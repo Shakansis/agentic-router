@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Agent LLM Desktop Interface</title>
+    <style>
+        :root {
+            --bg-main: #131316;
+            --bg-sidebar: #1a1a1f;
+            --bg-panel: #202028;
+            --border-color: #2e2e38;
+            --text-main: #ededf0;
+            --text-muted: #9ba1a6;
+            --accent: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.2);
+            --agent-active: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        sidebar {
+            width: 300px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        .sidebar-header {
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+        }
+
+        .status-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .status-card h4 {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .badge.active { background: rgba(16, 185, 129, 0.2); color: var(--agent-active); }
+        .badge.idle { background: rgba(155, 161, 166, 0.1); color: var(--text-muted); }
+
+        .status-card p {
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            position: relative;
+        }
+
+        .chat-header {
+            padding: 14px 24px;
+            border-bottom: 1px solid var(--border-color);
+            background-color: var(--bg-sidebar);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .chat-title {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .btn-config {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-config:hover {
+            border-color: var(--accent);
+            background-color: rgba(59, 130, 246, 0.1);
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .message {
+            max-width: 80%;
+            line-height: 1.5;
+            font-size: 14px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: var(--accent);
+            color: #fff;
+            padding: 10px 14px;
+            border-radius: 10px 10px 0 10px;
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 14px;
+            border-radius: 10px 10px 10px 0;
+            width: 100%;
+            max-width: 850px;
+        }
+
+        .execution-steps {
+            background: rgba(0, 0, 0, 0.25);
+            border-left: 3px solid var(--accent);
+            padding: 8px 12px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .chat-input-container {
+            padding: 16px 24px;
+            background-color: var(--bg-sidebar);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .input-wrapper {
+            display: flex;
+            background-color: var(--bg-main);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 8px 12px;
+            align-items: center;
+        }
+
+        .input-wrapper:focus-within {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        textarea {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-size: 14px;
+            resize: none;
+            height: 24px;
+            outline: none;
+            line-height: 24px;
+        }
+
+        button.send-btn {
+            background-color: var(--accent);
+            border: none;
+            color: white;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: var(--bg-sidebar);
+            border: 1px solid var(--border-color);
+            width: 900px;
+            max-height: 85vh;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        }
+
+        .modal-header {
+            padding: 18px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }
+
+        .agent-card {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+            transition: transform 0.2s, border-color 0.2s;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .agent-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent);
+        }
+
+        .agent-card label {
+            font-size: 11px;
+            color: var(--text-muted);
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .agent-card select, .agent-card textarea {
+            background: var(--bg-main);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 12px;
+            outline: none;
+            width: 100%;
+        }
+
+        .agent-card textarea {
+            resize: vertical;
+            height: 60px;
+            font-family: inherit;
+        }
+
+        .modal-footer {
+            padding: 14px 24px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: flex-end;
+            background: var(--bg-panel);
+        }
+    </style>
+</head>
+<body>
+
+    <sidebar>
+        <div class="sidebar-header">Cluster Multi-GPU</div>
+        
+        <div class="status-card">
+            <h4>Roteador Principal <span class="badge active">Ativo</span></h4>
+            <p>Classificando Intenções</p>
+        </div>
+
+        <div class="status-card">
+            <h4>Especialista: <span>Story-Telling</span> <span class="badge active">Ativo</span></h4>
+            <p id="expert-current">User: Como o taverneiro de tupunga...</p>
+        </div>
+
+        <div class="status-card">
+            <h4>Especialista: <span>Code</span> <span id="code-status" class="badge idle">Standby</span></h4>
+            <p id="code-current">Nenhuma tarefa recente</p>
+        </div>
+    </sidebar>
+
+    <main>
+        <div class="chat-header">
+            <div class="chat-title">Sessão Local - Motor Híbrido</div>
+            <button class="btn-config" onclick="openModal()">
+                ⚙️ Configurar Agentes e Intenções
+            </button>
+            <div style="font-size: 11px; color: var(--text-muted);">Ambiente Multi-GPU</div>
+        </div>
+
+        <div class="chat-messages" id="chat-messages">
+            <div class="message assistant">
+                Olá! O sistema está pronto. O roteador analisará sua intenção e ativará o especialista correspondente com a placa e o contexto configurados.
+            </div>
+        </div>
+
+        <div class="chat-input-container">
+            <div class="input-wrapper">
+                <textarea id="user-input" placeholder="Envie uma mensagem..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+                <button class="send-btn" onclick="sendMessage()">Enviar</button>
+            </div>
+        </div>
+    </main>
+
+    <div class="modal-overlay" id="config-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Matriz de Configuração de Agentes e Intenções</h3>
+                <button class="close-btn" onclick="closeModal()">✕</button>
+            </div>
+            
+            <div class="modal-body" id="agents-grid"></div>
+
+            <div class="modal-footer">
+                <button class="send-btn" onclick="saveConfig()">Salvar Configurações</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const availableIntentions = [
+            'story-telling',
+            'code',
+            'arquitecture',
+            'user-story',
+            'documentation-check',
+            'code-test',
+            'general-chat',
+            'generate-image'
+        ];
+
+        let intentionsList = [
+            { id: '1', name: 'story-telling', gpu: 'placa-1', prompt: 'Você é um escritor experiente de histórias de RPG e está escrevendo sobre o mundo de Khitai.' },
+            { id: '2', name: 'code', gpu: 'placa-1', prompt: 'Você é um engenheiro de software sênior focado em código limpo, modular e de alta performance.' },
+            { id: '3', name: 'arquitecture', gpu: 'placa-1', prompt: 'Você é um arquiteto de soluções especialista em design de sistemas distribuídos e microservices.' },
+            { id: '4', name: 'user-story', gpu: 'default', prompt: 'Você é um Product Owner experiente em especificação de requisitos ágeis e escrita de User Stories.' },
+            { id: '5', name: 'documentation-check', gpu: 'default', prompt: 'Você é um revisor técnico focado em clareza, padronização e validação de documentação de projetos.' },
+            { id: '6', name: 'code-test', gpu: 'placa-1', prompt: 'Você é um especialista em testes automatizados, TDD e garantia de qualidade de software.' },
+            { id: '7', name: 'general-chat', gpu: 'default', prompt: 'Você é um assistente geral prestativo, objetivo e direto para conversas do dia a dia.' },
+            { id: '8', name: 'generate-image', gpu: 'placa-2', prompt: 'Você é um diretor de arte conceitual especializado em prompts descritivos para geração visual.' }
+        ];
+
+        function renderCards() {
+            const grid = document.getElementById('agents-grid');
+            grid.innerHTML = '';
+
+            intentionsList.forEach(item => {
+                const card = document.createElement('div');
+                card.className = 'agent-card';
+                
+                // Opções para o select de intenções
+                let optionsHtml = '';
+                availableIntentions.forEach(intent => {
+                    optionsHtml += `<option value="${intent}" ${item.name === intent ? 'selected' : ''}>${intent}</option>`;
+                });
+
+                card.innerHTML = `
+                    <div>
+                        <label>Intenção / Assunto:</label>
+                        <select id="name-${item.id}">
+                            ${optionsHtml}
+                        </select>
+                    </div>
+                    <div>
+                        <label>Placa de Vídeo / Hardware:</label>
+                        <select id="gpu-${item.id}">
+                            <option value="default" ${item.gpu === 'default' ? 'selected' : ''}>Default</option>
+                            <option value="placa-1" ${item.gpu === 'placa-1' ? 'selected' : ''}>Placa 1</option>
+                            <option value="placa-2" ${item.gpu === 'placa-2' ? 'selected' : ''}>Placa 2</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Contexto Inicial (System Prompt):</label>
+                        <textarea id="prompt-${item.id}">${item.prompt}</textarea>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        function openModal() {
+            renderCards();
+            document.getElementById('config-modal').style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('config-modal').style.display = 'none';
+        }
+
+        function saveConfig() {
+            intentionsList.forEach(item => {
+                const selectedName = document.getElementById(`name-${item.id}`).value;
+                const selectedGpu = document.getElementById(`gpu-${item.id}`).value;
+                const customPrompt = document.getElementById(`prompt-${item.id}`).value;
+                
+                item.name = selectedName;
+                item.gpu = selectedGpu;
+                item.prompt = customPrompt;
+            });
+            closeModal();
+        }
+
+        function handleKeyDown(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('user-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const chatMessages = document.getElementById('chat-messages');
+
+            const userMsg = document.createElement('div');
+            userMsg.className = 'message user';
+            userMsg.textContent = text;
+            chatMessages.appendChild(userMsg);
+
+            input.value = '';
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            setTimeout(() => {
+                triggerWorkflow(text, chatMessages);
+            }, 500);
+        }
+
+        function triggerWorkflow(query, container) {
+            let detected = intentionsList.find(i => i.name === 'general-chat') || intentionsList[0];
+            const lower = query.toLowerCase();
+            if (lower.includes('rpg') || lower.includes('história') || lower.includes('mundo')) {
+                detected = intentionsList.find(i => i.name === 'story-telling') || detected;
+            } else if (lower.includes('código') || lower.includes('função')) {
+                detected = intentionsList.find(i => i.name === 'code') || detected;
+            }
+
+            document.getElementById('expert-status').className = 'badge active';
+            document.getElementById('expert-status').textContent = 'Processando';
+            document.getElementById('expert-current').textContent = `${detected.name} (${detected.gpu.toUpperCase()})`;
+
+            const assistantMsg = document.createElement('div');
+            assistantMsg.className = 'message assistant';
+            assistantMsg.innerHTML = `
+                <div class="execution-steps">
+                    [Roteador]: Intenção identificada -> <b>${detected.name.toUpperCase()}</b>.<br>
+                    [Hardware Selecionado]: Alocado na <b>${detected.gpu.toUpperCase()}</b>.<br>
+                    [System Prompt Injetado]: "${detected.prompt.substring(0, 60)}..."
+                </div>
+                <div id="stream-response"></div>
+            `;
+            container.appendChild(assistantMsg);
+            container.scrollTop = container.scrollHeight;
+
+            setTimeout(() => {
+                document.getElementById('expert-status').className = 'badge idle';
+                document.getElementById('expert-status').textContent = 'Standby';
+                
+                const responseText = `Processamento concluído pelo agente especialista (${detected.name}) utilizando o hardware [${detected.gpu.toUpperCase()}]. Resposta gerada com sucesso com base nas diretrizes configuradas!`;
+                document.getElementById('stream-response').textContent = responseText;
+                container.scrollTop = container.scrollHeight;
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
