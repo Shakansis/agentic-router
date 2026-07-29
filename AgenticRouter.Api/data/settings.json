@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "ollamaUrl": "http://localhost:11434",
+  "routerModel": "qwen3:1.7b",
+  "defaultModel": "gpt-oss:20b",
+  "defaultGpu": "auto",
+  "intentions": {
+    "general-chat": {
+      "model": "gpt-oss:20b",
+      "gpu": "auto",
+      "systemPrompt": "You are a clear, helpful local assistant."
+    },
+    "documentation": {
+      "model": "default",
+      "gpu": "default",
+      "systemPrompt": "You write concise and accurate technical documentation."
+    },
+    "software-development": {
+      "model": "default",
+      "gpu": "default",
+      "systemPrompt": "You are a pragmatic senior software developer."
+    },
+    "software-architecture": {
+      "model": "default",
+      "gpu": "default",
+      "systemPrompt": "You are a pragmatic software architect."
+    },
+    "rpg-storytelling": {
+      "model": "default",
+      "gpu": "default",
+      "systemPrompt": "You are an imaginative RPG storyteller."
+    },
+    "review-and-testing": {
+      "model": "default",
+      "gpu": "default",
+      "systemPrompt": "You review software carefully and focus on verifiable quality."
+    }
+  }
+}

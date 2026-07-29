@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Agentic Router</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <aside class="sidebar" aria-label="Status local">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">AR</span>
+      <div>
+        <strong>Agentic Router</strong>
+        <span>Local model chat</span>
+      </div>
+    </div>
+
+    <section class="status-list" aria-label="Provider status">
+      <article class="status-card">
+        <div class="status-heading">
+          <span>Ollama</span>
+          <span id="provider-badge" class="badge muted">Verificando</span>
+        </div>
+        <strong id="provider-detail">Conectando…</strong>
+      </article>
+      <article class="status-card">
+        <div class="status-heading">
+          <span>Modelos locais</span>
+        </div>
+        <strong id="model-count">—</strong>
+      </article>
+      <article class="status-card">
+        <div class="status-heading">
+          <span>Dispositivos gráficos</span>
+        </div>
+        <strong id="device-count">—</strong>
+        <small id="device-diagnostic"></small>
+      </article>
+    </section>
+
+    <p class="sidebar-note">
+      A GPU é uma preferência salva; o Ollama continua responsável pela execução.
+    </p>
+    <span class="app-version">v0.2.0</span>
+  </aside>
+
+  <main class="workspace">
+    <header class="chat-header">
+      <div>
+        <span class="eyebrow">Sessão local</span>
+        <h1>Conversa</h1>
+      </div>
+      <button id="open-settings" class="secondary-button" type="button">
+        Configurações
+      </button>
+    </header>
+
+    <section id="messages" class="messages" aria-live="polite">
+      <div id="empty-state" class="empty-state">
+        <div class="empty-icon" aria-hidden="true">✦</div>
+        <h2>Pronto para conversar</h2>
+        <p>Use Auto para classificar a intenção e escolher o modelo configurado.</p>
+      </div>
+    </section>
+
+    <footer class="composer-shell">
+      <form id="composer" class="composer">
+        <textarea
+          id="message-input"
+          rows="1"
+          aria-label="Mensagem"
+          placeholder="Envie uma mensagem…"
+        ></textarea>
+        <div class="composer-actions">
+          <label class="model-field">
+            <span>Modelo</span>
+            <select id="model-selector" aria-label="Modelo da solicitação">
+              <option value="auto">Auto</option>
+            </select>
+          </label>
+          <span id="composer-status" class="composer-status">Enter para enviar</span>
+          <button id="send-button" class="primary-button" type="submit">Enviar</button>
+        </div>
+      </form>
+    </footer>
+  </main>
+
+  <dialog id="settings-dialog" class="settings-dialog">
+    <form id="settings-form" method="dialog">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Configuração local</span>
+          <h2>Modelos e intenções</h2>
+        </div>
+        <button id="close-settings" class="icon-button" type="button" aria-label="Fechar">×</button>
+      </header>
+
+      <div class="dialog-body">
+        <div id="settings-errors" class="settings-errors" role="alert" hidden></div>
+
+        <section class="settings-section">
+          <div class="section-heading">
+            <h3>Geral</h3>
+            <p>Conexão e modelos usados pelo roteamento Auto.</p>
+          </div>
+          <div class="settings-grid">
+            <label>
+              <span>URL do Ollama</span>
+              <input id="ollama-url" name="ollamaUrl" type="url" required>
+            </label>
+            <label>
+              <span>Modelo roteador</span>
+              <select id="router-model" name="routerModel" required></select>
+            </label>
+            <label>
+              <span>Modelo padrão</span>
+              <select id="default-model" name="defaultModel" required></select>
+            </label>
+            <label>
+              <span>GPU padrão</span>
+              <select id="default-gpu" name="defaultGpu"></select>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="section-heading">
+            <h3>Configuração por intenção</h3>
+            <p>Em Auto, a intenção define o modelo alvo e o system prompt.</p>
+          </div>
+          <div id="intentions-grid" class="intentions-grid"></div>
+        </section>
+      </div>
+
+      <footer class="dialog-footer">
+        <span id="save-status" class="save-status"></span>
+        <button id="cancel-settings" class="secondary-button" type="button">Cancelar</button>
+        <button class="primary-button" type="submit">Salvar</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+# Build output
+**/bin/
+**/obj/
+TestResults/
+
+# IDE and user-specific files
+*.user
+*.suo
+.vs/
+.vscode/
+
+# Local staging snapshots
+.staging-v*/
+
+# OS files
+.DS_Store
+Thumbs.db

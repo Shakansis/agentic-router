@@ -1,0 +1,393 @@
+using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using AgenticRouter.Api.Contracts;
+
+namespace AgenticRouter.Api.Providers.Ollama;
+
+public sealed class OllamaClient : IOllamaClient
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    private readonly HttpClient _httpClient;
+
+    public OllamaClient(
+      HttpClient httpClient
+    )
+    {
+        _httpClient = httpClient;
+    }
+
+    public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
+      Uri baseUri,
+      CancellationToken cancellationToken
+    )
+    {
+        using var request = new HttpRequestMessage(
+          HttpMethod.Get,
+          new Uri(
+            baseUri,
+            "/api/tags"
+          )
+        );
+
+        using var response = await SendAsync(
+          request,
+          "model-discovery",
+          cancellationToken
+        );
+        var payload = await response.Content.ReadFromJsonAsync<OllamaTagsResponse>(
+          JsonOptions,
+          cancellationToken
+        ) ?? throw new OllamaProviderException(
+          "model-discovery",
+          "Ollama returned an empty model list.",
+          "The /api/tags response body was empty.",
+          (int)response.StatusCode,
+          true
+        );
+
+        return payload.Models
+          .Where(
+            model => !string.IsNullOrWhiteSpace(
+              model.Name
+            )
+          )
+          .Select(
+            model => new InstalledModel(
+              model.Name!,
+              model.Size,
+              model.ModifiedAt
+            )
+          )
+          .OrderBy(
+            model => model.Name,
+            StringComparer.OrdinalIgnoreCase
+          )
+          .ToArray();
+    }
+
+    public async Task<string> ClassifyAsync(
+      Uri baseUri,
+      string model,
+      IReadOnlyList<ChatMessage> messages,
+      CancellationToken cancellationToken
+    )
+    {
+        var payload = CreateRequest(
+          model,
+          messages,
+          false,
+          "json",
+          new OllamaOptions(
+            0
+          )
+        );
+        var json = JsonSerializer.Serialize(
+          payload,
+          JsonOptions
+        );
+        using var request = CreateChatRequest(
+          baseUri,
+          json
+        );
+        using var response = await SendAsync(
+          request,
+          "router-classification",
+          cancellationToken
+        );
+        var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
+          JsonOptions,
+          cancellationToken
+        ) ?? throw new OllamaProviderException(
+          "router-classification",
+          "The router model returned an empty response.",
+          "The non-streaming /api/chat response body was empty.",
+          (int)response.StatusCode,
+          true
+        );
+
+        if (!string.IsNullOrWhiteSpace(
+          result.Error
+        ))
+        {
+            throw new OllamaProviderException(
+              "router-classification",
+              "The router model could not classify the request.",
+              Sanitize(
+                result.Error
+              ),
+              (int)response.StatusCode,
+              true
+            );
+        }
+
+        return result.Message?.Content ?? string.Empty;
+    }
+
+    public async IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(
+      Uri baseUri,
+      string model,
+      IReadOnlyList<ChatMessage> messages,
+      [EnumeratorCancellation] CancellationToken cancellationToken
+    )
+    {
+        var payload = CreateRequest(
+          model,
+          messages,
+          true,
+          null,
+          null
+        );
+        var json = JsonSerializer.Serialize(
+          payload,
+          JsonOptions
+        );
+        using var request = CreateChatRequest(
+          baseUri,
+          json
+        );
+        using var response = await SendAsync(
+          request,
+          "generation",
+          cancellationToken,
+          HttpCompletionOption.ResponseHeadersRead
+        );
+        yield return new OllamaChatUpdate(
+          true,
+          null
+        );
+        await using var stream = await response.Content.ReadAsStreamAsync(
+          cancellationToken
+        );
+        using var reader = new StreamReader(
+          stream
+        );
+
+        while (true)
+        {
+            var line = await reader.ReadLineAsync(
+              cancellationToken
+            );
+
+            if (line is null)
+            {
+                break;
+            }
+
+            if (string.IsNullOrWhiteSpace(
+              line
+            ))
+            {
+                continue;
+            }
+
+            OllamaChatChunk chunk;
+
+            try
+            {
+                chunk = JsonSerializer.Deserialize<OllamaChatChunk>(
+                  line,
+                  JsonOptions
+                ) ?? throw new JsonException(
+                  "The stream chunk was empty."
+                );
+            }
+            catch (JsonException exception)
+            {
+                throw new OllamaProviderException(
+                  "generation",
+                  "Ollama returned an invalid streaming response.",
+                  exception.Message,
+                  (int)response.StatusCode,
+                  true,
+                  exception
+                );
+            }
+
+            if (!string.IsNullOrWhiteSpace(
+              chunk.Error
+            ))
+            {
+                throw new OllamaProviderException(
+                  "generation",
+                  "Ollama could not generate the response.",
+                  Sanitize(
+                    chunk.Error
+                  ),
+                  (int)response.StatusCode,
+                  true
+                );
+            }
+
+            if (!string.IsNullOrEmpty(
+              chunk.Message?.Content
+            ))
+            {
+                yield return new OllamaChatUpdate(
+                  false,
+                  chunk.Message.Content
+                );
+            }
+
+            if (chunk.Done)
+            {
+                break;
+            }
+        }
+    }
+
+    private static OllamaChatRequest CreateRequest(
+      string model,
+      IReadOnlyList<ChatMessage> messages,
+      bool stream,
+      string? format,
+      OllamaOptions? options
+    )
+    {
+        return new OllamaChatRequest(
+          model,
+          messages.Select(
+            message => new OllamaChatMessage(
+              message.Role,
+              message.Content
+            )
+          ).ToArray(),
+          stream,
+          format,
+          options
+        );
+    }
+
+    private static HttpRequestMessage CreateChatRequest(
+      Uri baseUri,
+      string json
+    )
+    {
+        return new HttpRequestMessage(
+          HttpMethod.Post,
+          new Uri(
+            baseUri,
+            "/api/chat"
+          )
+        )
+        {
+            Content = new StringContent(
+            json,
+            Encoding.UTF8,
+            "application/json"
+          )
+        };
+    }
+
+    private async Task<HttpResponseMessage> SendAsync(
+      HttpRequestMessage request,
+      string stage,
+      CancellationToken cancellationToken,
+      HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead
+    )
+    {
+        HttpResponseMessage response;
+
+        try
+        {
+            response = await _httpClient.SendAsync(
+              request,
+              completionOption,
+              cancellationToken
+            );
+        }
+        catch (HttpRequestException exception)
+        {
+            throw new OllamaProviderException(
+              stage,
+              "Ollama is unavailable. Check that it is running and that the saved URL is correct.",
+              exception.Message,
+              null,
+              true,
+              exception
+            );
+        }
+
+        if (response.IsSuccessStatusCode)
+        {
+            return response;
+        }
+
+        var providerDetails = await response.Content.ReadAsStringAsync(
+          cancellationToken
+        );
+        response.Dispose();
+
+        throw new OllamaProviderException(
+          stage,
+          $"Ollama returned HTTP {(int)response.StatusCode}.",
+          Sanitize(
+            providerDetails
+          ),
+          (int)response.StatusCode,
+          (int)response.StatusCode >= 500
+        );
+    }
+
+    private static string Sanitize(
+      string value
+    )
+    {
+        var singleLine = value
+          .Replace(
+            "\r",
+            " ",
+            StringComparison.Ordinal
+          )
+          .Replace(
+            "\n",
+            " ",
+            StringComparison.Ordinal
+          )
+          .Trim();
+
+        return singleLine.Length <= 1_000
+          ? singleLine
+          : singleLine[..1_000];
+    }
+
+    private sealed record OllamaTagsResponse(
+      IReadOnlyList<OllamaModel> Models
+    );
+
+    private sealed record OllamaModel(
+      string? Name,
+      long? Size,
+      [property: JsonPropertyName("modified_at")] DateTimeOffset? ModifiedAt
+    );
+
+    private sealed record OllamaChatRequest(
+      string Model,
+      IReadOnlyList<OllamaChatMessage> Messages,
+      bool Stream,
+      string? Format,
+      OllamaOptions? Options
+    );
+
+    private sealed record OllamaOptions(
+      double Temperature
+    );
+
+    private sealed record OllamaChatMessage(
+      string Role,
+      string Content
+    );
+
+    private sealed record OllamaChatChunk(
+      OllamaChatMessage? Message,
+      bool Done,
+      string? Error
+    );
+}
