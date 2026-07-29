@@ -7,7 +7,13 @@ const state = {
   autoFollow: true,
   runtimeTimer: null,
   activeAssistant: null,
-  editingTurn: null
+  editingTurn: null,
+  lockedModel: null,
+  conversationVersion: 0,
+  modelDiagnostics: null,
+  interactionMode: "chat",
+  approvalPolicy: "ask",
+  workspace: null
 };
 
 const elements = {};
@@ -40,6 +46,7 @@ function bindElements() {
     "composer",
     "message-input",
     "model-selector",
+    "model-lock",
     "send-button",
     "composer-status",
     "provider-badge",
@@ -60,7 +67,26 @@ function bindElements() {
     "runtime-summary",
     "runtime-memory-list",
     "runtime-model-list",
-    "resident-model-status"
+    "resident-model-status",
+    "new-conversation",
+    "default-context-tokens",
+    "reserved-response-tokens",
+    "max-conversation-messages",
+    "model-diagnostics-list",
+    "model-context-diagnostic",
+    "model-test-selector",
+    "test-model",
+    "model-test-result",
+    "approval-policy",
+    "workspace-badge",
+    "workspace-path",
+    "workspace-dialog",
+    "workspace-form",
+    "trusted-workspace-path",
+    "workspace-validation",
+    "workspace-save-status",
+    "clear-workspace",
+    "pick-workspace"
   ]) {
     elements[toCamelCase(id)] = document.querySelector(`#${id}`);
   }
@@ -74,10 +100,24 @@ function bindEvents() {
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
+  elements.newConversation.addEventListener("click", startNewConversation);
+  elements.modelSelector.addEventListener("change", handleModelSelectionChange);
+  elements.modelLock.addEventListener("change", handleModelLockChange);
+  elements.testModel.addEventListener("click", testSelectedModel);
+  elements.approvalPolicy.addEventListener("change", handleApprovalPolicyChange);
+  elements.workspaceForm.addEventListener("submit", saveWorkspace);
+  elements.clearWorkspace.addEventListener("click", clearWorkspace);
+  elements.pickWorkspace.addEventListener("click", pickWorkspace);
+  document.querySelectorAll(".mode-option").forEach(
+    button => button.addEventListener("click", handleModeChange)
+  );
   document.addEventListener("visibilitychange", handleVisibilityChange);
   document.querySelector("#open-settings").addEventListener("click", openSettings);
   document.querySelector("#close-settings").addEventListener("click", closeSettings);
   document.querySelector("#cancel-settings").addEventListener("click", closeSettings);
+  document.querySelector("#open-workspace").addEventListener("click", openWorkspace);
+  document.querySelector("#close-workspace").addEventListener("click", closeWorkspace);
+  document.querySelector("#cancel-workspace").addEventListener("click", closeWorkspace);
 }
 
 function initializeScrollFollowing() {
@@ -92,19 +132,23 @@ function initializeScrollFollowing() {
 }
 
 async function loadApplicationState() {
-  const [settings, modelsResponse, devicesResponse] = await Promise.all([
+  const [settings, modelsResponse, devicesResponse, workspace] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
-    fetchJson("/api/devices")
+    fetchJson("/api/devices"),
+    fetchJson("/api/workspace")
   ]);
 
   state.settings = settings;
   state.models = modelsResponse.models;
   state.devices = devicesResponse.devices;
+  state.workspace = workspace;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
   renderSettings();
+  renderWorkspace();
+  updateInteractionControls();
 }
 
 function updateProviderStatus(response) {
@@ -122,6 +166,120 @@ function updateDeviceStatus(response) {
   elements.deviceCount.textContent =
     `${physicalDevices.length} detectado${physicalDevices.length === 1 ? "" : "s"}`;
   elements.deviceDiagnostic.textContent = response.diagnostic ?? "";
+}
+
+function renderWorkspace() {
+  const workspace = state.workspace;
+  const valid = Boolean(workspace?.valid);
+  elements.workspaceBadge.textContent = valid ? "Configurado" : "Não configurado";
+  elements.workspaceBadge.className = `badge ${valid ? "success" : "muted"}`;
+  elements.workspacePath.textContent = workspace?.path ?? "Nenhuma pasta selecionada";
+  elements.workspaceValidation.textContent = workspace?.diagnostic
+    ?? workspace?.status
+    ?? "Não configurado";
+  elements.workspaceValidation.className =
+    `workspace-validation ${valid ? "valid" : workspace?.configured ? "invalid" : ""}`;
+  elements.trustedWorkspacePath.value = workspace?.path ?? "";
+  elements.clearWorkspace.disabled = !workspace?.configured;
+}
+
+function openWorkspace() {
+  elements.workspaceSaveStatus.textContent = "";
+  renderWorkspace();
+  elements.workspaceDialog.showModal();
+  elements.trustedWorkspacePath.focus();
+}
+
+function closeWorkspace() {
+  elements.workspaceDialog.close();
+}
+
+async function saveWorkspace(event) {
+  event.preventDefault();
+  const path = elements.trustedWorkspacePath.value.trim();
+  elements.workspaceSaveStatus.textContent = "Validando…";
+
+  try {
+    state.workspace = await fetchJson(
+      "/api/workspace",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          path
+        })
+      }
+    );
+    state.settings.trustedWorkspacePath = state.workspace.path;
+    renderWorkspace();
+    elements.workspaceSaveStatus.textContent = "Salvo";
+    elements.workspaceDialog.close();
+  } catch (error) {
+    state.workspace = error.payload ?? {
+      configured: true,
+      valid: false,
+      path,
+      status: "Inválido",
+      diagnostic: error.message
+    };
+    renderWorkspace();
+    elements.workspaceSaveStatus.textContent = "Não foi possível salvar";
+  }
+}
+
+async function pickWorkspace() {
+  elements.pickWorkspace.disabled = true;
+  elements.workspaceSaveStatus.textContent = "Abrindo seletor…";
+
+  try {
+    const result = await fetchJson(
+      "/api/workspace/pick",
+      {
+        method: "POST"
+      }
+    );
+
+    if (result.selected && result.path) {
+      elements.trustedWorkspacePath.value = result.path;
+      elements.workspaceValidation.textContent =
+        "Pasta selecionada. Clique em Salvar para torná-la confiável.";
+      elements.workspaceValidation.className = "workspace-validation valid";
+      elements.workspaceSaveStatus.textContent = "";
+    } else if (result.cancelled) {
+      elements.workspaceSaveStatus.textContent = "Seleção cancelada";
+    } else {
+      elements.workspaceValidation.textContent =
+        result.error ?? "Não foi possível abrir o seletor de pastas.";
+      elements.workspaceValidation.className = "workspace-validation invalid";
+      elements.workspaceSaveStatus.textContent = "";
+    }
+  } catch (error) {
+    elements.workspaceValidation.textContent = error.message;
+    elements.workspaceValidation.className = "workspace-validation invalid";
+    elements.workspaceSaveStatus.textContent = "";
+  } finally {
+    elements.pickWorkspace.disabled = false;
+  }
+}
+
+async function clearWorkspace() {
+  elements.workspaceSaveStatus.textContent = "Limpando…";
+
+  try {
+    state.workspace = await fetchJson(
+      "/api/workspace",
+      {
+        method: "DELETE"
+      }
+    );
+    state.settings.trustedWorkspacePath = null;
+    renderWorkspace();
+    elements.workspaceSaveStatus.textContent = "Removido";
+  } catch (error) {
+    elements.workspaceSaveStatus.textContent = error.message;
+  }
 }
 
 async function refreshRuntimeStatus() {
@@ -326,6 +484,7 @@ function renderComposerModels() {
     ],
     selected
   );
+  updateModelLockControls();
 }
 
 function renderSettings() {
@@ -337,11 +496,21 @@ function renderSettings() {
   replaceOptions(elements.routerModel, modelOptions(), state.settings.routerModel);
   replaceOptions(elements.defaultModel, modelOptions(), state.settings.defaultModel);
   replaceOptions(elements.defaultGpu, gpuOptions(false), state.settings.defaultGpu);
+  elements.defaultContextTokens.value = state.settings.context.defaultContextTokens;
+  elements.reservedResponseTokens.value = state.settings.context.reservedResponseTokens;
+  elements.maxConversationMessages.value = state.settings.context.maxConversationMessages;
+  replaceOptions(
+    elements.modelTestSelector,
+    modelOptions(),
+    elements.modelTestSelector.value || state.settings.defaultModel
+  );
   elements.intentionsGrid.replaceChildren();
 
   for (const [name, intention] of Object.entries(state.settings.intentions)) {
     elements.intentionsGrid.append(createIntentionCard(name, intention));
   }
+
+  renderModelDiagnostics();
 }
 
 function modelOptions() {
@@ -391,6 +560,22 @@ function createIntentionCard(name, intention) {
         ...modelOptions()
       ],
       intention.model
+    ),
+    createSelectField(
+      "Fallback",
+      "intention-fallback-model",
+      [
+        {
+          value: "none",
+          label: "Nenhum"
+        },
+        {
+          value: "default",
+          label: "Default"
+        },
+        ...modelOptions()
+      ],
+      intention.fallbackModel ?? "none"
     ),
     createSelectField(
       "GPU",
@@ -443,11 +628,81 @@ function replaceOptions(select, options, selected) {
   select.value = selected;
 }
 
-function openSettings() {
+function renderModelDiagnostics() {
+  if (!state.modelDiagnostics) {
+    elements.modelDiagnosticsList.replaceChildren();
+    elements.modelContextDiagnostic.textContent = "Carregando diagnóstico…";
+    return;
+  }
+
+  elements.modelContextDiagnostic.textContent =
+    state.modelDiagnostics.contextDiagnostic;
+  elements.modelDiagnosticsList.replaceChildren(
+    ...state.modelDiagnostics.models.map(
+      diagnostic => {
+        const row = document.createElement("div");
+        row.className = "model-diagnostic-row";
+        const configuration = document.createElement("span");
+        configuration.textContent = diagnostic.configuration;
+        const model = document.createElement("strong");
+        model.textContent = diagnostic.resolvedModel
+          ?? diagnostic.configuredValue
+          ?? "—";
+        const status = document.createElement("span");
+        status.className = `model-status ${diagnostic.status.toLowerCase()}`;
+        status.textContent = diagnostic.status;
+        row.append(configuration, model, status);
+        return row;
+      }
+    )
+  );
+}
+
+async function testSelectedModel() {
+  const model = elements.modelTestSelector.value;
+  elements.testModel.disabled = true;
+  elements.modelTestResult.textContent = `Testando ${model}…`;
+
+  try {
+    const result = await fetchJson(
+      "/api/models/test",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model
+        })
+      }
+    );
+    elements.modelTestResult.textContent = result.connected
+      ? `${result.model} · Concluído · Time to first chunk: `
+        + `${result.timeToFirstChunkMilliseconds ?? "unavailable"} ms · `
+        + `Total duration: ${result.totalDurationMilliseconds} ms`
+      : `${result.model} · Falhou · ${result.error} · Trace ID: ${result.traceId}`;
+    state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
+    renderModelDiagnostics();
+  } catch (error) {
+    elements.modelTestResult.textContent = error.message;
+  } finally {
+    elements.testModel.disabled = false;
+  }
+}
+
+async function openSettings() {
   elements.settingsErrors.hidden = true;
   elements.saveStatus.textContent = "";
+  elements.modelTestResult.textContent = "";
   renderSettings();
   elements.settingsDialog.showModal();
+
+  try {
+    state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
+    renderModelDiagnostics();
+  } catch (error) {
+    elements.modelContextDiagnostic.textContent = error.message;
+  }
 }
 
 function closeSettings() {
@@ -463,6 +718,7 @@ async function saveSettings(event) {
   for (const card of elements.intentionsGrid.querySelectorAll(".intention-card")) {
     intentions[card.dataset.intention] = {
       model: card.querySelector(".intention-model").value,
+      fallbackModel: card.querySelector(".intention-fallback-model").value,
       gpu: card.querySelector(".intention-gpu").value,
       systemPrompt: card.querySelector(".intention-prompt").value
     };
@@ -474,7 +730,13 @@ async function saveSettings(event) {
     routerModel: elements.routerModel.value,
     defaultModel: elements.defaultModel.value,
     defaultGpu: elements.defaultGpu.value,
+    trustedWorkspacePath: state.settings.trustedWorkspacePath ?? null,
     intentions,
+    context: {
+      defaultContextTokens: Number(elements.defaultContextTokens.value),
+      reservedResponseTokens: Number(elements.reservedResponseTokens.value),
+      maxConversationMessages: Number(elements.maxConversationMessages.value)
+    },
     runtime: state.settings.runtime
   };
 
@@ -490,6 +752,7 @@ async function saveSettings(event) {
       }
     );
     elements.saveStatus.textContent = "Salvo";
+    state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
     renderSettings();
     elements.settingsDialog.close();
     await refreshRuntimeStatus();
@@ -504,6 +767,139 @@ async function saveSettings(event) {
     elements.settingsErrors.hidden = false;
     elements.saveStatus.textContent = "";
   }
+}
+
+function handleModelSelectionChange() {
+  if (elements.modelSelector.value === "auto") {
+    state.lockedModel = null;
+    elements.modelLock.checked = false;
+  }
+
+  updateModelLockControls();
+  updateInteractionControls();
+  updateComposerStatus();
+}
+
+function handleModeChange(event) {
+  if (state.requestController) {
+    return;
+  }
+
+  state.interactionMode = event.currentTarget.dataset.mode;
+  updateInteractionControls();
+  updateComposerStatus();
+}
+
+function handleApprovalPolicyChange() {
+  state.approvalPolicy = elements.approvalPolicy.value;
+  updateComposerStatus();
+}
+
+function updateInteractionControls() {
+  const isStreaming = Boolean(state.requestController);
+  document.querySelectorAll(".mode-option").forEach(
+    button => {
+      const active = button.dataset.mode === state.interactionMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = isStreaming;
+    }
+  );
+  elements.approvalPolicy.value = state.approvalPolicy;
+  elements.approvalPolicy.disabled =
+    isStreaming || state.interactionMode !== "execute";
+  elements.composer.classList.toggle(
+    "execute-mode",
+    state.interactionMode === "execute"
+  );
+}
+
+function handleModelLockChange() {
+  if (
+    elements.modelLock.checked
+    && elements.modelSelector.value !== "auto"
+  ) {
+    state.lockedModel = elements.modelSelector.value;
+  } else {
+    state.lockedModel = null;
+    elements.modelLock.checked = false;
+  }
+
+  updateModelLockControls();
+  updateComposerStatus();
+}
+
+function updateModelLockControls() {
+  const isStreaming = Boolean(state.requestController);
+  const isLocked = Boolean(state.lockedModel);
+  elements.modelSelector.disabled = isStreaming || isLocked;
+  elements.modelLock.disabled = isStreaming
+    || (!isLocked && elements.modelSelector.value === "auto");
+  elements.modelLock.checked = isLocked;
+  elements.composer.classList.toggle(
+    "model-locked",
+    isLocked
+  );
+}
+
+function startNewConversation() {
+  if (
+    state.requestController
+    && !window.confirm(
+      "Cancelar a resposta atual e iniciar uma nova conversa?"
+    )
+  ) {
+    return;
+  }
+
+  state.conversationVersion++;
+  state.requestController?.abort();
+  state.history = [];
+  state.editingTurn = null;
+  state.lockedModel = null;
+  state.interactionMode = "chat";
+  state.approvalPolicy = "ask";
+  state.autoFollow = true;
+  elements.modelSelector.value = "auto";
+  elements.modelLock.checked = false;
+  elements.messageInput.value = "";
+  resizeComposer();
+  elements.composer.classList.remove("editing");
+
+  for (const message of elements.messages.children) {
+    resizeObserver.unobserve(message);
+  }
+
+  const emptyState = createEmptyState();
+  elements.emptyState = emptyState;
+  elements.messages.replaceChildren(
+    emptyState
+  );
+  updateModelLockControls();
+  updateInteractionControls();
+  updateComposerStatus();
+  updateJumpControl();
+  elements.messageInput.focus();
+}
+
+function createEmptyState() {
+  const container = document.createElement("div");
+  container.id = "empty-state";
+  container.className = "empty-state";
+  const icon = document.createElement("div");
+  icon.className = "empty-icon";
+  icon.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+  icon.textContent = "✦";
+  const heading = document.createElement("h2");
+  heading.textContent = "Pronto para conversar";
+  const description = document.createElement("p");
+  description.textContent =
+    "Use Auto para classificar a intenção e escolher o modelo configurado.";
+  container.append(icon, heading, description);
+  return container;
 }
 
 function handleComposerKeyDown(event) {
@@ -565,11 +961,14 @@ async function handleComposerSubmit(event) {
     message,
     historyIndex
   );
+  const conversationVersion = state.conversationVersion;
+  const selectedModel = state.lockedModel ?? elements.modelSelector.value;
+  const controller = new AbortController();
   const assistant = appendAssistantMessage();
   state.activeAssistant = assistant;
   elements.messageInput.value = "";
   resizeComposer();
-  state.requestController = new AbortController();
+  state.requestController = controller;
   setStreamingState(true);
   requestAnimationFrame(scrollToBottom);
   await refreshRuntimeStatus();
@@ -585,10 +984,13 @@ async function handleComposerSubmit(event) {
         },
         body: JSON.stringify({
           message,
-          model: elements.modelSelector.value,
-          history: state.history
+          model: selectedModel,
+          history: state.history,
+          modelLocked: Boolean(state.lockedModel),
+          interactionMode: state.interactionMode,
+          approvalPolicy: state.approvalPolicy
         }),
-        signal: state.requestController.signal
+        signal: controller.signal
       }
     );
 
@@ -598,7 +1000,10 @@ async function handleComposerSubmit(event) {
 
     const outcome = await consumeEventStream(response.body, assistant);
 
-    if (outcome.completed) {
+    if (
+      outcome.completed
+      && state.conversationVersion === conversationVersion
+    ) {
       state.history.push(
         {
           role: "user",
@@ -639,13 +1044,18 @@ async function handleComposerSubmit(event) {
       finishActivity(assistant, "Falhou", true);
     }
   } finally {
-    state.requestController = null;
-    state.activeAssistant = null;
-    setStreamingState(false);
-    await refreshRuntimeStatus();
-    scheduleRuntimeRefresh();
+    if (state.requestController === controller) {
+      state.requestController = null;
+      state.activeAssistant = null;
+      setStreamingState(false);
+      await refreshRuntimeStatus();
+      scheduleRuntimeRefresh();
+    }
 
-    if (state.autoFollow) {
+    if (
+      state.autoFollow
+      && state.conversationVersion === conversationVersion
+    ) {
       requestAnimationFrame(scrollToBottom);
     }
 
@@ -832,6 +1242,14 @@ async function consumeEventStream(stream, assistant) {
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
         finishActivity(assistant, "Cancelado", false);
+      } else if (
+        streamEvent.type === "action.awaiting-approval"
+        && streamEvent.localAction
+      ) {
+        addApprovalActivity(
+          assistant,
+          streamEvent
+        );
       } else if (streamEvent.message) {
         if (streamEvent.type === "target-request-recovered") {
           assistant.recovered = true;
@@ -878,6 +1296,83 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   message.textContent = streamEvent.message;
   row.append(time, message);
   assistant.activityList.append(row);
+}
+
+function addApprovalActivity(assistant, streamEvent) {
+  const action = streamEvent.localAction;
+  const row = document.createElement("div");
+  row.className = "activity-row action-approval";
+  row.dataset.eventType = streamEvent.type;
+  row.dataset.actionId = action.actionId;
+  const time = document.createElement("span");
+  time.className = "activity-time";
+  time.textContent = `${streamEvent.elapsedMilliseconds ?? 0} ms`;
+  const content = document.createElement("div");
+  content.className = "action-approval-content";
+  const title = document.createElement("strong");
+  title.textContent = action.summary;
+  const message = document.createElement("span");
+  message.textContent = streamEvent.message;
+  content.append(title, message);
+
+  if (action.preview) {
+    const preview = document.createElement("pre");
+    preview.className = "action-preview";
+    preview.textContent = action.preview;
+    content.append(preview);
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "approval-controls";
+  const reject = document.createElement("button");
+  reject.className = "secondary-button";
+  reject.type = "button";
+  reject.textContent = "Rejeitar";
+  const approve = document.createElement("button");
+  approve.className = "primary-button";
+  approve.type = "button";
+  approve.textContent = "Aprovar";
+  const status = document.createElement("span");
+  status.className = "approval-status";
+  controls.append(reject, approve, status);
+  content.append(controls);
+  row.append(time, content);
+  assistant.activityList.append(row);
+  assistant.details.open = true;
+  approve.addEventListener(
+    "click",
+    () => decideAction(action.actionId, true, approve, reject, status)
+  );
+  reject.addEventListener(
+    "click",
+    () => decideAction(action.actionId, false, approve, reject, status)
+  );
+}
+
+async function decideAction(actionId, approved, approveButton, rejectButton, status) {
+  approveButton.disabled = true;
+  rejectButton.disabled = true;
+  status.textContent = approved ? "Aprovando…" : "Rejeitando…";
+
+  try {
+    await fetchJson(
+      `/api/actions/${encodeURIComponent(actionId)}/decision`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          approved
+        })
+      }
+    );
+    status.textContent = approved ? "Aprovada" : "Rejeitada";
+  } catch (error) {
+    status.textContent = error.message;
+    approveButton.disabled = false;
+    rejectButton.disabled = false;
+  }
 }
 
 function finishActivity(assistant, summary, keepOpen) {
@@ -1151,12 +1646,12 @@ function setStreamingState(isStreaming) {
         : "Enviar mensagem"
   );
   elements.sendButton.classList.toggle("cancel", isStreaming);
-  elements.modelSelector.disabled = isStreaming;
   elements.messages.querySelectorAll(".edit-message").forEach(
     button => {
       button.disabled = isStreaming;
     }
   );
+  updateModelLockControls();
   updateComposerStatus();
 }
 
@@ -1165,6 +1660,11 @@ function updateComposerStatus() {
     elements.composerStatus.textContent = "Resposta em andamento";
   } else if (state.editingTurn) {
     elements.composerStatus.textContent = "Editando mensagem · Esc para cancelar";
+  } else if (state.lockedModel) {
+    elements.composerStatus.textContent = `Modelo fixado: ${state.lockedModel}`;
+  } else if (state.interactionMode === "execute") {
+    elements.composerStatus.textContent =
+      `Execute · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
   } else {
     elements.composerStatus.textContent = "Enter para enviar";
   }

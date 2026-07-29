@@ -17,6 +17,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     string repositoryRoot,
     string temporaryRoot,
     string dataDirectory,
+    string workspaceDirectory,
     string settingsPath,
     Uri baseUri,
     TestApplicationSettings baselineSettings,
@@ -28,6 +29,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     RepositoryRoot = repositoryRoot;
     _temporaryRoot = temporaryRoot;
     DataDirectory = dataDirectory;
+    WorkspaceDirectory = workspaceDirectory;
     SettingsPath = settingsPath;
     BaseUri = baseUri;
     BaselineSettings = baselineSettings;
@@ -46,6 +48,8 @@ internal sealed class TestEnvironment : IAsyncDisposable
   public string RepositoryRoot { get; }
 
   public string DataDirectory { get; }
+
+  public string WorkspaceDirectory { get; }
 
   public string SettingsPath { get; }
 
@@ -78,10 +82,18 @@ internal sealed class TestEnvironment : IAsyncDisposable
     Directory.CreateDirectory(
       dataDirectory
     );
+    var workspaceDirectory = Path.Combine(
+      temporaryRoot,
+      "workspace"
+    );
+    Directory.CreateDirectory(
+      workspaceDirectory
+    );
 
     var fakeOllama = FakeOllamaServer.Start();
     var baselineSettings = TestApplicationSettings.Create(
-      fakeOllama.BaseUrl
+      fakeOllama.BaseUrl,
+      workspaceDirectory
     );
     await File.WriteAllTextAsync(
       settingsPath,
@@ -181,6 +193,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
       repositoryRoot,
       temporaryRoot,
       dataDirectory,
+      workspaceDirectory,
       settingsPath,
       baseUri,
       baselineSettings,
@@ -203,6 +216,22 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   public async Task ResetSettingsAsync()
   {
+    foreach (var entry in new DirectoryInfo(
+      WorkspaceDirectory
+    ).EnumerateFileSystemInfos())
+    {
+      if (entry is DirectoryInfo directory)
+      {
+        directory.Delete(
+          true
+        );
+      }
+      else
+      {
+        entry.Delete();
+      }
+    }
+
     using var response = await HttpClient.PutAsJsonAsync(
           "api/settings",
           BaselineSettings,

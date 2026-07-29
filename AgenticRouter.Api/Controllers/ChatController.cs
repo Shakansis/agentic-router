@@ -185,7 +185,8 @@ public sealed class ChatController : ControllerBase
       exception.Model,
       exception.Intention,
       exception.HttpStatus,
-      exception.Recoverable
+      exception.Recoverable,
+      exception.Details
     );
     var streamEvent = new ChatStreamEvent(
       requestId,

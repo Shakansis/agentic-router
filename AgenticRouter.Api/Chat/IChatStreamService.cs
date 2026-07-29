@@ -4,47 +4,51 @@ namespace AgenticRouter.Api.Chat;
 
 public interface IChatStreamService
 {
-    IAsyncEnumerable<ChatStreamEvent> StreamAsync(
-      ChatRequest request,
-      string requestId,
-      CancellationToken cancellationToken
-    );
+  IAsyncEnumerable<ChatStreamEvent> StreamAsync(
+    ChatRequest request,
+    string requestId,
+    CancellationToken cancellationToken
+  );
 }
 
 public sealed class ChatStageException : Exception
 {
-    public ChatStageException(
-      string stage,
-      string message,
-      string technicalMessage,
-      string? model,
-      string? intention,
-      int? httpStatus,
-      bool recoverable,
-      Exception? innerException = null
+  public ChatStageException(
+    string stage,
+    string message,
+    string technicalMessage,
+    string? model,
+    string? intention,
+    int? httpStatus,
+    bool recoverable,
+    Exception? innerException = null,
+    IReadOnlyDictionary<string, string?>? details = null
+  )
+    : base(
+      message,
+      innerException
     )
-      : base(
-        message,
-        innerException
-      )
-    {
-        Stage = stage;
-        TechnicalMessage = technicalMessage;
-        Model = model;
-        Intention = intention;
-        HttpStatus = httpStatus;
-        Recoverable = recoverable;
-    }
+  {
+    Stage = stage;
+    TechnicalMessage = technicalMessage;
+    Model = model;
+    Intention = intention;
+    HttpStatus = httpStatus;
+    Recoverable = recoverable;
+    Details = details;
+  }
 
-    public string Stage { get; }
+  public string Stage { get; }
 
-    public string TechnicalMessage { get; }
+  public string TechnicalMessage { get; }
 
-    public string? Model { get; }
+  public string? Model { get; }
 
-    public string? Intention { get; }
+  public string? Intention { get; }
 
-    public int? HttpStatus { get; }
+  public int? HttpStatus { get; }
 
-    public bool Recoverable { get; }
+  public bool Recoverable { get; }
+
+  public IReadOnlyDictionary<string, string?>? Details { get; }
 }

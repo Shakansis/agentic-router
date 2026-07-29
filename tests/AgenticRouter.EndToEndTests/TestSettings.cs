@@ -14,48 +14,60 @@ internal sealed record TestApplicationSettings
 
   public string DefaultGpu { get; init; } = "auto";
 
+  public string? TrustedWorkspacePath { get; init; }
+
   public Dictionary<string, TestIntentionSettings> Intentions { get; init; } = [];
+
+  public TestContextSettings Context { get; init; } = new();
 
   public TestRuntimeSettings Runtime { get; init; } = new();
 
   public static TestApplicationSettings Create(
-    string ollamaUrl
+    string ollamaUrl,
+    string? trustedWorkspacePath = null
   )
   {
     return new TestApplicationSettings
     {
       OllamaUrl = ollamaUrl,
+      TrustedWorkspacePath = trustedWorkspacePath,
       Intentions = new Dictionary<string, TestIntentionSettings>(
         StringComparer.Ordinal
       )
       {
         ["general-chat"] = new(
           "default",
+          "none",
           "default",
           "You are a clear test assistant."
         ),
         ["documentation"] = new(
           "docs:latest",
+          "none",
           "default",
           "You write documentation."
         ),
         ["software-development"] = new(
           "default",
+          "none",
           "default",
           "You write software."
         ),
         ["software-architecture"] = new(
           "beta:code",
+          "none",
           "default",
           "You design software."
         ),
         ["rpg-storytelling"] = new(
           "default",
+          "none",
           "default",
           "You tell RPG stories."
         ),
         ["review-and-testing"] = new(
           "default",
+          "none",
           "default",
           "You review and test software."
         )
@@ -74,9 +86,19 @@ internal sealed record TestApplicationSettings
 
 internal sealed record TestIntentionSettings(
   string Model,
+  string FallbackModel,
   string Gpu,
   string SystemPrompt
 );
+
+internal sealed record TestContextSettings
+{
+  public int DefaultContextTokens { get; init; } = 8_192;
+
+  public int ReservedResponseTokens { get; init; } = 2_048;
+
+  public int MaxConversationMessages { get; init; } = 40;
+}
 
 internal sealed record TestRuntimeSettings
 {

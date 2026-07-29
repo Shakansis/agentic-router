@@ -34,12 +34,20 @@
         <strong id="device-count">—</strong>
         <small id="device-diagnostic"></small>
       </article>
+      <button id="open-workspace" class="status-card workspace-card" type="button">
+        <span class="status-heading">
+          <span>Workspace confiável</span>
+          <span id="workspace-badge" class="badge muted">Não configurado</span>
+        </span>
+        <strong id="workspace-path">Nenhuma pasta selecionada</strong>
+        <small>Configura onde o modo Execute pode atuar.</small>
+      </button>
     </section>
 
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.3.0</span>
+    <span class="app-version">v0.5.0</span>
   </aside>
 
   <main class="workspace">
@@ -67,9 +75,14 @@
         </div>
       </details>
 
-      <button id="open-settings" class="secondary-button" type="button">
-        Configurações
-      </button>
+      <div class="header-actions">
+        <button id="new-conversation" class="secondary-button" type="button">
+          Nova conversa
+        </button>
+        <button id="open-settings" class="secondary-button" type="button">
+          Configurações
+        </button>
+      </div>
     </header>
 
     <section id="messages" class="messages" aria-live="polite">
@@ -93,11 +106,30 @@
           placeholder="Envie uma mensagem…"
         ></textarea>
         <div class="composer-actions">
+          <div class="interaction-mode" role="group" aria-label="Modo de interação">
+            <button class="mode-option active" type="button" data-mode="chat" aria-pressed="true">
+              Chat
+            </button>
+            <button class="mode-option" type="button" data-mode="execute" aria-pressed="false">
+              Execute
+            </button>
+          </div>
+          <label class="model-field approval-field">
+            <span>Aprovação</span>
+            <select id="approval-policy" aria-label="Política de aprovação">
+              <option value="ask">Ask for approval</option>
+              <option value="auto">Approve for me</option>
+            </select>
+          </label>
           <label class="model-field">
             <span>Modelo</span>
             <select id="model-selector" aria-label="Modelo da solicitação">
               <option value="auto">Auto</option>
             </select>
+          </label>
+          <label class="model-lock-field">
+            <input id="model-lock" type="checkbox" disabled>
+            <span>Fixar nesta conversa</span>
           </label>
           <span id="composer-status" class="composer-status">Enter para enviar</span>
           <button id="send-button" class="primary-button" type="submit">Enviar</button>
@@ -145,16 +177,98 @@
 
         <section class="settings-section">
           <div class="section-heading">
+            <h3>Contexto da conversa</h3>
+            <p>Limites conservadores; a contagem de tokens é estimada.</p>
+          </div>
+          <div class="settings-grid context-settings-grid">
+            <label>
+              <span>Contexto padrão estimado</span>
+              <input id="default-context-tokens" type="number" min="1024" max="131072" required>
+            </label>
+            <label>
+              <span>Reserva para resposta</span>
+              <input id="reserved-response-tokens" type="number" min="256" required>
+            </label>
+            <label>
+              <span>Máximo de mensagens</span>
+              <input id="max-conversation-messages" type="number" min="2" max="200" required>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="section-heading">
             <h3>Configuração por intenção</h3>
             <p>Em Auto, a intenção define o modelo alvo e o system prompt.</p>
           </div>
           <div id="intentions-grid" class="intentions-grid"></div>
+        </section>
+
+        <section class="settings-section">
+          <div class="section-heading">
+            <h3>Diagnóstico de modelos</h3>
+            <p id="model-context-diagnostic">Carregando diagnóstico…</p>
+          </div>
+          <div id="model-diagnostics-list" class="model-diagnostics-list"></div>
+          <div class="model-test-panel">
+            <label>
+              <span>Modelo para teste</span>
+              <select id="model-test-selector"></select>
+            </label>
+            <button id="test-model" class="secondary-button" type="button">Testar modelo</button>
+            <output id="model-test-result" class="model-test-result"></output>
+          </div>
         </section>
       </div>
 
       <footer class="dialog-footer">
         <span id="save-status" class="save-status"></span>
         <button id="cancel-settings" class="secondary-button" type="button">Cancelar</button>
+        <button class="primary-button" type="submit">Salvar</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="workspace-dialog" class="settings-dialog workspace-dialog">
+    <form id="workspace-form" method="dialog">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Execução controlada</span>
+          <h2>Workspace confiável</h2>
+        </div>
+        <button id="close-workspace" class="icon-button" type="button" aria-label="Fechar">×</button>
+      </header>
+
+      <div class="dialog-body">
+        <p class="workspace-note">
+          No modo Execute, o agente só poderá ler, criar, editar e executar processos
+          dentro desta pasta. Caminhos externos e tentativas de escape serão bloqueados.
+        </p>
+        <label class="workspace-path-field">
+          <span>Caminho da pasta</span>
+          <span class="workspace-picker-row">
+            <input
+              id="trusted-workspace-path"
+              type="text"
+              autocomplete="off"
+              placeholder="C:\meu-projeto"
+            >
+            <button id="pick-workspace" class="secondary-button" type="button">
+              Selecionar pasta
+            </button>
+          </span>
+        </label>
+        <div id="workspace-validation" class="workspace-validation" role="status">
+          Não configurado
+        </div>
+      </div>
+
+      <footer class="dialog-footer">
+        <span id="workspace-save-status" class="save-status"></span>
+        <button id="clear-workspace" class="secondary-button danger-button" type="button">
+          Limpar
+        </button>
+        <button id="cancel-workspace" class="secondary-button" type="button">Cancelar</button>
         <button class="primary-button" type="submit">Salvar</button>
       </footer>
     </form>

@@ -1,8 +1,11 @@
 using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Devices;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Markdown;
+using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
 
 var builder = WebApplication.CreateBuilder(
@@ -40,6 +43,19 @@ builder.Services.AddSingleton<ISettingsStore>(
 );
 builder.Services.AddSingleton<IGpuDiscoveryService, WindowsGpuDiscoveryService>();
 builder.Services.AddSingleton<IMarkdownRenderer, SafeMarkdownRenderer>();
+builder.Services.AddSingleton<IRouterResponseParser, RouterResponseParser>();
+builder.Services.AddScoped<IIntentionRouter, IntentionRouter>();
+builder.Services.AddScoped<IModelResolver, ModelResolver>();
+builder.Services.AddScoped<IConversationContextBuilder, ConversationContextBuilder>();
+builder.Services.AddScoped<ITrustedWorkspaceService, TrustedWorkspaceService>();
+builder.Services.AddSingleton<IFolderPickerService, WindowsFolderPickerService>();
+builder.Services.AddScoped<ILocalActionService, LocalActionService>();
+builder.Services.AddScoped<IApprovalPolicyService, ApprovalPolicyService>();
+builder.Services.AddScoped<IProcessExecutionService, ProcessExecutionService>();
+builder.Services.AddScoped<ILocalActionPlanner, LocalActionPlanner>();
+builder.Services.AddScoped<IExpertExecutionGuidanceService, ExpertExecutionGuidanceService>();
+builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
+builder.Services.AddScoped<IModelDiagnosticService, ModelDiagnosticService>();
 builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
 builder.Services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
 builder.Services.AddSingleton<ResidentModelManager>();

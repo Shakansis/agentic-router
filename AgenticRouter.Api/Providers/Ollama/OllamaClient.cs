@@ -78,11 +78,65 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
+    return await GenerateJsonAsync(
+      baseUri,
+      model,
+      messages,
+      "router-classification",
+      cancellationToken
+    );
+  }
+
+  public async Task<string> GenerateJsonAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    string stage,
+    CancellationToken cancellationToken
+  )
+  {
+    return await GenerateAsync(
+      baseUri,
+      model,
+      messages,
+      stage,
+      "json",
+      cancellationToken
+    );
+  }
+
+  public async Task<string> GenerateTextAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    string stage,
+    CancellationToken cancellationToken
+  )
+  {
+    return await GenerateAsync(
+      baseUri,
+      model,
+      messages,
+      stage,
+      null,
+      cancellationToken
+    );
+  }
+
+  private async Task<string> GenerateAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    string stage,
+    string? format,
+    CancellationToken cancellationToken
+  )
+  {
     var payload = CreateRequest(
       model,
       messages,
       false,
-      "json",
+      format,
       new OllamaOptions(
         0
       ),
@@ -91,15 +145,15 @@ public sealed class OllamaClient : IOllamaClient
     using var response = await SendChatAsync(
       baseUri,
       payload,
-      "router-classification",
+      stage,
       cancellationToken
     );
     var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
       JsonOptions,
       cancellationToken
     ) ?? throw ProviderError(
-      "router-classification",
-      "The router model returned an empty response.",
+      stage,
+      "The model returned an empty response.",
       "The non-streaming /api/chat response body was empty.",
       (int)response.StatusCode
     );
@@ -109,14 +163,87 @@ public sealed class OllamaClient : IOllamaClient
     ))
     {
       throw ProviderError(
-        "router-classification",
-        "The router model could not classify the request.",
+        stage,
+        "The model could not produce a response.",
         result.Error,
         (int)response.StatusCode
       );
     }
 
     return result.Message?.Content ?? string.Empty;
+  }
+
+  public async Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var json = JsonSerializer.Serialize(
+      new OllamaShowRequest(
+        model
+      ),
+      JsonOptions
+    );
+    using var request = new HttpRequestMessage(
+      HttpMethod.Post,
+      new Uri(
+        baseUri,
+        "/api/show"
+      )
+    )
+    {
+      Content = new StringContent(
+        json,
+        Encoding.UTF8,
+        "application/json"
+      )
+    };
+    using var response = await SendAsync(
+      request,
+      "model-capability-inspection",
+      cancellationToken
+    );
+    OllamaShowResponse payload;
+
+    try
+    {
+      payload = await response.Content.ReadFromJsonAsync<OllamaShowResponse>(
+        JsonOptions,
+        cancellationToken
+      ) ?? throw new JsonException(
+        "The /api/show response body was empty."
+      );
+    }
+    catch (JsonException exception)
+    {
+      throw ProviderError(
+        "model-capability-inspection",
+        "Ollama returned an invalid model capability response.",
+        exception.Message,
+        (int)response.StatusCode
+      );
+    }
+
+    var capabilities = payload.Capabilities?
+      .Where(
+        capability => !string.IsNullOrWhiteSpace(
+          capability
+        )
+      )
+      .Distinct(
+        StringComparer.OrdinalIgnoreCase
+      )
+      .ToArray() ?? [];
+
+    return new OllamaModelCapabilities(
+      model,
+      capabilities,
+      capabilities.Contains(
+        "tools",
+        StringComparer.OrdinalIgnoreCase
+      )
+    );
   }
 
   public async Task<IReadOnlyList<OllamaRunningModel>> GetRunningModelsAsync(
@@ -475,6 +602,14 @@ public sealed class OllamaClient : IOllamaClient
 
   private sealed record OllamaPsResponse(
     IReadOnlyList<OllamaPsModel> Models
+  );
+
+  private sealed record OllamaShowRequest(
+    string Model
+  );
+
+  private sealed record OllamaShowResponse(
+    IReadOnlyList<string>? Capabilities
   );
 
   private sealed record OllamaPsModel(

@@ -10,10 +10,32 @@ public interface IOllamaClient
   );
 
   Task<string> ClassifyAsync(
-      Uri baseUri,
-      string model,
-      IReadOnlyList<ChatMessage> messages,
-      CancellationToken cancellationToken
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    CancellationToken cancellationToken
+  );
+
+  Task<string> GenerateJsonAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    string stage,
+    CancellationToken cancellationToken
+  );
+
+  Task<string> GenerateTextAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    string stage,
+    CancellationToken cancellationToken
+  );
+
+  Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
   );
 
   Task<IReadOnlyList<OllamaRunningModel>> GetRunningModelsAsync(
@@ -48,16 +70,22 @@ public sealed record OllamaRunningModel(
   DateTimeOffset? ExpiresAt
 );
 
+public sealed record OllamaModelCapabilities(
+  string Model,
+  IReadOnlyList<string> Capabilities,
+  bool ToolingConfirmed
+);
+
 public sealed class OllamaProviderException : Exception
 {
   public OllamaProviderException(
     string stage,
     string message,
-  string technicalMessage,
-  int? httpStatus,
-  bool recoverable,
-  Exception? innerException = null,
-  bool isMemoryPressure = false
+    string technicalMessage,
+    int? httpStatus,
+    bool recoverable,
+    Exception? innerException = null,
+    bool isMemoryPressure = false
   )
     : base(
       message,

@@ -12,7 +12,11 @@ public sealed record ApplicationSettings
 
   public string DefaultGpu { get; init; } = "auto";
 
+  public string? TrustedWorkspacePath { get; init; }
+
   public Dictionary<string, IntentionSettings> Intentions { get; init; } = [];
+
+  public ContextSettings Context { get; init; } = new();
 
   public RuntimeSettings Runtime { get; init; } = new();
 }
@@ -21,9 +25,20 @@ public sealed record IntentionSettings
 {
   public string Model { get; init; } = "default";
 
+  public string FallbackModel { get; init; } = "none";
+
   public string Gpu { get; init; } = "default";
 
   public string SystemPrompt { get; init; } = string.Empty;
+}
+
+public sealed record ContextSettings
+{
+  public int DefaultContextTokens { get; init; } = 8_192;
+
+  public int ReservedResponseTokens { get; init; } = 2_048;
+
+  public int MaxConversationMessages { get; init; } = 40;
 }
 
 public sealed record RuntimeSettings
@@ -39,6 +54,12 @@ public sealed record RuntimeSettings
 
 public static class SettingsDefaults
 {
+  public const string GlobalTargetInstruction =
+    "The latest user instruction has priority over earlier conversational patterns. "
+    + "Do not continue a previous task when the user explicitly changes the objective. "
+    + "Do not claim that you executed, tested, opened, accessed, or verified something "
+    + "unless the application actually performed that action.";
+
   public static readonly IReadOnlyList<string> IntentionNames =
   [
     "general-chat",

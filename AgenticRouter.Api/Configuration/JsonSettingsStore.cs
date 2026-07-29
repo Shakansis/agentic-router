@@ -84,11 +84,36 @@ public sealed class JsonSettingsStore : ISettingsStore
       using var document = JsonDocument.Parse(
         json
       );
-
-      if (!document.RootElement.TryGetProperty(
+      var requiresRewrite = !document.RootElement.TryGetProperty(
         "runtime",
         out _
-      ))
+      ) || !document.RootElement.TryGetProperty(
+        "context",
+        out _
+      ) || !document.RootElement.TryGetProperty(
+        "trustedWorkspacePath",
+        out _
+      );
+
+      if (
+        document.RootElement.TryGetProperty(
+          "intentions",
+          out var intentions
+        )
+        && intentions.ValueKind == JsonValueKind.Object
+      )
+      {
+        requiresRewrite = requiresRewrite || intentions
+          .EnumerateObject()
+          .Any(
+            intention => !intention.Value.TryGetProperty(
+              "fallbackModel",
+              out _
+            )
+          );
+      }
+
+      if (requiresRewrite)
       {
         await WriteValidatedAsync(
           settings,

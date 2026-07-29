@@ -45,6 +45,14 @@ public sealed class SettingsValidator : ISettingsValidator
       "defaultModel",
       settings.DefaultModel
     );
+    ValidateContext(
+      errors,
+      settings.Context
+    );
+    ValidateTrustedWorkspace(
+      errors,
+      settings.TrustedWorkspacePath
+    );
 
     if (!string.Equals(
       settings.Runtime.ResidentModelPolicy,
@@ -115,6 +123,33 @@ public sealed class SettingsValidator : ISettingsValidator
           errors,
           $"intentions.{intentionName}.model",
           "Model selection is required."
+        );
+      }
+      else if (intention.Model.Length > 256)
+      {
+        AddError(
+          errors,
+          $"intentions.{intentionName}.model",
+          "Model selection must contain at most 256 characters."
+        );
+      }
+
+      if (string.IsNullOrWhiteSpace(
+        intention.FallbackModel
+      ))
+      {
+        AddError(
+          errors,
+          $"intentions.{intentionName}.fallbackModel",
+          "Fallback model selection is required."
+        );
+      }
+      else if (intention.FallbackModel.Length > 256)
+      {
+        AddError(
+          errors,
+          $"intentions.{intentionName}.fallbackModel",
+          "Fallback model selection must contain at most 256 characters."
         );
       }
 
@@ -193,6 +228,76 @@ public sealed class SettingsValidator : ISettingsValidator
         errors,
         field,
         "Model name must contain at most 256 characters."
+      );
+    }
+  }
+
+  private static void ValidateContext(
+    IDictionary<string, List<string>> errors,
+    ContextSettings context
+  )
+  {
+    if (context.DefaultContextTokens is < 1_024 or > 131_072)
+    {
+      AddError(
+        errors,
+        "context.defaultContextTokens",
+        "Default context tokens must be between 1024 and 131072."
+      );
+    }
+
+    if (
+      context.ReservedResponseTokens < 256
+      || context.ReservedResponseTokens >= context.DefaultContextTokens
+    )
+    {
+      AddError(
+        errors,
+        "context.reservedResponseTokens",
+        "Reserved response tokens must be at least 256 and smaller than the context limit."
+      );
+    }
+
+    if (context.MaxConversationMessages is < 2 or > 200)
+    {
+      AddError(
+        errors,
+        "context.maxConversationMessages",
+        "Maximum conversation messages must be between 2 and 200."
+      );
+    }
+  }
+
+  private static void ValidateTrustedWorkspace(
+    IDictionary<string, List<string>> errors,
+    string? path
+  )
+  {
+    if (string.IsNullOrWhiteSpace(
+      path
+    ))
+    {
+      return;
+    }
+
+    if (path.Length > 1_024)
+    {
+      AddError(
+        errors,
+        "trustedWorkspacePath",
+        "Trusted workspace path must contain at most 1024 characters."
+      );
+      return;
+    }
+
+    if (!Path.IsPathFullyQualified(
+      path
+    ))
+    {
+      AddError(
+        errors,
+        "trustedWorkspacePath",
+        "Trusted workspace path must be absolute."
       );
     }
   }

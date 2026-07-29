@@ -29,6 +29,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     new(
       "beta:code",
       7_300_000_000L
+    ),
+    new(
+      "unused:latest",
+      2_300_000_000L
+    ),
+    new(
+      "command-r:latest",
+      6_800_000_000L
     )
   ];
 
@@ -36,6 +44,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private readonly CancellationTokenSource _shutdown = new();
   private readonly ConcurrentQueue<RecordedChatRequest> _requests = new();
   private readonly ConcurrentQueue<RecordedChatRequest> _allRequests = new();
+  private readonly ConcurrentQueue<string> _capabilityQueries = new();
   private readonly ConcurrentDictionary<string, RunningModel> _loaded = new(
     StringComparer.Ordinal
   );
@@ -60,6 +69,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
   public IReadOnlyList<RecordedChatRequest> AllRequests => _allRequests.ToArray();
 
+  public IReadOnlyList<string> CapabilityQueries => _capabilityQueries.ToArray();
+
   public IReadOnlyCollection<string> LoadedModels => _loaded.Keys.ToArray();
 
   public static FakeOllamaServer Start()
@@ -77,6 +88,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   public void Reset()
   {
     _requests.Clear();
+    _capabilityQueries.Clear();
     _generationAttempts.Clear();
   }
 
@@ -192,6 +204,18 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
       if (
         context.Request.HttpMethod == HttpMethod.Post.Method
+        && path == "/api/show"
+      )
+      {
+        await HandleShowAsync(
+          context,
+          cancellationToken
+        );
+        return;
+      }
+
+      if (
+        context.Request.HttpMethod == HttpMethod.Post.Method
         && path == "/api/chat"
       )
       {
@@ -220,6 +244,77 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       context.Response.Abort();
     }
+  }
+
+  private async Task HandleShowAsync(
+    HttpListenerContext context,
+    CancellationToken cancellationToken
+  )
+  {
+    using var document = await JsonDocument.ParseAsync(
+      context.Request.InputStream,
+      cancellationToken: cancellationToken
+    );
+    var model = document.RootElement.GetProperty(
+      "model"
+    ).GetString() ?? string.Empty;
+    _capabilityQueries.Enqueue(
+      model
+    );
+
+    if (!Models.Any(
+      candidate => candidate.Name == model
+    ))
+    {
+      await WriteJsonAsync(
+        context.Response,
+        HttpStatusCode.NotFound,
+        new
+        {
+          error = $"model '{model}' not found"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    if (string.Equals(
+      model,
+      "beta:code",
+      StringComparison.Ordinal
+    ))
+    {
+      await WriteJsonAsync(
+        context.Response,
+        HttpStatusCode.InternalServerError,
+        new
+        {
+          error = "capability inspection fixture failure"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    await WriteJsonAsync(
+      context.Response,
+      HttpStatusCode.OK,
+      new
+      {
+        capabilities = string.Equals(
+          model,
+          "command-r:latest",
+          StringComparison.Ordinal
+        )
+          ? new[]
+          {
+            "completion",
+            "tools"
+          }
+          : ["completion"]
+      },
+      cancellationToken
+    );
   }
 
   private async Task HandleChatAsync(
@@ -314,6 +409,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       );
       await ClassifyAsync(
         context.Response,
+        model,
         messages,
         cancellationToken
       );
@@ -368,30 +464,105 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
-  private static async Task ClassifyAsync(
+  private async Task ClassifyAsync(
     HttpListenerResponse response,
+    string model,
     IReadOnlyList<RecordedMessage> messages,
     CancellationToken cancellationToken
   )
   {
+    if (messages.Any(
+      message => message.Content.Contains(
+        "LOCAL_ACTION_PLANNER_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await PlanLocalActionAsync(
+        response,
+        model,
+        messages,
+        cancellationToken
+      );
+      return;
+    }
+
+    if (messages.Any(
+      message => message.Content.Contains(
+        "EXPERT_EXECUTION_GUIDANCE_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await PrepareExpertGuidanceAsync(
+        response,
+        messages,
+        cancellationToken
+      );
+      return;
+    }
+
     var current = messages.Last().Content;
     var intention = current.Contains(
-      "document",
-      StringComparison.OrdinalIgnoreCase
-    ) || current.Contains(
-      "markdown",
-      StringComparison.OrdinalIgnoreCase
-    ) || current.Contains(
-      "memory pressure",
+      "review tests",
       StringComparison.OrdinalIgnoreCase
     )
-      ? "documentation"
+      ? "review-and-testing"
       : current.Contains(
+        "service boundaries",
+        StringComparison.OrdinalIgnoreCase
+      ) || current.Contains(
         "architecture",
         StringComparison.OrdinalIgnoreCase
       )
         ? "software-architecture"
-        : "general-chat";
+        : current.Contains(
+          "write a plan",
+          StringComparison.OrdinalIgnoreCase
+        ) || current.Contains(
+          "specification",
+          StringComparison.OrdinalIgnoreCase
+        ) || current.Contains(
+          "document",
+          StringComparison.OrdinalIgnoreCase
+        ) || current.Contains(
+          "markdown",
+          StringComparison.OrdinalIgnoreCase
+        ) || current.Contains(
+          "memory pressure",
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? "documentation"
+          : (
+            current.Contains(
+              "story",
+              StringComparison.OrdinalIgnoreCase
+            ) || current.Contains(
+              "história",
+              StringComparison.OrdinalIgnoreCase
+            )
+          )
+            ? "rpg-storytelling"
+            : current.Contains(
+              "implement",
+              StringComparison.OrdinalIgnoreCase
+            ) || current.Contains(
+              "code request",
+              StringComparison.OrdinalIgnoreCase
+            ) || current.Contains(
+              "coding a game",
+              StringComparison.OrdinalIgnoreCase
+            ) || (
+              current.Contains(
+                "html",
+                StringComparison.OrdinalIgnoreCase
+              ) && current.Contains(
+                "javascript",
+                StringComparison.OrdinalIgnoreCase
+              )
+            )
+              ? "software-development"
+              : "general-chat";
     string content;
 
     if (current.Contains(
@@ -415,6 +586,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       );
     }
     else if (current.Contains(
+      "negative confidence",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      content = JsonSerializer.Serialize(
+        new
+        {
+          intention,
+          confidence = -0.1
+        },
+        CompactJsonOptions
+      );
+    }
+    else if (current.Contains(
       "out of range confidence",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -428,13 +613,45 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         CompactJsonOptions
       );
     }
+    else if (current.Contains(
+      "zero confidence",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      content = JsonSerializer.Serialize(
+        new
+        {
+          intention,
+          confidence = 0,
+          reason = "Explicit zero-confidence fixture."
+        },
+        CompactJsonOptions
+      );
+    }
+    else if (current.Contains(
+      "unsupported intention",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      content = JsonSerializer.Serialize(
+        new
+        {
+          intention = "unsupported",
+          confidence = 0.5
+        },
+        CompactJsonOptions
+      );
+    }
     else
     {
       content = JsonSerializer.Serialize(
         new
         {
           intention,
-          confidence = 0.93
+          confidence = 0.91,
+          reason = intention == "software-development"
+            ? "Explicit implementation request."
+            : "Latest user request classification."
         },
         CompactJsonOptions
       );
@@ -454,6 +671,428 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       },
       cancellationToken
     );
+  }
+
+  private static async Task PrepareExpertGuidanceAsync(
+    HttpListenerResponse response,
+    IReadOnlyList<RecordedMessage> messages,
+    CancellationToken cancellationToken
+  )
+  {
+    var current = messages.Last(
+      message => message.Role == "user"
+    ).Content;
+    var guidance = current.Contains(
+      "empty takeover guidance",
+      StringComparison.OrdinalIgnoreCase
+    )
+      ? string.Empty
+      : "Execute the requested change using the controlled local tools. "
+        + $"Original user request: {current}. "
+        + "Preserve the exact fixture paths and contents implied by that request.";
+
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content = guidance
+        },
+        done = true
+      },
+      cancellationToken
+    );
+  }
+
+  private async Task PlanLocalActionAsync(
+    HttpListenerResponse response,
+    string model,
+    IReadOnlyList<RecordedMessage> messages,
+    CancellationToken cancellationToken
+  )
+  {
+    var current = messages.Last(
+      message => message.Role == "user"
+    ).Content;
+    var attempt = _generationAttempts.AddOrUpdate(
+      $"planner:{current}",
+      1,
+      (
+        _,
+        count
+      ) => count + 1
+    );
+    var hasResult = messages.Any(
+      message => message.Content.StartsWith(
+        "LOCAL_ACTION_RESULT",
+        StringComparison.Ordinal
+      )
+    );
+    var allContent = string.Join(
+      "\n",
+      messages.Select(
+        message => message.Content
+      )
+    );
+    var latestResult = messages.LastOrDefault(
+      message => message.Content.StartsWith(
+        "LOCAL_ACTION_RESULT",
+        StringComparison.Ordinal
+      )
+    )?.Content;
+    object plan;
+
+    if (
+      hasResult
+      && latestResult?.Contains(
+        "Status: failed",
+        StringComparison.Ordinal
+      ) == true
+      && allContent.Contains(
+        "recover failed process",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "list_files",
+        arguments = new
+        {
+          path = ".",
+          recursive = false
+        },
+        explanation = "Recover from the unavailable process with the structured directory tool."
+      };
+    }
+    else if (hasResult)
+    {
+      plan = new
+      {
+        tool = (string?)null,
+        arguments = new { },
+        explanation = "The requested local action has a result."
+      };
+    }
+    else
+    {
+      if (current.Contains(
+        "string null planner",
+        StringComparison.OrdinalIgnoreCase
+      ) && attempt == 1)
+      {
+        plan = new
+        {
+          tool = "null",
+          arguments = new { },
+          explanation = "No local action remains."
+        };
+      }
+      else if (
+        current.Contains(
+          "retry unknown tool",
+          StringComparison.OrdinalIgnoreCase
+        )
+        && attempt == 1
+      )
+      {
+        plan = new
+        {
+          tool = "unknown_tool",
+          arguments = new { },
+          explanation = "Invalid tool fixture."
+        };
+      }
+      else
+      {
+        plan = CreateLocalActionPlan(
+          current
+        );
+      }
+    }
+    var alwaysInvalid = current.Contains(
+      "always invalid planner",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var recoverableInvalid = current.Contains(
+      "retry invalid planner",
+      StringComparison.OrdinalIgnoreCase
+    ) && attempt < 3;
+    var targetInvalid = string.Equals(
+      model,
+      "command-r:latest",
+      StringComparison.Ordinal
+    ) && current.Contains(
+      "target planner invalid",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var content = alwaysInvalid || recoverableInvalid || targetInvalid
+      ? string.Empty
+      : JsonSerializer.Serialize(
+        plan,
+        CompactJsonOptions
+      );
+
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content
+        },
+        done = true
+      },
+      cancellationToken
+    );
+  }
+
+  private static object CreateLocalActionPlan(
+    string current
+  )
+  {
+    if (current.Contains(
+      "recover failed process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "agentic-router-missing-executable",
+          arguments = new[]
+          {
+            "-la"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Attempt the unavailable listing process before recovering."
+      };
+    }
+
+    if (current.Contains(
+      "path traversal",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "../outside.txt"
+        },
+        explanation = "Attempt to leave the workspace."
+      };
+    }
+
+    if (current.Contains(
+      "create directory",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_directory",
+        arguments = new
+        {
+          path = "generated"
+        },
+        explanation = "Create the requested directory."
+      };
+    }
+
+    if (current.Contains(
+      "apply patch",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "apply_patch",
+        arguments = new
+        {
+          path = "hello.txt",
+          replacements = new[]
+          {
+            new
+            {
+              oldText = "hello",
+              newText = "patched"
+            }
+          }
+        },
+        explanation = "Apply the requested patch."
+      };
+    }
+
+    if (current.Contains(
+      "replace file",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "replace_text",
+        arguments = new
+        {
+          path = "hello.txt",
+          oldText = "hello",
+          newText = "updated",
+          replaceAll = false
+        },
+        explanation = "Replace text in the requested file."
+      };
+    }
+
+    if (current.Contains(
+      "write file",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "write_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = "rewritten by agent"
+        },
+        explanation = "Overwrite the requested existing file."
+      };
+    }
+
+    if (current.Contains(
+      "create file",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = "hello from agent"
+        },
+        explanation = "Create the requested file."
+      };
+    }
+
+    if (current.Contains(
+      "read file",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Read the requested file."
+      };
+    }
+
+    if (current.Contains(
+      "list files",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "list_files",
+        arguments = new
+        {
+          path = ".",
+          recursive = false
+        },
+        explanation = "List the trusted workspace."
+      };
+    }
+
+    if (current.Contains(
+      "unknown process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "dotnet",
+          arguments = new[]
+          {
+            "--list-sdks"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Run a non-allowlisted structured process."
+      };
+    }
+
+    if (current.Contains(
+      "destructive process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "git",
+          arguments = new[]
+          {
+            "clean",
+            "-fd"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Attempt a destructive process."
+      };
+    }
+
+    if (current.Contains(
+      "run process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "dotnet",
+          arguments = new[]
+          {
+            "--version"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Run a safe structured process."
+      };
+    }
+
+    return new
+    {
+      tool = (string?)null,
+      arguments = new { },
+      explanation = "No local action is needed."
+    };
   }
 
   private async Task StreamTargetAsync(
@@ -601,6 +1240,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     int messageCount
   )
   {
+    if (current.Contains(
+      "Reply with exactly: OK",
+      StringComparison.Ordinal
+    ))
+    {
+      return "OK";
+    }
+
     if (current.Contains(
       "long token",
       StringComparison.OrdinalIgnoreCase
