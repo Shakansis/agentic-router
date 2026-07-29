@@ -26,32 +26,47 @@
         <strong id="provider-detail">Conectando…</strong>
       </article>
       <article class="status-card">
-        <div class="status-heading">
-          <span>Modelos locais</span>
-        </div>
+        <div class="status-heading"><span>Modelos locais</span></div>
         <strong id="model-count">—</strong>
       </article>
       <article class="status-card">
-        <div class="status-heading">
-          <span>Dispositivos gráficos</span>
-        </div>
+        <div class="status-heading"><span>Dispositivos gráficos</span></div>
         <strong id="device-count">—</strong>
         <small id="device-diagnostic"></small>
       </article>
     </section>
 
     <p class="sidebar-note">
-      A GPU é uma preferência salva; o Ollama continua responsável pela execução.
+      RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.2.0</span>
+    <span class="app-version">v0.3.0</span>
   </aside>
 
   <main class="workspace">
     <header class="chat-header">
-      <div>
+      <div class="title-group">
         <span class="eyebrow">Sessão local</span>
         <h1>Conversa</h1>
       </div>
+
+      <details id="runtime-details" class="runtime-details">
+        <summary id="runtime-summary">Memória carregando…</summary>
+        <div class="runtime-popover">
+          <div id="runtime-memory-list" class="runtime-memory-list"></div>
+          <section>
+            <h2>Modelos carregados</h2>
+            <div id="runtime-model-list" class="runtime-model-list"></div>
+          </section>
+          <section>
+            <h2>Modelo residente</h2>
+            <p id="resident-model-status">Carregando…</p>
+          </section>
+          <p class="runtime-note">
+            VRAM do adaptador e alocação reportada por modelo não representam a mesma medição.
+          </p>
+        </div>
+      </details>
+
       <button id="open-settings" class="secondary-button" type="button">
         Configurações
       </button>
@@ -64,6 +79,10 @@
         <p>Use Auto para classificar a intenção e escolher o modelo configurado.</p>
       </div>
     </section>
+
+    <button id="jump-latest" class="jump-latest" type="button" hidden>
+      Ir para o mais recente
+    </button>
 
     <footer class="composer-shell">
       <form id="composer" class="composer">
@@ -99,11 +118,10 @@
 
       <div class="dialog-body">
         <div id="settings-errors" class="settings-errors" role="alert" hidden></div>
-
         <section class="settings-section">
           <div class="section-heading">
             <h3>Geral</h3>
-            <p>Conexão e modelos usados pelo roteamento Auto.</p>
+            <p>O modelo roteador é mantido residente com política adaptativa.</p>
           </div>
           <div class="settings-grid">
             <label>
@@ -111,7 +129,7 @@
               <input id="ollama-url" name="ollamaUrl" type="url" required>
             </label>
             <label>
-              <span>Modelo roteador</span>
+              <span>Modelo roteador residente</span>
               <select id="router-model" name="routerModel" required></select>
             </label>
             <label>

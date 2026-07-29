@@ -60,13 +60,13 @@ public sealed class JsonSettingsStore : ISettingsStore
         return defaults;
       }
 
-      await using var stream = File.OpenRead(
-        _settingsPath
-      );
-      var settings = await JsonSerializer.DeserializeAsync<ApplicationSettings>(
-        stream,
-        JsonOptions,
+      var json = await File.ReadAllTextAsync(
+        _settingsPath,
         cancellationToken
+      );
+      var settings = JsonSerializer.Deserialize<ApplicationSettings>(
+        json,
+        JsonOptions
       ) ?? throw new InvalidDataException(
         "The settings file contains no settings object."
       );
@@ -78,6 +78,21 @@ public sealed class JsonSettingsStore : ISettingsStore
       {
         throw new InvalidDataException(
           "The saved settings file is invalid."
+        );
+      }
+
+      using var document = JsonDocument.Parse(
+        json
+      );
+
+      if (!document.RootElement.TryGetProperty(
+        "runtime",
+        out _
+      ))
+      {
+        await WriteValidatedAsync(
+          settings,
+          cancellationToken
         );
       }
 

@@ -3,16 +3,22 @@ const state = {
   devices: [],
   settings: null,
   history: [],
-  requestController: null
+  requestController: null,
+  autoFollow: true,
+  runtimeTimer: null,
+  activeAssistant: null,
+  editingTurn: null
 };
 
 const elements = {};
+let resizeObserver;
 
 document.addEventListener("DOMContentLoaded", initialize);
 
 async function initialize() {
   bindElements();
   bindEvents();
+  initializeScrollFollowing();
 
   try {
     await loadApplicationState();
@@ -22,6 +28,8 @@ async function initialize() {
     elements.providerDetail.textContent = error.message;
   }
 
+  await refreshRuntimeStatus();
+  scheduleRuntimeRefresh();
   elements.messageInput.focus();
 }
 
@@ -47,7 +55,12 @@ function bindElements() {
     "ollama-url",
     "router-model",
     "default-model",
-    "default-gpu"
+    "default-gpu",
+    "jump-latest",
+    "runtime-summary",
+    "runtime-memory-list",
+    "runtime-model-list",
+    "resident-model-status"
   ]) {
     elements[toCamelCase(id)] = document.querySelector(`#${id}`);
   }
@@ -55,12 +68,27 @@ function bindElements() {
 
 function bindEvents() {
   elements.composer.addEventListener("submit", handleComposerSubmit);
+  elements.composer.addEventListener("click", handleComposerClick);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
   elements.messageInput.addEventListener("input", resizeComposer);
   elements.settingsForm.addEventListener("submit", saveSettings);
+  elements.messages.addEventListener("scroll", handleConversationScroll);
+  elements.jumpLatest.addEventListener("click", resumeAutoFollow);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   document.querySelector("#open-settings").addEventListener("click", openSettings);
   document.querySelector("#close-settings").addEventListener("click", closeSettings);
   document.querySelector("#cancel-settings").addEventListener("click", closeSettings);
+}
+
+function initializeScrollFollowing() {
+  resizeObserver = new ResizeObserver(
+    () => {
+      if (state.autoFollow) {
+        requestAnimationFrame(scrollToBottom);
+      }
+    }
+  );
+  resizeObserver.observe(elements.messages);
 }
 
 async function loadApplicationState() {
@@ -96,6 +124,195 @@ function updateDeviceStatus(response) {
   elements.deviceDiagnostic.textContent = response.diagnostic ?? "";
 }
 
+async function refreshRuntimeStatus() {
+  if (document.hidden) {
+    return;
+  }
+
+  try {
+    renderRuntimeStatus(
+      await fetchJson("/api/runtime/status")
+    );
+  } catch (error) {
+    elements.runtimeSummary.textContent = "Memória indisponível";
+    elements.residentModelStatus.textContent = error.message;
+  }
+}
+
+function renderRuntimeStatus(runtime) {
+  const compact = [];
+  const memoryRows = [];
+  const ram = runtime.systemMemory;
+
+  if (ram.status === "available") {
+    compact.push(
+      `RAM ${formatGiB(ram.usedBytes)} / ${formatGiB(ram.totalBytes)} ${formatPercent(ram.usedPercent)}`
+    );
+    memoryRows.push(
+      memoryRow(
+        "RAM do sistema",
+        ram.usedBytes,
+        ram.totalBytes,
+        ram.usedPercent,
+        ram.diagnostic,
+        "system"
+      )
+    );
+  } else {
+    compact.push("RAM n/d");
+    memoryRows.push(
+      diagnosticRow(
+        "RAM do sistema",
+        ram.diagnostic
+      )
+    );
+  }
+
+  for (const device of runtime.devices) {
+    compact.push(
+      device.usedDedicatedMemoryBytes == null
+        ? `${device.name} n/d`
+        : `${device.name} ${formatGiB(device.usedDedicatedMemoryBytes)} / `
+          + `${formatGiB(device.totalDedicatedMemoryBytes)} ${formatPercent(device.usedPercent)}`
+    );
+    memoryRows.push(
+      device.usedDedicatedMemoryBytes == null
+        ? diagnosticRow(
+          device.name,
+          device.diagnostic ?? `Total dedicado: ${formatGiB(device.totalDedicatedMemoryBytes)}`,
+          "partial"
+        )
+        : memoryRow(
+          device.name,
+          device.usedDedicatedMemoryBytes,
+          device.totalDedicatedMemoryBytes,
+          device.usedPercent,
+          device.diagnostic,
+          "gpu"
+        )
+    );
+  }
+
+  if (runtime.devicesStatus === "unavailable") {
+    memoryRows.push(
+      diagnosticRow(
+        "Dispositivos gráficos",
+        runtime.devicesDiagnostic
+      )
+    );
+  }
+
+  compact.push(
+    `Modelos ${runtime.loadedModels.length} carregado${runtime.loadedModels.length === 1 ? "" : "s"}`
+  );
+  elements.runtimeSummary.textContent = compact.join(" · ");
+  elements.runtimeMemoryList.replaceChildren(...memoryRows);
+  elements.runtimeModelList.replaceChildren(
+    ...(runtime.loadedModels.length === 0
+      ? [
+        diagnosticRow(
+          runtime.loadedModelsStatus === "unavailable"
+            ? "Telemetria do Ollama"
+            : "Nenhum modelo reportado",
+          runtime.loadedModelsDiagnostic
+            ?? "O Ollama não informou modelos carregados em /api/ps."
+        )
+      ]
+      : runtime.loadedModels.map(model => loadedModelRow(model)))
+  );
+  elements.residentModelStatus.textContent =
+    `${runtime.residentModel.configuredModel || "não configurado"} · `
+    + `${runtime.residentModel.state}`
+    + `${runtime.residentModel.loaded ? " · carregado" : ""}`
+    + `${runtime.residentModel.diagnostic ? ` · ${runtime.residentModel.diagnostic}` : ""}`;
+  elements.residentModelStatus.dataset.state = runtime.residentModel.state;
+}
+
+function memoryRow(name, used, total, percent, diagnostic, kind) {
+  const row = document.createElement("div");
+  row.className = `runtime-row memory ${kind}`;
+  const header = document.createElement("div");
+  header.className = "runtime-row-header";
+  const label = document.createElement("strong");
+  label.textContent = name;
+  const value = document.createElement("span");
+  value.textContent =
+    `${formatGiB(used)} / ${formatGiB(total)} · ${formatPercent(percent)}`;
+  const meter = document.createElement("div");
+  meter.className = "runtime-meter";
+  meter.setAttribute("role", "progressbar");
+  meter.setAttribute("aria-label", `${name}: ${formatPercent(percent)}`);
+  meter.setAttribute("aria-valuemin", "0");
+  meter.setAttribute("aria-valuemax", "100");
+  meter.setAttribute("aria-valuenow", String(Math.round(percent)));
+  const fill = document.createElement("span");
+  const normalized = Math.max(0, Math.min(100, percent));
+  fill.className = normalized >= 90
+    ? "critical"
+    : normalized >= 75
+      ? "warning"
+      : "";
+  fill.style.width = `${normalized}%`;
+  meter.append(fill);
+  row.title = diagnostic ?? "";
+  header.append(label, value);
+  row.append(header, meter);
+  return row;
+}
+
+function diagnosticRow(name, diagnostic, status = "unavailable") {
+  const row = document.createElement("div");
+  row.className = `runtime-row diagnostic ${status}`;
+  const label = document.createElement("strong");
+  label.textContent = name;
+  const value = document.createElement("span");
+  value.textContent = diagnostic ?? "Indisponível";
+  row.append(label, value);
+  return row;
+}
+
+function loadedModelRow(model) {
+  const row = document.createElement("div");
+  row.className = "loaded-model-row";
+  const name = document.createElement("strong");
+  name.textContent = `${model.name}${model.isResidentModel ? " · residente" : ""}`;
+  const details = document.createElement("span");
+  details.textContent =
+    `Total ${formatGiB(model.totalSizeBytes)} · VRAM ${formatGiB(model.vramSizeBytes)} · `
+    + `RAM estimada ${formatGiB(model.estimatedRamSizeBytes)} · ${model.processor}`
+    + `${model.expiresAt ? ` · expira ${new Date(model.expiresAt).toLocaleTimeString()}` : ""}`;
+  row.append(name, details);
+  return row;
+}
+
+function scheduleRuntimeRefresh() {
+  clearTimeout(state.runtimeTimer);
+
+  if (document.hidden || !state.settings) {
+    return;
+  }
+
+  const seconds = state.requestController
+    ? state.settings.runtime.runtimeStatusActiveRefreshSeconds
+    : state.settings.runtime.runtimeStatusIdleRefreshSeconds;
+  state.runtimeTimer = setTimeout(
+    async () => {
+      await refreshRuntimeStatus();
+      scheduleRuntimeRefresh();
+    },
+    seconds * 1000
+  );
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    clearTimeout(state.runtimeTimer);
+  } else {
+    refreshRuntimeStatus();
+    scheduleRuntimeRefresh();
+  }
+}
+
 function renderComposerModels() {
   const selected = elements.modelSelector.value || "auto";
   replaceOptions(
@@ -105,10 +322,7 @@ function renderComposerModels() {
         value: "auto",
         label: "Auto"
       },
-      ...state.models.map(model => ({
-        value: model.name,
-        label: model.name
-      }))
+      ...modelOptions()
     ],
     selected
   );
@@ -120,21 +334,9 @@ function renderSettings() {
   }
 
   elements.ollamaUrl.value = state.settings.ollamaUrl;
-  replaceOptions(
-    elements.routerModel,
-    modelOptions(),
-    state.settings.routerModel
-  );
-  replaceOptions(
-    elements.defaultModel,
-    modelOptions(),
-    state.settings.defaultModel
-  );
-  replaceOptions(
-    elements.defaultGpu,
-    gpuOptions(false),
-    state.settings.defaultGpu
-  );
+  replaceOptions(elements.routerModel, modelOptions(), state.settings.routerModel);
+  replaceOptions(elements.defaultModel, modelOptions(), state.settings.defaultModel);
+  replaceOptions(elements.defaultGpu, gpuOptions(false), state.settings.defaultGpu);
   elements.intentionsGrid.replaceChildren();
 
   for (const [name, intention] of Object.entries(state.settings.intentions)) {
@@ -173,10 +375,8 @@ function createIntentionCard(name, intention) {
   const card = document.createElement("article");
   card.className = "intention-card";
   card.dataset.intention = name;
-
   const heading = document.createElement("h4");
   heading.textContent = name;
-
   const selects = document.createElement("div");
   selects.className = "intention-selects";
   selects.append(
@@ -199,7 +399,6 @@ function createIntentionCard(name, intention) {
       intention.gpu
     )
   );
-
   const promptField = document.createElement("label");
   const promptLabel = document.createElement("span");
   promptLabel.textContent = "System prompt";
@@ -208,7 +407,6 @@ function createIntentionCard(name, intention) {
   prompt.required = true;
   prompt.value = intention.systemPrompt;
   promptField.append(promptLabel, prompt);
-
   card.append(heading, selects, promptField);
   return card;
 }
@@ -276,7 +474,8 @@ async function saveSettings(event) {
     routerModel: elements.routerModel.value,
     defaultModel: elements.defaultModel.value,
     defaultGpu: elements.defaultGpu.value,
-    intentions
+    intentions,
+    runtime: state.settings.runtime
   };
 
   try {
@@ -293,6 +492,8 @@ async function saveSettings(event) {
     elements.saveStatus.textContent = "Salvo";
     renderSettings();
     elements.settingsDialog.close();
+    await refreshRuntimeStatus();
+    scheduleRuntimeRefresh();
   } catch (error) {
     const errors = error.payload?.errors;
     elements.settingsErrors.textContent = errors
@@ -306,10 +507,24 @@ async function saveSettings(event) {
 }
 
 function handleComposerKeyDown(event) {
+  if (event.key === "Escape" && state.editingTurn && !state.requestController) {
+    event.preventDefault();
+    cancelMessageEdit();
+    return;
+  }
+
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     elements.composer.requestSubmit();
   }
+}
+
+function handleComposerClick(event) {
+  if (event.target.closest("button, select, option, label")) {
+    return;
+  }
+
+  elements.messageInput.focus();
 }
 
 function resizeComposer() {
@@ -331,13 +546,34 @@ async function handleComposerSubmit(event) {
     return;
   }
 
+  state.autoFollow = true;
+  updateJumpControl();
   elements.emptyState?.remove();
-  appendUserMessage(message);
+  const historyIndex = state.editingTurn?.historyIndex ?? state.history.length;
+
+  if (state.editingTurn) {
+    removeConversationFrom(state.editingTurn.element);
+    state.history = state.history.slice(
+      0,
+      historyIndex
+    );
+    state.editingTurn = null;
+    elements.composer.classList.remove("editing");
+  }
+
+  appendUserMessage(
+    message,
+    historyIndex
+  );
   const assistant = appendAssistantMessage();
+  state.activeAssistant = assistant;
   elements.messageInput.value = "";
   resizeComposer();
   state.requestController = new AbortController();
   setStreamingState(true);
+  requestAnimationFrame(scrollToBottom);
+  await refreshRuntimeStatus();
+  scheduleRuntimeRefresh();
 
   try {
     const response = await fetch(
@@ -383,9 +619,8 @@ async function handleComposerSubmit(event) {
           message: "Solicitação cancelada pelo usuário.",
           elapsedMilliseconds: elapsedSince(assistant)
         },
-        true
+        false
       );
-      assistant.answer.textContent ||= "Solicitação cancelada.";
       assistant.answer.classList.remove("pending");
       finishActivity(assistant, "Cancelado", false);
     } else {
@@ -398,45 +633,79 @@ async function handleComposerSubmit(event) {
         },
         true
       );
-      assistant.answer.textContent = "Não foi possível concluir a resposta.";
+      assistant.answer.textContent ||= "Não foi possível concluir a resposta.";
       assistant.answer.classList.add("error");
       assistant.answer.classList.remove("pending");
       finishActivity(assistant, "Falhou", true);
     }
   } finally {
     state.requestController = null;
+    state.activeAssistant = null;
     setStreamingState(false);
+    await refreshRuntimeStatus();
+    scheduleRuntimeRefresh();
+
+    if (state.autoFollow) {
+      requestAnimationFrame(scrollToBottom);
+    }
+
     elements.messageInput.focus();
   }
 }
 
-function appendUserMessage(message) {
+function appendUserMessage(message, historyIndex) {
   const element = document.createElement("article");
   element.className = "message user";
-  element.textContent = message;
+  const content = document.createElement("div");
+  content.className = "message-content";
+  content.textContent = message;
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  const editButton = createMessageActionButton(
+    "Editar",
+    "Editar mensagem"
+  );
+  editButton.classList.add("edit-message");
+  editButton.addEventListener(
+    "click",
+    () => startMessageEdit(
+      element,
+      message,
+      historyIndex
+    )
+  );
+  actions.append(editButton);
+  element.append(content, actions);
   elements.messages.append(element);
+  resizeObserver.observe(element);
 }
 
 function appendAssistantMessage() {
   const container = document.createElement("article");
   container.className = "message assistant";
 
-  const answer = document.createElement("div");
-  answer.className = "assistant-answer pending";
-
   const details = document.createElement("details");
   details.className = "activity";
   details.open = true;
-
   const summary = document.createElement("summary");
   summary.textContent = "Em andamento · 0 ms";
   summary.setAttribute("aria-label", "Atividade da solicitação");
-
   const activityList = document.createElement("div");
   activityList.className = "activity-list";
-
   details.append(summary, activityList);
-  container.append(answer, details);
+
+  const answer = document.createElement("div");
+  answer.className = "assistant-answer pending";
+  const actions = document.createElement("div");
+  actions.className = "message-actions assistant-actions";
+  const copyButton = createMessageActionButton(
+    "Copiar",
+    "Copiar resposta"
+  );
+  copyButton.classList.add("copy-message");
+  copyButton.disabled = true;
+  actions.append(copyButton);
+  container.append(details, answer, actions);
   elements.messages.append(container);
 
   const assistant = {
@@ -446,15 +715,43 @@ function appendAssistantMessage() {
     summary,
     activityList,
     startedAt: performance.now(),
-    timer: null
+    clockFrame: null,
+    lastClockUpdate: 0,
+    recovered: false,
+    rawAnswer: "",
+    copyButton
   };
-  assistant.timer = window.setInterval(
-    () => {
-      assistant.summary.textContent = `Em andamento · ${elapsedSince(assistant)} ms`;
-    },
-    100
+  copyButton.addEventListener(
+    "click",
+    () => copyText(
+      assistant.rawAnswer,
+      copyButton,
+      "Resposta copiada"
+    )
   );
+  details.addEventListener(
+    "toggle",
+    () => {
+      if (state.autoFollow) {
+        requestAnimationFrame(scrollToBottom);
+      }
+    }
+  );
+  resizeObserver.observe(container);
+  startElapsedClock(assistant);
   return assistant;
+}
+
+function startElapsedClock(assistant) {
+  const update = timestamp => {
+    if (timestamp - assistant.lastClockUpdate >= 250) {
+      assistant.summary.textContent = `Em andamento · ${elapsedSince(assistant)} ms`;
+      assistant.lastClockUpdate = timestamp;
+    }
+
+    assistant.clockFrame = requestAnimationFrame(update);
+  };
+  assistant.clockFrame = requestAnimationFrame(update);
 }
 
 async function consumeEventStream(stream, assistant) {
@@ -487,27 +784,34 @@ async function consumeEventStream(stream, assistant) {
       }
 
       const streamEvent = JSON.parse(data);
-      const shouldScroll = isNearBottom();
 
       if (streamEvent.type === "response.delta") {
         answer += streamEvent.delta ?? "";
-        assistant.answer.textContent = answer;
+        renderAssistantAnswer(
+          assistant,
+          streamEvent.renderedHtml ?? "",
+          answer
+        );
       } else if (streamEvent.type === "response.completed") {
         completed = true;
         assistant.answer.classList.remove("pending");
-        assistant.answer.innerHTML = streamEvent.renderedHtml ?? "";
-        secureRenderedLinks(assistant.answer);
+        renderAssistantAnswer(
+          assistant,
+          streamEvent.renderedHtml ?? "",
+          answer
+        );
         addActivity(assistant, streamEvent, false);
         finishActivity(
           assistant,
-          `Concluído · ${streamEvent.elapsedMilliseconds} ms`,
-          false
+          `${assistant.recovered ? "Recuperado" : "Concluído"} · `
+            + `${streamEvent.elapsedMilliseconds} ms`,
+          assistant.recovered
         );
       } else if (streamEvent.type === "error") {
         assistant.answer.classList.remove("pending");
         assistant.answer.classList.add("error");
-        assistant.answer.textContent =
-          `${streamEvent.error.message} Referência: ${streamEvent.error.traceId}`;
+        assistant.answer.textContent ||= `${streamEvent.error.message}\n`
+          + `Referência: ${streamEvent.error.traceId}`;
         addActivity(
           assistant,
           {
@@ -521,18 +825,34 @@ async function consumeEventStream(stream, assistant) {
         );
         finishActivity(
           assistant,
-          `Falhou · ${streamEvent.error.stage}`,
+          `Falhou · ${streamEvent.error.traceId}`,
           true
         );
+      } else if (streamEvent.type === "request.cancelled") {
+        addActivity(assistant, streamEvent, false);
+        assistant.answer.classList.remove("pending");
+        finishActivity(assistant, "Cancelado", false);
       } else if (streamEvent.message) {
+        if (streamEvent.type === "target-request-recovered") {
+          assistant.recovered = true;
+        }
+
         addActivity(
           assistant,
           streamEvent,
-          streamEvent.type === "router.warning"
+          streamEvent.type.includes("failed")
+            || streamEvent.type.includes("warning")
+            || streamEvent.type === "memory-pressure-detected"
         );
       }
 
-      scrollIfNeeded(shouldScroll);
+      if (
+        streamEvent.type === "memory-pressure-detected"
+        || streamEvent.type === "target-request-recovered"
+        || streamEvent.type.startsWith("resident-model-")
+      ) {
+        void refreshRuntimeStatus();
+      }
     }
   }
 
@@ -550,11 +870,9 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   const row = document.createElement("div");
   row.className = `activity-row${isWarningOrError ? " warning" : ""}`;
   row.dataset.eventType = streamEvent.type;
-
   const time = document.createElement("span");
   time.className = "activity-time";
   time.textContent = `${streamEvent.elapsedMilliseconds ?? 0} ms`;
-
   const message = document.createElement("span");
   message.className = "activity-message";
   message.textContent = streamEvent.message;
@@ -563,9 +881,228 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
 }
 
 function finishActivity(assistant, summary, keepOpen) {
-  window.clearInterval(assistant.timer);
+  cancelAnimationFrame(assistant.clockFrame);
   assistant.summary.textContent = summary;
   assistant.details.open = keepOpen;
+}
+
+function startMessageEdit(element, message, historyIndex) {
+  if (state.requestController) {
+    return;
+  }
+
+  state.editingTurn = {
+    element,
+    historyIndex
+  };
+  elements.composer.classList.add("editing");
+  elements.messageInput.value = message;
+  resizeComposer();
+  setStreamingState(false);
+  elements.messageInput.focus();
+  elements.messageInput.setSelectionRange(
+    message.length,
+    message.length
+  );
+}
+
+function cancelMessageEdit() {
+  state.editingTurn = null;
+  elements.composer.classList.remove("editing");
+  elements.messageInput.value = "";
+  resizeComposer();
+  setStreamingState(false);
+  elements.messageInput.focus();
+}
+
+function removeConversationFrom(element) {
+  let current = element;
+
+  while (current) {
+    const next = current.nextElementSibling;
+    resizeObserver.unobserve(current);
+    current.remove();
+    current = next;
+  }
+}
+
+function createMessageActionButton(text, accessibleName) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-action-button";
+  button.textContent = text;
+  button.setAttribute(
+    "aria-label",
+    accessibleName
+  );
+  button.dataset.originalLabel = accessibleName;
+  return button;
+}
+
+function renderAssistantAnswer(assistant, renderedHtml, markdown) {
+  assistant.rawAnswer = markdown;
+  assistant.copyButton.disabled = !markdown;
+  assistant.answer.innerHTML = renderedHtml;
+  secureRenderedLinks(assistant.answer);
+  enhanceCodeBlocks(
+    assistant.answer,
+    markdown
+  );
+}
+
+function enhanceCodeBlocks(container, markdown) {
+  const fencedLanguages = extractFencedLanguages(markdown);
+  const blocks = Array.from(
+    container.querySelectorAll("pre")
+  );
+
+  blocks.forEach(
+    (pre, index) => {
+      const parent = pre.parentElement;
+      const parentLanguage = parent?.tagName === "DIV"
+        ? Array.from(parent.classList).find(name => name !== "code-block")
+        : null;
+      const codeLanguage = pre.querySelector("code")?.className
+        .split(/\s+/)
+        .find(name => name.startsWith("language-"))
+        ?.slice("language-".length);
+      const language = parentLanguage
+        ?? codeLanguage
+        ?? fencedLanguages[index]
+        ?? "code";
+      const block = parentLanguage
+        ? parent
+        : document.createElement("div");
+
+      if (!parentLanguage) {
+        pre.replaceWith(block);
+        block.append(pre);
+      }
+
+      block.classList.add("code-block");
+      const header = document.createElement("div");
+      header.className = "code-block-header";
+      const label = document.createElement("span");
+      label.className = "code-language";
+      label.textContent = formatLanguageName(language);
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.className = "code-copy-button";
+      copyButton.setAttribute(
+        "aria-label",
+        `Copiar código ${label.textContent}`
+      );
+      copyButton.dataset.originalLabel = copyButton.getAttribute("aria-label");
+      const icon = document.createElement("span");
+      icon.className = "copy-icon";
+      icon.setAttribute(
+        "aria-hidden",
+        "true"
+      );
+      copyButton.append(icon);
+      copyButton.addEventListener(
+        "click",
+        () => copyText(
+          pre.textContent.replace(/\n$/, ""),
+          copyButton,
+          "Código copiado"
+        )
+      );
+      header.append(label, copyButton);
+      block.prepend(header);
+    }
+  );
+}
+
+function extractFencedLanguages(markdown) {
+  return Array.from(
+    markdown.matchAll(
+      /^```([^\s`]*)/gm
+    ),
+    match => match[1] || "code"
+  );
+}
+
+function formatLanguageName(language) {
+  const normalized = language.toLowerCase();
+  const names = {
+    csharp: "C#",
+    cs: "C#",
+    css: "CSS",
+    html: "HTML",
+    javascript: "JavaScript",
+    js: "JavaScript",
+    json: "JSON",
+    markdown: "Markdown",
+    md: "Markdown",
+    powershell: "PowerShell",
+    ps1: "PowerShell",
+    typescript: "TypeScript",
+    ts: "TypeScript",
+    xml: "XML"
+  };
+  return names[normalized]
+    ?? language.toUpperCase();
+}
+
+async function copyText(text, button, successLabel) {
+  if (!text) {
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      fallbackCopyText(text);
+    }
+
+    showCopySuccess(
+      button,
+      successLabel
+    );
+  } catch {
+    fallbackCopyText(text);
+    showCopySuccess(
+      button,
+      successLabel
+    );
+  }
+}
+
+function fallbackCopyText(text) {
+  const temporary = document.createElement("textarea");
+  temporary.value = text;
+  temporary.style.position = "fixed";
+  temporary.style.opacity = "0";
+  document.body.append(temporary);
+  temporary.select();
+  document.execCommand("copy");
+  temporary.remove();
+}
+
+function showCopySuccess(button, label) {
+  const originalLabel = button.dataset.originalLabel;
+  button.classList.add("copied");
+  button.setAttribute(
+    "aria-label",
+    label
+  );
+  clearTimeout(
+    Number(button.dataset.resetTimer)
+  );
+  button.dataset.resetTimer = String(
+    setTimeout(
+      () => {
+        button.classList.remove("copied");
+        button.setAttribute(
+          "aria-label",
+          originalLabel
+        );
+      },
+      1600
+    )
+  );
 }
 
 function secureRenderedLinks(container) {
@@ -575,13 +1112,62 @@ function secureRenderedLinks(container) {
   }
 }
 
+function handleConversationScroll() {
+  state.autoFollow = isNearBottom();
+  updateJumpControl();
+}
+
+function resumeAutoFollow() {
+  state.autoFollow = true;
+  updateJumpControl();
+  scrollToBottom();
+}
+
+function updateJumpControl() {
+  elements.jumpLatest.hidden = state.autoFollow;
+}
+
+function scrollToBottom() {
+  elements.messages.scrollTo(
+    {
+      top: elements.messages.scrollHeight,
+      behavior: "instant"
+    }
+  );
+}
+
 function setStreamingState(isStreaming) {
-  elements.sendButton.textContent = isStreaming ? "Cancelar" : "Enviar";
+  elements.sendButton.textContent = isStreaming
+    ? "Cancelar"
+    : state.editingTurn
+      ? "Enviar edição"
+      : "Enviar";
+  elements.sendButton.setAttribute(
+    "aria-label",
+    isStreaming
+      ? "Cancelar solicitação"
+      : state.editingTurn
+        ? "Enviar mensagem editada"
+        : "Enviar mensagem"
+  );
   elements.sendButton.classList.toggle("cancel", isStreaming);
-  elements.composerStatus.textContent = isStreaming
-    ? "Resposta em andamento"
-    : "Enter para enviar";
   elements.modelSelector.disabled = isStreaming;
+  elements.messages.querySelectorAll(".edit-message").forEach(
+    button => {
+      button.disabled = isStreaming;
+    }
+  );
+  updateComposerStatus();
+}
+
+function updateComposerStatus() {
+  if (state.requestController) {
+    elements.composerStatus.textContent = "Resposta em andamento";
+  } else if (state.editingTurn) {
+    elements.composerStatus.textContent = "Editando mensagem · Esc para cancelar";
+  } else {
+    elements.composerStatus.textContent = "Enter para enviar";
+  }
 }
 
 function elapsedSince(assistant) {
@@ -591,13 +1177,19 @@ function elapsedSince(assistant) {
 function isNearBottom() {
   return elements.messages.scrollHeight
     - elements.messages.scrollTop
-    - elements.messages.clientHeight < 120;
+    - elements.messages.clientHeight <= 120;
 }
 
-function scrollIfNeeded(shouldScroll) {
-  if (shouldScroll) {
-    elements.messages.scrollTop = elements.messages.scrollHeight;
-  }
+function formatGiB(bytes) {
+  return bytes == null
+    ? "n/d"
+    : `${(bytes / 1073741824).toFixed(1)} GB`;
+}
+
+function formatPercent(value) {
+  return value == null
+    ? "n/d"
+    : `${Math.round(value)}%`;
 }
 
 async function fetchJson(url, options) {
