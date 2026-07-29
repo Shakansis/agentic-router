@@ -1,3 +1,6 @@
+using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Execution;
+
 namespace AgenticRouter.Api.Contracts;
 
 public sealed record InstalledModel(
@@ -51,7 +54,98 @@ public sealed record ChatRequest(
   IReadOnlyList<ChatMessage>? History,
   bool ModelLocked = false,
   string InteractionMode = "chat",
-  string ApprovalPolicy = "ask"
+  string ApprovalPolicy = "ask",
+  string? BrowserSessionId = null,
+  string? ConversationSessionId = null
+);
+
+public sealed record WorkspaceProfileView(
+  string Id,
+  string Name,
+  string Path,
+  bool Active,
+  bool HistoryEnabled,
+  DateTimeOffset CreatedAt,
+  DateTimeOffset LastOpenedAt,
+  ProjectProfile? ProjectProfile,
+  string? DefaultModel,
+  ValidationProfileSettings? ValidationProfile,
+  bool Available,
+  string? Diagnostic
+);
+
+public sealed record WorkspaceProfilesResponse(
+  int SchemaVersion,
+  IReadOnlyList<WorkspaceProfileView> Profiles,
+  string? ActiveWorkspaceId
+);
+
+public sealed record CreateWorkspaceProfileRequest(
+  string Name,
+  string Path
+);
+
+public sealed record RenameWorkspaceProfileRequest(
+  string Name
+);
+
+public sealed record SetWorkspaceHistoryRequest(
+  bool Enabled
+);
+
+public sealed record WorkspaceHistoryUsage(
+  string WorkspaceId,
+  bool Enabled,
+  int SessionCount,
+  long StorageBytes,
+  DateTimeOffset? OldestSessionAt,
+  DateTimeOffset? NewestSessionAt
+);
+
+public sealed record ConversationSessionSummary(
+  string Id,
+  string WorkspaceId,
+  string Title,
+  DateTimeOffset CreatedAt,
+  DateTimeOffset UpdatedAt,
+  bool Archived,
+  string LastInteractionMode,
+  bool Interrupted,
+  long StorageBytes
+);
+
+public sealed record ConversationSessionRecord(
+  int SchemaVersion,
+  string Id,
+  string WorkspaceId,
+  string Title,
+  DateTimeOffset CreatedAt,
+  DateTimeOffset UpdatedAt,
+  bool Archived,
+  string State,
+  string LastInteractionMode,
+  string? SelectedModel,
+  IReadOnlyList<ChatMessage> Messages,
+  IReadOnlyList<ExecutionSessionReview> ExecutionReviews,
+  bool Interrupted,
+  bool ContextTruncated,
+  bool ArtifactsTruncated,
+  long StorageBytes,
+  IReadOnlyList<ExecutionSessionPersistenceSnapshot>? ExecutionRollbacks = null
+);
+
+public sealed record RenameConversationSessionRequest(
+  string Title
+);
+
+public sealed record ResumeConversationSessionRequest(
+  string BrowserSessionId
+);
+
+public sealed record ConversationSessionListResponse(
+  IReadOnlyList<ConversationSessionSummary> Recent,
+  IReadOnlyList<ConversationSessionSummary> Archived,
+  WorkspaceHistoryUsage Usage
 );
 
 public sealed record TrustedWorkspaceRequest(
@@ -73,14 +167,129 @@ public sealed record FolderPickerResult(
   string? Error
 );
 
+public sealed record ProjectRepositoryProfile(
+  bool IsGitRepository,
+  string? RootRelativePath,
+  string? Branch,
+  bool HasUncommittedChanges,
+  IReadOnlyList<string> DirtyPaths
+);
+
+public sealed record ValidationProfileReference(
+  string Name,
+  string Source
+);
+
+public sealed record ProjectProfile(
+  string? WorkspacePath,
+  string? DisplayName,
+  ProjectRepositoryProfile Repository,
+  IReadOnlyList<string> ProjectTypes,
+  IReadOnlyList<string> DetectedFiles,
+  IReadOnlyList<string> InstructionFiles,
+  ValidationProfileReference? ValidationProfile,
+  ValidationProfileSettings? DetectedValidationProfile,
+  string Status,
+  string? Diagnostic,
+  bool Truncated
+);
+
+public sealed record RepositoryInstructionSet(
+  IReadOnlyList<string> AppliedFiles,
+  string Content,
+  bool Truncated,
+  string? Diagnostic
+);
+
+public sealed record ExecutionPlanStep(
+  string Id,
+  string Title,
+  string Status
+);
+
+public sealed record ExecutionPlanView(
+  string Objective,
+  IReadOnlyList<ExecutionPlanStep> Steps,
+  string? CurrentStepId,
+  int CompletedStepCount,
+  int RevisionCount
+);
+
+public sealed record WorkspaceBaselineView(
+  string? Branch,
+  IReadOnlyList<string> PreExistingDirtyPaths,
+  DateTimeOffset CapturedAt,
+  bool GitAvailable,
+  string? Diagnostic
+);
+
+public sealed record ObservedFileView(
+  string RelativePath,
+  string Hash,
+  long SizeBytes,
+  DateTimeOffset LastWriteTimeUtc,
+  bool PreExistingChange
+);
+
+public sealed record FileConflictView(
+  string RelativePath,
+  string ExpectedHash,
+  string CurrentHash,
+  string Stage,
+  bool Retryable,
+  string? TraceId
+);
+
+public sealed record ValidationStepResultView(
+  string Id,
+  string Label,
+  string Executable,
+  IReadOnlyList<string> Arguments,
+  string WorkingDirectory,
+  bool Required,
+  DateTimeOffset StartedAt,
+  DateTimeOffset EndedAt,
+  int? ExitCode,
+  long DurationMilliseconds,
+  bool TimedOut,
+  bool Cancelled,
+  bool StandardOutputTruncated,
+  bool StandardErrorTruncated,
+  string Status,
+  string StandardOutput,
+  string StandardError
+);
+
+public sealed record ValidationRunView(
+  string State,
+  string? ProfileName,
+  DateTimeOffset StartedAt,
+  DateTimeOffset EndedAt,
+  IReadOnlyList<ValidationStepResultView> Steps,
+  IReadOnlyList<ValidationRunView> PriorAttempts
+);
+
+public sealed record ValidationProfileState(
+  ValidationProfileSettings? Active,
+  ValidationProfileSettings? Detected
+);
+
+public sealed record RunValidationRequest(
+  string BrowserSessionId,
+  bool Confirmed
+);
+
 public sealed record ApprovalDecisionRequest(
-  bool Approved
+  bool Approved,
+  string BrowserSessionId,
+  string ExecutionSessionId
 );
 
 public sealed record ApprovalDecisionResponse(
   string ActionId,
   bool Accepted,
-  bool Approved
+  bool Approved,
+  string? Diagnostic = null
 );
 
 public sealed record LocalActionEvent(
@@ -89,7 +298,86 @@ public sealed record LocalActionEvent(
   string Summary,
   string? Preview,
   string State,
-  bool RequiresApproval
+  bool RequiresApproval,
+  string? ExecutionSessionId = null,
+  bool Undoable = false,
+  string? UndoWarning = null
+);
+
+public sealed record ExecutionSessionSummary(
+  string Id,
+  string BrowserSessionId,
+  string State,
+  string CoordinatorModel,
+  string ExecutionPath,
+  int PlanningFailureCount,
+  int ConsecutiveToolFailureCount,
+  int HandoffCount,
+  int ActionCount,
+  int ChangedFileCount,
+  long ElapsedMilliseconds,
+  bool ReviewAvailable,
+  bool UndoAvailable,
+  string? UndoDiagnostic,
+  ExecutionPlanView? Plan = null,
+  string CompletionStatus = "not-evaluated"
+);
+
+public sealed record ExecutionFileReview(
+  string RelativePath,
+  string Operation,
+  bool ExistedBefore,
+  string OriginalHash,
+  string FinalHash,
+  long FinalSizeBytes,
+  bool Verified,
+  bool UndoAvailable,
+  string? UndoDiagnostic,
+  string? UnifiedDiff,
+  bool PreExistingChange = false,
+  string? CurrentGitStatus = null
+);
+
+public sealed record ExecutionProcessReview(
+  string Executable,
+  IReadOnlyList<string> Arguments,
+  string WorkingDirectory,
+  int? ExitCode,
+  long DurationMilliseconds,
+  bool TimedOut,
+  bool Cancelled,
+  bool StandardOutputTruncated,
+  bool StandardErrorTruncated,
+  string StandardOutput,
+  string StandardError
+);
+
+public sealed record ExecutionSessionReview(
+  ExecutionSessionSummary Summary,
+  string Objective,
+  string WorkspacePath,
+  IReadOnlyList<ExecutionFileReview> Files,
+  IReadOnlyList<ExecutionProcessReview> Processes,
+  IReadOnlyList<string> Warnings,
+  ProjectProfile? Project = null,
+  IReadOnlyList<string>? AppliedInstructionFiles = null,
+  WorkspaceBaselineView? Baseline = null,
+  IReadOnlyList<FileConflictView>? Conflicts = null,
+  ValidationProfileSettings? ValidationProfile = null,
+  ValidationRunView? Validation = null
+);
+
+public sealed record UndoExecutionRequest(
+  bool Confirmed,
+  string BrowserSessionId
+);
+
+public sealed record UndoExecutionResponse(
+  bool Succeeded,
+  string ExecutionSessionId,
+  string Message,
+  IReadOnlyList<string> RestoredFiles,
+  IReadOnlyList<string> Warnings
 );
 
 public sealed record RouterDecision(
@@ -135,7 +423,9 @@ public sealed record ChatStreamEvent(
   long? ElapsedMilliseconds,
   string? RenderedHtml,
   ProviderError? Error,
-  LocalActionEvent? LocalAction = null
+  LocalActionEvent? LocalAction = null,
+  ExecutionSessionSummary? ExecutionSession = null,
+  string? ConversationSessionId = null
 );
 
 public sealed record ValidationErrorsResponse(

@@ -22,6 +22,8 @@ internal sealed record TestApplicationSettings
 
   public TestRuntimeSettings Runtime { get; init; } = new();
 
+  public TestSessionHistorySettings SessionHistory { get; init; } = new();
+
   public static TestApplicationSettings Create(
     string ollamaUrl,
     string? trustedWorkspacePath = null
@@ -109,6 +111,17 @@ internal sealed record TestRuntimeSettings
   public int RuntimeStatusIdleRefreshSeconds { get; init; } = 5;
 
   public int RuntimeStatusActiveRefreshSeconds { get; init; } = 2;
+}
+
+internal sealed record TestSessionHistorySettings
+{
+  public int MaxSessionsPerWorkspace { get; init; } = 50;
+
+  public int MaxSessionBytes { get; init; } = 5_242_880;
+
+  public int MaxStoredProcessOutputBytesPerTurn { get; init; } = 65_536;
+
+  public int MaxStoredDiffBytesPerTurn { get; init; } = 262_144;
 }
 
 internal static class TestJson

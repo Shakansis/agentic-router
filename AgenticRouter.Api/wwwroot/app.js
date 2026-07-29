@@ -13,7 +13,14 @@ const state = {
   modelDiagnostics: null,
   interactionMode: "chat",
   approvalPolicy: "ask",
-  workspace: null
+  workspace: null,
+  workspaceProfiles: null,
+  projectProfile: null,
+  validationProfiles: null,
+  sessions: null,
+  conversationSessionId: null,
+  browserSessionId: createSessionId(),
+  activeReview: null
 };
 
 const elements = {};
@@ -80,13 +87,43 @@ function bindElements() {
     "approval-policy",
     "workspace-badge",
     "workspace-path",
+    "session-history",
+    "recent-sessions",
+    "archived-session-section",
+    "archived-sessions",
+    "history-new-conversation",
     "workspace-dialog",
     "workspace-form",
+    "workspace-profile-list",
+    "workspace-profile-name",
     "trusted-workspace-path",
     "workspace-validation",
     "workspace-save-status",
     "clear-workspace",
-    "pick-workspace"
+    "pick-workspace",
+    "workspace-history-enabled",
+    "history-usage",
+    "delete-archived-sessions",
+    "delete-all-sessions",
+    "project-profile-summary",
+    "project-profile-details",
+    "refresh-project-profile",
+    "detected-validation-profile",
+    "validation-profile-name",
+    "validation-steps",
+    "add-validation-step",
+    "reset-validation-profile",
+    "clear-validation-profile",
+    "save-validation-profile",
+    "validation-command-preview",
+    "validation-profile-status",
+    "change-review-dialog",
+    "change-review-body",
+    "close-change-review",
+    "dismiss-change-review",
+    "undo-execution",
+    "validate-changes",
+    "undo-status"
   ]) {
     elements[toCamelCase(id)] = document.querySelector(`#${id}`);
   }
@@ -101,6 +138,7 @@ function bindEvents() {
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
   elements.newConversation.addEventListener("click", startNewConversation);
+  elements.historyNewConversation.addEventListener("click", startNewConversation);
   elements.modelSelector.addEventListener("change", handleModelSelectionChange);
   elements.modelLock.addEventListener("change", handleModelLockChange);
   elements.testModel.addEventListener("click", testSelectedModel);
@@ -108,6 +146,39 @@ function bindEvents() {
   elements.workspaceForm.addEventListener("submit", saveWorkspace);
   elements.clearWorkspace.addEventListener("click", clearWorkspace);
   elements.pickWorkspace.addEventListener("click", pickWorkspace);
+  elements.workspaceHistoryEnabled.addEventListener(
+    "change",
+    changeWorkspaceHistory
+  );
+  elements.deleteArchivedSessions.addEventListener(
+    "click",
+    deleteArchivedSessions
+  );
+  elements.deleteAllSessions.addEventListener(
+    "click",
+    deleteAllSessions
+  );
+  elements.refreshProjectProfile.addEventListener("click", refreshProjectProfile);
+  elements.addValidationStep.addEventListener(
+    "click",
+    () => addValidationStep()
+  );
+  elements.resetValidationProfile.addEventListener(
+    "click",
+    resetValidationProfile
+  );
+  elements.clearValidationProfile.addEventListener(
+    "click",
+    clearValidationProfile
+  );
+  elements.saveValidationProfile.addEventListener(
+    "click",
+    saveValidationProfile
+  );
+  elements.closeChangeReview.addEventListener("click", closeChangeReview);
+  elements.dismissChangeReview.addEventListener("click", closeChangeReview);
+  elements.undoExecution.addEventListener("click", undoExecution);
+  elements.validateChanges.addEventListener("click", validateChanges);
   document.querySelectorAll(".mode-option").forEach(
     button => button.addEventListener("click", handleModeChange)
   );
@@ -132,23 +203,41 @@ function initializeScrollFollowing() {
 }
 
 async function loadApplicationState() {
-  const [settings, modelsResponse, devicesResponse, workspace] = await Promise.all([
+  const [
+    settings,
+    modelsResponse,
+    devicesResponse,
+    workspace,
+    projectProfile,
+    validationProfiles,
+    workspaceProfiles
+  ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
     fetchJson("/api/devices"),
-    fetchJson("/api/workspace")
+    fetchJson("/api/workspace"),
+    fetchJson("/api/workspace/project-profile"),
+    fetchJson("/api/workspace/validation-profile"),
+    fetchJson("/api/workspaces")
   ]);
 
   state.settings = settings;
   state.models = modelsResponse.models;
   state.devices = devicesResponse.devices;
   state.workspace = workspace;
+  state.projectProfile = projectProfile;
+  state.validationProfiles = validationProfiles;
+  state.workspaceProfiles = workspaceProfiles;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
   renderSettings();
   renderWorkspace();
+  renderWorkspaceProfiles();
+  renderProjectProfile();
+  renderValidationProfile();
   updateInteractionControls();
+  await refreshSessions();
 }
 
 function updateProviderStatus(response) {
@@ -169,25 +258,494 @@ function updateDeviceStatus(response) {
 }
 
 function renderWorkspace() {
+  const active = activeWorkspaceProfile();
   const workspace = state.workspace;
   const valid = Boolean(workspace?.valid);
-  elements.workspaceBadge.textContent = valid ? "Configurado" : "Não configurado";
-  elements.workspaceBadge.className = `badge ${valid ? "success" : "muted"}`;
-  elements.workspacePath.textContent = workspace?.path ?? "Nenhuma pasta selecionada";
+  elements.workspaceBadge.textContent = active?.available
+    ? "Ativo"
+    : active
+      ? "Indisponível"
+      : "Não configurado";
+  elements.workspaceBadge.className =
+    `badge ${active?.available ? "success" : active ? "error" : "muted"}`;
+  elements.workspacePath.textContent = active
+    ? `${active.name} · ${shortenPath(active.path)}`
+    : "Nenhuma pasta selecionada";
   elements.workspaceValidation.textContent = workspace?.diagnostic
     ?? workspace?.status
     ?? "Não configurado";
   elements.workspaceValidation.className =
     `workspace-validation ${valid ? "valid" : workspace?.configured ? "invalid" : ""}`;
   elements.trustedWorkspacePath.value = workspace?.path ?? "";
+  elements.workspaceProfileName.value = "";
   elements.clearWorkspace.disabled = !workspace?.configured;
+  elements.workspaceHistoryEnabled.checked = Boolean(active?.historyEnabled);
+}
+
+function activeWorkspaceProfile() {
+  return state.workspaceProfiles?.profiles?.find(profile => profile.active) ?? null;
+}
+
+function shortenPath(path) {
+  if (!path || path.length <= 46) {
+    return path ?? "";
+  }
+
+  return `…${path.slice(-45)}`;
+}
+
+function renderWorkspaceProfiles() {
+  elements.workspaceProfileList.replaceChildren();
+
+  for (const profile of state.workspaceProfiles?.profiles ?? []) {
+    const entry = document.createElement("article");
+    entry.className = `workspace-profile-entry${profile.active ? " active" : ""}`
+      + `${profile.available ? "" : " unavailable"}`;
+    entry.dataset.workspaceId = profile.id;
+    const name = document.createElement("strong");
+    name.textContent = `${profile.name}${profile.active ? " · ativo" : ""}`;
+    const path = document.createElement("small");
+    path.textContent = profile.path;
+    const metadata = document.createElement("small");
+    metadata.textContent = [
+      profile.projectProfile?.projectTypes?.join(", ") || "perfil não detectado",
+      profile.historyEnabled ? "histórico ativo" : "histórico desativado",
+      profile.available ? null : profile.diagnostic || "indisponível"
+    ].filter(Boolean).join(" · ");
+    const actions = document.createElement("div");
+    actions.className = "workspace-profile-actions";
+    const activate = document.createElement("button");
+    activate.type = "button";
+    activate.className = "secondary-button";
+    activate.textContent = profile.active ? "Ativo" : "Ativar";
+    activate.disabled = profile.active || !profile.available;
+    activate.addEventListener("click", () => activateWorkspace(profile.id));
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "secondary-button";
+    rename.textContent = "Renomear";
+    rename.addEventListener("click", () => renameWorkspace(profile));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary-button danger-button";
+    remove.textContent = "Remover";
+    remove.addEventListener("click", () => removeWorkspace(profile));
+    actions.append(activate, rename, remove);
+    entry.append(name, path, metadata, actions);
+    elements.workspaceProfileList.append(entry);
+  }
+}
+
+async function refreshWorkspaceState() {
+  const [
+    workspaceProfiles,
+    workspace,
+    projectProfile,
+    validationProfiles,
+    settings
+  ] =
+    await Promise.all([
+      fetchJson("/api/workspaces"),
+      fetchJson("/api/workspace"),
+      fetchJson("/api/workspace/project-profile"),
+      fetchJson("/api/workspace/validation-profile"),
+      fetchJson("/api/settings")
+    ]);
+  state.workspaceProfiles = workspaceProfiles;
+  state.workspace = workspace;
+  state.projectProfile = projectProfile;
+  state.validationProfiles = validationProfiles;
+  state.settings = settings;
+  renderWorkspace();
+  renderWorkspaceProfiles();
+  renderProjectProfile();
+  renderValidationProfile();
+  await refreshSessions();
+}
+
+async function activateWorkspace(id) {
+  elements.workspaceSaveStatus.textContent = "Ativando…";
+
+  try {
+    await fetchJson(
+      `/api/workspaces/${encodeURIComponent(id)}/activate`,
+      {
+        method: "POST"
+      }
+    );
+    resetConversationForWorkspaceChange();
+    await refreshWorkspaceState();
+    elements.workspaceSaveStatus.textContent =
+      "Workspace ativado. Modo Chat e aprovação manual restaurados.";
+  } catch (error) {
+    elements.workspaceSaveStatus.textContent = error.message;
+  }
+}
+
+async function renameWorkspace(profile) {
+  const name = window.prompt("Novo nome do workspace:", profile.name)?.trim();
+
+  if (!name) {
+    return;
+  }
+
+  try {
+    await fetchJson(
+      `/api/workspaces/${encodeURIComponent(profile.id)}/name`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ name })
+      }
+    );
+    await refreshWorkspaceState();
+  } catch (error) {
+    elements.workspaceSaveStatus.textContent = error.message;
+  }
+}
+
+async function removeWorkspace(profile) {
+  if (!window.confirm(
+    `Remover "${profile.name}" e seu histórico local do Agentic Router? `
+      + "A pasta real e os arquivos do projeto não serão excluídos."
+  )) {
+    return;
+  }
+
+  try {
+    await fetchJson(
+      `/api/workspaces/${encodeURIComponent(profile.id)}?confirmed=true`,
+      {
+        method: "DELETE"
+      }
+    );
+
+    if (profile.active) {
+      resetConversationForWorkspaceChange();
+    }
+
+    await refreshWorkspaceState();
+  } catch (error) {
+    elements.workspaceSaveStatus.textContent = error.message;
+  }
+}
+
+async function changeWorkspaceHistory(event) {
+  const active = activeWorkspaceProfile();
+
+  if (!active) {
+    event.currentTarget.checked = false;
+    return;
+  }
+
+  const enabled = event.currentTarget.checked;
+
+  if (
+    enabled
+    && !window.confirm(
+      "Ativar histórico local para este workspace? O conteúdo não será criptografado "
+        + "pelo Agentic Router v0.8.0."
+    )
+  ) {
+    event.currentTarget.checked = false;
+    return;
+  }
+
+  try {
+    await fetchJson(
+      `/api/workspaces/${encodeURIComponent(active.id)}/history`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ enabled })
+      }
+    );
+    await refreshWorkspaceState();
+  } catch (error) {
+    event.currentTarget.checked = !enabled;
+    elements.workspaceSaveStatus.textContent = error.message;
+  }
+}
+
+function resetConversationForWorkspaceChange() {
+  startNewConversation();
+  state.interactionMode = "chat";
+  state.approvalPolicy = "ask";
+  state.lockedModel = null;
+  elements.modelSelector.value = "auto";
+  elements.modelLock.checked = false;
+  updateInteractionControls();
+  updateModelLockControls();
+}
+
+function renderProjectProfile() {
+  const profile = state.projectProfile;
+
+  if (!profile || profile.status === "unavailable") {
+    elements.projectProfileSummary.textContent =
+      profile?.diagnostic ?? "Perfil indisponível";
+    elements.projectProfileDetails.replaceChildren();
+    return;
+  }
+
+  elements.projectProfileSummary.textContent =
+    `${profile.displayName} · ${profile.projectTypes.join(", ") || "sem marcadores de projeto"}`;
+  elements.projectProfileDetails.replaceChildren();
+  const repository = document.createElement("p");
+  repository.textContent = profile.repository.isGitRepository
+    ? `Git · ${profile.repository.branch ?? "detached"} · `
+      + `${profile.repository.hasUncommittedChanges ? "alterações existentes" : "limpo"}`
+    : "Git não detectado";
+  const instructions = document.createElement("p");
+  instructions.textContent =
+    `${profile.instructionFiles.length} arquivo(s) AGENTS.md`;
+  const validation = document.createElement("p");
+  validation.textContent =
+    `Validação: ${profile.validationProfile?.name ?? "não configurada"} `
+    + `(${profile.validationProfile?.source ?? "nenhuma"})`;
+  elements.projectProfileDetails.append(
+    repository,
+    instructions,
+    validation
+  );
+
+  if (profile.diagnostic) {
+    const diagnostic = document.createElement("p");
+    diagnostic.className = "verification-warning";
+    diagnostic.textContent = profile.diagnostic;
+    elements.projectProfileDetails.append(diagnostic);
+  }
+}
+
+async function refreshProjectProfile() {
+  elements.refreshProjectProfile.disabled = true;
+  elements.projectProfileSummary.textContent = "Atualizando…";
+
+  try {
+    state.projectProfile = await fetchJson(
+      "/api/workspace/project-profile/refresh",
+      {
+        method: "POST"
+      }
+    );
+    state.validationProfiles = await fetchJson(
+      "/api/workspace/validation-profile"
+    );
+    renderProjectProfile();
+    renderValidationProfile();
+  } catch (error) {
+    elements.projectProfileSummary.textContent = error.message;
+  } finally {
+    elements.refreshProjectProfile.disabled = false;
+  }
+}
+
+function renderValidationProfile(profile = state.validationProfiles?.active) {
+  const detected = state.validationProfiles?.detected;
+  elements.detectedValidationProfile.textContent = detected
+    ? `Sugestão detectada: ${detected.name} · ${detected.steps.length} etapa(s)`
+    : "Nenhuma sugestão de validação foi detectada.";
+  elements.validationProfileName.value = profile?.name ?? "";
+  elements.validationSteps.replaceChildren();
+
+  for (const step of profile?.steps ?? []) {
+    addValidationStep(step);
+  }
+
+  updateValidationCommandPreview();
+}
+
+function addValidationStep(step = {}) {
+  if (elements.validationSteps.children.length >= 8) {
+    elements.validationProfileStatus.textContent = "O limite é de 8 etapas.";
+    return;
+  }
+
+  const row = document.createElement("section");
+  row.className = "validation-step-editor";
+  row.innerHTML = `
+    <div class="validation-step-grid">
+      <label><span>ID</span><input data-field="id" maxlength="40"></label>
+      <label><span>Rótulo</span><input data-field="label" maxlength="100"></label>
+      <label><span>Executável</span><input data-field="executable" maxlength="260"></label>
+      <label class="validation-arguments">
+        <span>Argumentos (array JSON)</span>
+        <input data-field="arguments" spellcheck="false">
+      </label>
+      <label><span>Diretório relativo</span><input data-field="workingDirectory"></label>
+      <label><span>Timeout (s)</span><input data-field="timeoutSeconds" type="number" min="1" max="120"></label>
+      <label class="validation-required">
+        <input data-field="required" type="checkbox">
+        <span>Obrigatória</span>
+      </label>
+    </div>
+    <div class="validation-step-buttons">
+      <button class="secondary-button" data-action="up" type="button">↑</button>
+      <button class="secondary-button" data-action="down" type="button">↓</button>
+      <button class="secondary-button danger-button" data-action="remove" type="button">Remover</button>
+    </div>
+  `;
+  row.querySelector('[data-field="id"]').value =
+    step.id ?? `step-${elements.validationSteps.children.length + 1}`;
+  row.querySelector('[data-field="label"]').value = step.label ?? "";
+  row.querySelector('[data-field="executable"]').value = step.executable ?? "dotnet";
+  row.querySelector('[data-field="arguments"]').value =
+    JSON.stringify(step.arguments ?? []);
+  row.querySelector('[data-field="workingDirectory"]').value =
+    step.workingDirectory ?? ".";
+  row.querySelector('[data-field="timeoutSeconds"]').value =
+    step.timeoutSeconds ?? 60;
+  row.querySelector('[data-field="required"]').checked =
+    step.required ?? true;
+  row.addEventListener("input", updateValidationCommandPreview);
+  row.querySelector('[data-action="remove"]').addEventListener(
+    "click",
+    () => {
+      row.remove();
+      updateValidationCommandPreview();
+    }
+  );
+  row.querySelector('[data-action="up"]').addEventListener(
+    "click",
+    () => {
+      const previous = row.previousElementSibling;
+      if (previous) {
+        elements.validationSteps.insertBefore(row, previous);
+        updateValidationCommandPreview();
+      }
+    }
+  );
+  row.querySelector('[data-action="down"]').addEventListener(
+    "click",
+    () => {
+      const next = row.nextElementSibling;
+      if (next) {
+        elements.validationSteps.insertBefore(next, row);
+        updateValidationCommandPreview();
+      }
+    }
+  );
+  elements.validationSteps.append(row);
+  updateValidationCommandPreview();
+}
+
+function readValidationProfileEditor() {
+  const steps = [...elements.validationSteps.children].map(row => {
+    let args;
+    try {
+      args = JSON.parse(row.querySelector('[data-field="arguments"]').value);
+    } catch {
+      throw new Error("Os argumentos de cada etapa devem ser um array JSON válido.");
+    }
+
+    if (!Array.isArray(args) || args.some(item => typeof item !== "string")) {
+      throw new Error("Os argumentos de cada etapa devem ser um array JSON de strings.");
+    }
+
+    return {
+      id: row.querySelector('[data-field="id"]').value.trim(),
+      label: row.querySelector('[data-field="label"]').value.trim(),
+      executable: row.querySelector('[data-field="executable"]').value.trim(),
+      arguments: args,
+      workingDirectory:
+        row.querySelector('[data-field="workingDirectory"]').value.trim(),
+      timeoutSeconds: Number(
+        row.querySelector('[data-field="timeoutSeconds"]').value
+      ),
+      required: row.querySelector('[data-field="required"]').checked
+    };
+  });
+  return {
+    name: elements.validationProfileName.value.trim(),
+    source: "user",
+    steps
+  };
+}
+
+function updateValidationCommandPreview() {
+  try {
+    const profile = readValidationProfileEditor();
+    elements.validationCommandPreview.textContent = profile.steps.length
+      ? profile.steps.map(step =>
+        `${step.executable} ${step.arguments.map(JSON.stringify).join(" ")}`
+        + `\n  cwd: ${step.workingDirectory} · ${step.timeoutSeconds}s · `
+        + `${step.required ? "obrigatória" : "opcional"}`
+      ).join("\n")
+      : "Nenhuma etapa configurada.";
+  } catch (error) {
+    elements.validationCommandPreview.textContent = error.message;
+  }
+}
+
+function resetValidationProfile() {
+  const detected = state.validationProfiles?.detected;
+  if (!detected) {
+    elements.validationProfileStatus.textContent =
+      "Nenhuma sugestão detectada está disponível.";
+    return;
+  }
+
+  renderValidationProfile(detected);
+  elements.validationProfileStatus.textContent =
+    "Sugestão carregada. Salve para ativá-la.";
+}
+
+async function saveValidationProfile() {
+  elements.validationProfileStatus.textContent = "Validando e salvando…";
+
+  try {
+    const profile = readValidationProfileEditor();
+    state.validationProfiles.active = await fetchJson(
+      "/api/workspace/validation-profile",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(profile)
+      }
+    );
+    elements.validationProfileStatus.textContent = "Perfil salvo.";
+    await refreshProjectProfile();
+  } catch (error) {
+    const fieldErrors = error.payload?.errors
+      ? Object.values(error.payload.errors).flat().join(" ")
+      : "";
+    elements.validationProfileStatus.textContent =
+      `${error.message} ${fieldErrors}`.trim();
+  }
+}
+
+async function clearValidationProfile() {
+  elements.validationProfileStatus.textContent = "Limpando…";
+
+  try {
+    state.validationProfiles = await fetchJson(
+      "/api/workspace/validation-profile",
+      {
+        method: "DELETE"
+      }
+    );
+    renderValidationProfile();
+    elements.validationProfileStatus.textContent =
+      "Perfil ativo removido. Validação não configurada.";
+    await refreshProjectProfile();
+  } catch (error) {
+    elements.validationProfileStatus.textContent = error.message;
+  }
 }
 
 function openWorkspace() {
   elements.workspaceSaveStatus.textContent = "";
   renderWorkspace();
+  elements.workspaceProfileName.value = "";
+  elements.trustedWorkspacePath.value = "";
   elements.workspaceDialog.showModal();
-  elements.trustedWorkspacePath.focus();
+  elements.workspaceProfileName.focus();
 }
 
 function closeWorkspace() {
@@ -197,34 +755,41 @@ function closeWorkspace() {
 async function saveWorkspace(event) {
   event.preventDefault();
   const path = elements.trustedWorkspacePath.value.trim();
+  const name = elements.workspaceProfileName.value.trim()
+    || path.split(/[\\/]/).filter(Boolean).at(-1)
+    || "Workspace";
   elements.workspaceSaveStatus.textContent = "Validando…";
 
   try {
-    state.workspace = await fetchJson(
-      "/api/workspace",
+    const created = await fetchJson(
+      "/api/workspaces",
       {
-        method: "PUT",
+        method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          name,
           path
         })
       }
     );
-    state.settings.trustedWorkspacePath = state.workspace.path;
-    renderWorkspace();
-    elements.workspaceSaveStatus.textContent = "Salvo";
-    elements.workspaceDialog.close();
+    if (!created.active) {
+      await fetchJson(
+        `/api/workspaces/${encodeURIComponent(created.id)}/activate`,
+        {
+          method: "POST"
+        }
+      );
+    }
+    resetConversationForWorkspaceChange();
+    await refreshWorkspaceState();
+    elements.workspaceSaveStatus.textContent = "Workspace adicionado e ativado";
+    elements.workspaceProfileName.value = "";
+    elements.trustedWorkspacePath.value = "";
   } catch (error) {
-    state.workspace = error.payload ?? {
-      configured: true,
-      valid: false,
-      path,
-      status: "Inválido",
-      diagnostic: error.message
-    };
-    renderWorkspace();
+    elements.workspaceValidation.textContent = error.message;
+    elements.workspaceValidation.className = "workspace-validation invalid";
     elements.workspaceSaveStatus.textContent = "Não foi possível salvar";
   }
 }
@@ -265,21 +830,298 @@ async function pickWorkspace() {
 }
 
 async function clearWorkspace() {
-  elements.workspaceSaveStatus.textContent = "Limpando…";
+  const active = activeWorkspaceProfile();
+
+  if (active) {
+    await removeWorkspace(active);
+  }
+}
+
+async function refreshSessions() {
+  if (!activeWorkspaceProfile()) {
+    state.sessions = null;
+    renderSessionHistory();
+    return;
+  }
 
   try {
-    state.workspace = await fetchJson(
-      "/api/workspace",
+    state.sessions = await fetchJson("/api/sessions");
+  } catch {
+    state.sessions = null;
+  }
+
+  renderSessionHistory();
+}
+
+function renderSessionHistory() {
+  elements.recentSessions.replaceChildren();
+  elements.archivedSessions.replaceChildren();
+  const usage = state.sessions?.usage;
+  elements.historyUsage.textContent = usage
+    ? `${usage.sessionCount} sessão(ões) · ${formatBytes(usage.storageBytes)} · `
+      + `${usage.enabled ? "histórico ativo" : "histórico desativado"}`
+      + `${usage.oldestSessionAt
+        ? ` · mais antiga ${new Date(usage.oldestSessionAt).toLocaleDateString()}`
+        : ""}`
+      + `${usage.newestSessionAt
+        ? ` · mais recente ${new Date(usage.newestSessionAt).toLocaleDateString()}`
+        : ""}`
+    : "Nenhuma sessão armazenada.";
+
+  for (const session of state.sessions?.recent ?? []) {
+    elements.recentSessions.append(
+      createSessionEntry(session)
+    );
+  }
+
+  for (const session of state.sessions?.archived ?? []) {
+    elements.archivedSessions.append(
+      createSessionEntry(session)
+    );
+  }
+
+  elements.archivedSessionSection.hidden =
+    (state.sessions?.archived?.length ?? 0) === 0;
+}
+
+function createSessionEntry(session) {
+  const entry = document.createElement("article");
+  entry.className = "session-entry";
+  entry.dataset.sessionId = session.id;
+  const title = document.createElement("strong");
+  title.textContent = session.title;
+  const metadata = document.createElement("small");
+  metadata.textContent =
+    `${new Date(session.updatedAt).toLocaleString()} · ${session.lastInteractionMode}`;
+  const status = document.createElement("small");
+  status.className = session.interrupted ? "session-interrupted" : "";
+  status.textContent = [
+    session.interrupted ? "interrompida" : null,
+    session.archived ? "arquivada" : null
+  ].filter(Boolean).join(" · ");
+  status.hidden = !status.textContent;
+  const actions = document.createElement("div");
+  actions.className = "session-entry-actions";
+  const resume = document.createElement("button");
+  resume.type = "button";
+  resume.className = "secondary-button";
+  resume.textContent = "Retomar";
+  resume.addEventListener("click", () => resumeSession(session.id));
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.className = "secondary-button";
+  rename.textContent = "Renomear";
+  rename.addEventListener("click", () => renameSession(session));
+  const archive = document.createElement("button");
+  archive.type = "button";
+  archive.className = "secondary-button";
+  archive.textContent = "Arquivar";
+  archive.hidden = session.archived;
+  archive.addEventListener("click", () => archiveSession(session.id));
+  const exportButton = document.createElement("a");
+  exportButton.className = "secondary-button";
+  exportButton.textContent = "Exportar";
+  exportButton.href = `/api/sessions/${encodeURIComponent(session.id)}/export`;
+  exportButton.download = "";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "secondary-button danger-button";
+  remove.textContent = "Excluir";
+  remove.addEventListener("click", () => deleteSession(session));
+  actions.append(resume, rename, archive, exportButton, remove);
+  entry.append(title, metadata, status, actions);
+  return entry;
+}
+
+async function resumeSession(id) {
+  if (
+    state.requestController
+    || !window.confirm(
+      "Retomar esta conversa? Modo Chat, aprovação manual e modelo não fixado serão restaurados."
+    )
+  ) {
+    return;
+  }
+
+  startNewConversation();
+
+  try {
+    const session = await fetchJson(
+      `/api/sessions/${encodeURIComponent(id)}/resume`,
       {
-        method: "DELETE"
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId
+        })
       }
     );
-    state.settings.trustedWorkspacePath = null;
-    renderWorkspace();
-    elements.workspaceSaveStatus.textContent = "Removido";
+    state.conversationSessionId = session.id;
+    state.history = session.messages.map(
+      message => ({
+        role: message.role,
+        content: message.content
+      })
+    );
+    state.interactionMode = "chat";
+    state.approvalPolicy = "ask";
+    state.lockedModel = null;
+    elements.modelSelector.value = session.selectedModel
+      && state.models.some(model => model.name === session.selectedModel)
+      ? session.selectedModel
+      : "auto";
+    renderRestoredConversation(session);
+    updateInteractionControls();
+    updateModelLockControls();
+    updateComposerStatus();
+    elements.workspaceDialog.close();
   } catch (error) {
     elements.workspaceSaveStatus.textContent = error.message;
   }
+}
+
+function renderRestoredConversation(session) {
+  elements.emptyState?.remove();
+
+  session.messages.forEach(
+    (message, index) => {
+      if (message.role === "user") {
+        appendUserMessage(
+          message.content,
+          index
+        );
+      } else if (message.role === "assistant") {
+        const assistant = appendAssistantMessage();
+        cancelAnimationFrame(assistant.clockFrame);
+        assistant.details.open = false;
+        assistant.summary.textContent = "Histórico restaurado";
+        assistant.answer.classList.remove("pending");
+        assistant.answer.textContent = message.content;
+        assistant.rawAnswer = message.content;
+        assistant.copyButton.disabled = false;
+      }
+    }
+  );
+
+  if (session.interrupted) {
+    const warning = document.createElement("article");
+    warning.className = "message assistant";
+    warning.textContent =
+      "A execução anterior foi interrompida. Ações concluídas foram preservadas. "
+      + "Nenhum processo ou aprovação pendente foi retomado. Continue com um novo turno.";
+    elements.messages.append(warning);
+  }
+
+  if (session.contextTruncated) {
+    const notice = document.createElement("p");
+    notice.className = "workspace-note";
+    notice.textContent =
+      "Mensagens antigas continuam visíveis, mas serão omitidas do próximo contexto do modelo.";
+    elements.messages.append(notice);
+  }
+
+  if (session.executionReviews.length > 0) {
+    const review = session.executionReviews.at(-1);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.textContent = "Revisar alterações concluídas";
+    button.addEventListener(
+      "click",
+      () => {
+        state.activeReview = review;
+        renderChangeReview(review);
+        elements.changeReviewDialog.showModal();
+      }
+    );
+    elements.messages.append(button);
+  }
+}
+
+async function renameSession(session) {
+  const title = window.prompt("Novo título:", session.title)?.trim();
+
+  if (!title) {
+    return;
+  }
+
+  await fetchJson(
+    `/api/sessions/${encodeURIComponent(session.id)}/name`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ title })
+    }
+  );
+  await refreshSessions();
+}
+
+async function archiveSession(id) {
+  await fetchJson(
+    `/api/sessions/${encodeURIComponent(id)}/archive`,
+    {
+      method: "POST"
+    }
+  );
+  await refreshSessions();
+}
+
+async function deleteSession(session) {
+  if (!window.confirm(
+    `Excluir somente o registro local "${session.title}"? Os arquivos do projeto serão preservados.`
+  )) {
+    return;
+  }
+
+  await fetchJson(
+    `/api/sessions/${encodeURIComponent(session.id)}?confirmed=true`,
+    {
+      method: "DELETE"
+    }
+  );
+
+  if (state.conversationSessionId === session.id) {
+    startNewConversation();
+  }
+
+  await refreshSessions();
+}
+
+async function deleteArchivedSessions() {
+  if (!window.confirm(
+    "Excluir todas as conversas arquivadas deste workspace?"
+  )) {
+    return;
+  }
+
+  await fetchJson(
+    "/api/sessions/archived?confirmed=true",
+    {
+      method: "DELETE"
+    }
+  );
+  await refreshSessions();
+}
+
+async function deleteAllSessions() {
+  if (!window.confirm(
+    "Excluir todo o histórico local deste workspace? Os arquivos do projeto serão preservados."
+  )) {
+    return;
+  }
+
+  await fetchJson(
+    "/api/sessions?confirmed=true",
+    {
+      method: "DELETE"
+    }
+  );
+  startNewConversation();
+  await refreshSessions();
 }
 
 async function refreshRuntimeStatus() {
@@ -737,7 +1579,11 @@ async function saveSettings(event) {
       reservedResponseTokens: Number(elements.reservedResponseTokens.value),
       maxConversationMessages: Number(elements.maxConversationMessages.value)
     },
-    runtime: state.settings.runtime
+    runtime: state.settings.runtime,
+    execution: state.settings.execution,
+    projectAwareness: state.settings.projectAwareness,
+    validationProfile: state.validationProfiles?.active ?? null,
+    sessionHistory: state.settings.sessionHistory
   };
 
   try {
@@ -853,8 +1699,10 @@ function startNewConversation() {
   }
 
   state.conversationVersion++;
+  state.browserSessionId = createSessionId();
   state.requestController?.abort();
   state.history = [];
+  state.conversationSessionId = null;
   state.editingTurn = null;
   state.lockedModel = null;
   state.interactionMode = "chat";
@@ -988,7 +1836,9 @@ async function handleComposerSubmit(event) {
           history: state.history,
           modelLocked: Boolean(state.lockedModel),
           interactionMode: state.interactionMode,
-          approvalPolicy: state.approvalPolicy
+          approvalPolicy: state.approvalPolicy,
+          browserSessionId: state.browserSessionId,
+          conversationSessionId: state.conversationSessionId
         }),
         signal: controller.signal
       }
@@ -1014,6 +1864,7 @@ async function handleComposerSubmit(event) {
           content: outcome.answer
         }
       );
+      await refreshSessions();
     }
   } catch (error) {
     if (error.name === "AbortError") {
@@ -1028,6 +1879,9 @@ async function handleComposerSubmit(event) {
       );
       assistant.answer.classList.remove("pending");
       finishActivity(assistant, "Cancelado", false);
+      await refreshAssistantReviewAfterCancellation(
+        assistant
+      );
     } else {
       addActivity(
         assistant,
@@ -1102,7 +1956,18 @@ function appendAssistantMessage() {
   summary.setAttribute("aria-label", "Atividade da solicitação");
   const activityList = document.createElement("div");
   activityList.className = "activity-list";
-  details.append(summary, activityList);
+  const sessionHeader = document.createElement("div");
+  sessionHeader.className = "execution-session-header";
+  sessionHeader.hidden = true;
+  const planPanel = document.createElement("details");
+  planPanel.className = "execution-plan";
+  planPanel.hidden = true;
+  planPanel.open = true;
+  const planSummary = document.createElement("summary");
+  const planBody = document.createElement("div");
+  planBody.className = "execution-plan-body";
+  planPanel.append(planSummary, planBody);
+  details.append(summary, sessionHeader, activityList);
 
   const answer = document.createElement("div");
   answer.className = "assistant-answer pending";
@@ -1114,8 +1979,14 @@ function appendAssistantMessage() {
   );
   copyButton.classList.add("copy-message");
   copyButton.disabled = true;
-  actions.append(copyButton);
-  container.append(details, answer, actions);
+  const reviewButton = createMessageActionButton(
+    "Revisar alterações",
+    "Revisar alterações desta execução"
+  );
+  reviewButton.classList.add("review-changes");
+  reviewButton.hidden = true;
+  actions.append(reviewButton, copyButton);
+  container.append(details, planPanel, answer, actions);
   elements.messages.append(container);
 
   const assistant = {
@@ -1124,12 +1995,18 @@ function appendAssistantMessage() {
     details,
     summary,
     activityList,
+    sessionHeader,
+    planPanel,
+    planSummary,
+    planBody,
     startedAt: performance.now(),
     clockFrame: null,
     lastClockUpdate: 0,
     recovered: false,
     rawAnswer: "",
-    copyButton
+    copyButton,
+    reviewButton,
+    executionSession: null
   };
   copyButton.addEventListener(
     "click",
@@ -1138,6 +2015,10 @@ function appendAssistantMessage() {
       copyButton,
       "Resposta copiada"
     )
+  );
+  reviewButton.addEventListener(
+    "click",
+    () => openChangeReview(assistant.executionSession?.id)
   );
   details.addEventListener(
     "toggle",
@@ -1194,6 +2075,12 @@ async function consumeEventStream(stream, assistant) {
       }
 
       const streamEvent = JSON.parse(data);
+      state.conversationSessionId =
+        streamEvent.conversationSessionId ?? state.conversationSessionId;
+      updateExecutionSession(
+        assistant,
+        streamEvent.executionSession
+      );
 
       if (streamEvent.type === "response.delta") {
         answer += streamEvent.delta ?? "";
@@ -1217,6 +2104,8 @@ async function consumeEventStream(stream, assistant) {
             + `${streamEvent.elapsedMilliseconds} ms`,
           assistant.recovered
         );
+        assistant.reviewButton.hidden =
+          !assistant.executionSession?.reviewAvailable;
       } else if (streamEvent.type === "error") {
         assistant.answer.classList.remove("pending");
         assistant.answer.classList.add("error");
@@ -1298,12 +2187,409 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   assistant.activityList.append(row);
 }
 
+function updateExecutionSession(assistant, session) {
+  if (!session) {
+    return;
+  }
+
+  assistant.executionSession = session;
+  assistant.sessionHeader.hidden = false;
+  assistant.sessionHeader.replaceChildren();
+  const stateLabel = document.createElement("strong");
+  stateLabel.textContent = session.state;
+  const coordinator = document.createElement("span");
+  coordinator.textContent =
+    `${session.coordinatorModel} · ${session.executionPath}`;
+  const counts = document.createElement("span");
+  counts.textContent =
+    `${session.actionCount} ações · ${session.changedFileCount} arquivos · `
+    + `planning ${session.planningFailureCount} · `
+    + `tool failures ${session.consecutiveToolFailureCount} · `
+    + `${session.elapsedMilliseconds} ms`;
+  assistant.sessionHeader.append(
+    stateLabel,
+    coordinator,
+    counts
+  );
+  renderExecutionPlan(
+    assistant,
+    session.plan
+  );
+
+  if (session.reviewAvailable && session.state !== "running") {
+    assistant.reviewButton.hidden = false;
+  }
+}
+
+function renderExecutionPlan(assistant, plan) {
+  if (!plan) {
+    assistant.planPanel.hidden = true;
+    return;
+  }
+
+  assistant.planPanel.hidden = false;
+  assistant.planSummary.textContent =
+    `${plan.completedStepCount}/${plan.steps.length} · ${plan.objective}`;
+  assistant.planBody.replaceChildren();
+  const list = document.createElement("ol");
+
+  for (const step of plan.steps) {
+    const item = document.createElement("li");
+    item.className = `plan-step ${step.status}`;
+    item.dataset.stepId = step.id;
+    const marker = document.createElement("span");
+    marker.className = "plan-step-marker";
+    marker.textContent = {
+      completed: "✓",
+      failed: "×",
+      blocked: "!",
+      skipped: "–",
+      "in-progress": "●"
+    }[step.status] ?? "○";
+    const title = document.createElement("span");
+    title.textContent = step.title;
+    const status = document.createElement("small");
+    status.textContent = step.status;
+    item.append(marker, title, status);
+    list.append(item);
+  }
+
+  assistant.planBody.append(list);
+}
+
+async function openChangeReview(executionSessionId) {
+  if (!executionSessionId) {
+    return;
+  }
+
+  elements.changeReviewBody.textContent = "Carregando revisão…";
+  elements.undoStatus.textContent = "";
+  elements.undoExecution.disabled = true;
+  if (!elements.changeReviewDialog.open) {
+    elements.changeReviewDialog.showModal();
+  }
+
+  try {
+    const review = await fetchJson(
+      `/api/execution-sessions/${encodeURIComponent(executionSessionId)}/review`
+    );
+    state.activeReview = review;
+    renderChangeReview(review);
+  } catch (error) {
+    elements.changeReviewBody.textContent = error.message;
+  }
+}
+
+async function refreshAssistantReviewAfterCancellation(assistant) {
+  const executionSessionId = assistant.executionSession?.id;
+
+  if (!executionSessionId) {
+    return;
+  }
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const review = await fetchJson(
+        `/api/execution-sessions/${encodeURIComponent(executionSessionId)}/review`
+      );
+
+      if (review.summary.state === "running") {
+        await new Promise(
+          resolve => setTimeout(resolve, 75)
+        );
+        continue;
+      }
+
+      updateExecutionSession(
+        assistant,
+        review.summary
+      );
+      assistant.reviewButton.hidden = !review.summary.reviewAvailable;
+      return;
+    } catch {
+      await new Promise(
+        resolve => setTimeout(resolve, 75)
+      );
+    }
+  }
+}
+
+function closeChangeReview() {
+  state.activeReview = null;
+  elements.changeReviewDialog.close();
+}
+
+function renderChangeReview(review) {
+  elements.changeReviewBody.replaceChildren();
+  const summary = document.createElement("section");
+  summary.className = "change-review-summary";
+  const heading = document.createElement("h3");
+  heading.textContent = `${review.summary.state} · ${review.summary.coordinatorModel}`;
+  const metadata = document.createElement("p");
+  metadata.textContent =
+    `${review.summary.executionPath} · ${review.summary.actionCount} ações · `
+    + `${review.summary.changedFileCount} arquivos · `
+    + `${review.summary.elapsedMilliseconds} ms · `
+    + `${review.summary.completionStatus}`;
+  const objective = document.createElement("p");
+  objective.textContent = review.objective;
+  summary.append(heading, metadata, objective);
+  elements.changeReviewBody.append(summary);
+
+  if (review.project) {
+    const project = document.createElement("section");
+    project.className = "change-review-context";
+    const title = document.createElement("h3");
+    title.textContent = "Projeto e baseline";
+    const profile = document.createElement("p");
+    profile.textContent =
+      `${review.project.displayName} · `
+      + `${review.project.projectTypes.join(", ") || "sem tipo detectado"} · `
+      + `${review.baseline?.gitAvailable
+        ? `Git ${review.baseline.branch ?? "detached"}`
+        : "sem Git"}`;
+    const dirty = document.createElement("p");
+    dirty.textContent = review.baseline?.preExistingDirtyPaths.length
+      ? `Alterações pré-existentes: ${review.baseline.preExistingDirtyPaths.join(", ")}`
+      : "Nenhuma alteração pré-existente detectada.";
+    const instructions = document.createElement("p");
+    instructions.textContent = review.appliedInstructionFiles?.length
+      ? `Instruções aplicadas: ${review.appliedInstructionFiles.join(", ")}`
+      : "Nenhum AGENTS.md aplicado.";
+    project.append(title, profile, dirty, instructions);
+    elements.changeReviewBody.append(project);
+  }
+
+  if (review.summary.plan) {
+    const plan = document.createElement("section");
+    plan.className = "change-review-context";
+    const title = document.createElement("h3");
+    title.textContent =
+      `Plano · ${review.summary.plan.completedStepCount}/${review.summary.plan.steps.length}`;
+    const list = document.createElement("ol");
+    for (const step of review.summary.plan.steps) {
+      const item = document.createElement("li");
+      item.textContent = `${step.status} · ${step.title}`;
+      list.append(item);
+    }
+    plan.append(title, list);
+    elements.changeReviewBody.append(plan);
+  }
+
+  for (const file of review.files) {
+    const section = document.createElement("details");
+    section.className = "change-file-review";
+    section.open = true;
+    const title = document.createElement("summary");
+    title.textContent =
+      `${file.operation === "created" ? "Criado" : "Modificado"} · ${file.relativePath}`;
+    const status = document.createElement("p");
+    status.className = file.verified
+      ? "verification-ok"
+      : "verification-warning";
+    status.textContent = file.verified
+      ? `Verificado · ${file.finalSizeBytes} bytes`
+      : "A verificação de leitura falhou";
+    section.append(title, status);
+
+    if (file.preExistingChange) {
+      const existing = document.createElement("p");
+      existing.className = "preexisting-change";
+      existing.textContent =
+        "Este arquivo já possuía alterações antes da sessão e também foi alterado por ela.";
+      section.append(existing);
+    }
+
+    if (file.unifiedDiff) {
+      const diff = document.createElement("pre");
+      diff.className = "change-diff";
+      diff.textContent = file.unifiedDiff;
+      section.append(diff);
+    }
+
+    if (!file.undoAvailable && file.undoDiagnostic) {
+      const warning = document.createElement("p");
+      warning.className = "verification-warning";
+      warning.textContent = file.undoDiagnostic;
+      section.append(warning);
+    }
+
+    elements.changeReviewBody.append(section);
+  }
+
+  if (review.processes.length > 0) {
+    const processes = document.createElement("section");
+    processes.className = "process-review";
+    const heading = document.createElement("h3");
+    heading.textContent = "Processos";
+    processes.append(heading);
+
+    for (const process of review.processes) {
+      const entry = document.createElement("pre");
+      const flags = [
+        process.timedOut ? "timeout" : null,
+        process.cancelled ? "cancelled" : null,
+        process.standardOutputTruncated ? "stdout truncated" : null,
+        process.standardErrorTruncated ? "stderr truncated" : null
+      ].filter(Boolean);
+      entry.textContent =
+        `${process.executable} ${process.arguments.join(" ")}\n`
+        + `cwd: ${process.workingDirectory}\n`
+        + `exit: ${process.exitCode} · ${process.durationMilliseconds} ms`
+        + `${flags.length ? ` · ${flags.join(", ")}` : ""}\n`
+        + `${process.standardOutput}${process.standardError}`;
+      processes.append(entry);
+    }
+
+    elements.changeReviewBody.append(processes);
+  }
+
+  if (review.validation) {
+    const validation = document.createElement("section");
+    validation.className = "change-review-context validation-results";
+    const heading = document.createElement("h3");
+    heading.textContent =
+      `Validação · ${review.validation.state} · `
+      + `${review.validation.profileName ?? "não configurada"}`;
+    validation.append(heading);
+
+    for (const step of review.validation.steps) {
+      const result = document.createElement("p");
+      result.className = step.status === "passed"
+        ? "verification-ok"
+        : "verification-warning";
+      result.textContent =
+        `${step.label}: ${step.status} · exit ${step.exitCode ?? "n/a"} · `
+        + `${step.durationMilliseconds} ms`;
+      validation.append(result);
+    }
+
+    elements.changeReviewBody.append(validation);
+  }
+
+  for (const conflict of review.conflicts ?? []) {
+    const warning = document.createElement("p");
+    warning.className = "verification-warning";
+    warning.textContent =
+      `Conflito em ${conflict.relativePath}: esperado ${conflict.expectedHash}, `
+      + `atual ${conflict.currentHash}.`;
+    elements.changeReviewBody.append(warning);
+  }
+
+  for (const warningText of review.warnings) {
+    const warning = document.createElement("p");
+    warning.className = "verification-warning";
+    warning.textContent = warningText;
+    elements.changeReviewBody.append(warning);
+  }
+
+  elements.undoExecution.disabled = !review.summary.undoAvailable;
+  elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
+  elements.validateChanges.disabled = review.files.length === 0;
+}
+
+async function undoExecution() {
+  const review = state.activeReview;
+
+  if (!review?.summary.undoAvailable) {
+    return;
+  }
+
+  if (!window.confirm(
+    "Desfazer integralmente as alterações desta sessão? O estado atual será validado antes de qualquer mudança."
+  )) {
+    return;
+  }
+
+  elements.undoExecution.disabled = true;
+  elements.undoStatus.textContent = "Validando e desfazendo…";
+
+  try {
+    const response = await fetchJson(
+      `/api/execution-sessions/${encodeURIComponent(review.summary.id)}/undo`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          confirmed: true,
+          browserSessionId: state.browserSessionId
+        })
+      }
+    );
+    await openChangeReview(
+      review.summary.id
+    );
+    elements.undoStatus.textContent = response.message;
+  } catch (error) {
+    elements.undoStatus.textContent = error.message;
+
+    if (error.payload) {
+      const warning = document.createElement("p");
+      warning.className = "verification-warning";
+      warning.textContent = [
+        error.payload.message,
+        ...(error.payload.warnings ?? [])
+      ].join(" ");
+      elements.changeReviewBody.prepend(warning);
+    }
+
+    elements.undoExecution.disabled = false;
+  }
+}
+
+async function validateChanges() {
+  const review = state.activeReview;
+
+  if (!review || review.files.length === 0) {
+    return;
+  }
+
+  const confirmed = state.approvalPolicy !== "ask"
+    || window.confirm(
+      "Executar agora todas as etapas estruturadas do perfil de validação salvo?"
+    );
+
+  if (!confirmed) {
+    return;
+  }
+
+  elements.validateChanges.disabled = true;
+  elements.undoStatus.textContent = "Executando validação…";
+
+  try {
+    const result = await fetchJson(
+      `/api/execution-sessions/${encodeURIComponent(review.summary.id)}/validate`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          confirmed
+        })
+      }
+    );
+    await openChangeReview(
+      review.summary.id
+    );
+    elements.undoStatus.textContent =
+      `Validação ${result.state}.`;
+  } catch (error) {
+    elements.undoStatus.textContent = error.message;
+    elements.validateChanges.disabled = false;
+  }
+}
+
 function addApprovalActivity(assistant, streamEvent) {
   const action = streamEvent.localAction;
   const row = document.createElement("div");
   row.className = "activity-row action-approval";
   row.dataset.eventType = streamEvent.type;
   row.dataset.actionId = action.actionId;
+  row.dataset.executionSessionId = action.executionSessionId ?? "";
   const time = document.createElement("span");
   time.className = "activity-time";
   time.textContent = `${streamEvent.elapsedMilliseconds ?? 0} ms`;
@@ -1341,15 +2627,36 @@ function addApprovalActivity(assistant, streamEvent) {
   assistant.details.open = true;
   approve.addEventListener(
     "click",
-    () => decideAction(action.actionId, true, approve, reject, status)
+    () => decideAction(
+      action.actionId,
+      action.executionSessionId,
+      true,
+      approve,
+      reject,
+      status
+    )
   );
   reject.addEventListener(
     "click",
-    () => decideAction(action.actionId, false, approve, reject, status)
+    () => decideAction(
+      action.actionId,
+      action.executionSessionId,
+      false,
+      approve,
+      reject,
+      status
+    )
   );
 }
 
-async function decideAction(actionId, approved, approveButton, rejectButton, status) {
+async function decideAction(
+  actionId,
+  executionSessionId,
+  approved,
+  approveButton,
+  rejectButton,
+  status
+) {
   approveButton.disabled = true;
   rejectButton.disabled = true;
   status.textContent = approved ? "Aprovando…" : "Rejeitando…";
@@ -1363,7 +2670,9 @@ async function decideAction(actionId, approved, approveButton, rejectButton, sta
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          approved
+          approved,
+          browserSessionId: state.browserSessionId,
+          executionSessionId
         })
       }
     );
@@ -1686,6 +2995,18 @@ function formatGiB(bytes) {
     : `${(bytes / 1073741824).toFixed(1)} GB`;
 }
 
+function formatBytes(bytes) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KiB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 function formatPercent(value) {
   return value == null
     ? "n/d"
@@ -1694,15 +3015,22 @@ function formatPercent(value) {
 
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
-  const payload = await response.json();
+  const payload = response.status === 204
+    ? null
+    : await response.json();
 
   if (!response.ok) {
-    const error = new Error(payload.message ?? `HTTP ${response.status}`);
+    const error = new Error(payload?.message ?? `HTTP ${response.status}`);
     error.payload = payload;
     throw error;
   }
 
   return payload;
+}
+
+function createSessionId() {
+  return globalThis.crypto?.randomUUID?.()
+    ?? `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function toCamelCase(value) {

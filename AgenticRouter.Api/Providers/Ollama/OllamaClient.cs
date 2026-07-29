@@ -100,7 +100,9 @@ public sealed class OllamaClient : IOllamaClient
       model,
       messages,
       stage,
-      "json",
+      JsonSerializer.SerializeToElement(
+        "json"
+      ),
       cancellationToken
     );
   }
@@ -123,12 +125,100 @@ public sealed class OllamaClient : IOllamaClient
     );
   }
 
+  public async Task<string> GenerateStructuredAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    JsonElement schema,
+    string stage,
+    CancellationToken cancellationToken
+  )
+  {
+    return await GenerateAsync(
+      baseUri,
+      model,
+      messages,
+      stage,
+      schema,
+      cancellationToken
+    );
+  }
+
+  public async Task<OllamaToolResponse> GenerateToolCallAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<OllamaToolMessage> messages,
+    IReadOnlyList<OllamaToolDefinition> tools,
+    string stage,
+    CancellationToken cancellationToken
+  )
+  {
+    var payload = CreateRequest(
+      model,
+      messages,
+      false,
+      null,
+      new OllamaOptions(
+        0
+      ),
+      null,
+      tools.Select(
+        tool => new OllamaApiTool(
+          "function",
+          new OllamaFunctionDefinition(
+            tool.Name,
+            tool.Description,
+            tool.Parameters
+          )
+        )
+      ).ToArray()
+    );
+    using var response = await SendChatAsync(
+      baseUri,
+      payload,
+      stage,
+      cancellationToken
+    );
+    var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
+      JsonOptions,
+      cancellationToken
+    ) ?? throw ProviderError(
+      stage,
+      "The model returned an empty response.",
+      "The non-streaming /api/chat response body was empty.",
+      (int)response.StatusCode
+    );
+
+    if (!string.IsNullOrWhiteSpace(
+      result.Error
+    ))
+    {
+      throw ProviderError(
+        stage,
+        "The model could not produce a response.",
+        result.Error,
+        (int)response.StatusCode
+      );
+    }
+
+    return new OllamaToolResponse(
+      result.Message?.Content,
+      result.Message?.Thinking,
+      result.Message?.ToolCalls?.Select(
+        call => new OllamaToolCall(
+          call.Function.Name,
+          call.Function.Arguments.Clone()
+        )
+      ).ToArray() ?? []
+    );
+  }
+
   private async Task<string> GenerateAsync(
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
     string stage,
-    string? format,
+    JsonElement? format,
     CancellationToken cancellationToken
   )
   {
@@ -299,7 +389,7 @@ public sealed class OllamaClient : IOllamaClient
   {
     var payload = CreateRequest(
       model,
-      [],
+      Array.Empty<ChatMessage>(),
       false,
       null,
       null,
@@ -570,9 +660,10 @@ public sealed class OllamaClient : IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     bool stream,
-    string? format,
+    JsonElement? format,
     OllamaOptions? options,
-    int? keepAlive
+    int? keepAlive,
+    IReadOnlyList<OllamaApiTool>? tools = null
   )
   {
     return new OllamaChatRequest(
@@ -586,7 +677,45 @@ public sealed class OllamaClient : IOllamaClient
       stream,
       format,
       options,
-      keepAlive
+      keepAlive,
+      tools
+    );
+  }
+
+  private static OllamaChatRequest CreateRequest(
+    string model,
+    IReadOnlyList<OllamaToolMessage> messages,
+    bool stream,
+    JsonElement? format,
+    OllamaOptions? options,
+    int? keepAlive,
+    IReadOnlyList<OllamaApiTool>? tools = null
+  )
+  {
+    return new OllamaChatRequest(
+      model,
+      messages.Select(
+        message => new OllamaChatMessage(
+          message.Role,
+          message.Content,
+          message.Thinking,
+          message.ToolCalls?.Select(
+            call => new OllamaApiToolCall(
+              "function",
+              new OllamaApiFunctionCall(
+                call.Name,
+                call.Arguments
+              )
+            )
+          ).ToArray(),
+          message.ToolName
+        )
+      ).ToArray(),
+      stream,
+      format,
+      options,
+      keepAlive,
+      tools
     );
   }
 
@@ -623,9 +752,10 @@ public sealed class OllamaClient : IOllamaClient
     string Model,
     IReadOnlyList<OllamaChatMessage> Messages,
     bool Stream,
-    string? Format,
+    JsonElement? Format,
     OllamaOptions? Options,
-    [property: JsonPropertyName("keep_alive")] int? KeepAlive
+    [property: JsonPropertyName("keep_alive")] int? KeepAlive,
+    IReadOnlyList<OllamaApiTool>? Tools
   );
 
   private sealed record OllamaOptions(
@@ -634,7 +764,33 @@ public sealed class OllamaClient : IOllamaClient
 
   private sealed record OllamaChatMessage(
     string Role,
-    string Content
+    string? Content,
+    string? Thinking = null,
+    [property: JsonPropertyName("tool_calls")]
+    IReadOnlyList<OllamaApiToolCall>? ToolCalls = null,
+    [property: JsonPropertyName("tool_name")]
+    string? ToolName = null
+  );
+
+  private sealed record OllamaApiTool(
+    string Type,
+    OllamaFunctionDefinition Function
+  );
+
+  private sealed record OllamaFunctionDefinition(
+    string Name,
+    string Description,
+    JsonElement Parameters
+  );
+
+  private sealed record OllamaApiToolCall(
+    string? Type,
+    OllamaApiFunctionCall Function
+  );
+
+  private sealed record OllamaApiFunctionCall(
+    string Name,
+    JsonElement Arguments
   );
 
   private sealed record OllamaChatChunk(

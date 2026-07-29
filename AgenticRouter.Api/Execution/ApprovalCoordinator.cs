@@ -6,23 +6,31 @@ public interface IApprovalCoordinator
 {
   Task<bool> WaitAsync(
     string actionId,
+    string browserSessionId,
+    string executionSessionId,
     CancellationToken cancellationToken
   );
 
   bool TryDecide(
     string actionId,
+    string browserSessionId,
+    string executionSessionId,
     bool approved
   );
+
+  void InvalidateAll();
 }
 
 public sealed class ApprovalCoordinator : IApprovalCoordinator
 {
-  private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _pending = new(
+  private readonly ConcurrentDictionary<string, PendingApproval> _pending = new(
     StringComparer.Ordinal
   );
 
   public async Task<bool> WaitAsync(
     string actionId,
+    string browserSessionId,
+    string executionSessionId,
     CancellationToken cancellationToken
   )
   {
@@ -32,7 +40,11 @@ public sealed class ApprovalCoordinator : IApprovalCoordinator
 
     if (!_pending.TryAdd(
       actionId,
-      source
+      new PendingApproval(
+        browserSessionId,
+        executionSessionId,
+        source
+      )
     ))
     {
       throw new InvalidOperationException(
@@ -57,14 +69,40 @@ public sealed class ApprovalCoordinator : IApprovalCoordinator
 
   public bool TryDecide(
     string actionId,
+    string browserSessionId,
+    string executionSessionId,
     bool approved
   )
   {
     return _pending.TryGetValue(
       actionId,
-      out var source
-    ) && source.TrySetResult(
+      out var pending
+    ) && string.Equals(
+      pending.BrowserSessionId,
+      browserSessionId,
+      StringComparison.Ordinal
+    ) && string.Equals(
+      pending.ExecutionSessionId,
+      executionSessionId,
+      StringComparison.Ordinal
+    ) && pending.Source.TrySetResult(
       approved
     );
   }
+
+  public void InvalidateAll()
+  {
+    foreach (var pending in _pending.Values)
+    {
+      pending.Source.TrySetCanceled();
+    }
+
+    _pending.Clear();
+  }
+
+  private sealed record PendingApproval(
+    string BrowserSessionId,
+    string ExecutionSessionId,
+    TaskCompletionSource<bool> Source
+  );
 }

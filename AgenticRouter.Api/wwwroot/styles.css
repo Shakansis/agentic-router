@@ -151,6 +151,109 @@ summary:focus-visible {
   background: var(--panel-raised);
 }
 
+.session-history {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.session-history > summary,
+.archived-session-section > summary {
+  padding: 10px 12px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.session-history-actions,
+.session-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.session-list:empty::after {
+  content: "Nenhuma conversa armazenada.";
+  padding: 8px 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-entry,
+.workspace-profile-entry {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.session-entry strong,
+.workspace-profile-entry strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-entry small,
+.workspace-profile-entry small {
+  color: var(--muted);
+}
+
+.session-entry-actions,
+.workspace-profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-entry-actions button,
+.workspace-profile-actions button {
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.session-interrupted {
+  color: var(--warning);
+}
+
+.workspace-manager-section,
+.local-history-data {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.workspace-profile-list {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-profile-entry.active {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.workspace-profile-entry.unavailable {
+  border-color: var(--danger);
+}
+
+.history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.history-toggle input {
+  width: auto;
+}
+
 .workspace-card .status-heading {
   display: flex;
 }
@@ -613,6 +716,81 @@ p {
   padding: 4px 10px 8px 12px;
   color: var(--subtle);
   font-size: 11px;
+}
+
+.execution-session-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin: 4px 10px 6px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.execution-session-header strong {
+  color: var(--text);
+  text-transform: capitalize;
+}
+
+.execution-session-header span:last-child {
+  color: var(--subtle);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.execution-plan {
+  margin: 4px 10px 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+}
+
+.execution-plan > summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.execution-plan-body ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0 10px 10px;
+  list-style: none;
+}
+
+.plan-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.plan-step small {
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.plan-step.completed {
+  color: var(--success);
+}
+
+.plan-step.failed,
+.plan-step.blocked {
+  color: var(--danger);
+}
+
+.plan-step.in-progress {
+  color: var(--accent);
 }
 
 .activity-row {
@@ -1104,8 +1282,195 @@ p {
   flex-direction: column;
 }
 
+.change-review-dialog {
+  width: min(1040px, calc(100vw - 32px));
+}
+
+.change-review-shell {
+  display: flex;
+  max-height: inherit;
+  flex-direction: column;
+}
+
+.change-review-body {
+  gap: 14px;
+}
+
+.change-review-summary,
+.change-file-review,
+.process-review {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.change-review-summary h3,
+.process-review h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.change-review-summary p {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.change-file-review > summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.change-diff,
+.process-review pre {
+  max-height: 360px;
+  margin: 10px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: #d4d4d4;
+  background: #1e1e1e;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.verification-ok,
+.verification-warning {
+  margin: 8px 0 0;
+  font-size: 11px;
+}
+
+.verification-ok {
+  color: var(--success);
+}
+
+.verification-warning {
+  color: var(--danger);
+}
+
 .workspace-dialog {
   width: min(680px, calc(100vw - 32px));
+}
+
+.workspace-project-section {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.workspace-project-section > summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.workspace-project-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.project-profile-details p,
+.change-review-context p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.validation-profile-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.validation-profile-editor label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.validation-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.validation-step-editor {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.validation-step-grid {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.5fr) minmax(150px, 1fr);
+  gap: 8px;
+}
+
+.validation-arguments {
+  grid-column: 1 / -1;
+}
+
+.validation-required {
+  display: flex !important;
+  align-items: center;
+}
+
+.validation-step-buttons,
+.validation-profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.validation-command-preview {
+  max-height: 180px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: #d4d4d4;
+  background: #1e1e1e;
+  font: 11px/1.5 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+.change-review-context {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.change-review-context h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.change-review-context ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preexisting-change {
+  color: #d7ba7d;
+  font-size: 11px;
 }
 
 .workspace-note {

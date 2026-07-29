@@ -53,6 +53,22 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       settings.TrustedWorkspacePath
     );
+    ValidateExecution(
+      errors,
+      settings.Execution
+    );
+    ValidateProjectAwareness(
+      errors,
+      settings.ProjectAwareness
+    );
+    ValidateValidationProfile(
+      errors,
+      settings.ValidationProfile
+    );
+    ValidateSessionHistory(
+      errors,
+      settings.SessionHistory
+    );
 
     if (!string.Equals(
       settings.Runtime.ResidentModelPolicy,
@@ -302,6 +318,358 @@ public sealed class SettingsValidator : ISettingsValidator
     }
   }
 
+  private static void ValidateExecution(
+    IDictionary<string, List<string>> errors,
+    ExecutionSettings execution
+  )
+  {
+    ValidateRange(
+      errors,
+      "execution.directCoordinatorPlanningFailuresBeforeHandoff",
+      execution.DirectCoordinatorPlanningFailuresBeforeHandoff,
+      1,
+      5
+    );
+    ValidateRange(
+      errors,
+      "execution.residentCoordinatorPlanningFailuresBeforeFailure",
+      execution.ResidentCoordinatorPlanningFailuresBeforeFailure,
+      1,
+      10
+    );
+    ValidateRange(
+      errors,
+      "execution.maxCoordinatorHandoffsPerTurn",
+      execution.MaxCoordinatorHandoffsPerTurn,
+      0,
+      3
+    );
+    ValidateRange(
+      errors,
+      "execution.maxToolCallsPerTurn",
+      execution.MaxToolCallsPerTurn,
+      1,
+      100
+    );
+    ValidateRange(
+      errors,
+      "execution.maxConsecutiveToolFailures",
+      execution.MaxConsecutiveToolFailures,
+      1,
+      10
+    );
+    ValidateRange(
+      errors,
+      "execution.maxTrackedFilesPerSession",
+      execution.MaxTrackedFilesPerSession,
+      1,
+      500
+    );
+    ValidateRange(
+      errors,
+      "execution.maxRollbackBytesPerFile",
+      execution.MaxRollbackBytesPerFile,
+      1_024,
+      16 * 1_048_576
+    );
+    ValidateRange(
+      errors,
+      "execution.maxRollbackBytesPerSession",
+      execution.MaxRollbackBytesPerSession,
+      execution.MaxRollbackBytesPerFile,
+      128 * 1_048_576
+    );
+    ValidateRange(
+      errors,
+      "execution.maxSearchFiles",
+      execution.MaxSearchFiles,
+      1,
+      10_000
+    );
+    ValidateRange(
+      errors,
+      "execution.maxSearchMatches",
+      execution.MaxSearchMatches,
+      1,
+      5_000
+    );
+  }
+
+  private static void ValidateProjectAwareness(
+    IDictionary<string, List<string>> errors,
+    ProjectAwarenessSettings projectAwareness
+  )
+  {
+    ValidateRange(
+      errors,
+      "projectAwareness.maxProjectMarkers",
+      projectAwareness.MaxProjectMarkers,
+      10,
+      500
+    );
+    ValidateRange(
+      errors,
+      "projectAwareness.maxInstructionBytes",
+      projectAwareness.MaxInstructionBytes,
+      1_024,
+      1_048_576
+    );
+    ValidateRange(
+      errors,
+      "projectAwareness.maxPlanSteps",
+      projectAwareness.MaxPlanSteps,
+      1,
+      8
+    );
+    ValidateRange(
+      errors,
+      "projectAwareness.maxPlanRevisions",
+      projectAwareness.MaxPlanRevisions,
+      0,
+      3
+    );
+  }
+
+  private static void ValidateValidationProfile(
+    IDictionary<string, List<string>> errors,
+    ValidationProfileSettings? profile
+  )
+  {
+    if (profile is null)
+    {
+      return;
+    }
+
+    if (
+      string.IsNullOrWhiteSpace(
+        profile.Name
+      )
+      || profile.Name.Length > 80
+    )
+    {
+      AddError(
+        errors,
+        "validationProfile.name",
+        "Name must contain between 1 and 80 characters."
+      );
+    }
+
+    if (profile.Steps.Count is < 1 or > 8)
+    {
+      AddError(
+        errors,
+        "validationProfile.steps",
+        "A validation profile must contain between 1 and 8 steps."
+      );
+    }
+
+    var identifiers = new HashSet<string>(
+      StringComparer.Ordinal
+    );
+
+    for (var index = 0; index < profile.Steps.Count; index++)
+    {
+      var step = profile.Steps[index];
+      var prefix = $"validationProfile.steps[{index}]";
+
+      if (
+        string.IsNullOrWhiteSpace(
+          step.Id
+        )
+        || step.Id.Length > 40
+        || !identifiers.Add(
+          step.Id
+        )
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.id",
+          "Step IDs must be unique and contain between 1 and 40 characters."
+        );
+      }
+
+      if (
+        string.IsNullOrWhiteSpace(
+          step.Label
+        )
+        || step.Label.Length > 100
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.label",
+          "Label must contain between 1 and 100 characters."
+        );
+      }
+
+      if (
+        string.IsNullOrWhiteSpace(
+          step.Executable
+        )
+        || step.Executable.Length > 260
+        || step.Executable.Contains(
+          '\0',
+          StringComparison.Ordinal
+        )
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.executable",
+          "Executable is required and must be a structured executable value."
+        );
+      }
+      else if (
+        !Path.GetFileNameWithoutExtension(
+          step.Executable
+        ).Equals(
+          "dotnet",
+          StringComparison.OrdinalIgnoreCase
+        )
+        && !Path.GetFileNameWithoutExtension(
+          step.Executable
+        ).Equals(
+          "git",
+          StringComparison.OrdinalIgnoreCase
+        )
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.executable",
+          "Validation executable must be allowed for structured execution: dotnet or read-only git."
+        );
+      }
+
+      if (
+        step.Arguments.Count > 100
+        || step.Arguments.Any(
+          argument => argument.Length > 2_048 || argument.Contains(
+            '\0',
+            StringComparison.Ordinal
+          )
+        )
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.arguments",
+          "Arguments exceed the supported structured-command limits."
+        );
+      }
+      else if (
+        step.Arguments.Count == 0
+        || !IsAllowedValidationCommand(
+          step.Executable,
+          step.Arguments[0]
+        )
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.arguments",
+          "The validation command is not on the existing structured-command allowlist."
+        );
+      }
+
+      if (
+        string.IsNullOrWhiteSpace(
+          step.WorkingDirectory
+        )
+        || Path.IsPathFullyQualified(
+          step.WorkingDirectory
+        )
+        || step.WorkingDirectory.Split(
+          [
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar
+          ],
+          StringSplitOptions.RemoveEmptyEntries
+        ).Any(
+          part => part == ".."
+        )
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.workingDirectory",
+          "Working directory must be a relative path inside the trusted workspace."
+        );
+      }
+
+      if (step.TimeoutSeconds is < 1 or > 120)
+      {
+        AddError(
+          errors,
+          $"{prefix}.timeoutSeconds",
+          "Timeout must be between 1 and 120 seconds."
+        );
+      }
+    }
+  }
+
+  private static bool IsAllowedValidationCommand(
+    string executable,
+    string command
+  )
+  {
+    var name = Path.GetFileNameWithoutExtension(
+      executable
+    );
+
+    if (name.Equals(
+      "dotnet",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return command.Equals(
+        "build",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "test",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "format",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "restore",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "--info",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "--version",
+        StringComparison.OrdinalIgnoreCase
+      );
+    }
+
+    return name.Equals(
+      "git",
+      StringComparison.OrdinalIgnoreCase
+    ) && (
+      command.Equals(
+        "status",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "diff",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "log",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "show",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "branch",
+        StringComparison.OrdinalIgnoreCase
+      ) || command.Equals(
+        "rev-parse",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+  }
+
   private static void AddError(
       IDictionary<string, List<string>> errors,
       string field,
@@ -322,6 +690,41 @@ public sealed class SettingsValidator : ISettingsValidator
     );
   }
 
+  private static void ValidateSessionHistory(
+    IDictionary<string, List<string>> errors,
+    SessionHistorySettings settings
+  )
+  {
+    ValidateRange(
+      errors,
+      "sessionHistory.maxSessionsPerWorkspace",
+      settings.MaxSessionsPerWorkspace,
+      1,
+      200
+    );
+    ValidateRange(
+      errors,
+      "sessionHistory.maxSessionBytes",
+      settings.MaxSessionBytes,
+      262_144,
+      20_971_520
+    );
+    ValidateRange(
+      errors,
+      "sessionHistory.maxStoredProcessOutputBytesPerTurn",
+      settings.MaxStoredProcessOutputBytesPerTurn,
+      1_024,
+      262_144
+    );
+    ValidateRange(
+      errors,
+      "sessionHistory.maxStoredDiffBytesPerTurn",
+      settings.MaxStoredDiffBytesPerTurn,
+      4_096,
+      1_048_576
+    );
+  }
+
   private static void ValidateInterval(
     IDictionary<string, List<string>> errors,
     string field,
@@ -336,6 +739,24 @@ public sealed class SettingsValidator : ISettingsValidator
         errors,
         field,
         $"Value must be between {minimum} and {maximum} seconds."
+      );
+    }
+  }
+
+  private static void ValidateRange(
+    IDictionary<string, List<string>> errors,
+    string field,
+    int value,
+    int minimum,
+    int maximum
+  )
+  {
+    if (value < minimum || value > maximum)
+    {
+      AddError(
+        errors,
+        field,
+        $"Value must be between {minimum} and {maximum}."
       );
     }
   }

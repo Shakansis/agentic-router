@@ -44,10 +44,24 @@
       </button>
     </section>
 
+    <details id="session-history" class="session-history">
+      <summary>Conversas recentes</summary>
+      <div class="session-history-actions">
+        <button id="history-new-conversation" class="secondary-button" type="button">
+          Nova conversa
+        </button>
+      </div>
+      <div id="recent-sessions" class="session-list"></div>
+      <details id="archived-session-section" class="archived-session-section">
+        <summary>Arquivadas</summary>
+        <div id="archived-sessions" class="session-list"></div>
+      </details>
+    </details>
+
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.5.0</span>
+    <span class="app-version">v0.8.0</span>
   </aside>
 
   <main class="workspace">
@@ -240,10 +254,29 @@
       </header>
 
       <div class="dialog-body">
+        <section class="workspace-manager-section">
+          <div class="workspace-project-header">
+            <div>
+              <h3>Workspaces salvos</h3>
+              <p class="workspace-note">Somente um workspace fica ativo por vez.</p>
+            </div>
+          </div>
+          <div id="workspace-profile-list" class="workspace-profile-list"></div>
+        </section>
         <p class="workspace-note">
           No modo Execute, o agente só poderá ler, criar, editar e executar processos
           dentro desta pasta. Caminhos externos e tentativas de escape serão bloqueados.
         </p>
+        <label class="workspace-path-field">
+          <span>Nome do workspace</span>
+          <input
+            id="workspace-profile-name"
+            type="text"
+            maxlength="80"
+            autocomplete="off"
+            placeholder="Meu projeto"
+          >
+        </label>
         <label class="workspace-path-field">
           <span>Caminho da pasta</span>
           <span class="workspace-picker-row">
@@ -261,17 +294,103 @@
         <div id="workspace-validation" class="workspace-validation" role="status">
           Não configurado
         </div>
+        <section id="local-history-data" class="local-history-data">
+          <div class="workspace-project-header">
+            <div>
+              <h3>Histórico local</h3>
+              <p id="history-usage" class="workspace-note">Nenhuma sessão armazenada.</p>
+            </div>
+            <label class="history-toggle">
+              <input id="workspace-history-enabled" type="checkbox">
+              <span>Salvar histórico neste workspace</span>
+            </label>
+          </div>
+          <p class="workspace-note">
+            O conteúdo fica somente neste computador e pode incluir prompts, respostas,
+            caminhos, diffs e saída limitada de comandos. O histórico não é criptografado
+            pelo Agentic Router v0.8.0. Desativar interrompe novas gravações, mas não apaga
+            registros existentes.
+          </p>
+          <div class="validation-profile-actions">
+            <button id="delete-archived-sessions" class="secondary-button danger-button" type="button">
+              Excluir arquivadas
+            </button>
+            <button id="delete-all-sessions" class="secondary-button danger-button" type="button">
+              Excluir todo o histórico
+            </button>
+          </div>
+        </section>
+        <details id="project-profile-section" class="workspace-project-section">
+          <summary>Perfil do projeto</summary>
+          <div class="workspace-project-header">
+            <div id="project-profile-summary">Carregando perfil…</div>
+            <button id="refresh-project-profile" class="secondary-button" type="button">
+              Atualizar
+            </button>
+          </div>
+          <div id="project-profile-details" class="project-profile-details"></div>
+        </details>
+        <details id="validation-profile-section" class="workspace-project-section">
+          <summary>Perfil de validação</summary>
+          <div class="validation-profile-editor">
+            <p id="detected-validation-profile" class="workspace-note"></p>
+            <label>
+              <span>Nome do perfil ativo</span>
+              <input id="validation-profile-name" type="text" maxlength="80">
+            </label>
+            <div id="validation-steps" class="validation-steps"></div>
+            <div class="validation-profile-actions">
+              <button id="add-validation-step" class="secondary-button" type="button">
+                Adicionar etapa
+              </button>
+              <button id="reset-validation-profile" class="secondary-button" type="button">
+                Usar sugestão detectada
+              </button>
+              <button id="clear-validation-profile" class="secondary-button danger-button" type="button">
+                Limpar perfil
+              </button>
+              <button id="save-validation-profile" class="primary-button" type="button">
+                Salvar perfil
+              </button>
+            </div>
+            <pre id="validation-command-preview" class="validation-command-preview"></pre>
+            <p id="validation-profile-status" class="save-status" role="status"></p>
+          </div>
+        </details>
       </div>
 
       <footer class="dialog-footer">
         <span id="workspace-save-status" class="save-status"></span>
         <button id="clear-workspace" class="secondary-button danger-button" type="button">
-          Limpar
+          Remover perfil ativo
         </button>
         <button id="cancel-workspace" class="secondary-button" type="button">Cancelar</button>
-        <button class="primary-button" type="submit">Salvar</button>
+        <button class="primary-button" type="submit">Adicionar workspace</button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog id="change-review-dialog" class="settings-dialog change-review-dialog">
+    <section class="change-review-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Execution session</span>
+          <h2>Revisar alterações</h2>
+        </div>
+        <button id="close-change-review" class="icon-button" type="button" aria-label="Fechar">×</button>
+      </header>
+      <div id="change-review-body" class="dialog-body change-review-body"></div>
+      <footer class="dialog-footer">
+        <span id="undo-status" class="save-status"></span>
+        <button id="validate-changes" class="secondary-button" type="button">
+          Validar alterações
+        </button>
+        <button id="undo-execution" class="secondary-button danger-button" type="button">
+          Desfazer alterações
+        </button>
+        <button id="dismiss-change-review" class="primary-button" type="button">Fechar</button>
+      </footer>
+    </section>
   </dialog>
 
   <script src="/app.js"></script>

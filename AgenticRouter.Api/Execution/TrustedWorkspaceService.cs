@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -26,25 +27,25 @@ public interface ITrustedWorkspaceService
 
 public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
 {
-  private readonly ISettingsStore _settingsStore;
+  private readonly IWorkspaceProfileService _profiles;
 
   public TrustedWorkspaceService(
-    ISettingsStore settingsStore
+    IWorkspaceProfileService profiles
   )
   {
-    _settingsStore = settingsStore;
+    _profiles = profiles;
   }
 
   public async Task<TrustedWorkspaceStatus> GetStatusAsync(
     CancellationToken cancellationToken
   )
   {
-    var settings = await _settingsStore.GetAsync(
+    var active = await _profiles.GetActiveDataAsync(
       cancellationToken
     );
 
-    return Inspect(
-      settings.TrustedWorkspacePath
+    return WorkspacePathValidator.Inspect(
+      active?.Path
     );
   }
 
@@ -53,7 +54,7 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     CancellationToken cancellationToken
   )
   {
-    var status = Inspect(
+    var status = WorkspacePathValidator.Inspect(
       path
     );
 
@@ -62,30 +63,40 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
       return status;
     }
 
-    var settings = await _settingsStore.GetAsync(
+    var profiles = await _profiles.GetAllAsync(
       cancellationToken
     );
-    var result = await _settingsStore.SaveAsync(
-      settings with
-      {
-        TrustedWorkspacePath = status.Path
-      },
-      cancellationToken
+    var existing = profiles.Profiles.FirstOrDefault(
+      profile => string.Equals(
+        Path.GetFullPath(
+          profile.Path
+        ),
+        status.Path,
+        StringComparison.OrdinalIgnoreCase
+      )
     );
+    WorkspaceProfileView profile;
 
-    if (!result.IsValid)
+    if (existing is null)
     {
-      return new TrustedWorkspaceStatus(
-        false,
-        false,
-        null,
-        "Invalid",
-        string.Join(
-          " ",
-          result.Errors.SelectMany(
-            pair => pair.Value
-          )
-        )
+      profile = await _profiles.CreateAsync(
+        Path.GetFileName(
+          status.Path
+        ),
+        status.Path,
+        cancellationToken
+      );
+    }
+    else
+    {
+      profile = existing;
+    }
+
+    if (!profile.Active)
+    {
+      await _profiles.ActivateAsync(
+        profile.Id,
+        cancellationToken
       );
     }
 
@@ -96,18 +107,19 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     CancellationToken cancellationToken
   )
   {
-    var settings = await _settingsStore.GetAsync(
-      cancellationToken
-    );
-    await _settingsStore.SaveAsync(
-      settings with
-      {
-        TrustedWorkspacePath = null
-      },
+    var active = await _profiles.GetActiveDataAsync(
       cancellationToken
     );
 
-    return Inspect(
+    if (active is not null)
+    {
+      await _profiles.RemoveAsync(
+        active.Id,
+        cancellationToken
+      );
+    }
+
+    return WorkspacePathValidator.Inspect(
       null
     );
   }

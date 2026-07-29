@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -69,7 +70,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.5.0"
+      "v0.8.0"
     );
     await Expect(
       Page.Locator(
@@ -2063,6 +2064,9 @@ public sealed class ChatEndToEndTests : PageTest
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task TrustedWorkspaceModalValidatesPersistsAndClearsPath()
   {
+    var additionalWorkspace = _environment.CreateWorkspaceDirectory(
+      "workspace-modal"
+    );
     await Page.GotoAsync(
       "/"
     );
@@ -2071,7 +2075,7 @@ public sealed class ChatEndToEndTests : PageTest
         "#workspace-badge"
       )
     ).ToHaveTextAsync(
-      "Configurado"
+      "Ativo"
     );
     await Expect(
       Page.Locator(
@@ -2107,7 +2111,7 @@ public sealed class ChatEndToEndTests : PageTest
       AriaRole.Button,
       new()
       {
-        Name = "Salvar",
+        Name = "Adicionar workspace",
         Exact = true
       }
     ).ClickAsync();
@@ -2119,9 +2123,14 @@ public sealed class ChatEndToEndTests : PageTest
       "does not exist"
     );
     await Page.Locator(
+      "#workspace-profile-name"
+    ).FillAsync(
+      "Workspace modal"
+    );
+    await Page.Locator(
       "#trusted-workspace-path"
     ).FillAsync(
-      _environment.WorkspaceDirectory
+      additionalWorkspace
     );
     await Page.Locator(
       "#workspace-dialog"
@@ -2129,26 +2138,35 @@ public sealed class ChatEndToEndTests : PageTest
       AriaRole.Button,
       new()
       {
-        Name = "Salvar",
+        Name = "Adicionar workspace",
         Exact = true
       }
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#workspace-dialog"
+        ".workspace-profile-entry.active"
       )
-    ).ToBeHiddenAsync();
+    ).ToContainTextAsync(
+      "Workspace modal"
+    );
+    await Page.Locator(
+      "#close-workspace"
+    ).ClickAsync();
     await Page.ReloadAsync();
     await Expect(
       Page.Locator(
         "#workspace-path"
       )
-    ).ToHaveTextAsync(
-      _environment.WorkspaceDirectory
+    ).ToContainTextAsync(
+      "Workspace modal"
     );
     await Page.Locator(
       "#open-workspace"
     ).ClickAsync();
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#clear-workspace"
     ).ClickAsync();
@@ -2157,7 +2175,12 @@ public sealed class ChatEndToEndTests : PageTest
         "#workspace-badge"
       )
     ).ToHaveTextAsync(
-      "Não configurado"
+      "Ativo"
+    );
+    Assert.IsTrue(
+      Directory.Exists(
+        additionalWorkspace
+      )
     );
   }
 
@@ -2283,6 +2306,7 @@ public sealed class ChatEndToEndTests : PageTest
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "router:latest"
           && !request.Stream
+          && request.HasTools
           && request.Messages.Any(
             message => message.Content.Contains(
               "LOCAL_ACTION_PLANNER_V1",
@@ -2353,6 +2377,7 @@ public sealed class ChatEndToEndTests : PageTest
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "command-r:latest"
           && !request.Stream
+          && request.HasTools
           && request.Messages.Any(
             message => message.Content.Contains(
               "LOCAL_ACTION_PLANNER_V1",
@@ -2380,7 +2405,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"agent.tooling-confirmed\"]"
+        "[data-event-type=\"agent.tooling-validated\"]"
       )
     ).ToContainTextAsync(
       "command-r:latest"
@@ -2524,7 +2549,7 @@ public sealed class ChatEndToEndTests : PageTest
       )
     );
     Assert.HasCount(
-      4,
+      5,
       _environment.FakeOllama.Requests.Where(
         request => request.Model == "router:latest"
           && !request.Stream
@@ -2705,7 +2730,7 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.planning-retry\"]"
       )
     ).ToContainTextAsync(
-      "Tool 'unknown_tool' is not available"
+      "invalid local action proposal"
     );
     await Expect(
       Page.Locator(
@@ -2804,6 +2829,11 @@ public sealed class ChatEndToEndTests : PageTest
   {
     await Page.GotoAsync(
       "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
     );
     await SetExecuteModeAsync(
       "ask"
@@ -2941,6 +2971,1002 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ProjectProfileDetectsMarkersInstructionsAndShowsSuggestion()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "AGENTS.md"
+      ),
+      "Use the repository instructions."
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "Demo.csproj"
+      ),
+      "<Project Sdk=\"Microsoft.NET.Sdk\" />"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "package.json"
+      ),
+      "{}"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "playwright.config.js"
+      ),
+      "export default {};"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#project-profile-section"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(
+      Page.Locator(
+        "#project-profile-summary"
+      )
+    ).ToContainTextAsync(
+      "dotnet"
+    );
+    await Expect(
+      Page.Locator(
+        "#project-profile-summary"
+      )
+    ).ToContainTextAsync(
+      "node"
+    );
+    await Expect(
+      Page.Locator(
+        "#project-profile-details"
+      )
+    ).ToContainTextAsync(
+      "1 arquivo(s) AGENTS.md"
+    );
+    await Page.Locator(
+      "#validation-profile-section"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(
+      Page.Locator(
+        "#detected-validation-profile"
+      )
+    ).ToContainTextAsync(
+      "Detected .NET and Playwright"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExecuteCreatesVisibleFactDrivenPlanAboveAnswer()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    var plan = Page.Locator(
+      ".execution-plan"
+    ).Last;
+    await Expect(
+      plan
+    ).ToBeVisibleAsync();
+    await Expect(
+      plan
+    ).ToContainTextAsync(
+      "completed"
+    );
+    var isBeforeAnswer = await Page.EvaluateAsync<bool>(
+      """
+      () => {
+        const message = document.querySelector(".message.assistant:last-of-type");
+        const plan = message.querySelector(".execution-plan");
+        const answer = message.querySelector(".assistant-answer");
+        return Boolean(plan.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }
+      """
+    );
+    Assert.IsTrue(
+      isBeforeAnswer
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task FileEditRecoversFromInvalidPlanBeforeAnyLocalAction()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "hello"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute recover rejected execution plan write file"
+    );
+
+    Assert.AreEqual(
+      "rewritten by agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      )
+    ).ToContainTextAsync(
+      "Execution plan step titles must be short descriptions"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"execution-plan-created\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.validation-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    var plannerRequests = _environment.FakeOllama.Requests.Where(
+      request => !request.Stream
+        && request.Messages.Any(
+          message => message.Content.Contains(
+            "LOCAL_ACTION_PLANNER_V1",
+            StringComparison.Ordinal
+          )
+        )
+    ).ToArray();
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "create_execution_plan"
+      },
+      plannerRequests[0].AvailableTools.ToArray()
+    );
+    Assert.IsTrue(
+      plannerRequests.Any(
+        request => request.AvailableTools.Contains(
+          "write_file",
+          StringComparer.Ordinal
+        ) && !request.AvailableTools.Contains(
+          "create_execution_plan",
+          StringComparer.Ordinal
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StructuredValidationProfileEditorPersistsWithoutShellTextarea()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "Demo.csproj"
+      ),
+      "<Project Sdk=\"Microsoft.NET.Sdk\" />"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#validation-profile-section"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator(
+      "#reset-validation-profile"
+    ).ClickAsync();
+    await Page.Locator(
+      "#validation-profile-name"
+    ).FillAsync(
+      "Saved detected profile"
+    );
+    await Expect(
+      Page.Locator(
+        "#validation-profile-section textarea"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Page.Locator(
+      "#save-validation-profile"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#validation-profile-status"
+      )
+    ).ToContainTextAsync(
+      "Perfil salvo"
+    );
+    await Page.ReloadAsync();
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#validation-profile-section"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(
+      Page.Locator(
+        "#validation-profile-name"
+      )
+    ).ToHaveValueAsync(
+      "Saved detected profile"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NestedRepositoryInstructionsAppearInActivityAndReview()
+  {
+    var nested = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "nested"
+    );
+    Directory.CreateDirectory(
+      nested
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "AGENTS.md"
+      ),
+      "Root instruction."
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        nested,
+        "AGENTS.md"
+      ),
+      "Nested instruction overrides root."
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create nested file"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"repository-instructions-loaded\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "AGENTS.md"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".change-review-context"
+      ).First
+    ).ToContainTextAsync(
+      "nested/AGENTS.md"
+    );
+    Assert.AreEqual(
+      "nested agent output",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          nested,
+          "hello.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalChangeAfterInspectionBlocksApprovedWrite()
+  {
+    var file = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    await File.WriteAllTextAsync(
+      file,
+      "hello"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute write file"
+    );
+    var approval = Page.Locator(
+      ".action-approval"
+    );
+    await Expect(
+      approval
+    ).ToBeVisibleAsync();
+    await File.WriteAllTextAsync(
+      file,
+      "external change"
+    );
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.execution-error\"]"
+      )
+    ).ToContainTextAsync(
+      "current hash"
+    );
+    Assert.AreEqual(
+      "external change",
+      await File.ReadAllTextAsync(
+        file
+      )
+    );
+    await Expect(
+      Page.Locator(
+        ".review-changes"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#change-review-body"
+      )
+    ).ToContainTextAsync(
+      "Conflito em hello.txt"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitBaselineDistinguishesPreExistingAndSessionChanges()
+  {
+    await RunGitAsync(
+      "init"
+    );
+    var file = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    await File.WriteAllTextAsync(
+      file,
+      "hello"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute write file"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".change-review-context"
+      ).First
+    ).ToContainTextAsync(
+      "Alterações pré-existentes: hello.txt"
+    );
+    await Expect(
+      Page.Locator(
+        ".preexisting-change"
+      )
+    ).ToContainTextAsync(
+      "já possuía alterações"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SavedValidationProfileRunsInOrderAndGroundsCompletion()
+  {
+    using var save = await _environment.HttpClient.PutAsJsonAsync(
+      "api/workspace/validation-profile",
+      new
+      {
+        name = "Version check",
+        source = "user",
+        steps = new[]
+        {
+          new
+          {
+            id = "version",
+            label = "Check dotnet version",
+            executable = "dotnet",
+            arguments = new[]
+            {
+              "--version"
+            },
+            workingDirectory = ".",
+            timeoutSeconds = 30,
+            required = true
+          }
+        }
+      }
+    );
+    save.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file validate"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"validation-completed\"]"
+      )
+    ).ToContainTextAsync(
+      "Validation passed"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".validation-results"
+      )
+    ).ToContainTextAsync(
+      "Check dotnet version: passed"
+    );
+    await Expect(
+      Page.Locator(
+        ".change-review-summary"
+      )
+    ).ToContainTextAsync(
+      "implemented-and-validated"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RequiredValidationFailureBlocksSuccessfulCompletionClaim()
+  {
+    using var save = await _environment.HttpClient.PutAsJsonAsync(
+      "api/workspace/validation-profile",
+      new
+      {
+        name = "Required failure",
+        source = "user",
+        steps = new[]
+        {
+          new
+          {
+            id = "build",
+            label = "Build missing project",
+            executable = "dotnet",
+            arguments = new[]
+            {
+              "build",
+              "missing-project.csproj",
+              "-c",
+              "Release"
+            },
+            workingDirectory = ".",
+            timeoutSeconds = 30,
+            required = true
+          }
+        }
+      }
+    );
+    save.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file validate"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"validation-completed\"]"
+      )
+    ).ToContainTextAsync(
+      "Validation failed"
+    );
+    await Expect(
+      Page.Locator(
+        ".assistant-answer"
+      ).Last
+    ).ToContainTextAsync(
+      "Implemented; validation failed."
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".change-review-summary"
+      )
+    ).ToContainTextAsync(
+      "implemented-validation-failed"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExecutionSessionReviewsVerifiedChangeAndUndoesCreatedFile()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    var file = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    Assert.IsTrue(
+      File.Exists(
+        file
+      )
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      "1 arquivos"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#change-review-dialog"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        ".change-file-review"
+      )
+    ).ToContainTextAsync(
+      "hello.txt"
+    );
+    await Expect(
+      Page.Locator(
+        ".verification-ok"
+      )
+    ).ToContainTextAsync(
+      "Verificado"
+    );
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#undo-execution"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "undone"
+    );
+    Assert.IsFalse(
+      File.Exists(
+        file
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UndoDetectsConflictBeforeChangingAnyFile()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    var file = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    await File.WriteAllTextAsync(
+      file,
+      "external change"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#undo-execution"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "conflicts were detected"
+    );
+    Assert.AreEqual(
+      "external change",
+      await File.ReadAllTextAsync(
+        file
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UndoRestoresOriginalContentForModifiedFile()
+  {
+    var file = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    await File.WriteAllTextAsync(
+      file,
+      "original"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute write file"
+    );
+    Assert.AreEqual(
+      "rewritten by agent",
+      await File.ReadAllTextAsync(
+        file
+      )
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#undo-execution"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "undone"
+    );
+    Assert.AreEqual(
+      "original",
+      await File.ReadAllTextAsync(
+        file
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ProcessJournalAppearsInChangeReview()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute run process"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".process-review"
+      )
+    ).ToContainTextAsync(
+      "dotnet --version"
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-execution"
+      )
+    ).ToBeDisabledAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ApprovalFromWrongExecutionSessionIsRejected()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+    var approval = Page.Locator(
+      ".action-approval"
+    );
+    await Expect(
+      approval
+    ).ToBeVisibleAsync();
+    var actionId = await approval.GetAttributeAsync(
+      "data-action-id"
+    );
+    var status = await Page.EvaluateAsync<int>(
+      """
+      async actionId => {
+        const response = await fetch(`/api/actions/${encodeURIComponent(actionId)}/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            approved: true,
+            browserSessionId: "wrong-browser",
+            executionSessionId: "wrong-execution"
+          })
+        });
+        return response.status;
+      }
+      """,
+      actionId
+    );
+    Assert.AreEqual(
+      404,
+      status
+    );
+    Assert.IsFalse(
+      File.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToBeVisibleAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NewExecuteRequestCancelsOlderSessionBeforeItsApprovedActionRuns()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+    await Expect(
+      Page.Locator(
+        ".action-approval"
+      )
+    ).ToBeVisibleAsync();
+    var browserSessionId = await Page.EvaluateAsync<string>(
+      "() => state.browserSessionId"
+    );
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "execute create file",
+        model = "auto",
+        history = Array.Empty<object>(),
+        modelLocked = false,
+        interactionMode = "execute",
+        approvalPolicy = "auto",
+        browserSessionId
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    await Expect(
+      Page.Locator(
+        ".assistant-answer.error"
+      )
+    ).ToContainTextAsync(
+      "replaced by a newer request"
+    );
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CancellationAfterCompletedWriteKeepsChangeReviewAvailable()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute create file cancel stream"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#send-button"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"request.cancelled\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        ".review-changes"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".change-file-review"
+      )
+    ).ToContainTextAsync(
+      "hello.txt"
+    );
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BoundedMetadataAndTextSearchUseInternalTools()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "hello search"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute file info"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.output\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "\"sizeBytes\""
+    );
+    await SendMessageAsync(
+      "execute search text"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.output\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "hello.txt:1"
+    );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "\"tool\":\"run_process\"",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task PathTraversalAndDestructiveCommandsAreBlocked()
   {
     await Page.GotoAsync(
@@ -2982,7 +4008,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.validation-error\"]"
+        "[data-event-type=\"action.policy-denied\"]"
       )
     ).ToContainTextAsync(
       "blocked"
@@ -2990,6 +4016,88 @@ public sealed class ChatEndToEndTests : PageTest
     await Expect(
       Page.Locator(
         "[data-event-type=\"action.execution-started\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RepeatedIdenticalPolicyDenialStopsWithoutPlanningFailure()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute repeat denied process"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.policy-denied\"]"
+      )
+    ).ToHaveCountAsync(
+      2
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.policy-denied\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "repeated an identical denied proposal"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      "planning 0"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.execution-started\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ProviderPlanningFailureDoesNotIncrementOrTriggerHandoff()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute planner provider failure"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.provider-error\"]"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      "planning 0"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.tooling-fallback\"]"
       )
     ).ToHaveCountAsync(
       0
@@ -3127,6 +4235,721 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToHaveCountAsync(
       0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task MigratesTrustedWorkspaceOnceWithHistoryDisabled()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Workspace confiável"
+      }
+    ).ClickAsync();
+
+    await Expect(
+      Page.Locator(
+        ".workspace-profile-entry"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        ".workspace-profile-entry"
+      )
+    ).ToContainTextAsync(
+      "histórico desativado"
+    );
+    Assert.IsTrue(
+      File.Exists(
+        Path.Combine(
+          _environment.DataDirectory,
+          "workspaces.json"
+        )
+      )
+    );
+    using var first = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    using var second = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    first.EnsureSuccessStatusCode();
+    second.EnsureSuccessStatusCode();
+    using var firstDocument = JsonDocument.Parse(
+      await first.Content.ReadAsStringAsync()
+    );
+    using var secondDocument = JsonDocument.Parse(
+      await second.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      firstDocument.RootElement.GetProperty(
+        "activeWorkspaceId"
+      ).GetString(),
+      secondDocument.RootElement.GetProperty(
+        "activeWorkspaceId"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      1,
+      secondDocument.RootElement.GetProperty(
+        "profiles"
+      ).GetArrayLength()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task WorkspaceManagerAddsRenamesSwitchesAndResetsSessionAuthority()
+  {
+    var secondPath = _environment.CreateWorkspaceDirectory(
+      "second-workspace"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await Page.Locator(
+      "#model-lock"
+    ).CheckAsync();
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#workspace-profile-name"
+    ).FillAsync(
+      "Second project"
+    );
+    await Page.Locator(
+      "#trusted-workspace-path"
+    ).FillAsync(
+      secondPath
+    );
+    await Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Adicionar workspace"
+      }
+    ).ClickAsync();
+
+    await Expect(
+      Page.Locator(
+        ".workspace-profile-entry.active"
+      )
+    ).ToContainTextAsync(
+      "Second project"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-mode=\"chat\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+    await Expect(
+      Page.Locator(
+        "#approval-policy"
+      )
+    ).ToHaveValueAsync(
+      "ask"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-lock"
+      )
+    ).Not.ToBeCheckedAsync();
+
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync(
+      "Renamed project"
+    );
+    await Page.Locator(
+      ".workspace-profile-entry.active"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Renomear"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".workspace-profile-entry.active"
+      )
+    ).ToContainTextAsync(
+      "Renamed project"
+    );
+
+    await Page.Locator(
+      "#workspace-profile-name"
+    ).FillAsync(
+      "Duplicate"
+    );
+    await Page.Locator(
+      "#trusted-workspace-path"
+    ).FillAsync(
+      secondPath.ToUpperInvariant()
+    );
+    await Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Adicionar workspace"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#workspace-validation"
+      )
+    ).ToContainTextAsync(
+      "already uses"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ActiveExecutionBlocksWorkspaceActivation()
+  {
+    var secondPath = _environment.CreateWorkspaceDirectory(
+      "blocked-switch"
+    );
+    using var created = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Blocked switch",
+        path = secondPath
+      }
+    );
+    created.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(
+      await created.Content.ReadAsStringAsync()
+    );
+    var secondId = createdDocument.RootElement.GetProperty(
+      "id"
+    ).GetString()!;
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+    await Expect(
+      Page.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Aprovar",
+          Exact = true
+        }
+      )
+    ).ToBeVisibleAsync();
+
+    using var activation = await _environment.HttpClient.PostAsync(
+      $"api/workspaces/{secondId}/activate",
+      null
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      activation.StatusCode
+    );
+    Assert.Contains(
+      "workspace-activation-blocked",
+      await activation.Content.ReadAsStringAsync()
+    );
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#send-button"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HistoryOptInPersistsButRestartRequiresExplicitResume()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#workspace-history-enabled"
+    ).CheckAsync();
+    await Expect(
+      Page.Locator(
+        "#history-usage"
+      )
+    ).ToContainTextAsync(
+      "histórico ativo"
+    );
+    await Page.Locator(
+      "#close-workspace"
+    ).ClickAsync();
+    await SendMessageAsync(
+      "Persist this explicit local conversation."
+    );
+    await Expect(
+      Page.Locator(
+        "#recent-sessions .session-entry"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator(
+      "#recent-sessions .session-entry"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Retomar"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToContainTextAsync(
+      "Persist this explicit local conversation."
+    );
+    await Expect(
+      Page.Locator(
+        "#approval-policy"
+      )
+    ).ToHaveValueAsync(
+      "ask"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-mode=\"chat\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RestartMarksRunningPersistentExecutionInterrupted()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#workspace-history-enabled"
+    ).CheckAsync();
+    await Expect(
+      Page.Locator(
+        "#history-usage"
+      )
+    ).ToContainTextAsync(
+      "histórico ativo"
+    );
+    await Page.Locator(
+      "#close-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+    await Expect(
+      Page.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Aprovar",
+          Exact = true
+        }
+      )
+    ).ToBeVisibleAsync();
+
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(
+      Page.Locator(
+        "#recent-sessions .session-interrupted"
+      )
+    ).ToContainTextAsync(
+      "interrompida"
+    );
+    await Page.Locator(
+      "#recent-sessions .session-entry"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Retomar"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message.assistant"
+      ).Last
+    ).ToContainTextAsync(
+      "Nenhum processo ou aprovação pendente foi retomado"
+    );
+    Assert.IsFalse(
+      File.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+        "generated.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SessionExportAndDeletionPreserveWorkspaceFiles()
+  {
+    var marker = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "keep-project-file.txt"
+    );
+    await File.WriteAllTextAsync(
+      marker,
+      "keep"
+    );
+    var activeId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{activeId}/history",
+      new
+      {
+        enabled = true
+      }
+    );
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "Create an exportable local record."
+    );
+    using var sessions = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    sessions.EnsureSuccessStatusCode();
+    using var sessionsDocument = JsonDocument.Parse(
+      await sessions.Content.ReadAsStringAsync()
+    );
+    var sessionId = sessionsDocument.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+    using var export = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{sessionId}/export"
+    );
+    export.EnsureSuccessStatusCode();
+    var json = await export.Content.ReadAsStringAsync();
+    Assert.Contains(
+      "\"schemaVersion\": 1",
+      json
+    );
+    Assert.DoesNotContain(
+      "approvalToken",
+      json
+    );
+    Assert.DoesNotContain(
+      "processId",
+      json
+    );
+    using var deleted = await _environment.HttpClient.DeleteAsync(
+      "api/sessions?confirmed=true"
+    );
+    deleted.EnsureSuccessStatusCode();
+    Assert.IsTrue(
+      File.Exists(
+        marker
+      )
+    );
+    using var profiles = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    profiles.EnsureSuccessStatusCode();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ReviewAndUndoRemainEligibleAfterExplicitResume()
+  {
+    var activeId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{activeId}/history",
+      new
+      {
+        enabled = true
+      }
+    );
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    var changedFile = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    Assert.IsTrue(
+      File.Exists(
+        changedFile
+      )
+    );
+
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#recent-sessions .session-entry"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Retomar"
+      }
+    ).ClickAsync();
+    await Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Revisar alterações concluídas"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#change-review-body"
+      )
+    ).ToContainTextAsync(
+      "hello.txt"
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-execution"
+      )
+    ).ToBeEnabledAsync();
+    await Page.Locator(
+      "#undo-execution"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "undone"
+    );
+    Assert.IsFalse(
+      File.Exists(
+        changedFile
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RetentionLimitRequiresRemovingAnOlderSession()
+  {
+    using var settingsResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        SessionHistory = new TestSessionHistorySettings
+        {
+          MaxSessionsPerWorkspace = 1
+        }
+      }
+    );
+    settingsResponse.EnsureSuccessStatusCode();
+    var activeId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{activeId}/history",
+      new
+      {
+        enabled = true
+      }
+    );
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "First retained conversation."
+    );
+    await Page.Locator(
+      "#new-conversation"
+    ).ClickAsync();
+    await SendMessageAsync(
+      "Second conversation beyond the retention limit."
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"history-retention-limit-reached\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    using var sessions = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    sessions.EnsureSuccessStatusCode();
+    using var document = JsonDocument.Parse(
+      await sessions.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      1,
+      document.RootElement.GetProperty(
+        "recent"
+      ).GetArrayLength()
+    );
+    Assert.AreEqual(
+      "First retained conversation.",
+      document.RootElement.GetProperty(
+        "recent"
+      )[0].GetProperty(
+        "title"
+      ).GetString()
+    );
+  }
+
+  private static async Task<string> ActiveWorkspaceIdAsync()
+  {
+    using var response = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    response.EnsureSuccessStatusCode();
+    using var document = JsonDocument.Parse(
+      await response.Content.ReadAsStringAsync()
+    );
+    return document.RootElement.GetProperty(
+      "activeWorkspaceId"
+    ).GetString()!;
+  }
+
+  private static async Task RunGitAsync(
+    params string[] arguments
+  )
+  {
+    using var process = new Process
+    {
+      StartInfo = new ProcessStartInfo
+      {
+        FileName = "git",
+        WorkingDirectory = _environment.WorkspaceDirectory,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+      }
+    };
+
+    foreach (var argument in arguments)
+    {
+      process.StartInfo.ArgumentList.Add(
+        argument
+      );
+    }
+
+    Assert.IsTrue(
+      process.Start()
+    );
+    await process.WaitForExitAsync();
+    Assert.AreEqual(
+      0,
+      process.ExitCode,
+      await process.StandardError.ReadToEndAsync()
     );
   }
 

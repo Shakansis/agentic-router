@@ -3,12 +3,13 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace AgenticRouter.EndToEndTests;
 
 internal sealed class TestEnvironment : IAsyncDisposable
 {
-  private readonly Process _apiProcess;
+  private Process _apiProcess;
   private readonly FakeOllamaServer _fakeOllama;
   private readonly string _temporaryRoot;
   private readonly StringBuilder _apiOutput;
@@ -238,7 +239,144 @@ internal sealed class TestEnvironment : IAsyncDisposable
           TestJson.Options
     );
     response.EnsureSuccessStatusCode();
+    using var profilesResponse = await HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    profilesResponse.EnsureSuccessStatusCode();
+    using var profilesDocument = JsonDocument.Parse(
+      await profilesResponse.Content.ReadAsStringAsync()
+    );
+
+    foreach (var profile in profilesDocument.RootElement
+      .GetProperty(
+        "profiles"
+      )
+      .EnumerateArray()
+      .ToArray())
+    {
+      var id = profile.GetProperty(
+        "id"
+      ).GetString()!;
+      var path = profile.GetProperty(
+        "path"
+      ).GetString()!;
+
+      if (!string.Equals(
+        Path.GetFullPath(
+          path
+        ),
+        Path.GetFullPath(
+          WorkspaceDirectory
+        ),
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        using var removed = await HttpClient.DeleteAsync(
+          $"api/workspaces/{id}?confirmed=true"
+        );
+        removed.EnsureSuccessStatusCode();
+        continue;
+      }
+
+      using var activated = await HttpClient.PostAsync(
+        $"api/workspaces/{id}/activate",
+        null
+      );
+      activated.EnsureSuccessStatusCode();
+      using var history = await HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{id}/history",
+        new
+        {
+          enabled = false
+        }
+      );
+      history.EnsureSuccessStatusCode();
+    }
+
+    using var deletedSessions = await HttpClient.DeleteAsync(
+      "api/sessions?confirmed=true"
+    );
+    deletedSessions.EnsureSuccessStatusCode();
     _fakeOllama.Reset();
+  }
+
+  public string CreateWorkspaceDirectory(
+    string name
+  )
+  {
+    var path = Path.Combine(
+      _temporaryRoot,
+      name
+    );
+    Directory.CreateDirectory(
+      path
+    );
+    return path;
+  }
+
+  public async Task RestartApplicationAsync()
+  {
+    var startInfo = _apiProcess.StartInfo;
+
+    if (!string.Equals(
+      _apiProcess.ProcessName,
+      "AgenticRouter.Api",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      throw new InvalidOperationException(
+        $"Refusing to restart unexpected process {_apiProcess.ProcessName}."
+      );
+    }
+
+    if (!_apiProcess.HasExited)
+    {
+      _apiProcess.Kill();
+      await _apiProcess.WaitForExitAsync();
+    }
+
+    _apiProcess.Dispose();
+    _apiOutput.Clear();
+    _apiProcess = new Process
+    {
+      StartInfo = startInfo,
+      EnableRaisingEvents = true
+    };
+    _apiProcess.OutputDataReceived += (
+      _,
+      eventArgs
+    ) =>
+    {
+      if (eventArgs.Data is not null)
+      {
+        _apiOutput.AppendLine(
+          eventArgs.Data
+        );
+      }
+    };
+    _apiProcess.ErrorDataReceived += (
+      _,
+      eventArgs
+    ) =>
+    {
+      if (eventArgs.Data is not null)
+      {
+        _apiOutput.AppendLine(
+          eventArgs.Data
+        );
+      }
+    };
+
+    if (!_apiProcess.Start())
+    {
+      throw new InvalidOperationException(
+        "The E2E API process could not be restarted."
+      );
+    }
+
+    _apiProcess.BeginOutputReadLine();
+    _apiProcess.BeginErrorReadLine();
+    await WaitUntilReadyAsync();
   }
 
   public async Task<HttpResponseMessage> PutSettingsAsync(

@@ -32,6 +32,24 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task<string> GenerateStructuredAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    System.Text.Json.JsonElement schema,
+    string stage,
+    CancellationToken cancellationToken
+  );
+
+  Task<OllamaToolResponse> GenerateToolCallAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<OllamaToolMessage> messages,
+    IReadOnlyList<OllamaToolDefinition> tools,
+    string stage,
+    CancellationToken cancellationToken
+  );
+
   Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
     Uri baseUri,
     string model,
@@ -61,6 +79,31 @@ public interface IOllamaClient
 public sealed record OllamaChatUpdate(
   bool Accepted,
   string? Delta
+);
+
+public sealed record OllamaToolDefinition(
+  string Name,
+  string Description,
+  System.Text.Json.JsonElement Parameters
+);
+
+public sealed record OllamaToolCall(
+  string Name,
+  System.Text.Json.JsonElement Arguments
+);
+
+public sealed record OllamaToolMessage(
+  string Role,
+  string? Content = null,
+  string? Thinking = null,
+  IReadOnlyList<OllamaToolCall>? ToolCalls = null,
+  string? ToolName = null
+);
+
+public sealed record OllamaToolResponse(
+  string? Content,
+  string? Thinking,
+  IReadOnlyList<OllamaToolCall> ToolCalls
 );
 
 public sealed record OllamaRunningModel(

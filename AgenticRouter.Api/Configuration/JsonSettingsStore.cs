@@ -93,6 +93,18 @@ public sealed class JsonSettingsStore : ISettingsStore
       ) || !document.RootElement.TryGetProperty(
         "trustedWorkspacePath",
         out _
+      ) || !document.RootElement.TryGetProperty(
+        "execution",
+        out _
+      ) || !document.RootElement.TryGetProperty(
+        "projectAwareness",
+        out _
+      ) || !document.RootElement.TryGetProperty(
+        "validationProfile",
+        out _
+      ) || !document.RootElement.TryGetProperty(
+        "sessionHistory",
+        out _
       );
 
       if (

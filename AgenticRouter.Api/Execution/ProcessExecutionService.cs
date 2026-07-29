@@ -22,7 +22,11 @@ public sealed record ProcessExecutionResult(
   int ExitCode,
   string StandardOutput,
   string StandardError,
-  bool TimedOut
+  bool TimedOut,
+  bool Cancelled,
+  long DurationMilliseconds,
+  bool StandardOutputTruncated,
+  bool StandardErrorTruncated
 );
 
 public sealed class ProcessExecutionService : IProcessExecutionService
@@ -34,6 +38,7 @@ public sealed class ProcessExecutionService : IProcessExecutionService
     CancellationToken cancellationToken
   )
   {
+    var stopwatch = Stopwatch.StartNew();
     using var timeout = new CancellationTokenSource(
       request.Timeout
     );
@@ -103,32 +108,39 @@ public sealed class ProcessExecutionService : IProcessExecutionService
         process
       );
 
-      if (cancellationToken.IsCancellationRequested)
-      {
-        throw;
-      }
-
+      var cancelledOutput = await CompleteReadAsync(
+        standardOutput
+      );
+      var cancelledError = await CompleteReadAsync(
+        standardError
+      );
       return new ProcessExecutionResult(
         -1,
-        await CompleteReadAsync(
-          standardOutput
-        ),
-        await CompleteReadAsync(
-          standardError
-        ),
-        true
+        cancelledOutput.Text,
+        cancelledError.Text,
+        !cancellationToken.IsCancellationRequested,
+        cancellationToken.IsCancellationRequested,
+        stopwatch.ElapsedMilliseconds,
+        cancelledOutput.Truncated,
+        cancelledError.Truncated
       );
     }
 
+    var output = await standardOutput;
+    var error = await standardError;
     return new ProcessExecutionResult(
       process.ExitCode,
-      await standardOutput,
-      await standardError,
-      false
+      output.Text,
+      error.Text,
+      false,
+      false,
+      stopwatch.ElapsedMilliseconds,
+      output.Truncated,
+      error.Truncated
     );
   }
 
-  private static async Task<string> ReadBoundedAsync(
+  private static async Task<BoundedOutput> ReadBoundedAsync(
     StreamReader reader,
     CancellationToken cancellationToken
   )
@@ -180,11 +192,14 @@ public sealed class ProcessExecutionService : IProcessExecutionService
       );
     }
 
-    return result.ToString();
+    return new BoundedOutput(
+      result.ToString(),
+      truncated
+    );
   }
 
-  private static async Task<string> CompleteReadAsync(
-    Task<string> readTask
+  private static async Task<BoundedOutput> CompleteReadAsync(
+    Task<BoundedOutput> readTask
   )
   {
     try
@@ -193,7 +208,10 @@ public sealed class ProcessExecutionService : IProcessExecutionService
     }
     catch (OperationCanceledException)
     {
-      return string.Empty;
+      return new BoundedOutput(
+        string.Empty,
+        false
+      );
     }
   }
 
@@ -214,4 +232,9 @@ public sealed class ProcessExecutionService : IProcessExecutionService
     {
     }
   }
+
+  private sealed record BoundedOutput(
+    string Text,
+    bool Truncated
+  );
 }

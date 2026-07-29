@@ -424,6 +424,9 @@ tarballs/
 test-results/
 AgenticRouter.Api/data/settings.json
 AgenticRouter.Api/data/.settings-*.tmp
+AgenticRouter.Api/data/workspaces.json
+AgenticRouter.Api/data/.workspaces-*.tmp
+AgenticRouter.Api/data/workspaces/
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 # General

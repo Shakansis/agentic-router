@@ -5,9 +5,11 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Markdown;
+using AgenticRouter.Api.ProjectAwareness;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Chat;
 
@@ -26,9 +28,16 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly ILocalActionPlanner _actionPlanner;
   private readonly IExpertExecutionGuidanceService _expertGuidance;
   private readonly ILocalActionService _actionService;
+  private readonly IPlanningFailureClassifier _planningFailureClassifier;
   private readonly IApprovalPolicyService _approvalPolicy;
   private readonly IApprovalCoordinator _approvalCoordinator;
+  private readonly IExecutionSessionStore _executionSessions;
+  private readonly IProjectAwarenessService _projectAwareness;
+  private readonly IRepositoryInstructionService _repositoryInstructions;
+  private readonly IExecutionPlanService _executionPlans;
+  private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly ILogger<ChatStreamService> _logger;
+  private ExecutionSession? _executionSession;
 
   public ChatStreamService(
     ISettingsStore settingsStore,
@@ -42,8 +51,14 @@ public sealed class ChatStreamService : IChatStreamService
     ILocalActionPlanner actionPlanner,
     IExpertExecutionGuidanceService expertGuidance,
     ILocalActionService actionService,
+    IPlanningFailureClassifier planningFailureClassifier,
     IApprovalPolicyService approvalPolicy,
     IApprovalCoordinator approvalCoordinator,
+    IExecutionSessionStore executionSessions,
+    IProjectAwarenessService projectAwareness,
+    IRepositoryInstructionService repositoryInstructions,
+    IExecutionPlanService executionPlans,
+    IWorkspaceProfileService workspaceProfiles,
     ILogger<ChatStreamService> logger
   )
   {
@@ -58,8 +73,14 @@ public sealed class ChatStreamService : IChatStreamService
     _actionPlanner = actionPlanner;
     _expertGuidance = expertGuidance;
     _actionService = actionService;
+    _planningFailureClassifier = planningFailureClassifier;
     _approvalPolicy = approvalPolicy;
     _approvalCoordinator = approvalCoordinator;
+    _executionSessions = executionSessions;
+    _projectAwareness = projectAwareness;
+    _repositoryInstructions = repositoryInstructions;
+    _executionPlans = executionPlans;
+    _workspaceProfiles = workspaceProfiles;
     _logger = logger;
   }
 
@@ -419,6 +440,119 @@ public sealed class ChatStreamService : IChatStreamService
           selectedModel,
           intention
         );
+        yield return Event(
+          requestId,
+          "project-profile-loading",
+          "Loading the bounded project profile.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
+        var project = await _projectAwareness.GetAsync(
+          false,
+          cancellationToken
+        );
+        var rootInstructions = await _repositoryInstructions.ResolveAsync(
+          null,
+          cancellationToken
+        );
+        _executionSession = _executionSessions.Begin(
+          request.BrowserSessionId
+            ?? throw new ChatStageException(
+              "execution-session",
+              "Execute mode requires a browser session identifier.",
+              "The browserSessionId request field was missing.",
+              selectedModel,
+              intention,
+              400,
+              true
+            ),
+          requestId,
+          request.Message,
+          request.ApprovalPolicy,
+          workspace.Path,
+          selectedModel,
+          selectedModel,
+          "resolving",
+          settings.Execution
+        );
+        _executionSession.AttachProject(
+          project
+        );
+        _executionSession.ApplyInstructions(
+          rootInstructions
+        );
+        var activeWorkspace = await _workspaceProfiles.GetActiveDataAsync(
+          cancellationToken
+        );
+        _executionSession.SelectValidationProfile(
+          activeWorkspace?.ValidationProfile
+            ?? settings.ValidationProfile
+        );
+        yield return Event(
+          requestId,
+          "execution.session-started",
+          $"Execution session {_executionSession.Id} started.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
+        yield return Event(
+          requestId,
+          project.Status == "partial"
+            ? "project-profile-partial"
+            : "project-profile-loaded",
+          $"Project profile: {project.DisplayName ?? "workspace"} · "
+            + $"{string.Join(", ", project.ProjectTypes.DefaultIfEmpty("no project type"))}.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
+        yield return Event(
+          requestId,
+          "baseline-captured",
+          project.Repository.IsGitRepository
+            ? $"Git baseline captured on {project.Repository.Branch ?? "detached branch"} with "
+              + $"{project.Repository.DirtyPaths.Count} pre-existing dirty paths."
+            : "Workspace baseline captured; Git repository was not detected.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
+
+        if (project.Repository.DirtyPaths.Count > 0)
+        {
+          yield return Event(
+            requestId,
+            "preexisting-change-detected",
+            $"Pre-existing changed paths: {string.Join(", ", project.Repository.DirtyPaths)}.",
+            stopwatch,
+            selectedModel,
+            intention
+          );
+        }
+
+        if (rootInstructions.AppliedFiles.Count > 0)
+        {
+          yield return Event(
+            requestId,
+            "repository-instructions-loaded",
+            $"Repository instructions loaded: {string.Join(", ", rootInstructions.AppliedFiles)}.",
+            stopwatch,
+            selectedModel,
+            intention
+          );
+        }
+
+        messages = messages.Prepend(
+          new ChatMessage(
+            "system",
+            CreateProjectContext(
+              project,
+              rootInstructions
+            )
+          )
+        ).ToArray();
 
         var tooling = await InspectToolingAsync(
           baseUri,
@@ -427,6 +561,7 @@ public sealed class ChatStreamService : IChatStreamService
         );
         string coordinatorModel;
         List<ChatMessage> executionMessages;
+        ExpertExecutionGuidance? executionGuidance = null;
         var targetCoordinatesDirectly =
           tooling.Capabilities?.ToolingConfirmed == true;
 
@@ -434,8 +569,8 @@ public sealed class ChatStreamService : IChatStreamService
         {
           yield return Event(
             requestId,
-            "agent.tooling-confirmed",
-            $"Ollama confirmed tooling for {selectedModel}; the target model will coordinate local actions directly.",
+            "agent.tooling-advertised",
+            $"Ollama advertises tooling for {selectedModel}; the first valid native tool call will confirm it behaviorally.",
             stopwatch,
             selectedModel,
             intention
@@ -514,6 +649,7 @@ public sealed class ChatStreamService : IChatStreamService
                 )
               ]
             ).ToList();
+            executionGuidance = guidance.Guidance;
           }
           else
           {
@@ -545,8 +681,16 @@ public sealed class ChatStreamService : IChatStreamService
           coordinatorModel = settings.RouterModel;
         }
 
+        _executionSession.ResolveCoordinator(
+          coordinatorModel,
+          targetCoordinatesDirectly
+            ? "direct"
+            : "resident-bridge"
+        );
+
         var execution = new ExecutionProgress(
-          executionMessages
+          executionMessages,
+          executionGuidance
         );
 
         await foreach (var streamEvent in ExecuteActionsAsync(
@@ -561,9 +705,12 @@ public sealed class ChatStreamService : IChatStreamService
             ? null
             : selectedModel,
           targetCoordinatesDirectly
-            ? 2
-            : 3,
-          targetCoordinatesDirectly,
+            ? settings.Execution.DirectCoordinatorPlanningFailuresBeforeHandoff
+            : settings.Execution.ResidentCoordinatorPlanningFailuresBeforeFailure,
+          targetCoordinatesDirectly
+            && settings.Execution.MaxCoordinatorHandoffsPerTurn > 0,
+          settings.Execution,
+          settings.ProjectAwareness,
           cancellationToken
         ))
         {
@@ -614,6 +761,8 @@ public sealed class ChatStreamService : IChatStreamService
             cancellationToken
           );
           var residentMessages = execution.Messages.ToList();
+          var residentToolMessages = execution.ToolMessages.ToList();
+          ExpertExecutionGuidance? takeoverGuidance = null;
 
           if (guidance.Guidance is not null)
           {
@@ -631,6 +780,15 @@ public sealed class ChatStreamService : IChatStreamService
                 guidance.Guidance
               )
             );
+            residentToolMessages.Add(
+              ToToolMessage(
+                GuidanceMessage(
+                  selectedModel,
+                  guidance.Guidance
+                )
+              )
+            );
+            takeoverGuidance = guidance.Guidance;
           }
           else
           {
@@ -658,8 +816,14 @@ public sealed class ChatStreamService : IChatStreamService
             settings.RouterModel,
             intention
           );
+          _executionSession.RecordHandoff(
+            settings.RouterModel,
+            "resident-takeover"
+          );
           execution = new ExecutionProgress(
-            residentMessages
+            residentMessages,
+            takeoverGuidance,
+            residentToolMessages
           );
 
           await foreach (var streamEvent in ExecuteActionsAsync(
@@ -671,8 +835,10 @@ public sealed class ChatStreamService : IChatStreamService
             stopwatch,
             execution,
             selectedModel,
-            3,
+            settings.Execution.ResidentCoordinatorPlanningFailuresBeforeFailure,
             false,
+            settings.Execution,
+            settings.ProjectAwareness,
             cancellationToken
           ))
           {
@@ -685,10 +851,23 @@ public sealed class ChatStreamService : IChatStreamService
           throw execution.Failure;
         }
 
+        _executionSession.RefreshCompletionGate();
+        yield return Event(
+          requestId,
+          "completion-gate-evaluated",
+          $"Completion gate: {_executionSession.CreateSummary().CompletionStatus}.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
         execution.Messages.Add(
           new ChatMessage(
             "system",
             ExpertExecutionGuidanceService.FinalResponseInstruction
+              + "\n"
+              + CreateExecutionFacts(
+                _executionSession
+              )
           )
         );
         messages = execution.Messages;
@@ -883,6 +1062,20 @@ public sealed class ChatStreamService : IChatStreamService
         );
       }
 
+      _executionSession?.Complete(
+        _executionSession.HasWarnings
+          ? "completed-with-warnings"
+          : "completed"
+      );
+      var visibleAnswer = _executionSession is null
+        ? progress.Answer.ToString()
+        : string.Concat(
+          progress.Answer,
+          "\n\n---\n",
+          CreateAuthoritativeStatus(
+            _executionSession.CreateSummary().CompletionStatus
+          )
+        );
       yield return new ChatStreamEvent(
         requestId,
         "response.completed",
@@ -895,13 +1088,24 @@ public sealed class ChatStreamService : IChatStreamService
           : null,
         stopwatch.ElapsedMilliseconds,
         _markdownRenderer.Render(
-          progress.Answer.ToString()
+          visibleAnswer
         ),
-        null
+        null,
+        null,
+        _executionSession?.CreateSummary()
       );
     }
     finally
     {
+      if (_executionSession?.IsActive == true)
+      {
+        _executionSession.Complete(
+          cancellationToken.IsCancellationRequested
+            ? "cancelled"
+            : "failed"
+        );
+      }
+
       if (recoveryActive && recoveryTarget is not null)
       {
         await _residentModel.RestoreAfterRecoveryAsync(
@@ -923,12 +1127,26 @@ public sealed class ChatStreamService : IChatStreamService
     string? recoverySpecialistModel,
     int maximumPlanningAttempts,
     bool fallbackToResident,
+    ExecutionSettings settings,
+    ProjectAwarenessSettings projectAwareness,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    const int maximumActions = 8;
+    using var sessionCancellation = _executionSession is null
+      ? null
+      : CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken,
+        _executionSession.CancellationToken
+      );
 
-    for (var index = 0; index < maximumActions; index++)
+    if (sessionCancellation is not null)
+    {
+      cancellationToken = sessionCancellation.Token;
+    }
+
+    var planningFailures = 0;
+
+    for (var index = 0; index < settings.MaxToolCallsPerTurn; index++)
     {
       yield return Event(
         requestId,
@@ -941,26 +1159,78 @@ public sealed class ChatStreamService : IChatStreamService
       ValidatedLocalAction? validatedAction = null;
       Exception? exhaustedFailure = null;
       var noActionRequired = false;
+      var planHandled = false;
+      var proposalCycles = 0;
+      var deniedFingerprints = new HashSet<string>(
+        StringComparer.Ordinal
+      );
+      var planningFingerprints = new Dictionary<string, int>(
+        StringComparer.Ordinal
+      );
 
-      for (
-        var attempt = 1;
-        attempt <= maximumPlanningAttempts;
-        attempt++
+      while (
+        planningFailures < maximumPlanningAttempts
+        && proposalCycles < settings.MaxToolCallsPerTurn
       )
       {
+        proposalCycles++;
+        var attempt = planningFailures + 1;
+        var completionAllowed = CanCompletePlanning(
+          progress
+        );
         var planning = await TryPlanAsync(
           () => _actionPlanner.PlanAsync(
             baseUri,
             model,
-            progress.Messages,
+            progress.ToolMessages,
+            _executionSession?.Plan is null,
             attempt,
+            completionAllowed,
             cancellationToken
           )
         );
 
         if (planning.Failure is not null)
         {
+          if (
+            _planningFailureClassifier.Classify(
+              planning.Failure
+            ) == CoordinatorFailureCategory.Provider
+            && planning.Failure is OllamaProviderException providerFailure
+          )
+          {
+            yield return Event(
+              requestId,
+              "action.provider-error",
+              $"The coordinator provider failed while planning: {providerFailure.Message}",
+              stopwatch,
+              model,
+              intention
+            );
+            progress.Failure = ToChatException(
+              providerFailure,
+              model,
+              intention
+            );
+            yield break;
+          }
+
+          planningFailures++;
+          _executionSession?.RecordPlanningFailure();
           exhaustedFailure = planning.Failure;
+          var failureFingerprint = string.Concat(
+            planning.Failure.GetType().Name,
+            ":",
+            planning.Failure.Message,
+            ":",
+            planning.Failure.InnerException?.Message
+          );
+          planningFingerprints.TryGetValue(
+            failureFingerprint,
+            out var repeatedCount
+          );
+          repeatedCount++;
+          planningFingerprints[failureFingerprint] = repeatedCount;
           _logger.LogWarning(
             planning.Failure,
             "Local action planning attempt {Attempt} of {MaximumAttempts} failed for request {RequestId}.",
@@ -969,13 +1239,19 @@ public sealed class ChatStreamService : IChatStreamService
             requestId
           );
 
-          if (attempt < maximumPlanningAttempts)
+          if (planningFailures < maximumPlanningAttempts)
           {
             yield return Event(
               requestId,
               "action.planning-retry",
-              $"Planning attempt {attempt} of {maximumPlanningAttempts} failed: "
-                + $"{planning.Failure.Message} Retrying with attempt {attempt + 1} of "
+              $"Planning attempt {planningFailures} of {maximumPlanningAttempts} failed: "
+                + $"{planning.Failure.Message}"
+                + (
+                  repeatedCount > 1
+                    ? $" The same invalid response was repeated {repeatedCount} times."
+                    : string.Empty
+                )
+                + $" Retrying with attempt {planningFailures + 1} of "
                 + $"{maximumPlanningAttempts}.",
               stopwatch,
               model,
@@ -986,28 +1262,171 @@ public sealed class ChatStreamService : IChatStreamService
           continue;
         }
 
-        var proposal = planning.Proposal;
+        var planningResult = planning.Result!;
+        var proposal = planningResult.Proposal;
 
         if (proposal is null)
         {
+          if (
+            planningResult.ExplicitNoAction
+            && progress.Guidance?.ActionRequired == true
+            && !completionAllowed
+          )
+          {
+            var completionFailure = new LocalActionException(
+              "local-action-planning",
+              "The coordinator declared that no action was required while the structured specialist brief still has pending actions."
+            );
+            planningFailures++;
+            _executionSession?.RecordPlanningFailure();
+            exhaustedFailure = completionFailure;
+            progress.ToolMessages.Add(
+              new OllamaToolMessage(
+                "user",
+                "EXECUTION_COMPLETION_REJECTED\n"
+                  + "The structured specialist brief still requires local actions. "
+                  + "Call the next pending tool and do not answer with prose."
+              )
+            );
+
+            if (planningFailures < maximumPlanningAttempts)
+            {
+              yield return Event(
+                requestId,
+                "action.planning-retry",
+                $"Planning attempt {planningFailures} of {maximumPlanningAttempts} stopped before pending specialist actions were executed. "
+                  + $"Retrying with attempt {planningFailures + 1} of {maximumPlanningAttempts}.",
+                stopwatch,
+                model,
+                intention
+              );
+            }
+
+            continue;
+          }
+
+          _executionSession?.ResetPlanningFailures();
           noActionRequired = true;
           break;
         }
 
-        var validation = await TryValidateAsync(
-          () => _actionService.ValidateAsync(
+        progress.ToolMessages.Add(
+          planningResult.AssistantMessage
+        );
+
+        if (!progress.ToolingValidated)
+        {
+          progress.ToolingValidated = true;
+          yield return Event(
+            requestId,
+            "agent.tooling-validated",
+            $"Model {model} returned a valid native tool call; tooling is confirmed for this execution path.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
+
+        ValidationAttempt validation;
+
+        if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
+        {
+          var planFailure = TryApplyExecutionPlan(
+            proposal,
+            projectAwareness,
+            out var plan
+          );
+
+          if (planFailure is null)
+          {
+            planningFailures = 0;
+            _executionSession?.ResetPlanningFailures();
+            yield return Event(
+              requestId,
+              proposal.Tool == "create_execution_plan"
+                ? "execution-plan-created"
+                : "execution-plan-revised",
+              proposal.Tool == "create_execution_plan"
+                ? $"Execution plan created with {plan!.Steps.Count} steps."
+                : $"Execution plan revised; completed and failed steps were preserved.",
+              stopwatch,
+              model,
+              intention
+            );
+            progress.Messages.Add(
+              new ChatMessage(
+                "user",
+                $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: completed\n"
+                  + $"Output:\nVisible plan accepted with {plan!.Steps.Count} steps. "
+                  + "Now propose the first required local action."
+              )
+            );
+            progress.ToolMessages.Add(
+              NativeToolResultMessage(
+                proposal.Tool,
+                "completed",
+                $"Visible plan accepted with {plan!.Steps.Count} steps."
+              )
+            );
+            planHandled = true;
+            break;
+          }
+
+          validation = new ValidationAttempt(
+            null,
+            planFailure
+          );
+        }
+        else
+        {
+          var instructionFailure = await ApplyInstructionsForProposalAsync(
             proposal,
             cancellationToken
+          );
+          validation = instructionFailure is null
+            ? await TryValidateAsync(
+              () => _actionService.ValidateAsync(
+                proposal,
+                _executionSession,
+                cancellationToken
+              )
+            )
+            : new ValidationAttempt(
+              null,
+              instructionFailure
+            );
+
+          if (
+            validation.Failure is null
+            && _executionSession?.Plan is null
           )
-        );
+          {
+            validation = new ValidationAttempt(
+              null,
+              new LocalActionException(
+                "execution-plan",
+                "Create a valid visible execution plan before proposing a local action."
+              )
+            );
+          }
+        }
 
         if (validation.Failure is null)
         {
+          planningFailures = 0;
+          _executionSession?.ResetPlanningFailures();
           validatedAction = validation.Action;
           break;
         }
 
         var exception = validation.Failure;
+        progress.ToolMessages.Add(
+          NativeToolResultMessage(
+            proposal.Tool,
+            "rejected",
+            exception.Message
+          )
+        );
         _logger.LogWarning(
           exception,
           "Local action proposal {Tool} failed validation for request {RequestId}.",
@@ -1015,9 +1434,60 @@ public sealed class ChatStreamService : IChatStreamService
           requestId
         );
 
-        if (!IsReplannableValidation(
+        var failureCategory = _planningFailureClassifier.Classify(
           exception
-        ))
+        );
+
+        if (failureCategory == CoordinatorFailureCategory.PolicyDenied)
+        {
+          _executionSession?.AddWarning(
+            $"Policy denied {proposal.Tool}: {exception.Message}"
+          );
+          var fingerprint = string.Concat(
+            proposal.Tool,
+            ":",
+            proposal.Arguments.GetRawText()
+          );
+
+          if (!deniedFingerprints.Add(
+            fingerprint
+          ))
+          {
+            yield return Event(
+              requestId,
+              "action.policy-denied",
+              $"{proposal.Tool}: the coordinator repeated an identical denied proposal; execution was blocked.",
+              stopwatch,
+              model,
+              intention
+            );
+            progress.Failure = ToChatException(
+              exception,
+              model,
+              intention
+            );
+            yield break;
+          }
+
+          yield return Event(
+            requestId,
+            "action.policy-denied",
+            $"{proposal.Tool}: {exception.Message} The coordinator may propose a corrected safe action.",
+            stopwatch,
+            model,
+            intention
+          );
+          progress.Messages.Add(
+            new ChatMessage(
+              "user",
+              $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: policy-denied\n"
+                + $"Output:\n{exception.Message} Do not repeat the denied proposal; choose a safe alternative."
+            )
+          );
+          continue;
+        }
+
+        if (failureCategory != CoordinatorFailureCategory.CorrectablePlanning)
         {
           yield return Event(
             requestId,
@@ -1035,21 +1505,28 @@ public sealed class ChatStreamService : IChatStreamService
           yield break;
         }
 
+        planningFailures++;
+        _executionSession?.RecordPlanningFailure();
         exhaustedFailure = exception;
 
-        if (attempt < maximumPlanningAttempts)
+        if (planningFailures < maximumPlanningAttempts)
         {
           yield return Event(
             requestId,
             "action.planning-retry",
-            $"Planning attempt {attempt} of {maximumPlanningAttempts} produced an invalid action: "
-              + $"{exception.Message} Retrying with attempt {attempt + 1} of "
+            $"Planning attempt {planningFailures} of {maximumPlanningAttempts} produced an invalid action: "
+              + $"{exception.Message} Retrying with attempt {planningFailures + 1} of "
               + $"{maximumPlanningAttempts}.",
             stopwatch,
             model,
             intention
           );
         }
+      }
+
+      if (planHandled)
+      {
+        continue;
       }
 
       if (noActionRequired)
@@ -1104,6 +1581,36 @@ public sealed class ChatStreamService : IChatStreamService
       }
 
       var action = validatedAction;
+      var appliedInstructions = _executionSession?.CreateReview()
+        .AppliedInstructionFiles;
+
+      if (appliedInstructions?.Count > 0)
+      {
+        yield return Event(
+          requestId,
+          "repository-instructions-loaded",
+          $"Instructions applied to this action: {string.Join(", ", appliedInstructions)}.",
+          stopwatch,
+          model,
+          intention
+        );
+      }
+
+      _executionSession?.RecordPlanActionStarted(
+        action.Tool
+      );
+      yield return Event(
+        requestId,
+        "execution-step-started",
+        $"Plan step advanced from execution fact: {action.Summary}.",
+        stopwatch,
+        model,
+        intention
+      );
+      _executionSession?.RecordAction(
+        action,
+        "proposed"
+      );
       _logger.LogInformation(
         "Local action {ActionId} proposed for request {RequestId}: {Tool} {Summary}.",
         action.ActionId,
@@ -1131,6 +1638,8 @@ public sealed class ChatStreamService : IChatStreamService
       {
         var decisionTask = _approvalCoordinator.WaitAsync(
           action.ActionId,
+          _executionSession!.BrowserSessionId,
+          _executionSession.Id,
           cancellationToken
         );
         yield return ActionEvent(
@@ -1170,6 +1679,30 @@ public sealed class ChatStreamService : IChatStreamService
               "rejected",
               "The user rejected this action. It was not executed."
             )
+          );
+          progress.ToolMessages.Add(
+            NativeToolResultMessage(
+              action.Tool,
+              "rejected",
+              "The user rejected this action. It was not executed."
+            )
+          );
+          _executionSession.RecordAction(
+            action,
+            "rejected",
+            "Rejected by the user."
+          );
+          _executionSession.RecordPlanActionResult(
+            action.Tool,
+            "blocked"
+          );
+          yield return Event(
+            requestId,
+            "execution-step-blocked",
+            $"Plan step blocked because the action was rejected: {action.Summary}.",
+            stopwatch,
+            model,
+            intention
           );
           yield break;
         }
@@ -1213,16 +1746,64 @@ public sealed class ChatStreamService : IChatStreamService
         requiresApproval
       );
 
+      if (action.Tool == "run_validation_profile")
+      {
+        yield return Event(
+          requestId,
+          "validation-started",
+          "Running the saved validation profile in configured order.",
+          stopwatch,
+          model,
+          intention
+        );
+      }
+
       var execution = await TryExecuteAsync(
         () => _actionService.ExecuteAsync(
           action,
+          _executionSession,
           cancellationToken
         )
       );
 
-      if (execution.Result is not null)
+      if (execution.Result?.Succeeded == true)
       {
         var result = execution.Result;
+
+        if (result.Validation is not null)
+        {
+          foreach (var step in result.Validation.Steps)
+          {
+            yield return Event(
+              requestId,
+              "validation-step-started",
+              $"Validation step started: {step.Label}.",
+              stopwatch,
+              model,
+              intention
+            );
+            yield return Event(
+              requestId,
+              step.Status == "passed"
+                ? "validation-step-passed"
+                : "validation-step-failed",
+              $"{step.Label}: {step.Status} · exit {step.ExitCode?.ToString() ?? "n/a"} · "
+                + $"{step.DurationMilliseconds} ms.",
+              stopwatch,
+              model,
+              intention
+            );
+          }
+
+          yield return Event(
+            requestId,
+            "validation-completed",
+            $"Validation {result.Validation.State}: {result.Validation.ProfileName}.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
         _logger.LogInformation(
           "Local action {ActionId} completed for request {RequestId}: {Tool}.",
           action.ActionId,
@@ -1250,19 +1831,100 @@ public sealed class ChatStreamService : IChatStreamService
             result.Output
           )
         );
+        progress.ToolMessages.Add(
+          NativeToolResultMessage(
+            action.Tool,
+            "completed",
+            result.Output
+          )
+        );
+        _executionSession?.RecordAction(
+          action,
+          "completed",
+          result.Output
+        );
+        _executionSession?.RecordToolSuccess();
+        _executionSession?.RecordPlanActionResult(
+          action.Tool,
+          "completed"
+        );
+        yield return Event(
+          requestId,
+          "execution-step-completed",
+          $"Plan step completed from a verified action result: {action.Summary}.",
+          stopwatch,
+          model,
+          intention
+        );
       }
       else
       {
-        var exception = execution.Failure!;
-        var failureOutput = FormatExecutionFailure(
-          exception
+        var exception = execution.Failure ?? new LocalActionException(
+          "process-execution",
+          "The process returned an unsuccessful result."
         );
+        var failureOutput = execution.Result?.Output
+          ?? FormatExecutionFailure(
+            exception
+          );
+
+        if (execution.Result?.Validation is not null)
+        {
+          foreach (var step in execution.Result.Validation.Steps)
+          {
+            yield return Event(
+              requestId,
+              "validation-step-started",
+              $"Validation step started: {step.Label}.",
+              stopwatch,
+              model,
+              intention
+            );
+            yield return Event(
+              requestId,
+              step.Status == "passed"
+                ? "validation-step-passed"
+                : "validation-step-failed",
+              $"{step.Label}: {step.Status} · exit {step.ExitCode?.ToString() ?? "n/a"} · "
+                + $"{step.DurationMilliseconds} ms.",
+              stopwatch,
+              model,
+              intention
+            );
+          }
+
+          yield return Event(
+            requestId,
+            "validation-completed",
+            $"Validation {execution.Result.Validation.State}: "
+              + $"{execution.Result.Validation.ProfileName ?? "not configured"}.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
         _logger.LogWarning(
           exception,
           "Local action {ActionId} failed for request {RequestId}.",
           action.ActionId,
           requestId
         );
+
+        if (
+          exception is LocalActionException localFailure
+          && localFailure.Stage == "file-conflict"
+        )
+        {
+          yield return Event(
+            requestId,
+            "file-conflict-detected",
+            failureOutput,
+            stopwatch,
+            model,
+            intention
+          );
+        }
+
         yield return ActionEvent(
           requestId,
           "action.execution-error",
@@ -1281,6 +1943,55 @@ public sealed class ChatStreamService : IChatStreamService
             failureOutput
           )
         );
+        progress.ToolMessages.Add(
+          NativeToolResultMessage(
+            action.Tool,
+            "failed",
+            failureOutput
+          )
+        );
+        _executionSession?.RecordAction(
+          action,
+          "failed",
+          failureOutput
+        );
+        _executionSession?.RecordToolFailure();
+        _executionSession?.AddWarning(
+          $"{action.Tool} failed: {failureOutput}"
+        );
+        var failedProcess = execution.Result?.Process is null
+          ? CreateFailedProcessReview(
+            action,
+            exception,
+            execution.DurationMilliseconds,
+            _executionSession
+          )
+          : null;
+
+        if (failedProcess is not null)
+        {
+          _executionSession?.RecordProcess(
+            failedProcess
+          );
+        }
+
+        if (
+          _executionSession is not null
+          && _executionSession.CreateSummary().ConsecutiveToolFailureCount
+            >= settings.MaxConsecutiveToolFailures
+        )
+        {
+          progress.Failure = new ChatStageException(
+            "local-action-failure-limit",
+            $"The request reached the limit of {settings.MaxConsecutiveToolFailures} consecutive tool failures.",
+            failureOutput,
+            model,
+            intention,
+            400,
+            true
+          );
+          yield break;
+        }
 
         if (!string.IsNullOrWhiteSpace(
           recoverySpecialistModel
@@ -1303,12 +2014,19 @@ public sealed class ChatStreamService : IChatStreamService
 
           if (guidance.Guidance is not null)
           {
+            var guidanceMessage = GuidanceMessage(
+              recoverySpecialistModel,
+              guidance.Guidance
+            );
             progress.Messages.Add(
-              GuidanceMessage(
-                recoverySpecialistModel,
-                guidance.Guidance
+              guidanceMessage
+            );
+            progress.ToolMessages.Add(
+              ToToolMessage(
+                guidanceMessage
               )
             );
+            progress.Guidance = guidance.Guidance;
             yield return Event(
               requestId,
               "agent.execution-recovery-guidance-prepared",
@@ -1350,7 +2068,7 @@ public sealed class ChatStreamService : IChatStreamService
 
     progress.Failure = new ChatStageException(
       "local-action-limit",
-      "The request reached the limit of 8 local actions.",
+      $"The request reached the limit of {settings.MaxToolCallsPerTurn} local actions.",
       "The bounded Execute loop stopped before another action could be planned.",
       model,
       intention,
@@ -1454,7 +2172,9 @@ public sealed class ChatStreamService : IChatStreamService
         _markdownRenderer.Render(
           progress.Answer.ToString()
         ),
-        null
+        null,
+        null,
+        _executionSession?.CreateSummary()
       );
     }
   }
@@ -1586,7 +2306,7 @@ public sealed class ChatStreamService : IChatStreamService
   }
 
   private static async Task<PlanningAttempt> TryPlanAsync(
-    Func<Task<LocalActionProposal?>> action
+    Func<Task<LocalActionPlanningResult>> action
   )
   {
     try
@@ -1657,35 +2377,70 @@ public sealed class ChatStreamService : IChatStreamService
     }
   }
 
-  private static bool IsReplannableValidation(
-    LocalActionException exception
-  )
-  {
-    return string.Equals(
-      exception.Stage,
-      "action-validation",
-      StringComparison.Ordinal
-    );
-  }
-
   private static async Task<ExecutionAttempt> TryExecuteAsync(
     Func<Task<LocalActionResult>> action
   )
   {
+    var stopwatch = Stopwatch.StartNew();
+
     try
     {
       return new ExecutionAttempt(
         await action(),
-        null
+        null,
+        stopwatch.ElapsedMilliseconds
       );
     }
     catch (LocalActionException exception)
     {
       return new ExecutionAttempt(
         null,
-        exception
+        exception,
+        stopwatch.ElapsedMilliseconds
       );
     }
+  }
+
+  private static ExecutionProcessReview? CreateFailedProcessReview(
+    ValidatedLocalAction action,
+    LocalActionException exception,
+    long durationMilliseconds,
+    ExecutionSession? executionSession
+  )
+  {
+    if (action.Tool != "run_process")
+    {
+      return null;
+    }
+
+    var arguments = action.Arguments.TryGetProperty(
+      "arguments",
+      out var argumentElement
+    ) && argumentElement.ValueKind == System.Text.Json.JsonValueKind.Array
+      ? argumentElement.EnumerateArray()
+        .Select(
+          item => item.GetString() ?? string.Empty
+        ).ToArray()
+      : [];
+    return new ExecutionProcessReview(
+      action.TargetPath ?? string.Empty,
+      arguments,
+      executionSession is not null
+        && action.WorkingDirectory is not null
+        ? Path.GetRelativePath(
+          executionSession.WorkspacePath,
+          action.WorkingDirectory
+        )
+        : action.WorkingDirectory ?? string.Empty,
+      null,
+      durationMilliseconds,
+      false,
+      false,
+      false,
+      false,
+      string.Empty,
+      exception.Message
+    );
   }
 
   private static ChatStageException ToChatException(
@@ -1777,7 +2532,7 @@ public sealed class ChatStreamService : IChatStreamService
     }
   }
 
-  private static ChatStreamEvent ActionEvent(
+  private ChatStreamEvent ActionEvent(
     string requestId,
     string type,
     string message,
@@ -1806,8 +2561,12 @@ public sealed class ChatStreamService : IChatStreamService
         action.Summary,
         action.Preview,
         state,
-        requiresApproval
-      )
+        requiresApproval,
+        _executionSession?.Id,
+        action.PendingFileChange?.UndoAvailable == true,
+        action.PendingFileChange?.UndoDiagnostic
+      ),
+      _executionSession?.CreateSummary()
     );
   }
 
@@ -1828,17 +2587,73 @@ public sealed class ChatStreamService : IChatStreamService
     );
   }
 
+  private static OllamaToolMessage NativeToolResultMessage(
+    string tool,
+    string status,
+    string output
+  )
+  {
+    const int limit = 16_000;
+    var safeOutput = output.Length <= limit
+      ? output
+      : $"{output[..limit]}\n[tool result truncated]";
+
+    return new OllamaToolMessage(
+      "tool",
+      $"Status: {status}\nOutput:\n{safeOutput}",
+      ToolName: tool
+    );
+  }
+
   private static ChatMessage GuidanceMessage(
     string specialistModel,
-    string guidance
+    ExpertExecutionGuidance guidance
   )
   {
     return new ChatMessage(
       "user",
       $"{ExpertExecutionGuidanceService.GuidanceMarker}\n"
         + $"Specialist model: {specialistModel}\n"
-        + $"Guidance:\n{guidance}"
+        + $"Structured guidance:\n{ExpertExecutionGuidanceService.Serialize(guidance)}"
     );
+  }
+
+  private static OllamaToolMessage ToToolMessage(
+    ChatMessage message
+  )
+  {
+    return new OllamaToolMessage(
+      message.Role,
+      message.Content
+    );
+  }
+
+  private bool CanCompletePlanning(
+    ExecutionProgress progress
+  )
+  {
+    if (progress.Guidance?.ActionRequired == false)
+    {
+      return true;
+    }
+
+    var plan = _executionSession?.Plan;
+
+    if (
+      plan is null
+      || plan.Steps.Count == 0
+      || plan.Steps.Any(
+        step => step.Status != "completed"
+      )
+    )
+    {
+      return false;
+    }
+
+    var completedActions = _executionSession!.CompletedActionCount;
+    return progress.Guidance is null
+      ? completedActions > 0
+      : completedActions >= progress.Guidance.Actions.Count;
   }
 
   private static string FormatActivityOutput(
@@ -1871,7 +2686,7 @@ public sealed class ChatStreamService : IChatStreamService
       : $"{exception.Message} Details: {technical}";
   }
 
-  private static ChatStreamEvent Event(
+  private ChatStreamEvent Event(
     string requestId,
     string type,
     string? message,
@@ -1890,8 +2705,220 @@ public sealed class ChatStreamService : IChatStreamService
       intention,
       stopwatch.ElapsedMilliseconds,
       null,
-      null
+      null,
+      null,
+      _executionSession?.CreateSummary()
     );
+  }
+
+  private static string CreateExecutionFacts(
+    ExecutionSession session
+  )
+  {
+    var review = session.CreateReview();
+    var changedFiles = review.Files.Count == 0
+      ? "none"
+      : string.Join(
+        ", ",
+        review.Files.Select(
+          file => $"{file.Operation}:{file.RelativePath}"
+        )
+      );
+    var failedProcesses = review.Processes.Count(
+      process => process.ExitCode != 0 || process.TimedOut || process.Cancelled
+    );
+    var commands = review.Processes.Count == 0
+      ? "none"
+      : string.Join(
+        "; ",
+        review.Processes.Select(
+          process => $"{process.Executable} {string.Join(" ", process.Arguments)}"
+        )
+      );
+    var instructions = review.AppliedInstructionFiles?.Count > 0
+      ? string.Join(
+        ", ",
+        review.AppliedInstructionFiles
+      )
+      : "none";
+    var preExisting = review.Files.Where(
+      file => file.PreExistingChange
+    ).Select(
+      file => file.RelativePath
+    ).ToArray();
+
+    return "AUTHORITATIVE_EXECUTION_SESSION_FACTS\n"
+      + $"Session: {review.Summary.Id}\n"
+      + $"Coordinator: {review.Summary.CoordinatorModel}\n"
+      + $"Execution path: {review.Summary.ExecutionPath}\n"
+      + $"Actions: {review.Summary.ActionCount}\n"
+      + $"Changed files: {changedFiles}\n"
+      + $"Pre-existing changed paths touched by this session: {string.Join(", ", preExisting.DefaultIfEmpty("none"))}\n"
+      + $"Commands actually run: {commands}\n"
+      + $"Applied instruction files: {instructions}\n"
+      + $"Validation: {review.Validation?.State ?? "not-run"}\n"
+      + $"Completion gate: {review.Summary.CompletionStatus}\n"
+      + $"Process failures: {failedProcesses}\n"
+      + "Base the final summary only on these session facts and tool results. "
+      + "Do not claim implemented and validated unless completion gate says implemented-and-validated.";
+  }
+
+  private async Task<LocalActionException?> ApplyInstructionsForProposalAsync(
+    LocalActionProposal proposal,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      !proposal.Arguments.TryGetProperty(
+        "path",
+        out var pathElement
+      )
+      || pathElement.ValueKind != System.Text.Json.JsonValueKind.String
+    )
+    {
+      return null;
+    }
+
+    try
+    {
+      var instructions = await _repositoryInstructions.ResolveAsync(
+        pathElement.GetString(),
+        cancellationToken
+      );
+      _executionSession?.ApplyInstructions(
+        instructions
+      );
+      return null;
+    }
+    catch (Exception exception) when (
+      exception is IOException
+      or UnauthorizedAccessException
+      or LocalActionException
+    )
+    {
+      return new LocalActionException(
+        "repository-instructions",
+        $"Repository instructions could not be resolved for the proposed path: {exception.Message}",
+        exception
+      );
+    }
+  }
+
+  private LocalActionException? TryApplyExecutionPlan(
+    LocalActionProposal proposal,
+    ProjectAwarenessSettings projectAwareness,
+    out ExecutionPlanView? plan
+  )
+  {
+    try
+    {
+      var current = _executionSession?.Plan;
+
+      if (proposal.Tool == "create_execution_plan")
+      {
+        if (current is not null)
+        {
+          throw new LocalActionException(
+            "execution-plan",
+            "Use revise_execution_plan because this session already has a plan."
+          );
+        }
+
+        plan = _executionPlans.ValidateCreate(
+          proposal.Arguments,
+          projectAwareness.MaxPlanSteps
+        );
+        _executionSession?.CreatePlan(
+          plan
+        );
+        return null;
+      }
+
+      if (current is null)
+      {
+        throw new LocalActionException(
+          "execution-plan",
+          "Create an execution plan before revising it."
+        );
+      }
+
+      if (current.RevisionCount >= projectAwareness.MaxPlanRevisions)
+      {
+        throw new LocalActionException(
+          "execution-plan",
+          $"The execution plan revision limit of {projectAwareness.MaxPlanRevisions} was reached."
+        );
+      }
+
+      plan = _executionPlans.ValidateRevision(
+        proposal.Arguments,
+        current,
+        projectAwareness.MaxPlanSteps
+      );
+      _executionSession?.RevisePlan(
+        plan
+      );
+      return null;
+    }
+    catch (LocalActionException failure)
+    {
+      plan = null;
+      return failure;
+    }
+  }
+
+  private static string CreateProjectContext(
+    ProjectProfile project,
+    RepositoryInstructionSet instructions
+  )
+  {
+    var markers = project.DetectedFiles.Count == 0
+      ? "none"
+      : string.Join(
+        ", ",
+        project.DetectedFiles
+      );
+    var dirty = project.Repository.DirtyPaths.Count == 0
+      ? "none"
+      : string.Join(
+        ", ",
+        project.Repository.DirtyPaths
+      );
+    return "APPLICATION_OWNED_PROJECT_CONTEXT\n"
+      + $"Workspace display name: {project.DisplayName ?? "workspace"}\n"
+      + $"Project types: {string.Join(", ", project.ProjectTypes.DefaultIfEmpty("none"))}\n"
+      + $"Detected markers: {markers}\n"
+      + $"Git branch: {project.Repository.Branch ?? "unavailable"}\n"
+      + $"Pre-existing dirty paths: {dirty}\n"
+      + "Pre-existing dirty files must not be claimed as changes made solely by this turn.\n"
+      + "Existing files must be inspected before modification and may conflict if their hash changes.\n"
+      + (
+        string.IsNullOrWhiteSpace(
+          instructions.Content
+        )
+          ? "No repository AGENTS.md instructions were loaded."
+          : instructions.Content
+      );
+  }
+
+  private static string CreateAuthoritativeStatus(
+    string completionStatus
+  )
+  {
+    var text = completionStatus switch
+    {
+      "implemented-and-validated" => "Implemented and validated.",
+      "implemented-and-validated-with-warnings" => "Implemented and validated with warnings.",
+      "implemented-validation-failed" => "Implemented; validation failed.",
+      "implemented-validation-cancelled" => "Implemented; validation was cancelled.",
+      "implemented-validation-not-configured" => "Implemented; no validation profile is configured.",
+      "implemented-validation-not-run" => "Implemented; validation was not run.",
+      "validation-passed-no-files-changed" => "Validation passed; no files were changed.",
+      "blocked-validation-not-configured" => "Validation was requested, but no validation profile is configured.",
+      "blocked-validation-not-run" => "Validation was requested, but it did not run.",
+      _ => "Inspected only; no files were changed."
+    };
+    return $"**Authoritative execution status:** {text}";
   }
 
   private sealed class GenerationProgress
@@ -1906,13 +2933,25 @@ public sealed class ChatStreamService : IChatStreamService
   private sealed class ExecutionProgress
   {
     public ExecutionProgress(
-      List<ChatMessage> messages
+      List<ChatMessage> messages,
+      ExpertExecutionGuidance? guidance = null,
+      List<OllamaToolMessage>? toolMessages = null
     )
     {
       Messages = messages;
+      Guidance = guidance;
+      ToolMessages = toolMessages ?? messages.Select(
+        ToToolMessage
+      ).ToList();
     }
 
     public List<ChatMessage> Messages { get; }
+
+    public List<OllamaToolMessage> ToolMessages { get; }
+
+    public ExpertExecutionGuidance? Guidance { get; set; }
+
+    public bool ToolingValidated { get; set; }
 
     public ChatStageException? Failure { get; set; }
 
@@ -1920,7 +2959,7 @@ public sealed class ChatStreamService : IChatStreamService
   }
 
   private sealed record PlanningAttempt(
-    LocalActionProposal? Proposal,
+    LocalActionPlanningResult? Result,
     Exception? Failure
   );
 
@@ -1931,7 +2970,8 @@ public sealed class ChatStreamService : IChatStreamService
 
   private sealed record ExecutionAttempt(
     LocalActionResult? Result,
-    LocalActionException? Failure
+    LocalActionException? Failure,
+    long DurationMilliseconds
   );
 
   private sealed record ToolingInspection(
@@ -1940,7 +2980,7 @@ public sealed class ChatStreamService : IChatStreamService
   );
 
   private sealed record GuidanceAttempt(
-    string? Guidance,
+    ExpertExecutionGuidance? Guidance,
     Exception? Failure
   );
 

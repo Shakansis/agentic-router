@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Contracts;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -7,11 +9,13 @@ public interface ILocalActionService
 {
   Task<ValidatedLocalAction> ValidateAsync(
     LocalActionProposal proposal,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   );
 
   Task<LocalActionResult> ExecuteAsync(
     ValidatedLocalAction action,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   );
 }
@@ -31,12 +35,29 @@ public sealed record ValidatedLocalAction(
   string Summary,
   string? Preview,
   bool ReadOnly,
-  bool RequiresExplicitApproval
+  bool RequiresExplicitApproval,
+  PendingFileChange? PendingFileChange = null
 );
 
 public sealed record LocalActionResult(
   string Output,
-  string EventType
+  string EventType,
+  ExecutionProcessReview? Process = null,
+  bool Succeeded = true,
+  ValidationRunView? Validation = null
+);
+
+public sealed record PendingFileChange(
+  string RelativePath,
+  string Operation,
+  bool ExistedBefore,
+  string OriginalHash,
+  string? OriginalContent,
+  string FinalContent,
+  string ExpectedFinalHash,
+  long OriginalBytes,
+  bool UndoAvailable,
+  string? UndoDiagnostic
 );
 
 public sealed class LocalActionService : ILocalActionService
@@ -47,76 +68,39 @@ public sealed class LocalActionService : ILocalActionService
     [
       "list_files",
       "read_file",
+      "get_file_info",
+      "search_text",
       "create_file",
       "write_file",
       "replace_text",
       "apply_patch",
       "create_directory",
-      "run_process"
+      "run_process",
+      "run_validation_profile"
     ],
     StringComparer.Ordinal
   );
-  private static readonly HashSet<string> ShellExecutables = new(
-    [
-      "cmd",
-      "command",
-      "powershell",
-      "pwsh",
-      "bash",
-      "sh",
-      "zsh",
-      "wsl",
-      "cscript",
-      "wscript"
-    ],
-    StringComparer.OrdinalIgnoreCase
-  );
-  private static readonly HashSet<string> SafeDotnetCommands = new(
-    [
-      "build",
-      "test",
-      "format",
-      "restore",
-      "--info",
-      "--version"
-    ],
-    StringComparer.OrdinalIgnoreCase
-  );
-  private static readonly HashSet<string> SafeGitCommands = new(
-    [
-      "status",
-      "diff",
-      "log",
-      "show",
-      "branch",
-      "rev-parse"
-    ],
-    StringComparer.OrdinalIgnoreCase
-  );
-  private static readonly HashSet<string> BlockedGitCommands = new(
-    [
-      "clean",
-      "reset",
-      "rm",
-      "restore"
-    ],
-    StringComparer.OrdinalIgnoreCase
-  );
-
   private readonly ITrustedWorkspaceService _workspace;
   private readonly IProcessExecutionService _processExecution;
+  private readonly IProcessPolicyService _processPolicy;
+  private readonly IValidationProfileService _validationProfiles;
 
   public LocalActionService(
     ITrustedWorkspaceService workspace,
-    IProcessExecutionService processExecution
+    IProcessExecutionService processExecution,
+    IProcessPolicyService processPolicy,
+    IValidationProfileService validationProfiles
   )
   {
     _workspace = workspace;
     _processExecution = processExecution;
+    _processPolicy = processPolicy;
+    _validationProfiles = validationProfiles;
   }
 
   public async Task<ValidatedLocalAction> ValidateAsync(
     LocalActionProposal proposal,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   )
   {
@@ -130,6 +114,31 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    if (proposal.Tool == "run_validation_profile")
+    {
+      if (executionSession is null)
+      {
+        throw new LocalActionException(
+          "validation-profile",
+          "Validation requires an active execution session."
+        );
+      }
+
+      return new ValidatedLocalAction(
+        Guid.NewGuid().ToString(
+          "N"
+        ),
+        proposal.Tool,
+        proposal.Arguments.Clone(),
+        null,
+        null,
+        "run_validation_profile",
+        "Run the saved structured validation profile.",
+        false,
+        false
+      );
+    }
+
     return proposal.Tool == "run_process"
       ? await ValidateProcessAsync(
         proposal,
@@ -137,18 +146,25 @@ public sealed class LocalActionService : ILocalActionService
       )
       : await ValidateFileActionAsync(
         proposal,
+        executionSession,
         cancellationToken
       );
   }
 
   public async Task<LocalActionResult> ExecuteAsync(
     ValidatedLocalAction action,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   )
   {
     try
     {
-      return action.Tool switch
+      await ValidatePendingFileStateAsync(
+        action,
+        executionSession,
+        cancellationToken
+      );
+      var result = action.Tool switch
       {
         "list_files" => await ListFilesAsync(
           action,
@@ -156,6 +172,17 @@ public sealed class LocalActionService : ILocalActionService
         ),
         "read_file" => await ReadFileAsync(
           action,
+          executionSession,
+          cancellationToken
+        ),
+        "get_file_info" => await GetFileInfoAsync(
+          action,
+          executionSession,
+          cancellationToken
+        ),
+        "search_text" => await SearchTextAsync(
+          action,
+          executionSession,
           cancellationToken
         ),
         "create_file" => await CreateFileAsync(
@@ -181,11 +208,54 @@ public sealed class LocalActionService : ILocalActionService
           action,
           cancellationToken
         ),
+        "run_validation_profile" => await RunValidationProfileAsync(
+          executionSession
+            ?? throw new LocalActionException(
+              "validation-profile",
+              "Validation requires an active execution session."
+            ),
+          cancellationToken
+        ),
         _ => throw new LocalActionException(
           "action-execution",
           $"Tool '{action.Tool}' is not available."
         )
       };
+
+      if (action.PendingFileChange is not null)
+      {
+        await VerifyAndRecordFileChangeAsync(
+          action,
+          executionSession,
+          cancellationToken
+        );
+      }
+      else if (
+        action.Tool == "create_directory"
+        && executionSession is not null
+      )
+      {
+        executionSession.RecordCreatedDirectory(
+          await GetRelativePathAsync(
+            RequiredTarget(
+              action
+            ),
+            cancellationToken
+          )
+        );
+      }
+
+      if (
+        result.Process is not null
+        && executionSession is not null
+      )
+      {
+        executionSession.RecordProcess(
+          result.Process
+        );
+      }
+
+      return result;
     }
     catch (Exception exception) when (
       exception is IOException
@@ -200,8 +270,29 @@ public sealed class LocalActionService : ILocalActionService
     }
   }
 
+  private async Task<LocalActionResult> RunValidationProfileAsync(
+    ExecutionSession executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var validation = await _validationProfiles.RunAsync(
+      executionSession,
+      cancellationToken
+    );
+    return new LocalActionResult(
+      ValidationProfileService.FormatResult(
+        validation
+      ),
+      "action.output",
+      null,
+      validation.State is "passed" or "passed-with-warnings",
+      validation
+    );
+  }
+
   private async Task<ValidatedLocalAction> ValidateFileActionAsync(
     LocalActionProposal proposal,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   )
   {
@@ -217,7 +308,11 @@ public sealed class LocalActionService : ILocalActionService
       targetPath,
       cancellationToken
     );
-    var readOnly = proposal.Tool is "list_files" or "read_file";
+    var readOnly = proposal.Tool is
+      "list_files"
+      or "read_file"
+      or "get_file_info"
+      or "search_text";
     string? preview = null;
 
     if (proposal.Tool is "create_file" or "write_file")
@@ -247,6 +342,34 @@ public sealed class LocalActionService : ILocalActionService
         )
       );
     }
+    else if (proposal.Tool == "search_text")
+    {
+      preview = $"Search for: {LimitPreview(GetRequiredString(proposal.Arguments, "query"))}";
+    }
+
+    var pendingFileChange = await PrepareFileChangeAsync(
+      proposal,
+      targetPath,
+      relativePath,
+      executionSession,
+      cancellationToken
+    );
+    var protectedInstructionFile = IsProtectedInstructionFile(
+      relativePath
+    );
+    var explicitlyRequested = protectedInstructionFile
+      && executionSession?.Objective.Contains(
+        Path.GetFileName(
+          relativePath
+        ),
+        StringComparison.OrdinalIgnoreCase
+      ) == true;
+
+    if (protectedInstructionFile && !explicitlyRequested)
+    {
+      preview = "Elevated risk: repository instructions or formatting policy were not explicitly requested.\n\n"
+        + preview;
+    }
 
     return new ValidatedLocalAction(
       Guid.NewGuid().ToString(
@@ -259,7 +382,8 @@ public sealed class LocalActionService : ILocalActionService
       $"{proposal.Tool}: {relativePath}",
       preview,
       readOnly,
-      false
+      protectedInstructionFile && !explicitlyRequested,
+      pendingFileChange
     );
   }
 
@@ -271,134 +395,21 @@ public sealed class LocalActionService : ILocalActionService
     var executable = GetRequiredString(
       proposal.Arguments,
       "executable"
-    ).Trim();
-
-    if (string.IsNullOrWhiteSpace(
-      executable
-    ))
-    {
-      throw new LocalActionException(
-        "process-validation",
-        "Process executable is required."
-      );
-    }
-
-    var executableName = Path.GetFileNameWithoutExtension(
-      executable
     );
-
-    if (ShellExecutables.Contains(
-      executableName
-    ))
-    {
-      throw new LocalActionException(
-        "process-validation",
-        "Shell interpreters are not allowed. Use a structured executable and argument list."
-      );
-    }
-
-    if (
-      !Path.IsPathFullyQualified(
-        executable
-      )
-      && (
-        executable.Contains(
-          Path.DirectorySeparatorChar
-        )
-        || executable.Contains(
-          Path.AltDirectorySeparatorChar
-        )
-      )
-    )
-    {
-      throw new LocalActionException(
-        "process-validation",
-        "Executable paths must be absolute or use a bare executable name."
-      );
-    }
-
-    if (Path.IsPathFullyQualified(
-      executable
-    ))
-    {
-      executable = await _workspace.ResolvePathAsync(
-        executable,
-        cancellationToken
-      );
-    }
-
     var arguments = GetStringArray(
       proposal.Arguments,
       "arguments"
     );
-
-    if (arguments.Count > 100 || arguments.Any(
-      argument => argument.Length > 2_048 || argument.Contains(
-        '\0',
-        StringComparison.Ordinal
-      )
-    ))
-    {
-      throw new LocalActionException(
-        "process-validation",
-        "Process arguments exceed the supported safe limits."
-      );
-    }
-
-    var workingDirectory = await _workspace.ResolvePathAsync(
+    var command = await _processPolicy.ValidateAsync(
+      executable,
+      arguments,
       GetOptionalString(
         proposal.Arguments,
         "workingDirectory"
       ),
       cancellationToken
     );
-
-    if (!Directory.Exists(
-      workingDirectory
-    ))
-    {
-      throw new LocalActionException(
-        "process-validation",
-        "Process working directory does not exist."
-      );
-    }
-
-    var command = arguments.FirstOrDefault() ?? string.Empty;
-
-    if (
-      executableName.Equals(
-        "git",
-        StringComparison.OrdinalIgnoreCase
-      )
-      && BlockedGitCommands.Contains(
-        command
-      )
-    )
-    {
-      throw new LocalActionException(
-        "process-validation",
-        $"The potentially destructive git command '{command}' is blocked."
-      );
-    }
-
-    var safe = (
-      executableName.Equals(
-        "dotnet",
-        StringComparison.OrdinalIgnoreCase
-      )
-      && SafeDotnetCommands.Contains(
-        command
-      )
-    ) || (
-      executableName.Equals(
-        "git",
-        StringComparison.OrdinalIgnoreCase
-      )
-      && SafeGitCommands.Contains(
-        command
-      )
-    );
-    var preview = $"{executable} {string.Join(" ", arguments.Select(QuoteArgument))}";
+    var preview = $"{command.Executable} {string.Join(" ", arguments.Select(QuoteArgument))}";
 
     return new ValidatedLocalAction(
       Guid.NewGuid().ToString(
@@ -406,14 +417,14 @@ public sealed class LocalActionService : ILocalActionService
       ),
       proposal.Tool,
       proposal.Arguments.Clone(),
-      executable,
-      workingDirectory,
-      $"run_process: {Path.GetFileName(executable)}",
+      command.Executable,
+      command.WorkingDirectory,
+      $"run_process: {Path.GetFileName(command.Executable)}",
       LimitPreview(
         preview
       ),
       false,
-      !safe
+      command.RequiresExplicitApproval
     );
   }
 
@@ -474,8 +485,9 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
-  private static async Task<LocalActionResult> ReadFileAsync(
+  private async Task<LocalActionResult> ReadFileAsync(
     ValidatedLocalAction action,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   )
   {
@@ -502,11 +514,270 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    var content = await File.ReadAllTextAsync(
+      target,
+      cancellationToken
+    );
+    await RecordObservationAsync(
+      target,
+      content,
+      executionSession,
+      cancellationToken
+    );
     return new LocalActionResult(
-      await File.ReadAllTextAsync(
+      content,
+      "action.output"
+    );
+  }
+
+  private async Task<LocalActionResult> GetFileInfoAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var target = RequiredTarget(
+      action
+    );
+    var root = await _workspace.ResolvePathAsync(
+      null,
+      cancellationToken
+    );
+
+    if (
+      !File.Exists(
+        target
+      )
+      && !Directory.Exists(
+        target
+      )
+    )
+    {
+      throw new LocalActionException(
+        "action-execution",
+        "The requested path does not exist."
+      );
+    }
+
+    var attributes = File.GetAttributes(
+      target
+    );
+    var isDirectory = (
+      attributes
+      & FileAttributes.Directory
+    ) != 0;
+    var size = isDirectory
+      ? null
+      : new FileInfo(
+        target
+      ).Length as long?;
+    var modified = isDirectory
+      ? Directory.GetLastWriteTimeUtc(
+        target
+      )
+      : File.GetLastWriteTimeUtc(
+        target
+      );
+    var output = JsonSerializer.Serialize(
+      new
+      {
+        path = Path.GetRelativePath(
+          root,
+          target
+        ),
+        type = isDirectory
+          ? "directory"
+          : "file",
+        sizeBytes = size,
+        lastWriteTimeUtc = modified,
+        readOnly = (
+          attributes
+          & FileAttributes.ReadOnly
+        ) != 0,
+        reparsePoint = (
+          attributes
+          & FileAttributes.ReparsePoint
+        ) != 0
+      },
+      new JsonSerializerOptions
+      {
+        WriteIndented = true
+      }
+    );
+
+    if (!isDirectory)
+    {
+      await RecordObservationAsync(
         target,
+        null,
+        executionSession,
         cancellationToken
-      ),
+      );
+    }
+
+    return new LocalActionResult(
+      output,
+      "action.output"
+    );
+  }
+
+  private async Task<LocalActionResult> SearchTextAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    const int maximumSearchFileBytes = 1024 * 1024;
+    const int excerptLimit = 240;
+    var target = RequiredTarget(
+      action
+    );
+    var query = GetRequiredString(
+      action.Arguments,
+      "query"
+    );
+
+    if (string.IsNullOrWhiteSpace(
+      query
+    ) || query.Length > 512)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "Search query must contain between 1 and 512 characters."
+      );
+    }
+
+    var maxFiles = executionSession?.Limits.MaxSearchFiles
+      ?? 500;
+    var maxMatches = executionSession?.Limits.MaxSearchMatches
+      ?? 200;
+    var root = await _workspace.ResolvePathAsync(
+      null,
+      cancellationToken
+    );
+    var files = File.Exists(
+      target
+    )
+      ? new[]
+      {
+        target
+      }.AsEnumerable()
+      : EnumerateEntries(
+        target,
+        true
+      ).Where(
+        File.Exists
+      );
+    var output = new StringBuilder();
+    var searched = 0;
+    var matches = 0;
+    var truncated = false;
+
+    foreach (var file in files)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+
+      if (searched >= maxFiles)
+      {
+        truncated = true;
+        break;
+      }
+
+      var info = new FileInfo(
+        file
+      );
+
+      if (
+        !info.Exists
+        || info.Length > maximumSearchFileBytes
+        || (
+          info.Attributes
+          & FileAttributes.ReparsePoint
+        ) != 0
+        || await IsBinaryAsync(
+          file,
+          cancellationToken
+        )
+      )
+      {
+        continue;
+      }
+
+      searched++;
+      using var reader = new StreamReader(
+        file,
+        Encoding.UTF8,
+        true
+      );
+      var lineNumber = 0;
+
+      while (
+        await reader.ReadLineAsync(
+          cancellationToken
+        ) is
+        {
+        } line
+      )
+      {
+        lineNumber++;
+
+        if (!line.Contains(
+          query,
+          StringComparison.OrdinalIgnoreCase
+        ))
+        {
+          continue;
+        }
+
+        var excerpt = line.Length <= excerptLimit
+          ? line
+          : string.Concat(
+            line.AsSpan(
+              0,
+              excerptLimit
+            ),
+            "..."
+          );
+        output.Append(
+          Path.GetRelativePath(
+            root,
+            file
+          )
+        ).Append(
+          ':'
+        ).Append(
+          lineNumber
+        ).Append(
+          ": "
+        ).AppendLine(
+          excerpt
+        );
+        matches++;
+
+        if (matches >= maxMatches)
+        {
+          truncated = true;
+          break;
+        }
+      }
+
+      if (matches >= maxMatches)
+      {
+        break;
+      }
+    }
+
+    if (truncated)
+    {
+      output.AppendLine(
+        $"[search truncated: files={searched}/{maxFiles}, matches={matches}/{maxMatches}]"
+      );
+    }
+
+    return new LocalActionResult(
+      matches == 0
+        ? $"[no matches; searched {searched} text files]"
+        : output.ToString().TrimEnd(),
       "action.output"
     );
   }
@@ -819,7 +1090,519 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       output.ToString().TrimEnd(),
-      "action.process-output"
+      "action.process-output",
+      new ExecutionProcessReview(
+        action.TargetPath!,
+        arguments,
+        await GetRelativePathAsync(
+          action.WorkingDirectory!,
+          cancellationToken
+        ),
+        result.ExitCode,
+        result.DurationMilliseconds,
+        result.TimedOut,
+        result.Cancelled,
+        result.StandardOutputTruncated,
+        result.StandardErrorTruncated,
+        result.StandardOutput,
+        result.StandardError
+      ),
+      result.ExitCode == 0
+        && !result.TimedOut
+        && !result.Cancelled
+    );
+  }
+
+  private static async Task<PendingFileChange?> PrepareFileChangeAsync(
+    LocalActionProposal proposal,
+    string targetPath,
+    string relativePath,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (proposal.Tool is not (
+      "create_file"
+      or "write_file"
+      or "replace_text"
+      or "apply_patch"
+    ))
+    {
+      return null;
+    }
+
+    var existedBefore = File.Exists(
+      targetPath
+    );
+
+    if (proposal.Tool == "create_file" && existedBefore)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "The file already exists."
+      );
+    }
+
+    if (proposal.Tool != "create_file" && !existedBefore)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "The file does not exist."
+      );
+    }
+
+    string? originalContent = null;
+    long originalBytes = 0;
+    var originalHash = HashText(
+      string.Empty
+    );
+
+    if (existedBefore)
+    {
+      var info = new FileInfo(
+        targetPath
+      );
+      originalBytes = info.Length;
+      originalHash = await HashFileAsync(
+        targetPath,
+        cancellationToken
+      );
+
+      if (
+        executionSession is null
+        || !executionSession.TryGetObservedFile(
+          relativePath,
+          out var observed
+        )
+        || observed is null
+      )
+      {
+        throw new LocalActionException(
+          "file-not-inspected",
+          $"{relativePath}: the file must be read or inspected during this execution session before it can be modified."
+        );
+      }
+
+      if (!string.Equals(
+        observed.Hash,
+        originalHash,
+        StringComparison.Ordinal
+      ))
+      {
+        executionSession.RecordConflict(
+          new FileConflictView(
+            relativePath,
+            observed.Hash,
+            originalHash,
+            "pre-write-validation",
+            true,
+            null
+          )
+        );
+        throw new LocalActionException(
+          "file-conflict",
+          $"{relativePath}: the file changed since inspection. Expected hash {observed.Hash}; current hash {originalHash}. Read the file again before retrying."
+        );
+      }
+
+      if (
+        originalBytes
+        <= (
+          executionSession?.Limits.MaxRollbackBytesPerFile
+            ?? FileWriteLimit
+        )
+      )
+      {
+        originalContent = await File.ReadAllTextAsync(
+          targetPath,
+          cancellationToken
+        );
+      }
+    }
+
+    string finalContent;
+
+    if (proposal.Tool is "create_file" or "write_file")
+    {
+      finalContent = GetRequiredString(
+        proposal.Arguments,
+        "content"
+      );
+    }
+    else
+    {
+      if (originalContent is null)
+      {
+        throw new LocalActionException(
+          "action-validation",
+          "The file is too large for a bounded text edit."
+        );
+      }
+
+      finalContent = originalContent;
+
+      if (proposal.Tool == "replace_text")
+      {
+        var oldText = GetRequiredString(
+          proposal.Arguments,
+          "oldText"
+        );
+        var newText = GetRequiredString(
+          proposal.Arguments,
+          "newText"
+        );
+        var first = finalContent.IndexOf(
+          oldText,
+          StringComparison.Ordinal
+        );
+
+        if (first < 0)
+        {
+          throw new LocalActionException(
+            "action-validation",
+            "The requested text was not found."
+          );
+        }
+
+        finalContent = GetOptionalBoolean(
+          proposal.Arguments,
+          "replaceAll"
+        )
+          ? finalContent.Replace(
+            oldText,
+            newText,
+            StringComparison.Ordinal
+          )
+          : string.Concat(
+            finalContent.AsSpan(
+              0,
+              first
+            ),
+            newText,
+            finalContent.AsSpan(
+              first + oldText.Length
+            )
+          );
+      }
+      else
+      {
+        foreach (var replacement in GetReplacements(
+          proposal.Arguments
+        ))
+        {
+          var index = finalContent.IndexOf(
+            replacement.OldText,
+            StringComparison.Ordinal
+          );
+
+          if (index < 0)
+          {
+            throw new LocalActionException(
+              "action-validation",
+              "A patch search block was not found."
+            );
+          }
+
+          finalContent = string.Concat(
+            finalContent.AsSpan(
+              0,
+              index
+            ),
+            replacement.NewText,
+            finalContent.AsSpan(
+              index + replacement.OldText.Length
+            )
+          );
+        }
+      }
+    }
+
+    ValidateContent(
+      finalContent
+    );
+    string? undoDiagnostic = null;
+    var undoAvailable = executionSession is not null
+      && executionSession.CanTrackRollback(
+        originalBytes,
+        out undoDiagnostic
+      );
+
+    if (executionSession is null)
+    {
+      undoDiagnostic = "No execution session is associated with this action.";
+    }
+
+    return new PendingFileChange(
+      relativePath,
+      existedBefore
+        ? "modified"
+        : "created",
+      existedBefore,
+      originalHash,
+      undoAvailable
+        ? originalContent
+        : null,
+      finalContent,
+      HashText(
+        finalContent
+      ),
+      originalBytes,
+      undoAvailable,
+      undoDiagnostic
+    );
+  }
+
+  private static async Task ValidatePendingFileStateAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var pending = action.PendingFileChange;
+
+    if (pending is null)
+    {
+      return;
+    }
+
+    var target = RequiredTarget(
+      action
+    );
+    var exists = File.Exists(
+      target
+    );
+
+    if (exists != pending.ExistedBefore)
+    {
+      throw new LocalActionException(
+        "file-conflict",
+        "The target file changed after the action was proposed."
+      );
+    }
+
+    if (exists)
+    {
+      var currentHash = await HashFileAsync(
+        target,
+        cancellationToken
+      );
+
+      if (!string.Equals(
+        currentHash,
+        pending.OriginalHash,
+        StringComparison.Ordinal
+      ))
+      {
+        executionSession?.RecordConflict(
+          new FileConflictView(
+            pending.RelativePath,
+            pending.OriginalHash,
+            currentHash,
+            "pre-write-execution",
+            true,
+            null
+          )
+        );
+        throw new LocalActionException(
+          "file-conflict",
+          $"{pending.RelativePath}: the file changed after the action was proposed. Expected hash {pending.OriginalHash}; current hash {currentHash}."
+        );
+      }
+    }
+  }
+
+  private async Task RecordObservationAsync(
+    string target,
+    string? knownContent,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      return;
+    }
+
+    var relative = await GetRelativePathAsync(
+      target,
+      cancellationToken
+    );
+    var info = new FileInfo(
+      target
+    );
+    var hash = knownContent is null
+      ? await HashFileAsync(
+        target,
+        cancellationToken
+      )
+      : HashText(
+        knownContent
+      );
+    var preExisting = executionSession.CreateReview().Baseline
+      ?.PreExistingDirtyPaths.Contains(
+        relative,
+        StringComparer.OrdinalIgnoreCase
+      ) == true;
+    executionSession.RecordObservedFile(
+      new ObservedFileView(
+        relative,
+        hash,
+        info.Length,
+        info.LastWriteTimeUtc,
+        preExisting
+      )
+    );
+  }
+
+  private static async Task VerifyAndRecordFileChangeAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var pending = action.PendingFileChange!;
+    var target = RequiredTarget(
+      action
+    );
+
+    if (!File.Exists(
+      target
+    ))
+    {
+      throw new LocalActionException(
+        "post-write-verification",
+        "The written file could not be found during verification."
+      );
+    }
+
+    var content = await File.ReadAllTextAsync(
+      target,
+      cancellationToken
+    );
+    var hash = HashText(
+      content
+    );
+
+    if (
+      !string.Equals(
+        hash,
+        pending.ExpectedFinalHash,
+        StringComparison.Ordinal
+      )
+      || !string.Equals(
+        content,
+        pending.FinalContent,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      throw new LocalActionException(
+        "post-write-verification",
+        "The file read-back did not match the intended content."
+      );
+    }
+
+    executionSession?.RecordFileChange(
+      new ExecutionFileChange(
+        pending.RelativePath,
+        pending.Operation,
+        pending.ExistedBefore,
+        pending.OriginalHash,
+        hash,
+        pending.OriginalContent,
+        pending.FinalContent,
+        Encoding.UTF8.GetByteCount(
+          content
+        ),
+        DateTimeOffset.UtcNow,
+        true,
+        pending.UndoAvailable,
+        pending.UndoDiagnostic,
+        pending.UndoAvailable
+          ? pending.OriginalBytes
+          : 0
+      )
+    );
+  }
+
+  private static async Task<bool> IsBinaryAsync(
+    string path,
+    CancellationToken cancellationToken
+  )
+  {
+    var buffer = new byte[4_096];
+    await using var stream = new FileStream(
+      path,
+      FileMode.Open,
+      FileAccess.Read,
+      FileShare.ReadWrite,
+      buffer.Length,
+      FileOptions.Asynchronous | FileOptions.SequentialScan
+    );
+    var read = await stream.ReadAsync(
+      buffer,
+      cancellationToken
+    );
+
+    for (var index = 0; index < read; index++)
+    {
+      if (buffer[index] == 0)
+      {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private static async Task<string> HashFileAsync(
+    string path,
+    CancellationToken cancellationToken
+  )
+  {
+    await using var stream = new FileStream(
+      path,
+      FileMode.Open,
+      FileAccess.Read,
+      FileShare.Read,
+      65_536,
+      FileOptions.Asynchronous | FileOptions.SequentialScan
+    );
+    var hash = await SHA256.HashDataAsync(
+      stream,
+      cancellationToken
+    );
+    return Convert.ToHexString(
+      hash
+    ).ToLowerInvariant();
+  }
+
+  private static string HashText(
+    string content
+  )
+  {
+    return Convert.ToHexString(
+      SHA256.HashData(
+        Encoding.UTF8.GetBytes(
+          content
+        )
+      )
+    ).ToLowerInvariant();
+  }
+
+  private static bool IsProtectedInstructionFile(
+    string relativePath
+  )
+  {
+    var name = Path.GetFileName(
+      relativePath
+    );
+    return name.Equals(
+      "AGENTS.md",
+      StringComparison.OrdinalIgnoreCase
+    ) || name.Equals(
+      ".editorconfig",
+      StringComparison.OrdinalIgnoreCase
     );
   }
 

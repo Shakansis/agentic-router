@@ -25,12 +25,17 @@ public sealed class ActionsController : ControllerBase
   {
     var accepted = _approvalCoordinator.TryDecide(
       actionId,
+      request.BrowserSessionId,
+      request.ExecutionSessionId,
       request.Approved
     );
     var response = new ApprovalDecisionResponse(
       actionId,
       accepted,
-      request.Approved
+      request.Approved,
+      accepted
+        ? null
+        : "The action is no longer pending or belongs to a different execution session."
     );
 
     return accepted

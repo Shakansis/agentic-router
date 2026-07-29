@@ -19,6 +19,25 @@ public sealed record ApplicationSettings
   public ContextSettings Context { get; init; } = new();
 
   public RuntimeSettings Runtime { get; init; } = new();
+
+  public ExecutionSettings Execution { get; init; } = new();
+
+  public ProjectAwarenessSettings ProjectAwareness { get; init; } = new();
+
+  public ValidationProfileSettings? ValidationProfile { get; init; }
+
+  public SessionHistorySettings SessionHistory { get; init; } = new();
+}
+
+public sealed record SessionHistorySettings
+{
+  public int MaxSessionsPerWorkspace { get; init; } = 50;
+
+  public int MaxSessionBytes { get; init; } = 5_242_880;
+
+  public int MaxStoredProcessOutputBytesPerTurn { get; init; } = 65_536;
+
+  public int MaxStoredDiffBytesPerTurn { get; init; } = 262_144;
 }
 
 public sealed record IntentionSettings
@@ -50,6 +69,66 @@ public sealed record RuntimeSettings
   public int RuntimeStatusIdleRefreshSeconds { get; init; } = 5;
 
   public int RuntimeStatusActiveRefreshSeconds { get; init; } = 2;
+}
+
+public sealed record ExecutionSettings
+{
+  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 2;
+
+  public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 3;
+
+  public int MaxCoordinatorHandoffsPerTurn { get; init; } = 1;
+
+  public int MaxToolCallsPerTurn { get; init; } = 20;
+
+  public int MaxConsecutiveToolFailures { get; init; } = 3;
+
+  public int MaxTrackedFilesPerSession { get; init; } = 50;
+
+  public int MaxRollbackBytesPerFile { get; init; } = 1_048_576;
+
+  public int MaxRollbackBytesPerSession { get; init; } = 10_485_760;
+
+  public int MaxSearchFiles { get; init; } = 500;
+
+  public int MaxSearchMatches { get; init; } = 200;
+}
+
+public sealed record ProjectAwarenessSettings
+{
+  public int MaxProjectMarkers { get; init; } = 100;
+
+  public int MaxInstructionBytes { get; init; } = 131_072;
+
+  public int MaxPlanSteps { get; init; } = 8;
+
+  public int MaxPlanRevisions { get; init; } = 3;
+}
+
+public sealed record ValidationProfileSettings
+{
+  public string Name { get; init; } = string.Empty;
+
+  public string Source { get; init; } = "user";
+
+  public IReadOnlyList<ValidationStepSettings> Steps { get; init; } = [];
+}
+
+public sealed record ValidationStepSettings
+{
+  public string Id { get; init; } = string.Empty;
+
+  public string Label { get; init; } = string.Empty;
+
+  public string Executable { get; init; } = string.Empty;
+
+  public IReadOnlyList<string> Arguments { get; init; } = [];
+
+  public string WorkingDirectory { get; init; } = ".";
+
+  public int TimeoutSeconds { get; init; } = 60;
+
+  public bool Required { get; init; } = true;
 }
 
 public static class SettingsDefaults

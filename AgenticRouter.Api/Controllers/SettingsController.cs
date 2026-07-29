@@ -1,6 +1,8 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgenticRouter.Api.Controllers;
@@ -12,16 +14,22 @@ public sealed class SettingsController : ControllerBase
   private readonly ISettingsStore _settingsStore;
   private readonly IResidentModelManager _residentModel;
   private readonly ISettingsValidator _validator;
+  private readonly IWorkspaceProfileService _workspaceProfiles;
+  private readonly ITrustedWorkspaceService _trustedWorkspace;
 
   public SettingsController(
     ISettingsStore settingsStore,
     IResidentModelManager residentModel,
-    ISettingsValidator validator
+    ISettingsValidator validator,
+    IWorkspaceProfileService workspaceProfiles,
+    ITrustedWorkspaceService trustedWorkspace
   )
   {
     _settingsStore = settingsStore;
     _residentModel = residentModel;
     _validator = validator;
+    _workspaceProfiles = workspaceProfiles;
+    _trustedWorkspace = trustedWorkspace;
   }
 
   [HttpGet]
@@ -90,6 +98,19 @@ public sealed class SettingsController : ControllerBase
       settings,
       cancellationToken
     );
+    await _workspaceProfiles.UpdateDefaultModelAsync(
+      settings.DefaultModel,
+      cancellationToken
+    );
+    if (!string.IsNullOrWhiteSpace(
+      settings.TrustedWorkspacePath
+    ))
+    {
+      await _trustedWorkspace.ConfigureAsync(
+        settings.TrustedWorkspacePath,
+        cancellationToken
+      );
+    }
 
     return Ok(
       result.Settings
