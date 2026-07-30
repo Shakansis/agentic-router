@@ -87,6 +87,14 @@ All workspace paths must be canonicalized and confined to the trusted root. Reje
 
 Approvals are host decisions. Policies may auto-approve explicitly safe operations, but ambiguous, sensitive, process, or destructive proposals must remain blocked or require the configured approval flow. Cancellation must stop active provider and process work.
 
+### Safe Git delivery
+
+Review changes may prepare an explicitly selected delivery for a valid Git repository inside the trusted workspace. The host may inspect bounded status, diff, log, and commit data, and may perform only structured staging, unstaging, commit, annotated-tag, current-upstream branch push, and exact-tag push operations.
+
+Every Git write always requires immutable, action-specific user approval, including under the automatic approval policy. Pre-existing user changes remain separate and unselected by default. A commit requires an exact staged-set match and a passing validation bound to current file hashes, unless a permitted explicit override is approved. Commit, tag, branch-push, and tag-push facts remain distinct in session state.
+
+Never expose arbitrary Git arguments, force push, amend, reset, checkout, switch, clean, stash, pull, merge, rebase, cherry-pick, revert, remote mutation, branch mutation, tag deletion, or history rewriting. Once a session delivery is committed, internal undo must not contradict or rewrite repository history.
+
 ## 7. Plans, Recovery, and Limits
 
 Plans are host state, not opaque model documents. The model may propose objectives and normalizable titles; the host assigns stable plan and step IDs, validates dependencies, and records state transitions.
@@ -192,7 +200,6 @@ Do not implement these without an explicit later request:
 - RAG, embeddings, vector databases, fine-tuning, or training pipelines;
 - authentication, accounts, billing, telemetry platforms, installers, or auto-update;
 - automatic model downloads;
-- generic Git delivery, commit, tag, or push operations;
 - frontend frameworks or a JavaScript build pipeline.
 
 ## 14. Definition of Done

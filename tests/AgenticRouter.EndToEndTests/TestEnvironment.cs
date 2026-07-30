@@ -223,12 +223,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
     {
       if (entry is DirectoryInfo directory)
       {
+        NormalizeDeletionAttributes(
+          directory.FullName
+        );
         directory.Delete(
           true
         );
       }
       else
       {
+        entry.Attributes = FileAttributes.Normal;
         entry.Delete();
       }
     }
@@ -409,6 +413,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
       _temporaryRoot
     ))
     {
+      NormalizeDeletionAttributes(
+        _temporaryRoot
+      );
       Directory.Delete(
         _temporaryRoot,
         true
@@ -527,5 +534,40 @@ internal sealed class TestEnvironment : IAsyncDisposable
     var port = ((IPEndPoint)listener.LocalEndpoint).Port;
     listener.Stop();
     return port;
+  }
+
+  private static void NormalizeDeletionAttributes(
+    string root
+  )
+  {
+    foreach (var path in Directory.EnumerateFileSystemEntries(
+      root,
+      "*",
+      SearchOption.AllDirectories
+    ))
+    {
+      try
+      {
+        File.SetAttributes(
+          path,
+          FileAttributes.Normal
+        );
+      }
+      catch (
+        IOException
+      )
+      {
+      }
+      catch (
+        UnauthorizedAccessException
+      )
+      {
+      }
+    }
+
+    File.SetAttributes(
+      root,
+      FileAttributes.Normal
+    );
   }
 }

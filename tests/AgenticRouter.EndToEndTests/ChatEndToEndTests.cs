@@ -95,7 +95,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.8.1"
+      "v0.9.0"
     );
     await Expect(
       Page.Locator(
@@ -4516,6 +4516,1070 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliverySeparatesSelectionAndRequiresExplicitStageAndUnstageApproval()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await File.AppendAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "preexisting.txt"
+      ),
+      "\nuser change"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    var panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await Expect(
+      panel
+    ).ToContainTextAsync(
+      "main"
+    );
+    await Expect(
+      panel.Locator(
+        ".git-delivery-files"
+      ).First
+    ).ToContainTextAsync(
+      "hello.txt"
+    );
+    await Expect(
+      panel.Locator(
+        ".git-delivery-files.preexisting"
+      )
+    ).ToContainTextAsync(
+      "preexisting.txt"
+    );
+    await Expect(
+      panel.Locator(
+        ".delivery-file-selection[value=\"hello.txt\"]"
+      )
+    ).ToBeCheckedAsync();
+    await Expect(
+      panel.Locator(
+        ".delivery-file-selection[value=\"preexisting.txt\"]"
+      )
+    ).Not.ToBeCheckedAsync();
+
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Stage selected",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      panel.Locator(
+        ".delivery-approval"
+      )
+    ).ToContainTextAsync(
+      "Explicit approval required"
+    );
+    Assert.AreEqual(
+      string.Empty,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "diff",
+        "--cached",
+        "--name-only"
+      )
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Approve exact action",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "validation-required"
+    );
+    Assert.AreEqual(
+      "hello.txt",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "diff",
+        "--cached",
+        "--name-only"
+      )
+    );
+
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Unstage selected",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      panel.Locator(
+        ".delivery-approval"
+      )
+    ).ToBeVisibleAsync();
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Approve exact action",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "changes-selected"
+    );
+    Assert.AreEqual(
+      string.Empty,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "diff",
+        "--cached",
+        "--name-only"
+      )
+    );
+    await panel.Locator(
+      ".delivery-file-selection[value=\"preexisting.txt\"]"
+    ).CheckAsync();
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await Expect(
+      panel.Locator(
+        ".delivery-file-selection[value=\"preexisting.txt\"]"
+      )
+    ).ToBeCheckedAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliveryCommitsTagsAndPushesExactFactsThroughDisposableRemote()
+  {
+    var remote = await InitializeDeliveryRepositoryAsync();
+    using var save = await _environment.HttpClient.PutAsJsonAsync(
+      "api/workspace/validation-profile",
+      new
+      {
+        name = "Delivery validation",
+        source = "user",
+        steps = new[]
+        {
+          new
+          {
+            id = "version",
+            label = "Check dotnet version",
+            executable = "dotnet",
+            arguments = new[]
+            {
+              "--version"
+            },
+            workingDirectory = ".",
+            timeoutSeconds = 30,
+            required = true
+          }
+        }
+      }
+    );
+    save.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file validate"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    var panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await Expect(
+      panel.Locator(
+        ".delivery-validation"
+      )
+    ).ToContainTextAsync(
+      "Validation bound"
+    );
+    await panel.Locator(
+      ".delivery-commit-message"
+    ).FillAsync(
+      "feat: deliver hello"
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await StageDeliveryAsync(
+      panel
+    );
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "ready-to-commit"
+    );
+
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create commit"
+    );
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "committed"
+    );
+    await Expect(
+      panel.Locator(
+        ".delivery-facts"
+      )
+    ).ToContainTextAsync(
+      "feat: deliver hello"
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-execution"
+      )
+    ).ToBeDisabledAsync();
+    var commit = await RunGitTextAsync(
+      _environment.WorkspaceDirectory,
+      "rev-parse",
+      "HEAD"
+    );
+    Assert.AreEqual(
+      "feat: deliver hello",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "show",
+        "-s",
+        "--format=%s",
+        "HEAD"
+      )
+    );
+
+    await panel.Locator(
+      ".delivery-tag-name"
+    ).FillAsync(
+      "v-test-0.9.0"
+    );
+    await panel.Locator(
+      ".delivery-tag-annotation"
+    ).FillAsync(
+      "Disposable delivery tag"
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create annotated tag"
+    );
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "tagged"
+    );
+    Assert.AreEqual(
+      "tag",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "cat-file",
+        "-t",
+        "v-test-0.9.0"
+      )
+    );
+    Assert.AreEqual(
+      commit,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "rev-list",
+        "-n",
+        "1",
+        "v-test-0.9.0"
+      )
+    );
+
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Push current branch"
+    );
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "partially-pushed"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Push exact tag"
+    );
+    await Expect(
+      panel
+    ).ToHaveAttributeAsync(
+      "data-delivery-state",
+      "pushed"
+    );
+    Assert.AreEqual(
+      commit,
+      await RunGitTextAsync(
+        remote,
+        "rev-parse",
+        "refs/heads/main"
+      )
+    );
+    Assert.AreEqual(
+      commit,
+      await RunGitTextAsync(
+        remote,
+        "rev-list",
+        "-n",
+        "1",
+        "refs/tags/v-test-0.9.0"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliveryMarksValidationStaleAndBlocksCommit()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    using var save = await _environment.HttpClient.PutAsJsonAsync(
+      "api/workspace/validation-profile",
+      new
+      {
+        name = "Delivery validation",
+        source = "user",
+        steps = new[]
+        {
+          new
+          {
+            id = "version",
+            label = "Check dotnet version",
+            executable = "dotnet",
+            arguments = new[]
+            {
+              "--version"
+            },
+            workingDirectory = ".",
+            timeoutSeconds = 30,
+            required = true
+          }
+        }
+      }
+    );
+    save.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file validate"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    var panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await panel.Locator(
+      ".delivery-commit-message"
+    ).FillAsync(
+      "feat: stale delivery"
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await StageDeliveryAsync(
+      panel
+    );
+    await File.AppendAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "\nexternal edit"
+    );
+    await Page.Locator(
+      "#close-change-review"
+    ).ClickAsync();
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await Expect(
+      panel.Locator(
+        ".delivery-validation"
+      )
+    ).ToContainTextAsync(
+      "Validation stale"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create commit",
+      false
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "Validation is stale"
+    );
+    Assert.AreEqual(
+      "1",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "rev-list",
+        "--count",
+        "HEAD"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliveryRejectsMissingApprovalStaleActionAndOutsidePath()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".git-delivery-panel"
+      )
+    ).ToBeVisibleAsync();
+    var executionSessionId = await Page.EvaluateAsync<string>(
+      "() => state.activeReview.summary.id"
+    );
+    var browserSessionId = await Page.EvaluateAsync<string>(
+      "() => state.browserSessionId"
+    );
+    using var current = await _environment.HttpClient.GetAsync(
+      $"api/execution-sessions/{executionSessionId}/delivery"
+    );
+    current.EnsureSuccessStatusCode();
+    using var currentDocument = JsonDocument.Parse(
+      await current.Content.ReadAsStringAsync()
+    );
+    var stageActionId = currentDocument.RootElement.GetProperty(
+      "stageActionId"
+    ).GetString()!;
+
+    using var missingApproval = await _environment.HttpClient.PostAsJsonAsync(
+      $"api/execution-sessions/{executionSessionId}/delivery/stage",
+      new
+      {
+        browserSessionId,
+        actionId = stageActionId,
+        confirmed = false
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.Conflict,
+      missingApproval.StatusCode
+    );
+    using var missingDocument = JsonDocument.Parse(
+      await missingApproval.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "git-approval-required",
+      missingDocument.RootElement.GetProperty(
+        "code"
+      ).GetString()
+    );
+
+    using var outside = await _environment.HttpClient.PostAsJsonAsync(
+      $"api/execution-sessions/{executionSessionId}/delivery/diff",
+      new
+      {
+        paths = new[]
+        {
+          "../outside.txt"
+        },
+        staged = false
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.Conflict,
+      outside.StatusCode
+    );
+    using var outsideDocument = JsonDocument.Parse(
+      await outside.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "git-selected-path-outside-repository",
+      outsideDocument.RootElement.GetProperty(
+        "code"
+      ).GetString()
+    );
+
+    using var changed = await _environment.HttpClient.PostAsJsonAsync(
+      $"api/execution-sessions/{executionSessionId}/delivery/selection",
+      new
+      {
+        browserSessionId,
+        selectedFiles = new[]
+        {
+          "hello.txt"
+        },
+        includePreExistingChanges = false,
+        commitMessage = "changed after approval",
+        tag = (string?)null,
+        tagAnnotation = (string?)null,
+        commitWithoutValidation = false
+      }
+    );
+    changed.EnsureSuccessStatusCode();
+    using var stale = await _environment.HttpClient.PostAsJsonAsync(
+      $"api/execution-sessions/{executionSessionId}/delivery/stage",
+      new
+      {
+        browserSessionId,
+        actionId = stageActionId,
+        confirmed = true
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.Conflict,
+      stale.StatusCode
+    );
+    using var staleDocument = JsonDocument.Parse(
+      await stale.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "git-approval-invalidated",
+      staleDocument.RootElement.GetProperty(
+        "code"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      string.Empty,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "diff",
+        "--cached",
+        "--name-only"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitPushPreflightBlocksDivergedDisposableRemoteWithoutRewriting()
+  {
+    var remote = await InitializeDeliveryRepositoryAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    var panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await panel.Locator(
+      ".delivery-commit-message"
+    ).FillAsync(
+      "feat: local delivery"
+    );
+    await panel.Locator(
+      ".delivery-commit-override"
+    ).CheckAsync();
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await StageDeliveryAsync(
+      panel
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create commit"
+    );
+    var localCommit = await RunGitTextAsync(
+      _environment.WorkspaceDirectory,
+      "rev-parse",
+      "HEAD"
+    );
+
+    var competingClone = _environment.CreateWorkspaceDirectory(
+      $"delivery-clone-{Guid.NewGuid():N}"
+    );
+    _ = await RunGitTextAsync(
+      competingClone,
+      "clone",
+      remote,
+      "."
+    );
+    _ = await RunGitTextAsync(
+      competingClone,
+      "config",
+      "user.name",
+      "Competing E2E"
+    );
+    _ = await RunGitTextAsync(
+      competingClone,
+      "config",
+      "user.email",
+      "competing@example.invalid"
+    );
+    await File.AppendAllTextAsync(
+      Path.Combine(
+        competingClone,
+        "baseline.txt"
+      ),
+      "\nremote change"
+    );
+    _ = await RunGitTextAsync(
+      competingClone,
+      "add",
+      "--",
+      "baseline.txt"
+    );
+    _ = await RunGitTextAsync(
+      competingClone,
+      "commit",
+      "-m",
+      "competing remote commit"
+    );
+    _ = await RunGitTextAsync(
+      competingClone,
+      "push",
+      "origin",
+      "main"
+    );
+    var remoteCommit = await RunGitTextAsync(
+      remote,
+      "rev-parse",
+      "refs/heads/main"
+    );
+
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Push current branch",
+      false
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "diverged"
+    );
+    Assert.AreEqual(
+      localCommit,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "rev-parse",
+        "HEAD"
+      )
+    );
+    Assert.AreEqual(
+      remoteCommit,
+      await RunGitTextAsync(
+        remote,
+        "rev-parse",
+        "refs/heads/main"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliveryBoundsUntrackedDiffAndReportsTruncation()
+  {
+    using var settings = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        GitDelivery = new TestGitDeliverySettings
+        {
+          MaxDiffBytesPerFile = 4_096
+        }
+      }
+    );
+    settings.EnsureSuccessStatusCode();
+    _ = await InitializeDeliveryRepositoryAsync();
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "large.txt"
+      ),
+      new string(
+        'x',
+        20_000
+      )
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    var executionSessionId = await Page.EvaluateAsync<string>(
+      "() => state.activeReview.summary.id"
+    );
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      $"api/execution-sessions/{executionSessionId}/delivery/diff",
+      new
+      {
+        paths = new[]
+        {
+          "large.txt"
+        },
+        staged = false
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    using var document = JsonDocument.Parse(
+      await response.Content.ReadAsStringAsync()
+    );
+    var file = document.RootElement.GetProperty(
+      "files"
+    )[0];
+    Assert.IsTrue(
+      file.GetProperty(
+        "truncated"
+      ).GetBoolean()
+    );
+    Assert.IsFalse(
+      file.GetProperty(
+        "binary"
+      ).GetBoolean()
+    );
+    var content = file.GetProperty(
+      "content"
+    ).GetString()!;
+    StringAssert.Contains(
+      content,
+      "[diff truncated]"
+    );
+    Assert.IsLessThan(
+8_500,
+      content.Length, $"Bounded diff was unexpectedly large: {content.Length}."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitCommitAndTagPreflightRejectsInvalidInputsAndDetachedHead()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    var panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await panel.Locator(
+      ".delivery-commit-message"
+    ).FillAsync(
+      string.Empty
+    );
+    await panel.Locator(
+      ".delivery-commit-override"
+    ).CheckAsync();
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await StageDeliveryAsync(
+      panel
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create commit",
+      false
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "cannot be empty"
+    );
+    await panel.Locator(
+      ".delivery-commit-message"
+    ).FillAsync(
+      "feat: guarded commit"
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await RunGitAsync(
+      "checkout",
+      "--detach"
+    );
+    await Page.Locator(
+      "#close-change-review"
+    ).ClickAsync();
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create commit",
+      false
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "detached"
+    );
+    Assert.AreEqual(
+      "1",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "rev-list",
+        "--count",
+        "HEAD"
+      )
+    );
+    await RunGitAsync(
+      "checkout",
+      "main"
+    );
+    await Page.Locator(
+      "#close-change-review"
+    ).ClickAsync();
+    await Page.Locator(
+      ".review-changes"
+    ).ClickAsync();
+    panel = Page.Locator(
+      ".git-delivery-panel"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create commit"
+    );
+
+    await panel.Locator(
+      ".delivery-tag-name"
+    ).FillAsync(
+      "invalid tag"
+    );
+    await panel.Locator(
+      ".delivery-tag-annotation"
+    ).FillAsync(
+      "Invalid tag test"
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create annotated tag",
+      false
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "tag name is invalid"
+    );
+    await RunGitAsync(
+      "tag",
+      "-a",
+      "existing-tag",
+      "-m",
+      "External tag"
+    );
+    await panel.Locator(
+      ".delivery-tag-name"
+    ).FillAsync(
+      "existing-tag"
+    );
+    await panel.Locator(
+      ".delivery-tag-annotation"
+    ).FillAsync(
+      "Existing tag test"
+    );
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Save selection",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "selection saved"
+    );
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Create annotated tag",
+      false
+    );
+    await Expect(
+      Page.Locator(
+        "#undo-status"
+      )
+    ).ToContainTextAsync(
+      "already exists locally"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task SavedValidationProfileRunsInOrderAndGroundsCompletion()
   {
     using var save = await _environment.HttpClient.PutAsJsonAsync(
@@ -6638,12 +7702,23 @@ public sealed class ChatEndToEndTests : PageTest
     params string[] arguments
   )
   {
+    _ = await RunGitTextAsync(
+      _environment.WorkspaceDirectory,
+      arguments
+    );
+  }
+
+  private static async Task<string> RunGitTextAsync(
+    string workingDirectory,
+    params string[] arguments
+  )
+  {
     using var process = new Process
     {
       StartInfo = new ProcessStartInfo
       {
         FileName = "git",
-        WorkingDirectory = _environment.WorkspaceDirectory,
+        WorkingDirectory = workingDirectory,
         UseShellExecute = false,
         CreateNoWindow = true,
         RedirectStandardOutput = true,
@@ -6667,6 +7742,141 @@ public sealed class ChatEndToEndTests : PageTest
       process.ExitCode,
       await process.StandardError.ReadToEndAsync()
     );
+    return (
+      await process.StandardOutput.ReadToEndAsync()
+    ).Trim();
+  }
+
+  private static async Task<string> InitializeDeliveryRepositoryAsync()
+  {
+    await RunGitAsync(
+      "init",
+      "-b",
+      "main"
+    );
+    await RunGitAsync(
+      "config",
+      "user.name",
+      "Agentic Router E2E"
+    );
+    await RunGitAsync(
+      "config",
+      "user.email",
+      "agentic-router-e2e@example.invalid"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "baseline.txt"
+      ),
+      "baseline"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "preexisting.txt"
+      ),
+      "user baseline"
+    );
+    await RunGitAsync(
+      "add",
+      "--",
+      "baseline.txt",
+      "preexisting.txt"
+    );
+    await RunGitAsync(
+      "commit",
+      "-m",
+      "test baseline"
+    );
+    var remote = _environment.CreateWorkspaceDirectory(
+      $"delivery-remote-{Guid.NewGuid():N}.git"
+    );
+    _ = await RunGitTextAsync(
+      _environment.WorkspaceDirectory,
+      "init",
+      "--bare",
+      remote
+    );
+    await RunGitAsync(
+      "remote",
+      "add",
+      "origin",
+      remote
+    );
+    await RunGitAsync(
+      "push",
+      "-u",
+      "origin",
+      "main"
+    );
+    _ = await RunGitTextAsync(
+      remote,
+      "symbolic-ref",
+      "HEAD",
+      "refs/heads/main"
+    );
+    return remote;
+  }
+
+  private async Task StageDeliveryAsync(
+    ILocator panel
+  )
+  {
+    await ApproveDeliveryOperationAsync(
+      panel,
+      "Stage selected"
+    );
+  }
+
+  private async Task ApproveDeliveryOperationAsync(
+    ILocator panel,
+    string operation,
+    bool expectSuccess = true
+  )
+  {
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = operation,
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      panel.Locator(
+        ".delivery-approval"
+      )
+    ).ToBeVisibleAsync();
+    await panel.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Approve exact action",
+        Exact = true
+      }
+    ).ClickAsync();
+
+    if (expectSuccess)
+    {
+      var operationCode = operation switch
+      {
+        "Stage selected" => "stage",
+        "Unstage selected" => "unstage",
+        "Create commit" => "commit",
+        "Create annotated tag" => "tag",
+        "Push current branch" => "push-branch",
+        "Push exact tag" => "push-tag",
+        _ => operation
+      };
+      await Expect(
+        Page.Locator(
+          "#undo-status"
+        )
+      ).ToContainTextAsync(
+        $"Git {operationCode} completed"
+      );
+    }
   }
 
   private async Task SetExecuteModeAsync(

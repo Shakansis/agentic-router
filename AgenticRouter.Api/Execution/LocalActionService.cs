@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.GitDelivery;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -76,7 +77,17 @@ public sealed class LocalActionService : ILocalActionService
       "apply_patch",
       "create_directory",
       "run_process",
-      "run_validation_profile"
+      "run_validation_profile",
+      "git_status",
+      "git_diff",
+      "git_log",
+      "git_show_commit",
+      "git_stage_files",
+      "git_unstage_files",
+      "git_create_commit",
+      "git_create_annotated_tag",
+      "git_push_current_branch",
+      "git_push_tag"
     ],
     StringComparer.Ordinal
   );
@@ -84,18 +95,24 @@ public sealed class LocalActionService : ILocalActionService
   private readonly IProcessExecutionService _processExecution;
   private readonly IProcessPolicyService _processPolicy;
   private readonly IValidationProfileService _validationProfiles;
+  private readonly IGitRepositoryService _git;
+  private readonly IGitDeliveryService _gitDelivery;
 
   public LocalActionService(
     ITrustedWorkspaceService workspace,
     IProcessExecutionService processExecution,
     IProcessPolicyService processPolicy,
-    IValidationProfileService validationProfiles
+    IValidationProfileService validationProfiles,
+    IGitRepositoryService git,
+    IGitDeliveryService gitDelivery
   )
   {
     _workspace = workspace;
     _processExecution = processExecution;
     _processPolicy = processPolicy;
     _validationProfiles = validationProfiles;
+    _git = git;
+    _gitDelivery = gitDelivery;
   }
 
   public async Task<ValidatedLocalAction> ValidateAsync(
@@ -136,6 +153,18 @@ public sealed class LocalActionService : ILocalActionService
         "Run the saved structured validation profile.",
         false,
         false
+      );
+    }
+
+    if (proposal.Tool.StartsWith(
+      "git_",
+      StringComparison.Ordinal
+    ))
+    {
+      return await ValidateGitActionAsync(
+        proposal,
+        executionSession,
+        cancellationToken
       );
     }
 
@@ -216,6 +245,18 @@ public sealed class LocalActionService : ILocalActionService
             ),
           cancellationToken
         ),
+        var tool when tool.StartsWith(
+          "git_",
+          StringComparison.Ordinal
+        ) => await RunGitActionAsync(
+          action,
+          executionSession
+            ?? throw new LocalActionException(
+              "git-delivery",
+              "Git tools require an active execution session."
+            ),
+          cancellationToken
+        ),
         _ => throw new LocalActionException(
           "action-execution",
           $"Tool '{action.Tool}' is not available."
@@ -287,6 +328,344 @@ public sealed class LocalActionService : ILocalActionService
       null,
       validation.State is "passed" or "passed-with-warnings",
       validation
+    );
+  }
+
+  private async Task<ValidatedLocalAction> ValidateGitActionAsync(
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      throw new LocalActionException(
+        "git-delivery",
+        "Git tools require an active Execute session."
+      );
+    }
+    _ = await _git.GetStatusAsync(
+      executionSession.WorkspacePath,
+      false,
+      cancellationToken
+    );
+    var readOnly = proposal.Tool is
+      "git_status"
+      or "git_diff"
+      or "git_log"
+      or "git_show_commit";
+    var preview = proposal.Tool switch
+    {
+      "git_diff" or "git_stage_files" or "git_unstage_files" =>
+        string.Join(
+          "\n",
+          GetStringArray(
+            proposal.Arguments,
+            "paths"
+          )
+        ),
+      "git_create_commit" => GetRequiredString(
+        proposal.Arguments,
+        "message"
+      ),
+      "git_create_annotated_tag" =>
+        $"{GetRequiredString(proposal.Arguments, "tag")}\n"
+          + GetRequiredString(
+            proposal.Arguments,
+            "annotation"
+          ),
+      "git_show_commit" => GetRequiredString(
+        proposal.Arguments,
+        "commit"
+      ),
+      _ => proposal.Tool
+    };
+    return new ValidatedLocalAction(
+      Guid.NewGuid().ToString(
+        "N"
+      ),
+      proposal.Tool,
+      proposal.Arguments.Clone(),
+      null,
+      executionSession.WorkspacePath,
+      proposal.Tool,
+      LimitPreview(
+        preview
+      ),
+      readOnly,
+      !readOnly
+    );
+  }
+
+  private async Task<LocalActionResult> RunGitActionAsync(
+    ValidatedLocalAction action,
+    ExecutionSession session,
+    CancellationToken cancellationToken
+  )
+  {
+    object result;
+    switch (action.Tool)
+    {
+      case "git_status":
+        result = await _git.GetStatusAsync(
+          session.WorkspacePath,
+          false,
+          cancellationToken
+        );
+        break;
+      case "git_diff":
+        result = await _git.GetDiffAsync(
+          session.WorkspacePath,
+          GetStringArray(
+            action.Arguments,
+            "paths"
+          ),
+          GetOptionalBoolean(
+            action.Arguments,
+            "staged"
+          ),
+          cancellationToken
+        );
+        break;
+      case "git_log":
+        result = await _git.GetLogAsync(
+          session.WorkspacePath,
+          GetOptionalInteger(
+            action.Arguments,
+            "maxEntries",
+            20
+          ),
+          cancellationToken
+        );
+        break;
+      case "git_show_commit":
+        result = await _git.ShowCommitAsync(
+          session.WorkspacePath,
+          GetRequiredString(
+            action.Arguments,
+            "commit"
+          ),
+          cancellationToken
+        );
+        break;
+      case "git_stage_files":
+        {
+          var delivery = await _gitDelivery.GetAsync(
+            session,
+            false,
+            cancellationToken
+          );
+          delivery = await _gitDelivery.UpdateAsync(
+            session,
+            new UpdateDeliveryRequest(
+              session.BrowserSessionId,
+              GetStringArray(
+                action.Arguments,
+                "paths"
+              ),
+              true,
+              delivery.CommitMessage,
+              delivery.Tag,
+              delivery.TagAnnotation,
+              false
+            ),
+            cancellationToken
+          );
+          result = await _gitDelivery.StageAsync(
+            session,
+            new GitWriteRequest(
+              session.BrowserSessionId,
+              delivery.StageActionId,
+              true
+            ),
+            cancellationToken
+          );
+          break;
+        }
+      case "git_unstage_files":
+        {
+          var delivery = await _gitDelivery.GetAsync(
+            session,
+            false,
+            cancellationToken
+          );
+          delivery = await _gitDelivery.UpdateAsync(
+            session,
+            new UpdateDeliveryRequest(
+              session.BrowserSessionId,
+              GetStringArray(
+                action.Arguments,
+                "paths"
+              ),
+              true,
+              delivery.CommitMessage,
+              delivery.Tag,
+              delivery.TagAnnotation,
+              false
+            ),
+            cancellationToken
+          );
+          result = await _gitDelivery.UnstageAsync(
+            session,
+            new GitWriteRequest(
+              session.BrowserSessionId,
+              delivery.UnstageActionId,
+              true
+            ),
+            cancellationToken
+          );
+          break;
+        }
+      case "git_create_commit":
+        {
+          var delivery = await _gitDelivery.GetAsync(
+            session,
+            false,
+            cancellationToken
+          );
+          delivery = await _gitDelivery.UpdateAsync(
+            session,
+            new UpdateDeliveryRequest(
+              session.BrowserSessionId,
+              delivery.SelectedFiles,
+              delivery.PreExistingFiles.Any(
+                path => delivery.SelectedFiles.Contains(
+                  path,
+                  StringComparer.OrdinalIgnoreCase
+                )
+              ),
+              GetRequiredString(
+                action.Arguments,
+                "message"
+              ),
+              delivery.Tag,
+              delivery.TagAnnotation,
+              GetOptionalBoolean(
+                action.Arguments,
+                "commitWithoutValidation"
+              )
+            ),
+            cancellationToken
+          );
+          result = await _gitDelivery.CommitAsync(
+            session,
+            new GitCommitRequest(
+              session.BrowserSessionId,
+              delivery.CommitActionId,
+              true,
+              GetOptionalBoolean(
+                action.Arguments,
+                "commitWithoutValidation"
+              )
+            ),
+            cancellationToken
+          );
+          break;
+        }
+      case "git_create_annotated_tag":
+        {
+          var delivery = await _gitDelivery.GetAsync(
+            session,
+            false,
+            cancellationToken
+          );
+          var tag = GetRequiredString(
+            action.Arguments,
+            "tag"
+          );
+          var annotation = GetRequiredString(
+            action.Arguments,
+            "annotation"
+          );
+          delivery = await _gitDelivery.UpdateAsync(
+            session,
+            new UpdateDeliveryRequest(
+              session.BrowserSessionId,
+              delivery.SelectedFiles,
+              delivery.PreExistingFiles.Any(
+                path => delivery.SelectedFiles.Contains(
+                  path,
+                  StringComparer.OrdinalIgnoreCase
+                )
+              ),
+              delivery.CommitMessage,
+              tag,
+              annotation,
+              false
+            ),
+            cancellationToken
+          );
+          result = await _gitDelivery.TagAsync(
+            session,
+            new GitTagRequest(
+              session.BrowserSessionId,
+              delivery.TagActionId,
+              true,
+              tag,
+              annotation
+            ),
+            cancellationToken
+          );
+          break;
+        }
+      case "git_push_current_branch":
+        {
+          var delivery = await _gitDelivery.GetAsync(
+            session,
+            false,
+            cancellationToken
+          );
+          result = await _gitDelivery.PushBranchAsync(
+            session,
+            new GitWriteRequest(
+              session.BrowserSessionId,
+              delivery.PushBranchActionId,
+              true
+            ),
+            cancellationToken
+          );
+          break;
+        }
+      case "git_push_tag":
+        {
+          var delivery = await _gitDelivery.GetAsync(
+            session,
+            false,
+            cancellationToken
+          );
+          result = await _gitDelivery.PushTagAsync(
+            session,
+            new GitWriteRequest(
+              session.BrowserSessionId,
+              delivery.PushTagActionId,
+              true
+            ),
+            cancellationToken
+          );
+          break;
+        }
+      default:
+        throw new LocalActionException(
+          "git-delivery",
+          $"Git tool '{action.Tool}' is unavailable."
+        );
+    }
+    return new LocalActionResult(
+      JsonSerializer.Serialize(
+        result
+      ),
+      action.ReadOnly
+        ? "git-status-refreshed"
+        : action.Tool switch
+        {
+          "git_stage_files" => "git-files-staged",
+          "git_unstage_files" => "git-files-unstaged",
+          "git_create_commit" => "git-commit-created",
+          "git_create_annotated_tag" => "git-tag-created",
+          "git_push_current_branch" => "git-branch-pushed",
+          "git_push_tag" => "git-tag-pushed",
+          _ => "action.output"
+        }
     );
   }
 

@@ -2,6 +2,7 @@ using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.ProjectAwareness;
@@ -49,19 +50,19 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
 
   private readonly ISettingsStore _settingsStore;
   private readonly ITrustedWorkspaceService _workspace;
-  private readonly IProcessExecutionService _processExecution;
+  private readonly IGitRepositoryService _git;
   private readonly IWorkspaceProfileService _workspaceProfiles;
 
   public ProjectAwarenessService(
     ISettingsStore settingsStore,
     ITrustedWorkspaceService workspace,
-    IProcessExecutionService processExecution,
+    IGitRepositoryService git,
     IWorkspaceProfileService workspaceProfiles
   )
   {
     _settingsStore = settingsStore;
     _workspace = workspace;
-    _processExecution = processExecution;
+    _git = git;
     _workspaceProfiles = workspaceProfiles;
   }
 
@@ -370,35 +371,13 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
 
     try
     {
-      var branch = await RunGitAsync(
+      var status = await _git.GetStatusAsync(
         root,
-        [
-          "branch",
-          "--show-current"
-        ],
+        false,
         cancellationToken
       );
-      var status = await RunGitAsync(
-        root,
-        [
-          "status",
-          "--porcelain=v1",
-          "--untracked-files=all"
-        ],
-        cancellationToken
-      );
-      var dirtyPaths = status.StandardOutput.Split(
-        [
-          '\r',
-          '\n'
-        ],
-        StringSplitOptions.RemoveEmptyEntries
-      ).Select(
-        ParseStatusPath
-      ).Where(
-        path => !string.IsNullOrWhiteSpace(
-          path
-        )
+      var dirtyPaths = status.Paths.Select(
+        path => path.Path
       ).Distinct(
         StringComparer.OrdinalIgnoreCase
       ).Take(
@@ -407,45 +386,45 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
 
       return new ProjectRepositoryProfile(
         true,
-        ".",
-        string.IsNullOrWhiteSpace(
-          branch.StandardOutput
-        )
-          ? null
-          : branch.StandardOutput.Trim(),
+        status.RepositoryRoot,
+        status.Branch,
         dirtyPaths.Length > 0,
-        dirtyPaths
+        dirtyPaths,
+        status
       );
     }
-    catch (Exception)
+    catch (GitDeliveryException exception)
     {
       return new ProjectRepositoryProfile(
         true,
         ".",
         null,
         false,
-        []
+        [],
+        new GitRepositoryStatusView(
+          false,
+          exception.Message,
+          null,
+          null,
+          null,
+          null,
+          null,
+          0,
+          0,
+          false,
+          null,
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          false,
+          false,
+          DateTimeOffset.UtcNow
+        )
       );
     }
-  }
-
-  private Task<ProcessExecutionResult> RunGitAsync(
-    string root,
-    IReadOnlyList<string> arguments,
-    CancellationToken cancellationToken
-  )
-  {
-    return _processExecution.ExecuteAsync(
-      new ProcessExecutionRequest(
-        "git",
-        arguments,
-        root,
-        TimeSpan.FromSeconds(
-          10
-        )
-      ),
-      cancellationToken
-    );
   }
 
   private static IReadOnlyList<string> DetectProjectTypes(
@@ -652,35 +631,6 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
     ) || fileName.Equals(
       "index.html",
       StringComparison.OrdinalIgnoreCase
-    );
-  }
-
-  private static string ParseStatusPath(
-    string line
-  )
-  {
-    var path = line.Length > 3
-      ? line[3..]
-      : line;
-    var rename = path.LastIndexOf(
-      " -> ",
-      StringComparison.Ordinal
-    );
-
-    if (rename >= 0)
-    {
-      path = path[
-        (
-          rename + 4
-        )..
-      ];
-    }
-
-    return path.Trim(
-      '"'
-    ).Replace(
-      '\\',
-      '/'
     );
   }
 

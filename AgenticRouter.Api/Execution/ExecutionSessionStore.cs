@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.GitDelivery;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -837,6 +838,8 @@ public sealed class ExecutionSession
   private ExecutionPlanView? _plan;
   private ValidationProfileSettings? _validationProfile;
   private ValidationRunView? _validation;
+  private GitDeliveryStateView? _delivery;
+  private string? _deliveryCommitHash;
   private string _completionStatus = "not-evaluated";
 
   public ExecutionSession(
@@ -1158,6 +1161,26 @@ public sealed class ExecutionSession
     }
   }
 
+  public void RecordDelivery(
+    GitDeliveryStateView delivery
+  )
+  {
+    lock (_gate)
+    {
+      _delivery = delivery;
+    }
+  }
+
+  public void MarkDeliveryCommitted(
+    string commitHash
+  )
+  {
+    lock (_gate)
+    {
+      _deliveryCommitHash = commitHash;
+    }
+  }
+
   public void RefreshCompletionGate()
   {
     lock (_gate)
@@ -1464,7 +1487,8 @@ public sealed class ExecutionSession
         undo.Allowed,
         undo.Diagnostic,
         _plan,
-        _completionStatus
+        _completionStatus,
+        _delivery
       );
     }
   }
@@ -1487,7 +1511,8 @@ public sealed class ExecutionSession
         _baseline,
         _conflicts.ToArray(),
         _validationProfile,
-        _validation
+        _validation,
+        _delivery
       );
     }
   }
@@ -1529,6 +1554,8 @@ public sealed class ExecutionSession
       _plan = snapshot.Review.Summary.Plan;
       _validationProfile = snapshot.Review.ValidationProfile;
       _validation = snapshot.Review.Validation;
+      _delivery = snapshot.Review.Delivery;
+      _deliveryCommitHash = snapshot.Review.Delivery?.CommitHash;
       _conflicts.AddRange(
         snapshot.Review.Conflicts
           ?? []
@@ -1606,6 +1633,16 @@ public sealed class ExecutionSession
     string? Diagnostic
   ) EvaluateUndo()
   {
+    if (!string.IsNullOrWhiteSpace(
+      _deliveryCommitHash
+    ))
+    {
+      return (
+        false,
+        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.0 does not rewrite Git history."
+      );
+    }
+
     if (_undoCompleted)
     {
       return (

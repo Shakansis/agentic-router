@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.GitDelivery;
 
 namespace AgenticRouter.Api.Contracts;
 
@@ -173,7 +174,8 @@ public sealed record ProjectRepositoryProfile(
   string? RootRelativePath,
   string? Branch,
   bool HasUncommittedChanges,
-  IReadOnlyList<string> DirtyPaths
+  IReadOnlyList<string> DirtyPaths,
+  GitRepositoryStatusView? Status = null
 );
 
 public sealed record ValidationProfileReference(
@@ -347,7 +349,8 @@ public sealed record ExecutionSessionSummary(
   bool UndoAvailable,
   string? UndoDiagnostic,
   ExecutionPlanView? Plan = null,
-  string CompletionStatus = "not-evaluated"
+  string CompletionStatus = "not-evaluated",
+  GitDeliveryStateView? Delivery = null
 );
 
 public sealed record ExecutionFileReview(
@@ -391,7 +394,8 @@ public sealed record ExecutionSessionReview(
   WorkspaceBaselineView? Baseline = null,
   IReadOnlyList<FileConflictView>? Conflicts = null,
   ValidationProfileSettings? ValidationProfile = null,
-  ValidationRunView? Validation = null
+  ValidationRunView? Validation = null,
+  GitDeliveryStateView? Delivery = null
 );
 
 public sealed record UndoExecutionRequest(

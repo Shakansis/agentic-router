@@ -49,7 +49,13 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "apply_patch {path,replacements:[{oldText,newText}]}; "
     + "create_directory {path}; "
     + "run_process {executable,arguments:[string],workingDirectory,timeoutSeconds}; "
-    + "run_validation_profile {}. "
+    + "run_validation_profile {}; "
+    + "git_status {}; git_diff {paths:[string],staged}; git_log {maxEntries}; "
+    + "git_show_commit {commit}; git_stage_files {paths:[string]}; "
+    + "git_unstage_files {paths:[string]}; git_create_commit {message,commitWithoutValidation}; "
+    + "git_create_annotated_tag {tag,annotation}; git_push_current_branch {}; "
+    + "git_push_tag {}. "
+    + "Every Git write is separately approved by the user even under automatic approval. "
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
     + "are intentionally unavailable. "
@@ -397,6 +403,102 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         {
         },
         []
+      ),
+      Tool(
+        "git_status",
+        "Refresh structured Git status for the trusted repository.",
+        new
+        {
+        },
+        []
+      ),
+      Tool(
+        "git_diff",
+        "Read bounded authoritative Git diffs for explicit repository paths.",
+        new
+        {
+          paths = StringArrayProperty(),
+          staged = BooleanProperty()
+        },
+        ["paths"]
+      ),
+      Tool(
+        "git_log",
+        "Read a bounded structured Git log.",
+        new
+        {
+          maxEntries = new
+          {
+            type = "integer"
+          }
+        },
+        []
+      ),
+      Tool(
+        "git_show_commit",
+        "Read one structured Git commit.",
+        new
+        {
+          commit = StringProperty()
+        },
+        ["commit"]
+      ),
+      Tool(
+        "git_stage_files",
+        "Stage only explicit repository-relative files after user approval.",
+        new
+        {
+          paths = StringArrayProperty()
+        },
+        ["paths"]
+      ),
+      Tool(
+        "git_unstage_files",
+        "Unstage only explicit repository-relative files after user approval.",
+        new
+        {
+          paths = StringArrayProperty()
+        },
+        ["paths"]
+      ),
+      Tool(
+        "git_create_commit",
+        "Create one commit from the exact approved staged set.",
+        new
+        {
+          message = StringProperty(),
+          commitWithoutValidation = BooleanProperty()
+        },
+        ["message"]
+      ),
+      Tool(
+        "git_create_annotated_tag",
+        "Create one annotated tag on the delivery commit.",
+        new
+        {
+          tag = StringProperty(),
+          annotation = StringProperty()
+        },
+        [
+          "tag",
+          "annotation"
+        ]
+      ),
+      Tool(
+        "git_push_current_branch",
+        "Push only the current branch to its existing upstream after guarded preflight.",
+        new
+        {
+        },
+        []
+      ),
+      Tool(
+        "git_push_tag",
+        "Push only the exact annotated tag created for this delivery.",
+        new
+        {
+        },
+        []
       )
     ];
   }
@@ -435,6 +537,17 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     return new
     {
       type = "boolean"
+    };
+  }
+
+  private static object StringArrayProperty()
+  {
+    return new
+    {
+      type = "array",
+      minItems = 1,
+      maxItems = 100,
+      items = StringProperty()
     };
   }
 

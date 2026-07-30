@@ -21,6 +21,8 @@ const state = {
   conversationSessionId: null,
   browserSessionId: createSessionId(),
   activeReview: null,
+  activeDelivery: null,
+  pendingDeliveryAction: null,
   activeAgentModel: null
 };
 
@@ -455,7 +457,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.8.1."
+        + "pelo Agentic Router v0.9.0."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1608,7 +1610,8 @@ async function saveSettings(event) {
     },
     projectAwareness: state.settings.projectAwareness,
     validationProfile: state.validationProfiles?.active ?? null,
-    sessionHistory: state.settings.sessionHistory
+    sessionHistory: state.settings.sessionHistory,
+    gitDelivery: state.settings.gitDelivery
   };
 
   try {
@@ -2506,6 +2509,7 @@ async function openChangeReview(executionSessionId) {
     );
     state.activeReview = review;
     renderChangeReview(review);
+    await loadGitDelivery(review);
   } catch (error) {
     elements.changeReviewBody.textContent = error.message;
   }
@@ -2547,6 +2551,8 @@ async function refreshAssistantReviewAfterCancellation(assistant) {
 
 function closeChangeReview() {
   state.activeReview = null;
+  state.activeDelivery = null;
+  state.pendingDeliveryAction = null;
   elements.changeReviewDialog.close();
 }
 
@@ -2717,6 +2723,485 @@ function renderChangeReview(review) {
   elements.undoExecution.disabled = !review.summary.undoAvailable;
   elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
   elements.validateChanges.disabled = review.files.length === 0;
+}
+
+async function loadGitDelivery(review) {
+  const existing = elements.changeReviewBody.querySelector(
+    ".git-delivery-panel"
+  );
+  existing?.remove();
+
+  if (!review.project?.repository?.isGitRepository) {
+    renderGitDeliveryUnavailable(
+      "Prepare delivery is unavailable because this workspace is not a Git repository."
+    );
+    return;
+  }
+
+  const loading = document.createElement("section");
+  loading.className = "change-review-context git-delivery-panel";
+  loading.textContent = "Loading Git delivery status...";
+  elements.changeReviewBody.append(loading);
+
+  try {
+    state.activeDelivery = await fetchJson(
+      `/api/execution-sessions/${encodeURIComponent(review.summary.id)}/delivery`
+    );
+    renderGitDelivery(state.activeDelivery);
+  } catch (error) {
+    state.activeDelivery = null;
+    renderGitDeliveryUnavailable(error.message);
+  }
+}
+
+function renderGitDeliveryUnavailable(message) {
+  elements.changeReviewBody.querySelector(".git-delivery-panel")?.remove();
+  const panel = document.createElement("section");
+  panel.className = "change-review-context git-delivery-panel";
+  const heading = document.createElement("h3");
+  heading.textContent = "Prepare delivery";
+  const diagnostic = document.createElement("p");
+  diagnostic.className = "verification-warning";
+  diagnostic.textContent = message;
+  panel.append(heading, diagnostic);
+  elements.changeReviewBody.append(panel);
+}
+
+function renderGitDelivery(delivery) {
+  elements.changeReviewBody.querySelector(".git-delivery-panel")?.remove();
+  const panel = document.createElement("section");
+  panel.className = "change-review-context git-delivery-panel";
+  panel.dataset.deliveryState = delivery.state;
+
+  const heading = document.createElement("h3");
+  heading.textContent = `Prepare delivery · ${delivery.state}`;
+  const repository = document.createElement("p");
+  repository.className = "git-delivery-repository";
+  repository.textContent =
+    `${delivery.repository.repositoryRoot ?? "."} · `
+    + `${delivery.repository.branch ?? "detached HEAD"} · `
+    + `${shortHash(delivery.repository.head)} · `
+    + `${delivery.repository.upstream ?? "no upstream"} · `
+    + `ahead ${delivery.repository.ahead} / behind ${delivery.repository.behind}`;
+  panel.append(heading, repository);
+
+  if (delivery.repository.operationInProgress) {
+    const operation = document.createElement("p");
+    operation.className = "verification-warning";
+    operation.textContent =
+      `Git ${delivery.repository.operationInProgress} operation in progress. Delivery writes are blocked.`;
+    panel.append(operation);
+  }
+
+  const sessionGroup = createDeliveryFileGroup(
+    "Session changes",
+    delivery.sessionChangedFiles,
+    delivery,
+    false
+  );
+  const preExistingGroup = createDeliveryFileGroup(
+    "Pre-existing user changes",
+    delivery.preExistingFiles,
+    delivery,
+    true
+  );
+  panel.append(sessionGroup, preExistingGroup);
+
+  const editor = document.createElement("div");
+  editor.className = "git-delivery-editor";
+  editor.innerHTML = `
+    <label>
+      <span>Commit message</span>
+      <textarea class="delivery-commit-message" maxlength="10000"></textarea>
+    </label>
+    <div class="git-delivery-tag-grid">
+      <label>
+        <span>Annotated tag (optional)</span>
+        <input class="delivery-tag-name" type="text" maxlength="200">
+      </label>
+      <label>
+        <span>Tag annotation</span>
+        <input class="delivery-tag-annotation" type="text" maxlength="10000">
+      </label>
+    </div>
+    <label class="delivery-validation-override">
+      <input class="delivery-commit-override" type="checkbox">
+      <span>Commit without current validation (explicit override)</span>
+    </label>
+  `;
+  editor.querySelector(".delivery-commit-message").value =
+    delivery.commitMessage ?? "";
+  editor.querySelector(".delivery-tag-name").value = delivery.tag ?? "";
+  editor.querySelector(".delivery-tag-annotation").value =
+    delivery.tagAnnotation ?? "";
+  editor.querySelector(".delivery-commit-override").checked =
+    delivery.commitWithoutValidation;
+  panel.append(editor);
+
+  const validation = document.createElement("p");
+  validation.className = delivery.validationBinding?.passed
+    && !delivery.validationBinding?.stale
+    ? "verification-ok delivery-validation"
+    : "verification-warning delivery-validation";
+  validation.textContent = delivery.validationBinding
+    ? delivery.validationBinding.stale
+      ? `Validation stale · ${delivery.validationBinding.diagnostic}`
+      : delivery.validationBinding.passed
+        ? `Validation bound to ${delivery.validationBinding.fileHashes
+          ? Object.keys(delivery.validationBinding.fileHashes).length
+          : 0} selected files.`
+        : `Validation unavailable · ${delivery.validationBinding.diagnostic}`
+    : "No passing validation is bound to this selection.";
+  panel.append(validation);
+
+  if (delivery.commitHash) {
+    const facts = document.createElement("p");
+    facts.className = "delivery-facts";
+    facts.textContent =
+      `Commit ${shortHash(delivery.commitHash)} · ${delivery.commitSubject} · `
+      + `branch pushed: ${delivery.branchPushed ? "yes" : "no"} · `
+      + `tag: ${delivery.tag ?? "none"} · tag pushed: ${delivery.tagPushed ? "yes" : "no"}`;
+    panel.append(facts);
+  }
+
+  if (delivery.events?.length) {
+    const activity = document.createElement("details");
+    activity.className = "delivery-activity";
+    const summary = document.createElement("summary");
+    summary.textContent = `Delivery activity · ${delivery.events.length}`;
+    activity.append(summary);
+    for (const entry of delivery.events.slice(-12)) {
+      const row = document.createElement("p");
+      row.dataset.eventType = entry.type;
+      row.textContent = `${entry.type} · ${entry.message}`;
+      activity.append(row);
+    }
+    panel.append(activity);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "git-delivery-actions";
+  actions.append(
+    createDeliveryButton("Save selection", "save-selection"),
+    createDeliveryButton("Review unstaged diff", "diff"),
+    createDeliveryButton("Stage selected", "stage"),
+    createDeliveryButton("Unstage selected", "unstage"),
+    createDeliveryButton("Create commit", "commit"),
+    createDeliveryButton("Create annotated tag", "tag"),
+    createDeliveryButton("Push current branch", "push-branch"),
+    createDeliveryButton("Push exact tag", "push-tag")
+  );
+  panel.append(actions);
+
+  const approvalHost = document.createElement("div");
+  approvalHost.className = "git-delivery-approval-host";
+  panel.append(approvalHost);
+  panel.addEventListener("click", handleDeliveryPanelClick);
+  elements.changeReviewBody.append(panel);
+}
+
+function createDeliveryFileGroup(title, paths, delivery, preExisting) {
+  const group = document.createElement("fieldset");
+  group.className = preExisting
+    ? "git-delivery-files preexisting"
+    : "git-delivery-files";
+  const legend = document.createElement("legend");
+  legend.textContent = title;
+  group.append(legend);
+
+  if (paths.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "None.";
+    group.append(empty);
+    return group;
+  }
+
+  for (const path of paths) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "delivery-file-selection";
+    checkbox.value = path;
+    checkbox.dataset.preExisting = preExisting ? "true" : "false";
+    checkbox.checked = delivery.selectedFiles.includes(path);
+    checkbox.disabled = delivery.repository.conflictedPaths.includes(path);
+    const text = document.createElement("span");
+    text.textContent = path;
+    const status = document.createElement("small");
+    status.textContent = [
+      delivery.repository.stagedPaths.includes(path) ? "staged" : null,
+      delivery.repository.unstagedPaths.includes(path) ? "unstaged" : null,
+      delivery.repository.untrackedPaths.includes(path) ? "untracked" : null,
+      delivery.repository.conflictedPaths.includes(path) ? "conflicted" : null
+    ].filter(Boolean).join(", ");
+    label.append(checkbox, text, status);
+    group.append(label);
+  }
+
+  if (preExisting) {
+    const warning = document.createElement("p");
+    warning.className = "verification-warning";
+    warning.textContent =
+      "Pre-existing changes are not owned by this execution and require explicit inclusion.";
+    group.append(warning);
+  }
+  return group;
+}
+
+function createDeliveryButton(label, operation) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.dataset.deliveryOperation = operation;
+  button.textContent = label;
+  return button;
+}
+
+async function handleDeliveryPanelClick(event) {
+  const button = event.target.closest("[data-delivery-operation]");
+
+  if (!button || !state.activeReview || !state.activeDelivery) {
+    return;
+  }
+
+  const operation = button.dataset.deliveryOperation;
+  if (operation === "save-selection") {
+    await saveDeliverySelection();
+    return;
+  }
+  if (operation === "diff") {
+    await showDeliveryDiff();
+    return;
+  }
+  showDeliveryApproval(operation);
+}
+
+async function saveDeliverySelection() {
+  const panel = elements.changeReviewBody.querySelector(".git-delivery-panel");
+  const selected = [...panel.querySelectorAll(".delivery-file-selection:checked")]
+    .map(input => input.value);
+  const includePreExisting = [...panel.querySelectorAll(
+    ".delivery-file-selection:checked"
+  )].some(input => input.dataset.preExisting === "true");
+  const commitMessage = panel.querySelector(".delivery-commit-message").value;
+  const tag = panel.querySelector(".delivery-tag-name").value;
+  const tagAnnotation = panel.querySelector(
+    ".delivery-tag-annotation"
+  ).value;
+  const commitWithoutValidation = panel.querySelector(
+    ".delivery-commit-override"
+  ).checked;
+
+  try {
+    state.activeDelivery = await fetchJson(
+      deliveryUrl("selection"),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          selectedFiles: selected,
+          includePreExistingChanges: includePreExisting,
+          commitMessage,
+          tag,
+          tagAnnotation,
+          commitWithoutValidation
+        })
+      }
+    );
+    state.pendingDeliveryAction = null;
+    renderGitDelivery(state.activeDelivery);
+    elements.undoStatus.textContent = "Delivery selection saved. No Git write occurred.";
+  } catch (error) {
+    elements.undoStatus.textContent = error.message;
+  }
+}
+
+async function showDeliveryDiff() {
+  const selected = state.activeDelivery.selectedFiles;
+
+  if (selected.length === 0) {
+    elements.undoStatus.textContent = "Select files before requesting a diff.";
+    return;
+  }
+
+  try {
+    const diff = await fetchJson(
+      deliveryUrl("diff"),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          paths: selected,
+          staged: false
+        })
+      }
+    );
+    const panel = elements.changeReviewBody.querySelector(".git-delivery-panel");
+    panel.querySelector(".delivery-diff-results")?.remove();
+    const results = document.createElement("div");
+    results.className = "delivery-diff-results";
+    for (const file of diff.files) {
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent =
+        `${file.path}${file.binary ? " · binary" : ""}${file.truncated ? " · truncated" : ""}`;
+      const content = document.createElement("pre");
+      content.className = "change-diff";
+      content.textContent = file.content || "[no unstaged diff]";
+      details.append(summary, content);
+      results.append(details);
+    }
+    panel.append(results);
+  } catch (error) {
+    elements.undoStatus.textContent = error.message;
+  }
+}
+
+function showDeliveryApproval(operation) {
+  const delivery = state.activeDelivery;
+  const panel = elements.changeReviewBody.querySelector(".git-delivery-panel");
+  const actionId = {
+    stage: delivery.stageActionId,
+    unstage: delivery.unstageActionId,
+    commit: delivery.commitActionId,
+    tag: delivery.tagActionId,
+    "push-branch": delivery.pushBranchActionId,
+    "push-tag": delivery.pushTagActionId
+  }[operation];
+
+  if (!actionId) {
+    return;
+  }
+
+  state.pendingDeliveryAction = {
+    operation,
+    actionId,
+    commitWithoutValidation: panel.querySelector(
+      ".delivery-commit-override"
+    ).checked,
+    tag: panel.querySelector(".delivery-tag-name").value.trim(),
+    annotation: panel.querySelector(
+      ".delivery-tag-annotation"
+    ).value.trim()
+  };
+  const host = panel.querySelector(".git-delivery-approval-host");
+  host.replaceChildren();
+  const card = document.createElement("section");
+  card.className = "delivery-approval";
+  const heading = document.createElement("h4");
+  heading.textContent = `Explicit approval required · ${operation}`;
+  const facts = document.createElement("pre");
+  facts.textContent = [
+    `action: ${actionId}`,
+    `repository: ${delivery.repository.repositoryRoot ?? "."}`,
+    `branch: ${delivery.repository.branch ?? "detached"}`,
+    `upstream: ${delivery.repository.upstream ?? "none"}`,
+    `files: ${delivery.selectedFiles.join(", ") || "none"}`,
+    `message: ${delivery.commitMessage || "none"}`,
+    `tag: ${state.pendingDeliveryAction.tag || "none"}`,
+    `validation: ${delivery.validationBinding?.stale
+      ? "stale"
+      : delivery.validationBinding?.passed
+        ? "passed and bound"
+        : "missing"}`,
+    `override: ${state.pendingDeliveryAction.commitWithoutValidation
+      ? "commit without validation"
+      : "none"}`
+  ].join("\n");
+  const controls = document.createElement("div");
+  controls.className = "git-delivery-actions";
+  const approve = document.createElement("button");
+  approve.type = "button";
+  approve.className = "primary-button";
+  approve.textContent = "Approve exact action";
+  approve.addEventListener("click", approveDeliveryAction);
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.className = "secondary-button";
+  reject.textContent = "Cancel";
+  reject.addEventListener(
+    "click",
+    () => {
+      state.pendingDeliveryAction = null;
+      host.replaceChildren();
+    }
+  );
+  controls.append(reject, approve);
+  card.append(heading, facts, controls);
+  host.append(card);
+}
+
+async function approveDeliveryAction() {
+  const pending = state.pendingDeliveryAction;
+  if (!pending) {
+    return;
+  }
+  const endpoint = {
+    stage: "stage",
+    unstage: "unstage",
+    commit: "commit",
+    tag: "tag",
+    "push-branch": "push-branch",
+    "push-tag": "push-tag"
+  }[pending.operation];
+  let payload = {
+    browserSessionId: state.browserSessionId,
+    actionId: pending.actionId,
+    confirmed: true
+  };
+  if (pending.operation === "commit") {
+    payload.commitWithoutValidation = pending.commitWithoutValidation;
+  }
+  if (pending.operation === "tag") {
+    payload.tag = pending.tag;
+    payload.annotation = pending.annotation;
+  }
+
+  try {
+    state.activeDelivery = await fetchJson(
+      deliveryUrl(endpoint),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+    state.pendingDeliveryAction = null;
+    renderGitDelivery(state.activeDelivery);
+    const review = await fetchJson(
+      `/api/execution-sessions/${encodeURIComponent(
+        state.activeReview.summary.id
+      )}/review`
+    );
+    state.activeReview = review;
+    elements.undoExecution.disabled = !review.summary.undoAvailable;
+    elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
+    elements.undoStatus.textContent =
+      `Git ${pending.operation} completed and repository status refreshed.`;
+  } catch (error) {
+    elements.undoStatus.textContent = error.message;
+  }
+}
+
+function deliveryUrl(action = "") {
+  const id = encodeURIComponent(
+    state.activeReview.summary.id
+  );
+  return `/api/execution-sessions/${id}/delivery${action ? `/${action}` : ""}`;
+}
+
+function shortHash(hash) {
+  return hash
+    ? hash.slice(0, 8)
+    : "unborn";
 }
 
 async function undoExecution() {

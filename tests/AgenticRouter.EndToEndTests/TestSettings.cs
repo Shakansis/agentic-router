@@ -28,6 +28,8 @@ internal sealed record TestApplicationSettings
 
   public TestSessionHistorySettings SessionHistory { get; init; } = new();
 
+  public TestGitDeliverySettings GitDelivery { get; init; } = new();
+
   public static TestApplicationSettings Create(
     string ollamaUrl,
     string? trustedWorkspacePath = null
@@ -157,6 +159,19 @@ internal sealed record TestSessionHistorySettings
   public int MaxStoredProcessOutputBytesPerTurn { get; init; } = 65_536;
 
   public int MaxStoredDiffBytesPerTurn { get; init; } = 262_144;
+}
+
+internal sealed record TestGitDeliverySettings
+{
+  public bool Enabled { get; init; } = true;
+
+  public bool RequireValidationBeforeCommit { get; init; } = true;
+
+  public bool AllowExplicitCommitWithoutValidation { get; init; } = true;
+
+  public int MaxDiffBytesPerFile { get; init; } = 262_144;
+
+  public int MaxLogEntries { get; init; } = 50;
 }
 
 internal static class TestJson

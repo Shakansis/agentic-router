@@ -29,6 +29,21 @@ public sealed record ApplicationSettings
   public ValidationProfileSettings? ValidationProfile { get; init; }
 
   public SessionHistorySettings SessionHistory { get; init; } = new();
+
+  public GitDeliverySettings GitDelivery { get; init; } = new();
+}
+
+public sealed record GitDeliverySettings
+{
+  public bool Enabled { get; init; } = true;
+
+  public bool RequireValidationBeforeCommit { get; init; } = true;
+
+  public bool AllowExplicitCommitWithoutValidation { get; init; } = true;
+
+  public int MaxDiffBytesPerFile { get; init; } = 262_144;
+
+  public int MaxLogEntries { get; init; } = 50;
 }
 
 public sealed record SessionHistorySettings

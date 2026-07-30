@@ -87,6 +87,10 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       settings.SessionHistory
     );
+    ValidateGitDelivery(
+      errors,
+      settings.GitDelivery
+    );
 
     if (!string.Equals(
       settings.Runtime.ResidentModelPolicy,
@@ -271,6 +275,31 @@ public sealed class SettingsValidator : ISettingsValidator
         "Model name must contain at most 256 characters."
       );
     }
+  }
+
+  private static void ValidateGitDelivery(
+    IDictionary<string, List<string>> errors,
+    GitDeliverySettings gitDelivery
+  )
+  {
+    if (gitDelivery.MaxDiffBytesPerFile is < 4_096 or > 1_048_576)
+    {
+      AddError(
+        errors,
+        "gitDelivery.maxDiffBytesPerFile",
+        "Maximum Git diff bytes per file must be between 4096 and 1048576."
+      );
+    }
+
+    if (gitDelivery.MaxLogEntries is < 1 or > 200)
+    {
+      AddError(
+        errors,
+        "gitDelivery.maxLogEntries",
+        "Maximum Git log entries must be between 1 and 200."
+      );
+    }
+
   }
 
   private static void ValidateContext(
