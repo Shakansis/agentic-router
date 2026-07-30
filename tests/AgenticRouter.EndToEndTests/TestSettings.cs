@@ -10,6 +10,8 @@ internal sealed record TestApplicationSettings
 
   public string RouterModel { get; init; } = "router:latest";
 
+  public string CoordinatorModel { get; init; } = "router:latest";
+
   public string DefaultModel { get; init; } = "alpha:latest";
 
   public string DefaultGpu { get; init; } = "auto";
@@ -21,6 +23,8 @@ internal sealed record TestApplicationSettings
   public TestContextSettings Context { get; init; } = new();
 
   public TestRuntimeSettings Runtime { get; init; } = new();
+
+  public TestExecutionSettings Execution { get; init; } = new();
 
   public TestSessionHistorySettings SessionHistory { get; init; } = new();
 
@@ -95,9 +99,11 @@ internal sealed record TestIntentionSettings(
 
 internal sealed record TestContextSettings
 {
-  public int DefaultContextTokens { get; init; } = 8_192;
+  public int DefaultContextTokens { get; init; } = 32_768;
 
-  public int ReservedResponseTokens { get; init; } = 2_048;
+  public int ProviderContextTokens { get; init; } = 40_960;
+
+  public int ReservedResponseTokens { get; init; } = 4_096;
 
   public int MaxConversationMessages { get; init; } = 40;
 }
@@ -111,6 +117,35 @@ internal sealed record TestRuntimeSettings
   public int RuntimeStatusIdleRefreshSeconds { get; init; } = 5;
 
   public int RuntimeStatusActiveRefreshSeconds { get; init; } = 2;
+
+  public int GenerationTimeoutSeconds { get; init; } = 300;
+}
+
+internal sealed record TestExecutionSettings
+{
+  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 2;
+
+  public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
+
+  public int MaxCoordinatorHandoffsPerTurn { get; init; } = 1;
+
+  public int MaxToolCallsPerTurn { get; init; } = 20;
+
+  public int MaxConsecutiveToolFailures { get; init; } = 5;
+
+  public int MaxRecoveryAttemptsPerTurn { get; init; } = 5;
+
+  public int MaxTrackedFilesPerSession { get; init; } = 50;
+
+  public int MaxRollbackBytesPerFile { get; init; } = 1_048_576;
+
+  public int MaxRollbackBytesPerSession { get; init; } = 10_485_760;
+
+  public int MaxSearchFiles { get; init; } = 500;
+
+  public int MaxSearchMatches { get; init; } = 200;
+
+  public int MaxToolOutputTokens { get; init; } = 2_048;
 }
 
 internal sealed record TestSessionHistorySettings

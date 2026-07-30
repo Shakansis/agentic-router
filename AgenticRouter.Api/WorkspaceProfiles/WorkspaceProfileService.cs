@@ -68,6 +68,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
   private readonly ISettingsStore _settings;
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IApprovalCoordinator _approvals;
+  private readonly IRecoveryDecisionCoordinator _recoveryDecisions;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
@@ -77,13 +78,15 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
     IWorkspaceProfileStore store,
     ISettingsStore settings,
     IExecutionSessionStore executionSessions,
-    IApprovalCoordinator approvals
+    IApprovalCoordinator approvals,
+    IRecoveryDecisionCoordinator recoveryDecisions
   )
   {
     _store = store;
     _settings = settings;
     _executionSessions = executionSessions;
     _approvals = approvals;
+    _recoveryDecisions = recoveryDecisions;
   }
 
   public async Task InitializeAsync(
@@ -254,6 +257,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
           cancellationToken
         );
         _approvals.InvalidateAll();
+        _recoveryDecisions.InvalidateAll();
       }
 
       return ToView(
@@ -379,6 +383,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
         cancellationToken
       );
       _approvals.InvalidateAll();
+      _recoveryDecisions.InvalidateAll();
       return ToView(
         active
       );
@@ -474,6 +479,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
         cancellationToken
       );
       _approvals.InvalidateAll();
+      _recoveryDecisions.InvalidateAll();
     }
     finally
     {

@@ -35,9 +35,28 @@ public sealed class ExecutionPlanService : IExecutionPlanService
     int maximumSteps
   )
   {
-    return Parse(
+    var parsed = ParseArguments(
       arguments,
-      maximumSteps,
+      maximumSteps
+    );
+    var steps = parsed.Titles.Select(
+      (
+        title,
+        index
+      ) => new ExecutionPlanStep(
+        CreateStepId(
+          index + 1
+        ),
+        title,
+        "pending"
+      )
+    ).ToArray();
+
+    return new ExecutionPlanView(
+      parsed.Objective,
+      steps,
+      null,
+      0,
       0
     );
   }
@@ -48,66 +67,134 @@ public sealed class ExecutionPlanService : IExecutionPlanService
     int maximumSteps
   )
   {
-    var proposed = Parse(
+    var parsed = ParseArguments(
       arguments,
-      maximumSteps,
-      current.RevisionCount + 1
+      maximumSteps
     );
-    var proposedIds = proposed.Steps.Select(
+    var usedIds = new HashSet<string>(
+      StringComparer.Ordinal
+    );
+    var allocatedIds = current.Steps.Select(
       step => step.Id
     ).ToHashSet(
       StringComparer.Ordinal
     );
+    var steps = new List<ExecutionPlanStep>();
 
-    foreach (var step in current.Steps.Where(
-      step => step.Status is "completed" or "failed" or "blocked"
-    ))
+    for (var index = 0; index < parsed.Titles.Count; index++)
     {
-      if (!proposedIds.Contains(
-        step.Id
-      ))
+      var title = parsed.Titles[index];
+      var existing = current.Steps.FirstOrDefault(
+        step => !usedIds.Contains(
+          step.Id
+        ) && string.Equals(
+          step.Title,
+          title,
+          StringComparison.Ordinal
+        )
+      );
+
+      if (
+        existing is null
+        && index < current.Steps.Count
+        && current.Steps[index].Status is not (
+          "completed" or "failed" or "blocked"
+        )
+        && !usedIds.Contains(
+          current.Steps[index].Id
+        )
+      )
       {
-        throw new LocalActionException(
-          "execution-plan",
-          $"Revised plan cannot remove {step.Status} step '{step.Id}'."
-        );
+        existing = current.Steps[index];
       }
+
+      if (existing is not null)
+      {
+        usedIds.Add(
+          existing.Id
+        );
+        steps.Add(
+          existing.Status is "completed" or "failed" or "blocked"
+            ? existing
+            : existing with
+            {
+              Title = title
+            }
+        );
+        continue;
+      }
+
+      var generatedId = NextStepId(
+        allocatedIds
+      );
+      allocatedIds.Add(
+        generatedId
+      );
+      usedIds.Add(
+        generatedId
+      );
+      steps.Add(
+        new ExecutionPlanStep(
+          generatedId,
+          title,
+          "pending"
+        )
+      );
     }
 
-    var existingSteps = current.Steps.ToDictionary(
-      step => step.Id,
-      step => step,
-      StringComparer.Ordinal
-    );
-    var steps = proposed.Steps.Select(
-      step => existingSteps.TryGetValue(
-        step.Id,
-        out var existing
+    var omittedTerminalSteps = current.Steps.Select(
+      (
+        step,
+        index
+      ) => new
+      {
+        Step = step,
+        Index = index
+      }
+    ).Where(
+      item => (
+        item.Step.Status is "completed" or "failed" or "blocked"
       )
-        ? existing.Status is "completed" or "failed" or "blocked"
-          ? existing
-          : step with
-          {
-            Status = existing.Status
-          }
-        : step
+        && !usedIds.Contains(
+          item.Step.Id
+        )
     ).ToArray();
-    return proposed with
+
+    if (steps.Count + omittedTerminalSteps.Length > maximumSteps)
     {
-      Steps = steps,
-      CurrentStepId = steps.FirstOrDefault(
+      throw new LocalActionException(
+        "execution-plan",
+        $"Revised plan cannot preserve terminal steps within the {maximumSteps}-step limit."
+      );
+    }
+
+    foreach (var omitted in omittedTerminalSteps)
+    {
+      steps.Insert(
+        Math.Min(
+          omitted.Index,
+          steps.Count
+        ),
+        omitted.Step
+      );
+    }
+
+    return new ExecutionPlanView(
+      parsed.Objective,
+      steps,
+      steps.FirstOrDefault(
         step => step.Status == "in-progress"
       )?.Id,
-      CompletedStepCount = steps.Count(
+      steps.Count(
         step => step.Status == "completed"
-      )
-    };
+      ),
+      current.RevisionCount + 1
+    );
   }
 
-  private static ExecutionPlanView Parse(
+  private static ParsedPlan ParseArguments(
     JsonElement arguments,
-    int maximumSteps,
-    int revisionCount
+    int maximumSteps
   )
   {
     if (
@@ -159,48 +246,36 @@ public sealed class ExecutionPlanService : IExecutionPlanService
       );
     }
 
-    var identifiers = new HashSet<string>(
-      StringComparer.Ordinal
-    );
-    var steps = new List<ExecutionPlanStep>();
+    var titles = new List<string>();
 
     foreach (var element in elements)
     {
-      if (
-        element.ValueKind != JsonValueKind.Object
-        || !element.TryGetProperty(
-          "id",
-          out var idElement
-        )
-        || idElement.ValueKind != JsonValueKind.String
-        || !element.TryGetProperty(
+      JsonElement titleElement;
+
+      if (element.ValueKind == JsonValueKind.String)
+      {
+        titleElement = element;
+      }
+      else if (
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(
           "title",
-          out var titleElement
+          out var objectTitle
         )
-        || titleElement.ValueKind != JsonValueKind.String
+        && objectTitle.ValueKind == JsonValueKind.String
       )
+      {
+        titleElement = objectTitle;
+      }
+      else
       {
         throw new LocalActionException(
           "execution-plan",
-          "Every execution plan step requires string id and title fields."
+          "Every execution plan step requires a textual title."
         );
       }
 
-      var id = idElement.GetString()?.Trim() ?? string.Empty;
       var title = titleElement.GetString()?.Trim() ?? string.Empty;
-
-      if (
-        id.Length is < 1 or > 40
-        || !identifiers.Add(
-          id
-        )
-      )
-      {
-        throw new LocalActionException(
-          "execution-plan",
-          "Execution plan step IDs must be unique and contain between 1 and 40 characters."
-        );
-      }
 
       if (
         title.Length is < 1 or > 100
@@ -222,21 +297,45 @@ public sealed class ExecutionPlanService : IExecutionPlanService
         );
       }
 
-      steps.Add(
-        new ExecutionPlanStep(
-          id,
-          title,
-          "pending"
-        )
+      titles.Add(
+        title
       );
     }
 
-    return new ExecutionPlanView(
+    return new ParsedPlan(
       objective,
-      steps,
-      null,
-      0,
-      revisionCount
+      titles
     );
   }
+
+  private static string NextStepId(
+    IReadOnlySet<string> usedIds
+  )
+  {
+    for (var index = 1; ; index++)
+    {
+      var candidate = CreateStepId(
+        index
+      );
+
+      if (!usedIds.Contains(
+        candidate
+      ))
+      {
+        return candidate;
+      }
+    }
+  }
+
+  private static string CreateStepId(
+    int index
+  )
+  {
+    return $"step-{index}";
+  }
+
+  private sealed record ParsedPlan(
+    string Objective,
+    IReadOnlyList<string> Titles
+  );
 }

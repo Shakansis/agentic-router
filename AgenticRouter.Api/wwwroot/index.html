@@ -20,23 +20,27 @@
     <section class="status-list" aria-label="Provider status">
       <article class="status-card">
         <div class="status-heading">
-          <span>Ollama</span>
+          <span class="status-label"><span class="status-icon" aria-hidden="true">●</span>Ollama</span>
           <span id="provider-badge" class="badge muted">Verificando</span>
         </div>
         <strong id="provider-detail">Conectando…</strong>
       </article>
       <article class="status-card">
-        <div class="status-heading"><span>Modelos locais</span></div>
+        <div class="status-heading">
+          <span class="status-label"><span class="status-icon" aria-hidden="true">◆</span>Modelos locais</span>
+        </div>
         <strong id="model-count">—</strong>
       </article>
       <article class="status-card">
-        <div class="status-heading"><span>Dispositivos gráficos</span></div>
+        <div class="status-heading">
+          <span class="status-label"><span class="status-icon" aria-hidden="true">▦</span>Dispositivos gráficos</span>
+        </div>
         <strong id="device-count">—</strong>
         <small id="device-diagnostic"></small>
       </article>
       <button id="open-workspace" class="status-card workspace-card" type="button">
         <span class="status-heading">
-          <span>Workspace confiável</span>
+          <span class="status-label"><span class="status-icon" aria-hidden="true">⌂</span>Workspace confiável</span>
           <span id="workspace-badge" class="badge muted">Não configurado</span>
         </span>
         <strong id="workspace-path">Nenhuma pasta selecionada</strong>
@@ -45,7 +49,7 @@
     </section>
 
     <details id="session-history" class="session-history">
-      <summary>Conversas recentes</summary>
+      <summary><span class="summary-icon" aria-hidden="true">◷</span>Conversas recentes</summary>
       <div class="session-history-actions">
         <button id="history-new-conversation" class="secondary-button" type="button">
           Nova conversa
@@ -61,7 +65,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.8.0</span>
+    <span class="app-version">v0.8.1</span>
   </aside>
 
   <main class="workspace">
@@ -91,10 +95,12 @@
 
       <div class="header-actions">
         <button id="new-conversation" class="secondary-button" type="button">
-          Nova conversa
+          <span class="button-icon" aria-hidden="true">＋</span>
+          <span>Nova conversa</span>
         </button>
         <button id="open-settings" class="secondary-button" type="button">
-          Configurações
+          <span class="button-icon" aria-hidden="true">⚙</span>
+          <span>Configurações</span>
         </button>
       </div>
     </header>
@@ -113,6 +119,13 @@
 
     <footer class="composer-shell">
       <form id="composer" class="composer">
+        <div class="composer-context">
+          <span class="active-agent-pill">
+            <span class="agent-icon" aria-hidden="true">⚡</span>
+            <span>Agente:</span>
+            <strong id="active-agent-label">Auto (Roteador)</strong>
+          </span>
+        </div>
         <textarea
           id="message-input"
           rows="1"
@@ -122,10 +135,12 @@
         <div class="composer-actions">
           <div class="interaction-mode" role="group" aria-label="Modo de interação">
             <button class="mode-option active" type="button" data-mode="chat" aria-pressed="true">
-              Chat
+              <span class="mode-icon" aria-hidden="true">◌</span>
+              <span>Chat</span>
             </button>
             <button class="mode-option" type="button" data-mode="execute" aria-pressed="false">
-              Execute
+              <span class="mode-icon code-icon" aria-hidden="true">&gt;_</span>
+              <span>Execute</span>
             </button>
           </div>
           <label class="model-field approval-field">
@@ -146,7 +161,20 @@
             <span>Fixar nesta conversa</span>
           </label>
           <span id="composer-status" class="composer-status">Enter para enviar</span>
-          <button id="send-button" class="primary-button" type="submit">Enviar</button>
+          <div class="composer-submit-actions">
+            <button
+              id="cancel-message-edit"
+              class="icon-button edit-cancel-button"
+              type="button"
+              aria-label="Cancelar edição"
+              title="Cancelar edição (Esc)"
+              hidden
+            >×</button>
+            <button id="send-button" class="primary-button" type="submit">
+              <span id="send-button-label">Enviar</span>
+              <span class="button-icon send-icon" aria-hidden="true">➤</span>
+            </button>
+          </div>
         </div>
       </form>
     </footer>
@@ -179,6 +207,10 @@
               <select id="router-model" name="routerModel" required></select>
             </label>
             <label>
+              <span>Modelo coordenador</span>
+              <select id="coordinator-model" name="coordinatorModel" required></select>
+            </label>
+            <label>
               <span>Modelo padrão</span>
               <select id="default-model" name="defaultModel" required></select>
             </label>
@@ -200,8 +232,20 @@
               <input id="default-context-tokens" type="number" min="1024" max="131072" required>
             </label>
             <label>
+              <span>Contexto enviado ao Ollama</span>
+              <input id="provider-context-tokens" type="number" min="1024" max="131072" required>
+            </label>
+            <label>
               <span>Reserva para resposta</span>
               <input id="reserved-response-tokens" type="number" min="256" required>
+            </label>
+            <label>
+              <span>Saída máxima de ferramentas</span>
+              <input id="max-tool-output-tokens" type="number" min="256" max="16384" required>
+            </label>
+            <label>
+              <span>Timeout de geração (segundos)</span>
+              <input id="generation-timeout-seconds" type="number" min="1" max="1800" required>
             </label>
             <label>
               <span>Máximo de mensagens</span>
@@ -308,7 +352,7 @@
           <p class="workspace-note">
             O conteúdo fica somente neste computador e pode incluir prompts, respostas,
             caminhos, diffs e saída limitada de comandos. O histórico não é criptografado
-            pelo Agentic Router v0.8.0. Desativar interrompe novas gravações, mas não apaga
+            pelo Agentic Router v0.8.1. Desativar interrompe novas gravações, mas não apaga
             registros existentes.
           </p>
           <div class="validation-profile-actions">

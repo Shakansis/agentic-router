@@ -20,7 +20,9 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 builder.Services.AddControllers();
-builder.Services.AddHttpClient<IOllamaClient, OllamaClient>();
+builder.Services.AddHttpClient<IOllamaClient, OllamaClient>(
+  client => client.Timeout = Timeout.InfiniteTimeSpan
+);
 builder.Services.AddSingleton<ISettingsValidator, SettingsValidator>();
 var configuredDirectory = builder.Configuration["AgenticRouter:DataDirectory"];
 var dataDirectory = string.IsNullOrWhiteSpace(
@@ -68,9 +70,11 @@ builder.Services.AddScoped<IProcessPolicyService, ProcessPolicyService>();
 builder.Services.AddScoped<IValidationProfileService, ValidationProfileService>();
 builder.Services.AddScoped<ILocalActionPlanner, LocalActionPlanner>();
 builder.Services.AddSingleton<IPlanningFailureClassifier, PlanningFailureClassifier>();
+builder.Services.AddSingleton<IToolProtocolConformanceService, ToolProtocolConformanceService>();
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
 builder.Services.AddScoped<IExpertExecutionGuidanceService, ExpertExecutionGuidanceService>();
 builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
+builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
 builder.Services.AddScoped<IModelDiagnosticService, ModelDiagnosticService>();
 builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();

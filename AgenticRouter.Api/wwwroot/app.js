@@ -20,7 +20,8 @@ const state = {
   sessions: null,
   conversationSessionId: null,
   browserSessionId: createSessionId(),
-  activeReview: null
+  activeReview: null,
+  activeAgentModel: null
 };
 
 const elements = {};
@@ -55,6 +56,9 @@ function bindElements() {
     "model-selector",
     "model-lock",
     "send-button",
+    "send-button-label",
+    "cancel-message-edit",
+    "active-agent-label",
     "composer-status",
     "provider-badge",
     "provider-detail",
@@ -68,6 +72,7 @@ function bindElements() {
     "intentions-grid",
     "ollama-url",
     "router-model",
+    "coordinator-model",
     "default-model",
     "default-gpu",
     "jump-latest",
@@ -77,7 +82,10 @@ function bindElements() {
     "resident-model-status",
     "new-conversation",
     "default-context-tokens",
+    "provider-context-tokens",
     "reserved-response-tokens",
+    "max-tool-output-tokens",
+    "generation-timeout-seconds",
     "max-conversation-messages",
     "model-diagnostics-list",
     "model-context-diagnostic",
@@ -132,6 +140,7 @@ function bindElements() {
 function bindEvents() {
   elements.composer.addEventListener("submit", handleComposerSubmit);
   elements.composer.addEventListener("click", handleComposerClick);
+  elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
   elements.messageInput.addEventListener("input", resizeComposer);
   elements.settingsForm.addEventListener("submit", saveSettings);
@@ -446,7 +455,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.8.0."
+        + "pelo Agentic Router v0.8.1."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1336,10 +1345,18 @@ function renderSettings() {
 
   elements.ollamaUrl.value = state.settings.ollamaUrl;
   replaceOptions(elements.routerModel, modelOptions(), state.settings.routerModel);
+  replaceOptions(
+    elements.coordinatorModel,
+    modelOptions(),
+    state.settings.coordinatorModel
+  );
   replaceOptions(elements.defaultModel, modelOptions(), state.settings.defaultModel);
   replaceOptions(elements.defaultGpu, gpuOptions(false), state.settings.defaultGpu);
   elements.defaultContextTokens.value = state.settings.context.defaultContextTokens;
+  elements.providerContextTokens.value = state.settings.context.providerContextTokens;
   elements.reservedResponseTokens.value = state.settings.context.reservedResponseTokens;
+  elements.maxToolOutputTokens.value = state.settings.execution.maxToolOutputTokens;
+  elements.generationTimeoutSeconds.value = state.settings.runtime.generationTimeoutSeconds;
   elements.maxConversationMessages.value = state.settings.context.maxConversationMessages;
   replaceOptions(
     elements.modelTestSelector,
@@ -1570,17 +1587,25 @@ async function saveSettings(event) {
     schemaVersion: state.settings.schemaVersion,
     ollamaUrl: elements.ollamaUrl.value.trim(),
     routerModel: elements.routerModel.value,
+    coordinatorModel: elements.coordinatorModel.value,
     defaultModel: elements.defaultModel.value,
     defaultGpu: elements.defaultGpu.value,
     trustedWorkspacePath: state.settings.trustedWorkspacePath ?? null,
     intentions,
     context: {
       defaultContextTokens: Number(elements.defaultContextTokens.value),
+      providerContextTokens: Number(elements.providerContextTokens.value),
       reservedResponseTokens: Number(elements.reservedResponseTokens.value),
       maxConversationMessages: Number(elements.maxConversationMessages.value)
     },
-    runtime: state.settings.runtime,
-    execution: state.settings.execution,
+    runtime: {
+      ...state.settings.runtime,
+      generationTimeoutSeconds: Number(elements.generationTimeoutSeconds.value)
+    },
+    execution: {
+      ...state.settings.execution,
+      maxToolOutputTokens: Number(elements.maxToolOutputTokens.value)
+    },
     projectAwareness: state.settings.projectAwareness,
     validationProfile: state.validationProfiles?.active ?? null,
     sessionHistory: state.settings.sessionHistory
@@ -1707,12 +1732,14 @@ function startNewConversation() {
   state.lockedModel = null;
   state.interactionMode = "chat";
   state.approvalPolicy = "ask";
+  state.activeAgentModel = null;
   state.autoFollow = true;
   elements.modelSelector.value = "auto";
   elements.modelLock.checked = false;
   elements.messageInput.value = "";
   resizeComposer();
   elements.composer.classList.remove("editing");
+  elements.cancelMessageEdit.hidden = true;
 
   for (const message of elements.messages.children) {
     resizeObserver.unobserve(message);
@@ -2006,7 +2033,9 @@ function appendAssistantMessage() {
     rawAnswer: "",
     copyButton,
     reviewButton,
-    executionSession: null
+    executionSession: null,
+    lastActivityGroup: null,
+    lastActivityGroupKey: null
   };
   copyButton.addEventListener(
     "click",
@@ -2036,7 +2065,8 @@ function appendAssistantMessage() {
 function startElapsedClock(assistant) {
   const update = timestamp => {
     if (timestamp - assistant.lastClockUpdate >= 250) {
-      assistant.summary.textContent = `Em andamento · ${elapsedSince(assistant)} ms`;
+      assistant.summary.textContent =
+        `Em andamento · ${formatElapsed(elapsedSince(assistant))}`;
       assistant.lastClockUpdate = timestamp;
     }
 
@@ -2077,6 +2107,15 @@ async function consumeEventStream(stream, assistant) {
       const streamEvent = JSON.parse(data);
       state.conversationSessionId =
         streamEvent.conversationSessionId ?? state.conversationSessionId;
+
+      if (
+        streamEvent.type === "target.model-resolved"
+        && streamEvent.selectedModel
+      ) {
+        state.activeAgentModel = streamEvent.selectedModel;
+        updateActiveAgentLabel();
+      }
+
       updateExecutionSession(
         assistant,
         streamEvent.executionSession
@@ -2101,7 +2140,7 @@ async function consumeEventStream(stream, assistant) {
         finishActivity(
           assistant,
           `${assistant.recovered ? "Recuperado" : "Concluído"} · `
-            + `${streamEvent.elapsedMilliseconds} ms`,
+            + formatElapsed(streamEvent.elapsedMilliseconds),
           assistant.recovered
         );
         assistant.reviewButton.hidden =
@@ -2136,6 +2175,14 @@ async function consumeEventStream(stream, assistant) {
         && streamEvent.localAction
       ) {
         addApprovalActivity(
+          assistant,
+          streamEvent
+        );
+      } else if (
+        streamEvent.type === "action.recovery-decision-required"
+        && streamEvent.recoveryDecision
+      ) {
+        addRecoveryDecisionActivity(
           assistant,
           streamEvent
         );
@@ -2174,17 +2221,201 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
     return;
   }
 
+  const group = ensureActivityGroup(
+    assistant,
+    streamEvent,
+    isWarningOrError
+  );
   const row = document.createElement("div");
   row.className = `activity-row${isWarningOrError ? " warning" : ""}`;
   row.dataset.eventType = streamEvent.type;
   const time = document.createElement("span");
   time.className = "activity-time";
-  time.textContent = `${streamEvent.elapsedMilliseconds ?? 0} ms`;
+  time.textContent = formatElapsed(
+    streamEvent.elapsedMilliseconds
+  );
+  const icon = document.createElement("span");
+  icon.className = "activity-icon";
+  icon.textContent = activityIconFor(
+    streamEvent.type
+  );
+  icon.setAttribute(
+    "aria-hidden",
+    "true"
+  );
   const message = document.createElement("span");
   message.className = "activity-message";
   message.textContent = streamEvent.message;
-  row.append(time, message);
-  assistant.activityList.append(row);
+  row.append(time, icon, message);
+  group.body.append(row);
+  group.count++;
+  group.countLabel.textContent =
+    `${group.count} ${group.count === 1 ? "evento" : "eventos"}`;
+}
+
+function ensureActivityGroup(assistant, streamEvent, isWarningOrError) {
+  const definition = activityGroupFor(
+    streamEvent
+  );
+
+  if (
+    assistant.lastActivityGroup
+    && assistant.lastActivityGroupKey === definition.key
+  ) {
+    if (isWarningOrError) {
+      assistant.lastActivityGroup.details.classList.add("warning");
+    }
+
+    return assistant.lastActivityGroup;
+  }
+
+  const details = document.createElement("details");
+  details.className = `activity-group${isWarningOrError ? " warning" : ""}`;
+  const summary = document.createElement("summary");
+  const time = document.createElement("span");
+  time.className = "activity-time";
+  time.textContent = formatElapsed(
+    streamEvent.elapsedMilliseconds
+  );
+  const icon = document.createElement("span");
+  icon.className = "activity-icon";
+  icon.textContent = activityIconFor(
+    streamEvent.type
+  );
+  icon.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+  const title = document.createElement("strong");
+  title.className = "activity-group-title";
+  title.textContent = definition.title;
+  const countLabel = document.createElement("span");
+  countLabel.className = "activity-group-count";
+  const body = document.createElement("div");
+  body.className = "activity-group-body";
+  summary.append(time, icon, title, countLabel);
+  details.append(summary, body);
+  assistant.activityList.append(details);
+  const group = {
+    details,
+    body,
+    countLabel,
+    count: 0
+  };
+  assistant.lastActivityGroup = group;
+  assistant.lastActivityGroupKey = definition.key;
+  return group;
+}
+
+function activityGroupFor(streamEvent) {
+  const type = streamEvent.type ?? "";
+  const action = streamEvent.localAction;
+
+  if (action?.actionId) {
+    return {
+      key: `action:${action.actionId}`,
+      title: action.summary
+    };
+  }
+
+  if (
+    type.startsWith("action.planning")
+    || type.startsWith("execution-plan")
+    || type === "execution-step-completed"
+  ) {
+    return {
+      key: "planning",
+      title: "Planejamento"
+    };
+  }
+
+  if (type.includes("recovery")) {
+    return {
+      key: "recovery",
+      title: "Recuperação"
+    };
+  }
+
+  if (
+    type.startsWith("agent.")
+    || type.startsWith("target.")
+    || type.startsWith("router.")
+    || type.startsWith("model.")
+    || type.startsWith("ollama.")
+  ) {
+    return {
+      key: "agents",
+      title: "Agentes e roteamento"
+    };
+  }
+
+  if (
+    type.startsWith("workspace")
+    || type.startsWith("project-")
+    || type.startsWith("baseline-")
+    || type.startsWith("repository-")
+    || type.startsWith("preexisting-")
+  ) {
+    return {
+      key: "workspace",
+      title: "Workspace e projeto"
+    };
+  }
+
+  if (type.startsWith("validation-")) {
+    return {
+      key: "validation",
+      title: "Validação"
+    };
+  }
+
+  if (
+    type.startsWith("response.")
+    || type.startsWith("request.")
+    || type.startsWith("turn.")
+  ) {
+    return {
+      key: "response",
+      title: "Resposta"
+    };
+  }
+
+  return {
+    key: "execution",
+    title: "Execução"
+  };
+}
+
+function activityIconFor(type) {
+  if (type.includes("error") || type.includes("failed")) {
+    return "!";
+  }
+
+  if (type.includes("warning") || type.includes("denied")) {
+    return "◇";
+  }
+
+  if (type.startsWith("action.")) {
+    return type.includes("planning")
+      ? "⌁"
+      : type.includes("completed") || type.includes("applied")
+        ? "✓"
+        : "›";
+  }
+
+  if (type.startsWith("execution-plan")) {
+    return "☷";
+  }
+
+  if (type.startsWith("agent.") || type.startsWith("target.")) {
+    return "⚡";
+  }
+
+  if (type.startsWith("validation-")) {
+    return "✓";
+  }
+
+  return "·";
 }
 
 function updateExecutionSession(assistant, session) {
@@ -2205,7 +2436,7 @@ function updateExecutionSession(assistant, session) {
     `${session.actionCount} ações · ${session.changedFileCount} arquivos · `
     + `planning ${session.planningFailureCount} · `
     + `tool failures ${session.consecutiveToolFailureCount} · `
-    + `${session.elapsedMilliseconds} ms`;
+    + formatElapsed(session.elapsedMilliseconds);
   assistant.sessionHeader.append(
     stateLabel,
     coordinator,
@@ -2329,7 +2560,7 @@ function renderChangeReview(review) {
   metadata.textContent =
     `${review.summary.executionPath} · ${review.summary.actionCount} ações · `
     + `${review.summary.changedFileCount} arquivos · `
-    + `${review.summary.elapsedMilliseconds} ms · `
+    + `${formatElapsed(review.summary.elapsedMilliseconds)} · `
     + `${review.summary.completionStatus}`;
   const objective = document.createElement("p");
   objective.textContent = review.objective;
@@ -2585,21 +2816,41 @@ async function validateChanges() {
 
 function addApprovalActivity(assistant, streamEvent) {
   const action = streamEvent.localAction;
-  const row = document.createElement("div");
+  const row = document.createElement("details");
   row.className = "activity-row action-approval";
+  row.open = true;
   row.dataset.eventType = streamEvent.type;
   row.dataset.actionId = action.actionId;
   row.dataset.executionSessionId = action.executionSessionId ?? "";
+  const summary = document.createElement("summary");
+  summary.className = "action-approval-summary";
   const time = document.createElement("span");
   time.className = "activity-time";
-  time.textContent = `${streamEvent.elapsedMilliseconds ?? 0} ms`;
-  const content = document.createElement("div");
-  content.className = "action-approval-content";
+  time.textContent = formatElapsed(
+    streamEvent.elapsedMilliseconds
+  );
+  const toggle = document.createElement("span");
+  toggle.className = "action-approval-toggle";
+  toggle.textContent = "›";
+  toggle.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+  const summaryContent = document.createElement("span");
+  summaryContent.className = "action-approval-summary-content";
   const title = document.createElement("strong");
   title.textContent = action.summary;
+  const status = document.createElement("span");
+  status.className = "approval-status";
+  status.textContent = "Aguardando decisão";
+  summaryContent.append(title, status);
+  summary.append(time, toggle, summaryContent);
+  const content = document.createElement("div");
+  content.className = "action-approval-content";
   const message = document.createElement("span");
+  message.className = "activity-message";
   message.textContent = streamEvent.message;
-  content.append(title, message);
+  content.append(message);
 
   if (action.preview) {
     const preview = document.createElement("pre");
@@ -2618,11 +2869,9 @@ function addApprovalActivity(assistant, streamEvent) {
   approve.className = "primary-button";
   approve.type = "button";
   approve.textContent = "Aprovar";
-  const status = document.createElement("span");
-  status.className = "approval-status";
-  controls.append(reject, approve, status);
+  controls.append(reject, approve);
   content.append(controls);
-  row.append(time, content);
+  row.append(summary, content);
   assistant.activityList.append(row);
   assistant.details.open = true;
   approve.addEventListener(
@@ -2633,7 +2882,8 @@ function addApprovalActivity(assistant, streamEvent) {
       true,
       approve,
       reject,
-      status
+      status,
+      row
     )
   );
   reject.addEventListener(
@@ -2644,7 +2894,8 @@ function addApprovalActivity(assistant, streamEvent) {
       false,
       approve,
       reject,
-      status
+      status,
+      row
     )
   );
 }
@@ -2655,7 +2906,8 @@ async function decideAction(
   approved,
   approveButton,
   rejectButton,
-  status
+  status,
+  approval
 ) {
   approveButton.disabled = true;
   rejectButton.disabled = true;
@@ -2677,10 +2929,137 @@ async function decideAction(
       }
     );
     status.textContent = approved ? "Aprovada" : "Rejeitada";
+    approval.dataset.decision = approved
+      ? "approved"
+      : "rejected";
+    approval.open = false;
   } catch (error) {
     status.textContent = error.message;
     approveButton.disabled = false;
     rejectButton.disabled = false;
+  }
+}
+
+function addRecoveryDecisionActivity(assistant, streamEvent) {
+  const recovery = streamEvent.recoveryDecision;
+  const row = document.createElement("details");
+  row.className = "activity-row action-approval recovery-decision";
+  row.open = true;
+  row.dataset.eventType = streamEvent.type;
+  row.dataset.checkpointId = recovery.checkpointId;
+  row.dataset.executionSessionId = recovery.executionSessionId;
+  const summary = document.createElement("summary");
+  summary.className = "action-approval-summary";
+  const time = document.createElement("span");
+  time.className = "activity-time";
+  time.textContent = formatElapsed(
+    streamEvent.elapsedMilliseconds
+  );
+  const toggle = document.createElement("span");
+  toggle.className = "action-approval-toggle";
+  toggle.textContent = "›";
+  toggle.setAttribute(
+    "aria-hidden",
+    "true"
+  );
+  const summaryContent = document.createElement("span");
+  summaryContent.className = "action-approval-summary-content";
+  const title = document.createElement("strong");
+  title.textContent = "Recuperação automática esgotada";
+  const status = document.createElement("span");
+  status.className = "approval-status";
+  status.textContent = "Escolha uma alternativa";
+  summaryContent.append(title, status);
+  summary.append(time, toggle, summaryContent);
+  const content = document.createElement("div");
+  content.className = "action-approval-content";
+  const message = document.createElement("span");
+  message.className = "activity-message";
+  message.textContent = streamEvent.message;
+  const reason = document.createElement("pre");
+  reason.className = "action-preview recovery-reason";
+  reason.textContent = recovery.reason;
+  const controls = document.createElement("div");
+  controls.className = "approval-controls recovery-controls";
+  const optionRows = [];
+  const buttons = recovery.options.map(
+    (option, index) => {
+      const optionRow = document.createElement("div");
+      optionRow.className = "recovery-option";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = option.id === "retry"
+        ? "primary-button"
+        : "secondary-button";
+      button.dataset.recoveryOption = option.id;
+      button.title = option.description;
+      button.textContent =
+        `${String.fromCharCode(65 + index)} · ${option.label}`;
+      const description = document.createElement("small");
+      description.textContent = option.description;
+      optionRow.append(button, description);
+      optionRows.push(
+        optionRow
+      );
+      button.addEventListener(
+        "click",
+        () => decideRecovery(
+          recovery,
+          option,
+          buttons,
+          status,
+          row
+        )
+      );
+      return button;
+    }
+  );
+  controls.append(...optionRows);
+  content.append(message, reason, controls);
+  row.append(summary, content);
+  assistant.activityList.append(row);
+  assistant.details.open = true;
+}
+
+async function decideRecovery(
+  recovery,
+  option,
+  buttons,
+  status,
+  checkpoint
+) {
+  buttons.forEach(
+    button => {
+      button.disabled = true;
+    }
+  );
+  status.textContent = "Aplicando decisão…";
+
+  try {
+    await fetchJson(
+      `/api/recovery/${encodeURIComponent(recovery.checkpointId)}/decision`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          option: option.id,
+          browserSessionId: state.browserSessionId,
+          executionSessionId: recovery.executionSessionId
+        })
+      }
+    );
+    status.textContent = option.label;
+    checkpoint.dataset.decision = option.id;
+    checkpoint.open = false;
+  } catch (error) {
+    status.textContent = error.message;
+    buttons.forEach(
+      button => {
+        button.disabled = false;
+      }
+    );
   }
 }
 
@@ -2941,7 +3320,11 @@ function scrollToBottom() {
 }
 
 function setStreamingState(isStreaming) {
-  elements.sendButton.textContent = isStreaming
+  if (!isStreaming) {
+    state.activeAgentModel = null;
+  }
+
+  elements.sendButtonLabel.textContent = isStreaming
     ? "Cancelar"
     : state.editingTurn
       ? "Enviar edição"
@@ -2955,6 +3338,7 @@ function setStreamingState(isStreaming) {
         : "Enviar mensagem"
   );
   elements.sendButton.classList.toggle("cancel", isStreaming);
+  elements.cancelMessageEdit.hidden = isStreaming || !state.editingTurn;
   elements.messages.querySelectorAll(".edit-message").forEach(
     button => {
       button.disabled = isStreaming;
@@ -2977,10 +3361,51 @@ function updateComposerStatus() {
   } else {
     elements.composerStatus.textContent = "Enter para enviar";
   }
+
+  updateActiveAgentLabel();
+}
+
+function updateActiveAgentLabel() {
+  if (!elements.activeAgentLabel) {
+    return;
+  }
+
+  const selectedModel = state.activeAgentModel
+    ?? state.lockedModel
+    ?? elements.modelSelector.value;
+  elements.activeAgentLabel.textContent =
+    selectedModel && selectedModel !== "auto"
+      ? selectedModel
+      : "Auto (Roteador)";
 }
 
 function elapsedSince(assistant) {
   return Math.round(performance.now() - assistant.startedAt);
+}
+
+function formatElapsed(milliseconds) {
+  const elapsed = Math.max(
+    0,
+    Math.round(milliseconds ?? 0)
+  );
+
+  if (elapsed < 1_000) {
+    return `${elapsed} ms`;
+  }
+
+  if (elapsed < 60_000) {
+    const seconds = elapsed / 1_000;
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+  }
+
+  const totalSeconds = Math.round(
+    elapsed / 1_000
+  );
+  const minutes = Math.floor(
+    totalSeconds / 60
+  );
+  const seconds = totalSeconds % 60;
+  return `${minutes} min ${seconds} s`;
 }
 
 function isNearBottom() {

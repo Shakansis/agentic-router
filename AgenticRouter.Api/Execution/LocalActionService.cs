@@ -296,9 +296,13 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
-    var path = GetOptionalString(
-      proposal.Arguments,
-      "path"
+    var path = NormalizeWorkspaceRootAlias(
+      proposal.Tool,
+      GetOptionalString(
+        proposal.Arguments,
+        "path"
+      ),
+      executionSession
     );
     var targetPath = await _workspace.ResolvePathAsync(
       path,
@@ -307,6 +311,11 @@ public sealed class LocalActionService : ILocalActionService
     var relativePath = await GetRelativePathAsync(
       targetPath,
       cancellationToken
+    );
+    ValidateWorkspaceRootAlias(
+      proposal,
+      relativePath,
+      executionSession
     );
     var readOnly = proposal.Tool is
       "list_files"
@@ -1454,7 +1463,7 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
-  private static async Task VerifyAndRecordFileChangeAsync(
+  private async Task VerifyAndRecordFileChangeAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
     CancellationToken cancellationToken
@@ -1522,6 +1531,12 @@ public sealed class LocalActionService : ILocalActionService
           ? pending.OriginalBytes
           : 0
       )
+    );
+    await RecordObservationAsync(
+      target,
+      content,
+      executionSession,
+      cancellationToken
     );
   }
 
@@ -1604,6 +1619,161 @@ public sealed class LocalActionService : ILocalActionService
       ".editorconfig",
       StringComparison.OrdinalIgnoreCase
     );
+  }
+
+  private static void ValidateWorkspaceRootAlias(
+    LocalActionProposal proposal,
+    string relativePath,
+    ExecutionSession? executionSession
+  )
+  {
+    if (
+      proposal.Tool != "create_file"
+      || executionSession is null
+    )
+    {
+      return;
+    }
+
+    var segments = relativePath.Split(
+      [
+        Path.DirectorySeparatorChar,
+        Path.AltDirectorySeparatorChar
+      ],
+      StringSplitOptions.RemoveEmptyEntries
+    );
+    var workspaceName = Path.GetFileName(
+      Path.TrimEndingDirectorySeparator(
+        executionSession.WorkspacePath
+      )
+    );
+
+    if (
+      segments.Length < 2
+      || !segments[0].Equals(
+        workspaceName,
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      return;
+    }
+
+    var unprefixedPath = Path.Combine(
+      executionSession.WorkspacePath,
+      Path.Combine(
+        segments[1..]
+      )
+    );
+
+    if (!File.Exists(
+      unprefixedPath
+    ))
+    {
+      return;
+    }
+
+    var unprefixedRelativePath = Path.GetRelativePath(
+      executionSession.WorkspacePath,
+      unprefixedPath
+    );
+    throw new LocalActionException(
+      "action-validation",
+      $"The trusted workspace is already the project root. '{relativePath}' repeats "
+        + $"the workspace directory name while existing file '{unprefixedRelativePath}' "
+        + "is available at the root. Read that existing file before proposing an edit."
+    );
+  }
+
+  private static string? NormalizeWorkspaceRootAlias(
+    string tool,
+    string? path,
+    ExecutionSession? executionSession
+  )
+  {
+    if (
+      executionSession is null
+      || string.IsNullOrWhiteSpace(
+        path
+      )
+      || Path.IsPathRooted(
+        path
+      )
+      || tool is not (
+        "list_files"
+        or "read_file"
+        or "get_file_info"
+        or "search_text"
+      )
+    )
+    {
+      return path;
+    }
+
+    var segments = path.Split(
+      [
+        Path.DirectorySeparatorChar,
+        Path.AltDirectorySeparatorChar
+      ],
+      StringSplitOptions.RemoveEmptyEntries
+    );
+    var workspaceName = Path.GetFileName(
+      Path.TrimEndingDirectorySeparator(
+        executionSession.WorkspacePath
+      )
+    );
+
+    if (
+      segments.Length == 0
+      || !segments[0].Equals(
+        workspaceName,
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      return path;
+    }
+
+    var prefixedPath = Path.Combine(
+      executionSession.WorkspacePath,
+      Path.Combine(
+        segments
+      )
+    );
+    var unprefixedPath = segments.Length == 1
+      ? executionSession.WorkspacePath
+      : Path.Combine(
+        executionSession.WorkspacePath,
+        Path.Combine(
+          segments[1..]
+        )
+      );
+
+    if (
+      File.Exists(
+        prefixedPath
+      )
+      || Directory.Exists(
+        prefixedPath
+      )
+      || (
+        !File.Exists(
+          unprefixedPath
+        )
+        && !Directory.Exists(
+          unprefixedPath
+        )
+      )
+    )
+    {
+      return path;
+    }
+
+    return segments.Length == 1
+      ? "."
+      : Path.Combine(
+        segments[1..]
+      );
   }
 
   private async Task<string> GetRelativePathAsync(

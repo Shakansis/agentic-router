@@ -56,6 +56,11 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task<string> GetVersionAsync(
+    Uri baseUri,
+    CancellationToken cancellationToken
+  );
+
   Task<IReadOnlyList<OllamaRunningModel>> GetRunningModelsAsync(
     Uri baseUri,
     CancellationToken cancellationToken
@@ -119,7 +124,7 @@ public sealed record OllamaModelCapabilities(
   bool ToolingConfirmed
 );
 
-public sealed class OllamaProviderException : Exception
+public class OllamaProviderException : Exception
 {
   public OllamaProviderException(
     string stage,
@@ -151,4 +156,24 @@ public sealed class OllamaProviderException : Exception
   public bool Recoverable { get; }
 
   public bool IsMemoryPressure { get; }
+}
+
+public sealed class ToolProtocolException : OllamaProviderException
+{
+  public ToolProtocolException(
+    string stage,
+    string technicalMessage,
+    int? httpStatus,
+    Exception? innerException = null
+  )
+    : base(
+      stage,
+      "The model returned an invalid native tool call.",
+      technicalMessage,
+      httpStatus,
+      true,
+      innerException
+    )
+  {
+  }
 }

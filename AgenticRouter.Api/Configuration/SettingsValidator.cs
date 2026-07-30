@@ -42,6 +42,11 @@ public sealed class SettingsValidator : ISettingsValidator
     );
     ValidateRequiredModel(
       errors,
+      "coordinatorModel",
+      settings.CoordinatorModel
+    );
+    ValidateRequiredModel(
+      errors,
       "defaultModel",
       settings.DefaultModel
     );
@@ -57,6 +62,19 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       settings.Execution
     );
+
+    if (
+      settings.Execution.MaxToolOutputTokens
+      >= settings.Context.ProviderContextTokens
+    )
+    {
+      AddError(
+        errors,
+        "execution.maxToolOutputTokens",
+        "Maximum tool output tokens must be smaller than the provider context limit."
+      );
+    }
+
     ValidateProjectAwareness(
       errors,
       settings.ProjectAwareness
@@ -103,6 +121,13 @@ public sealed class SettingsValidator : ISettingsValidator
       settings.Runtime.RuntimeStatusActiveRefreshSeconds,
       1,
       10
+    );
+    ValidateInterval(
+      errors,
+      "runtime.generationTimeoutSeconds",
+      settings.Runtime.GenerationTimeoutSeconds,
+      1,
+      1_800
     );
 
     if (string.IsNullOrWhiteSpace(
@@ -262,6 +287,24 @@ public sealed class SettingsValidator : ISettingsValidator
       );
     }
 
+    if (context.ProviderContextTokens is < 1_024 or > 131_072)
+    {
+      AddError(
+        errors,
+        "context.providerContextTokens",
+        "Provider context tokens must be between 1024 and 131072."
+      );
+    }
+
+    if (context.DefaultContextTokens > context.ProviderContextTokens)
+    {
+      AddError(
+        errors,
+        "context.defaultContextTokens",
+        "Default context tokens must not exceed the provider context limit."
+      );
+    }
+
     if (
       context.ReservedResponseTokens < 256
       || context.ReservedResponseTokens >= context.DefaultContextTokens
@@ -360,6 +403,13 @@ public sealed class SettingsValidator : ISettingsValidator
     );
     ValidateRange(
       errors,
+      "execution.maxRecoveryAttemptsPerTurn",
+      execution.MaxRecoveryAttemptsPerTurn,
+      1,
+      20
+    );
+    ValidateRange(
+      errors,
       "execution.maxTrackedFilesPerSession",
       execution.MaxTrackedFilesPerSession,
       1,
@@ -392,6 +442,13 @@ public sealed class SettingsValidator : ISettingsValidator
       execution.MaxSearchMatches,
       1,
       5_000
+    );
+    ValidateRange(
+      errors,
+      "execution.maxToolOutputTokens",
+      execution.MaxToolOutputTokens,
+      256,
+      16_384
     );
   }
 

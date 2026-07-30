@@ -70,6 +70,79 @@ public sealed class JsonSettingsStore : ISettingsStore
       ) ?? throw new InvalidDataException(
         "The settings file contains no settings object."
       );
+      using var document = JsonDocument.Parse(
+        json
+      );
+      var hasCoordinatorModel = document.RootElement.TryGetProperty(
+        "coordinatorModel",
+        out _
+      );
+      var contextElement = document.RootElement.TryGetProperty(
+        "context",
+        out var savedContext
+      )
+        ? savedContext
+        : default;
+      var hasProviderContext = contextElement.ValueKind == JsonValueKind.Object
+        && contextElement.TryGetProperty(
+          "providerContextTokens",
+          out _
+        );
+      var executionElement = document.RootElement.TryGetProperty(
+        "execution",
+        out var savedExecution
+      )
+        ? savedExecution
+        : default;
+      var hasMaxRecoveryAttempts = executionElement.ValueKind == JsonValueKind.Object
+        && executionElement.TryGetProperty(
+          "maxRecoveryAttemptsPerTurn",
+          out _
+        );
+
+      if (!hasCoordinatorModel)
+      {
+        settings = settings with
+        {
+          CoordinatorModel = settings.RouterModel
+        };
+      }
+
+      if (
+        !hasProviderContext
+        && settings.Context.DefaultContextTokens == 8_192
+        && settings.Context.ReservedResponseTokens == 2_048
+      )
+      {
+        settings = settings with
+        {
+          Context = settings.Context with
+          {
+            DefaultContextTokens = 32_768,
+            ReservedResponseTokens = 4_096
+          }
+        };
+      }
+
+      if (!hasMaxRecoveryAttempts)
+      {
+        settings = settings with
+        {
+          Execution = settings.Execution with
+          {
+            MaxRecoveryAttemptsPerTurn = 5,
+            ResidentCoordinatorPlanningFailuresBeforeFailure = Math.Max(
+              5,
+              settings.Execution.ResidentCoordinatorPlanningFailuresBeforeFailure
+            ),
+            MaxConsecutiveToolFailures = Math.Max(
+              5,
+              settings.Execution.MaxConsecutiveToolFailures
+            )
+          }
+        };
+      }
+
       var errors = _validator.Validate(
         settings
       );
@@ -81,9 +154,6 @@ public sealed class JsonSettingsStore : ISettingsStore
         );
       }
 
-      using var document = JsonDocument.Parse(
-        json
-      );
       var requiresRewrite = !document.RootElement.TryGetProperty(
         "runtime",
         out _
@@ -105,7 +175,21 @@ public sealed class JsonSettingsStore : ISettingsStore
       ) || !document.RootElement.TryGetProperty(
         "sessionHistory",
         out _
-      );
+      ) || !hasProviderContext
+        || !document.RootElement.GetProperty(
+          "runtime"
+        ).TryGetProperty(
+          "generationTimeoutSeconds",
+          out _
+        )
+        || !document.RootElement.GetProperty(
+          "execution"
+        ).TryGetProperty(
+          "maxToolOutputTokens",
+          out _
+        )
+        || !hasCoordinatorModel
+        || !hasMaxRecoveryAttempts;
 
       if (
         document.RootElement.TryGetProperty(

@@ -34,7 +34,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Use exactly one native tool call when a local action is required. "
     + "Before the first local action, call create_execution_plan once with a 1 to 8 step "
     + "checklist. When bridging structured specialist guidance, create one plan step for "
-    + "each guidance action and preserve its id and title. Use revise_execution_plan only "
+    + "each guidance action and preserve its title and order. The Host generates stable "
+    + "step IDs; never invent or return IDs. Use revise_execution_plan only "
     + "when execution facts require changing "
     + "remaining steps. The plan cannot execute commands. "
     + "Before any completed tool result, when no local action is needed, reply exactly "
@@ -52,7 +53,11 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
     + "are intentionally unavailable. "
-    + "Use paths relative to the trusted workspace. Never request deletion, moving, "
+    + "The trusted workspace is already the project root. Use paths relative to it and "
+    + "never prefix a path with the workspace display name or root directory name. Before "
+    + "editing, fixing, or updating existing files, inspect their real paths and contents. "
+    + "Never use create_file as a substitute for editing an existing file. "
+    + "Never request deletion, moving, "
     + "a shell interpreter, command chaining, or access outside the workspace. "
     + "Do not return a prose plan, do not claim execution, and do not stop while the "
     + "specialist guidance still contains an uncompleted local action.";
@@ -117,23 +122,19 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       "local-action-planning",
       cancellationToken
     );
+    var selectedToolCalls = response.ToolCalls.Take(
+      1
+    ).ToArray();
     var assistantMessage = new OllamaToolMessage(
       "assistant",
       response.Content,
       response.Thinking,
-      response.ToolCalls
+      selectedToolCalls
     );
 
     try
     {
-      if (response.ToolCalls.Count > 1)
-      {
-        throw new JsonException(
-          "The coordinator returned more than one native tool call."
-        );
-      }
-
-      if (response.ToolCalls.Count == 0)
+      if (selectedToolCalls.Length == 0)
       {
         if (IsExplicitNoAction(
           response.Content
@@ -170,7 +171,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         );
       }
 
-      var call = response.ToolCalls[0];
+      var call = selectedToolCalls[0];
       var tool = call.Name;
 
       if (
@@ -228,7 +229,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           null
         ),
         assistantMessage,
-        false
+        false,
+        response.ToolCalls.Count - selectedToolCalls.Length
       );
     }
     catch (JsonException exception)
@@ -454,10 +456,6 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           type = "object",
           properties = new
           {
-            id = PlanStringProperty(
-              40,
-              "Unique stable step identifier."
-            ),
             title = PlanStringProperty(
               100,
               "Short single-line description only; do not include commands, code, or executable content."
@@ -465,7 +463,6 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           },
           required = new[]
           {
-            "id",
             "title"
           }
         }
@@ -528,5 +525,6 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 public sealed record LocalActionPlanningResult(
   LocalActionProposal? Proposal,
   OllamaToolMessage AssistantMessage,
-  bool ExplicitNoAction
+  bool ExplicitNoAction,
+  int IgnoredToolCallCount = 0
 );

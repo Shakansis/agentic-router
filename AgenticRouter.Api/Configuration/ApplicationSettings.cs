@@ -8,6 +8,8 @@ public sealed record ApplicationSettings
 
   public string RouterModel { get; init; } = "configure-model";
 
+  public string CoordinatorModel { get; init; } = "configure-model";
+
   public string DefaultModel { get; init; } = "configure-model";
 
   public string DefaultGpu { get; init; } = "auto";
@@ -53,9 +55,11 @@ public sealed record IntentionSettings
 
 public sealed record ContextSettings
 {
-  public int DefaultContextTokens { get; init; } = 8_192;
+  public int DefaultContextTokens { get; init; } = 32_768;
 
-  public int ReservedResponseTokens { get; init; } = 2_048;
+  public int ProviderContextTokens { get; init; } = 40_960;
+
+  public int ReservedResponseTokens { get; init; } = 4_096;
 
   public int MaxConversationMessages { get; init; } = 40;
 }
@@ -69,19 +73,23 @@ public sealed record RuntimeSettings
   public int RuntimeStatusIdleRefreshSeconds { get; init; } = 5;
 
   public int RuntimeStatusActiveRefreshSeconds { get; init; } = 2;
+
+  public int GenerationTimeoutSeconds { get; init; } = 300;
 }
 
 public sealed record ExecutionSettings
 {
   public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 2;
 
-  public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 3;
+  public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
 
   public int MaxCoordinatorHandoffsPerTurn { get; init; } = 1;
 
   public int MaxToolCallsPerTurn { get; init; } = 20;
 
-  public int MaxConsecutiveToolFailures { get; init; } = 3;
+  public int MaxConsecutiveToolFailures { get; init; } = 5;
+
+  public int MaxRecoveryAttemptsPerTurn { get; init; } = 5;
 
   public int MaxTrackedFilesPerSession { get; init; } = 50;
 
@@ -92,6 +100,8 @@ public sealed record ExecutionSettings
   public int MaxSearchFiles { get; init; } = 500;
 
   public int MaxSearchMatches { get; init; } = 200;
+
+  public int MaxToolOutputTokens { get; init; } = 2_048;
 }
 
 public sealed record ProjectAwarenessSettings

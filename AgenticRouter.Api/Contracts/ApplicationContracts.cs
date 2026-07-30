@@ -6,7 +6,8 @@ namespace AgenticRouter.Api.Contracts;
 public sealed record InstalledModel(
   string Name,
   long? SizeBytes,
-  DateTimeOffset? ModifiedAt
+  DateTimeOffset? ModifiedAt,
+  string? Digest = null
 );
 
 public sealed record ProviderError(
@@ -292,6 +293,32 @@ public sealed record ApprovalDecisionResponse(
   string? Diagnostic = null
 );
 
+public sealed record RecoveryDecisionRequest(
+  string Option,
+  string BrowserSessionId,
+  string ExecutionSessionId
+);
+
+public sealed record RecoveryDecisionResponse(
+  string CheckpointId,
+  bool Accepted,
+  string Option,
+  string? Diagnostic = null
+);
+
+public sealed record RecoveryOptionView(
+  string Id,
+  string Label,
+  string Description
+);
+
+public sealed record RecoveryDecisionEvent(
+  string CheckpointId,
+  string ExecutionSessionId,
+  string Reason,
+  IReadOnlyList<RecoveryOptionView> Options
+);
+
 public sealed record LocalActionEvent(
   string ActionId,
   string Tool,
@@ -425,7 +452,8 @@ public sealed record ChatStreamEvent(
   ProviderError? Error,
   LocalActionEvent? LocalAction = null,
   ExecutionSessionSummary? ExecutionSession = null,
-  string? ConversationSessionId = null
+  string? ConversationSessionId = null,
+  RecoveryDecisionEvent? RecoveryDecision = null
 );
 
 public sealed record ValidationErrorsResponse(

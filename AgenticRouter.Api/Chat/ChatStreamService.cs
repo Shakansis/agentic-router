@@ -29,8 +29,10 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IExpertExecutionGuidanceService _expertGuidance;
   private readonly ILocalActionService _actionService;
   private readonly IPlanningFailureClassifier _planningFailureClassifier;
+  private readonly IToolProtocolConformanceService _toolConformance;
   private readonly IApprovalPolicyService _approvalPolicy;
   private readonly IApprovalCoordinator _approvalCoordinator;
+  private readonly IRecoveryDecisionCoordinator _recoveryDecisions;
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IProjectAwarenessService _projectAwareness;
   private readonly IRepositoryInstructionService _repositoryInstructions;
@@ -52,8 +54,10 @@ public sealed class ChatStreamService : IChatStreamService
     IExpertExecutionGuidanceService expertGuidance,
     ILocalActionService actionService,
     IPlanningFailureClassifier planningFailureClassifier,
+    IToolProtocolConformanceService toolConformance,
     IApprovalPolicyService approvalPolicy,
     IApprovalCoordinator approvalCoordinator,
+    IRecoveryDecisionCoordinator recoveryDecisions,
     IExecutionSessionStore executionSessions,
     IProjectAwarenessService projectAwareness,
     IRepositoryInstructionService repositoryInstructions,
@@ -74,8 +78,10 @@ public sealed class ChatStreamService : IChatStreamService
     _expertGuidance = expertGuidance;
     _actionService = actionService;
     _planningFailureClassifier = planningFailureClassifier;
+    _toolConformance = toolConformance;
     _approvalPolicy = approvalPolicy;
     _approvalCoordinator = approvalCoordinator;
+    _recoveryDecisions = recoveryDecisions;
     _executionSessions = executionSessions;
     _projectAwareness = projectAwareness;
     _repositoryInstructions = repositoryInstructions;
@@ -554,27 +560,179 @@ public sealed class ChatStreamService : IChatStreamService
           )
         ).ToArray();
 
+        if (!string.Equals(
+          settings.CoordinatorModel,
+          settings.RouterModel,
+          StringComparison.OrdinalIgnoreCase
+        ))
+        {
+          yield return Event(
+            requestId,
+            "resident-model-eviction-started",
+            $"Evicting resident router model {settings.RouterModel} before coordinator conformance.",
+            stopwatch,
+            settings.RouterModel,
+            intention
+          );
+          recoveryActive = await _residentModel.EvictForRecoveryAsync(
+            settings.CoordinatorModel,
+            cancellationToken
+          );
+          recoveryTarget = settings.CoordinatorModel;
+
+          if (recoveryActive)
+          {
+            yield return Event(
+              requestId,
+              "resident-model-evicted",
+              $"Resident router model {settings.RouterModel} was temporarily evicted for coordinator conformance.",
+              stopwatch,
+              settings.RouterModel,
+              intention
+            );
+          }
+        }
+
         var tooling = await InspectToolingAsync(
           baseUri,
           selectedModel,
           cancellationToken
         );
+        if (!ContainsModel(
+          models,
+          settings.CoordinatorModel
+        ))
+        {
+          throw new ChatStageException(
+            "coordinator-conformance",
+            "The configured tooling coordinator is unavailable.",
+            $"Configured coordinator model '{settings.CoordinatorModel}' was not present in the installed model list.",
+            settings.CoordinatorModel,
+            intention,
+            400,
+            true
+          );
+        }
+
+        var coordinatorTooling = string.Equals(
+          settings.CoordinatorModel,
+          selectedModel,
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? tooling
+          : await InspectToolingAsync(
+            baseUri,
+            settings.CoordinatorModel,
+            cancellationToken
+          );
+        ToolProtocolConformanceResult? coordinatorConformance = null;
+
+        if (coordinatorTooling.Capabilities?.ToolingConfirmed == true)
+        {
+          var coordinatorIdentity = models.First(
+            installed => string.Equals(
+              installed.Name,
+              settings.CoordinatorModel,
+              StringComparison.OrdinalIgnoreCase
+            )
+          );
+          coordinatorConformance = await _toolConformance.VerifyAsync(
+            baseUri,
+            settings.CoordinatorModel,
+            coordinatorIdentity.Digest,
+            cancellationToken
+          );
+        }
+
+        if (coordinatorConformance?.Passed != true)
+        {
+          var coordinatorFailure = coordinatorConformance?.Failure
+            ?? coordinatorTooling.Failure?.Message
+            ?? "Ollama does not advertise native tool support for this model.";
+          yield return Event(
+            requestId,
+            "agent.coordinator-conformance-failed",
+            $"Tooling coordinator {settings.CoordinatorModel} did not pass protocol conformance: {coordinatorFailure}",
+            stopwatch,
+            settings.CoordinatorModel,
+            intention
+          );
+          throw new ChatStageException(
+            "coordinator-conformance",
+            "The configured tooling coordinator did not pass protocol conformance.",
+            coordinatorFailure,
+            settings.CoordinatorModel,
+            intention,
+            null,
+            true
+          );
+        }
+
+        yield return Event(
+          requestId,
+          "agent.coordinator-conformance-passed",
+          $"Tooling coordinator {settings.CoordinatorModel} passed protocol conformance with "
+            + $"Ollama {coordinatorConformance.OllamaVersion} and digest {coordinatorConformance.Digest}.",
+          stopwatch,
+          settings.CoordinatorModel,
+          intention
+        );
         string coordinatorModel;
         List<ChatMessage> executionMessages;
         ExpertExecutionGuidance? executionGuidance = null;
-        var targetCoordinatesDirectly =
+        var toolingAdvertised =
           tooling.Capabilities?.ToolingConfirmed == true;
+        var targetCoordinatesDirectly = false;
 
-        if (targetCoordinatesDirectly)
+        if (toolingAdvertised)
         {
           yield return Event(
             requestId,
             "agent.tooling-advertised",
-            $"Ollama advertises tooling for {selectedModel}; the first valid native tool call will confirm it behaviorally.",
+            $"Ollama advertises tooling for {selectedModel}; behavioral conformance must pass before direct coordination.",
             stopwatch,
             selectedModel,
             intention
           );
+          yield return Event(
+            requestId,
+            "agent.tooling-conformance-started",
+            $"Running native tool protocol conformance for {selectedModel}.",
+            stopwatch,
+            selectedModel,
+            intention
+          );
+          var selectedIdentity = models.First(
+            installed => string.Equals(
+              installed.Name,
+              selectedModel,
+              StringComparison.OrdinalIgnoreCase
+            )
+          );
+          var conformance = await _toolConformance.VerifyAsync(
+            baseUri,
+            selectedModel,
+            selectedIdentity.Digest,
+            cancellationToken
+          );
+          targetCoordinatesDirectly = conformance.Passed;
+          yield return Event(
+            requestId,
+            conformance.Passed
+              ? "agent.tooling-conformance-passed"
+              : "agent.tooling-conformance-failed",
+            conformance.Passed
+              ? $"Tool protocol conformance passed for {selectedModel} with Ollama {conformance.OllamaVersion} and digest {conformance.Digest}."
+              : $"Tool protocol conformance failed for {selectedModel}: {conformance.Failure} "
+                + "The configured coordinator will bridge this turn.",
+            stopwatch,
+            selectedModel,
+            intention
+          );
+        }
+
+        if (targetCoordinatesDirectly)
+        {
           coordinatorModel = selectedModel;
           executionMessages = messages.ToList();
         }
@@ -594,22 +752,22 @@ public sealed class ChatStreamService : IChatStreamService
 
           if (!ContainsModel(
             models,
-            settings.RouterModel
+            settings.CoordinatorModel
           ))
           {
             yield return Event(
               requestId,
               "action.validation-error",
-              $"Resident tooling agent '{settings.RouterModel}' is not installed.",
+              $"Tooling coordinator '{settings.CoordinatorModel}' is not installed.",
               stopwatch,
-              settings.RouterModel,
+              settings.CoordinatorModel,
               intention
             );
             throw new ChatStageException(
               "resident-agent-resolution",
-              "The resident tooling agent is unavailable.",
-              $"Configured resident model '{settings.RouterModel}' was not present in the installed model list.",
-              settings.RouterModel,
+              "The tooling coordinator is unavailable.",
+              $"Configured coordinator model '{settings.CoordinatorModel}' was not present in the installed model list.",
+              settings.CoordinatorModel,
               intention,
               400,
               true
@@ -673,12 +831,12 @@ public sealed class ChatStreamService : IChatStreamService
           yield return Event(
             requestId,
             "agent.resident-bridge-resolved",
-            $"Resident tooling agent: {settings.RouterModel}.",
+            $"Tooling coordinator: {settings.CoordinatorModel}.",
             stopwatch,
-            settings.RouterModel,
+            settings.CoordinatorModel,
             intention
           );
-          coordinatorModel = settings.RouterModel;
+          coordinatorModel = settings.CoordinatorModel;
         }
 
         _executionSession.ResolveCoordinator(
@@ -724,22 +882,22 @@ public sealed class ChatStreamService : IChatStreamService
         {
           if (!ContainsModel(
             models,
-            settings.RouterModel
+            settings.CoordinatorModel
           ))
           {
             yield return Event(
               requestId,
               "action.validation-error",
-              $"Resident tooling agent '{settings.RouterModel}' is not installed.",
+              $"Tooling coordinator '{settings.CoordinatorModel}' is not installed.",
               stopwatch,
-              settings.RouterModel,
+              settings.CoordinatorModel,
               intention
             );
             throw new ChatStageException(
               "resident-agent-resolution",
-              "The resident tooling agent is unavailable.",
-              $"Configured resident model '{settings.RouterModel}' was not present in the installed model list.",
-              settings.RouterModel,
+              "The tooling coordinator is unavailable.",
+              $"Configured coordinator model '{settings.CoordinatorModel}' was not present in the installed model list.",
+              settings.CoordinatorModel,
               intention,
               400,
               true
@@ -811,24 +969,28 @@ public sealed class ChatStreamService : IChatStreamService
           yield return Event(
             requestId,
             "agent.resident-bridge-resolved",
-            $"Resident tooling agent {settings.RouterModel} took over with a reset planning error counter.",
+            $"Tooling coordinator {settings.CoordinatorModel} took over with a reset planning error counter.",
             stopwatch,
-            settings.RouterModel,
+            settings.CoordinatorModel,
             intention
           );
           _executionSession.RecordHandoff(
-            settings.RouterModel,
-            "resident-takeover"
+            settings.CoordinatorModel,
+            "coordinator-takeover"
           );
+          var recoveryAttemptCount = execution.RecoveryAttemptCount;
           execution = new ExecutionProgress(
             residentMessages,
             takeoverGuidance,
             residentToolMessages
-          );
+          )
+          {
+            RecoveryAttemptCount = recoveryAttemptCount
+          };
 
           await foreach (var streamEvent in ExecuteActionsAsync(
             baseUri,
-            settings.RouterModel,
+            settings.CoordinatorModel,
             request,
             requestId,
             intention,
@@ -885,6 +1047,11 @@ public sealed class ChatStreamService : IChatStreamService
       }
 
       var progress = new GenerationProgress();
+
+      if (recoveryActive)
+      {
+        recoveryTarget = selectedModel;
+      }
 
       await foreach (var streamEvent in StreamAttemptAsync(
         baseUri,
@@ -1062,6 +1229,35 @@ public sealed class ChatStreamService : IChatStreamService
         );
       }
 
+      if (recoveryActive && recoveryTarget is not null)
+      {
+        yield return Event(
+          requestId,
+          "resident-model-reload-started",
+          $"Reloading resident router model {settings.RouterModel}.",
+          stopwatch,
+          settings.RouterModel,
+          intention
+        );
+        var restored = await _residentModel.RestoreAfterRecoveryAsync(
+          recoveryTarget,
+          cancellationToken
+        );
+        recoveryActive = false;
+        yield return Event(
+          requestId,
+          restored
+            ? "resident-model-reloaded"
+            : "resident-model-reload-failed",
+          restored
+            ? $"Resident router model {settings.RouterModel} was restored."
+            : $"Resident router model {settings.RouterModel} could not be restored.",
+          stopwatch,
+          settings.RouterModel,
+          intention
+        );
+      }
+
       _executionSession?.Complete(
         _executionSession.HasWarnings
           ? "completed-with-warnings"
@@ -1145,9 +1341,52 @@ public sealed class ChatStreamService : IChatStreamService
     }
 
     var planningFailures = 0;
+    var deniedFingerprints = new HashSet<string>(
+      StringComparer.Ordinal
+    );
 
-    for (var index = 0; index < settings.MaxToolCallsPerTurn; index++)
+    var actionBudget = 0;
+
+    while (true)
     {
+      if (actionBudget >= settings.MaxToolCallsPerTurn)
+      {
+        var checkpoint = CreateRecoveryCheckpoint(
+          requestId,
+          stopwatch,
+          model,
+          intention,
+          $"The execution used its bounded allowance of {settings.MaxToolCallsPerTurn} local actions before all planned work was completed.",
+          recoverySpecialistModel,
+          cancellationToken
+        );
+        yield return checkpoint.Event;
+        var resolution = await ResolveRecoveryDecisionAsync(
+          checkpoint,
+          baseUri,
+          requestId,
+          stopwatch,
+          model,
+          intention,
+          progress,
+          recoverySpecialistModel,
+          cancellationToken
+        );
+
+        foreach (var recoveryEvent in resolution.Events)
+        {
+          yield return recoveryEvent;
+        }
+
+        if (!resolution.ContinueExecution)
+        {
+          yield break;
+        }
+
+        actionBudget = 0;
+      }
+
+      actionBudget++;
       yield return Event(
         requestId,
         "action.planning-started",
@@ -1161,9 +1400,6 @@ public sealed class ChatStreamService : IChatStreamService
       var noActionRequired = false;
       var planHandled = false;
       var proposalCycles = 0;
-      var deniedFingerprints = new HashSet<string>(
-        StringComparer.Ordinal
-      );
       var planningFingerprints = new Dictionary<string, int>(
         StringComparer.Ordinal
       );
@@ -1192,10 +1428,84 @@ public sealed class ChatStreamService : IChatStreamService
 
         if (planning.Failure is not null)
         {
+          var planningFailureCategory = _planningFailureClassifier.Classify(
+            planning.Failure
+          );
+
+          if (planning.Failure is ToolProtocolException protocolFailure)
+          {
+            _executionSession?.RecordPlanningFailure();
+            _logger.LogWarning(
+              protocolFailure,
+              "Native tool protocol failed for coordinator {Model} on request {RequestId}; identical automatic retries are disabled.",
+              model,
+              requestId
+            );
+            yield return Event(
+              requestId,
+              "action.tool-protocol-error",
+              $"Model {model} returned a syntactically invalid native tool call. "
+                + "The same prompt and schema will not be retried automatically.",
+              stopwatch,
+              model,
+              intention
+            );
+
+            if (fallbackToResident)
+            {
+              yield return Event(
+                requestId,
+                "agent.tooling-fallback",
+                $"Native tool coordination for {model} is disabled for this turn after its first protocol failure; "
+                  + "the configured coordinator will take over with a different execution path.",
+                stopwatch,
+                model,
+                intention
+              );
+              progress.PlanningFailure = protocolFailure;
+              yield break;
+            }
+
+            var checkpoint = CreateRecoveryCheckpoint(
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              protocolFailure.TechnicalMessage,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+            yield return checkpoint.Event;
+            var resolution = await ResolveRecoveryDecisionAsync(
+              checkpoint,
+              baseUri,
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              progress,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+
+            foreach (var recoveryEvent in resolution.Events)
+            {
+              yield return recoveryEvent;
+            }
+
+            if (!resolution.ContinueExecution)
+            {
+              yield break;
+            }
+
+            planningFailures = 0;
+            exhaustedFailure = null;
+            planningFingerprints.Clear();
+            continue;
+          }
+
           if (
-            _planningFailureClassifier.Classify(
-              planning.Failure
-            ) == CoordinatorFailureCategory.Provider
+            planningFailureCategory == CoordinatorFailureCategory.Provider
             && planning.Failure is OllamaProviderException providerFailure
           )
           {
@@ -1238,6 +1548,65 @@ public sealed class ChatStreamService : IChatStreamService
             maximumPlanningAttempts,
             requestId
           );
+          var recoveryLimitFailure = RecordRecoveryAttempt(
+            progress,
+            settings,
+            planning.Failure.InnerException?.Message
+              ?? planning.Failure.Message,
+            model,
+            intention
+          );
+
+          if (recoveryLimitFailure is not null)
+          {
+            var checkpoint = CreateRecoveryCheckpoint(
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              recoveryLimitFailure.TechnicalMessage,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+            yield return checkpoint.Event;
+            var resolution = await ResolveRecoveryDecisionAsync(
+              checkpoint,
+              baseUri,
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              progress,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+
+            foreach (var recoveryEvent in resolution.Events)
+            {
+              yield return recoveryEvent;
+            }
+
+            if (!resolution.ContinueExecution)
+            {
+              yield break;
+            }
+
+            planningFailures = 0;
+            exhaustedFailure = null;
+            planningFingerprints.Clear();
+            continue;
+          }
+
+          if (
+            planningFailureCategory == CoordinatorFailureCategory.CorrectablePlanning
+            && !completionAllowed
+            && planningFailures < maximumPlanningAttempts
+          )
+          {
+            progress.ToolMessages.Add(
+              CreateCompletionRejectedMessage()
+            );
+          }
 
           if (planningFailures < maximumPlanningAttempts)
           {
@@ -1251,11 +1620,17 @@ public sealed class ChatStreamService : IChatStreamService
                     ? $" The same invalid response was repeated {repeatedCount} times."
                     : string.Empty
                 )
+                + $" Recovery budget: {progress.RecoveryAttemptCount}/"
+                + $"{settings.MaxRecoveryAttemptsPerTurn}."
                 + $" Retrying with attempt {planningFailures + 1} of "
                 + $"{maximumPlanningAttempts}.",
               stopwatch,
               model,
               intention
+            );
+            await DelayBeforeRecoveryRetryAsync(
+              progress.RecoveryAttemptCount,
+              cancellationToken
             );
           }
 
@@ -1265,11 +1640,23 @@ public sealed class ChatStreamService : IChatStreamService
         var planningResult = planning.Result!;
         var proposal = planningResult.Proposal;
 
+        if (planningResult.IgnoredToolCallCount > 0)
+        {
+          yield return Event(
+            requestId,
+            "action.planning-normalized",
+            $"The coordinator returned {planningResult.IgnoredToolCallCount + 1} native tool calls; "
+              + "only the first call was retained for validation and the remaining calls were ignored.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
+
         if (proposal is null)
         {
           if (
             planningResult.ExplicitNoAction
-            && progress.Guidance?.ActionRequired == true
             && !completionAllowed
           )
           {
@@ -1280,13 +1667,56 @@ public sealed class ChatStreamService : IChatStreamService
             planningFailures++;
             _executionSession?.RecordPlanningFailure();
             exhaustedFailure = completionFailure;
+            var recoveryLimitFailure = RecordRecoveryAttempt(
+              progress,
+              settings,
+              completionFailure.Message,
+              model,
+              intention
+            );
+
+            if (recoveryLimitFailure is not null)
+            {
+              var checkpoint = CreateRecoveryCheckpoint(
+                requestId,
+                stopwatch,
+                model,
+                intention,
+                recoveryLimitFailure.TechnicalMessage,
+                recoverySpecialistModel,
+                cancellationToken
+              );
+              yield return checkpoint.Event;
+              var resolution = await ResolveRecoveryDecisionAsync(
+                checkpoint,
+                baseUri,
+                requestId,
+                stopwatch,
+                model,
+                intention,
+                progress,
+                recoverySpecialistModel,
+                cancellationToken
+              );
+
+              foreach (var recoveryEvent in resolution.Events)
+              {
+                yield return recoveryEvent;
+              }
+
+              if (!resolution.ContinueExecution)
+              {
+                yield break;
+              }
+
+              planningFailures = 0;
+              exhaustedFailure = null;
+              planningFingerprints.Clear();
+              continue;
+            }
+
             progress.ToolMessages.Add(
-              new OllamaToolMessage(
-                "user",
-                "EXECUTION_COMPLETION_REJECTED\n"
-                  + "The structured specialist brief still requires local actions. "
-                  + "Call the next pending tool and do not answer with prose."
-              )
+              CreateCompletionRejectedMessage()
             );
 
             if (planningFailures < maximumPlanningAttempts)
@@ -1295,10 +1725,16 @@ public sealed class ChatStreamService : IChatStreamService
                 requestId,
                 "action.planning-retry",
                 $"Planning attempt {planningFailures} of {maximumPlanningAttempts} stopped before pending specialist actions were executed. "
+                  + $"Recovery budget: {progress.RecoveryAttemptCount}/"
+                  + $"{settings.MaxRecoveryAttemptsPerTurn}. "
                   + $"Retrying with attempt {planningFailures + 1} of {maximumPlanningAttempts}.",
                 stopwatch,
                 model,
                 intention
+              );
+              await DelayBeforeRecoveryRetryAsync(
+                progress.RecoveryAttemptCount,
+                cancellationToken
               );
             }
 
@@ -1368,6 +1804,7 @@ public sealed class ChatStreamService : IChatStreamService
                 $"Visible plan accepted with {plan!.Steps.Count} steps."
               )
             );
+            progress.RecoveryAttemptCount = 0;
             planHandled = true;
             break;
           }
@@ -1438,10 +1875,17 @@ public sealed class ChatStreamService : IChatStreamService
           exception
         );
 
-        if (failureCategory == CoordinatorFailureCategory.PolicyDenied)
+        if (
+          failureCategory is CoordinatorFailureCategory.PolicyDenied
+            or CoordinatorFailureCategory.ToolExecution
+          || (
+            failureCategory == CoordinatorFailureCategory.SecurityDenied
+            && exception.Stage == "path-validation"
+          )
+        )
         {
           _executionSession?.AddWarning(
-            $"Policy denied {proposal.Tool}: {exception.Message}"
+            $"Action denied {proposal.Tool}: {exception.Message}"
           );
           var fingerprint = string.Concat(
             proposal.Tool,
@@ -1453,26 +1897,132 @@ public sealed class ChatStreamService : IChatStreamService
             fingerprint
           ))
           {
+            var repeatedDenial =
+              $"{proposal.Tool}: the coordinator repeated an identical denied proposal; execution remains blocked.";
             yield return Event(
               requestId,
-              "action.policy-denied",
-              $"{proposal.Tool}: the coordinator repeated an identical denied proposal; execution was blocked.",
+              failureCategory switch
+              {
+                CoordinatorFailureCategory.SecurityDenied => "action.security-denied",
+                CoordinatorFailureCategory.ToolExecution => "action.validation-error",
+                _ => "action.policy-denied"
+              },
+              repeatedDenial,
               stopwatch,
               model,
               intention
             );
-            progress.Failure = ToChatException(
-              exception,
-              model,
-              intention
+            var denialMessage = new ChatMessage(
+              "user",
+              $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: policy-denied\n"
+                + $"Output:\n{exception.Message} The repeated action was not executed. "
+                + "Choose a materially different safe alternative."
             );
-            yield break;
+            progress.Messages.Add(
+              denialMessage
+            );
+            progress.ToolMessages.Add(
+              ToToolMessage(
+                denialMessage
+              )
+            );
+            var checkpoint = CreateRecoveryCheckpoint(
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              repeatedDenial,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+            yield return checkpoint.Event;
+            var resolution = await ResolveRecoveryDecisionAsync(
+              checkpoint,
+              baseUri,
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              progress,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+
+            foreach (var recoveryEvent in resolution.Events)
+            {
+              yield return recoveryEvent;
+            }
+
+            if (!resolution.ContinueExecution)
+            {
+              yield break;
+            }
+
+            planningFailures = 0;
+            exhaustedFailure = null;
+            planningFingerprints.Clear();
+            continue;
+          }
+
+          var recoveryLimitFailure = RecordRecoveryAttempt(
+            progress,
+            settings,
+            exception.Message,
+            model,
+            intention
+          );
+
+          if (recoveryLimitFailure is not null)
+          {
+            var checkpoint = CreateRecoveryCheckpoint(
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              recoveryLimitFailure.TechnicalMessage,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+            yield return checkpoint.Event;
+            var resolution = await ResolveRecoveryDecisionAsync(
+              checkpoint,
+              baseUri,
+              requestId,
+              stopwatch,
+              model,
+              intention,
+              progress,
+              recoverySpecialistModel,
+              cancellationToken
+            );
+
+            foreach (var recoveryEvent in resolution.Events)
+            {
+              yield return recoveryEvent;
+            }
+
+            if (!resolution.ContinueExecution)
+            {
+              yield break;
+            }
+
+            planningFailures = 0;
+            exhaustedFailure = null;
+            planningFingerprints.Clear();
+            continue;
           }
 
           yield return Event(
             requestId,
-            "action.policy-denied",
-            $"{proposal.Tool}: {exception.Message} The coordinator may propose a corrected safe action.",
+            failureCategory switch
+            {
+              CoordinatorFailureCategory.SecurityDenied => "action.security-denied",
+              CoordinatorFailureCategory.ToolExecution => "action.validation-error",
+              _ => "action.policy-denied"
+            },
+            $"{proposal.Tool}: {exception.Message} The action was not permitted and was not executed. "
+              + $"The coordinator may propose a corrected safe action. Recovery budget: "
+              + $"{progress.RecoveryAttemptCount}/{settings.MaxRecoveryAttemptsPerTurn}.",
             stopwatch,
             model,
             intention
@@ -1481,8 +2031,13 @@ public sealed class ChatStreamService : IChatStreamService
             new ChatMessage(
               "user",
               $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: policy-denied\n"
-                + $"Output:\n{exception.Message} Do not repeat the denied proposal; choose a safe alternative."
+                + $"Output:\n{exception.Message} The action was not executed. "
+                + "Do not repeat the denied proposal; choose a safe alternative inside the trusted workspace."
             )
+          );
+          await DelayBeforeRecoveryRetryAsync(
+            progress.RecoveryAttemptCount,
+            cancellationToken
           );
           continue;
         }
@@ -1508,6 +2063,53 @@ public sealed class ChatStreamService : IChatStreamService
         planningFailures++;
         _executionSession?.RecordPlanningFailure();
         exhaustedFailure = exception;
+        var planningRecoveryLimitFailure = RecordRecoveryAttempt(
+          progress,
+          settings,
+          exception.Message,
+          model,
+          intention
+        );
+
+        if (planningRecoveryLimitFailure is not null)
+        {
+          var checkpoint = CreateRecoveryCheckpoint(
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            planningRecoveryLimitFailure.TechnicalMessage,
+            recoverySpecialistModel,
+            cancellationToken
+          );
+          yield return checkpoint.Event;
+          var resolution = await ResolveRecoveryDecisionAsync(
+            checkpoint,
+            baseUri,
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            progress,
+            recoverySpecialistModel,
+            cancellationToken
+          );
+
+          foreach (var recoveryEvent in resolution.Events)
+          {
+            yield return recoveryEvent;
+          }
+
+          if (!resolution.ContinueExecution)
+          {
+            yield break;
+          }
+
+          planningFailures = 0;
+          exhaustedFailure = null;
+          planningFingerprints.Clear();
+          continue;
+        }
 
         if (planningFailures < maximumPlanningAttempts)
         {
@@ -1515,11 +2117,16 @@ public sealed class ChatStreamService : IChatStreamService
             requestId,
             "action.planning-retry",
             $"Planning attempt {planningFailures} of {maximumPlanningAttempts} produced an invalid action: "
-              + $"{exception.Message} Retrying with attempt {planningFailures + 1} of "
+              + $"{exception.Message} Recovery budget: {progress.RecoveryAttemptCount}/"
+              + $"{settings.MaxRecoveryAttemptsPerTurn}. Retrying with attempt {planningFailures + 1} of "
               + $"{maximumPlanningAttempts}.",
             stopwatch,
             model,
-            intention
+              intention
+            );
+          await DelayBeforeRecoveryRetryAsync(
+            progress.RecoveryAttemptCount,
+            cancellationToken
           );
         }
       }
@@ -1566,18 +2173,46 @@ public sealed class ChatStreamService : IChatStreamService
 
         yield return Event(
           requestId,
-          "action.validation-error",
-          $"Local action planning failed after {maximumPlanningAttempts} attempts: {exception.Message}",
+          "action.planning-exhausted",
+          $"Local action planning exhausted its {maximumPlanningAttempts} automatic attempts: {exception.Message}",
           stopwatch,
           model,
           intention
         );
-        progress.Failure = ToPlanningChatException(
-          exception,
+        var checkpoint = CreateRecoveryCheckpoint(
+          requestId,
+          stopwatch,
           model,
-          intention
+          intention,
+          exception.Message,
+          recoverySpecialistModel,
+          cancellationToken
         );
-        yield break;
+        yield return checkpoint.Event;
+        var resolution = await ResolveRecoveryDecisionAsync(
+          checkpoint,
+          baseUri,
+          requestId,
+          stopwatch,
+          model,
+          intention,
+          progress,
+          recoverySpecialistModel,
+          cancellationToken
+        );
+
+        foreach (var recoveryEvent in resolution.Events)
+        {
+          yield return recoveryEvent;
+        }
+
+        if (!resolution.ContinueExecution)
+        {
+          yield break;
+        }
+
+        planningFailures = 0;
+        continue;
       }
 
       var action = validatedAction;
@@ -1844,6 +2479,7 @@ public sealed class ChatStreamService : IChatStreamService
           result.Output
         );
         _executionSession?.RecordToolSuccess();
+        progress.RecoveryAttemptCount = 0;
         _executionSession?.RecordPlanActionResult(
           action.Tool,
           "completed"
@@ -1976,6 +2612,77 @@ public sealed class ChatStreamService : IChatStreamService
         }
 
         if (
+          exception is LocalActionException terminalConflict
+          && terminalConflict.Stage == "file-conflict"
+        )
+        {
+          _executionSession?.RecordPlanActionResult(
+            action.Tool,
+            "blocked"
+          );
+          yield return Event(
+            requestId,
+            "execution-step-blocked",
+            $"Plan step blocked because the target changed outside this execution: {action.Summary}.",
+            stopwatch,
+            model,
+            intention
+          );
+          progress.Failure = ToChatException(
+            terminalConflict,
+            model,
+            intention
+          );
+          yield break;
+        }
+
+        var recoveryLimitFailure = RecordRecoveryAttempt(
+          progress,
+          settings,
+          failureOutput,
+          model,
+          intention
+        );
+
+        if (recoveryLimitFailure is not null)
+        {
+          var checkpoint = CreateRecoveryCheckpoint(
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            recoveryLimitFailure.TechnicalMessage,
+            recoverySpecialistModel,
+            cancellationToken
+          );
+          yield return checkpoint.Event;
+          var resolution = await ResolveRecoveryDecisionAsync(
+            checkpoint,
+            baseUri,
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            progress,
+            recoverySpecialistModel,
+            cancellationToken
+          );
+
+          foreach (var recoveryEvent in resolution.Events)
+          {
+            yield return recoveryEvent;
+          }
+
+          if (!resolution.ContinueExecution)
+          {
+            yield break;
+          }
+
+          planningFailures = 0;
+          continue;
+        }
+
+        if (
           _executionSession is not null
           && _executionSession.CreateSummary().ConsecutiveToolFailureCount
             >= settings.MaxConsecutiveToolFailures
@@ -1995,25 +2702,36 @@ public sealed class ChatStreamService : IChatStreamService
 
         if (!string.IsNullOrWhiteSpace(
           recoverySpecialistModel
-        ))
+        ) && progress.AutomaticStrategyRevisionCount < 2)
         {
           yield return Event(
             requestId,
             "agent.execution-recovery-started",
-            $"Execution failure sent to specialist model {recoverySpecialistModel} for revised guidance.",
+            $"The resident coordinator asked specialist model {recoverySpecialistModel} for a materially different strategy.",
             stopwatch,
             recoverySpecialistModel,
             intention
           );
-          var guidance = await TryPrepareGuidanceAsync(
+          var guidance = await TryPrepareSupervisedGuidanceAsync(
             baseUri,
             recoverySpecialistModel,
-            progress.Messages,
+            action,
+            failureOutput,
+            progress,
             cancellationToken
           );
 
           if (guidance.Guidance is not null)
           {
+            progress.Messages.RemoveAll(
+              IsGuidanceMessage
+            );
+            progress.ToolMessages.RemoveAll(
+              message => message.Content?.StartsWith(
+                ExpertExecutionGuidanceService.GuidanceMarker,
+                StringComparison.Ordinal
+              ) == true
+            );
             var guidanceMessage = GuidanceMessage(
               recoverySpecialistModel,
               guidance.Guidance
@@ -2030,7 +2748,37 @@ public sealed class ChatStreamService : IChatStreamService
             yield return Event(
               requestId,
               "agent.execution-recovery-guidance-prepared",
-              $"Revised execution guidance received from specialist model {recoverySpecialistModel}.",
+              guidance.RejectedUnchangedCandidate
+                ? $"A materially different strategy was received from specialist model {recoverySpecialistModel} after rejecting an unchanged first response."
+                : $"A materially different strategy was received from specialist model {recoverySpecialistModel}.",
+              stopwatch,
+              recoverySpecialistModel,
+              intention
+            );
+          }
+          else if (guidance.RepeatedPreviousStrategy)
+          {
+            var correction = new ChatMessage(
+              "user",
+              "RESIDENT_STRATEGY_SUPERVISION_RESULT\n"
+                + "The specialist repeated the previous strategy twice, so that strategy was rejected. "
+                + "Replan from the authoritative tool results. Preserve completed work, do not recreate "
+                + "the project, do not repeat failed paths or actions, and choose a materially different "
+                + "bounded next action."
+            );
+            progress.Messages.Add(
+              correction
+            );
+            progress.ToolMessages.Add(
+              ToToolMessage(
+                correction
+              )
+            );
+            yield return Event(
+              requestId,
+              "agent.execution-recovery-guidance-unchanged",
+              $"Specialist model {recoverySpecialistModel} repeated the previous strategy twice. "
+                + "The duplicate strategy was rejected and the active coordinator received a host-owned correction.",
               stopwatch,
               recoverySpecialistModel,
               intention
@@ -2058,30 +2806,116 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "action.recovery-planning",
-          $"Execution failed for {action.Tool}; the result was returned to the active coordinator for replanning.",
+          $"Execution failed for {action.Tool}; the result was returned to the active coordinator for replanning. "
+            + $"Recovery budget: {progress.RecoveryAttemptCount}/{settings.MaxRecoveryAttemptsPerTurn}.",
           stopwatch,
           model,
           intention
         );
+        await DelayBeforeRecoveryRetryAsync(
+          progress.RecoveryAttemptCount,
+          cancellationToken
+        );
       }
     }
 
-    progress.Failure = new ChatStageException(
-      "local-action-limit",
-      $"The request reached the limit of {settings.MaxToolCallsPerTurn} local actions.",
-      "The bounded Execute loop stopped before another action could be planned.",
-      model,
-      intention,
-      400,
-      true
+  }
+
+  private async Task<SupervisedGuidanceAttempt> TryPrepareSupervisedGuidanceAsync(
+    Uri baseUri,
+    string specialistModel,
+    ValidatedLocalAction failedAction,
+    string failureOutput,
+    ExecutionProgress progress,
+    CancellationToken cancellationToken
+  )
+  {
+    progress.AutomaticStrategyRevisionCount++;
+    var previousGuidance = progress.Guidance is null
+      ? null
+      : ExpertExecutionGuidanceService.Serialize(
+        progress.Guidance
+      );
+    var pendingSteps = _executionSession?.Plan?.Steps.Where(
+      step => step.Status != "completed"
+    ).Select(
+      step => $"{step.Id}: {step.Title} [{step.Status}]"
+    ).ToArray() ?? [];
+    var revisionMessages = progress.Messages.Where(
+      message => !IsGuidanceMessage(
+        message
+      )
+    ).ToList();
+    revisionMessages.Add(
+      new ChatMessage(
+        "user",
+        "RESIDENT_STRATEGY_SUPERVISION\n"
+          + "The resident coordinator detected execution without verified progress and is requesting "
+          + "a different specialist approach.\n"
+          + $"Failed action: {failedAction.Summary}\n"
+          + $"Authoritative failure: {TruncateRecoveryContext(failureOutput)}\n"
+          + $"Pending plan: {(pendingSteps.Length == 0 ? "none" : string.Join("; ", pendingSteps))}\n"
+          + "The trusted workspace is already the project root. Preserve completed work and existing "
+          + "files. Do not recreate the project, do not repeat the failed tool or path unchanged, and "
+          + "do not use create_file when an existing file should be inspected or edited. Return a "
+          + "materially different structured strategy focused on the smallest corrective action."
+      )
     );
-    yield return Event(
-      requestId,
-      "action.validation-error",
-      progress.Failure.Message,
-      stopwatch,
-      model,
-      intention
+    var guidance = await TryPrepareGuidanceAsync(
+      baseUri,
+      specialistModel,
+      revisionMessages,
+      cancellationToken
+    );
+    var rejectedUnchangedCandidate = false;
+
+    if (
+      guidance.Guidance is not null
+      && previousGuidance is not null
+      && string.Equals(
+        ExpertExecutionGuidanceService.Serialize(
+          guidance.Guidance
+        ),
+        previousGuidance,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      rejectedUnchangedCandidate = true;
+      revisionMessages.Add(
+        new ChatMessage(
+          "user",
+          "RESIDENT_STRATEGY_SUPERVISION_REJECTED\n"
+            + "The proposed strategy is identical to the strategy that already failed and was not accepted. "
+            + "Change the tool, path, sequence, or arguments to address the authoritative failure. "
+            + "Do not return the same JSON again."
+        )
+      );
+      guidance = await TryPrepareGuidanceAsync(
+        baseUri,
+        specialistModel,
+        revisionMessages,
+        cancellationToken
+      );
+    }
+
+    var repeatedPreviousStrategy = guidance.Guidance is not null
+      && previousGuidance is not null
+      && string.Equals(
+        ExpertExecutionGuidanceService.Serialize(
+          guidance.Guidance
+        ),
+        previousGuidance,
+        StringComparison.Ordinal
+      );
+
+    return new SupervisedGuidanceAttempt(
+      repeatedPreviousStrategy
+        ? null
+        : guidance.Guidance,
+      guidance.Failure,
+      rejectedUnchangedCandidate,
+      repeatedPreviousStrategy
     );
   }
 
@@ -2330,31 +3164,6 @@ public sealed class ChatStreamService : IChatStreamService
         exception
       );
     }
-  }
-
-  private static ChatStageException ToPlanningChatException(
-    Exception exception,
-    string? model,
-    string? intention
-  )
-  {
-    return exception switch
-    {
-      LocalActionException localAction => ToChatException(
-        localAction,
-        model,
-        intention
-      ),
-      OllamaProviderException provider => ToChatException(
-        provider,
-        model,
-        intention
-      ),
-      _ => throw new InvalidOperationException(
-        "Unexpected local action planning exception.",
-        exception
-      )
-    };
   }
 
   private static async Task<ValidationAttempt> TryValidateAsync(
@@ -2656,11 +3465,482 @@ public sealed class ChatStreamService : IChatStreamService
       : completedActions >= progress.Guidance.Actions.Count;
   }
 
+  private OllamaToolMessage CreateCompletionRejectedMessage()
+  {
+    var pendingSteps = _executionSession?.Plan?.Steps.Where(
+      step => step.Status != "completed"
+    ).Select(
+      step => $"{step.Id}: {step.Title}"
+    ).ToArray() ?? [];
+    var requirement = pendingSteps.Length == 0
+      ? "No valid completed execution plan is stored. Call create_execution_plan with the required remaining work."
+      : $"The visible execution plan still has pending steps: {string.Join("; ", pendingSteps)}. "
+        + "Call exactly one available tool for the next required step.";
+    return new OllamaToolMessage(
+      "user",
+      $"EXECUTION_COMPLETION_REJECTED\n{requirement} Do not answer with prose."
+    );
+  }
+
+  private RecoveryCheckpoint CreateRecoveryCheckpoint(
+    string requestId,
+    Stopwatch stopwatch,
+    string model,
+    string intention,
+    string reason,
+    string? recoverySpecialistModel,
+    CancellationToken cancellationToken
+  )
+  {
+    var executionSession = _executionSession
+      ?? throw new InvalidOperationException(
+        "A recovery checkpoint requires an active execution session."
+      );
+    var checkpointId = Guid.NewGuid().ToString(
+      "N"
+    );
+    var options = new List<RecoveryOptionView>
+    {
+      new(
+        "retry",
+        "Tentar novamente",
+        "Repassa o erro e o plano pendente ao agente ativo, com um novo limite de tentativas."
+      )
+    };
+
+    var recoveryAdvisorModel = recoverySpecialistModel ?? model;
+    options.Add(
+      new RecoveryOptionView(
+        "specialist",
+        "Pedir nova estratégia",
+        $"Solicita ao modelo {recoveryAdvisorModel} uma estratégia revisada antes de retomar."
+      )
+    );
+
+    options.Add(
+      new RecoveryOptionView(
+        "stop",
+        "Encerrar e manter alterações",
+        "Interrompe novas ações, preserva os arquivos atuais e produz um resumo parcial."
+      )
+    );
+    var allowedOptions = options.Select(
+      option => option.Id
+    ).ToHashSet(
+      StringComparer.Ordinal
+    );
+    var decisionTask = _recoveryDecisions.WaitAsync(
+      checkpointId,
+      executionSession.BrowserSessionId,
+      executionSession.Id,
+      allowedOptions,
+      cancellationToken
+    );
+    var streamEvent = Event(
+      requestId,
+      "action.recovery-decision-required",
+      "Automatic recovery reached its bounded limit. Choose how the agent should continue.",
+      stopwatch,
+      model,
+      intention
+    ) with
+    {
+      RecoveryDecision = new RecoveryDecisionEvent(
+        checkpointId,
+        executionSession.Id,
+        reason,
+        options
+      )
+    };
+
+    return new RecoveryCheckpoint(
+      streamEvent,
+      decisionTask,
+      reason
+    );
+  }
+
+  private ChatMessage CreateRecoveryDecisionMessage(
+    string option,
+    RecoveryCheckpoint checkpoint,
+    ExecutionProgress progress
+  )
+  {
+    var pendingSteps = _executionSession?.Plan?.Steps.Where(
+      step => step.Status != "completed"
+    ).Select(
+      step => $"{step.Id}: {step.Title} [{step.Status}]"
+    ).ToArray() ?? [];
+    var pendingPlan = pendingSteps.Length == 0
+      ? "No accepted visible plan is currently available."
+      : string.Join(
+        "; ",
+        pendingSteps
+      );
+    var previousGuidance = progress.Guidance is null
+      ? "No previous specialist strategy is available."
+      : TruncateRecoveryContext(
+        ExpertExecutionGuidanceService.Serialize(
+          progress.Guidance
+        )
+      );
+    var marker = option == "specialist"
+      ? "RECOVERY_STRATEGY_REVISION"
+      : "RECOVERY_DECISION";
+
+    return new ChatMessage(
+      "user",
+      $"{marker}\n"
+        + $"Option: {option}\n"
+        + $"Exact failure to correct:\n{TruncateRecoveryContext(checkpoint.Reason)}\n"
+        + $"Pending visible plan:\n{pendingPlan}\n"
+        + $"Previous specialist strategy:\n{previousGuidance}\n"
+        + "Do not repeat the failed proposal. Address the exact failure before continuing. "
+        + "When creating or revising an execution plan, every step must contain non-empty string id and title fields. "
+        + (
+          option == "specialist"
+            ? "Return a materially revised structured strategy, not the previous strategy again."
+            : "Propose a materially corrected next action."
+        )
+    );
+  }
+
+  private static bool IsGuidanceMessage(
+    ChatMessage message
+  )
+  {
+    return message.Content.StartsWith(
+      ExpertExecutionGuidanceService.GuidanceMarker,
+      StringComparison.Ordinal
+    );
+  }
+
+  private static string TruncateRecoveryContext(
+    string value
+  )
+  {
+    const int maximumLength = 12_000;
+    return value.Length <= maximumLength
+      ? value
+      : $"{value[..maximumLength]}\n[recovery context truncated]";
+  }
+
+  private async Task<RecoveryResolution> ResolveRecoveryDecisionAsync(
+    RecoveryCheckpoint checkpoint,
+    Uri baseUri,
+    string requestId,
+    Stopwatch stopwatch,
+    string model,
+    string intention,
+    ExecutionProgress progress,
+    string? recoverySpecialistModel,
+    CancellationToken cancellationToken
+  )
+  {
+    var option = await checkpoint.DecisionTask;
+    var events = new List<ChatStreamEvent>();
+
+    if (option == "stop")
+    {
+      const string message =
+        "Execution stopped by the user at the recovery checkpoint. Existing changes were preserved.";
+      _executionSession?.AddWarning(
+        message
+      );
+      progress.Messages.Add(
+        new ChatMessage(
+          "user",
+          "RECOVERY_DECISION\nOption: stop\n"
+            + "Stop proposing local actions. Preserve existing changes and report the partial result."
+        )
+      );
+      events.Add(
+        Event(
+          requestId,
+          "action.recovery-stopped",
+          message,
+          stopwatch,
+          model,
+          intention
+        )
+      );
+      return new RecoveryResolution(
+        false,
+        events
+      );
+    }
+
+    progress.RecoveryAttemptCount = 0;
+    progress.PlanningFailure = null;
+    var decisionMessage = CreateRecoveryDecisionMessage(
+      option,
+      checkpoint,
+      progress
+    );
+    progress.Messages.Add(
+      decisionMessage
+    );
+    progress.ToolMessages.Add(
+      ToToolMessage(
+        decisionMessage
+      )
+    );
+
+    if (option == "specialist")
+    {
+      var recoveryAdvisorModel = recoverySpecialistModel ?? model;
+      events.Add(
+        Event(
+          requestId,
+          "agent.execution-recovery-started",
+          $"The user requested a revised strategy from model {recoveryAdvisorModel}.",
+          stopwatch,
+          recoveryAdvisorModel,
+          intention
+        )
+      );
+      var previousGuidance = progress.Guidance is null
+        ? null
+        : ExpertExecutionGuidanceService.Serialize(
+          progress.Guidance
+        );
+      var revisionMessages = progress.Messages.Where(
+        message => !message.Content.StartsWith(
+          ExpertExecutionGuidanceService.GuidanceMarker,
+          StringComparison.Ordinal
+        )
+      ).ToList();
+      var guidance = await TryPrepareGuidanceAsync(
+        baseUri,
+        recoveryAdvisorModel,
+        revisionMessages,
+        cancellationToken
+      );
+      var rejectedUnchangedCandidate = false;
+
+      if (
+        guidance.Guidance is not null
+        && previousGuidance is not null
+        && string.Equals(
+          ExpertExecutionGuidanceService.Serialize(
+            guidance.Guidance
+          ),
+          previousGuidance,
+          StringComparison.Ordinal
+        )
+      )
+      {
+        rejectedUnchangedCandidate = true;
+        revisionMessages.Add(
+          new ChatMessage(
+            "user",
+            "RECOVERY_STRATEGY_REVISION_REJECTED\n"
+              + "The proposed strategy was identical to the previous strategy and was not accepted. "
+              + "Return a materially revised brief that directly addresses the reported failure. "
+              + "Change the action titles, sequence, tool choice, or arguments as needed; do not repeat the same JSON."
+          )
+        );
+        guidance = await TryPrepareGuidanceAsync(
+          baseUri,
+          recoveryAdvisorModel,
+          revisionMessages,
+          cancellationToken
+        );
+      }
+
+      if (guidance.Guidance is not null)
+      {
+        var revisedGuidance = ExpertExecutionGuidanceService.Serialize(
+          guidance.Guidance
+        );
+
+        if (
+          previousGuidance is not null
+          && string.Equals(
+            revisedGuidance,
+            previousGuidance,
+            StringComparison.Ordinal
+          )
+        )
+        {
+          events.Add(
+            Event(
+              requestId,
+              "agent.execution-recovery-guidance-unchanged",
+              $"Model {recoveryAdvisorModel} repeated the previous strategy after two bounded revision attempts. "
+                + "The duplicate strategy was not accepted; the active coordinator will retry using the explicit failure context.",
+              stopwatch,
+              recoveryAdvisorModel,
+              intention
+            )
+          );
+        }
+        else
+        {
+          progress.Messages.RemoveAll(
+            IsGuidanceMessage
+          );
+          progress.ToolMessages.RemoveAll(
+            message => message.Content?.StartsWith(
+              ExpertExecutionGuidanceService.GuidanceMarker,
+              StringComparison.Ordinal
+            ) == true
+          );
+          var guidanceMessage = GuidanceMessage(
+            recoveryAdvisorModel,
+            guidance.Guidance
+          );
+          progress.Messages.Add(
+            guidanceMessage
+          );
+          progress.ToolMessages.Add(
+            ToToolMessage(
+              guidanceMessage
+            )
+          );
+          progress.Guidance = guidance.Guidance;
+          events.Add(
+            Event(
+              requestId,
+              "agent.execution-recovery-guidance-prepared",
+              rejectedUnchangedCandidate
+                ? $"A materially revised strategy was received from model {recoveryAdvisorModel} after rejecting an unchanged first response."
+                : $"A materially revised strategy was received from model {recoveryAdvisorModel}.",
+              stopwatch,
+              recoveryAdvisorModel,
+              intention
+            )
+          );
+        }
+      }
+      else
+      {
+        _logger.LogWarning(
+          guidance.Failure,
+          "User-requested recovery guidance was unavailable for model {Model}; the coordinator will retry directly.",
+          recoveryAdvisorModel
+        );
+        events.Add(
+          Event(
+            requestId,
+            "agent.execution-recovery-guidance-unavailable",
+            $"The requested specialist strategy was unavailable: {guidance.Failure!.Message} "
+              + "The active coordinator will retry with the recorded failure context.",
+            stopwatch,
+            recoveryAdvisorModel,
+            intention
+          )
+        );
+      }
+    }
+
+    events.Add(
+      Event(
+        requestId,
+        "action.recovery-resumed",
+        option == "specialist"
+          ? "Execution resumed with a fresh bounded recovery budget and explicit failure context."
+          : "Execution resumed with a fresh bounded recovery budget and strengthened failure context.",
+        stopwatch,
+        model,
+        intention
+      )
+    );
+    return new RecoveryResolution(
+      true,
+      events
+    );
+  }
+
+  private static ChatStageException? RecordRecoveryAttempt(
+    ExecutionProgress progress,
+    ExecutionSettings settings,
+    string detail,
+    string model,
+    string intention
+  )
+  {
+    progress.RecoveryAttemptCount++;
+
+    if (
+      progress.RecoveryAttemptCount
+      < settings.MaxRecoveryAttemptsPerTurn
+    )
+    {
+      return null;
+    }
+
+    return new ChatStageException(
+      "local-action-recovery-limit",
+      $"The request reached the limit of {settings.MaxRecoveryAttemptsPerTurn} recovery attempts.",
+      detail,
+      model,
+      intention,
+      400,
+      true
+    );
+  }
+
+  private static Task DelayBeforeRecoveryRetryAsync(
+    int recoveryAttemptCount,
+    CancellationToken cancellationToken
+  )
+  {
+    var exponent = Math.Clamp(
+      recoveryAttemptCount - 1,
+      0,
+      3
+    );
+    var delayMilliseconds = Math.Min(
+      1_200,
+      150 * (1 << exponent)
+    );
+    return Task.Delay(
+      delayMilliseconds,
+      cancellationToken
+    );
+  }
+
   private static string FormatActivityOutput(
     ValidatedLocalAction action,
     string output
   )
   {
+    if (action.Tool == "read_file")
+    {
+      return $"Read file: {Path.GetFileName(action.TargetPath)}.";
+    }
+
+    if (action.Tool == "get_file_info")
+    {
+      return $"Inspected: {Path.GetFileName(action.TargetPath)}.";
+    }
+
+    if (action.Tool == "search_text")
+    {
+      return $"Search completed in '{action.Summary["search_text: ".Length..]}'";
+    }
+
+    if (action.Tool == "list_files")
+    {
+      var files = output.Split(
+        [
+          '\r',
+          '\n'
+        ],
+        StringSplitOptions.RemoveEmptyEntries
+      );
+      const int maximumVisibleFiles = 50;
+      var visibleFiles = files.Take(
+        maximumVisibleFiles
+      );
+      var suffix = files.Length > maximumVisibleFiles
+        ? $"\nâ€¦ and {files.Length - maximumVisibleFiles} more."
+        : string.Empty;
+
+      return $"{action.Summary}\n{string.Join("\n", visibleFiles)}{suffix}";
+    }
+
     const int limit = 8_000;
     var safeOutput = output.Length <= limit
       ? output
@@ -2790,10 +4070,13 @@ public sealed class ChatStreamService : IChatStreamService
       );
       return null;
     }
+    catch (LocalActionException exception)
+    {
+      return exception;
+    }
     catch (Exception exception) when (
       exception is IOException
       or UnauthorizedAccessException
-      or LocalActionException
     )
     {
       return new LocalActionException(
@@ -2956,6 +4239,10 @@ public sealed class ChatStreamService : IChatStreamService
     public ChatStageException? Failure { get; set; }
 
     public Exception? PlanningFailure { get; set; }
+
+    public int RecoveryAttemptCount { get; set; }
+
+    public int AutomaticStrategyRevisionCount { get; set; }
   }
 
   private sealed record PlanningAttempt(
@@ -2966,6 +4253,17 @@ public sealed class ChatStreamService : IChatStreamService
   private sealed record ValidationAttempt(
     ValidatedLocalAction? Action,
     LocalActionException? Failure
+  );
+
+  private sealed record RecoveryCheckpoint(
+    ChatStreamEvent Event,
+    Task<string> DecisionTask,
+    string Reason
+  );
+
+  private sealed record RecoveryResolution(
+    bool ContinueExecution,
+    IReadOnlyList<ChatStreamEvent> Events
   );
 
   private sealed record ExecutionAttempt(
@@ -2982,6 +4280,13 @@ public sealed class ChatStreamService : IChatStreamService
   private sealed record GuidanceAttempt(
     ExpertExecutionGuidance? Guidance,
     Exception? Failure
+  );
+
+  private sealed record SupervisedGuidanceAttempt(
+    ExpertExecutionGuidance? Guidance,
+    Exception? Failure,
+    bool RejectedUnchangedCandidate,
+    bool RepeatedPreviousStrategy
   );
 
 }

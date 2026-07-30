@@ -49,6 +49,31 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StartupResolvesRecoveryAndWorkspaceServices()
+  {
+    using var workspacesResponse = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    workspacesResponse.EnsureSuccessStatusCode();
+
+    using var recoveryResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/not-pending/decision",
+      new
+      {
+        option = "retry",
+        browserSessionId = "startup-smoke",
+        executionSessionId = "startup-smoke"
+      }
+    );
+
+    Assert.AreEqual(
+      HttpStatusCode.NotFound,
+      recoveryResponse.StatusCode
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LoadsVersionModelsAndCleanGpuNames()
   {
     await Page.GotoAsync(
@@ -70,7 +95,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.8.0"
+      "v0.8.1"
     );
     await Expect(
       Page.Locator(
@@ -129,6 +154,76 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CompactLayoutKeepsControlsIconsAndActiveAgentIdentity()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        "#active-agent-label"
+      )
+    ).ToHaveTextAsync(
+      "Auto (Roteador)"
+    );
+    await Expect(
+      Page.Locator(
+        ".status-icon"
+      )
+    ).ToHaveCountAsync(
+      4
+    );
+    await Expect(
+      Page.Locator(
+        "#new-conversation .button-icon, "
+          + "#open-settings .button-icon, "
+          + "#send-button .button-icon"
+      )
+    ).ToHaveCountAsync(
+      3
+    );
+    Assert.AreEqual(
+      "16px",
+      await Page.Locator(
+        ".sidebar"
+      ).EvaluateAsync<string>(
+        "element => getComputedStyle(element).gap"
+      )
+    );
+    Assert.IsLessThanOrEqualTo(
+      64,
+      await Page.Locator(
+        ".chat-header"
+      ).EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().height"
+      )
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "#active-agent-label"
+      )
+    ).ToHaveTextAsync(
+      "command-r:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "#approval-policy"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#model-lock"
+      )
+    ).ToBeAttachedAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task SavesRoutingSettingsAndChangesResidentModel()
   {
     await Page.GotoAsync(
@@ -141,9 +236,29 @@ public sealed class ChatEndToEndTests : PageTest
       "beta:code"
     );
     await Page.Locator(
+      "#coordinator-model"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await Page.Locator(
       "[data-intention=\"documentation\"] .intention-prompt"
     ).FillAsync(
       "Persisted documentation prompt."
+    );
+    await Page.Locator(
+      "#provider-context-tokens"
+    ).FillAsync(
+      "49152"
+    );
+    await Page.Locator(
+      "#generation-timeout-seconds"
+    ).FillAsync(
+      "240"
+    );
+    await Page.Locator(
+      "#max-tool-output-tokens"
+    ).FillAsync(
+      "1536"
     );
     await Page.GetByRole(
       AriaRole.Button,
@@ -171,6 +286,12 @@ public sealed class ChatEndToEndTests : PageTest
       ).GetString()
     );
     Assert.AreEqual(
+      "command-r:latest",
+      savedDocument.RootElement.GetProperty(
+        "coordinatorModel"
+      ).GetString()
+    );
+    Assert.AreEqual(
       "Persisted documentation prompt.",
       savedDocument.RootElement
         .GetProperty(
@@ -183,6 +304,50 @@ public sealed class ChatEndToEndTests : PageTest
           "systemPrompt"
         )
         .GetString()
+    );
+    Assert.AreEqual(
+      49_152,
+      savedDocument.RootElement
+        .GetProperty(
+          "context"
+        )
+        .GetProperty(
+          "providerContextTokens"
+        )
+        .GetInt32()
+    );
+    Assert.AreEqual(
+      240,
+      savedDocument.RootElement
+        .GetProperty(
+          "runtime"
+        )
+        .GetProperty(
+          "generationTimeoutSeconds"
+        )
+        .GetInt32()
+    );
+    Assert.AreEqual(
+      1_536,
+      savedDocument.RootElement
+        .GetProperty(
+          "execution"
+        )
+        .GetProperty(
+          "maxToolOutputTokens"
+        )
+        .GetInt32()
+    );
+    Assert.AreEqual(
+      5,
+      savedDocument.RootElement
+        .GetProperty(
+          "execution"
+        )
+        .GetProperty(
+          "maxRecoveryAttemptsPerTurn"
+        )
+        .GetInt32()
     );
 
     Assert.IsTrue(
@@ -223,6 +388,7 @@ public sealed class ChatEndToEndTests : PageTest
     var invalid = _environment.BaselineSettings with
     {
       RouterModel = " ",
+      CoordinatorModel = " ",
       DefaultModel = string.Empty,
       Intentions = intentions
     };
@@ -249,6 +415,12 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.IsTrue(
       errors.TryGetProperty(
         "defaultModel",
+        out _
+      )
+    );
+    Assert.IsTrue(
+      errors.TryGetProperty(
+        "coordinatorModel",
         out _
       )
     );
@@ -357,7 +529,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       activity.Locator(
-        "summary"
+        ":scope > summary"
       )
     ).ToContainTextAsync(
       "Concluído"
@@ -617,7 +789,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "#send-button"
+        "#send-button-label"
       )
     ).ToHaveTextAsync(
       "Enviar"
@@ -1065,6 +1237,90 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task EditingMessageKeepsSubmitControlsAlignedAndCanBeCancelledVisibly()
+  {
+    await Page.SetViewportSizeAsync(
+      1024,
+      720
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "Message to edit"
+    );
+    var editButton = Page.Locator(
+      ".message.user"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Editar mensagem",
+        Exact = true
+      }
+    );
+    await editButton.ClickAsync();
+    var cancelEdit = Page.Locator(
+      "#cancel-message-edit"
+    );
+    await Expect(
+      cancelEdit
+    ).ToBeVisibleAsync();
+    var alignmentDifference = await Page.EvaluateAsync<double>(
+      """
+      () => {
+        const controls = document.querySelector(".composer-submit-actions");
+        const approval = document.querySelector("#approval-policy");
+        return Math.abs(
+          controls.getBoundingClientRect().bottom
+            - approval.getBoundingClientRect().bottom
+        );
+      }
+      """
+    );
+    Assert.IsLessThanOrEqualTo(
+      1,
+      alignmentDifference
+    );
+    await cancelEdit.ClickAsync();
+    await Expect(
+      cancelEdit
+    ).ToBeHiddenAsync();
+    await Expect(
+      Page.Locator(
+        "#message-input"
+      )
+    ).ToHaveValueAsync(
+      string.Empty
+    );
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+
+    await editButton.ClickAsync();
+    await Page.Locator(
+      "#message-input"
+    ).PressAsync(
+      "Escape"
+    );
+    await Expect(
+      cancelEdit
+    ).ToBeHiddenAsync();
+    await Expect(
+      Page.Locator(
+        "#send-button-label"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task RendersMarkdownAndBlocksExecutableHtmlAndUnsafeUrls()
   {
     await Page.GotoAsync(
@@ -1469,7 +1725,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Falhou"
@@ -1500,7 +1756,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Falhou"
@@ -1821,7 +2077,7 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToBeVisibleAsync();
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Concluído"
@@ -1911,7 +2167,7 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToHaveTextAsync(
       "Cancelado"
@@ -1964,7 +2220,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Recuperado"
@@ -2021,7 +2277,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Falhou"
@@ -2270,10 +2526,10 @@ public sealed class ChatEndToEndTests : PageTest
       Page.Locator(
         "[data-event-type=\"action.edit-applied\"]"
       )
-    ).ToBeVisibleAsync();
+    ).ToBeAttachedAsync();
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Concluído"
@@ -2421,6 +2677,74 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AdvertisedToolsDoNotBypassFailedBehavioralConformance()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "unused:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.tooling-advertised\"]"
+      )
+    ).ToContainTextAsync(
+      "behavioral conformance must pass"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.tooling-conformance-failed\"]"
+      )
+    ).ToContainTextAsync(
+      "configured coordinator will bridge"
+    );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "unused:latest"
+          && !request.Stream
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && !request.Stream
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CapabilityInspectionFailureUsesResidentBridge()
   {
     await Page.GotoAsync(
@@ -2477,6 +2801,102 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RouterAndToolingCoordinatorUseSeparateConfiguredModels()
+  {
+    using var settingsResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        CoordinatorModel = "command-r:latest"
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      settingsResponse.StatusCode
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"router.model-resolved\"]"
+      )
+    ).ToContainTextAsync(
+      "router:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.resident-bridge-resolved\"]"
+      )
+    ).ToContainTextAsync(
+      "command-r:latest"
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "command-r:latest"
+          && !request.Stream
+          && request.HasTools
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && !request.Stream
+          && request.HasTools
+      )
+    );
+    var requests = _environment.FakeOllama.Requests.ToArray();
+    var residentEvictionIndex = Array.FindIndex(
+      requests,
+      request => request.Model == "router:latest"
+        && request.KeepAlive == 0
+        && request.Messages.Count == 0
+    );
+    var coordinatorToolRequestIndex = Array.FindIndex(
+      requests,
+      request => request.Model == "command-r:latest"
+        && request.HasTools
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      0,
+      residentEvictionIndex
+    );
+    Assert.IsGreaterThan(
+      residentEvictionIndex,
+      coordinatorToolRequestIndex
+    );
+    Assert.IsTrue(
+      requests.Any(
+        request => request.Model == "router:latest"
+          && request.KeepAlive == -1
+          && request.Messages.Count == 0
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task InvalidPlannerResponseRetriesAndRecoversOnThirdAttempt()
   {
     await Page.GotoAsync(
@@ -2519,7 +2939,7 @@ public sealed class ChatEndToEndTests : PageTest
     await Expect(
       retries.Last
     ).ToContainTextAsync(
-      "attempt 2 of 3 failed"
+      "attempt 2 of 5 failed"
     );
     await Expect(
       Page.Locator(
@@ -2750,7 +3170,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task InvalidPlannerResponseFailsOnlyAfterThreeAttempts()
+  public async Task RecoveryLimitOffersChoicesAndCanStopWithoutFatalFailure()
   {
     await Page.GotoAsync(
       "/"
@@ -2783,17 +3203,65 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.validation-error\"]"
+        "[data-event-type=\"action.recovery-decision-required\"]"
       )
     ).ToContainTextAsync(
-      "failed after 3 attempts"
+      "Automatic recovery reached its bounded limit"
+    );
+    var checkpoint = Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"]"
+    );
+    await Expect(
+      checkpoint.Locator(
+        "[data-recovery-option]"
+      )
+    ).ToHaveCountAsync(
+      3
+    );
+    await Expect(
+      checkpoint
+    ).ToContainTextAsync(
+      "A · Tentar novamente"
+    );
+    await Expect(
+      checkpoint
+    ).ToContainTextAsync(
+      "B · Pedir nova estratégia"
+    );
+    await Expect(
+      checkpoint
+    ).ToContainTextAsync(
+      "C · Encerrar e manter alterações"
+    );
+    await checkpoint.Locator(
+      "[data-recovery-option=\"stop\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.recovery-stopped\"]"
+      )
+    ).ToContainTextAsync(
+      "Existing changes were preserved"
+    );
+    await Expect(
+      checkpoint
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        "[data-event-type=\"error\"]"
       )
-    ).ToContainTextAsync(
-      "Falhou"
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"response.completed\"]"
+      )
+    ).ToHaveCountAsync(
+      1
     );
     Assert.HasCount(
       2,
@@ -2819,6 +3287,247 @@ public sealed class ChatEndToEndTests : PageTest
               StringComparison.Ordinal
             )
           )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RecoveryCheckpointRetryResumesWithFreshBoundedBudget()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute human recovery retry create file"
+    );
+    var checkpoint = Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"]"
+    );
+    await Expect(
+      checkpoint
+    ).ToBeVisibleAsync();
+    await checkpoint.Locator(
+      "[data-recovery-option=\"retry\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.recovery-resumed\"]"
+      )
+    ).ToContainTextAsync(
+      "fresh bounded recovery budget"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RecoveryBudgetResetsAfterVerifiedProgress()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute recovery budget reset create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    var retries = Page.Locator(
+      "[data-event-type=\"action.planning-retry\"]"
+    );
+    await Expect(
+      retries
+    ).ToHaveCountAsync(
+      5
+    );
+    await Expect(
+      retries.Last
+    ).ToContainTextAsync(
+      "Recovery budget: 1/5"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.recovery-decision-required\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RecoveryCheckpointCanRequestRevisedStrategy()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute human recovery specialist create file"
+    );
+    var checkpoint = Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"]"
+    );
+    await Expect(
+      checkpoint
+    ).ToBeVisibleAsync();
+    await checkpoint.Locator(
+      "[data-recovery-option=\"specialist\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.execution-recovery-guidance-prepared\"]"
+      ).First
+    ).ToContainTextAsync(
+      "materially revised strategy"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "Exact failure to correct:",
+            StringComparison.Ordinal
+          ) && message.Content.Contains(
+            "Every execution plan step requires a textual title.",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UnchangedRecoveryStrategyIsRejectedAndReported()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute human recovery unchanged strategy create file"
+    );
+    var checkpoint = Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"]"
+    );
+    await Expect(
+      checkpoint
+    ).ToBeVisibleAsync();
+    await checkpoint.Locator(
+      "[data-recovery-option=\"specialist\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.execution-recovery-guidance-unchanged\"]"
+      )
+    ).ToContainTextAsync(
+      "repeated the previous strategy after two bounded revision attempts"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.execution-recovery-guidance-prepared\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"response.completed\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Content.StartsWith(
+            "RECOVERY_STRATEGY_REVISION_REJECTED",
+            StringComparison.Ordinal
+          )
+        )
       )
     );
   }
@@ -2860,10 +3569,10 @@ public sealed class ChatEndToEndTests : PageTest
       Page.Locator(
         "[data-event-type=\"action.rejected\"]"
       )
-    ).ToBeVisibleAsync();
+    ).ToBeAttachedAsync();
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Concluído"
@@ -2923,6 +3632,13 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.output\"]"
       ).Last
     ).ToContainTextAsync(
+      "Read file: hello.txt."
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.output\"]"
+      ).Last
+    ).Not.ToContainTextAsync(
       "hello from agent"
     );
     await SendMessageAsync(
@@ -3088,6 +3804,43 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HostGeneratesStablePlanIdsFromModelTitles()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file with host generated plan ids"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-plan .plan-step[data-step-id=\"step-1\"]"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task FileEditRecoversFromInvalidPlanBeforeAnyLocalAction()
   {
     await File.WriteAllTextAsync(
@@ -3163,6 +3916,311 @@ public sealed class ChatEndToEndTests : PageTest
           StringComparer.Ordinal
         )
       )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DuplicateWorkspaceRootCreationIsRejectedAndReplannedAsExistingFileEdit()
+  {
+    var rootFile = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    await File.WriteAllTextAsync(
+      rootFile,
+      "existing root content"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute duplicate workspace root edit"
+    );
+
+    Assert.AreEqual(
+      "edited existing root file",
+      await File.ReadAllTextAsync(
+        rootFile
+      )
+    );
+    Assert.IsFalse(
+      File.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "workspace",
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      )
+    ).ToContainTextAsync(
+      "already the project root"
+    );
+    var plannerRequests = _environment.FakeOllama.Requests.Where(
+      request => request.HasTools
+        && request.Messages.Any(
+          message => message.Content.Contains(
+            "duplicate workspace root edit",
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+    ).ToArray();
+    Assert.IsTrue(
+      plannerRequests.Any(
+        request => request.AvailableTools.Contains(
+          "read_file",
+          StringComparer.Ordinal
+        )
+      )
+    );
+    Assert.IsTrue(
+      plannerRequests.Any(
+        request => request.AvailableTools.Contains(
+          "write_file",
+          StringComparer.Ordinal
+        )
+      )
+    );
+    Assert.IsTrue(
+      plannerRequests.Any(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "workspace is already the project root",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "alpha:latest"
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "never prefix a path with the workspace display name",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.execution-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RevisionPreservesCompletedStepsOmittedByCoordinator()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "hello"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute revise plan omitting completed step write file"
+    );
+
+    Assert.AreEqual(
+      "rewritten by agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"execution-plan-revised\"]"
+      )
+    ).ToContainTextAsync(
+      "preserved"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-plan .plan-step[data-step-id=\"step-1\"]"
+      )
+    ).ToContainTextAsync(
+      "completed"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-plan .plan-step[data-step-id=\"step-2\"]"
+      )
+    ).ToContainTextAsync(
+      "completed"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.validation-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task MultipleNativeToolCallsRetainAndExecuteOnlyTheFirst()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute multiple native tool calls create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    Assert.IsFalse(
+      Directory.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "ignored-extra-call"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-normalized\"]"
+      )
+    ).ToContainTextAsync(
+      "2 native tool calls"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests
+        .SelectMany(
+          request => request.Messages
+        )
+        .All(
+          message => message.ToolCalls.Count <= 1
+        )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConfiguredOllamaLimitsAndTimeoutApplyToExecutionPlanning()
+  {
+    using var save = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        Context = _environment.BaselineSettings.Context with
+        {
+          DefaultContextTokens = 16_384,
+          ProviderContextTokens = 24_576,
+          ReservedResponseTokens = 3_072
+        },
+        Runtime = _environment.BaselineSettings.Runtime with
+        {
+          GenerationTimeoutSeconds = 1
+        },
+        Execution = _environment.BaselineSettings.Execution with
+        {
+          DirectCoordinatorPlanningFailuresBeforeHandoff = 1,
+          ResidentCoordinatorPlanningFailuresBeforeFailure = 1,
+          MaxCoordinatorHandoffsPerTurn = 0,
+          MaxToolOutputTokens = 768
+        }
+      }
+    );
+    save.EnsureSuccessStatusCode();
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute configurable planner timeout"
+    );
+
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"error\"]"
+      )
+    ).ToContainTextAsync(
+      "configured generation timeout of 1 second"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-plan"
+      ).Last
+    ).ToBeVisibleAsync();
+
+    var plannerRequests = _environment.FakeOllama.Requests.Where(
+      request => request.HasTools
+        && request.Messages.Any(
+          message => message.Content.Contains(
+            "LOCAL_ACTION_PLANNER_V1",
+            StringComparison.Ordinal
+          )
+        )
+    ).ToArray();
+    Assert.IsGreaterThanOrEqualTo(
+      2,
+      plannerRequests.Length
+    );
+    Assert.IsTrue(
+      plannerRequests.All(
+        request => request.ContextTokens == 24_576
+          && request.PredictTokens == 768
+      )
+    );
+    var routerRequest = _environment.FakeOllama.Requests.First(
+      request => request.Model == "router:latest"
+        && !request.HasTools
+        && request.Messages.Count > 0
+    );
+    Assert.AreEqual(
+      24_576,
+      routerRequest.ContextTokens
+    );
+    Assert.AreEqual(
+      3_072,
+      routerRequest.PredictTokens
     );
   }
 
@@ -3291,6 +4349,13 @@ public sealed class ChatEndToEndTests : PageTest
         )
       )
     );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.execution-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
   }
 
   [TestMethod]
@@ -3359,6 +4424,50 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToContainTextAsync(
       "Conflito em hello.txt"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SequentialAgentEditsRefreshTheObservedFileHash()
+  {
+    var file = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    await File.WriteAllTextAsync(
+      file,
+      "hello"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute sequential apply patch"
+    );
+
+    Assert.AreEqual(
+      "patched twice",
+      await File.ReadAllTextAsync(
+        file
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToHaveCountAsync(
+      2
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"file-conflict-detected\"]"
+      )
+    ).ToHaveCountAsync(
+      0
     );
   }
 
@@ -3799,7 +4908,148 @@ public sealed class ChatEndToEndTests : PageTest
       Page.Locator(
         "[data-event-type=\"action.edit-applied\"]"
       )
-    ).ToBeVisibleAsync();
+    ).ToBeAttachedAsync();
+    await Expect(
+      approval
+    ).ToHaveAttributeAsync(
+      "data-decision",
+      "approved"
+    );
+    await Expect(
+      approval
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await approval.Locator(
+      "summary"
+    ).ClickAsync();
+    await Expect(
+      approval
+    ).ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await Expect(
+      approval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Aprovar",
+          Exact = true
+        }
+      )
+    ).ToBeDisabledAsync();
+    await Expect(
+      Page.Locator(
+        "#send-button-label"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ApprovalCardCollapsesAfterRejectionAndRemainsExpandable()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+    var approval = Page.Locator(
+      ".action-approval"
+    );
+    await Expect(
+      approval
+    ).ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    var approvalWidth = await approval.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().width"
+    );
+    var approvalSummary = approval.Locator(
+      ":scope > summary"
+    );
+    var summaryWidth = await approvalSummary.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().width"
+    );
+    var summaryHeight = await approvalSummary.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().height"
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      approvalWidth * 0.9,
+      summaryWidth
+    );
+    Assert.IsLessThanOrEqualTo(
+      80,
+      summaryHeight
+    );
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Rejeitar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      approval
+    ).ToHaveAttributeAsync(
+      "data-decision",
+      "rejected"
+    );
+    await Expect(
+      approval
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await approval.Locator(
+      "summary"
+    ).ClickAsync();
+    await Expect(
+      approval
+    ).ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await Expect(
+      approval
+    ).ToContainTextAsync(
+      "Rejeitada"
+    );
+    await Expect(
+      approval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Rejeitar",
+          Exact = true
+        }
+      )
+    ).ToBeDisabledAsync();
+    Assert.IsFalse(
+      File.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "#send-button-label"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
+    );
   }
 
   [TestMethod]
@@ -3872,13 +5122,13 @@ public sealed class ChatEndToEndTests : PageTest
       Page.Locator(
         "[data-event-type=\"action.edit-applied\"]"
       )
-    ).ToBeVisibleAsync();
+    ).ToBeAttachedAsync();
     await Page.Locator(
       "#send-button"
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#send-button"
+        "#send-button-label"
       )
     ).ToHaveTextAsync(
       "Enviar"
@@ -3941,7 +5191,7 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.output\"]"
       ).Last
     ).ToContainTextAsync(
-      "\"sizeBytes\""
+      "Inspected: hello.txt."
     );
     await SendMessageAsync(
       "execute search text"
@@ -3951,7 +5201,7 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.output\"]"
       ).Last
     ).ToContainTextAsync(
-      "hello.txt:1"
+      "Search completed in '.'"
     );
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
@@ -3962,6 +5212,117 @@ public sealed class ChatEndToEndTests : PageTest
           )
         )
       )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ToolActivityIsCollapsedAndLongDurationsRemainCompact()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "private file contents"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute read file"
+    );
+
+    var output = Page.Locator(
+      "[data-event-type=\"action.output\"]"
+    ).Last;
+    var group = Page.Locator(
+      ".activity-group"
+    ).Filter(
+      new()
+      {
+        Has = output
+      }
+    );
+    await Expect(
+      group
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await Expect(
+      group.Locator(
+        ":scope > summary"
+      )
+    ).ToContainTextAsync(
+      "read_file: hello.txt"
+    );
+    await Expect(
+      output
+    ).Not.ToContainTextAsync(
+      "private file contents"
+    );
+    Assert.AreEqual(
+      "3 min 42 s",
+      await Page.EvaluateAsync<string>(
+        "() => formatElapsed(221793)"
+      )
+    );
+    Assert.AreEqual(
+      "nowrap",
+      await Page.Locator(
+        ".activity-time"
+      ).First.EvaluateAsync<string>(
+        "element => getComputedStyle(element).whiteSpace"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PathValidationDenialIsReturnedForSafeReplanning()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute path traversal recover"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.security-denied\"]"
+      )
+    ).ToContainTextAsync(
+      "was not permitted and was not executed"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    Assert.AreEqual(
+      "recovered inside trusted workspace",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "safe.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.recovery-limit\"]"
+      )
+    ).ToHaveCountAsync(
+      0
     );
   }
 
@@ -3980,17 +5341,45 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.validation-error\"]"
+        "[data-event-type=\"action.security-denied\"]"
       )
+    ).ToHaveCountAsync(
+      2
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.security-denied\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "repeated an identical denied proposal"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.security-denied\"]"
+      ).First
     ).ToContainTextAsync(
       "outside the trusted workspace"
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        "[data-event-type=\"action.recovery-decision-required\"]"
       )
-    ).ToContainTextAsync(
-      "Falhou"
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"] "
+        + "[data-recovery-option=\"stop\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.recovery-stopped\"]"
+      )
+    ).ToBeAttachedAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"response.completed\"]"
+      )
+    ).ToHaveCountAsync(
+      1
     );
     await Page.GetByRole(
       AriaRole.Button,
@@ -4063,6 +5452,15 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToHaveCountAsync(
       0
     );
+    await Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"] "
+        + "[data-recovery-option=\"stop\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.recovery-stopped\"]"
+      )
+    ).ToBeAttachedAsync();
   }
 
   [TestMethod]
@@ -4087,7 +5485,7 @@ public sealed class ChatEndToEndTests : PageTest
       Page.Locator(
         "[data-event-type=\"action.provider-error\"]"
       )
-    ).ToBeVisibleAsync();
+    ).ToBeAttachedAsync();
     await Expect(
       Page.Locator(
         ".execution-session-header"
@@ -4101,6 +5499,160 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToHaveCountAsync(
       0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task TruncatedPlannerToolCallTriggersResidentRecovery()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute target planner invalid truncated planner tool call create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.tooling-fallback\"]"
+      )
+    ).ToContainTextAsync(
+      "configured coordinator will take over"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.provider-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.HasCount(
+      2,
+      _environment.FakeOllama.Requests.Where(
+        request => request.Model == "command-r:latest"
+          && !request.Stream
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && !request.Stream
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task XmlToolProtocolFailureHandsOffWithoutIdenticalRetry()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute xml syntax tool call create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.tool-protocol-error\"]"
+      )
+    ).ToContainTextAsync(
+      "will not be retried automatically"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.tooling-fallback\"]"
+      )
+    ).ToContainTextAsync(
+      "disabled for this turn after its first protocol failure"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.HasCount(
+      1,
+      _environment.FakeOllama.Requests.Where(
+        request => request.Model == "command-r:latest"
+          && !request.Stream
+          && request.HasTools
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && !request.Stream
+          && request.HasTools
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "LOCAL_ACTION_PLANNER_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
     );
   }
 
@@ -4160,6 +5712,91 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PrematureProseAfterApprovedProcessReceivesPendingPlanFeedback()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute recover premature prose after approved process"
+    );
+    var approval = Page.Locator(
+      ".action-approval"
+    );
+    await Expect(
+      approval
+    ).ToBeVisibleAsync();
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    var recoveredApproval = Page.Locator(
+      ".action-approval"
+    ).Last;
+    await Expect(
+      recoveredApproval
+    ).ToBeVisibleAsync();
+    await recoveredApproval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.edit-applied\"]"
+      )
+    ).ToBeAttachedAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.validation-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.AreEqual(
+      "recovered after premature prose",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-plan .plan-step"
+      )
+    ).ToHaveCountAsync(
+      2
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-plan .plan-step.completed"
+      )
+    ).ToHaveCountAsync(
+      2
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task FailedProcessIsReturnedToSpecialistAndReplanned()
   {
     await Page.GotoAsync(
@@ -4206,7 +5843,7 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"agent.execution-recovery-guidance-prepared\"]"
       )
     ).ToContainTextAsync(
-      "alpha:latest"
+      "materially different strategy"
     );
     await Expect(
       Page.Locator(
@@ -4224,7 +5861,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        ".activity summary"
+        ".activity > summary"
       )
     ).ToContainTextAsync(
       "Concluído"
@@ -4235,6 +5872,85 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToHaveCountAsync(
       0
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "alpha:latest"
+          && request.Messages.Any(
+            message => message.Content.StartsWith(
+              "RESIDENT_STRATEGY_SUPERVISION",
+              StringComparison.Ordinal
+            ) && message.Content.Contains(
+              "do not recreate the project",
+              StringComparison.OrdinalIgnoreCase
+            )
+          )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RepeatedAutomaticSpecialistStrategyIsRejectedAfterTwoAttempts()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute recover failed process unchanged strategy"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.awaiting-approval\"]"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      ".action-approval"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.execution-recovery-guidance-unchanged\"]"
+      )
+    ).ToContainTextAsync(
+      "repeated the previous strategy twice"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.execution-recovery-guidance-prepared\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.output\"]"
+      )
+    ).ToContainTextAsync(
+      "list_files"
+    );
+    Assert.HasCount(
+      3,
+      _environment.FakeOllama.Requests.Where(
+        request => request.Model == "alpha:latest"
+          && !request.Stream
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "EXPERT_EXECUTION_GUIDANCE_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
     );
   }
 
@@ -4488,7 +6204,7 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#send-button"
+        "#send-button-label"
       )
     ).ToHaveTextAsync(
       "Enviar"

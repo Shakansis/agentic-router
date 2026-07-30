@@ -25,6 +25,11 @@ public sealed class PlanningFailureClassifier : IPlanningFailureClassifier
     Exception exception
   )
   {
+    if (exception is ToolProtocolException)
+    {
+      return CoordinatorFailureCategory.CorrectablePlanning;
+    }
+
     if (exception is OllamaProviderException)
     {
       return CoordinatorFailureCategory.Provider;
@@ -51,4 +56,5 @@ public sealed class PlanningFailureClassifier : IPlanningFailureClassifier
       _ => CoordinatorFailureCategory.Other
     };
   }
+
 }

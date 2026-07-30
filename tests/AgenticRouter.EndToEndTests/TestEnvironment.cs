@@ -472,23 +472,44 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   private static string FindRepositoryRoot()
   {
-    var directory = new DirectoryInfo(
-      AppContext.BaseDirectory
+    var configuredRoot = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_REPOSITORY_ROOT"
     );
+    IReadOnlyList<string> startPaths = string.IsNullOrWhiteSpace(
+      configuredRoot
+    )
+      ?
+      [
+        Environment.CurrentDirectory,
+        AppContext.BaseDirectory
+      ]
+      :
+      [
+        configuredRoot,
+        Environment.CurrentDirectory,
+        AppContext.BaseDirectory
+      ];
 
-    while (directory is not null)
+    foreach (var startPath in startPaths)
     {
-      if (File.Exists(
-        Path.Combine(
-          directory.FullName,
-          "AgenticRouter.slnx"
-        )
-      ))
-      {
-        return directory.FullName;
-      }
+      var directory = new DirectoryInfo(
+        startPath
+      );
 
-      directory = directory.Parent;
+      while (directory is not null)
+      {
+        if (File.Exists(
+          Path.Combine(
+            directory.FullName,
+            "AgenticRouter.slnx"
+          )
+        ))
+        {
+          return directory.FullName;
+        }
+
+        directory = directory.Parent;
+      }
     }
 
     throw new DirectoryNotFoundException(

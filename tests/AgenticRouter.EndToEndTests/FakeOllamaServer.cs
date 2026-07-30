@@ -155,6 +155,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
       if (
         context.Request.HttpMethod == HttpMethod.Get.Method
+        && path == "/api/version"
+      )
+      {
+        await WriteJsonAsync(
+          context.Response,
+          HttpStatusCode.OK,
+          new
+          {
+            version = "0.13.5-test"
+          },
+          cancellationToken
+        );
+        return;
+      }
+
+      if (
+        context.Request.HttpMethod == HttpMethod.Get.Method
         && path == "/api/tags"
       )
       {
@@ -168,7 +185,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               {
                 name = model.Name,
                 size = model.Size,
-                modified_at = "2026-07-28T10:00:00Z"
+                modified_at = "2026-07-28T10:00:00Z",
+                digest = $"digest-{model.Name}"
               }
             )
           },
@@ -301,11 +319,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       HttpStatusCode.OK,
       new
       {
-        capabilities = string.Equals(
-          model,
-          "command-r:latest",
-          StringComparison.Ordinal
-        )
+        capabilities = model is "command-r:latest" or "router:latest" or "unused:latest"
           ? new[]
           {
             "completion",
@@ -396,13 +410,31 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         )
       )
       .ToArray();
+    int? contextTokens = root.TryGetProperty(
+      "options",
+      out var options
+    ) && options.TryGetProperty(
+      "num_ctx",
+      out var contextTokensElement
+    )
+      ? contextTokensElement.GetInt32()
+      : null;
+    int? predictTokens = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty(
+        "num_predict",
+        out var predictTokensElement
+      )
+        ? predictTokensElement.GetInt32()
+        : null;
     var recorded = new RecordedChatRequest(
       model,
       stream,
       keepAlive,
       messages,
       hasTools,
-      availableTools
+      availableTools,
+      contextTokens,
+      predictTokens
     );
     _requests.Enqueue(
       recorded
@@ -520,6 +552,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    if (messages.Any(
+      message => message.Content.Contains(
+        "TOOL_PROTOCOL_CONFORMANCE_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await RespondToToolConformanceAsync(
+        response,
+        model,
+        availableTools,
+        cancellationToken
+      );
+      return;
+    }
+
     if (messages.Any(
       message => message.Content.Contains(
         "LOCAL_ACTION_PLANNER_V1",
@@ -724,6 +772,93 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
+  private static async Task RespondToToolConformanceAsync(
+    HttpListenerResponse response,
+    string model,
+    IReadOnlyList<string> availableTools,
+    CancellationToken cancellationToken
+  )
+  {
+    if (string.Equals(
+      model,
+      "unused:latest",
+      StringComparison.Ordinal
+    ))
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.InternalServerError,
+        new
+        {
+          error = "xml syntax error: element <parameter> closed by </function>"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    var tool = availableTools.Single();
+    object arguments = tool switch
+    {
+      "benchmark_echo" => new
+      {
+        value = "ok"
+      },
+      "benchmark_plan" => new
+      {
+        objective = "verify",
+        steps = new[]
+        {
+          new
+          {
+            title = "Read synthetic input"
+          },
+          new
+          {
+            title = "Edit synthetic output"
+          }
+        }
+      },
+      "benchmark_read" => new
+      {
+        path = "sample.txt"
+      },
+      "benchmark_edit" => new
+      {
+        path = "sample.txt",
+        content = "after"
+      },
+      _ => throw new InvalidOperationException(
+        $"Unknown conformance tool {tool}."
+      )
+    };
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content = string.Empty,
+          tool_calls = new[]
+          {
+            new
+            {
+              function = new
+              {
+                name = tool,
+                arguments
+              }
+            }
+          }
+        },
+        done = true
+      },
+      cancellationToken
+    );
+  }
+
   private static async Task PrepareExpertGuidanceAsync(
     HttpListenerResponse response,
     IReadOnlyList<RecordedMessage> messages,
@@ -759,6 +894,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     );
+    var revisionRequested = messages.Any(
+      message => message.Content.StartsWith(
+        "RECOVERY_STRATEGY_REVISION",
+        StringComparison.Ordinal
+      )
+    );
+    var supervisionRequested = messages.Any(
+      message => message.Content.StartsWith(
+        "RESIDENT_STRATEGY_SUPERVISION",
+        StringComparison.Ordinal
+      )
+    );
+    var forceUnchangedRevision = current.Contains(
+      "unchanged strategy",
+      StringComparison.OrdinalIgnoreCase
+    );
     var guidance = validationFailed
       ? JsonSerializer.Serialize(
         new
@@ -778,9 +929,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         StringComparison.OrdinalIgnoreCase
       )
         ? string.Empty
-        : CreateStructuredGuidance(
-          current
-        );
+        : (
+          revisionRequested
+          || supervisionRequested
+        ) && !forceUnchangedRevision
+          ? CreateRevisedStructuredGuidance(
+            current
+          )
+          : CreateStructuredGuidance(
+            current
+          );
 
     await WriteJsonAsync(
       response,
@@ -855,6 +1013,64 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
+  private static string CreateRevisedStructuredGuidance(
+    string current
+  )
+  {
+    var proposal = JsonSerializer.SerializeToElement(
+      CreateLocalActionPlan(
+        current
+      ),
+      CompactJsonOptions
+    );
+    var tool = proposal.TryGetProperty(
+      "tool",
+      out var toolElement
+    ) && toolElement.ValueKind == JsonValueKind.String
+      ? toolElement.GetString()
+      : null;
+    var arguments = proposal.TryGetProperty(
+      "arguments",
+      out var argumentsElement
+    )
+      ? argumentsElement
+      : JsonSerializer.SerializeToElement(
+        new { }
+      );
+    object[] actions = tool is null
+      ? []
+      :
+      [
+        new
+        {
+          id = "recovery-guidance-1",
+          title = $"Correct the failed planning contract, then execute {tool}",
+          tool,
+          arguments
+        }
+      ];
+
+    return JsonSerializer.Serialize(
+      new
+      {
+        actionRequired = tool is not null,
+        objective = $"Recover from the reported planning failure while completing: {current}",
+        actions,
+        completionCriteria = tool is null
+          ? new[]
+          {
+            "No local action is required after correcting the reported failure."
+          }
+          : new[]
+          {
+            "The corrected visible plan uses non-empty string id and title fields.",
+            "The requested local action completes with a verified tool result."
+          }
+      },
+      CompactJsonOptions
+    );
+  }
+
   private async Task PlanLocalActionAsync(
     HttpListenerResponse response,
     string model,
@@ -908,6 +1124,21 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     );
+
+    if (
+      hasPlan
+      && current.Contains(
+        "configurable planner timeout",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      await Task.Delay(
+        1_250,
+        cancellationToken
+      );
+    }
+
     var actionResults = results.Where(
       message => message.ToolName is not "create_execution_plan"
         and not "revise_execution_plan"
@@ -927,6 +1158,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         message => message.Content
       )
     );
+    var humanRecoveryNeedsInvalidPlan = current.Contains(
+      "human recovery",
+      StringComparison.OrdinalIgnoreCase
+    ) && !allContent.Contains(
+      "RECOVERY_DECISION",
+      StringComparison.Ordinal
+    ) && !allContent.Contains(
+      "RECOVERY_STRATEGY_REVISION",
+      StringComparison.Ordinal
+    );
     var latestResult = actionResults.LastOrDefault()?.Content;
     object plan;
 
@@ -941,6 +1182,56 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         new
         {
           error = "planner provider fixture failure"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    if (
+      string.Equals(
+        model,
+        "command-r:latest",
+        StringComparison.Ordinal
+      )
+      && current.Contains(
+        "xml syntax tool call",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && attempt == 1
+    )
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.InternalServerError,
+        new
+        {
+          error = "xml syntax error on line 1: element <parameter> closed by </function>"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    if (
+      string.Equals(
+        model,
+        "command-r:latest",
+        StringComparison.Ordinal
+      )
+      && current.Contains(
+        "truncated planner tool call",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && attempt == 2
+    )
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.InternalServerError,
+        new
+        {
+          error = "error parsing tool call: raw='{\"objective\":\"Create a file\",\"steps\":[{\"id\":\"step-1\",\"title\":\"Create requested file\"}]', err=unexpected end of JSON input"
         },
         cancellationToken
       );
@@ -989,6 +1280,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         arguments = new { },
         explanation = "No local action remains."
       };
+    }
+    else if (
+      !hasPlan
+      && humanRecoveryNeedsInvalidPlan
+    )
+    {
+      plan = CreateMissingFieldsExecutionPlan(
+        current
+      );
     }
     else if (!hasPlan)
     {
@@ -1044,8 +1344,183 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     else if (
       hasResult
       && actionResults.Last().ToolName == "read_file"
+      && current.Contains(
+        "revise plan omitting completed step",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !results.Any(
+        result => result.ToolName == "revise_execution_plan"
+          || result.Content.Contains(
+            "Tool: revise_execution_plan",
+            StringComparison.Ordinal
+          )
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "revise_execution_plan",
+        arguments = new
+        {
+          objective = current,
+          steps = new[]
+          {
+            new
+            {
+              id = "step-2",
+              title = "Implement requested file changes"
+            }
+          }
+        },
+        explanation = "Revise the remaining work while omitting the completed inspection step."
+      };
+    }
+    else if (
+      hasResult
+      && actionResults.Last().ToolName == "read_file"
+      && current.Contains(
+        "duplicate workspace root edit",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "write_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = "edited existing root file"
+        },
+        explanation = "Edit the inspected file at the actual workspace root."
+      };
+    }
+    else if (
+      hasResult
+      && latestResult?.Contains(
+        "already the project root",
+        StringComparison.OrdinalIgnoreCase
+      ) == true
+      && current.Contains(
+        "duplicate workspace root edit",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "workspace/hello.txt"
+        },
+        explanation = "Retry inspection while still repeating the workspace root alias."
+      };
+    }
+    else if (
+      hasResult
+      && actionResults.Last().ToolName == "read_file"
       && IsMutationFixture(
         current
+      )
+    )
+    {
+      plan = CreateLocalActionPlan(
+        current
+      );
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "sequential apply patch",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && actionResults.Count(
+        result => result.ToolName == "apply_patch"
+          || result.Content.Contains(
+            "Tool: apply_patch",
+            StringComparison.Ordinal
+          )
+      ) == 1
+    )
+    {
+      plan = new
+      {
+        tool = "apply_patch",
+        arguments = new
+        {
+          path = "hello.txt",
+          replacements = new[]
+          {
+            new
+            {
+              oldText = "patched",
+              newText = "patched twice"
+            }
+          }
+        },
+        explanation = "Apply a second patch to the file changed by the previous action."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "recover premature prose after approved process",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && allContent.Contains(
+        "EXECUTION_COMPLETION_REJECTED",
+        StringComparison.Ordinal
+      )
+      && !actionResults.Any(
+        result => result.ToolName == "create_file"
+          || result.Content.Contains(
+            "Tool: create_file",
+            StringComparison.Ordinal
+          )
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = "recovered after premature prose"
+        },
+        explanation = "Continue with the pending file creation after the completion rejection."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "path traversal recover",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && actionResults.Last().ToolName == "read_file"
+    )
+    {
+      plan = new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "safe.txt",
+          content = "recovered inside trusted workspace"
+        },
+        explanation = "Use a safe path inside the trusted workspace."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "path traversal",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !current.Contains(
+        "path traversal recover",
+        StringComparison.OrdinalIgnoreCase
       )
     )
     {
@@ -1098,11 +1573,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         };
       }
       else if (
-        current.Contains(
-          "retry unknown tool",
-          StringComparison.OrdinalIgnoreCase
+        (
+          current.Contains(
+            "retry unknown tool",
+            StringComparison.OrdinalIgnoreCase
+          )
+          && attempt == 2
         )
-        && attempt == 2
+        || (
+          current.Contains(
+            "recovery budget reset",
+            StringComparison.OrdinalIgnoreCase
+          )
+          && attempt == 6
+        )
       )
       {
         plan = new
@@ -1114,9 +1598,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       }
       else
       {
-        plan = IsMutationFixture(
-          current
+        plan = current.Contains(
+          "duplicate workspace root edit",
+          StringComparison.OrdinalIgnoreCase
         )
+          ? CreateLocalActionPlan(
+            current
+          )
+          : IsMutationFixture(
+            current
+          )
           ? new
           {
             tool = "read_file",
@@ -1138,7 +1629,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var recoverableInvalid = current.Contains(
       "retry invalid planner",
       StringComparison.OrdinalIgnoreCase
-    ) && attempt < 3;
+    ) && attempt < 3
+      || current.Contains(
+        "recovery budget reset",
+        StringComparison.OrdinalIgnoreCase
+      ) && attempt < 5;
     var targetInvalid = string.Equals(
       model,
       "command-r:latest",
@@ -1147,7 +1642,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "target planner invalid",
       StringComparison.OrdinalIgnoreCase
     );
-    var invalid = alwaysInvalid || recoverableInvalid || targetInvalid;
+    var invalid = alwaysInvalid
+      || recoverableInvalid
+      || targetInvalid;
     var planElement = JsonSerializer.SerializeToElement(
       plan,
       CompactJsonOptions
@@ -1200,6 +1697,36 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       }
       : null;
 
+    if (
+      toolCalls is not null
+      && hasPlan
+      && !hasResult
+      && current.Contains(
+        "multiple native tool calls",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      toolCalls =
+      [
+        toolCalls[0],
+        new
+        {
+          function = new
+          {
+            name = "create_directory",
+            arguments = JsonSerializer.SerializeToElement(
+              new
+              {
+                path = "ignored-extra-call"
+              },
+              CompactJsonOptions
+            )
+          }
+        }
+      ];
+    }
+
     await WriteJsonAsync(
       response,
       HttpStatusCode.OK,
@@ -1221,6 +1748,58 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string objective
   )
   {
+    if (objective.Contains(
+      "host generated plan ids",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_execution_plan",
+        arguments = new
+        {
+          objective,
+          steps = new[]
+          {
+            new
+            {
+              title = "Perform requested local action"
+            }
+          }
+        },
+        explanation = "Return only a plan title and let the Host assign the stable step ID."
+      };
+    }
+
+    if (objective.Contains(
+      "recover premature prose after approved process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_execution_plan",
+        arguments = new
+        {
+          objective,
+          steps = new[]
+          {
+            new
+            {
+              id = "step-1",
+              title = "Run approved process"
+            },
+            new
+            {
+              id = "step-2",
+              title = "Create requested file"
+            }
+          }
+        },
+        explanation = "Create a two-step plan that must not stop after the process."
+      };
+    }
+
     var planObjective = objective.Length <= 240
       ? objective
       : "Complete the requested local action";
@@ -1309,6 +1888,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     };
   }
 
+  private static object CreateMissingFieldsExecutionPlan(
+    string objective
+  )
+  {
+    return new
+    {
+      tool = "create_execution_plan",
+      arguments = new
+      {
+        objective,
+        steps = new[]
+        {
+          new
+          {
+            name = "Missing required id and title fields"
+          }
+        }
+      },
+      explanation = "Create a plan step without the required id and title fields."
+    };
+  }
+
   private static bool IsMutationFixture(
     string objective
   )
@@ -1329,6 +1930,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (current.Contains(
+      "recover premature prose after approved process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "dotnet",
+          arguments = new[]
+          {
+            "--list-sdks"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Run the first approved process before continuing the remaining plan."
+      };
+    }
+
     if (current.Contains(
       "recover failed process",
       StringComparison.OrdinalIgnoreCase
@@ -1380,6 +2003,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           path = "generated"
         },
         explanation = "Create the requested directory."
+      };
+    }
+
+    if (current.Contains(
+      "duplicate workspace root edit",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "workspace/hello.txt",
+          content = "incorrect duplicate file"
+        },
+        explanation = "Incorrectly repeat the workspace root while trying to edit an existing file."
       };
     }
 
@@ -1942,7 +2582,9 @@ internal sealed record RecordedChatRequest(
   int? KeepAlive,
   IReadOnlyList<RecordedMessage> Messages,
   bool HasTools,
-  IReadOnlyList<string> AvailableTools
+  IReadOnlyList<string> AvailableTools,
+  int? ContextTokens,
+  int? PredictTokens
 );
 
 internal sealed record RecordedMessage(
