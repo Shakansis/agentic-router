@@ -149,6 +149,7 @@ Configuration is stored in a local JSON file in the `data/` directory. The appli
 
 - Ollama base URL
 - Router model selection
+- Resident coordinator model selection
 - Global default expert model
 - Global default device (or `auto`)
 - Configurable intent profiles
@@ -170,8 +171,10 @@ The **Advanced** settings section can export and atomically import a portable
 `agentic-router.yaml` backup. It includes the Ollama connection, router,
 coordinator, default and intent models, GPU choices, system prompts, context,
 runtime, execution, retention, project-awareness, and Git-delivery limits.
-Workspace paths, conversations, validation commands, and approvals remain local
-and are intentionally excluded.
+Ollama runtime role profiles, memory headroom, and exact model/digest overrides
+are portable too. Workspace paths, conversations, validation commands,
+approvals, and measured hardware evidence remain local and are intentionally
+excluded.
 
 Model roles use only `primary` and `fallback`:
 
@@ -194,6 +197,27 @@ Unsupported roles and keys are rejected with field and line diagnostics; the
 existing configuration is not modified when parsing or validation fails. The
 same operations are available at `GET /api/settings/yaml` and
 `PUT /api/settings/yaml`.
+
+### Ollama runtime context and memory profiles
+
+Local Ollama requests use native `/api/chat` with a Host-selected `num_ctx`.
+Profiles are resolved per router, resident coordinator, specialist, primary,
+fallback, benchmark, model-test, web-search-synthesis, and vision role. An
+optional override applies only to one exact local model ID and digest. The
+provider context and model-declared context remain hard ceilings.
+
+The resident coordinator defaults to 8,192 context tokens and is considered
+ready only after `/api/ps` confirms the exact model and `context_length`.
+Request fit reserves output and accounts for bounded messages, tool state, and
+image overhead. It grows only through the configured discrete context ladder.
+
+`GET /api/runtime/profiles` exposes policy and evidence.
+`POST /api/runtime/profiles/analyze` reads metadata without loading a model.
+`POST /api/runtime/profiles/measure` requires explicit permission because it
+loads a real model; it is blocked during active requests and restores prior
+resident state. Measured records stay local under
+`data/runtime-profiles/ollama-model-memory.json` and are never included in
+portable YAML.
 
 ### Token usage and equivalent cost
 

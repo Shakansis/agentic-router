@@ -195,6 +195,16 @@ builder.Services.AddSingleton<ResidentModelManager>();
 builder.Services.AddSingleton<IResidentModelManager>(
   services => services.GetRequiredService<ResidentModelManager>()
 );
+builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
+  services => new OllamaRuntimeProfileService(
+    dataDirectory,
+    services.GetRequiredService<ISettingsStore>(),
+    services.GetRequiredService<IOllamaClient>(),
+    services.GetRequiredService<IResidentModelManager>(),
+    services.GetRequiredService<IGpuMemoryMetricsProvider>(),
+    services.GetRequiredService<ISystemMemoryMetricsProvider>()
+  )
+);
 builder.Services.AddHostedService<SafeResidentModelHostedService>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
 builder.Services.AddScoped<IChatStreamService, ChatStreamService>();

@@ -1,3 +1,41 @@
+# Agentic Router v0.9.10
+
+This development version adds Host-owned Ollama runtime context and memory
+profiles without guessing hardware-sensitive runner settings.
+
+## Highlights
+
+- Adds typed context profiles for router, resident coordinator, specialist,
+  primary, fallback, benchmark, model test, web-search synthesis, and vision
+  requests. The resident coordinator defaults to 8,192 context tokens.
+- Resolves every local request from role defaults plus an optional exact
+  provider/model/digest override, caps it by provider and model limits, and
+  sends the selected context as native Ollama `num_ctx`.
+- Calculates request fit from bounded input, tool schema/results, image
+  overhead, and reserved output. Context grows only through a configured
+  discrete ladder and fails with a typed error when the request cannot fit.
+- Verifies resident preload and context through `/api/ps`, unloads and reloads
+  mismatched runners only while idle, and surfaces requested versus actual
+  context, digest, VRAM, estimated RAM, offload, and shared-model warnings.
+- Adds metadata-only analysis that must not load a model plus explicit,
+  permission-gated real measurement with bounded context, prior-state
+  restoration, and atomic measured records under
+  `data/runtime-profiles/ollama-model-memory.json`.
+- Invalidates measured evidence when exact model digest, Ollama version,
+  hardware signature, or relevant runtime signature changes. Parallelism,
+  flash attention, and KV-cache type remain visibly unknown instead of being
+  guessed or changed.
+- Adds Runtime settings for per-role profiles, exact overrides, memory
+  headroom, metadata analysis, and confirmed measurement. Portable YAML
+  includes policy and overrides but excludes measured hardware evidence.
+- Compacts resident coordination to the current objective, project context,
+  specialist guidance, and bounded current tool state instead of unrelated
+  conversation history.
+- Adds deterministic fake-Ollama E2E coverage for defaults, native payloads,
+  `/api/ps` verification, shared warnings, analysis without load, explicit
+  permission, measurement persistence/restoration, exact overrides, and YAML
+  exclusion.
+
 # Agentic Router v0.9.9
 
 This development version adds pre-1.0 recovery, safe backup and restore,

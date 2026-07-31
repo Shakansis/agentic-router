@@ -12,6 +12,8 @@ public static class UsageModelRoles
   public const string Benchmark = "benchmark";
   public const string ModelTest = "model-test";
   public const string Summary = "summary";
+  public const string WebSearchSynthesis = "web-search-synthesis";
+  public const string VisionRequest = "vision-request";
 
   public static readonly IReadOnlySet<string> All = new HashSet<string>(
     [
@@ -22,7 +24,9 @@ public static class UsageModelRoles
       Fallback,
       Benchmark,
       ModelTest,
-      Summary
+      Summary,
+      WebSearchSynthesis,
+      VisionRequest
     ],
     StringComparer.Ordinal
   );
@@ -122,7 +126,8 @@ public sealed record ProviderCallContext(
   string? ExecutionSessionId,
   string ModelRole,
   string RequestPurpose,
-  string? ModelRevision = null
+  string? ModelRevision = null,
+  int? RuntimeContextTokens = null
 );
 
 public sealed record ProviderTokenUsage(

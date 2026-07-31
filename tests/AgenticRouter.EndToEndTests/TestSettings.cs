@@ -24,6 +24,8 @@ internal sealed record TestApplicationSettings
 
   public TestRuntimeSettings Runtime { get; init; } = new();
 
+  public TestOllamaRuntimeSettings OllamaRuntime { get; init; } = new();
+
   public TestExecutionSettings Execution { get; init; } = new();
 
   public TestSessionHistorySettings SessionHistory { get; init; } = new();
@@ -123,6 +125,175 @@ internal sealed record TestRuntimeSettings
   public int RuntimeStatusActiveRefreshSeconds { get; init; } = 2;
 
   public int GenerationTimeoutSeconds { get; init; } = 300;
+}
+
+internal sealed record TestOllamaRuntimeSettings
+{
+  public int ProfileSchemaVersion { get; init; } = 1;
+
+  public Dictionary<string, TestOllamaRoleRuntimeSettings> RoleDefaults
+  {
+    get;
+    init;
+  } = TestOllamaRuntimeDefaults.CreateRoleDefaults();
+
+  public IReadOnlyList<TestOllamaModelRuntimeOverride> ModelOverrides
+  {
+    get;
+    init;
+  } = [];
+
+  public IReadOnlyList<int> ContextEscalationLadder { get; init; } =
+  [
+    4_096,
+    8_192,
+    12_288,
+    16_384,
+    24_576,
+    32_768,
+    40_960
+  ];
+
+  public TestOllamaRuntimeMemoryPolicy Memory { get; init; } = new();
+}
+
+internal sealed record TestOllamaRoleRuntimeSettings(
+  int MinimumContextTokens,
+  int TargetContextTokens,
+  int MaximumContextTokens,
+  int KeepAlive,
+  int OutputTokenLimit
+);
+
+internal sealed record TestOllamaModelRuntimeOverride(
+  string Provider,
+  string Model,
+  string Digest,
+  Dictionary<string, TestOllamaRoleRuntimeSettings> Overrides
+);
+
+internal sealed record TestOllamaRuntimeMemoryPolicy
+{
+  public int TargetMaximumGpuUsagePercent { get; init; } = 90;
+
+  public long MinimumFreeVramBytes { get; init; } = 2_147_483_648;
+
+  public long MinimumFreeSystemRamBytes { get; init; } = 4_294_967_296;
+
+  public bool AllowCpuOffload { get; init; } = true;
+
+  public bool PreferFullGpuForActivePrimary { get; init; } = true;
+
+  public Dictionary<string, object> Devices { get; init; } = [];
+}
+
+internal static class TestOllamaRuntimeDefaults
+{
+  public static Dictionary<string, TestOllamaRoleRuntimeSettings> CreateRoleDefaults()
+  {
+    return new Dictionary<string, TestOllamaRoleRuntimeSettings>(
+      StringComparer.Ordinal
+    )
+    {
+      ["router"] = Profile(
+        4_096,
+        8_192,
+        8_192,
+        1_024
+      ),
+      ["residentCoordinator"] = Profile(
+        4_096,
+        8_192,
+        16_384,
+        1_024,
+        -1
+      ),
+      ["specialist"] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      ["primary"] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      ["fallback"] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      ["benchmark"] = Profile(
+        4_096,
+        8_192,
+        16_384,
+        1_024
+      ),
+      ["modelTest"] = Profile(
+        4_096,
+        4_096,
+        8_192,
+        512
+      ),
+      ["webSearchSynthesis"] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      ["visionRequest"] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      )
+    };
+  }
+
+  public static Dictionary<string, TestOllamaRoleRuntimeSettings> WithMaximum(
+    int maximum
+  )
+  {
+    return CreateRoleDefaults().ToDictionary(
+      pair => pair.Key,
+      pair => pair.Value with
+      {
+        MinimumContextTokens = Math.Min(
+          pair.Value.MinimumContextTokens,
+          maximum
+        ),
+        TargetContextTokens = Math.Min(
+          pair.Value.TargetContextTokens,
+          maximum
+        ),
+        MaximumContextTokens = Math.Min(
+          pair.Value.MaximumContextTokens,
+          maximum
+        )
+      },
+      StringComparer.Ordinal
+    );
+  }
+
+  private static TestOllamaRoleRuntimeSettings Profile(
+    int minimum,
+    int target,
+    int maximum,
+    int output,
+    int keepAlive = 300
+  )
+  {
+    return new TestOllamaRoleRuntimeSettings(
+      minimum,
+      target,
+      maximum,
+      keepAlive,
+      output
+    );
+  }
 }
 
 internal sealed record TestExecutionSettings

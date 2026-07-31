@@ -9,11 +9,13 @@ public interface IResidentModelManager
 
   ResidentModelStatus GetStatus();
 
-  Task ChangeRouterModelAsync(
+  Task ChangeResidentModelAsync(
     ApplicationSettings previousSettings,
     ApplicationSettings nextSettings,
     CancellationToken cancellationToken
   );
+
+  bool HasActiveRequests { get; }
 
   Task<bool> EvictForRecoveryAsync(
     string targetModel,

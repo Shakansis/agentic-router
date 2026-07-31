@@ -2876,7 +2876,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.9"
+      "v0.9.10"
     );
     await Expect(
       Page.Locator(
@@ -3214,14 +3214,15 @@ public sealed class ChatEndToEndTests : PageTest
     );
     Assert.IsTrue(
       _environment.FakeOllama.Requests.Any(
-        request => request.Model == "beta:code"
+        request => request.Model == "command-r:latest"
           && request.KeepAlive == -1
+          && request.ContextTokens == 8_192
           && request.Messages.Count == 0
       )
     );
     CollectionAssert.Contains(
       _environment.FakeOllama.LoadedModels.ToArray(),
-      "beta:code"
+      "command-r:latest"
     );
   }
 
@@ -3269,12 +3270,18 @@ public sealed class ChatEndToEndTests : PageTest
         ".settings-responsive-navigation"
       )
     ).ToBeHiddenAsync();
+    Assert.IsGreaterThanOrEqualTo(
+      8,
+      await Page.Locator(
+        "#settings-dialog .information-button"
+      ).CountAsync()
+    );
     await Expect(
       Page.Locator(
-        "#settings-dialog .information-button"
+        "#runtime-shared-model-warnings .runtime-shared-warning"
       )
-    ).ToHaveCountAsync(
-      7
+    ).Not.ToHaveCountAsync(
+      0
     );
     await Expect(
       Page.Locator(
@@ -3535,6 +3542,13 @@ public sealed class ChatEndToEndTests : PageTest
           fallback: docs:latest
       runtime:
         generation_timeout_seconds: 222
+      ollama_runtime:
+        memory:
+          devices:
+            device_1:
+              id: gpu-test
+              target_maximum_usage_percent: 88
+              minimum_free_vram_bytes: 1073741824
       """;
     using var importResponse = await _environment.HttpClient.PutAsJsonAsync(
       "api/settings/yaml",
@@ -3583,6 +3597,30 @@ public sealed class ChatEndToEndTests : PageTest
         )
         .GetInt32()
     );
+    var importedGpuPolicy = imported.GetProperty(
+        "ollamaRuntime"
+      )
+      .GetProperty(
+        "memory"
+      )
+      .GetProperty(
+        "devices"
+      )
+      .GetProperty(
+        "gpu-test"
+      );
+    Assert.AreEqual(
+      88,
+      importedGpuPolicy.GetProperty(
+        "targetMaximumUsagePercent"
+      ).GetInt32()
+    );
+    Assert.AreEqual(
+      1_073_741_824,
+      importedGpuPolicy.GetProperty(
+        "minimumFreeVramBytes"
+      ).GetInt64()
+    );
     Assert.AreEqual(
       _environment.WorkspaceDirectory,
       imported.GetProperty(
@@ -3603,7 +3641,11 @@ public sealed class ChatEndToEndTests : PageTest
       },
       TestJson.Options
     );
-    roundTripResponse.EnsureSuccessStatusCode();
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      roundTripResponse.StatusCode,
+      await roundTripResponse.Content.ReadAsStringAsync()
+    );
     var beforeInvalid = await File.ReadAllTextAsync(
       _environment.SettingsPath
     );
@@ -4243,6 +4285,33 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToContainTextAsync(
       "Hello"
     );
+    using (
+      var measurement = await _environment.HttpClient.PostAsJsonAsync(
+        "api/runtime/profiles/measure",
+        new
+        {
+          model = "alpha:latest",
+          role = "modelTest",
+          contextCandidates = new[]
+          {
+            4_096
+          },
+          permissionGranted = true,
+          runMinimalRequest = false
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.Conflict,
+        measurement.StatusCode
+      );
+      var blocked = await measurement.Content.ReadAsStringAsync();
+      StringAssert.Contains(
+        blocked,
+        "reload-blocked-by-active-request"
+      );
+    }
     await Page.GetByRole(
       AriaRole.Button,
       new()
@@ -5723,7 +5792,510 @@ public sealed class ChatEndToEndTests : PageTest
       _environment.FakeOllama.AllRequests.Any(
         request => request.Model == "router:latest"
           && request.KeepAlive == -1
+          && request.ContextTokens == 8_192
           && request.Messages.Count == 0
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OllamaRuntimeProfilesResolveAnalyzeMeasurePersistAndRestore()
+  {
+    using var profilesResponse = await _environment.HttpClient.GetAsync(
+      "api/runtime/profiles"
+    );
+    profilesResponse.EnsureSuccessStatusCode();
+    using var profilesDocument = JsonDocument.Parse(
+      await profilesResponse.Content.ReadAsStringAsync()
+    );
+    var profiles = profilesDocument.RootElement;
+    Assert.AreEqual(
+      8_192,
+      profiles.GetProperty(
+        "roleDefaults"
+      ).GetProperty(
+        "residentCoordinator"
+      ).GetProperty(
+        "targetContextTokens"
+      ).GetInt32()
+    );
+    Assert.IsTrue(
+      profiles.GetProperty(
+        "sharedModelWarnings"
+      ).EnumerateArray().Any(
+        warning => warning.GetProperty(
+          "model"
+        ).GetString() == "router:latest"
+      )
+    );
+
+    var loadedBefore = _environment.FakeOllama.LoadedModels.Order(
+      StringComparer.Ordinal
+    ).ToArray();
+    using var analyzeResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/runtime/profiles/analyze",
+      new
+      {
+        model = "alpha:latest",
+        role = "primary"
+      }
+    );
+    analyzeResponse.EnsureSuccessStatusCode();
+    using var analyzeDocument = JsonDocument.Parse(
+      await analyzeResponse.Content.ReadAsStringAsync()
+    );
+    Assert.IsFalse(
+      analyzeDocument.RootElement.GetProperty(
+        "loadedModelChanged"
+      ).GetBoolean()
+    );
+    CollectionAssert.AreEqual(
+      loadedBefore,
+      _environment.FakeOllama.LoadedModels.Order(
+        StringComparer.Ordinal
+      ).ToArray()
+    );
+
+    using var deniedMeasurement = await _environment.HttpClient.PostAsJsonAsync(
+      "api/runtime/profiles/measure",
+      new
+      {
+        model = "alpha:latest",
+        role = "modelTest",
+        contextCandidates = new[]
+        {
+          4_096
+        },
+        permissionGranted = false,
+        runMinimalRequest = false
+      }
+    );
+    Assert.AreEqual(
+      (HttpStatusCode)428,
+      deniedMeasurement.StatusCode
+    );
+
+    using var measurementResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/runtime/profiles/measure",
+      new
+      {
+        model = "alpha:latest",
+        role = "modelTest",
+        contextCandidates = new[]
+        {
+          4_096
+        },
+        permissionGranted = true,
+        runMinimalRequest = false
+      }
+    );
+    measurementResponse.EnsureSuccessStatusCode();
+    using var measurementDocument = JsonDocument.Parse(
+      await measurementResponse.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      4_096,
+      measurementDocument.RootElement.GetProperty(
+        "measurement"
+      ).GetProperty(
+        "actualContext"
+      ).GetInt32()
+    );
+    Assert.IsFalse(
+      measurementDocument.RootElement.GetProperty(
+        "measurement"
+      ).GetProperty(
+        "stale"
+      ).GetBoolean()
+    );
+    Assert.IsTrue(
+      measurementDocument.RootElement.GetProperty(
+        "priorResidentRestored"
+      ).GetBoolean()
+    );
+    CollectionAssert.AreEquivalent(
+      loadedBefore,
+      _environment.FakeOllama.LoadedModels.ToArray()
+    );
+    var measurementPath = Path.Combine(
+      _environment.DataDirectory,
+      "runtime-profiles",
+      "ollama-model-memory.json"
+    );
+    Assert.IsTrue(
+      File.Exists(
+        measurementPath
+      )
+    );
+    var measurementStore = JsonNode.Parse(
+      await File.ReadAllTextAsync(
+        measurementPath
+      )
+    )!.AsObject();
+    var originalMeasurement = measurementStore["records"]![0]!.DeepClone();
+
+    foreach (var identityField in new[]
+    {
+      "digest",
+      "ollamaVersion",
+      "hardwareSignature",
+      "runtimeSettingSignature"
+    })
+    {
+      measurementStore["records"]![0] = originalMeasurement.DeepClone();
+      measurementStore["records"]![0]![identityField] =
+        $"stale-{identityField}";
+      await File.WriteAllTextAsync(
+        measurementPath,
+        measurementStore.ToJsonString(
+          TestJson.Options
+        )
+      );
+      using var staleResponse = await _environment.HttpClient.GetAsync(
+        "api/runtime/profiles"
+      );
+      staleResponse.EnsureSuccessStatusCode();
+      using var staleDocument = JsonDocument.Parse(
+        await staleResponse.Content.ReadAsStringAsync()
+      );
+      Assert.IsTrue(
+        staleDocument.RootElement.GetProperty(
+          "measurements"
+        )[0].GetProperty(
+          "stale"
+        ).GetBoolean(),
+        $"Expected {identityField} to invalidate the measurement."
+      );
+    }
+
+    measurementStore["records"]![0] = originalMeasurement;
+    await File.WriteAllTextAsync(
+      measurementPath,
+      measurementStore.ToJsonString(
+        TestJson.Options
+      )
+    );
+
+    using var yamlResponse = await _environment.HttpClient.GetAsync(
+      "api/settings/yaml"
+    );
+    yamlResponse.EnsureSuccessStatusCode();
+    var yaml = await yamlResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      yaml,
+      "ollama_runtime:"
+    );
+    Assert.DoesNotContain(
+      "hardwareSignature",
+      yaml
+    );
+    Assert.DoesNotContain(
+      "ollama-model-memory",
+      yaml
+    );
+
+    var runtimeOverride = new TestOllamaModelRuntimeOverride(
+      "ollama-local",
+      "router:latest",
+      "digest-router:latest",
+      new Dictionary<string, TestOllamaRoleRuntimeSettings>(
+        StringComparer.Ordinal
+      )
+      {
+        ["residentCoordinator"] = new(
+          4_096,
+          12_288,
+          16_384,
+          -1,
+          1_024
+        )
+      }
+    );
+    using var saveResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        OllamaRuntime = _environment.BaselineSettings.OllamaRuntime with
+        {
+          ModelOverrides =
+          [
+            runtimeOverride
+          ]
+        }
+      }
+    );
+    saveResponse.EnsureSuccessStatusCode();
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && request.KeepAlive == -1
+          && request.ContextTokens == 12_288
+          && request.Messages.Count == 0
+      )
+    );
+    using var overrideYamlResponse = await _environment.HttpClient.GetAsync(
+      "api/settings/yaml"
+    );
+    overrideYamlResponse.EnsureSuccessStatusCode();
+    var overrideYaml = await overrideYamlResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      overrideYaml,
+      "model_overrides:"
+    );
+    StringAssert.Contains(
+      overrideYaml,
+      "digest-router:latest"
+    );
+    using var overrideRoundTrip = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings/yaml",
+      new
+      {
+        yaml = overrideYaml
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      overrideRoundTrip.StatusCode,
+      await overrideRoundTrip.Content.ReadAsStringAsync()
+    );
+
+    using var statusResponse = await _environment.HttpClient.GetAsync(
+      "api/runtime/status"
+    );
+    statusResponse.EnsureSuccessStatusCode();
+    using var statusDocument = JsonDocument.Parse(
+      await statusResponse.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      12_288,
+      statusDocument.RootElement.GetProperty(
+        "residentModel"
+      ).GetProperty(
+        "actualContextTokens"
+      ).GetInt32()
+    );
+    _environment.FakeOllama.SetLoadedModelContext(
+      "router:latest",
+      4_096
+    );
+    using var mismatchResponse = await _environment.HttpClient.GetAsync(
+      "api/runtime/status"
+    );
+    mismatchResponse.EnsureSuccessStatusCode();
+    using var mismatchDocument = JsonDocument.Parse(
+      await mismatchResponse.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      mismatchDocument.RootElement.GetProperty(
+        "warning"
+      ).GetBoolean()
+    );
+    Assert.IsTrue(
+      mismatchDocument.RootElement.GetProperty(
+        "loadedModels"
+      ).EnumerateArray().Any(
+        model => model.GetProperty(
+          "name"
+        ).GetString() == "router:latest"
+          && model.GetProperty(
+            "profileStatus"
+          ).GetString() == "context-mismatch"
+      )
+    );
+
+    var reloadedOverride = runtimeOverride with
+    {
+      Overrides = new Dictionary<string, TestOllamaRoleRuntimeSettings>(
+        StringComparer.Ordinal
+      )
+      {
+        ["residentCoordinator"] = new(
+          4_096,
+          16_384,
+          16_384,
+          -1,
+          1_024
+        )
+      }
+    };
+    using var reloadResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        OllamaRuntime = _environment.BaselineSettings.OllamaRuntime with
+        {
+          ModelOverrides =
+          [
+            reloadedOverride
+          ]
+        }
+      }
+    );
+    reloadResponse.EnsureSuccessStatusCode();
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && request.KeepAlive == 0
+      )
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && request.KeepAlive == -1
+          && request.ContextTokens == 16_384
+      )
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"runtime\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#runtime-role-profiles"
+      )
+    ).ToContainTextAsync(
+      "Coordenador residente"
+    );
+    var memoryPolicy = Page.Locator(
+      ".runtime-profile-subsection",
+      new()
+      {
+        Has = Page.GetByText(
+          "Política de memória",
+          new()
+          {
+            Exact = true
+          }
+        )
+      }
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-memory-device-policies"
+      )
+    ).ToBeHiddenAsync();
+    await memoryPolicy.Locator(
+      "summary"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#runtime-memory-device-policies"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#runtime-profile-result"
+      )
+    ).ToContainTextAsync(
+      "Nenhuma análise"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SharedCoordinatorAndSpecialistUseLargestConfiguredContext()
+  {
+    using var saveResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        CoordinatorModel = "alpha:latest",
+        DefaultModel = "alpha:latest"
+      }
+    );
+    saveResponse.EnsureSuccessStatusCode();
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "alpha:latest"
+          && request.KeepAlive == -1
+          && request.ContextTokens == 32_768
+          && request.Messages.Count == 0
+      )
+    );
+
+    using var profilesResponse = await _environment.HttpClient.GetAsync(
+      "api/runtime/profiles"
+    );
+    profilesResponse.EnsureSuccessStatusCode();
+    using var profilesDocument = JsonDocument.Parse(
+      await profilesResponse.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      profilesDocument.RootElement.GetProperty(
+        "sharedModelWarnings"
+      ).EnumerateArray().Any(
+        warning => warning.GetProperty(
+          "model"
+        ).GetString() == "alpha:latest"
+          && warning.GetProperty(
+            "largestConfiguredTarget"
+          ).GetInt32() == 32_768
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RequestFitUsesDiscreteEscalationAndRejectsImpossibleContext()
+  {
+    _environment.FakeOllama.Reset();
+    using var escalatedResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = new string(
+          'a',
+          88_000
+        ),
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        modelLocked = true,
+        interactionMode = "chat",
+        approvalPolicy = "ask"
+      }
+    );
+    escalatedResponse.EnsureSuccessStatusCode();
+    var escalatedEvents = await escalatedResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      escalatedEvents,
+      "request-context-escalated"
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "alpha:latest"
+          && request.Stream
+          && request.ContextTokens == 40_960
+      )
+    );
+
+    _environment.FakeOllama.Reset();
+    using var rejectedResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = new string(
+          'b',
+          132_000
+        ),
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        modelLocked = true,
+        interactionMode = "chat",
+        approvalPolicy = "ask"
+      }
+    );
+    rejectedResponse.EnsureSuccessStatusCode();
+    var rejectedEvents = await rejectedResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      rejectedEvents,
+      "request-context-does-not-fit"
+    );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "alpha:latest"
+          && request.Stream
       )
     );
   }
@@ -5737,6 +6309,20 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await SendMessageAsync(
       "Simple ordering request"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"runtime-profile-inherited\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"request-context-fit-evaluated\"]"
+      )
+    ).ToContainTextAsync(
+      "context tokens selected"
     );
     var activityComesFirst = await Page.Locator(
       ".message.assistant"
@@ -6697,10 +7283,11 @@ public sealed class ChatEndToEndTests : PageTest
       )
     );
     var requests = _environment.FakeOllama.Requests.ToArray();
-    var residentEvictionIndex = Array.FindIndex(
+    var residentPreloadIndex = Array.FindIndex(
       requests,
-      request => request.Model == "router:latest"
-        && request.KeepAlive == 0
+      request => request.Model == "command-r:latest"
+        && request.KeepAlive == -1
+        && request.ContextTokens == 8_192
         && request.Messages.Count == 0
     );
     var coordinatorToolRequestIndex = Array.FindIndex(
@@ -6710,16 +7297,17 @@ public sealed class ChatEndToEndTests : PageTest
     );
     Assert.IsGreaterThanOrEqualTo(
       0,
-      residentEvictionIndex
+      residentPreloadIndex
     );
     Assert.IsGreaterThan(
-      residentEvictionIndex,
+      residentPreloadIndex,
       coordinatorToolRequestIndex
     );
     Assert.IsTrue(
       requests.Any(
-        request => request.Model == "router:latest"
+        request => request.Model == "command-r:latest"
           && request.KeepAlive == -1
+          && request.ContextTokens == 8_192
           && request.Messages.Count == 0
       )
     );
@@ -7986,6 +8574,12 @@ public sealed class ChatEndToEndTests : PageTest
         {
           GenerationTimeoutSeconds = 1
         },
+        OllamaRuntime = _environment.BaselineSettings.OllamaRuntime with
+        {
+          RoleDefaults = TestOllamaRuntimeDefaults.WithMaximum(
+            24_576
+          )
+        },
         Execution = _environment.BaselineSettings.Execution with
         {
           DirectCoordinatorPlanningFailuresBeforeHandoff = 1,
@@ -8035,7 +8629,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     Assert.IsTrue(
       plannerRequests.All(
-        request => request.ContextTokens == 24_576
+        request => request.ContextTokens == 8_192
           && request.PredictTokens == 768
       )
     );
@@ -8045,11 +8639,11 @@ public sealed class ChatEndToEndTests : PageTest
         && request.Messages.Count > 0
     );
     Assert.AreEqual(
-      24_576,
+      8_192,
       routerRequest.ContextTokens
     );
     Assert.AreEqual(
-      3_072,
+      1_024,
       routerRequest.PredictTokens
     );
   }

@@ -32,6 +32,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     "routing",
     "context",
     "runtime",
+    "ollama_runtime",
     "execution",
     "project_awareness",
     "session_history",
@@ -201,6 +202,10 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       1,
       "generation_timeout_seconds",
       settings.Runtime.GenerationTimeoutSeconds
+    );
+    ExportOllamaRuntime(
+      yaml,
+      settings.OllamaRuntime
     );
     yaml.AppendLine(
       "execution:"
@@ -829,6 +834,11 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings,
       errors
     );
+    settings = ApplyOllamaRuntime(
+      root,
+      settings,
+      errors
+    );
     settings = ApplyExecution(
       root,
       settings,
@@ -859,6 +869,444 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings,
       errors
     );
+  }
+
+  private static ApplicationSettings ApplyOllamaRuntime(
+    YamlNode root,
+    ApplicationSettings settings,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    var section = Map(
+      root,
+      "ollama_runtime",
+      "ollama_runtime",
+      errors
+    );
+
+    if (section is null)
+    {
+      return settings;
+    }
+
+    ValidateKeys(
+      section,
+      [
+        "profile_schema_version",
+        "context_escalation_ladder",
+        "role_defaults",
+        "memory",
+        "model_overrides"
+      ],
+      "ollama_runtime",
+      errors
+    );
+    var current = settings.OllamaRuntime;
+    var roles = current.RoleDefaults.ToDictionary(
+      pair => pair.Key,
+      pair => pair.Value,
+      StringComparer.Ordinal
+    );
+    var roleMap = Map(
+      section,
+      "role_defaults",
+      "ollama_runtime.role_defaults",
+      errors
+    );
+
+    if (roleMap is not null)
+    {
+      ValidateKeys(
+        roleMap,
+        OllamaRuntimeRoleIds.All,
+        "ollama_runtime.role_defaults",
+        errors
+      );
+
+      foreach (var role in OllamaRuntimeRoleIds.All)
+      {
+        var node = Map(
+          roleMap,
+          role,
+          $"ollama_runtime.role_defaults.{role}",
+          errors
+        );
+
+        if (node is not null)
+        {
+          roles[role] = ReadRoleProfile(
+            node,
+            roles[role],
+            $"ollama_runtime.role_defaults.{role}",
+            errors
+          );
+        }
+      }
+    }
+
+    var memory = current.Memory;
+    var memoryMap = Map(
+      section,
+      "memory",
+      "ollama_runtime.memory",
+      errors
+    );
+
+    if (memoryMap is not null)
+    {
+      ValidateKeys(
+        memoryMap,
+        [
+          "target_maximum_gpu_usage_percent",
+          "minimum_free_vram_bytes",
+          "minimum_free_system_ram_bytes",
+          "allow_cpu_offload",
+          "prefer_full_gpu_for_active_primary",
+          "devices"
+        ],
+        "ollama_runtime.memory",
+        errors
+      );
+      memory = memory with
+      {
+        TargetMaximumGpuUsagePercent = ReadInt(
+          memoryMap,
+          "target_maximum_gpu_usage_percent",
+          memory.TargetMaximumGpuUsagePercent,
+          "ollama_runtime.memory.target_maximum_gpu_usage_percent",
+          errors
+        ),
+        MinimumFreeVramBytes = ReadLong(
+          memoryMap,
+          "minimum_free_vram_bytes",
+          memory.MinimumFreeVramBytes,
+          "ollama_runtime.memory.minimum_free_vram_bytes",
+          errors
+        ),
+        MinimumFreeSystemRamBytes = ReadLong(
+          memoryMap,
+          "minimum_free_system_ram_bytes",
+          memory.MinimumFreeSystemRamBytes,
+          "ollama_runtime.memory.minimum_free_system_ram_bytes",
+          errors
+        ),
+        AllowCpuOffload = ReadBoolean(
+          memoryMap,
+          "allow_cpu_offload",
+          memory.AllowCpuOffload,
+          "ollama_runtime.memory.allow_cpu_offload",
+          errors
+        ),
+        PreferFullGpuForActivePrimary = ReadBoolean(
+          memoryMap,
+          "prefer_full_gpu_for_active_primary",
+          memory.PreferFullGpuForActivePrimary,
+          "ollama_runtime.memory.prefer_full_gpu_for_active_primary",
+          errors
+        )
+      };
+      var memoryDevices = Map(
+        memoryMap,
+        "devices",
+        "ollama_runtime.memory.devices",
+        errors
+      );
+
+      if (memoryDevices?.Children is not null)
+      {
+        var importedDevices = new Dictionary<string, OllamaGpuMemoryPolicy>(
+          StringComparer.Ordinal
+        );
+
+        foreach (var entry in memoryDevices.Children.OrderBy(
+          pair => pair.Key,
+          StringComparer.Ordinal
+        ))
+        {
+          var path = $"ollama_runtime.memory.devices.{entry.Key}";
+
+          if (entry.Value.Children is null)
+          {
+            AddError(
+              errors,
+              path,
+              $"Line {entry.Value.Line}: expected a mapping."
+            );
+            continue;
+          }
+
+          ValidateKeys(
+            entry.Value,
+            [
+              "id",
+              "target_maximum_usage_percent",
+              "minimum_free_vram_bytes"
+            ],
+            path,
+            errors
+          );
+          var id = ReadString(
+            entry.Value,
+            "id",
+            string.Empty,
+            $"{path}.id",
+            errors
+          );
+
+          if (!string.IsNullOrWhiteSpace(
+            id
+          ))
+          {
+            importedDevices[id] = new OllamaGpuMemoryPolicy
+            {
+              TargetMaximumUsagePercent = ReadInt(
+                entry.Value,
+                "target_maximum_usage_percent",
+                memory.TargetMaximumGpuUsagePercent,
+                $"{path}.target_maximum_usage_percent",
+                errors
+              ),
+              MinimumFreeVramBytes = ReadLong(
+                entry.Value,
+                "minimum_free_vram_bytes",
+                memory.MinimumFreeVramBytes,
+                $"{path}.minimum_free_vram_bytes",
+                errors
+              )
+            };
+          }
+        }
+
+        memory = memory with
+        {
+          Devices = importedDevices
+        };
+      }
+    }
+
+    var overrides = new List<OllamaModelRuntimeOverride>();
+    var overrideMap = Map(
+      section,
+      "model_overrides",
+      "ollama_runtime.model_overrides",
+      errors
+    );
+
+    if (overrideMap?.Children is not null)
+    {
+      foreach (var entry in overrideMap.Children.OrderBy(
+        pair => pair.Key,
+        StringComparer.Ordinal
+      ))
+      {
+        var path = $"ollama_runtime.model_overrides.{entry.Key}";
+
+        if (entry.Value.Children is null)
+        {
+          AddError(
+            errors,
+            path,
+            $"Line {entry.Value.Line}: expected a mapping."
+          );
+          continue;
+        }
+
+        ValidateKeys(
+          entry.Value,
+          [
+            "provider",
+            "model",
+            "digest",
+            "roles"
+          ],
+          path,
+          errors
+        );
+        var overrideRoles = new Dictionary<string, OllamaRoleRuntimeSettings>(
+          StringComparer.Ordinal
+        );
+        var overrideRoleMap = Map(
+          entry.Value,
+          "roles",
+          $"{path}.roles",
+          errors
+        );
+
+        if (overrideRoleMap is not null)
+        {
+          ValidateKeys(
+            overrideRoleMap,
+            OllamaRuntimeRoleIds.All,
+            $"{path}.roles",
+            errors
+          );
+
+          foreach (var role in OllamaRuntimeRoleIds.All)
+          {
+            var roleNode = Map(
+              overrideRoleMap,
+              role,
+              $"{path}.roles.{role}",
+              errors
+            );
+
+            if (roleNode is not null)
+            {
+              overrideRoles[role] = ReadRoleProfile(
+                roleNode,
+                roles[role],
+                $"{path}.roles.{role}",
+                errors
+              );
+            }
+          }
+        }
+
+        overrides.Add(
+          new OllamaModelRuntimeOverride
+          {
+            Provider = ReadString(
+              entry.Value,
+              "provider",
+              "ollama-local",
+              $"{path}.provider",
+              errors
+            ),
+            Model = ReadString(
+              entry.Value,
+              "model",
+              string.Empty,
+              $"{path}.model",
+              errors
+            ),
+            Digest = ReadString(
+              entry.Value,
+              "digest",
+              string.Empty,
+              $"{path}.digest",
+              errors
+            ),
+            Overrides = overrideRoles
+          }
+        );
+      }
+    }
+
+    var ladderValue = ReadString(
+      section,
+      "context_escalation_ladder",
+      string.Join(
+        ",",
+        current.ContextEscalationLadder
+      ),
+      "ollama_runtime.context_escalation_ladder",
+      errors
+    );
+    var ladder = ladderValue.Split(
+      ',',
+      StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+    ).Select(
+      value => int.TryParse(
+        value,
+        NumberStyles.Integer,
+        CultureInfo.InvariantCulture,
+        out var parsed
+      )
+        ? parsed
+        : 0
+    ).ToArray();
+
+    if (ladder.Any(
+      value => value == 0
+    ))
+    {
+      AddError(
+        errors,
+        "ollama_runtime.context_escalation_ladder",
+        "Every context escalation ladder entry must be an integer."
+      );
+      ladder = current.ContextEscalationLadder.ToArray();
+    }
+
+    return settings with
+    {
+      OllamaRuntime = current with
+      {
+        ProfileSchemaVersion = ReadInt(
+          section,
+          "profile_schema_version",
+          current.ProfileSchemaVersion,
+          "ollama_runtime.profile_schema_version",
+          errors
+        ),
+        RoleDefaults = roles,
+        ContextEscalationLadder = ladder,
+        Memory = memory,
+        ModelOverrides = overrideMap is null
+          ? current.ModelOverrides
+          : overrides
+      }
+    };
+  }
+
+  private static OllamaRoleRuntimeSettings ReadRoleProfile(
+    YamlNode node,
+    OllamaRoleRuntimeSettings fallback,
+    string path,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    ValidateKeys(
+      node,
+      [
+        "minimum_context_tokens",
+        "target_context_tokens",
+        "maximum_context_tokens",
+        "output_token_limit",
+        "keep_alive"
+      ],
+      path,
+      errors
+    );
+
+    return fallback with
+    {
+      MinimumContextTokens = ReadInt(
+        node,
+        "minimum_context_tokens",
+        fallback.MinimumContextTokens,
+        $"{path}.minimum_context_tokens",
+        errors
+      ),
+      TargetContextTokens = ReadInt(
+        node,
+        "target_context_tokens",
+        fallback.TargetContextTokens,
+        $"{path}.target_context_tokens",
+        errors
+      ),
+      MaximumContextTokens = ReadInt(
+        node,
+        "maximum_context_tokens",
+        fallback.MaximumContextTokens,
+        $"{path}.maximum_context_tokens",
+        errors
+      ),
+      OutputTokenLimit = ReadInt(
+        node,
+        "output_token_limit",
+        fallback.OutputTokenLimit,
+        $"{path}.output_token_limit",
+        errors
+      ),
+      KeepAlive = ReadInt(
+        node,
+        "keep_alive",
+        fallback.KeepAlive,
+        $"{path}.keep_alive",
+        errors
+      )
+    };
   }
 
   private static ApplicationSettings ApplyWebSearch(
@@ -1656,12 +2104,12 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         character => character == ' '
       ).Count();
 
-      if (indent % 2 != 0 || indent > 8)
+      if (indent % 2 != 0 || indent > 10)
       {
         AddError(
           errors,
           "yaml",
-          $"Line {lineNumber}: indentation must use two spaces per level, up to four levels."
+          $"Line {lineNumber}: indentation must use two spaces per level, up to five levels."
         );
         continue;
       }
@@ -2051,6 +2499,42 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     return fallback;
   }
 
+  private static long ReadLong(
+    YamlNode parent,
+    string key,
+    long fallback,
+    string path,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    var value = ReadString(
+      parent,
+      key,
+      fallback.ToString(
+        CultureInfo.InvariantCulture
+      ),
+      path,
+      errors
+    );
+
+    if (long.TryParse(
+      value,
+      NumberStyles.Integer,
+      CultureInfo.InvariantCulture,
+      out var parsed
+    ))
+    {
+      return parsed;
+    }
+
+    AddError(
+      errors,
+      path,
+      "Value must be an integer."
+    );
+    return fallback;
+  }
+
   private static bool ReadBoolean(
     YamlNode parent,
     string key,
@@ -2155,6 +2639,218 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     );
   }
 
+  private static void ExportOllamaRuntime(
+    StringBuilder yaml,
+    OllamaRuntimeSettings runtime
+  )
+  {
+    yaml.AppendLine(
+      "ollama_runtime:"
+    );
+    Scalar(
+      yaml,
+      1,
+      "profile_schema_version",
+      runtime.ProfileSchemaVersion
+    );
+    Scalar(
+      yaml,
+      1,
+      "context_escalation_ladder",
+      string.Join(
+        ",",
+        runtime.ContextEscalationLadder
+      )
+    );
+    yaml.AppendLine(
+      "  role_defaults:"
+    );
+
+    foreach (var role in OllamaRuntimeRoleIds.All)
+    {
+      yaml.Append(
+        "    "
+      ).Append(
+        role
+      ).AppendLine(
+        ":"
+      );
+      ExportRoleProfile(
+        yaml,
+        3,
+        runtime.RoleDefaults[role]
+      );
+    }
+
+    yaml.AppendLine(
+      "  memory:"
+    );
+    Scalar(
+      yaml,
+      2,
+      "target_maximum_gpu_usage_percent",
+      runtime.Memory.TargetMaximumGpuUsagePercent
+    );
+    Scalar(
+      yaml,
+      2,
+      "minimum_free_vram_bytes",
+      runtime.Memory.MinimumFreeVramBytes
+    );
+    Scalar(
+      yaml,
+      2,
+      "minimum_free_system_ram_bytes",
+      runtime.Memory.MinimumFreeSystemRamBytes
+    );
+    Scalar(
+      yaml,
+      2,
+      "allow_cpu_offload",
+      runtime.Memory.AllowCpuOffload
+    );
+    Scalar(
+      yaml,
+      2,
+      "prefer_full_gpu_for_active_primary",
+      runtime.Memory.PreferFullGpuForActivePrimary
+    );
+    yaml.AppendLine(
+      "    devices:"
+    );
+    var deviceIndex = 0;
+
+    foreach (var device in runtime.Memory.Devices.OrderBy(
+      pair => pair.Key,
+      StringComparer.Ordinal
+    ))
+    {
+      deviceIndex++;
+      yaml.Append(
+        "      device_"
+      ).Append(
+        deviceIndex
+      ).AppendLine(
+        ":"
+      );
+      Scalar(
+        yaml,
+        4,
+        "id",
+        device.Key
+      );
+      Scalar(
+        yaml,
+        4,
+        "target_maximum_usage_percent",
+        device.Value.TargetMaximumUsagePercent
+      );
+      Scalar(
+        yaml,
+        4,
+        "minimum_free_vram_bytes",
+        device.Value.MinimumFreeVramBytes
+      );
+    }
+    yaml.AppendLine(
+      "  model_overrides:"
+    );
+
+    for (
+      var index = 0;
+      index < runtime.ModelOverrides.Count;
+      index++
+    )
+    {
+      var modelOverride = runtime.ModelOverrides[index];
+      yaml.Append(
+        "    override_"
+      ).Append(
+        index + 1
+      ).AppendLine(
+        ":"
+      );
+      Scalar(
+        yaml,
+        3,
+        "provider",
+        modelOverride.Provider
+      );
+      Scalar(
+        yaml,
+        3,
+        "model",
+        modelOverride.Model
+      );
+      Scalar(
+        yaml,
+        3,
+        "digest",
+        modelOverride.Digest
+      );
+      yaml.AppendLine(
+        "      roles:"
+      );
+
+      foreach (var role in modelOverride.Overrides.OrderBy(
+        pair => pair.Key,
+        StringComparer.Ordinal
+      ))
+      {
+        yaml.Append(
+          "        "
+        ).Append(
+          role.Key
+        ).AppendLine(
+          ":"
+        );
+        ExportRoleProfile(
+          yaml,
+          5,
+          role.Value
+        );
+      }
+    }
+  }
+
+  private static void ExportRoleProfile(
+    StringBuilder yaml,
+    int level,
+    OllamaRoleRuntimeSettings profile
+  )
+  {
+    Scalar(
+      yaml,
+      level,
+      "minimum_context_tokens",
+      profile.MinimumContextTokens
+    );
+    Scalar(
+      yaml,
+      level,
+      "target_context_tokens",
+      profile.TargetContextTokens
+    );
+    Scalar(
+      yaml,
+      level,
+      "maximum_context_tokens",
+      profile.MaximumContextTokens
+    );
+    Scalar(
+      yaml,
+      level,
+      "output_token_limit",
+      profile.OutputTokenLimit
+    );
+    Scalar(
+      yaml,
+      level,
+      "keep_alive",
+      profile.KeepAlive
+    );
+  }
+
   private static void ModelGroup(
     StringBuilder yaml,
     string name,
@@ -2212,7 +2908,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     StringBuilder yaml,
     int level,
     string key,
-    int value
+    long value
   )
   {
     yaml.Append(
@@ -2226,6 +2922,33 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       value.ToString(
         CultureInfo.InvariantCulture
       )
+    );
+  }
+
+  private static void Scalar(
+    StringBuilder yaml,
+    int level,
+    string key,
+    int value
+  )
+  {
+    yaml.Append(
+      ' ',
+      level * 2
+    ).Append(
+      key
+    ).Append(
+      ": "
+    ).AppendLine(
+      value < 0
+        ? JsonSerializer.Serialize(
+          value.ToString(
+            CultureInfo.InvariantCulture
+          )
+        )
+        : value.ToString(
+          CultureInfo.InvariantCulture
+        )
     );
   }
 

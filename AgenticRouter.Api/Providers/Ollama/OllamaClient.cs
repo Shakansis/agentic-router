@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Providers.Ollama;
@@ -195,6 +196,10 @@ public sealed class OllamaClient : IOllamaClient
     try
     {
       var policy = await GetGenerationPolicyAsync(
+        baseUri,
+        model,
+        usageContext,
+        estimatedInput,
         true,
         cancellationToken
       );
@@ -205,7 +210,7 @@ public sealed class OllamaClient : IOllamaClient
         null,
         new OllamaOptions(
           0,
-          policy.ContextTokens,
+          policy.Resolution.EffectiveContextTokens,
           policy.OutputTokens
         ),
         null,
@@ -270,7 +275,8 @@ public sealed class OllamaClient : IOllamaClient
             call.Function.Name,
             call.Function.Arguments.Clone()
           )
-        ).ToArray() ?? []
+        ).ToArray() ?? [],
+        policy.Resolution
       );
       estimatedOutput = _tokenEstimator.EstimateToolResponse(
         toolResponse
@@ -321,6 +327,10 @@ public sealed class OllamaClient : IOllamaClient
     try
     {
       var policy = await GetGenerationPolicyAsync(
+        baseUri,
+        model,
+        usageContext,
+        estimatedInput,
         false,
         cancellationToken
       );
@@ -331,7 +341,7 @@ public sealed class OllamaClient : IOllamaClient
         format,
         new OllamaOptions(
           0,
-          policy.ContextTokens,
+          policy.Resolution.EffectiveContextTokens,
           policy.OutputTokens
         ),
         null
@@ -420,6 +430,10 @@ public sealed class OllamaClient : IOllamaClient
         "application/json"
       )
     };
+    request.Headers.TryAddWithoutValidation(
+      "X-Agentic-Router-Operation",
+      "model-capability-inspection"
+    );
     using var response = await SendAsync(
       request,
       "model-capability-inspection",
@@ -465,6 +479,121 @@ public sealed class OllamaClient : IOllamaClient
         StringComparer.OrdinalIgnoreCase
       )
     );
+  }
+
+  public async Task<OllamaModelMetadata> GetModelMetadataAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var payload = await GetShowResponseAsync(
+      baseUri,
+      model,
+      "model-metadata-inspection",
+      cancellationToken
+    );
+    int? declaredContext = null;
+
+    if (payload.ModelInfo is not null)
+    {
+      foreach (var pair in payload.ModelInfo)
+      {
+        if (
+          !pair.Key.EndsWith(
+            ".context_length",
+            StringComparison.OrdinalIgnoreCase
+          )
+          && !string.Equals(
+            pair.Key,
+            "context_length",
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+        {
+          continue;
+        }
+
+        if (
+          pair.Value.ValueKind == JsonValueKind.Number
+          && pair.Value.TryGetInt32(
+            out var context
+          )
+          && context > 0
+        )
+        {
+          declaredContext = declaredContext is null
+            ? context
+            : Math.Max(
+              declaredContext.Value,
+              context
+            );
+        }
+      }
+    }
+
+    return new OllamaModelMetadata(
+      model,
+      declaredContext,
+      payload.Details?.ParameterSize,
+      payload.Details?.QuantizationLevel,
+      payload.Details?.Format,
+      payload.Details?.Family,
+      payload.Details?.Families ?? []
+    );
+  }
+
+  private async Task<OllamaShowResponse> GetShowResponseAsync(
+    Uri baseUri,
+    string model,
+    string stage,
+    CancellationToken cancellationToken
+  )
+  {
+    var json = JsonSerializer.Serialize(
+      new OllamaShowRequest(
+        model
+      ),
+      JsonOptions
+    );
+    using var request = new HttpRequestMessage(
+      HttpMethod.Post,
+      new Uri(
+        baseUri,
+        "/api/show"
+      )
+    )
+    {
+      Content = new StringContent(
+        json,
+        Encoding.UTF8,
+        "application/json"
+      )
+    };
+    using var response = await SendAsync(
+      request,
+      stage,
+      cancellationToken
+    );
+
+    try
+    {
+      return await response.Content.ReadFromJsonAsync<OllamaShowResponse>(
+        JsonOptions,
+        cancellationToken
+      ) ?? throw new JsonException(
+        "The /api/show response body was empty."
+      );
+    }
+    catch (JsonException exception)
+    {
+      throw ProviderError(
+        stage,
+        "Ollama returned invalid model metadata.",
+        exception.Message,
+        (int)response.StatusCode
+      );
+    }
   }
 
   public async Task<ProviderModelCapabilities> GetProviderModelCapabilitiesAsync(
@@ -614,8 +743,10 @@ public sealed class OllamaClient : IOllamaClient
       .Select(
         model => new OllamaRunningModel(
           model.Name!,
+          model.Digest,
           model.Size,
           model.SizeVram,
+          model.ContextLength,
           model.ExpiresAt
         )
       )
@@ -629,8 +760,24 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
-    var policy = await GetGenerationPolicyAsync(
-      false,
+    await SetModelResidencyAsync(
+      baseUri,
+      model,
+      keepAlive,
+      null,
+      cancellationToken
+    );
+  }
+
+  public async Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    CancellationToken cancellationToken
+  )
+  {
+    var settings = await _settingsStore.GetAsync(
       cancellationToken
     );
     var payload = CreateRequest(
@@ -638,7 +785,13 @@ public sealed class OllamaClient : IOllamaClient
       Array.Empty<ChatMessage>(),
       false,
       null,
-      null,
+      contextTokens is null || keepAlive == 0
+        ? null
+        : new OllamaOptions(
+          0,
+          contextTokens,
+          null
+        ),
       keepAlive
     );
     using var response = await SendChatAsync(
@@ -648,7 +801,9 @@ public sealed class OllamaClient : IOllamaClient
         ? "resident-model-unload"
         : "resident-model-preload",
       cancellationToken,
-      requestTimeout: policy.Timeout
+      requestTimeout: TimeSpan.FromSeconds(
+        settings.Runtime.GenerationTimeoutSeconds
+      )
     );
   }
 
@@ -665,11 +820,27 @@ public sealed class OllamaClient : IOllamaClient
     var stopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
+    ) + options.Images.Sum(
+      image => Math.Max(
+        1_024L,
+        (long)Math.Ceiling(
+          image.Bytes.LongLength / 512d
+        )
+      )
     );
     long estimatedOutput = 0;
     ProviderTokenUsage? providerUsage = null;
     var status = UsageStatuses.Failure;
     var policy = await GetGenerationPolicyAsync(
+      baseUri,
+      model,
+      options.Images.Count > 0
+        ? usageContext with
+        {
+          ModelRole = UsageModelRoles.VisionRequest
+        }
+        : usageContext,
+      estimatedInput,
       false,
       cancellationToken
     );
@@ -692,6 +863,8 @@ public sealed class OllamaClient : IOllamaClient
 
     try
     {
+      var resolutionEmitted = false;
+
       while (true)
       {
         bool hasNext;
@@ -729,7 +902,13 @@ public sealed class OllamaClient : IOllamaClient
           status = UsageStatuses.Success;
         }
 
-        yield return update;
+        yield return !resolutionEmitted
+          ? update with
+          {
+            ContextResolution = policy.Resolution
+          }
+          : update;
+        resolutionEmitted = true;
       }
     }
     finally
@@ -774,7 +953,7 @@ public sealed class OllamaClient : IOllamaClient
       null,
       new OllamaOptions(
         0,
-        policy.ContextTokens,
+        policy.Resolution.EffectiveContextTokens,
         policy.OutputTokens
       ),
       null,
@@ -993,6 +1172,10 @@ public sealed class OllamaClient : IOllamaClient
   }
 
   private async Task<GenerationPolicy> GetGenerationPolicyAsync(
+    Uri baseUri,
+    string model,
+    ProviderCallContext usageContext,
+    long estimatedInputTokens,
     bool toolOutput,
     CancellationToken cancellationToken
   )
@@ -1001,11 +1184,100 @@ public sealed class OllamaClient : IOllamaClient
       cancellationToken
     );
 
+    var requestedOutput = toolOutput
+      ? settings.Execution.MaxToolOutputTokens
+      : settings.Context.ReservedResponseTokens;
+    OllamaModelMetadata metadata;
+
+    try
+    {
+      metadata = await GetModelMetadataAsync(
+        baseUri,
+        model,
+        cancellationToken
+      );
+    }
+    catch (OllamaProviderException exception)
+    {
+      throw new OllamaRuntimeProfileException(
+        "model-metadata-unavailable",
+        "Ollama model metadata is unavailable for runtime context resolution.",
+        usageContext.RequestPurpose,
+        model,
+        usageContext.ModelRevision,
+        OllamaRuntimeProfileResolver.NormalizeRole(
+          usageContext.ModelRole
+        ),
+        null,
+        null,
+        true,
+        exception.Message,
+        exception
+      );
+    }
+
+    if (metadata.DeclaredContextTokens is null)
+    {
+      throw new OllamaRuntimeProfileException(
+        "declared-context-unavailable",
+        "Ollama did not declare a maximum context for this model.",
+        usageContext.RequestPurpose,
+        model,
+        usageContext.ModelRevision,
+        OllamaRuntimeProfileResolver.NormalizeRole(
+          usageContext.ModelRole
+        ),
+        null,
+        null,
+        false,
+        "The native /api/show response did not contain a positive context_length."
+      );
+    }
+
+    var resolution = OllamaRuntimeProfileResolver.Resolve(
+      settings,
+      model,
+      usageContext.ModelRevision,
+      usageContext.ModelRole,
+      metadata.DeclaredContextTokens,
+      estimatedInputTokens,
+      requestedOutput
+    );
+
+    if (usageContext.RuntimeContextTokens is not null)
+    {
+      var explicitContext = usageContext.RuntimeContextTokens.Value;
+
+      if (
+        explicitContext < resolution.RequiredContextTokens
+        || explicitContext > resolution.MaximumContextTokens
+      )
+      {
+        throw new OllamaRuntimeProfileException(
+          "invalid-runtime-context-override",
+          "The request-specific runtime context does not fit the resolved profile.",
+          usageContext.RequestPurpose,
+          model,
+          usageContext.ModelRevision,
+          resolution.Role,
+          explicitContext,
+          null,
+          false,
+          $"Required={resolution.RequiredContextTokens}; maximum={resolution.MaximumContextTokens}."
+        );
+      }
+
+      resolution = resolution with
+      {
+        EffectiveContextTokens = explicitContext,
+        Escalated = explicitContext > resolution.TargetContextTokens,
+        Reason = $"An explicit bounded runtime context of {explicitContext} tokens was requested."
+      };
+    }
+
     return new GenerationPolicy(
-      settings.Context.ProviderContextTokens,
-      toolOutput
-        ? settings.Execution.MaxToolOutputTokens
-        : settings.Context.ReservedResponseTokens,
+      resolution,
+      resolution.OutputTokenLimit,
       TimeSpan.FromSeconds(
         settings.Runtime.GenerationTimeoutSeconds
       )
@@ -1314,13 +1586,26 @@ public sealed class OllamaClient : IOllamaClient
   );
 
   private sealed record OllamaShowResponse(
-    IReadOnlyList<string>? Capabilities
+    IReadOnlyList<string>? Capabilities,
+    [property: JsonPropertyName("model_info")]
+    IReadOnlyDictionary<string, JsonElement>? ModelInfo,
+    OllamaModelDetails? Details
+  );
+
+  private sealed record OllamaModelDetails(
+    string? Format,
+    string? Family,
+    IReadOnlyList<string>? Families,
+    [property: JsonPropertyName("parameter_size")] string? ParameterSize,
+    [property: JsonPropertyName("quantization_level")] string? QuantizationLevel
   );
 
   private sealed record OllamaPsModel(
     string? Name,
+    string? Digest,
     long? Size,
     [property: JsonPropertyName("size_vram")] long? SizeVram,
+    [property: JsonPropertyName("context_length")] int? ContextLength,
     [property: JsonPropertyName("expires_at")] DateTimeOffset? ExpiresAt
   );
 
@@ -1335,13 +1620,13 @@ public sealed class OllamaClient : IOllamaClient
   );
 
   private sealed record OllamaOptions(
-    double Temperature,
-    int NumCtx,
-    int NumPredict
+    double? Temperature,
+    int? NumCtx,
+    int? NumPredict
   );
 
   private sealed record GenerationPolicy(
-    int ContextTokens,
+    OllamaContextResolution Resolution,
     int OutputTokens,
     TimeSpan Timeout
   );

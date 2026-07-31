@@ -289,7 +289,7 @@ public sealed class ModelsController : ControllerBase
         {
           _logger.LogWarning(
             exception,
-            "The resident router model could not be restored after benchmarking {Model}.",
+            "The resident coordinator model could not be restored after benchmarking {Model}.",
             selected.Name
           );
         }

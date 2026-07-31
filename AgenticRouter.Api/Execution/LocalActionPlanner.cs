@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
@@ -153,7 +154,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           return new LocalActionPlanningResult(
             null,
             assistantMessage,
-            true
+            true,
+            ContextResolution: response.ContextResolution
           );
         }
 
@@ -167,7 +169,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           return new LocalActionPlanningResult(
             null,
             assistantMessage,
-            false
+            false,
+            ContextResolution: response.ContextResolution
           );
         }
 
@@ -198,7 +201,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           return new LocalActionPlanningResult(
             null,
             assistantMessage,
-            true
+            true,
+            ContextResolution: response.ContextResolution
           );
         }
 
@@ -240,7 +244,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         ),
         assistantMessage,
         false,
-        response.ToolCalls.Count - selectedToolCalls.Length
+        response.ToolCalls.Count - selectedToolCalls.Length,
+        response.ContextResolution
       );
     }
     catch (JsonException exception)
@@ -643,5 +648,6 @@ public sealed record LocalActionPlanningResult(
   LocalActionProposal? Proposal,
   OllamaToolMessage AssistantMessage,
   bool ExplicitNoAction,
-  int IgnoredToolCallCount = 0
+  int IgnoredToolCallCount = 0,
+  OllamaContextResolution? ContextResolution = null
 );

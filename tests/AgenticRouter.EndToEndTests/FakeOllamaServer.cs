@@ -103,6 +103,18 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
+  public void SetLoadedModelContext(
+    string model,
+    int contextTokens
+  )
+  {
+    AddLoadedModel(
+      model,
+      -1,
+      contextTokens
+    );
+  }
+
   public async ValueTask DisposeAsync()
   {
     await _shutdown.CancelAsync();
@@ -210,8 +222,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               model => new
               {
                 name = model.Name,
+                digest = model.Digest,
                 size = model.Size,
                 size_vram = model.VramSize,
+                context_length = model.ContextTokens,
                 expires_at = model.ExpiresAt
               }
             )
@@ -301,6 +315,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       model,
       "beta:code",
       StringComparison.Ordinal
+    ) && string.Equals(
+      context.Request.Headers["X-Agentic-Router-Operation"],
+      "model-capability-inspection",
+      StringComparison.Ordinal
     ))
     {
       await WriteJsonAsync(
@@ -320,6 +338,21 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       HttpStatusCode.OK,
       new
       {
+        model_info = new Dictionary<string, object>
+        {
+          ["general.context_length"] = 65_536
+        },
+        details = new
+        {
+          format = "gguf",
+          family = "qwen3",
+          families = new[]
+          {
+            "qwen3"
+          },
+          parameter_size = "8B",
+          quantization_level = "Q4_K_M"
+        },
         capabilities = model == "alpha:latest"
           ? new[]
           {
@@ -476,7 +509,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       UpdateResidency(
         model,
-        keepAlive.Value
+        keepAlive.Value,
+        contextTokens
       );
       await WriteJsonAsync(
         context.Response,
@@ -495,7 +529,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       AddLoadedModel(
         model,
-        -1
+        -1,
+        contextTokens
       );
       await ClassifyAsync(
         context.Response,
@@ -512,13 +547,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       context.Response,
       model,
       messages,
+      contextTokens,
       cancellationToken
     );
   }
 
   private void UpdateResidency(
     string model,
-    int keepAlive
+    int keepAlive,
+    int? contextTokens
   )
   {
     if (keepAlive == 0)
@@ -532,13 +569,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     AddLoadedModel(
       model,
-      keepAlive
+      keepAlive,
+      contextTokens
     );
   }
 
   private void AddLoadedModel(
     string model,
-    int keepAlive
+    int keepAlive,
+    int? contextTokens = null
   )
   {
     var definition = Models.Single(
@@ -546,8 +585,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
     _loaded[model] = new RunningModel(
       model,
+      $"digest-{model}",
       definition.Size,
       definition.Size * 3 / 4,
+      contextTokens ?? 8_192,
       keepAlive < 0
         ? null
         : DateTimeOffset.UtcNow.AddMinutes(
@@ -2332,6 +2373,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     HttpListenerResponse response,
     string model,
     IReadOnlyList<RecordedMessage> messages,
+    int? contextTokens,
     CancellationToken cancellationToken
   )
   {
@@ -2393,7 +2435,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     AddLoadedModel(
       model,
-      300
+      300,
+      contextTokens
     );
     var answer = BuildAnswer(
       current,
@@ -2661,8 +2704,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
   private sealed record RunningModel(
     string Name,
+    string Digest,
     long Size,
     long VramSize,
+    int ContextTokens,
     DateTimeOffset? ExpiresAt
   );
 }

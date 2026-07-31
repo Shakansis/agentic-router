@@ -157,6 +157,11 @@ public sealed class SettingsValidator : ISettingsValidator
       1,
       1_800
     );
+    ValidateOllamaRuntime(
+      errors,
+      settings.OllamaRuntime,
+      settings.Context.ProviderContextTokens
+    );
 
     if (string.IsNullOrWhiteSpace(
       settings.DefaultGpu
@@ -1204,6 +1209,270 @@ public sealed class SettingsValidator : ISettingsValidator
         errors,
         field,
         $"Value must be between {minimum} and {maximum} seconds."
+      );
+    }
+  }
+
+  private static void ValidateOllamaRuntime(
+    IDictionary<string, List<string>> errors,
+    OllamaRuntimeSettings runtime,
+    int providerContextCeiling
+  )
+  {
+    if (runtime.ProfileSchemaVersion != 1)
+    {
+      AddError(
+        errors,
+        "ollamaRuntime.profileSchemaVersion",
+        "Ollama runtime profile schema version must be 1."
+      );
+    }
+
+    foreach (var role in OllamaRuntimeRoleIds.All)
+    {
+      if (!runtime.RoleDefaults.TryGetValue(
+        role,
+        out var profile
+      ))
+      {
+        AddError(
+          errors,
+          $"ollamaRuntime.roleDefaults.{role}",
+          "A runtime context profile is required for every supported role."
+        );
+        continue;
+      }
+
+      ValidateOllamaRoleProfile(
+        errors,
+        $"ollamaRuntime.roleDefaults.{role}",
+        profile,
+        providerContextCeiling
+      );
+    }
+
+    foreach (var unsupported in runtime.RoleDefaults.Keys.Except(
+      OllamaRuntimeRoleIds.All,
+      StringComparer.Ordinal
+    ))
+    {
+      AddError(
+        errors,
+        $"ollamaRuntime.roleDefaults.{unsupported}",
+        "The Ollama runtime role is not supported."
+      );
+    }
+
+    if (
+      runtime.ContextEscalationLadder.Count == 0
+      || runtime.ContextEscalationLadder.Count > 16
+      || runtime.ContextEscalationLadder.Any(
+        value => value is < 1_024 or > 131_072
+      )
+      || runtime.ContextEscalationLadder.Distinct().Count()
+        != runtime.ContextEscalationLadder.Count
+      || !runtime.ContextEscalationLadder.SequenceEqual(
+        runtime.ContextEscalationLadder.Order()
+      )
+    )
+    {
+      AddError(
+        errors,
+        "ollamaRuntime.contextEscalationLadder",
+        "The context escalation ladder must contain distinct ascending values between 1024 and 131072."
+      );
+    }
+
+    if (runtime.ModelOverrides.Count > 100)
+    {
+      AddError(
+        errors,
+        "ollamaRuntime.modelOverrides",
+        "At most 100 local Ollama model overrides may be configured."
+      );
+    }
+
+    var identities = new HashSet<string>(
+      StringComparer.Ordinal
+    );
+
+    for (var index = 0; index < runtime.ModelOverrides.Count; index++)
+    {
+      var modelOverride = runtime.ModelOverrides[index];
+      var prefix = $"ollamaRuntime.modelOverrides.{index}";
+
+      if (!string.Equals(
+        modelOverride.Provider,
+        "ollama-local",
+        StringComparison.Ordinal
+      ))
+      {
+        AddError(
+          errors,
+          $"{prefix}.provider",
+          "Runtime overrides are supported only for ollama-local."
+        );
+      }
+
+      if (
+        string.IsNullOrWhiteSpace(
+          modelOverride.Model
+        )
+        || modelOverride.Model.Length > 256
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.model",
+          "An exact local model ID with at most 256 characters is required."
+        );
+      }
+
+      if (
+        string.IsNullOrWhiteSpace(
+          modelOverride.Digest
+        )
+        || modelOverride.Digest.Length > 256
+      )
+      {
+        AddError(
+          errors,
+          $"{prefix}.digest",
+          "An exact model digest with at most 256 characters is required."
+        );
+      }
+
+      if (!identities.Add(
+        $"{modelOverride.Provider}|{modelOverride.Model}|{modelOverride.Digest}"
+      ))
+      {
+        AddError(
+          errors,
+          prefix,
+          "Duplicate runtime override identities are not allowed."
+        );
+      }
+
+      if (modelOverride.Overrides.Count == 0)
+      {
+        AddError(
+          errors,
+          $"{prefix}.overrides",
+          "At least one role override is required."
+        );
+      }
+
+      foreach (var pair in modelOverride.Overrides)
+      {
+        if (!OllamaRuntimeRoleIds.All.Contains(
+          pair.Key,
+          StringComparer.Ordinal
+        ))
+        {
+          AddError(
+            errors,
+            $"{prefix}.overrides.{pair.Key}",
+            "The Ollama runtime role is not supported."
+          );
+          continue;
+        }
+
+        ValidateOllamaRoleProfile(
+          errors,
+          $"{prefix}.overrides.{pair.Key}",
+          pair.Value,
+          providerContextCeiling
+        );
+      }
+    }
+
+    if (runtime.Memory.TargetMaximumGpuUsagePercent is < 50 or > 100)
+    {
+      AddError(
+        errors,
+        "ollamaRuntime.memory.targetMaximumGpuUsagePercent",
+        "Target maximum GPU usage must be between 50 and 100 percent."
+      );
+    }
+
+    if (
+      runtime.Memory.MinimumFreeVramBytes is < 0 or > 1_099_511_627_776
+      || runtime.Memory.MinimumFreeSystemRamBytes is < 0 or > 4_398_046_511_104
+    )
+    {
+      AddError(
+        errors,
+        "ollamaRuntime.memory",
+        "Runtime memory headroom values are outside the supported bounds."
+      );
+    }
+
+    foreach (var pair in runtime.Memory.Devices)
+    {
+      if (string.IsNullOrWhiteSpace(
+        pair.Key
+      ) || pair.Key.Length > 256)
+      {
+        AddError(
+          errors,
+          "ollamaRuntime.memory.devices",
+          "Every GPU memory policy requires a bounded device ID."
+        );
+      }
+
+      if (
+        pair.Value.TargetMaximumUsagePercent is < 50 or > 100
+        || pair.Value.MinimumFreeVramBytes is < 0 or > 1_099_511_627_776
+      )
+      {
+        AddError(
+          errors,
+          $"ollamaRuntime.memory.devices.{pair.Key}",
+          "The GPU-specific runtime memory policy is outside the supported bounds."
+        );
+      }
+    }
+  }
+
+  private static void ValidateOllamaRoleProfile(
+    IDictionary<string, List<string>> errors,
+    string prefix,
+    OllamaRoleRuntimeSettings profile,
+    int providerContextCeiling
+  )
+  {
+    if (
+      profile.MinimumContextTokens < 1_024
+      || profile.MinimumContextTokens > profile.TargetContextTokens
+      || profile.TargetContextTokens > profile.MaximumContextTokens
+      || profile.MaximumContextTokens > providerContextCeiling
+    )
+    {
+      AddError(
+        errors,
+        prefix,
+        "Context minimum, target, and maximum must be ordered and remain within the provider context ceiling."
+      );
+    }
+
+    if (
+      profile.OutputTokenLimit is < 128
+      || profile.OutputTokenLimit >= profile.MaximumContextTokens
+    )
+    {
+      AddError(
+        errors,
+        $"{prefix}.outputTokenLimit",
+        "Output token limit must be at least 128 and smaller than the role maximum context."
+      );
+    }
+
+    if (profile.KeepAlive is < -1 or > 86_400)
+    {
+      AddError(
+        errors,
+        $"{prefix}.keepAlive",
+        "Keep alive must be -1 for indefinite residency or between 0 and 86400 seconds."
       );
     }
   }

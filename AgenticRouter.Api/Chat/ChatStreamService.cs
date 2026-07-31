@@ -698,43 +698,6 @@ public sealed class ChatStreamService : IChatStreamService
         var configuredCoordinatorReference = ProviderModelReference.Parse(
           settings.CoordinatorModel
         );
-
-        if (
-          configuredCoordinatorReference.IsLocal
-          && !string.Equals(
-          settings.CoordinatorModel,
-          settings.RouterModel,
-          StringComparison.OrdinalIgnoreCase
-          )
-        )
-        {
-          yield return Event(
-            requestId,
-            "resident-model-eviction-started",
-            $"Evicting resident router model {settings.RouterModel} before coordinator conformance.",
-            stopwatch,
-            settings.RouterModel,
-            intention
-          );
-          recoveryActive = await _residentModel.EvictForRecoveryAsync(
-            settings.CoordinatorModel,
-            cancellationToken
-          );
-          recoveryTarget = settings.CoordinatorModel;
-
-          if (recoveryActive)
-          {
-            yield return Event(
-              requestId,
-              "resident-model-evicted",
-              $"Resident router model {settings.RouterModel} was temporarily evicted for coordinator conformance.",
-              stopwatch,
-              settings.RouterModel,
-              intention
-            );
-          }
-        }
-
         var tooling = await InspectToolingAsync(
           baseUri,
           selectedModel,
@@ -1015,6 +978,13 @@ public sealed class ChatStreamService : IChatStreamService
             : "resident-bridge"
         );
 
+        if (!targetCoordinatesDirectly)
+        {
+          executionMessages = CompactCoordinatorMessages(
+            executionMessages
+          );
+        }
+
         var execution = new ExecutionProgress(
           executionMessages,
           executionGuidance
@@ -1148,6 +1118,12 @@ public sealed class ChatStreamService : IChatStreamService
             "coordinator-takeover"
           );
           var recoveryAttemptCount = execution.RecoveryAttemptCount;
+          residentMessages = CompactCoordinatorMessages(
+            residentMessages
+          );
+          residentToolMessages = CompactCoordinatorToolMessages(
+            residentToolMessages
+          );
           execution = new ExecutionProgress(
             residentMessages,
             takeoverGuidance,
@@ -1345,11 +1321,12 @@ public sealed class ChatStreamService : IChatStreamService
       if (progress.Failure is not null)
       {
         var failure = progress.Failure;
-        var canRecover = failure.IsMemoryPressure
+        var canRecover = failure is OllamaProviderException providerFailure
+          && providerFailure.IsMemoryPressure
           && !progress.ReceivedFirstChunk
           && !string.Equals(
             selectedModel,
-            settings.RouterModel,
+            settings.CoordinatorModel,
             StringComparison.OrdinalIgnoreCase
           );
 
@@ -1375,9 +1352,9 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "resident-model-eviction-started",
-          $"Evicting resident router model {settings.RouterModel} for one adaptive retry.",
+          $"Evicting resident coordinator model {settings.CoordinatorModel} for one adaptive retry.",
           stopwatch,
-          settings.RouterModel,
+          settings.CoordinatorModel,
           intention
         );
 
@@ -1399,9 +1376,9 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "resident-model-evicted",
-          $"Resident router model {settings.RouterModel} was temporarily evicted.",
+          $"Resident coordinator model {settings.CoordinatorModel} was temporarily evicted.",
           stopwatch,
-          settings.RouterModel,
+          settings.CoordinatorModel,
           intention
         );
         yield return Event(
@@ -1439,9 +1416,9 @@ public sealed class ChatStreamService : IChatStreamService
           yield return Event(
             requestId,
             "resident-model-reload-started",
-            $"Reloading resident router model {settings.RouterModel}.",
+            $"Reloading resident coordinator model {settings.CoordinatorModel}.",
             stopwatch,
-            settings.RouterModel,
+            settings.CoordinatorModel,
             intention
           );
           var restored = await _residentModel.RestoreAfterRecoveryAsync(
@@ -1455,10 +1432,10 @@ public sealed class ChatStreamService : IChatStreamService
               ? "resident-model-reloaded"
               : "resident-model-reload-failed",
             restored
-              ? $"Resident router model {settings.RouterModel} was restored."
-              : $"Resident router model {settings.RouterModel} could not be restored.",
+              ? $"Resident coordinator model {settings.CoordinatorModel} was restored."
+              : $"Resident coordinator model {settings.CoordinatorModel} could not be restored.",
             stopwatch,
-            settings.RouterModel,
+            settings.CoordinatorModel,
             intention
           );
 
@@ -1480,9 +1457,9 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "resident-model-reload-started",
-          $"Reloading resident router model {settings.RouterModel}.",
+          $"Reloading resident coordinator model {settings.CoordinatorModel}.",
           stopwatch,
-          settings.RouterModel,
+          settings.CoordinatorModel,
           intention
         );
         var reloaded = await _residentModel.RestoreAfterRecoveryAsync(
@@ -1496,10 +1473,10 @@ public sealed class ChatStreamService : IChatStreamService
             ? "resident-model-reloaded"
             : "resident-model-reload-failed",
           reloaded
-            ? $"Resident router model {settings.RouterModel} was restored."
-            : $"Resident router model {settings.RouterModel} could not be restored.",
+            ? $"Resident coordinator model {settings.CoordinatorModel} was restored."
+            : $"Resident coordinator model {settings.CoordinatorModel} could not be restored.",
           stopwatch,
-          settings.RouterModel,
+          settings.CoordinatorModel,
           intention
         );
       }
@@ -1509,9 +1486,9 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "resident-model-reload-started",
-          $"Reloading resident router model {settings.RouterModel}.",
+          $"Reloading resident coordinator model {settings.CoordinatorModel}.",
           stopwatch,
-          settings.RouterModel,
+          settings.CoordinatorModel,
           intention
         );
         var restored = await _residentModel.RestoreAfterRecoveryAsync(
@@ -1525,10 +1502,10 @@ public sealed class ChatStreamService : IChatStreamService
             ? "resident-model-reloaded"
             : "resident-model-reload-failed",
           restored
-            ? $"Resident router model {settings.RouterModel} was restored."
-            : $"Resident router model {settings.RouterModel} could not be restored.",
+            ? $"Resident coordinator model {settings.CoordinatorModel} was restored."
+            : $"Resident coordinator model {settings.CoordinatorModel} could not be restored.",
           stopwatch,
-          settings.RouterModel,
+          settings.CoordinatorModel,
           intention
         );
       }
@@ -1927,6 +1904,25 @@ public sealed class ChatStreamService : IChatStreamService
 
         var planningResult = planning.Result!;
         var proposal = planningResult.Proposal;
+
+        if (
+          !progress.RuntimeContextReported
+          && planningResult.ContextResolution is not null
+        )
+        {
+          foreach (var contextEvent in RuntimeContextEvents(
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            planningResult.ContextResolution
+          ))
+          {
+            yield return contextEvent;
+          }
+
+          progress.RuntimeContextReported = true;
+        }
 
         if (planningResult.IgnoredToolCallCount > 0)
         {
@@ -3253,6 +3249,11 @@ public sealed class ChatStreamService : IChatStreamService
         progress.Failure = exception;
         yield break;
       }
+      catch (OllamaRuntimeProfileException exception)
+      {
+        progress.Failure = exception;
+        yield break;
+      }
 
       if (update.Accepted && !progress.ReceivedFirstChunk)
       {
@@ -3264,6 +3265,25 @@ public sealed class ChatStreamService : IChatStreamService
           model,
           intention
         );
+      }
+
+      if (
+        !progress.RuntimeContextReported
+        && update.ContextResolution is not null
+      )
+      {
+        foreach (var contextEvent in RuntimeContextEvents(
+          requestId,
+          stopwatch,
+          model,
+          intention,
+          update.ContextResolution
+        ))
+        {
+          yield return contextEvent;
+        }
+
+        progress.RuntimeContextReported = true;
       }
 
       if (update.Citations is not null)
@@ -3965,6 +3985,69 @@ public sealed class ChatStreamService : IChatStreamService
   }
 
   private static ChatStageException ToChatException(
+    OllamaRuntimeProfileException exception,
+    string? model,
+    string? intention
+  )
+  {
+    return new ChatStageException(
+      exception.Error.Stage,
+      exception.Error.Message,
+      exception.Error.Diagnostic,
+      model ?? exception.Error.Model,
+      intention,
+      exception.Error.Code == "request-context-does-not-fit"
+        ? 413
+        : 400,
+      exception.Error.Retryable,
+      exception,
+      new Dictionary<string, string?>(
+        StringComparer.Ordinal
+      )
+      {
+        ["code"] = exception.Error.Code,
+        ["providerTraceId"] = exception.Error.TraceId,
+        ["role"] = exception.Error.Role,
+        ["requestedContext"] = exception.Error.RequestedContext?.ToString(),
+        ["actualContext"] = exception.Error.ActualContext?.ToString()
+      },
+      exception.Error.Provider
+    );
+  }
+
+  private static ChatStageException ToChatException(
+    Exception exception,
+    string? model,
+    string? intention
+  )
+  {
+    return exception switch
+    {
+      OllamaProviderException provider => ToChatException(
+        provider,
+        model,
+        intention
+      ),
+      OllamaRuntimeProfileException runtime => ToChatException(
+        runtime,
+        model,
+        intention
+      ),
+      ChatStageException stage => stage,
+      _ => new ChatStageException(
+        "generation",
+        "The model request could not be completed.",
+        exception.Message,
+        model,
+        intention,
+        500,
+        false,
+        exception
+      )
+    };
+  }
+
+  private static ChatStageException ToChatException(
     LocalActionException exception,
     string? model,
     string? intention
@@ -4119,6 +4202,183 @@ public sealed class ChatStreamService : IChatStreamService
         + $"Specialist model: {specialistModel}\n"
         + $"Structured guidance:\n{ExpertExecutionGuidanceService.Serialize(guidance)}"
     );
+  }
+
+  private static List<ChatMessage> CompactCoordinatorMessages(
+    IReadOnlyList<ChatMessage> messages
+  )
+  {
+    var compact = new List<ChatMessage>();
+    var projectContext = messages.LastOrDefault(
+      message => message.Role == "system"
+        && message.Content.StartsWith(
+          "APPLICATION_OWNED_PROJECT_CONTEXT",
+          StringComparison.Ordinal
+        )
+    );
+    var objective = messages.LastOrDefault(
+      message => message.Role == "user"
+        && !IsGuidanceMessage(
+          message
+        )
+        && !IsCoordinatorControlMessage(
+          message.Content
+        )
+    );
+    var guidance = messages.LastOrDefault(
+      IsGuidanceMessage
+    );
+
+    if (projectContext is not null)
+    {
+      compact.Add(
+        projectContext
+      );
+    }
+
+    if (objective is not null)
+    {
+      compact.Add(
+        objective
+      );
+    }
+
+    if (guidance is not null)
+    {
+      compact.Add(
+        guidance
+      );
+    }
+
+    return compact.Count > 0
+      ? compact
+      : messages.TakeLast(
+        2
+      ).ToList();
+  }
+
+  private static List<OllamaToolMessage> CompactCoordinatorToolMessages(
+    IReadOnlyList<OllamaToolMessage> messages
+  )
+  {
+    var context = messages.Where(
+      message => message.Role == "system"
+        && message.Content?.StartsWith(
+          "APPLICATION_OWNED_PROJECT_CONTEXT",
+          StringComparison.Ordinal
+        ) == true
+    ).TakeLast(
+      1
+    );
+    var objective = messages.Where(
+      message => message.Role == "user"
+        && message.Content?.StartsWith(
+          ExpertExecutionGuidanceService.GuidanceMarker,
+          StringComparison.Ordinal
+        ) != true
+        && !IsCoordinatorControlMessage(
+          message.Content
+        )
+    ).TakeLast(
+      1
+    );
+    var guidance = messages.Where(
+      message => message.Content?.StartsWith(
+        ExpertExecutionGuidanceService.GuidanceMarker,
+        StringComparison.Ordinal
+      ) == true
+    ).TakeLast(
+      1
+    );
+    var actionState = messages.Where(
+      message => message.Role is "assistant" or "tool"
+    ).TakeLast(
+      12
+    );
+
+    return context
+      .Concat(
+        objective
+      )
+      .Concat(
+        guidance
+      )
+      .Concat(
+        actionState
+      )
+      .ToList();
+  }
+
+  private IReadOnlyList<ChatStreamEvent> RuntimeContextEvents(
+    string requestId,
+    Stopwatch stopwatch,
+    string model,
+    string? intention,
+    OllamaContextResolution resolution
+  )
+  {
+    var events = new List<ChatStreamEvent>
+    {
+      Event(
+        requestId,
+        resolution.Overridden
+          ? "runtime-profile-overridden"
+          : "runtime-profile-inherited",
+        resolution.Overridden
+          ? $"Applied the exact {resolution.Model}@{resolution.Digest} override for role {resolution.Role}."
+          : $"Inherited the {resolution.Role} runtime profile for {resolution.Model}.",
+        stopwatch,
+        model,
+        intention
+      ),
+      Event(
+        requestId,
+        "request-context-fit-evaluated",
+        $"Request fit: {resolution.RequiredContextTokens} required, "
+          + $"{resolution.EffectiveContextTokens} context tokens selected, "
+          + $"{resolution.OutputTokenLimit} output tokens reserved.",
+        stopwatch,
+        model,
+        intention
+      )
+    };
+
+    if (resolution.Escalated)
+    {
+      events.Add(
+        Event(
+          requestId,
+          "request-context-escalated",
+          $"Context escalated from {resolution.TargetContextTokens} to "
+            + $"{resolution.EffectiveContextTokens} tokens for this request.",
+          stopwatch,
+          model,
+          intention
+        )
+      );
+    }
+
+    return events;
+  }
+
+  private static bool IsCoordinatorControlMessage(
+    string? content
+  )
+  {
+    return content is null
+      || new[]
+      {
+        "LOCAL_ACTION_RESULT",
+        "EXECUTION_COMPLETION_REJECTED",
+        "RECOVERY_",
+        "RESIDENT_",
+        "AUTHORITATIVE_EXECUTION_SESSION_FACTS"
+      }.Any(
+        marker => content.StartsWith(
+          marker,
+          StringComparison.Ordinal
+        )
+      );
   }
 
   private static OllamaToolMessage ToToolMessage(
@@ -4926,11 +5186,13 @@ public sealed class ChatStreamService : IChatStreamService
 
     public bool ReceivedFirstChunk { get; set; }
 
-    public OllamaProviderException? Failure { get; set; }
+    public Exception? Failure { get; set; }
 
     public IReadOnlyList<ProviderCitation>? Citations { get; set; }
 
     public ProviderTokenUsage? Usage { get; set; }
+
+    public bool RuntimeContextReported { get; set; }
   }
 
   private sealed class ExecutionProgress
@@ -4963,6 +5225,8 @@ public sealed class ChatStreamService : IChatStreamService
     public int RecoveryAttemptCount { get; set; }
 
     public int AutomaticStrategyRevisionCount { get; set; }
+
+    public bool RuntimeContextReported { get; set; }
   }
 
   private sealed record PlanningAttempt(

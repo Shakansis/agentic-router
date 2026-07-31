@@ -118,6 +118,40 @@ Keep configuration typed, validated, versionable, and backward-compatible when p
 
 Configuration includes provider URL, router and coordinator models, intent profiles, model/device defaults, context sizes, timeouts, execution limits, approval policy, trusted workspaces, and persistence preferences.
 
+Ollama Local context is Host-owned and role-specific. Resolve it from typed
+router, resident-coordinator, specialist, primary, fallback, benchmark,
+model-test, web-search-synthesis, and vision-request defaults plus an optional
+exact provider/model/digest override. The global provider context remains a
+ceiling, and the model-declared maximum is another ceiling. Send the effective
+value only through native `/api/chat` `options.num_ctx`.
+
+Request fit includes bounded message input, tool definitions and results,
+image overhead, and reserved output. Grow context only through the configured
+discrete ladder; reject an unfit request with a typed error rather than
+silently truncating required execution state. Resident coordination receives
+only the current objective, project context, specialist guidance, and bounded
+current tool state.
+
+The configured coordinator is the resident model. Preload it at 8,192 context
+tokens by default, verify exact model, digest, and `context_length` through
+`/api/ps`, and mark it ready only after verification. A mismatched resident is
+unloaded, verified absent, and reloaded only while no request is active.
+Settings changes, recovery eviction, and measurement must restore or explicitly
+report the prior resident state.
+
+Metadata analysis may use `/api/tags`, `/api/show`, `/api/ps`, and Ollama
+version without loading a model. Real memory measurement always requires
+explicit permission, bounded context candidates, active-request exclusion,
+and restoration. Store measured evidence atomically under
+`data/runtime-profiles/ollama-model-memory.json`, keyed by exact model digest,
+Ollama version, hardware signature, role, context, and runtime signature.
+Never export measured hardware records in portable YAML.
+
+Memory recommendations distinguish configured, inherited, overridden,
+metadata-derived, measured, and stale evidence. Surface shared-model and CPU
+offload consequences. Do not infer or mutate Ollama parallelism, flash
+attention, or KV-cache type when those values are unavailable.
+
 When an intent primary resolves to a cloud provider, its configured fallback
 must resolve unambiguously to an installed Ollama Local model. The Host may
 switch once for an eligible timeout, provider outage, rate limit, quota

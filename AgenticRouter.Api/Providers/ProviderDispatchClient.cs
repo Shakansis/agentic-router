@@ -4,6 +4,7 @@ using System.Text.Json;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Providers;
@@ -419,6 +420,39 @@ public sealed class ProviderDispatchClient : IOllamaClient
     );
   }
 
+  public Task<OllamaModelMetadata> GetModelMetadataAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var reference = ProviderModelReference.Parse(
+      model
+    );
+
+    if (!reference.IsLocal)
+    {
+      throw new OllamaRuntimeProfileException(
+        "model-metadata-unavailable",
+        "Runtime profile metadata is available only for Ollama Local models.",
+        "model-metadata-inspection",
+        model,
+        null,
+        "unknown",
+        null,
+        null,
+        false,
+        "The selected provider is not ollama-local."
+      );
+    }
+
+    return _ollama.GetModelMetadataAsync(
+      baseUri,
+      reference.ModelId,
+      cancellationToken
+    );
+  }
+
   public async Task<ProviderModelCapabilities> GetProviderModelCapabilitiesAsync(
     Uri baseUri,
     string model,
@@ -537,8 +571,31 @@ public sealed class ProviderDispatchClient : IOllamaClient
     return reference.IsLocal
       ? _ollama.SetModelResidencyAsync(
         baseUri,
-        model,
+        reference.ModelId,
         keepAlive,
+        cancellationToken
+      )
+      : Task.CompletedTask;
+  }
+
+  public Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    CancellationToken cancellationToken
+  )
+  {
+    var reference = ProviderModelReference.Parse(
+      model
+    );
+
+    return reference.IsLocal
+      ? _ollama.SetModelResidencyAsync(
+        baseUri,
+        reference.ModelId,
+        keepAlive,
+        contextTokens,
         cancellationToken
       )
       : Task.CompletedTask;

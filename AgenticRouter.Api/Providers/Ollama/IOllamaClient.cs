@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Providers.Ollama;
@@ -63,6 +64,12 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task<OllamaModelMetadata> GetModelMetadataAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  );
+
   Task<ProviderModelCapabilities> GetProviderModelCapabilitiesAsync(
     Uri baseUri,
     string model,
@@ -92,6 +99,14 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    CancellationToken cancellationToken
+  );
+
   IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(
     Uri baseUri,
     string model,
@@ -110,7 +125,8 @@ public sealed record OllamaChatUpdate(
   ProviderRateLimitSnapshot? RateLimit = null,
   IReadOnlyList<ProviderCitation>? Citations = null,
   ProviderActivityMetadata? Activity = null,
-  string? RetryActivity = null
+  string? RetryActivity = null,
+  OllamaContextResolution? ContextResolution = null
 );
 
 public sealed record OllamaToolDefinition(
@@ -136,14 +152,27 @@ public sealed record OllamaToolMessage(
 public sealed record OllamaToolResponse(
   string? Content,
   string? Thinking,
-  IReadOnlyList<OllamaToolCall> ToolCalls
+  IReadOnlyList<OllamaToolCall> ToolCalls,
+  OllamaContextResolution? ContextResolution = null
 );
 
 public sealed record OllamaRunningModel(
   string Name,
+  string? Digest,
   long? SizeBytes,
   long? VramSizeBytes,
+  int? ContextLength,
   DateTimeOffset? ExpiresAt
+);
+
+public sealed record OllamaModelMetadata(
+  string Model,
+  int? DeclaredContextTokens,
+  string? ParameterSize,
+  string? Quantization,
+  string? Format,
+  string? Family,
+  IReadOnlyList<string> Families
 );
 
 public sealed record OllamaModelCapabilities(

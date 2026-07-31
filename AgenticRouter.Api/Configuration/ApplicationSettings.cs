@@ -22,6 +22,8 @@ public sealed record ApplicationSettings
 
   public RuntimeSettings Runtime { get; init; } = new();
 
+  public OllamaRuntimeSettings OllamaRuntime { get; init; } = new();
+
   public ExecutionSettings Execution { get; init; } = new();
 
   public ProjectAwarenessSettings ProjectAwareness { get; init; } = new();
@@ -187,6 +189,203 @@ public sealed record RuntimeSettings
   public int RuntimeStatusActiveRefreshSeconds { get; init; } = 2;
 
   public int GenerationTimeoutSeconds { get; init; } = 300;
+}
+
+public sealed record OllamaRuntimeSettings
+{
+  public int ProfileSchemaVersion { get; init; } = 1;
+
+  public Dictionary<string, OllamaRoleRuntimeSettings> RoleDefaults
+  {
+    get;
+    init;
+  } = OllamaRuntimeDefaults.CreateRoleDefaults();
+
+  public IReadOnlyList<OllamaModelRuntimeOverride> ModelOverrides
+  {
+    get;
+    init;
+  } = [];
+
+  public IReadOnlyList<int> ContextEscalationLadder { get; init; } =
+  [
+    4_096,
+    8_192,
+    12_288,
+    16_384,
+    24_576,
+    32_768,
+    40_960
+  ];
+
+  public OllamaRuntimeMemoryPolicy Memory { get; init; } = new();
+}
+
+public sealed record OllamaRoleRuntimeSettings
+{
+  public int MinimumContextTokens { get; init; } = 4_096;
+
+  public int TargetContextTokens { get; init; } = 8_192;
+
+  public int MaximumContextTokens { get; init; } = 16_384;
+
+  public int KeepAlive { get; init; } = 300;
+
+  public int OutputTokenLimit { get; init; } = 4_096;
+}
+
+public sealed record OllamaModelRuntimeOverride
+{
+  public string Provider { get; init; } = "ollama-local";
+
+  public string Model { get; init; } = string.Empty;
+
+  public string Digest { get; init; } = string.Empty;
+
+  public Dictionary<string, OllamaRoleRuntimeSettings> Overrides
+  {
+    get;
+    init;
+  } = [];
+}
+
+public sealed record OllamaRuntimeMemoryPolicy
+{
+  public int TargetMaximumGpuUsagePercent { get; init; } = 90;
+
+  public long MinimumFreeVramBytes { get; init; } = 2_147_483_648;
+
+  public long MinimumFreeSystemRamBytes { get; init; } = 4_294_967_296;
+
+  public bool AllowCpuOffload { get; init; } = true;
+
+  public bool PreferFullGpuForActivePrimary { get; init; } = true;
+
+  public IReadOnlyDictionary<string, OllamaGpuMemoryPolicy> Devices
+  {
+    get;
+    init;
+  } = new Dictionary<string, OllamaGpuMemoryPolicy>(
+    StringComparer.Ordinal
+  );
+}
+
+public sealed record OllamaGpuMemoryPolicy
+{
+  public int TargetMaximumUsagePercent { get; init; } = 90;
+
+  public long MinimumFreeVramBytes { get; init; } = 2_147_483_648;
+}
+
+public static class OllamaRuntimeRoleIds
+{
+  public const string Router = "router";
+  public const string ResidentCoordinator = "residentCoordinator";
+  public const string Specialist = "specialist";
+  public const string Primary = "primary";
+  public const string Fallback = "fallback";
+  public const string Benchmark = "benchmark";
+  public const string ModelTest = "modelTest";
+  public const string WebSearchSynthesis = "webSearchSynthesis";
+  public const string VisionRequest = "visionRequest";
+
+  public static readonly IReadOnlyList<string> All =
+  [
+    Router,
+    ResidentCoordinator,
+    Specialist,
+    Primary,
+    Fallback,
+    Benchmark,
+    ModelTest,
+    WebSearchSynthesis,
+    VisionRequest
+  ];
+}
+
+public static class OllamaRuntimeDefaults
+{
+  public static Dictionary<string, OllamaRoleRuntimeSettings> CreateRoleDefaults()
+  {
+    return new Dictionary<string, OllamaRoleRuntimeSettings>(
+      StringComparer.Ordinal
+    )
+    {
+      [OllamaRuntimeRoleIds.Router] = Profile(
+        4_096,
+        8_192,
+        8_192,
+        1_024
+      ),
+      [OllamaRuntimeRoleIds.ResidentCoordinator] = Profile(
+        4_096,
+        8_192,
+        16_384,
+        1_024,
+        -1
+      ),
+      [OllamaRuntimeRoleIds.Specialist] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      [OllamaRuntimeRoleIds.Primary] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      [OllamaRuntimeRoleIds.Fallback] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      [OllamaRuntimeRoleIds.Benchmark] = Profile(
+        4_096,
+        8_192,
+        16_384,
+        1_024
+      ),
+      [OllamaRuntimeRoleIds.ModelTest] = Profile(
+        4_096,
+        4_096,
+        8_192,
+        512
+      ),
+      [OllamaRuntimeRoleIds.WebSearchSynthesis] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      ),
+      [OllamaRuntimeRoleIds.VisionRequest] = Profile(
+        8_192,
+        32_768,
+        40_960,
+        4_096
+      )
+    };
+  }
+
+  private static OllamaRoleRuntimeSettings Profile(
+    int minimum,
+    int target,
+    int maximum,
+    int output,
+    int keepAlive = 300
+  )
+  {
+    return new OllamaRoleRuntimeSettings
+    {
+      MinimumContextTokens = minimum,
+      TargetContextTokens = target,
+      MaximumContextTokens = maximum,
+      KeepAlive = keepAlive,
+      OutputTokenLimit = output
+    };
+  }
 }
 
 public sealed record ExecutionSettings

@@ -19,6 +19,7 @@ public sealed class SettingsController : ControllerBase
   private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly ITrustedWorkspaceService _trustedWorkspace;
   private readonly ICloudFallbackPolicy _cloudFallbackPolicy;
+  private readonly IOllamaRuntimeProfileService _runtimeProfiles;
 
   public SettingsController(
     ISettingsStore settingsStore,
@@ -27,7 +28,8 @@ public sealed class SettingsController : ControllerBase
     ISettingsValidator validator,
     IWorkspaceProfileService workspaceProfiles,
     ITrustedWorkspaceService trustedWorkspace,
-    ICloudFallbackPolicy cloudFallbackPolicy
+    ICloudFallbackPolicy cloudFallbackPolicy,
+    IOllamaRuntimeProfileService runtimeProfiles
   )
   {
     _settingsStore = settingsStore;
@@ -37,6 +39,7 @@ public sealed class SettingsController : ControllerBase
     _workspaceProfiles = workspaceProfiles;
     _trustedWorkspace = trustedWorkspace;
     _cloudFallbackPolicy = cloudFallbackPolicy;
+    _runtimeProfiles = runtimeProfiles;
   }
 
   [HttpGet]
@@ -152,13 +155,28 @@ public sealed class SettingsController : ControllerBase
       );
     }
 
+    var runtimeErrors = await _runtimeProfiles.ValidateOverridesAsync(
+      settings,
+      cancellationToken
+    );
+
+    if (runtimeErrors.Count > 0)
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "Settings were not saved because an Ollama runtime override exceeds the exact model capability.",
+          runtimeErrors
+        )
+      );
+    }
+
     previous ??= await _settingsStore.GetAsync(
       cancellationToken
     );
 
     try
     {
-      await _residentModel.ChangeRouterModelAsync(
+      await _residentModel.ChangeResidentModelAsync(
         previous,
         settings,
         cancellationToken
@@ -168,10 +186,10 @@ public sealed class SettingsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "Settings were not saved because the resident router model could not be changed.",
+          "Settings were not saved because the resident coordinator model could not be changed.",
           new Dictionary<string, string[]>
           {
-            ["routerModel"] =
+            ["coordinatorModel"] =
             [
               exception.Message
             ]

@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Runtime;
 
@@ -16,15 +17,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
   private readonly object _stateGate = new();
   private TaskCompletionSource _idleSignal = CompletedSignal();
   private int _activeRequests;
-  private ResidentModelStatus _status = new(
-    string.Empty,
-    "disabled",
-    false,
-    "adaptive",
-    null,
-    null,
-    null
-  );
+  private ResidentModelStatus _status = EmptyStatus();
 
   public ResidentModelManager(
     ISettingsStore settingsStore,
@@ -36,6 +29,10 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     _ollamaClient = ollamaClient;
     _logger = logger;
   }
+
+  public bool HasActiveRequests => Volatile.Read(
+    ref _activeRequests
+  ) > 0;
 
   public IDisposable BeginRequest()
   {
@@ -64,15 +61,15 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     }
   }
 
-  public async Task ChangeRouterModelAsync(
+  public async Task ChangeResidentModelAsync(
     ApplicationSettings previousSettings,
     ApplicationSettings nextSettings,
     CancellationToken cancellationToken
   )
   {
     var modelChanged = !string.Equals(
-      previousSettings.RouterModel,
-      nextSettings.RouterModel,
+      previousSettings.CoordinatorModel,
+      nextSettings.CoordinatorModel,
       StringComparison.OrdinalIgnoreCase
     );
     var endpointChanged = !string.Equals(
@@ -80,8 +77,12 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       nextSettings.OllamaUrl,
       StringComparison.OrdinalIgnoreCase
     );
+    var profileChanged = ResidentProfileChanged(
+      previousSettings,
+      nextSettings
+    );
 
-    if (!modelChanged && !endpointChanged)
+    if (!modelChanged && !endpointChanged && !profileChanged)
     {
       return;
     }
@@ -99,28 +100,16 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         nextSettings.OllamaUrl,
         UriKind.Absolute
       );
-      var installed = await _ollamaClient.GetModelsAsync(
+      var installed = await RequireInstalledAsync(
         nextBaseUri,
+        nextSettings.CoordinatorModel,
         cancellationToken
       );
-
-      if (!installed.Any(
-        model => string.Equals(
-          model.Name,
-          nextSettings.RouterModel,
-          StringComparison.OrdinalIgnoreCase
-        )
-      ))
-      {
-        throw new InvalidOperationException(
-          $"Router model '{nextSettings.RouterModel}' is not installed in Ollama."
-        );
-      }
 
       if (
         modelChanged
         && !string.IsNullOrWhiteSpace(
-          previousSettings.RouterModel
+          previousSettings.CoordinatorModel
         )
       )
       {
@@ -129,15 +118,43 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
             previousSettings.OllamaUrl,
             UriKind.Absolute
           ),
-          previousSettings.RouterModel,
+          previousSettings.CoordinatorModel,
           0,
+          cancellationToken
+        );
+      }
+
+      var resolution = await ResolveResidentAsync(
+        nextBaseUri,
+        nextSettings,
+        installed,
+        cancellationToken
+      );
+      var running = await _ollamaClient.GetRunningModelsAsync(
+        nextBaseUri,
+        cancellationToken
+      );
+      var current = FindModel(
+        running,
+        installed.Name
+      );
+
+      if (
+        current is not null
+        && current.ContextLength != resolution.EffectiveContextTokens
+      )
+      {
+        await UnloadAndVerifyAsync(
+          nextBaseUri,
+          installed.Name,
           cancellationToken
         );
       }
 
       await PreloadAndVerifyAsync(
         nextBaseUri,
-        nextSettings.RouterModel,
+        installed,
+        resolution,
         "preloading",
         cancellationToken
       );
@@ -172,7 +189,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       );
 
       if (string.Equals(
-        settings.RouterModel,
+        settings.CoordinatorModel,
         targetModel,
         StringComparison.OrdinalIgnoreCase
       ))
@@ -185,39 +202,34 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         UriKind.Absolute
       );
       UpdateStatus(
-        settings.RouterModel,
+        settings.CoordinatorModel,
+        null,
         "temporarily-evicted",
         false,
+        null,
+        null,
+        null,
+        null,
+        null,
         "unloading",
         null,
         null
       );
-      await _ollamaClient.SetModelResidencyAsync(
+      await UnloadAndVerifyAsync(
         baseUri,
-        settings.RouterModel,
-        0,
+        settings.CoordinatorModel,
         cancellationToken
       );
-      var running = await _ollamaClient.GetRunningModelsAsync(
-        baseUri,
-        cancellationToken
-      );
-      var absent = !ContainsModel(
-        running,
-        settings.RouterModel
-      );
-
-      if (!absent)
-      {
-        throw new InvalidOperationException(
-          "Ollama still reports the resident model after unload."
-        );
-      }
-
       UpdateStatus(
-        settings.RouterModel,
+        settings.CoordinatorModel,
+        null,
         "temporarily-evicted",
         false,
+        null,
+        null,
+        null,
+        null,
+        null,
         "adaptive-recovery",
         null,
         null
@@ -257,9 +269,15 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         UriKind.Absolute
       );
       UpdateStatus(
-        settings.RouterModel,
+        settings.CoordinatorModel,
+        null,
         "reloading",
         false,
+        null,
+        null,
+        null,
+        null,
+        null,
         "unloading-recovery-target",
         null,
         null
@@ -270,9 +288,21 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         0,
         cancellationToken
       );
+      var installed = await RequireInstalledAsync(
+        baseUri,
+        settings.CoordinatorModel,
+        cancellationToken
+      );
+      var resolution = await ResolveResidentAsync(
+        baseUri,
+        settings,
+        installed,
+        cancellationToken
+      );
       await PreloadAndVerifyAsync(
         baseUri,
-        settings.RouterModel,
+        installed,
+        resolution,
         "reloading",
         cancellationToken
       );
@@ -304,9 +334,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     {
       try
       {
-        if (Volatile.Read(
-          ref _activeRequests
-        ) == 0)
+        if (!HasActiveRequests)
         {
           await EnsureReadyAsync(
             stoppingToken
@@ -364,6 +392,11 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
 
     try
     {
+      if (HasActiveRequests)
+      {
+        return;
+      }
+
       var settings = await _settingsStore.GetAsync(
         cancellationToken
       );
@@ -371,55 +404,113 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         settings.OllamaUrl,
         UriKind.Absolute
       );
-      var installed = await _ollamaClient.GetModelsAsync(
-        baseUri,
-        cancellationToken
-      );
+      InstalledModel installed;
 
-      if (!installed.Any(
-        model => string.Equals(
-          model.Name,
-          settings.RouterModel,
-          StringComparison.OrdinalIgnoreCase
-        )
-      ))
+      try
+      {
+        installed = await RequireInstalledAsync(
+          baseUri,
+          settings.CoordinatorModel,
+          cancellationToken
+        );
+      }
+      catch (OllamaRuntimeProfileException exception) when (
+        exception.Error.Code == "model-metadata-unavailable"
+      )
       {
         UpdateStatus(
-          settings.RouterModel,
+          settings.CoordinatorModel,
+          null,
           "unavailable",
           false,
+          null,
+          null,
+          null,
+          null,
+          null,
           "model-validation",
-          $"Router model '{settings.RouterModel}' is not installed.",
-          null
+          exception.Message,
+          exception.Error.TraceId
         );
         return;
       }
 
+      var resolution = await ResolveResidentAsync(
+        baseUri,
+        settings,
+        installed,
+        cancellationToken
+      );
       var running = await _ollamaClient.GetRunningModelsAsync(
         baseUri,
         cancellationToken
       );
-
-      if (ContainsModel(
+      var current = FindModel(
         running,
-        settings.RouterModel
-      ))
+        installed.Name
+      );
+
+      if (
+        current is not null
+        && current.ContextLength == resolution.EffectiveContextTokens
+      )
       {
-        UpdateStatus(
-          settings.RouterModel,
-          "ready",
-          true,
-          "verified",
-          null,
-          null
+        SetVerifiedStatus(
+          installed,
+          current,
+          resolution
         );
         return;
       }
 
+      if (current is not null)
+      {
+        if (HasActiveRequests)
+        {
+          throw new OllamaRuntimeProfileException(
+            "reload-blocked-by-active-request",
+            "The resident context reload is blocked by an active request.",
+            "resident-context-reload",
+            installed.Name,
+            installed.Digest,
+            OllamaRuntimeRoleIds.ResidentCoordinator,
+            resolution.EffectiveContextTokens,
+            current.ContextLength,
+            true,
+            "The current request must finish or be cancelled before resident reload."
+          );
+        }
+
+        UpdateStatus(
+          installed.Name,
+          installed.Digest,
+          "context-mismatch",
+          true,
+          resolution.EffectiveContextTokens,
+          current.ContextLength,
+          current.SizeBytes,
+          current.VramSizeBytes,
+          EstimatedRam(
+            current
+          ),
+          "resident-context-reload-started",
+          "The loaded context differs from the configured resident profile.",
+          null
+        );
+        await UnloadAndVerifyAsync(
+          baseUri,
+          installed.Name,
+          cancellationToken
+        );
+      }
+
       await PreloadAndVerifyAsync(
         baseUri,
-        settings.RouterModel,
-        "preloading",
+        installed,
+        resolution,
+        current is null
+          ? "preloading"
+          : "reloading",
         cancellationToken
       );
     }
@@ -431,23 +522,186 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
 
   private async Task PreloadAndVerifyAsync(
     Uri baseUri,
-    string model,
+    InstalledModel installed,
+    OllamaContextResolution resolution,
     string state,
     CancellationToken cancellationToken
   )
   {
     UpdateStatus(
-      model,
+      installed.Name,
+      installed.Digest,
       state,
       false,
-      "preloading",
+      resolution.EffectiveContextTokens,
+      null,
+      null,
+      null,
+      null,
+      "resident-context-preload-started",
       null,
       null
     );
     await _ollamaClient.SetModelResidencyAsync(
       baseUri,
-      model,
+      installed.Name,
       -1,
+      resolution.EffectiveContextTokens,
+      cancellationToken
+    );
+    var running = await _ollamaClient.GetRunningModelsAsync(
+      baseUri,
+      cancellationToken
+    );
+    var verified = FindModel(
+      running,
+      installed.Name
+    );
+
+    if (verified is null)
+    {
+      throw new OllamaRuntimeProfileException(
+        "actual-context-not-verified",
+        "Ollama did not confirm the resident model through /api/ps.",
+        "resident-context-verification",
+        installed.Name,
+        installed.Digest,
+        OllamaRuntimeRoleIds.ResidentCoordinator,
+        resolution.EffectiveContextTokens,
+        null,
+        true,
+        "The exact resident model was absent from /api/ps after preload."
+      );
+    }
+
+    if (verified.ContextLength != resolution.EffectiveContextTokens)
+    {
+      throw new OllamaRuntimeProfileException(
+        "resident-context-mismatch",
+        "The loaded resident context does not match the configured runtime profile.",
+        "resident-context-verification",
+        installed.Name,
+        installed.Digest,
+        OllamaRuntimeRoleIds.ResidentCoordinator,
+        resolution.EffectiveContextTokens,
+        verified.ContextLength,
+        true,
+        $"Ollama reported context_length {verified.ContextLength?.ToString() ?? "unavailable"}."
+      );
+    }
+
+    SetVerifiedStatus(
+      installed,
+      verified,
+      resolution
+    );
+  }
+
+  private async Task<InstalledModel> RequireInstalledAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var installed = (await _ollamaClient.GetModelsAsync(
+      baseUri,
+      cancellationToken
+    )).FirstOrDefault(
+      candidate => string.Equals(
+        candidate.Name,
+        model,
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+
+    return installed ?? throw new OllamaRuntimeProfileException(
+      "model-metadata-unavailable",
+      $"Resident coordinator model '{model}' is not installed in Ollama.",
+      "resident-model-validation",
+      model,
+      null,
+      OllamaRuntimeRoleIds.ResidentCoordinator,
+      null,
+      null,
+      false,
+      "The exact model ID was absent from /api/tags."
+    );
+  }
+
+  private async Task<OllamaContextResolution> ResolveResidentAsync(
+    Uri baseUri,
+    ApplicationSettings settings,
+    InstalledModel installed,
+    CancellationToken cancellationToken
+  )
+  {
+    OllamaModelMetadata metadata;
+
+    try
+    {
+      metadata = await _ollamaClient.GetModelMetadataAsync(
+        baseUri,
+        installed.Name,
+        cancellationToken
+      );
+    }
+    catch (Exception exception) when (
+      exception is OllamaProviderException
+        or OllamaRuntimeProfileException
+    )
+    {
+      throw new OllamaRuntimeProfileException(
+        "model-metadata-unavailable",
+        "Ollama model metadata is unavailable for resident context resolution.",
+        "resident-context-resolution",
+        installed.Name,
+        installed.Digest,
+        OllamaRuntimeRoleIds.ResidentCoordinator,
+        null,
+        null,
+        true,
+        exception.Message,
+        exception
+      );
+    }
+
+    if (metadata.DeclaredContextTokens is null)
+    {
+      throw new OllamaRuntimeProfileException(
+        "declared-context-unavailable",
+        "Ollama did not declare a maximum context for the resident coordinator.",
+        "resident-context-resolution",
+        installed.Name,
+        installed.Digest,
+        OllamaRuntimeRoleIds.ResidentCoordinator,
+        null,
+        null,
+        false,
+        "The native /api/show response did not contain a positive context_length."
+      );
+    }
+
+    return OllamaRuntimeProfileResolver.Resolve(
+      settings,
+      installed.Name,
+      installed.Digest,
+      UsageModelRoles.Coordinator,
+      metadata.DeclaredContextTokens,
+      0,
+      0
+    );
+  }
+
+  private async Task UnloadAndVerifyAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    await _ollamaClient.SetModelResidencyAsync(
+      baseUri,
+      model,
+      0,
       cancellationToken
     );
     var running = await _ollamaClient.GetRunningModelsAsync(
@@ -455,24 +709,24 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       cancellationToken
     );
 
-    if (!ContainsModel(
+    if (FindModel(
       running,
       model
-    ))
+    ) is not null)
     {
-      throw new InvalidOperationException(
-        "Ollama did not confirm the resident model through /api/ps."
+      throw new OllamaRuntimeProfileException(
+        "model-load-failed",
+        "Ollama still reports the resident model after unload.",
+        "resident-context-unload",
+        model,
+        null,
+        OllamaRuntimeRoleIds.ResidentCoordinator,
+        null,
+        null,
+        true,
+        "The exact model remained present in /api/ps after keep_alive 0."
       );
     }
-
-    UpdateStatus(
-      model,
-      "ready",
-      true,
-      "verified",
-      null,
-      null
-    );
   }
 
   private async Task WaitForIdleAsync(
@@ -504,28 +758,67 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     }
   }
 
+  private void SetVerifiedStatus(
+    InstalledModel installed,
+    OllamaRunningModel running,
+    OllamaContextResolution resolution
+  )
+  {
+    UpdateStatus(
+      installed.Name,
+      installed.Digest ?? running.Digest,
+      "ready",
+      true,
+      resolution.EffectiveContextTokens,
+      running.ContextLength,
+      running.SizeBytes,
+      running.VramSizeBytes,
+      EstimatedRam(
+        running
+      ),
+      "resident-context-verified",
+      resolution.SharedModelWarning,
+      null
+    );
+  }
+
   private void SetFailure(
     string operation,
     Exception exception
   )
   {
     var current = GetStatus();
+    var traceId = exception is OllamaRuntimeProfileException profile
+      ? profile.Error.TraceId
+      : Guid.NewGuid().ToString(
+        "N"
+      );
     UpdateStatus(
       current.ConfiguredModel,
+      current.Digest,
       "error",
       false,
+      current.RequestedContextTokens,
+      current.ActualContextTokens,
+      current.TotalSizeBytes,
+      current.VramSizeBytes,
+      current.EstimatedRamSizeBytes,
       operation,
       exception.Message,
-      Guid.NewGuid().ToString(
-        "N"
-      )
+      traceId
     );
   }
 
   private void UpdateStatus(
     string model,
+    string? digest,
     string state,
     bool loaded,
+    int? requestedContext,
+    int? actualContext,
+    long? totalSize,
+    long? vramSize,
+    long? estimatedRam,
     string? operation,
     string? diagnostic,
     string? traceId
@@ -535,9 +828,15 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     {
       _status = new ResidentModelStatus(
         model,
+        digest,
         state,
         loaded,
         "adaptive",
+        requestedContext,
+        actualContext,
+        totalSize,
+        vramSize,
+        estimatedRam,
         operation,
         diagnostic,
         traceId
@@ -545,18 +844,139 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     }
   }
 
-  private static bool ContainsModel(
+  private static ResidentModelStatus EmptyStatus()
+  {
+    return new ResidentModelStatus(
+      string.Empty,
+      null,
+      "disabled",
+      false,
+      "adaptive",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    );
+  }
+
+  private static OllamaRunningModel? FindModel(
     IReadOnlyList<OllamaRunningModel> models,
     string model
   )
   {
-    return models.Any(
+    return models.FirstOrDefault(
       running => string.Equals(
         running.Name,
         model,
         StringComparison.OrdinalIgnoreCase
       )
     );
+  }
+
+  private static bool ResidentProfileChanged(
+    ApplicationSettings previous,
+    ApplicationSettings next
+  )
+  {
+    if (
+      previous.Context.ProviderContextTokens
+        != next.Context.ProviderContextTokens
+      || !Equals(
+        ResidentRoleProfile(
+          previous
+        ),
+        ResidentRoleProfile(
+          next
+        )
+      )
+    )
+    {
+      return true;
+    }
+
+    return !ResidentOverrides(
+      previous
+    ).SequenceEqual(
+      ResidentOverrides(
+        next
+      ),
+      StringComparer.Ordinal
+    );
+  }
+
+  private static OllamaRoleRuntimeSettings ResidentRoleProfile(
+    ApplicationSettings settings
+  )
+  {
+    return settings.OllamaRuntime.RoleDefaults.TryGetValue(
+      OllamaRuntimeRoleIds.ResidentCoordinator,
+      out var profile
+    )
+      ? profile
+      : OllamaRuntimeDefaults.CreateRoleDefaults()[
+        OllamaRuntimeRoleIds.ResidentCoordinator
+      ];
+  }
+
+  private static IReadOnlyList<string> ResidentOverrides(
+    ApplicationSettings settings
+  )
+  {
+    var reference = Providers.ProviderModelReference.Parse(
+      settings.CoordinatorModel
+    );
+
+    return settings.OllamaRuntime.ModelOverrides
+      .Where(
+        modelOverride => string.Equals(
+          modelOverride.Provider,
+          Providers.ModelProviderIds.OllamaLocal,
+          StringComparison.Ordinal
+        ) && string.Equals(
+          modelOverride.Model,
+          reference.ModelId,
+          StringComparison.Ordinal
+        )
+      )
+      .Select(
+        modelOverride =>
+        {
+          modelOverride.Overrides.TryGetValue(
+            OllamaRuntimeRoleIds.ResidentCoordinator,
+            out var profile
+          );
+          return string.Join(
+            "|",
+            modelOverride.Model,
+            modelOverride.Digest,
+            profile?.MinimumContextTokens,
+            profile?.TargetContextTokens,
+            profile?.MaximumContextTokens,
+            profile?.OutputTokenLimit,
+            profile?.KeepAlive
+          );
+        }
+      )
+      .Order(
+        StringComparer.Ordinal
+      )
+      .ToArray();
+  }
+
+  private static long? EstimatedRam(
+    OllamaRunningModel model
+  )
+  {
+    return model.SizeBytes is null || model.VramSizeBytes is null
+      ? null
+      : Math.Max(
+        0,
+        model.SizeBytes.Value - model.VramSizeBytes.Value
+      );
   }
 
   private static TaskCompletionSource CompletedSignal()

@@ -55,7 +55,8 @@ const state = {
   contextUsage: null,
   recovery: null,
   inspectedBackup: null,
-  inspectedBackupBase64: null
+  inspectedBackupBase64: null,
+  runtimeProfiles: null
 };
 
 const elements = {};
@@ -172,6 +173,26 @@ function bindElements() {
     "purge-usage",
     "usage-purge-status",
     "reconcile-usage",
+    "runtime-role-profiles",
+    "runtime-override-model",
+    "runtime-override-role",
+    "runtime-override-minimum",
+    "runtime-override-target",
+    "runtime-override-maximum",
+    "runtime-override-output",
+    "runtime-override-keep-alive",
+    "save-runtime-override",
+    "remove-runtime-override",
+    "runtime-memory-gpu-percent",
+    "runtime-memory-free-vram",
+    "runtime-memory-free-ram",
+    "runtime-memory-cpu-offload",
+    "runtime-memory-prefer-full-gpu",
+    "runtime-memory-device-policies",
+    "analyze-runtime-profile",
+    "measure-runtime-profile",
+    "runtime-profile-result",
+    "runtime-shared-model-warnings",
     "provider-health-list",
     "refresh-provider-health",
     "cloud-providers-list",
@@ -442,6 +463,34 @@ function bindEvents() {
     "click",
     reconcileUsage
   );
+  elements.runtimeOverrideModel.addEventListener(
+    "change",
+    loadRuntimeOverrideEditor
+  );
+  elements.runtimeOverrideRole.addEventListener(
+    "change",
+    loadRuntimeOverrideEditor
+  );
+  elements.runtimeMemoryDevicePolicies.addEventListener(
+    "change",
+    handleRuntimeDevicePolicyChange
+  );
+  elements.saveRuntimeOverride.addEventListener(
+    "click",
+    saveRuntimeOverrideDraft
+  );
+  elements.removeRuntimeOverride.addEventListener(
+    "click",
+    removeRuntimeOverrideDraft
+  );
+  elements.analyzeRuntimeProfile.addEventListener(
+    "click",
+    analyzeRuntimeProfile
+  );
+  elements.measureRuntimeProfile.addEventListener(
+    "click",
+    measureRuntimeProfile
+  );
   elements.refreshProviderHealth.addEventListener(
     "click",
     refreshProviderHealth
@@ -620,7 +669,8 @@ async function loadApplicationState() {
     cloudUsageDashboard,
     webSearch,
     providerHealth,
-    modelOrganization
+    modelOrganization,
+    runtimeProfiles
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -635,7 +685,8 @@ async function loadApplicationState() {
     fetchJson("/api/usage/cloud-dashboard"),
     fetchJson("/api/web-search"),
     fetchJson("/api/provider-health"),
-    fetchJson("/api/model-organization")
+    fetchJson("/api/model-organization"),
+    fetchJson("/api/runtime/profiles")
   ]);
 
   state.settings = settings;
@@ -652,6 +703,7 @@ async function loadApplicationState() {
   state.webSearch = webSearch;
   state.providerHealth = providerHealth;
   state.modelOrganization = modelOrganization;
+  state.runtimeProfiles = runtimeProfiles;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
@@ -1305,7 +1357,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.9."
+        + "pelo Agentic Router v0.9.10."
     )
   ) {
     event.currentTarget.checked = false;
@@ -3162,7 +3214,13 @@ function renderRuntimeStatus(runtime) {
   compact.push(
     `Modelos ${runtime.loadedModels.length} carregado${runtime.loadedModels.length === 1 ? "" : "s"}`
   );
+  if (runtime.warning) {
+    compact.push(
+      `⚠ ${runtime.warnings.length} aviso${runtime.warnings.length === 1 ? "" : "s"}`
+    );
+  }
   elements.runtimeSummary.textContent = compact.join(" · ");
+  elements.runtimeSummary.title = runtime.warnings.join("\n");
   elements.runtimeMemoryList.replaceChildren(...memoryRows);
   elements.runtimeModelList.replaceChildren(
     ...(runtime.loadedModels.length === 0
@@ -3181,6 +3239,9 @@ function renderRuntimeStatus(runtime) {
     `${runtime.residentModel.configuredModel || "não configurado"} · `
     + `${runtime.residentModel.state}`
     + `${runtime.residentModel.loaded ? " · carregado" : ""}`
+    + `${runtime.residentModel.requestedContextTokens
+      ? ` · contexto ${formatInteger(runtime.residentModel.actualContextTokens)} / ${formatInteger(runtime.residentModel.requestedContextTokens)}`
+      : ""}`
     + `${runtime.residentModel.diagnostic ? ` · ${runtime.residentModel.diagnostic}` : ""}`;
   elements.residentModelStatus.dataset.state = runtime.residentModel.state;
 }
@@ -3235,7 +3296,11 @@ function loadedModelRow(model) {
   name.textContent = `${model.name}${model.isResidentModel ? " · residente" : ""}`;
   const details = document.createElement("span");
   details.textContent =
-    `Total ${formatGiB(model.totalSizeBytes)} · VRAM ${formatGiB(model.vramSizeBytes)} · `
+    `${model.role ?? "papel não configurado"} · ${shortDigest(model.digest)} · `
+    + `contexto ${formatInteger(model.actualContextTokens)} / `
+    + `${formatInteger(model.requestedContextTokens)} · ${model.profileStatus}`
+    + `${model.sharedAcrossRoles ? " · compartilhado" : ""}\n`
+    + `Total ${formatGiB(model.totalSizeBytes)} · VRAM ${formatGiB(model.vramSizeBytes)} · `
     + `RAM estimada ${formatGiB(model.estimatedRamSizeBytes)} · ${model.processor}`
     + `${model.expiresAt ? ` · expira ${new Date(model.expiresAt).toLocaleTimeString()}` : ""}`;
   row.append(name, details);
@@ -3291,6 +3356,506 @@ function handleVisibilityChange() {
   }
 }
 
+const runtimeRoleLabels = {
+  router: "Router",
+  residentCoordinator: "Coordenador residente",
+  specialist: "Especialista",
+  primary: "Primário",
+  fallback: "Fallback",
+  benchmark: "Benchmark",
+  modelTest: "Teste de modelo",
+  webSearchSynthesis: "Síntese de busca web",
+  visionRequest: "Requisição com visão"
+};
+
+function renderRuntimeProfilesEditor() {
+  const runtime = state.settings?.ollamaRuntime;
+
+  if (!runtime || !elements.runtimeRoleProfiles) {
+    return;
+  }
+
+  const profiles = [];
+
+  for (const [role, profile] of Object.entries(runtime.roleDefaults)) {
+    const card = document.createElement("article");
+    card.className = "runtime-role-profile";
+    card.dataset.role = role;
+    const title = document.createElement("strong");
+    title.textContent = runtimeRoleLabels[role] ?? role;
+    const fields = document.createElement("div");
+    fields.className = "runtime-profile-fields";
+
+    for (const [label, field] of [
+      ["Mín.", "minimumContextTokens"],
+      ["Alvo", "targetContextTokens"],
+      ["Máx.", "maximumContextTokens"],
+      ["Saída", "outputTokenLimit"],
+      ["Keep-alive", "keepAlive"]
+    ]) {
+      const fieldLabel = document.createElement("label");
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = field === "keepAlive" ? "-1" : "128";
+      input.max = field === "keepAlive" ? "86400" : "131072";
+      input.value = profile[field];
+      input.dataset.runtimeRole = role;
+      input.dataset.runtimeField = field;
+      fieldLabel.append(caption, input);
+      fields.append(fieldLabel);
+    }
+
+    card.append(title, fields);
+    profiles.push(card);
+  }
+
+  elements.runtimeRoleProfiles.replaceChildren(...profiles);
+  elements.runtimeMemoryGpuPercent.value =
+    runtime.memory.targetMaximumGpuUsagePercent;
+  elements.runtimeMemoryFreeVram.value =
+    bytesToGiB(runtime.memory.minimumFreeVramBytes);
+  elements.runtimeMemoryFreeRam.value =
+    bytesToGiB(runtime.memory.minimumFreeSystemRamBytes);
+  elements.runtimeMemoryCpuOffload.checked = runtime.memory.allowCpuOffload;
+  elements.runtimeMemoryPreferFullGpu.checked =
+    runtime.memory.preferFullGpuForActivePrimary;
+  renderRuntimeDevicePolicies(
+    runtime.memory
+  );
+
+  const localModels = state.models
+    .filter(model => model.provider === "ollama-local")
+    .map(model => ({
+      value: model.name,
+      label: `${model.displayName ?? model.name} · ${shortDigest(model.digest)}`,
+      title: model.digest ?? "digest indisponível"
+    }));
+  replaceOptions(
+    elements.runtimeOverrideModel,
+    localModels,
+    elements.runtimeOverrideModel.value
+      || localModels[0]?.value
+      || ""
+  );
+  replaceOptions(
+    elements.runtimeOverrideRole,
+    Object.keys(runtimeRoleLabels).map(role => ({
+      value: role,
+      label: runtimeRoleLabels[role]
+    })),
+    elements.runtimeOverrideRole.value || "residentCoordinator"
+  );
+  loadRuntimeOverrideEditor();
+  renderRuntimeProfileEvidence();
+}
+
+function loadRuntimeOverrideEditor() {
+  const runtime = state.settings?.ollamaRuntime;
+  const model = state.models.find(
+    candidate => candidate.name === elements.runtimeOverrideModel.value
+      && candidate.provider === "ollama-local"
+  );
+  const role = elements.runtimeOverrideRole.value;
+  const saved = runtime?.modelOverrides.find(
+    candidate => candidate.provider === "ollama-local"
+      && candidate.model === model?.name
+      && candidate.digest === model?.digest
+  )?.overrides?.[role];
+  const profile = saved ?? runtime?.roleDefaults?.[role];
+
+  if (!profile) {
+    return;
+  }
+
+  elements.runtimeOverrideMinimum.value = profile.minimumContextTokens;
+  elements.runtimeOverrideTarget.value = profile.targetContextTokens;
+  elements.runtimeOverrideMaximum.value = profile.maximumContextTokens;
+  elements.runtimeOverrideOutput.value = profile.outputTokenLimit;
+  elements.runtimeOverrideKeepAlive.value = profile.keepAlive;
+  elements.removeRuntimeOverride.disabled = !saved;
+}
+
+function renderRuntimeDevicePolicies(memory) {
+  const cards = state.devices
+    .filter(device => !device.isAuto)
+    .map(device => {
+      const card = document.createElement("article");
+      card.className = "runtime-device-policy";
+      const enabledLabel = document.createElement("label");
+      enabledLabel.className = "checkbox-label";
+      const enabled = document.createElement("input");
+      enabled.type = "checkbox";
+      enabled.dataset.runtimeDeviceEnabled = device.id;
+      enabled.checked = Object.hasOwn(
+        memory.devices,
+        device.id
+      );
+      const name = document.createElement("span");
+      name.textContent = device.name;
+      enabledLabel.append(enabled, name);
+
+      const fields = document.createElement("div");
+      fields.className = "runtime-profile-fields runtime-device-policy-fields";
+      const policy = memory.devices[device.id] ?? {
+        targetMaximumUsagePercent: memory.targetMaximumGpuUsagePercent,
+        minimumFreeVramBytes: memory.minimumFreeVramBytes
+      };
+      const percentLabel = document.createElement("label");
+      const percentCaption = document.createElement("span");
+      percentCaption.textContent = "Uso máximo (%)";
+      const percent = document.createElement("input");
+      percent.type = "number";
+      percent.min = "50";
+      percent.max = "100";
+      percent.value = policy.targetMaximumUsagePercent;
+      percent.dataset.runtimeDevicePercent = device.id;
+      percent.disabled = !enabled.checked;
+      percentLabel.append(percentCaption, percent);
+      const freeLabel = document.createElement("label");
+      const freeCaption = document.createElement("span");
+      freeCaption.textContent = "VRAM livre (GiB)";
+      const free = document.createElement("input");
+      free.type = "number";
+      free.min = "0";
+      free.step = "0.25";
+      free.value = bytesToGiB(policy.minimumFreeVramBytes);
+      free.dataset.runtimeDeviceFreeVram = device.id;
+      free.disabled = !enabled.checked;
+      freeLabel.append(freeCaption, free);
+      fields.append(percentLabel, freeLabel);
+      card.append(enabledLabel, fields);
+      return card;
+    });
+
+  if (cards.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "runtime-note";
+    empty.textContent = "Nenhuma GPU específica foi detectada.";
+    cards.push(empty);
+  }
+
+  elements.runtimeMemoryDevicePolicies.replaceChildren(...cards);
+}
+
+function handleRuntimeDevicePolicyChange(event) {
+  const deviceId = event.target.dataset.runtimeDeviceEnabled;
+
+  if (!deviceId) {
+    return;
+  }
+
+  const enabled = event.target.checked;
+  elements.runtimeMemoryDevicePolicies.querySelector(
+    `[data-runtime-device-percent="${CSS.escape(deviceId)}"]`
+  ).disabled = !enabled;
+  elements.runtimeMemoryDevicePolicies.querySelector(
+    `[data-runtime-device-free-vram="${CSS.escape(deviceId)}"]`
+  ).disabled = !enabled;
+}
+
+function saveRuntimeOverrideDraft() {
+  const runtime = state.settings.ollamaRuntime;
+  const model = state.models.find(
+    candidate => candidate.name === elements.runtimeOverrideModel.value
+      && candidate.provider === "ollama-local"
+  );
+  const role = elements.runtimeOverrideRole.value;
+
+  if (!model?.digest) {
+    elements.runtimeProfileResult.textContent =
+      "O modelo local precisa ter um digest exato para receber um override.";
+    return;
+  }
+
+  const profile = {
+    minimumContextTokens: Number(elements.runtimeOverrideMinimum.value),
+    targetContextTokens: Number(elements.runtimeOverrideTarget.value),
+    maximumContextTokens: Number(elements.runtimeOverrideMaximum.value),
+    outputTokenLimit: Number(elements.runtimeOverrideOutput.value),
+    keepAlive: Number(elements.runtimeOverrideKeepAlive.value)
+  };
+  const overrides = runtime.modelOverrides.map(
+    item => ({
+      ...item,
+      overrides: {
+        ...item.overrides
+      }
+    })
+  );
+  let exact = overrides.find(
+    item => item.provider === "ollama-local"
+      && item.model === model.name
+      && item.digest === model.digest
+  );
+
+  if (!exact) {
+    exact = {
+      provider: "ollama-local",
+      model: model.name,
+      digest: model.digest,
+      overrides: {}
+    };
+    overrides.push(exact);
+  }
+
+  exact.overrides[role] = profile;
+  state.settings.ollamaRuntime = {
+    ...runtime,
+    modelOverrides: overrides
+  };
+  state.settingsDirty = true;
+  updateSettingsDirtyState();
+  elements.runtimeProfileResult.textContent =
+    `Override preparado para ${model.name}@${shortDigest(model.digest)} · ${runtimeRoleLabels[role]}. Salve as configurações para aplicar.`;
+  loadRuntimeOverrideEditor();
+}
+
+function removeRuntimeOverrideDraft() {
+  const runtime = state.settings.ollamaRuntime;
+  const model = state.models.find(
+    candidate => candidate.name === elements.runtimeOverrideModel.value
+      && candidate.provider === "ollama-local"
+  );
+  const role = elements.runtimeOverrideRole.value;
+  const overrides = runtime.modelOverrides.map(
+    item => ({
+      ...item,
+      overrides: {
+        ...item.overrides
+      }
+    })
+  );
+  const exact = overrides.find(
+    item => item.provider === "ollama-local"
+      && item.model === model?.name
+      && item.digest === model?.digest
+  );
+
+  if (exact) {
+    delete exact.overrides[role];
+  }
+
+  state.settings.ollamaRuntime = {
+    ...runtime,
+    modelOverrides: overrides.filter(
+      item => Object.keys(item.overrides).length > 0
+    )
+  };
+  state.settingsDirty = true;
+  updateSettingsDirtyState();
+  elements.runtimeProfileResult.textContent =
+    "Override removido do rascunho. Salve as configurações para aplicar.";
+  loadRuntimeOverrideEditor();
+}
+
+function collectOllamaRuntimeSettings() {
+  const runtime = state.settings.ollamaRuntime;
+  const roles = {};
+
+  for (const [role, fallback] of Object.entries(runtime.roleDefaults)) {
+    const values = {};
+
+    for (const field of Object.keys(fallback)) {
+      const input = elements.runtimeRoleProfiles.querySelector(
+        `[data-runtime-role="${role}"][data-runtime-field="${field}"]`
+      );
+      values[field] = input ? Number(input.value) : fallback[field];
+    }
+
+    roles[role] = values;
+  }
+
+  const devices = {};
+
+  for (const enabled of elements.runtimeMemoryDevicePolicies.querySelectorAll(
+    "[data-runtime-device-enabled]"
+  )) {
+    if (!enabled.checked) {
+      continue;
+    }
+
+    const deviceId = enabled.dataset.runtimeDeviceEnabled;
+    devices[deviceId] = {
+      targetMaximumUsagePercent: Number(
+        elements.runtimeMemoryDevicePolicies.querySelector(
+          `[data-runtime-device-percent="${CSS.escape(deviceId)}"]`
+        ).value
+      ),
+      minimumFreeVramBytes: giBToBytes(
+        elements.runtimeMemoryDevicePolicies.querySelector(
+          `[data-runtime-device-free-vram="${CSS.escape(deviceId)}"]`
+        ).value
+      )
+    };
+  }
+
+  return {
+    ...runtime,
+    roleDefaults: roles,
+    memory: {
+      ...runtime.memory,
+      targetMaximumGpuUsagePercent: Number(
+        elements.runtimeMemoryGpuPercent.value
+      ),
+      minimumFreeVramBytes: giBToBytes(
+        elements.runtimeMemoryFreeVram.value
+      ),
+      minimumFreeSystemRamBytes: giBToBytes(
+        elements.runtimeMemoryFreeRam.value
+      ),
+      allowCpuOffload: elements.runtimeMemoryCpuOffload.checked,
+      preferFullGpuForActivePrimary:
+        elements.runtimeMemoryPreferFullGpu.checked,
+      devices
+    }
+  };
+}
+
+async function analyzeRuntimeProfile() {
+  const model = elements.runtimeOverrideModel.value;
+  const role = elements.runtimeOverrideRole.value;
+  elements.analyzeRuntimeProfile.disabled = true;
+  elements.runtimeProfileResult.textContent =
+    `Analisando metadados de ${model}; o modelo não será carregado…`;
+
+  try {
+    const result = await fetchJson(
+      "/api/runtime/profiles/analyze",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          role
+        })
+      }
+    );
+    const recommendation = result.recommendation;
+    elements.runtimeProfileResult.textContent =
+      `${model} · ${runtimeRoleLabels[role] ?? role}\n`
+      + `Declarado: ${formatInteger(recommendation.declaredMaximumContext)} · `
+      + `configurado: ${formatInteger(recommendation.configuredContext)}\n`
+      + `Sugestão ${formatInteger(recommendation.suggestedMinimum)} / `
+      + `${formatInteger(recommendation.suggestedTarget)} / `
+      + `${formatInteger(recommendation.suggestedMaximum)} · `
+      + `confiança ${recommendation.confidence}\n`
+      + `Origem: ${recommendation.source} · ${recommendation.reason}\n`
+      + `Carga alterada: ${result.loadedModelChanged ? "sim (inesperado)" : "não"}`;
+  } catch (error) {
+    elements.runtimeProfileResult.textContent =
+      runtimeProfileErrorMessage(error);
+  } finally {
+    elements.analyzeRuntimeProfile.disabled = false;
+  }
+}
+
+async function measureRuntimeProfile() {
+  const model = elements.runtimeOverrideModel.value;
+  const role = elements.runtimeOverrideRole.value;
+  const context = Number(elements.runtimeOverrideTarget.value);
+  const consent =
+    `Medir ${model} com ${formatInteger(context)} tokens de contexto?\n\n`
+    + "Esta ação carregará um modelo real no Ollama e poderá usar GPU, VRAM e RAM. "
+    + "O Host tentará restaurar o estado residente anterior.";
+
+  if (!window.confirm(consent)) {
+    return;
+  }
+
+  elements.measureRuntimeProfile.disabled = true;
+  elements.runtimeProfileResult.textContent =
+    `Medindo ${model} em ${formatInteger(context)} tokens…`;
+
+  try {
+    const result = await fetchJson(
+      "/api/runtime/profiles/measure",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          role,
+          contextCandidates: [context],
+          permissionGranted: true,
+          runMinimalRequest: false
+        })
+      }
+    );
+    const measurement = result.measurement;
+    elements.runtimeProfileResult.textContent =
+      `${measurement.model}@${shortDigest(measurement.digest)} · `
+      + `${formatInteger(measurement.actualContext)} tokens\n`
+      + `VRAM ${formatGiB(measurement.vramSizeBytes)} · `
+      + `RAM estimada ${formatGiB(measurement.estimatedRamSizeBytes)} · `
+      + `${measurement.processor}\n`
+      + `Carga ${formatInteger(measurement.loadDurationMilliseconds)} ms · `
+      + `residente restaurado: ${result.priorResidentRestored ? "sim" : "não necessário"}`;
+    state.runtimeProfiles = await fetchJson("/api/runtime/profiles");
+    renderRuntimeProfileEvidence();
+    await refreshRuntimeStatus();
+  } catch (error) {
+    elements.runtimeProfileResult.textContent =
+      runtimeProfileErrorMessage(error);
+  } finally {
+    elements.measureRuntimeProfile.disabled = false;
+  }
+}
+
+function renderRuntimeProfileEvidence() {
+  const profiles = state.runtimeProfiles;
+
+  if (!profiles) {
+    return;
+  }
+
+  const warnings = profiles.sharedModelWarnings.map(warning => {
+    const row = document.createElement("div");
+    row.className = "runtime-shared-warning";
+    const icon = document.createElement("span");
+    icon.className = "information-button";
+    icon.textContent = "i";
+    icon.tabIndex = 0;
+    icon.setAttribute("role", "img");
+    icon.setAttribute("aria-label", warning.message);
+    icon.dataset.tooltip = warning.message;
+    const text = document.createElement("span");
+    text.textContent =
+      `${warning.model} · ${warning.roles.map(
+        role => runtimeRoleLabels[role] ?? role
+      ).join(", ")}`;
+    row.append(icon, text);
+    return row;
+  });
+  elements.runtimeSharedModelWarnings.replaceChildren(...warnings);
+}
+
+function runtimeProfileErrorMessage(error) {
+  const payload = error.payload;
+  return payload?.code
+    ? `${payload.message}\nCódigo: ${payload.code} · etapa: ${payload.stage} · trace: ${payload.traceId}`
+    : error.message;
+}
+
+function shortDigest(value) {
+  return value
+    ? value.slice(0, 12)
+    : "sem digest";
+}
+
+function bytesToGiB(value) {
+  return Number((Number(value ?? 0) / (1024 ** 3)).toFixed(2));
+}
+
+function giBToBytes(value) {
+  return Math.round(Number(value || 0) * (1024 ** 3));
+}
+
 function renderComposerModels() {
   const selected = elements.modelSelector.value || "auto";
   replaceOptions(
@@ -3327,6 +3892,7 @@ function renderSettings() {
   elements.maxToolOutputTokens.value = state.settings.execution.maxToolOutputTokens;
   elements.generationTimeoutSeconds.value = state.settings.runtime.generationTimeoutSeconds;
   elements.maxConversationMessages.value = state.settings.context.maxConversationMessages;
+  renderRuntimeProfilesEditor();
   elements.usageSelectedWindow.value = state.settings.usage.selectedWindow;
   elements.usageRetentionDays.value = state.settings.usage.retentionDays;
   elements.usageProviderShortMinutes.value =
@@ -4561,10 +5127,18 @@ async function openSettings(section = "general") {
   document.querySelector(`[data-settings-target="${section}"]`)?.focus();
 
   try {
-    state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
+    [
+      state.modelDiagnostics,
+      state.runtimeProfiles
+    ] = await Promise.all([
+      fetchJson("/api/models/diagnostics"),
+      fetchJson("/api/runtime/profiles")
+    ]);
     renderModelDiagnostics();
+    renderRuntimeProfilesEditor();
   } catch (error) {
     elements.modelContextDiagnostic.textContent = error.message;
+    elements.runtimeProfileResult.textContent = error.message;
   }
 
   await loadPortableYaml();
@@ -4619,6 +5193,7 @@ async function saveSettings(event) {
       ...state.settings.runtime,
       generationTimeoutSeconds: Number(elements.generationTimeoutSeconds.value)
     },
+    ollamaRuntime: collectOllamaRuntimeSettings(),
     execution: {
       ...state.settings.execution,
       maxToolOutputTokens: Number(elements.maxToolOutputTokens.value)

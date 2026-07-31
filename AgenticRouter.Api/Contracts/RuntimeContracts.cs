@@ -9,7 +9,9 @@ public sealed record RuntimeStatusResponse(
   IReadOnlyList<LoadedModelStatus> LoadedModels,
   string LoadedModelsStatus,
   string? LoadedModelsDiagnostic,
-  ResidentModelStatus ResidentModel
+  ResidentModelStatus ResidentModel,
+  bool Warning,
+  IReadOnlyList<string> Warnings
 );
 
 public sealed record SystemMemoryStatus(
@@ -33,19 +35,31 @@ public sealed record GpuMemoryStatus(
 
 public sealed record LoadedModelStatus(
   string Name,
+  string? Digest,
+  string? Role,
+  int? RequestedContextTokens,
+  int? ActualContextTokens,
   long? TotalSizeBytes,
   long? VramSizeBytes,
   long? EstimatedRamSizeBytes,
   string Processor,
   DateTimeOffset? ExpiresAt,
-  bool IsResidentModel
+  bool IsResidentModel,
+  string ProfileStatus,
+  bool SharedAcrossRoles
 );
 
 public sealed record ResidentModelStatus(
   string ConfiguredModel,
+  string? Digest,
   string State,
   bool Loaded,
   string Policy,
+  int? RequestedContextTokens,
+  int? ActualContextTokens,
+  long? TotalSizeBytes,
+  long? VramSizeBytes,
+  long? EstimatedRamSizeBytes,
   string? Operation,
   string? Diagnostic,
   string? TraceId
