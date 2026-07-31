@@ -2641,6 +2641,62 @@ p {
   outline-offset: 2px;
 }
 
+.cloud-providers-list {
+  display: grid;
+  gap: 10px;
+}
+
+.cloud-provider-card {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--sidebar) 68%, transparent);
+}
+
+.cloud-provider-card summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px;
+  cursor: pointer;
+}
+
+.cloud-provider-title {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.cloud-provider-body {
+  display: grid;
+  gap: 14px;
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.cloud-provider-metadata {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 14px 0 0;
+  font-size: 11px;
+}
+
+.cloud-provider-metadata dt {
+  color: var(--muted);
+}
+
+.cloud-provider-metadata dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cloud-provider-diagnostic {
+  min-height: 1.3em;
+  margin: 0;
+}
+
 .settings-responsive-navigation {
   display: none;
   padding: 10px 16px;

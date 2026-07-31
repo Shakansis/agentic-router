@@ -22,7 +22,8 @@ public sealed class ChatStageException : Exception
     int? httpStatus,
     bool recoverable,
     Exception? innerException = null,
-    IReadOnlyDictionary<string, string?>? details = null
+    IReadOnlyDictionary<string, string?>? details = null,
+    string provider = "ollama-local"
   )
     : base(
       message,
@@ -36,6 +37,7 @@ public sealed class ChatStageException : Exception
     HttpStatus = httpStatus;
     Recoverable = recoverable;
     Details = details;
+    Provider = provider;
   }
 
   public string Stage { get; }
@@ -51,4 +53,6 @@ public sealed class ChatStageException : Exception
   public bool Recoverable { get; }
 
   public IReadOnlyDictionary<string, string?>? Details { get; }
+
+  public string Provider { get; }
 }

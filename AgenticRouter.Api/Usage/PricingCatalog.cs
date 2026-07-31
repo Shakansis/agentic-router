@@ -23,7 +23,7 @@ public interface IPricingCatalog
 public sealed class BuiltInPricingCatalog : IPricingCatalog
 {
   private const int StaleAfterDays = 90;
-  public const string CatalogVersion = "2026-07-30.1";
+  public const string CatalogVersion = "2026-07-30.2";
   private static readonly DateTimeOffset UpdatedAt = new(
     2026,
     7,
@@ -72,6 +72,63 @@ public sealed class BuiltInPricingCatalog : IPricingCatalog
       "https://ai.google.dev/gemini-api/docs/pricing",
       UpdatedAt,
       "official-page-snapshot",
+      false
+    ),
+    new(
+      CatalogVersion,
+      "groq",
+      "openai/gpt-oss-120b",
+      0.15m,
+      0.60m,
+      0.075m,
+      "Reasoning tokens are included in the output price.",
+      "USD",
+      new DateOnly(
+        2026,
+        7,
+        30
+      ),
+      "https://groq.com/pricing",
+      UpdatedAt,
+      "official-page-snapshot",
+      false
+    ),
+    new(
+      CatalogVersion,
+      "groq",
+      "openai/gpt-oss-20b",
+      0.075m,
+      0.30m,
+      0.0375m,
+      "Reasoning tokens are included in the output price.",
+      "USD",
+      new DateOnly(
+        2026,
+        7,
+        30
+      ),
+      "https://groq.com/pricing",
+      UpdatedAt,
+      "official-page-snapshot",
+      false
+    ),
+    new(
+      CatalogVersion,
+      "cerebras",
+      "gpt-oss-120b",
+      0.35m,
+      0.75m,
+      null,
+      "Reasoning treatment follows the provider's reported completion usage.",
+      "USD",
+      new DateOnly(
+        2026,
+        7,
+        30
+      ),
+      "https://inference-docs.cerebras.ai/api-reference/models/public-models",
+      UpdatedAt,
+      "official-structured-metadata-snapshot",
       false
     )
   ];
@@ -318,7 +375,8 @@ public sealed class UsageRecorder : IUsageRecorder
         Currency = equivalent?.Currency ?? "USD",
         PricingCatalogVersion = _pricing.Get().Version,
         ActualPriceSnapshot = actualPrice,
-        EquivalentPriceSnapshot = equivalent
+        EquivalentPriceSnapshot = equivalent,
+        RateLimit = request.RateLimit
       };
       await _ledger.AppendAsync(
         usageEvent,

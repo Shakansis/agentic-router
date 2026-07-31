@@ -36,7 +36,8 @@ const state = {
   pendingDeliveryAction: null,
   activeAgentModel: null,
   usageOverview: null,
-  pricingCatalog: null
+  pricingCatalog: null,
+  cloudProviders: null
 };
 
 const elements = {};
@@ -124,6 +125,7 @@ function bindElements() {
     "settings-usage-details",
     "purge-usage",
     "usage-purge-status",
+    "cloud-providers-list",
     "model-diagnostics-list",
     "model-context-diagnostic",
     "model-test-selector",
@@ -266,6 +268,10 @@ function bindEvents() {
     "click",
     purgeUsageHistory
   );
+  elements.cloudProvidersList.addEventListener(
+    "click",
+    handleCloudProviderAction
+  );
   elements.refreshProjectProfile.addEventListener("click", refreshProjectProfile);
   elements.addValidationStep.addEventListener(
     "click",
@@ -378,7 +384,8 @@ async function loadApplicationState() {
     validationProfiles,
     workspaceProfiles,
     usageOverview,
-    pricingCatalog
+    pricingCatalog,
+    cloudProviders
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -388,7 +395,8 @@ async function loadApplicationState() {
     fetchJson("/api/workspace/validation-profile"),
     fetchJson("/api/workspaces"),
     fetchJson("/api/usage/overview"),
-    fetchJson("/api/usage/pricing")
+    fetchJson("/api/usage/pricing"),
+    fetchJson("/api/cloud-providers")
   ]);
 
   state.settings = settings;
@@ -400,6 +408,7 @@ async function loadApplicationState() {
   state.workspaceProfiles = workspaceProfiles;
   state.usageOverview = usageOverview;
   state.pricingCatalog = pricingCatalog;
+  state.cloudProviders = cloudProviders;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
@@ -1028,7 +1037,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.2."
+        + "pelo Agentic Router v0.9.3."
     )
   ) {
     event.currentTarget.checked = false;
@@ -2215,6 +2224,7 @@ function renderSettings() {
   }
 
   renderModelDiagnostics();
+  renderCloudProviders();
   renderSettingsSummaries();
   renderUsageSummary();
 }
@@ -2258,11 +2268,224 @@ function renderSettingsSummaries() {
 }
 
 function modelOptions() {
-  return state.models.map(model => ({
-    value: model.name,
-    label: model.name,
-    group: "Instalados"
-  }));
+  const groups = {
+    "ollama-local": "Modelos locais",
+    groq: "Groq",
+    "google-ai-studio": "Google AI Studio",
+    cerebras: "Cerebras"
+  };
+
+  return state.models.map(model => {
+    const capabilities = model.capabilities;
+    const badges = [
+      capabilities?.nativeTools ? "tools" : null,
+      capabilities?.vision ? "visão" : null,
+      capabilities?.streaming ? "stream" : null
+    ].filter(Boolean);
+
+    return {
+      value: model.name,
+      label: `${model.displayName ?? model.name}`
+        + `${badges.length ? ` · ${badges.join(" · ")}` : ""}`,
+      group: groups[model.provider] ?? model.provider ?? "Modelos locais",
+      disabled: model.selectable === false,
+      title: capabilities?.source
+        ? `Capacidades: ${capabilities.source}`
+        : null
+    };
+  });
+}
+
+function renderCloudProviders() {
+  elements.cloudProvidersList.replaceChildren();
+
+  for (const provider of state.cloudProviders?.providers ?? []) {
+    const card = document.createElement("details");
+    card.className = "cloud-provider-card";
+    card.dataset.provider = provider.provider;
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.className = "cloud-provider-title";
+    title.textContent = provider.displayName;
+    const status = document.createElement("span");
+    status.className = `badge ${provider.connectionState === "connected"
+      ? "success"
+      : provider.connectionState === "error"
+        ? "error"
+        : "muted"}`;
+    status.textContent = cloudConnectionLabel(provider.connectionState);
+    summary.append(title, status);
+
+    const body = document.createElement("div");
+    body.className = "cloud-provider-body";
+    const metadata = document.createElement("dl");
+    metadata.className = "cloud-provider-metadata";
+    appendDefinition(metadata, "Ativo", provider.enabled ? "Sim" : "Não");
+    appendDefinition(metadata, "Chave", provider.maskedKeyState);
+    appendDefinition(metadata, "Modelos", String(provider.modelCount));
+    appendDefinition(
+      metadata,
+      "Última atualização",
+      provider.lastRefreshAt
+        ? new Date(provider.lastRefreshAt).toLocaleString()
+        : "Ainda não atualizada"
+    );
+    appendDefinition(metadata, "Quota", provider.quotaSource);
+
+    const keyField = document.createElement("label");
+    const keyLabel = document.createElement("span");
+    keyLabel.textContent = provider.hasKey ? "Substituir chave" : "API key";
+    const keyInput = document.createElement("input");
+    keyInput.type = "password";
+    keyInput.autocomplete = "new-password";
+    keyInput.dataset.cloudKey = provider.provider;
+    keyInput.dataset.ignoreSettingsDirty = "";
+    keyInput.placeholder = provider.hasKey
+      ? "Digite uma nova chave"
+      : "Digite a chave";
+    keyField.append(keyLabel, keyInput);
+
+    const actions = document.createElement("div");
+    actions.className = "settings-action-row";
+    actions.append(
+      cloudActionButton(
+        provider.provider,
+        "save-key",
+        provider.hasKey ? "Substituir" : "Salvar chave"
+      ),
+      cloudActionButton(provider.provider, "test", "Testar conexão"),
+      cloudActionButton(provider.provider, "refresh", "Atualizar modelos"),
+      cloudActionButton(
+        provider.provider,
+        "remove-key",
+        "Remover chave",
+        "danger-button"
+      )
+    );
+    actions.querySelector('[data-cloud-action="test"]').disabled = !provider.hasKey;
+    actions.querySelector('[data-cloud-action="refresh"]').disabled = !provider.hasKey;
+    actions.querySelector('[data-cloud-action="remove-key"]').disabled = !provider.hasKey;
+
+    const diagnostic = document.createElement("p");
+    diagnostic.className = "runtime-note cloud-provider-diagnostic";
+    diagnostic.dataset.cloudDiagnostic = provider.provider;
+    diagnostic.textContent = provider.diagnostic ?? "";
+    body.append(metadata, keyField, actions, diagnostic);
+    card.append(summary, body);
+    elements.cloudProvidersList.append(card);
+  }
+}
+
+function cloudActionButton(provider, action, label, extraClass = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `secondary-button ${extraClass}`.trim();
+  button.dataset.cloudProvider = provider;
+  button.dataset.cloudAction = action;
+  button.textContent = label;
+  return button;
+}
+
+function appendDefinition(list, term, description) {
+  const dt = document.createElement("dt");
+  dt.textContent = term;
+  const dd = document.createElement("dd");
+  dd.textContent = description;
+  list.append(dt, dd);
+}
+
+function cloudConnectionLabel(stateName) {
+  return {
+    connected: "Conectado",
+    error: "Erro",
+    disabled: "Desativado",
+    "key-required": "Chave necessária",
+    "not-tested": "Não testado"
+  }[stateName] ?? stateName;
+}
+
+async function handleCloudProviderAction(event) {
+  const button = event.target.closest("[data-cloud-action]");
+
+  if (!button) {
+    return;
+  }
+
+  const provider = button.dataset.cloudProvider;
+  const action = button.dataset.cloudAction;
+  const diagnostic = elements.cloudProvidersList.querySelector(
+    `[data-cloud-diagnostic="${CSS.escape(provider)}"]`
+  );
+  let path;
+  let options;
+
+  if (action === "save-key") {
+    const input = elements.cloudProvidersList.querySelector(
+      `[data-cloud-key="${CSS.escape(provider)}"]`
+    );
+    const apiKey = input.value.trim();
+
+    if (!apiKey) {
+      diagnostic.textContent = "Digite uma API key antes de salvar.";
+      input.focus();
+      return;
+    }
+
+    path = `/api/cloud-providers/${encodeURIComponent(provider)}/key`;
+    options = {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ apiKey })
+    };
+  } else if (action === "remove-key") {
+    if (!window.confirm("Remover permanentemente a chave protegida deste provedor?")) {
+      return;
+    }
+
+    path = `/api/cloud-providers/${encodeURIComponent(provider)}/key?confirmed=true`;
+    options = { method: "DELETE" };
+  } else {
+    const operation = action === "test" ? "testar a conexão" : "atualizar os modelos";
+
+    if (!window.confirm(
+      `Permitir uma chamada real ao provedor para ${operation}? Essa ação pode consumir quota.`
+    )) {
+      return;
+    }
+
+    path = action === "test"
+      ? `/api/cloud-providers/${encodeURIComponent(provider)}/test`
+      : `/api/cloud-providers/${encodeURIComponent(provider)}/models/refresh`;
+    options = { method: "POST" };
+  }
+
+  button.disabled = true;
+  diagnostic.textContent = "Processando…";
+
+  try {
+    await fetchJson(path, options);
+    await refreshCloudProviderState();
+  } catch (error) {
+    diagnostic.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshCloudProviderState() {
+  const [cloudProviders, modelsResponse, settings] = await Promise.all([
+    fetchJson("/api/cloud-providers"),
+    fetchJson("/api/models"),
+    fetchJson("/api/settings")
+  ]);
+  state.cloudProviders = cloudProviders;
+  state.models = modelsResponse.models;
+  state.settings = settings;
+  renderCloudProviders();
+  renderComposerModels();
+  renderSettings();
 }
 
 function gpuOptions(includeDefault) {
@@ -2565,7 +2788,8 @@ async function saveSettings(event) {
       comparisonProvider: elements.usageComparisonModel.value.split("|")[0],
       comparisonModel: elements.usageComparisonModel.value.split("|")[1],
       ollamaPlanReference: elements.usageOllamaPlan.value
-    }
+    },
+    cloudProviders: state.settings.cloudProviders
   };
 
   try {

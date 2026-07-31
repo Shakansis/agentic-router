@@ -33,6 +33,43 @@ public sealed record ApplicationSettings
   public GitDeliverySettings GitDelivery { get; init; } = new();
 
   public UsageSettings Usage { get; init; } = new();
+
+  public CloudProvidersSettings CloudProviders { get; init; } = new();
+}
+
+public sealed record CloudProvidersSettings
+{
+  public CloudProviderIntegrationSettings Groq { get; init; } = new();
+
+  public CloudProviderIntegrationSettings GoogleAiStudio { get; init; } = new();
+
+  public CloudProviderIntegrationSettings Cerebras { get; init; } = new();
+}
+
+public sealed record CloudProviderIntegrationSettings
+{
+  public bool Enabled { get; init; }
+
+  public string? SecretReference { get; init; }
+
+  public IReadOnlyDictionary<string, CloudModelQuotaSettings> ModelQuotas
+  {
+    get;
+    init;
+  } = new Dictionary<string, CloudModelQuotaSettings>(
+    StringComparer.Ordinal
+  );
+}
+
+public sealed record CloudModelQuotaSettings
+{
+  public long? ShortWindowTokenLimit { get; init; }
+
+  public int ShortWindowMinutes { get; init; } = 1;
+
+  public long? LongWindowTokenLimit { get; init; }
+
+  public int LongWindowMinutes { get; init; } = 1_440;
 }
 
 public sealed record UsageSettings

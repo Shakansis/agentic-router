@@ -1,5 +1,7 @@
 namespace AgenticRouter.Api.Usage;
 
+using AgenticRouter.Api.Providers;
+
 public static class UsageModelRoles
 {
   public const string Router = "router";
@@ -120,7 +122,8 @@ public sealed record UsageRecordRequest(
   string Status,
   ProviderTokenUsage? ProviderUsage,
   long EstimatedInputTokens,
-  long EstimatedOutputTokens
+  long EstimatedOutputTokens,
+  ProviderRateLimitSnapshot? RateLimit = null
 );
 
 public sealed record PricingSnapshot(
@@ -196,6 +199,8 @@ public sealed record UsageEvent
   public PricingSnapshot? ActualPriceSnapshot { get; init; }
 
   public PricingSnapshot? EquivalentPriceSnapshot { get; init; }
+
+  public ProviderRateLimitSnapshot? RateLimit { get; init; }
 }
 
 public sealed record UsageFilter(

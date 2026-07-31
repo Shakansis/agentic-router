@@ -2,7 +2,7 @@
 
 ## 1. Product Mission
 
-Agentic Router is a local-first application that routes conversations and supervised software-development tasks to local Ollama models.
+Agentic Router is a local-first application that routes conversations and supervised software-development tasks to local Ollama models or explicitly configured cloud providers.
 
 The product has two user-visible modes:
 
@@ -28,7 +28,7 @@ The implementation uses:
 
 - .NET 10 and ASP.NET Core Web API;
 - controllers for HTTP endpoints;
-- Ollama as the only model provider;
+- Ollama Local plus optional Groq, Google AI Studio, and Cerebras providers;
 - vanilla HTML, CSS, and JavaScript;
 - Playwright for .NET with MSTest for browser-driven end-to-end tests;
 - one local application instance;
@@ -46,7 +46,7 @@ Keep responsibilities explicit:
 - Controllers translate HTTP input and output only.
 - Chat services coordinate turns, routing, streaming, and conversation context.
 - Execution services own plans, approvals, local actions, validation, recovery, and session state.
-- The Ollama provider owns provider HTTP communication and provider-specific contracts.
+- Each provider adapter owns its HTTP communication and provider-specific contracts.
 - Settings and workspace-profile stores own validated local configuration.
 - The browser renders host state and sends explicit user decisions; it is not an execution authority.
 
@@ -118,6 +118,8 @@ Keep configuration typed, validated, versionable, and backward-compatible when p
 
 Configuration includes provider URL, router and coordinator models, intent profiles, model/device defaults, context sizes, timeouts, execution limits, approval policy, trusted workspaces, and persistence preferences.
 
+Cloud API keys are protected for the current Windows user with DPAPI. Ordinary settings and portable YAML contain no keys, and browser contracts expose only masked state and opaque secret references.
+
 Persist only the data the user has enabled. Do not expose secrets, raw provider payloads, full stack traces, or unrestricted local paths in browser-visible errors.
 
 Provider calls record bounded metadata-only usage events under `data/usage/`.
@@ -177,7 +179,7 @@ The automated suite contains end-to-end tests only.
 
 Use Playwright for .NET with MSTest to exercise the browser and running API together. The default suite may replace Ollama only at its external HTTP boundary with a deterministic fake. Do not mock internal controllers, routing, execution, persistence, or browser code.
 
-Before running any benchmark, smoke test, or other validation that invokes a real Ollama model, obtain explicit permission from the user for that run. The GPU may be occupied by unrelated work, which would make timing, loading, timeout, and memory-pressure evidence unreliable. Fake-Ollama E2E tests and read-only model discovery do not require this permission.
+Before running any benchmark, smoke test, or other validation that invokes a real Ollama model, obtain explicit permission from the user for that run. Before using a real cloud provider for conformance or validation, obtain explicit permission because the call may consume quota. Fake-provider E2E tests and read-only local model discovery do not require this permission.
 
 Every E2E test has a maximum timeout of 60 seconds. Do not solve slow tests by raising that limit. Use Playwright assertions and event-based waiting, avoid arbitrary sleeps, and keep tests independent.
 
@@ -210,7 +212,7 @@ Before editing, inspect the relevant implementation, repository instructions, an
 
 Do not implement these without an explicit later request:
 
-- model providers other than Ollama;
+- model providers other than Ollama Local, Groq, Google AI Studio, and Cerebras;
 - MCP, plugin, remote-agent, or recursive delegation systems;
 - unrestricted shell or operating-system control;
 - destructive filesystem operations or history rewriting;

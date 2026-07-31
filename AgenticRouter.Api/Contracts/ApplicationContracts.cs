@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Providers;
 
 namespace AgenticRouter.Api.Contracts;
 
@@ -8,7 +9,12 @@ public sealed record InstalledModel(
   string Name,
   long? SizeBytes,
   DateTimeOffset? ModifiedAt,
-  string? Digest = null
+  string? Digest = null,
+  string Provider = ModelProviderIds.OllamaLocal,
+  string? DisplayName = null,
+  ProviderModelCapabilities? Capabilities = null,
+  bool Selectable = true,
+  ProviderModelPricing? Pricing = null
 );
 
 public sealed record ProviderError(
@@ -455,7 +461,8 @@ public sealed record ModelTestRequest(
 
 public sealed record ModelConformanceBenchmarkRequest(
   string Model,
-  bool RestoreResidentModel = true
+  bool RestoreResidentModel = true,
+  bool ExternalProviderPermissionGranted = false
 );
 
 public sealed record PortableYamlSettingsRequest(

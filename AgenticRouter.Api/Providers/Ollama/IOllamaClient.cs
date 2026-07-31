@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Providers.Ollama;
@@ -67,6 +68,12 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task<string> GetProtocolVersionAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  );
+
   Task<IReadOnlyList<OllamaRunningModel>> GetRunningModelsAsync(
     Uri baseUri,
     CancellationToken cancellationToken
@@ -92,7 +99,8 @@ public sealed record OllamaChatUpdate(
   bool Accepted,
   string? Delta,
   bool Done = false,
-  ProviderTokenUsage? Usage = null
+  ProviderTokenUsage? Usage = null,
+  ProviderRateLimitSnapshot? RateLimit = null
 );
 
 public sealed record OllamaToolDefinition(
@@ -103,7 +111,8 @@ public sealed record OllamaToolDefinition(
 
 public sealed record OllamaToolCall(
   string Name,
-  System.Text.Json.JsonElement Arguments
+  System.Text.Json.JsonElement Arguments,
+  string? Id = null
 );
 
 public sealed record OllamaToolMessage(
@@ -185,4 +194,36 @@ public sealed class ToolProtocolException : OllamaProviderException
     )
   {
   }
+}
+
+public sealed class RoutedProviderException : OllamaProviderException
+{
+  public RoutedProviderException(
+    Cloud.CloudProviderException exception
+  )
+    : base(
+      exception.Stage,
+      exception.Message,
+      $"{exception.Code}; trace={exception.TraceId}",
+      exception.HttpStatus,
+      exception.Retryable,
+      exception
+    )
+  {
+    Code = exception.Code;
+    Provider = exception.Provider;
+    Model = exception.Model;
+    RateLimit = exception.RateLimit;
+    TraceId = exception.TraceId;
+  }
+
+  public string Code { get; }
+
+  public string Provider { get; }
+
+  public string? Model { get; }
+
+  public ProviderRateLimitSnapshot? RateLimit { get; }
+
+  public string TraceId { get; }
 }

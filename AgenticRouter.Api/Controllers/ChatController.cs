@@ -290,7 +290,10 @@ public sealed class ChatController : ControllerBase
           null,
           exception.HttpStatus,
           exception.Recoverable,
-          exception
+          exception,
+          provider: exception is RoutedProviderException routed
+            ? routed.Provider
+            : "ollama-local"
         ),
         cancellationToken
       );
@@ -465,7 +468,7 @@ public sealed class ChatController : ControllerBase
       exception.Message,
       exception.TechnicalMessage,
       HttpContext.TraceIdentifier,
-      "ollama",
+      exception.Provider,
       exception.Model,
       exception.Intention,
       exception.HttpStatus,

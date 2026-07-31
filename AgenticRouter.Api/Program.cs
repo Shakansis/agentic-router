@@ -6,6 +6,8 @@ using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Models;
 using AgenticRouter.Api.ProjectAwareness;
+using AgenticRouter.Api.Providers;
+using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
@@ -22,7 +24,7 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 builder.Services.AddControllers();
-builder.Services.AddHttpClient<IOllamaClient, OllamaClient>(
+builder.Services.AddHttpClient<OllamaClient>(
   client => client.Timeout = Timeout.InfiniteTimeSpan
 );
 builder.Services.AddSingleton<ISettingsValidator, SettingsValidator>();
@@ -51,6 +53,32 @@ builder.Services.AddSingleton<ISettingsStore>(
     );
   }
 );
+builder.Services.AddSingleton<IProtectedSecretStore>(
+  new DpapiProtectedSecretStore(
+    dataDirectory
+  )
+);
+builder.Services.AddSingleton<ICloudProviderAdapter, GroqCloudProvider>();
+builder.Services.AddSingleton<ICloudProviderAdapter>(
+  services => new GeminiCloudProvider(
+    services.GetRequiredService<IHttpClientFactory>(),
+    new Uri(
+      builder.Configuration[
+        "AgenticRouter:Providers:GoogleAiStudioBaseUrl"
+      ] ?? "https://generativelanguage.googleapis.com/v1beta/",
+      UriKind.Absolute
+    )
+  )
+);
+builder.Services.AddSingleton<ICloudProviderAdapter, CerebrasCloudProvider>();
+builder.Services.AddSingleton<ICloudProviderRegistry>(
+  services => new CloudProviderRegistry(
+    services.GetServices<ICloudProviderAdapter>(),
+    services.GetRequiredService<ISettingsStore>(),
+    services.GetRequiredService<IProtectedSecretStore>(),
+    dataDirectory
+  )
+);
 builder.Services.AddSingleton<IPricingCatalog, BuiltInPricingCatalog>();
 builder.Services.AddSingleton<IUsageLedger>(
   services => new JsonlUsageLedger(
@@ -60,6 +88,7 @@ builder.Services.AddSingleton<IUsageLedger>(
 );
 builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
 builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
+builder.Services.AddTransient<IOllamaClient, ProviderDispatchClient>();
 builder.Services.AddSingleton<IWorkspaceProfileStore>(
   new WorkspaceProfileStore(
     dataDirectory

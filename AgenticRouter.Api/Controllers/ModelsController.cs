@@ -3,6 +3,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Models;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
@@ -58,7 +59,7 @@ public sealed class ModelsController : ControllerBase
 
       return Ok(
         new ModelsResponse(
-          "ollama",
+          "provider-registry",
           true,
           models,
           null
@@ -76,8 +77,12 @@ public sealed class ModelsController : ControllerBase
         exception.Message,
         exception.TechnicalMessage,
         HttpContext.TraceIdentifier,
-        "ollama",
-        null,
+        exception is RoutedProviderException routed
+          ? routed.Provider
+          : ModelProviderIds.OllamaLocal,
+        exception is RoutedProviderException routedModel
+          ? routedModel.Model
+          : null,
         null,
         exception.HttpStatus,
         exception.Recoverable
@@ -152,6 +157,28 @@ public sealed class ModelsController : ControllerBase
       settings.OllamaUrl,
       UriKind.Absolute
     );
+    var reference = ProviderModelReference.Parse(
+      request.Model
+    );
+
+    if (
+      !reference.IsLocal
+      && !request.ExternalProviderPermissionGranted
+    )
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "The cloud protocol benchmark requires explicit permission.",
+          new Dictionary<string, string[]>
+          {
+            ["externalProviderPermissionGranted"] =
+            [
+              "Confirm that this benchmark may make real provider calls and consume quota."
+            ]
+          }
+        )
+      );
+    }
     IReadOnlyList<InstalledModel> installed;
 
     try
@@ -196,7 +223,7 @@ public sealed class ModelsController : ControllerBase
           {
             ["model"] =
             [
-              $"Model '{request.Model}' is not installed in the configured Ollama instance."
+              $"Model '{request.Model}' is unavailable in the configured provider registry."
             ]
           }
         )
@@ -209,10 +236,11 @@ public sealed class ModelsController : ControllerBase
 
     try
     {
-      routerEvicted = await _residentModel.EvictForRecoveryAsync(
-        selected.Name,
-        cancellationToken
-      );
+      routerEvicted = reference.IsLocal
+        && await _residentModel.EvictForRecoveryAsync(
+          selected.Name,
+          cancellationToken
+        );
       var result = await _toolConformance.VerifyAsync(
         baseUri,
         selected.Name,

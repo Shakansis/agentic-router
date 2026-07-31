@@ -1,3 +1,35 @@
+# Agentic Router v0.9.3
+
+This development version adds protected, provider-qualified cloud inference
+through Groq, Google AI Studio, and Cerebras while preserving Ollama Local
+behavior.
+
+## Highlights
+
+- Adds a provider registry and collision-safe `provider::model` identities with
+  grouped model selectors, capability metadata, and repairable unavailable
+  saved references.
+- Adds official HTTP adapters for Groq's OpenAI-compatible API, the Gemini
+  Developer API, and Cerebras Inference, including streaming, native tool or
+  function calls, provider token usage, rate-limit snapshots, and typed errors.
+- Protects API keys with Windows DPAPI for the current user. Settings retain
+  opaque references only; keys never return to the browser, portable YAML,
+  usage ledger, logs, or conversation history.
+- Adds focused cloud-provider settings cards for masked key state, connection
+  tests, model refresh, last refresh, model count, quota source, diagnostics,
+  key replacement, and confirmed removal.
+- Caches non-secret provider model metadata locally so qualified selections
+  survive application restarts without automatically spending cloud quota.
+- Requires explicit permission before a cloud behavioral conformance
+  benchmark and keys results by qualified model revision and adapter protocol
+  version rather than trusting advertised tool capability alone.
+- Records each completed cloud provider call exactly once in the v0.9.2 usage
+  ledger, including exact/estimated token source, price snapshot, failure or
+  429 state, and observed rate-limit metadata.
+- Adds deterministic fake-provider E2E coverage for encryption at rest,
+  secret exclusion, model discovery, restart persistence, grouped selection,
+  streaming, tools/functions, usage, rate limits, and cloud conformance.
+
 # Agentic Router v0.9.2
 
 This development version adds local token-usage analytics and transparent

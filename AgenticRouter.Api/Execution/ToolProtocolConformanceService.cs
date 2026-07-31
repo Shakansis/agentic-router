@@ -14,6 +14,13 @@ public interface IToolProtocolConformanceService
     ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
+
+  Task<ToolProtocolConformanceResult?> GetCachedAsync(
+    Uri baseUri,
+    string model,
+    string? digest,
+    CancellationToken cancellationToken
+  );
 }
 
 public sealed record ToolProtocolConformanceResult(
@@ -115,8 +122,9 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
 
     try
     {
-      version = await _ollamaClient.GetVersionAsync(
+      version = await _ollamaClient.GetProtocolVersionAsync(
         baseUri,
+        model,
         cancellationToken
       );
     }
@@ -211,6 +219,50 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       result
     );
     return result;
+  }
+
+  public async Task<ToolProtocolConformanceResult?> GetCachedAsync(
+    Uri baseUri,
+    string model,
+    string? digest,
+    CancellationToken cancellationToken
+  )
+  {
+    string version;
+
+    try
+    {
+      version = await _ollamaClient.GetProtocolVersionAsync(
+        baseUri,
+        model,
+        cancellationToken
+      );
+    }
+    catch (Exception exception) when (
+      exception is OllamaProviderException
+      or JsonException
+    )
+    {
+      return null;
+    }
+
+    var key = string.Join(
+      "|",
+      model,
+      string.IsNullOrWhiteSpace(
+        digest
+      )
+        ? "unknown"
+        : digest,
+      version
+    );
+
+    return _results.TryGetValue(
+      key,
+      out var cached
+    )
+      ? cached
+      : null;
   }
 
   private async Task VerifySimpleCallAsync(

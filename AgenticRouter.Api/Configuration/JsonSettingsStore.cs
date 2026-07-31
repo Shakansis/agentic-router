@@ -181,6 +181,9 @@ public sealed class JsonSettingsStore : ISettingsStore
       ) || !document.RootElement.TryGetProperty(
         "usage",
         out _
+      ) || !document.RootElement.TryGetProperty(
+        "cloudProviders",
+        out _
       ) || !hasProviderContext
         || !document.RootElement.GetProperty(
           "runtime"

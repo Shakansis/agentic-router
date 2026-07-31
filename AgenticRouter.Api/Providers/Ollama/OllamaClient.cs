@@ -509,6 +509,18 @@ public sealed class OllamaClient : IOllamaClient
     return payload.Version;
   }
 
+  public Task<string> GetProtocolVersionAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    return GetVersionAsync(
+      baseUri,
+      cancellationToken
+    );
+  }
+
   public async Task<IReadOnlyList<OllamaRunningModel>> GetRunningModelsAsync(
     Uri baseUri,
     CancellationToken cancellationToken

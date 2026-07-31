@@ -11,6 +11,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
 {
   private Process _apiProcess;
   private readonly FakeOllamaServer _fakeOllama;
+  private readonly FakeCloudProviderServer _fakeCloud;
   private readonly string _temporaryRoot;
   private readonly StringBuilder _apiOutput;
 
@@ -23,6 +24,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     Uri baseUri,
     TestApplicationSettings baselineSettings,
     FakeOllamaServer fakeOllama,
+    FakeCloudProviderServer fakeCloud,
     Process apiProcess,
     StringBuilder apiOutput
   )
@@ -35,6 +37,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     BaseUri = baseUri;
     BaselineSettings = baselineSettings;
     _fakeOllama = fakeOllama;
+    _fakeCloud = fakeCloud;
     _apiProcess = apiProcess;
     _apiOutput = apiOutput;
     HttpClient = new HttpClient
@@ -61,6 +64,10 @@ internal sealed class TestEnvironment : IAsyncDisposable
   public HttpClient HttpClient { get; }
 
   public FakeOllamaServer FakeOllama => _fakeOllama;
+
+  public FakeCloudProviderServer FakeCloud => _fakeCloud;
+
+  public string ApiOutput => _apiOutput.ToString();
 
   public static async Task<TestEnvironment> StartAsync()
   {
@@ -92,6 +99,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     );
 
     var fakeOllama = FakeOllamaServer.Start();
+    var fakeCloud = FakeCloudProviderServer.Start();
     var baselineSettings = TestApplicationSettings.Create(
       fakeOllama.BaseUrl,
       workspaceDirectory
@@ -149,6 +157,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
       RedirectStandardError = true
     };
     processStartInfo.Environment["AgenticRouter__DataDirectory"] = dataDirectory;
+    processStartInfo.Environment["AgenticRouter__Providers__GroqBaseUrl"] =
+      $"{fakeCloud.BaseUrl}/groq/openai/v1/";
+    processStartInfo.Environment[
+      "AgenticRouter__Providers__GoogleAiStudioBaseUrl"
+    ] = $"{fakeCloud.BaseUrl}/gemini/v1beta/";
+    processStartInfo.Environment["AgenticRouter__Providers__CerebrasBaseUrl"] =
+      $"{fakeCloud.BaseUrl}/cerebras/v1/";
+    processStartInfo.Environment[
+      "AgenticRouter__Providers__CerebrasPublicBaseUrl"
+    ] = $"{fakeCloud.BaseUrl}/cerebras/public/v1/";
     var apiProcess = new Process
     {
       StartInfo = processStartInfo,
@@ -182,6 +200,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     if (!apiProcess.Start())
     {
       await fakeOllama.DisposeAsync();
+      await fakeCloud.DisposeAsync();
       throw new InvalidOperationException(
         "The E2E API process could not be started."
       );
@@ -199,6 +218,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
       baseUri,
       baselineSettings,
       fakeOllama,
+      fakeCloud,
       apiProcess,
       apiOutput
     );
@@ -306,6 +326,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     );
     purgedUsage.EnsureSuccessStatusCode();
     _fakeOllama.Reset();
+    _fakeCloud.Reset();
   }
 
   public string CreateWorkspaceDirectory(
@@ -412,6 +433,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
     _apiProcess.Dispose();
     await _fakeOllama.DisposeAsync();
+    await _fakeCloud.DisposeAsync();
 
     if (Directory.Exists(
       _temporaryRoot

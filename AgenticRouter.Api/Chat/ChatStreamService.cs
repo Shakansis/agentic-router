@@ -6,6 +6,7 @@ using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.ProjectAwareness;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
@@ -585,11 +586,18 @@ public sealed class ChatStreamService : IChatStreamService
           )
         ).ToArray();
 
-        if (!string.Equals(
+        var configuredCoordinatorReference = ProviderModelReference.Parse(
+          settings.CoordinatorModel
+        );
+
+        if (
+          configuredCoordinatorReference.IsLocal
+          && !string.Equals(
           settings.CoordinatorModel,
           settings.RouterModel,
           StringComparison.OrdinalIgnoreCase
-        ))
+          )
+        )
         {
           yield return Event(
             requestId,
@@ -661,17 +669,24 @@ public sealed class ChatStreamService : IChatStreamService
               StringComparison.OrdinalIgnoreCase
             )
           );
-          coordinatorConformance = await _toolConformance.VerifyAsync(
-            baseUri,
-            settings.CoordinatorModel,
-            coordinatorIdentity.Digest,
-            UsageContext(
+          coordinatorConformance = configuredCoordinatorReference.IsLocal
+            ? await _toolConformance.VerifyAsync(
+              baseUri,
               settings.CoordinatorModel,
-              UsageModelRoles.Benchmark,
-              "tool-protocol-conformance"
-            ),
-            cancellationToken
-          );
+              coordinatorIdentity.Digest,
+              UsageContext(
+                settings.CoordinatorModel,
+                UsageModelRoles.Benchmark,
+                "tool-protocol-conformance"
+              ),
+              cancellationToken
+            )
+            : await _toolConformance.GetCachedAsync(
+              baseUri,
+              settings.CoordinatorModel,
+              coordinatorIdentity.Digest,
+              cancellationToken
+            );
         }
 
         if (coordinatorConformance?.Passed != true)
@@ -739,26 +754,36 @@ public sealed class ChatStreamService : IChatStreamService
               StringComparison.OrdinalIgnoreCase
             )
           );
-          var conformance = await _toolConformance.VerifyAsync(
-            baseUri,
-            selectedModel,
-            selectedIdentity.Digest,
-            UsageContext(
-              selectedModel,
-              UsageModelRoles.Benchmark,
-              "tool-protocol-conformance"
-            ),
-            cancellationToken
+          var selectedReference = ProviderModelReference.Parse(
+            selectedModel
           );
-          targetCoordinatesDirectly = conformance.Passed;
+          var conformance = selectedReference.IsLocal
+            ? await _toolConformance.VerifyAsync(
+              baseUri,
+              selectedModel,
+              selectedIdentity.Digest,
+              UsageContext(
+                selectedModel,
+                UsageModelRoles.Benchmark,
+                "tool-protocol-conformance"
+              ),
+              cancellationToken
+            )
+            : await _toolConformance.GetCachedAsync(
+              baseUri,
+              selectedModel,
+              selectedIdentity.Digest,
+              cancellationToken
+            );
+          targetCoordinatesDirectly = conformance?.Passed == true;
           yield return Event(
             requestId,
-            conformance.Passed
+            conformance?.Passed == true
               ? "agent.tooling-conformance-passed"
               : "agent.tooling-conformance-failed",
-            conformance.Passed
+            conformance?.Passed == true
               ? $"Tool protocol conformance passed for {selectedModel} with Ollama {conformance.OllamaVersion} and digest {conformance.Digest}."
-              : $"Tool protocol conformance failed for {selectedModel}: {conformance.Failure} "
+              : $"Tool protocol conformance is unavailable for {selectedModel}: {conformance?.Failure ?? "explicit cloud benchmark permission is required"} "
                 + "The configured coordinator will bridge this turn.",
             stopwatch,
             selectedModel,
@@ -3316,6 +3341,8 @@ public sealed class ChatStreamService : IChatStreamService
     string? intention
   )
   {
+    var routed = exception as RoutedProviderException;
+
     return new ChatStageException(
       exception.Stage,
       exception.Message,
@@ -3324,7 +3351,20 @@ public sealed class ChatStreamService : IChatStreamService
       intention,
       exception.HttpStatus,
       exception.Recoverable,
-      exception
+      exception,
+      routed is null
+        ? null
+        : new Dictionary<string, string?>(
+          StringComparer.Ordinal
+        )
+        {
+          ["code"] = routed.Code,
+          ["providerTraceId"] = routed.TraceId,
+          ["requestRemaining"] = routed.RateLimit?.RequestRemaining?.ToString(),
+          ["tokenRemaining"] = routed.RateLimit?.TokenRemaining?.ToString()
+        },
+      routed?.Provider
+        ?? ModelProviderIds.OllamaLocal
     );
   }
 

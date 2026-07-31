@@ -97,6 +97,10 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       settings.Usage
     );
+    ValidateCloudProviders(
+      errors,
+      settings.CloudProviders
+    );
 
     if (!string.Equals(
       settings.Runtime.ResidentModelPolicy,
@@ -928,6 +932,105 @@ public sealed class SettingsValidator : ISettingsValidator
         "usage.ollamaPlanReference",
         "Ollama plan reference is required and must contain at most 40 characters."
       );
+    }
+  }
+
+  private static void ValidateCloudProviders(
+    IDictionary<string, List<string>> errors,
+    CloudProvidersSettings providers
+  )
+  {
+    ValidateCloudProvider(
+      errors,
+      "cloudProviders.groq",
+      providers.Groq
+    );
+    ValidateCloudProvider(
+      errors,
+      "cloudProviders.googleAiStudio",
+      providers.GoogleAiStudio
+    );
+    ValidateCloudProvider(
+      errors,
+      "cloudProviders.cerebras",
+      providers.Cerebras
+    );
+  }
+
+  private static void ValidateCloudProvider(
+    IDictionary<string, List<string>> errors,
+    string field,
+    CloudProviderIntegrationSettings provider
+  )
+  {
+    if (
+      provider.SecretReference is not null
+      && (
+        !provider.SecretReference.StartsWith(
+          "secret-",
+          StringComparison.Ordinal
+        )
+        || provider.SecretReference.Length != 39
+      )
+    )
+    {
+      AddError(
+        errors,
+        $"{field}.secretReference",
+        "The protected secret reference is invalid."
+      );
+    }
+
+    if (
+      provider.Enabled
+      && string.IsNullOrWhiteSpace(
+        provider.SecretReference
+      )
+    )
+    {
+      AddError(
+        errors,
+        $"{field}.enabled",
+        "An enabled cloud provider requires a protected API key."
+      );
+    }
+
+    foreach (var pair in provider.ModelQuotas)
+    {
+      if (string.IsNullOrWhiteSpace(
+        pair.Key
+      ))
+      {
+        AddError(
+          errors,
+          $"{field}.modelQuotas",
+          "Quota model identities cannot be empty."
+        );
+      }
+
+      if (
+        pair.Value.ShortWindowTokenLimit is <= 0
+        || pair.Value.LongWindowTokenLimit is <= 0
+      )
+      {
+        AddError(
+          errors,
+          $"{field}.modelQuotas.{pair.Key}",
+          "Configured token limits must be greater than zero."
+        );
+      }
+
+      if (
+        pair.Value.ShortWindowMinutes is < 1 or > 43_200
+        || pair.Value.LongWindowMinutes is < 1 or > 525_600
+      )
+      {
+        AddError(
+          errors,
+          $"{field}.modelQuotas.{pair.Key}",
+          "Configured quota windows are outside the supported range."
+        );
+      }
     }
   }
 

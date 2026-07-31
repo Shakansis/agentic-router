@@ -1675,7 +1675,7 @@ public sealed class ExecutionSession
     {
       return (
         false,
-        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.2 does not rewrite Git history."
+        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.3 does not rewrite Git history."
       );
     }
 

@@ -1,6 +1,6 @@
 # Agentic Router
 
-A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs** or remote LLM providers via HTTP.
+A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
 ## 🎯 Project Mission
 
@@ -17,7 +17,7 @@ The system follows a **Mixture of Experts (MoE)** approach and is **completely G
 - **Single GPU**: Works seamlessly with one graphics card
 - **Multi-GPU**: Supports multiple GPUs for distributed workloads
 - **No GPU**: Runs on CPU-only systems
-- **Remote Providers**: Connects to LLM providers via HTTP (Ollama, or future providers)
+- **Remote Providers**: Connects to Ollama, Groq, Google AI Studio, or Cerebras through provider-specific HTTP contracts
 
 ### Optional Multi-GPU Distribution
 
@@ -39,19 +39,19 @@ The application follows a flexible pipeline that adapts to available hardware:
 3. **Intent Detection**: Router identifies the intent (e.g., "rpg-storytelling") and triggers the appropriate expert
 4. **Model Resolution**: System resolves the target model based on configuration precedence
 5. **Device Resolution**: System selects the appropriate device (auto, specific GPU, or CPU-only)
-6. **Provider Connection**: Application connects to the LLM provider via HTTP (Ollama or future providers)
+6. **Provider Connection**: Application connects to Ollama Local or an enabled cloud provider through the provider registry
 7. **Inference**: Provider processes the request and streams the response
 8. **Response Streaming**: Response streams in real-time to the UI with routing activity visible
 
-**Key Point**: The application delegates actual model execution to the provider (Ollama). GPU selection is a preference passed to the provider, which handles the final hardware allocation.
+**Key Point**: Local GPU selection is an Ollama preference. Cloud providers own their remote hardware allocation and require an explicitly saved, Windows-protected API key.
 
 ## 🛠️ Tech Stack
 
 ### Backend
 - **.NET 10** - Latest .NET platform
 - **ASP.NET Core Web API** - Minimal hosting model with controllers
-- **Ollama** - HTTP-based model provider (current implementation)
-- **HTTP Provider Interface** - Extensible for future providers (OpenAI, Anthropic, etc.)
+- **Provider registry** - Ollama Local, Groq, Google AI Studio, and Cerebras
+- **Protected secrets** - Windows DPAPI with opaque references in ordinary settings
 - **Server-Sent Events (SSE)** - Streaming mechanism for real-time updates
 - **CancellationToken** - Proper async cancellation throughout the pipeline
 - **GPU Discovery Service** - Automatic detection of available graphics devices (Windows)
@@ -64,6 +64,7 @@ The application follows a flexible pipeline that adapts to available hardware:
 ### Testing
 - **Playwright for .NET with MSTest** - Browser-driven end-to-end tests
 - **Fake Ollama Server** - Deterministic test double for provider boundary
+- **Fake Cloud Provider Server** - Deterministic Groq, Gemini, and Cerebras contracts without quota use
 
 ### Dependencies
 - `HtmlSanitizer` (9.1.973) - Safe HTML rendering
@@ -85,6 +86,7 @@ The application follows a flexible pipeline that adapts to available hardware:
     Markdown/                  # Safe markdown rendering
     Providers/
       Ollama/                  # Ollama HTTP communication
+      Cloud/                   # Groq, Gemini, Cerebras, registry, and protected keys
     Contracts/                 # Typed request/response contracts
     wwwroot/
       index.html               # Main chat UI

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
@@ -70,6 +71,478 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.AreEqual(
       HttpStatusCode.NotFound,
       recoveryResponse.StatusCode
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CloudProviderKeysAreProtectedAndQualifiedModelsAreGrouped()
+  {
+    var keys = new Dictionary<string, string>(
+      StringComparer.Ordinal
+    )
+    {
+      ["groq"] = "gsk_fake_secret_093",
+      ["google-ai-studio"] = "AIza_fake_secret_093",
+      ["cerebras"] = "csk_fake_secret_093"
+    };
+
+    foreach (var pair in keys)
+    {
+      using var saved = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/cloud-providers/{pair.Key}/key",
+        new
+        {
+          apiKey = pair.Value
+        }
+      );
+      var responseText = await saved.Content.ReadAsStringAsync();
+      Assert.AreEqual(HttpStatusCode.OK, saved.StatusCode, responseText);
+      Assert.DoesNotContain(
+        pair.Value,
+        responseText
+      );
+
+      using var refreshed = await _environment.HttpClient.PostAsync(
+        $"api/cloud-providers/{pair.Key}/models/refresh",
+        null
+      );
+      refreshed.EnsureSuccessStatusCode();
+    }
+
+    var settingsText = await File.ReadAllTextAsync(
+      _environment.SettingsPath
+    );
+    using var yamlResponse = await _environment.HttpClient.GetAsync(
+      "api/settings/yaml"
+    );
+    yamlResponse.EnsureSuccessStatusCode();
+    var yaml = await yamlResponse.Content.ReadAsStringAsync();
+
+    foreach (var key in keys.Values)
+    {
+      Assert.DoesNotContain(
+        key,
+        settingsText
+      );
+      Assert.DoesNotContain(
+        key,
+        yaml
+      );
+    }
+
+    var protectedFiles = Directory.GetFiles(
+      Path.Combine(
+        _environment.DataDirectory,
+        "secrets"
+      ),
+      "*.bin"
+    );
+    Assert.HasCount(
+      3,
+      protectedFiles
+    );
+
+    foreach (var path in protectedFiles)
+    {
+      var protectedText = Encoding.UTF8.GetString(
+        await File.ReadAllBytesAsync(
+          path
+        )
+      );
+
+      foreach (var key in keys.Values)
+      {
+        Assert.DoesNotContain(
+          key,
+          protectedText
+        );
+      }
+    }
+
+    using var modelsResponse = await _environment.HttpClient.GetAsync(
+      "api/models"
+    );
+    modelsResponse.EnsureSuccessStatusCode();
+    var modelsText = await modelsResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      modelsText,
+      "groq::openai/gpt-oss-120b"
+    );
+    StringAssert.Contains(
+      modelsText,
+      "google-ai-studio::gemini-test-flash"
+    );
+    StringAssert.Contains(
+      modelsText,
+      "cerebras::gpt-oss-120b"
+    );
+    StringAssert.Contains(
+      modelsText,
+      "provider-public-model-metadata"
+    );
+
+    await _environment.RestartApplicationAsync();
+    using var restartedModels = await _environment.HttpClient.GetAsync(
+      "api/models"
+    );
+    restartedModels.EnsureSuccessStatusCode();
+    StringAssert.Contains(
+      await restartedModels.Content.ReadAsStringAsync(),
+      "groq::openai/gpt-oss-120b"
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#open-settings"
+    ).ClickAsync();
+    await Page.Locator(
+      "[data-settings-target=\"cloud-providers\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#cloud-providers-list .cloud-provider-card"
+      )
+    ).ToHaveCountAsync(
+      3
+    );
+    await Expect(
+      Page.Locator(
+        "#cloud-providers-list"
+      )
+    ).ToContainTextAsync(
+      "Google AI Studio"
+    );
+
+    await Expect(
+      Page.Locator(
+        "#default-model optgroup[label=\"Groq\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "#default-model optgroup[label=\"Groq\"]"
+      )
+    ).ToContainTextAsync(
+      "openai/gpt-oss-120b"
+    );
+    await Page.Locator(
+      "#default-model"
+    ).SelectOptionAsync(
+      "cerebras::gpt-oss-120b"
+    );
+    await Page.Locator(
+      "#save-settings"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-dialog"
+      )
+    ).Not.ToBeVisibleAsync();
+    using var qualifiedYamlResponse = await _environment.HttpClient.GetAsync(
+      "api/settings/yaml"
+    );
+    qualifiedYamlResponse.EnsureSuccessStatusCode();
+    var qualifiedYaml = await qualifiedYamlResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      qualifiedYaml,
+      "cerebras::gpt-oss-120b"
+    );
+
+    foreach (var key in keys.Values)
+    {
+      Assert.DoesNotContain(
+        key,
+        qualifiedYaml
+      );
+    }
+
+    using (
+      var removed = await _environment.HttpClient.DeleteAsync(
+        "api/cloud-providers/cerebras/key?confirmed=true"
+      )
+    )
+    {
+      removed.EnsureSuccessStatusCode();
+    }
+    Assert.HasCount(
+      2,
+      Directory.GetFiles(
+        Path.Combine(
+          _environment.DataDirectory,
+          "secrets"
+        ),
+        "*.bin"
+      )
+    );
+
+    await Page.ReloadAsync();
+    await Page.Locator(
+      "#open-settings"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#default-model"
+      )
+    ).ToHaveValueAsync(
+      "cerebras::gpt-oss-120b"
+    );
+    await Expect(
+      Page.Locator(
+        "#default-model option[value=\"cerebras::gpt-oss-120b\"]"
+      )
+    ).ToContainTextAsync(
+      "indisponível"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-selector option[value=\"cerebras::gpt-oss-120b\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+
+    const string rejectedKey = "gsk_rejected_secret_093";
+    await Page.Locator(
+      "[data-settings-target=\"cloud-providers\"]"
+    ).ClickAsync();
+    await Page.Locator(
+      ".cloud-provider-card[data-provider=\"groq\"] summary"
+    ).ClickAsync();
+    await Page.Locator(
+      "[data-cloud-key=\"groq\"]"
+    ).FillAsync(
+      rejectedKey
+    );
+    await Page.Locator(
+      "[data-cloud-provider=\"groq\"][data-cloud-action=\"save-key\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-cloud-key=\"groq\"]"
+      )
+    ).ToHaveValueAsync(
+      string.Empty
+    );
+    Assert.DoesNotContain(
+      rejectedKey,
+      await Page.ContentAsync()
+    );
+
+    using var rejected = await _environment.HttpClient.PostAsync(
+      "api/cloud-providers/groq/test",
+      null
+    );
+    Assert.AreEqual(
+      HttpStatusCode.Unauthorized,
+      rejected.StatusCode
+    );
+    var rejectedBody = await rejected.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      rejectedBody,
+      "provider-key-invalid"
+    );
+    StringAssert.Contains(
+      rejectedBody,
+      "[redacted]"
+    );
+    Assert.DoesNotContain(
+      rejectedKey,
+      rejectedBody
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task FakeCloudProvidersStreamToolsUsageAndRateLimitsEndToEnd()
+  {
+    var providers = new[]
+    {
+      new
+      {
+        Id = "groq",
+        Key = "gsk_fake_stream_093",
+        Model = "groq::openai/gpt-oss-120b",
+        Answer = "cloud answer"
+      },
+      new
+      {
+        Id = "google-ai-studio",
+        Key = "AIza_fake_stream_093",
+        Model = "google-ai-studio::gemini-test-flash",
+        Answer = "gemini cloud answer"
+      },
+      new
+      {
+        Id = "cerebras",
+        Key = "csk_fake_stream_093",
+        Model = "cerebras::gpt-oss-120b",
+        Answer = "cloud answer"
+      }
+    };
+
+    foreach (var provider in providers)
+    {
+      using var saved = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/cloud-providers/{provider.Id}/key",
+        new
+        {
+          apiKey = provider.Key
+        }
+      );
+      Assert.AreEqual(
+        HttpStatusCode.OK,
+        saved.StatusCode,
+        await saved.Content.ReadAsStringAsync()
+      );
+      using var tested = await _environment.HttpClient.PostAsync(
+        $"api/cloud-providers/{provider.Id}/test",
+        null
+      );
+      tested.EnsureSuccessStatusCode();
+    }
+
+    using (
+      var denied = await _environment.HttpClient.PostAsJsonAsync(
+        "api/models/conformance",
+        new
+        {
+          model = providers[0].Model
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        denied.StatusCode
+      );
+    }
+
+    foreach (var provider in providers)
+    {
+      using var conformance = await _environment.HttpClient.PostAsJsonAsync(
+        "api/models/conformance",
+        new
+        {
+          model = provider.Model,
+          restoreResidentModel = false,
+          externalProviderPermissionGranted = true
+        }
+      );
+      conformance.EnsureSuccessStatusCode();
+      using var document = JsonDocument.Parse(
+        await conformance.Content.ReadAsStringAsync()
+      );
+      Assert.IsTrue(
+        document.RootElement.GetProperty(
+          "passed"
+        ).GetBoolean(),
+        await conformance.Content.ReadAsStringAsync()
+      );
+    }
+
+    await Page.GotoAsync(
+      "/"
+    );
+
+    foreach (var provider in providers)
+    {
+      await Page.Locator(
+        "#model-selector"
+      ).SelectOptionAsync(
+        provider.Model
+      );
+      await Page.Locator(
+        "#model-lock"
+      ).CheckAsync();
+      await StartMessageAsync(
+        $"Use {provider.Id} for this deterministic fake turn."
+      );
+      var activity = Page.Locator(
+        ".message.assistant .activity"
+      ).Last;
+
+      try
+      {
+        await Expect(
+          activity
+        ).Not.ToHaveAttributeAsync(
+          "open",
+          string.Empty
+        );
+      }
+      catch (PlaywrightException)
+      {
+        Assert.Fail(
+          $"{provider.Id}: {await activity.InnerHTMLAsync()}\n{_environment.ApiOutput}"
+        );
+      }
+      await Expect(
+        Page.Locator(
+          ".message.assistant .assistant-answer"
+        ).Last
+      ).ToContainTextAsync(
+        provider.Answer
+      );
+      await Page.Locator(
+        "#model-lock"
+      ).UncheckAsync();
+    }
+
+    foreach (var provider in providers)
+    {
+      using var usageResponse = await _environment.HttpClient.GetAsync(
+        $"api/usage/summary?window=rolling-hour&providerId={Uri.EscapeDataString(provider.Id)}"
+      );
+      usageResponse.EnsureSuccessStatusCode();
+      using var usage = JsonDocument.Parse(
+        await usageResponse.Content.ReadAsStringAsync()
+      );
+      Assert.AreEqual(
+        5L,
+        usage.RootElement.GetProperty(
+          "requests"
+        ).GetInt64()
+      );
+      Assert.AreEqual(
+        "exact",
+        usage.RootElement.GetProperty(
+          "accuracy"
+        ).GetString()
+      );
+    }
+
+    var ledger = string.Join(
+      "\n",
+      Directory.GetFiles(
+        Path.Combine(
+          _environment.DataDirectory,
+          "usage"
+        ),
+        "*.jsonl"
+      ).Select(
+        File.ReadAllText
+      )
+    );
+    StringAssert.Contains(
+      ledger,
+      "\"rateLimit\""
+    );
+    StringAssert.Contains(
+      ledger,
+      "\"providerId\":\"groq\""
+    );
+    StringAssert.Contains(
+      ledger,
+      "\"providerId\":\"google-ai-studio\""
+    );
+    StringAssert.Contains(
+      ledger,
+      "\"providerId\":\"cerebras\""
     );
   }
 
@@ -345,7 +818,7 @@ public sealed class ChatEndToEndTests : PageTest
       TestJson.Options
     );
     Assert.HasCount(
-      2,
+      5,
       pricing.GetProperty(
         "comparisons"
       ).EnumerateArray()
@@ -506,7 +979,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.2"
+      "v0.9.3"
     );
     await Expect(
       Page.Locator(
@@ -904,7 +1377,7 @@ public sealed class ChatEndToEndTests : PageTest
         "#settings-dialog .information-button"
       )
     ).ToHaveCountAsync(
-      5
+      6
     );
     await Expect(
       Page.Locator(
