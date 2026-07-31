@@ -41,6 +41,7 @@ const state = {
   cloudProviders: null,
   cloudUsageDashboard: null,
   providerHealth: null,
+  modelOrganization: null,
   modelCapability: null,
   capabilityRequestId: 0,
   webEnabled: false,
@@ -159,6 +160,33 @@ function bindElements() {
     "provider-health-list",
     "refresh-provider-health",
     "cloud-providers-list",
+    "model-filter-search",
+    "model-filter-location",
+    "model-filter-context",
+    "model-filter-tools",
+    "model-filter-web",
+    "model-filter-vision",
+    "model-filter-structured",
+    "model-filter-conformance",
+    "model-filter-available",
+    "model-filter-favorites",
+    "model-filter-hidden",
+    "model-organization-list",
+    "model-profile-selector",
+    "model-profile-name",
+    "model-profile-primary",
+    "model-profile-fallback",
+    "model-profile-router",
+    "model-profile-coordinator",
+    "model-profile-web",
+    "model-profile-usage-window",
+    "workspace-model-profile",
+    "save-model-profile",
+    "apply-model-profile",
+    "delete-model-profile",
+    "model-profile-preview",
+    "model-profile-status",
+    "model-chain-preview",
     "model-diagnostics-list",
     "model-context-diagnostic",
     "model-test-selector",
@@ -342,6 +370,37 @@ function bindEvents() {
     "click",
     handleCloudProviderAction
   );
+  for (const filter of [
+    elements.modelFilterSearch,
+    elements.modelFilterLocation,
+    elements.modelFilterContext,
+    elements.modelFilterTools,
+    elements.modelFilterWeb,
+    elements.modelFilterVision,
+    elements.modelFilterStructured,
+    elements.modelFilterConformance,
+    elements.modelFilterAvailable,
+    elements.modelFilterFavorites,
+    elements.modelFilterHidden
+  ]) {
+    filter.addEventListener("input", renderModelOrganization);
+    filter.addEventListener("change", renderModelOrganization);
+  }
+  elements.modelOrganizationList.addEventListener(
+    "click",
+    handleModelOrganizationAction
+  );
+  elements.saveModelProfile.addEventListener("click", saveModelProfile);
+  elements.applyModelProfile.addEventListener("click", applyModelProfile);
+  elements.deleteModelProfile.addEventListener("click", deleteModelProfile);
+  elements.modelProfileSelector.addEventListener(
+    "change",
+    loadSelectedModelProfile
+  );
+  elements.workspaceModelProfile.addEventListener(
+    "change",
+    saveWorkspaceModelProfile
+  );
   elements.refreshProjectProfile.addEventListener("click", refreshProjectProfile);
   elements.addValidationStep.addEventListener(
     "click",
@@ -458,7 +517,8 @@ async function loadApplicationState() {
     cloudProviders,
     cloudUsageDashboard,
     webSearch,
-    providerHealth
+    providerHealth,
+    modelOrganization
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -472,7 +532,8 @@ async function loadApplicationState() {
     fetchJson("/api/cloud-providers"),
     fetchJson("/api/usage/cloud-dashboard"),
     fetchJson("/api/web-search"),
-    fetchJson("/api/provider-health")
+    fetchJson("/api/provider-health"),
+    fetchJson("/api/model-organization")
   ]);
 
   state.settings = settings;
@@ -488,6 +549,7 @@ async function loadApplicationState() {
   state.cloudUsageDashboard = cloudUsageDashboard;
   state.webSearch = webSearch;
   state.providerHealth = providerHealth;
+  state.modelOrganization = modelOrganization;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
@@ -1119,7 +1181,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.6."
+        + "pelo Agentic Router v0.9.7."
     )
   ) {
     event.currentTarget.checked = false;
@@ -2750,6 +2812,9 @@ function renderSettings() {
 
   renderModelDiagnostics();
   renderCloudProviders();
+  renderModelOrganization();
+  renderModelProfiles();
+  renderModelChainPreview();
   renderSettingsSummaries();
   renderUsageSummary();
 }
@@ -2801,6 +2866,7 @@ function modelOptions() {
   };
 
   return state.models.map(model => {
+    const organized = organizedModel(model.name);
     const capabilities = model.capabilities;
     const badges = [
       capabilities?.nativeTools ? "tools" : null,
@@ -2810,15 +2876,526 @@ function modelOptions() {
 
     return {
       value: model.name,
-      label: `${model.displayName ?? model.name}`
+      label: `${organized?.alias ?? model.displayName ?? model.name}`
+        + `${organized?.alias ? ` · ${model.name}` : ""}`
+        + `${organized?.favorite ? " ★" : ""}`
         + `${badges.length ? ` · ${badges.join(" · ")}` : ""}`,
       group: groups[model.provider] ?? model.provider ?? "Modelos locais",
       disabled: model.selectable === false,
+      hidden: organized?.hidden === true,
+      favorite: organized?.favorite === true,
+      provider: model.provider ?? "ollama-local",
+      exactId: organized?.modelId ?? model.name,
       title: capabilities?.source
         ? `Capacidades: ${capabilities.source}`
         : null
     };
-  });
+  }).filter(
+    option => !option.hidden
+  ).sort(
+    (left, right) =>
+      left.provider.localeCompare(right.provider)
+      || Number(right.favorite) - Number(left.favorite)
+      || left.label.localeCompare(right.label, undefined, { sensitivity: "base" })
+      || left.exactId.localeCompare(right.exactId)
+  );
+}
+
+function organizedModel(qualifiedId) {
+  return state.modelOrganization?.models?.find(
+    model => model.qualifiedId === qualifiedId
+  ) ?? null;
+}
+
+function renderModelOrganization() {
+  if (!elements.modelOrganizationList) {
+    return;
+  }
+
+  elements.modelOrganizationList.replaceChildren();
+  const search = elements.modelFilterSearch.value.trim().toLocaleLowerCase();
+  const location = elements.modelFilterLocation.value;
+  const minimumContext = Number(elements.modelFilterContext.value) || 0;
+  const models = (state.modelOrganization?.models ?? []).filter(
+    model => {
+      const capability = model.capabilities;
+      return (elements.modelFilterHidden.checked || !model.hidden)
+        && (!search
+          || `${model.alias ?? ""} ${model.modelId} ${model.qualifiedId}`
+            .toLocaleLowerCase()
+            .includes(search))
+        && (location === "all"
+          || location === "local" && model.providerId === "ollama-local"
+          || location === "cloud" && model.providerId !== "ollama-local")
+        && (!elements.modelFilterTools.checked || capability?.nativeTools)
+        && (!elements.modelFilterWeb.checked || capability?.webSearch)
+        && (!elements.modelFilterVision.checked || capability?.vision)
+        && (!elements.modelFilterStructured.checked || capability?.structuredOutput)
+        && (!elements.modelFilterConformance.checked || model.conformanceApproved)
+        && (!elements.modelFilterAvailable.checked || model.available)
+        && (!elements.modelFilterFavorites.checked || model.favorite)
+        && (minimumContext <= 0 || (capability?.contextTokens ?? 0) >= minimumContext);
+    }
+  );
+
+  for (const model of models) {
+    const card = document.createElement("article");
+    card.className = "model-organization-card";
+    card.dataset.modelIdentity = model.qualifiedId;
+    const heading = document.createElement("div");
+    heading.className = "model-organization-card-heading";
+    const title = document.createElement("strong");
+    title.textContent = model.alias ?? model.modelId;
+    const exact = document.createElement("small");
+    exact.textContent = `${providerLabel(model.providerId)} · ${model.modelId}`;
+    const badges = document.createElement("span");
+    badges.className = "model-organization-badges";
+
+    for (const label of [
+      model.favorite ? "★ favorito" : null,
+      model.hidden ? "oculto" : null,
+      model.available ? "disponível" : "indisponível",
+      model.conformanceApproved ? "conformidade aprovada" : null,
+      model.capabilities?.nativeTools ? "tools" : null,
+      model.capabilities?.webSearch ? "web" : null,
+      model.capabilities?.vision ? "vision" : null,
+      model.capabilities?.structuredOutput ? "structured" : null
+    ].filter(Boolean)) {
+      const badge = document.createElement("span");
+      badge.className = "badge muted";
+      badge.textContent = label;
+      badges.append(badge);
+    }
+
+    heading.append(title, exact, badges);
+    const fields = document.createElement("div");
+    fields.className = "model-preference-fields";
+    const alias = document.createElement("input");
+    alias.type = "text";
+    alias.maxLength = 80;
+    alias.placeholder = "Alias local";
+    alias.value = model.alias ?? "";
+    alias.dataset.modelAlias = "";
+    const note = document.createElement("input");
+    note.type = "text";
+    note.maxLength = 500;
+    note.placeholder = "Nota opcional";
+    note.value = model.note ?? "";
+    note.dataset.modelNote = "";
+    fields.append(alias, note);
+    const actions = document.createElement("div");
+    actions.className = "settings-action-row";
+
+    for (const action of [
+      {
+        value: "favorite",
+        label: model.favorite ? "Desfavoritar" : "Favoritar"
+      },
+      {
+        value: "hidden",
+        label: model.hidden ? "Reexibir" : "Ocultar"
+      },
+      {
+        value: "save",
+        label: "Salvar alias e nota"
+      }
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-button";
+      button.dataset.modelOrganizationAction = action.value;
+      button.dataset.providerId = model.providerId;
+      button.dataset.modelId = model.modelId;
+      button.textContent = action.label;
+      actions.append(button);
+    }
+
+    card.append(heading, fields, actions);
+    elements.modelOrganizationList.append(card);
+  }
+
+  if (models.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "runtime-note";
+    empty.textContent = "Nenhum modelo corresponde aos filtros.";
+    elements.modelOrganizationList.append(empty);
+  }
+}
+
+async function handleModelOrganizationAction(event) {
+  const button = event.target.closest("[data-model-organization-action]");
+
+  if (!button) {
+    return;
+  }
+
+  const current = (state.modelOrganization?.models ?? []).find(
+    model => model.providerId === button.dataset.providerId
+      && model.modelId === button.dataset.modelId
+  );
+
+  if (!current) {
+    return;
+  }
+
+  const card = button.closest(".model-organization-card");
+  button.disabled = true;
+
+  try {
+    state.modelOrganization = await fetchJson(
+      "/api/model-organization/preference",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          providerId: current.providerId,
+          modelId: current.modelId,
+          alias: card.querySelector("[data-model-alias]").value.trim() || null,
+          note: card.querySelector("[data-model-note]").value.trim() || null,
+          favorite: button.dataset.modelOrganizationAction === "favorite"
+            ? !current.favorite
+            : current.favorite,
+          hidden: button.dataset.modelOrganizationAction === "hidden"
+            ? !current.hidden
+            : current.hidden
+        })
+      }
+    );
+    renderComposerModels();
+    renderSettings();
+  } catch (error) {
+    elements.modelProfileStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function allProfileModelOptions(includeNone = false) {
+  return [
+    ...(includeNone
+      ? [
+        {
+          value: "none",
+          label: "Nenhum"
+        }
+      ]
+      : []),
+    ...(state.modelOrganization?.models ?? []).map(
+      model => ({
+        value: model.qualifiedId,
+        label: `${model.alias ?? model.modelId}`
+          + `${model.alias ? ` · ${model.qualifiedId}` : ""}`
+          + `${model.available ? "" : " (indisponível)"}`,
+        group: providerLabel(model.providerId),
+        disabled: !model.available
+      })
+    )
+  ];
+}
+
+function renderModelProfiles() {
+  const profiles = state.modelOrganization?.profiles ?? [];
+  const selected = elements.modelProfileSelector.value;
+  replaceOptions(
+    elements.modelProfileSelector,
+    [
+      {
+        value: "",
+        label: "Novo perfil"
+      },
+      ...profiles.map(
+        profile => ({
+          value: profile.id,
+          label: profile.name
+        })
+      )
+    ],
+    profiles.some(profile => profile.id === selected)
+      ? selected
+      : ""
+  );
+  replaceOptions(
+    elements.modelProfilePrimary,
+    allProfileModelOptions(),
+    elements.modelProfilePrimary.value || state.settings?.defaultModel
+  );
+  replaceOptions(
+    elements.modelProfileFallback,
+    allProfileModelOptions(true),
+    elements.modelProfileFallback.value || "none"
+  );
+  replaceOptions(
+    elements.modelProfileRouter,
+    allProfileModelOptions(),
+    elements.modelProfileRouter.value || state.settings?.routerModel
+  );
+  replaceOptions(
+    elements.modelProfileCoordinator,
+    allProfileModelOptions(),
+    elements.modelProfileCoordinator.value || state.settings?.coordinatorModel
+  );
+  replaceOptions(
+    elements.workspaceModelProfile,
+    [
+      {
+        value: "",
+        label: "Nenhum perfil preferido"
+      },
+      ...profiles.map(
+        profile => ({
+          value: profile.id,
+          label: profile.name
+        })
+      )
+    ],
+    activeWorkspaceProfile()?.preferredModelProfileId ?? ""
+  );
+  elements.workspaceModelProfile.disabled = !activeWorkspaceProfile();
+  elements.applyModelProfile.disabled = !elements.modelProfileSelector.value;
+  elements.deleteModelProfile.disabled = !elements.modelProfileSelector.value;
+}
+
+function loadSelectedModelProfile() {
+  const profile = (state.modelOrganization?.profiles ?? []).find(
+    item => item.id === elements.modelProfileSelector.value
+  );
+
+  if (!profile) {
+    elements.modelProfileName.value = "";
+    elements.modelProfilePreview.textContent =
+      "Preencha os campos e salve para gerar a visualização autoritativa.";
+    renderModelProfiles();
+    return;
+  }
+
+  elements.modelProfileName.value = profile.name;
+  replaceOptions(
+    elements.modelProfilePrimary,
+    allProfileModelOptions(),
+    profile.primaryModel
+  );
+  replaceOptions(
+    elements.modelProfileFallback,
+    allProfileModelOptions(true),
+    profile.fallbackModel
+  );
+  replaceOptions(
+    elements.modelProfileRouter,
+    allProfileModelOptions(),
+    profile.routerModel
+  );
+  replaceOptions(
+    elements.modelProfileCoordinator,
+    allProfileModelOptions(),
+    profile.coordinatorModel
+  );
+  elements.modelProfileWeb.value = profile.webPreference;
+  elements.modelProfileUsageWindow.value = profile.usageWindow ?? "";
+  renderModelProfiles();
+  void previewModelProfile(profile.id);
+}
+
+async function saveModelProfile() {
+  elements.saveModelProfile.disabled = true;
+  elements.modelProfileStatus.textContent = "Validando e salvando perfil…";
+
+  try {
+    const preview = await fetchJson(
+      "/api/model-organization/profiles",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          id: elements.modelProfileSelector.value || null,
+          name: elements.modelProfileName.value.trim(),
+          primaryModel: elements.modelProfilePrimary.value,
+          fallbackModel: elements.modelProfileFallback.value,
+          routerModel: elements.modelProfileRouter.value,
+          coordinatorModel: elements.modelProfileCoordinator.value,
+          webPreference: elements.modelProfileWeb.value,
+          comparisonModel: null,
+          usageWindow: elements.modelProfileUsageWindow.value || null
+        })
+      }
+    );
+    state.modelOrganization = await fetchJson("/api/model-organization");
+    renderModelProfiles();
+    elements.modelProfileSelector.value = preview.profileId;
+    loadSelectedModelProfile();
+    renderProfilePreview(preview);
+    elements.modelProfileStatus.textContent = "Perfil salvo sem iniciar modelo.";
+  } catch (error) {
+    elements.modelProfileStatus.textContent = error.message;
+  } finally {
+    elements.saveModelProfile.disabled = false;
+  }
+}
+
+async function previewModelProfile(profileId) {
+  try {
+    renderProfilePreview(
+      await fetchJson(
+        `/api/model-organization/profiles/${encodeURIComponent(profileId)}/preview`
+      )
+    );
+  } catch (error) {
+    elements.modelProfilePreview.textContent = error.message;
+  }
+}
+
+function renderProfilePreview(preview) {
+  elements.modelProfilePreview.textContent = [
+    ...preview.chain.map(
+      item =>
+        `${item.role.toUpperCase()}\n`
+        + `${providerLabel(item.providerId)} · ${item.exactModelId}\n`
+        + `${item.alias ? `Alias: ${item.alias}\n` : ""}`
+        + `Disponível: ${item.available ? "sim" : "não"} · `
+        + `Conformidade: ${item.conformanceApproved ? "aprovada" : "não aprovada"} · `
+        + `Tools: ${item.toolPath} · Web: ${item.web ? "sim" : "não"} · `
+        + `Vision: ${item.vision ? "sim" : "não"}`
+    ),
+    `Fallback local: ${preview.localFallbackValid ? "válido" : "inválido"}`,
+    `Workspaces afetados: ${preview.affectedWorkspaces.join(", ") || "nenhum"}`,
+    ...preview.errors.map(error => `ERRO: ${error}`)
+  ].join("\n\n");
+}
+
+async function applyModelProfile() {
+  const profileId = elements.modelProfileSelector.value;
+
+  if (!profileId || !window.confirm(
+    "Aplicar este perfil atomicamente às novas solicitações? A conversa atual não será reiniciada."
+  )) {
+    return;
+  }
+
+  elements.applyModelProfile.disabled = true;
+
+  try {
+    const preview = await fetchJson(
+      `/api/model-organization/profiles/${encodeURIComponent(profileId)}/apply`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          confirmed: true
+        })
+      }
+    );
+    state.settings = await fetchJson("/api/settings");
+    renderSettings();
+    renderProfilePreview(preview);
+    elements.modelProfileStatus.textContent =
+      "Perfil aplicado. O lock da conversa atual foi preservado.";
+  } catch (error) {
+    elements.modelProfileStatus.textContent = error.message;
+  } finally {
+    elements.applyModelProfile.disabled = false;
+  }
+}
+
+async function deleteModelProfile() {
+  const profileId = elements.modelProfileSelector.value;
+
+  if (!profileId || !window.confirm("Excluir este perfil salvo?")) {
+    return;
+  }
+
+  try {
+    state.modelOrganization = await fetchJson(
+      `/api/model-organization/profiles/${encodeURIComponent(profileId)}`,
+      {
+        method: "DELETE"
+      }
+    );
+    elements.modelProfileSelector.value = "";
+    loadSelectedModelProfile();
+    elements.modelProfileStatus.textContent = "Perfil excluído.";
+  } catch (error) {
+    elements.modelProfileStatus.textContent = error.message;
+  }
+}
+
+async function saveWorkspaceModelProfile() {
+  const workspace = activeWorkspaceProfile();
+
+  if (!workspace) {
+    return;
+  }
+
+  try {
+    state.workspaceProfiles = await fetchJson(
+      `/api/model-organization/workspaces/${encodeURIComponent(workspace.id)}/preferred-profile`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          profileId: elements.workspaceModelProfile.value || null
+        })
+      }
+    );
+    elements.modelProfileStatus.textContent =
+      "Preferência do workspace salva por referência.";
+  } catch (error) {
+    elements.modelProfileStatus.textContent = error.message;
+  }
+}
+
+function renderModelChainPreview() {
+  if (!state.settings || !elements.modelChainPreview) {
+    return;
+  }
+
+  const generalFallback =
+    document.querySelector('[data-intention="general-chat"] .intention-fallback-model')
+      ?.value
+    ?? state.settings.intentions["general-chat"]?.fallbackModel
+    ?? "none";
+  const roles = [
+    {
+      role: "PRIMARY",
+      model: elements.defaultModel.value || state.settings.defaultModel
+    },
+    {
+      role: "FALLBACK",
+      model: generalFallback
+    },
+    {
+      role: "ROUTER",
+      model: elements.routerModel.value || state.settings.routerModel
+    },
+    {
+      role: "COORDINATOR",
+      model: elements.coordinatorModel.value || state.settings.coordinatorModel
+    }
+  ];
+  elements.modelChainPreview.textContent = roles.map(
+    item => {
+      if (item.model === "none") {
+        return `${item.role}\nNenhum`;
+      }
+
+      const model = organizedModel(item.model);
+      const reference = parseModelReference(item.model);
+      return `${item.role}\n`
+        + `${providerLabel(reference.provider)} · ${reference.model}\n`
+        + `${model?.alias ? `Alias: ${model.alias} · ` : ""}`
+        + `${model?.available ? "disponível" : "indisponível"} · `
+        + `conformidade ${model?.conformanceApproved ? "aprovada" : "não aprovada"} · `
+        + `tools ${model?.capabilities?.nativeTools ? "sim" : "não"} · `
+        + `web ${model?.capabilities?.webSearch ? "sim" : "não"} · `
+        + `vision ${model?.capabilities?.vision ? "sim" : "não"}`;
+    }
+  ).join("\n\n");
 }
 
 function renderCloudProviders() {
@@ -3506,7 +4083,9 @@ async function saveSettings(event) {
       comparisonModel: elements.usageComparisonModel.value.split("|")[1],
       ollamaPlanReference: elements.usageOllamaPlan.value
     },
-    cloudProviders: collectCloudProviderSettings()
+    cloudProviders: collectCloudProviderSettings(),
+    webSearch: state.settings.webSearch,
+    modelOrganization: state.settings.modelOrganization
   };
 
   try {
@@ -3554,6 +4133,7 @@ function handleSettingsInput(event) {
   }
   state.settingsDirty = true;
   updateSettingsDirtyState();
+  renderModelChainPreview();
 }
 
 function updateSettingsDirtyState() {

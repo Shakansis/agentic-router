@@ -135,6 +135,17 @@ builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
 builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
 builder.Services.AddScoped<IModelDiagnosticService, ModelDiagnosticService>();
+builder.Services.AddSingleton<IModelOrganizationService>(
+  services => new ModelOrganizationService(
+    dataDirectory,
+    services.GetRequiredService<ISettingsStore>(),
+    services.GetRequiredService<ISettingsValidator>(),
+    services.GetRequiredService<IOllamaClient>(),
+    services.GetRequiredService<IToolProtocolConformanceService>(),
+    services.GetRequiredService<IWorkspaceProfileStore>(),
+    services.GetRequiredService<IWorkspaceProfileService>()
+  )
+);
 builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
 builder.Services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
 builder.Services.AddSingleton<ResidentModelManager>();

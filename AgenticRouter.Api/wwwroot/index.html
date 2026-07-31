@@ -111,7 +111,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.6</span>
+    <span class="app-version">v0.9.7</span>
   </aside>
 
   <main class="workspace">
@@ -405,6 +405,104 @@
             </label>
             </div>
             <div id="intentions-grid" class="intentions-grid"></div>
+            <details class="model-organization-panel" data-ignore-settings-dirty>
+              <summary>Organização e filtros de modelos</summary>
+              <div class="model-organization-body">
+                <div class="model-filter-grid">
+                  <label>
+                    <span>Buscar alias ou ID exato</span>
+                    <input id="model-filter-search" type="search" autocomplete="off">
+                  </label>
+                  <label>
+                    <span>Origem</span>
+                    <select id="model-filter-location">
+                      <option value="all">Local e cloud</option>
+                      <option value="local">Local</option>
+                      <option value="cloud">Cloud</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Contexto mínimo</span>
+                    <input id="model-filter-context" type="number" min="0" step="1024" value="0">
+                  </label>
+                </div>
+                <div class="model-filter-toggles">
+                  <label><input id="model-filter-tools" type="checkbox"> Tools</label>
+                  <label><input id="model-filter-web" type="checkbox"> Web</label>
+                  <label><input id="model-filter-vision" type="checkbox"> Vision</label>
+                  <label><input id="model-filter-structured" type="checkbox"> Structured output</label>
+                  <label><input id="model-filter-conformance" type="checkbox"> Conformidade aprovada</label>
+                  <label><input id="model-filter-available" type="checkbox"> Somente disponíveis</label>
+                  <label><input id="model-filter-favorites" type="checkbox"> Somente favoritos</label>
+                  <label><input id="model-filter-hidden" type="checkbox"> Mostrar ocultos</label>
+                </div>
+                <div id="model-organization-list" class="model-organization-list"></div>
+              </div>
+            </details>
+            <details class="model-organization-panel" data-ignore-settings-dirty>
+              <summary>Perfis de configuração</summary>
+              <div class="model-organization-body">
+                <div class="settings-grid model-profile-grid">
+                  <label>
+                    <span>Perfil salvo</span>
+                    <select id="model-profile-selector"></select>
+                  </label>
+                  <label>
+                    <span>Nome</span>
+                    <input id="model-profile-name" type="text" maxlength="80">
+                  </label>
+                  <label>
+                    <span>Primary</span>
+                    <select id="model-profile-primary"></select>
+                  </label>
+                  <label>
+                    <span>Fallback</span>
+                    <select id="model-profile-fallback"></select>
+                  </label>
+                  <label>
+                    <span>Router</span>
+                    <select id="model-profile-router"></select>
+                  </label>
+                  <label>
+                    <span>Coordinator</span>
+                    <select id="model-profile-coordinator"></select>
+                  </label>
+                  <label>
+                    <span>Preferência Web</span>
+                    <select id="model-profile-web">
+                      <option value="off">Off</option>
+                      <option value="available">Available</option>
+                      <option value="enabled">Enabled</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Janela de uso</span>
+                    <select id="model-profile-usage-window">
+                      <option value="">Manter atual</option>
+                      <option value="rolling-hour">Última hora</option>
+                      <option value="day">Hoje</option>
+                      <option value="rolling-seven-days">Últimos 7 dias</option>
+                      <option value="calendar-month">Mês atual</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Perfil preferido do workspace</span>
+                    <select id="workspace-model-profile"></select>
+                  </label>
+                </div>
+                <div class="settings-action-row">
+                  <button id="save-model-profile" class="secondary-button" type="button">Salvar perfil</button>
+                  <button id="apply-model-profile" class="primary-button" type="button">Aplicar perfil</button>
+                  <button id="delete-model-profile" class="secondary-button danger-button" type="button">Excluir perfil</button>
+                </div>
+                <pre id="model-profile-preview" class="model-profile-preview">Selecione ou salve um perfil para visualizar a cadeia.</pre>
+                <output id="model-profile-status" class="runtime-note" role="status"></output>
+              </div>
+            </details>
+            <div class="model-chain-preview-shell">
+              <h4>Cadeia efetiva antes de salvar</h4>
+              <pre id="model-chain-preview" class="model-profile-preview"></pre>
+            </div>
           </section>
 
           <section id="settings-coordinator" class="settings-section" data-settings-section="coordinator" tabindex="-1">
@@ -454,8 +552,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.6."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.6."
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.7."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.7."
                 >i</button>
               </div>
             </div>
@@ -738,8 +836,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.6."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.6. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.7."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.7. Desativar interrompe novas gravações, mas não apaga registros existentes."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>

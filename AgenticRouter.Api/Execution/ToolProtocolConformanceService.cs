@@ -142,8 +142,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       );
     }
 
-    var key = string.Join(
-      "|",
+    var key = CacheKey(
       model,
       normalizedDigest,
       version
@@ -246,8 +245,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       return null;
     }
 
-    var key = string.Join(
-      "|",
+    var key = CacheKey(
       model,
       string.IsNullOrWhiteSpace(
         digest
@@ -263,6 +261,21 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     )
       ? cached
       : null;
+  }
+
+  private static string CacheKey(
+    string model,
+    string digest,
+    string version
+  )
+  {
+    return string.Join(
+      "|",
+      BenchmarkMarker,
+      model,
+      digest,
+      version
+    );
   }
 
   private async Task VerifySimpleCallAsync(

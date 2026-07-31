@@ -240,6 +240,20 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   public async Task ResetSettingsAsync()
   {
+    var modelOrganizationPath = Path.Combine(
+      DataDirectory,
+      "model-organization.json"
+    );
+
+    if (File.Exists(
+      modelOrganizationPath
+    ))
+    {
+      File.Delete(
+        modelOrganizationPath
+      );
+    }
+
     foreach (var entry in new DirectoryInfo(
       WorkspaceDirectory
     ).EnumerateFileSystemInfos())
@@ -318,6 +332,14 @@ internal sealed class TestEnvironment : IAsyncDisposable
         }
       );
       history.EnsureSuccessStatusCode();
+      using var modelProfile = await HttpClient.PutAsJsonAsync(
+        $"api/model-organization/workspaces/{id}/preferred-profile",
+        new
+        {
+          profileId = (string?)null
+        }
+      );
+      modelProfile.EnsureSuccessStatusCode();
     }
 
     using var deletedSessions = await HttpClient.DeleteAsync(

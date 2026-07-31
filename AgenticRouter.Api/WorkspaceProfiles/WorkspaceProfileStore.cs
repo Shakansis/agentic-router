@@ -26,6 +26,8 @@ public sealed record WorkspaceProfileData
   public string? DefaultModel { get; init; }
 
   public ValidationProfileSettings? ValidationProfile { get; init; }
+
+  public string? PreferredModelProfileId { get; init; }
 }
 
 public sealed record WorkspaceProfileDocument

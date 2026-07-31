@@ -2875,7 +2875,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.6"
+      "v0.9.7"
     );
     await Expect(
       Page.Locator(
@@ -12376,6 +12376,658 @@ public sealed class ChatEndToEndTests : PageTest
       )[0].GetProperty(
         "title"
       ).GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ModelOrganizationFiltersProfilesAndWorkspaceReferencesAreAuthoritative()
+  {
+    const string groqKey = "gsk_fake_organization_097";
+    await ConnectFakeCloudAsync(
+      "groq",
+      groqKey
+    );
+
+    foreach (var preference in new[]
+    {
+      new
+      {
+        providerId = "ollama-local",
+        modelId = "command-r:latest",
+        alias = "A Tools",
+        favorite = true,
+        hidden = false,
+        note = "Preferred local tool model"
+      },
+      new
+      {
+        providerId = "ollama-local",
+        modelId = "alpha:latest",
+        alias = "Z Vision",
+        favorite = true,
+        hidden = false,
+        note = "Preferred visual model"
+      },
+      new
+      {
+        providerId = "ollama-local",
+        modelId = "docs:latest",
+        alias = "Docs Hidden",
+        favorite = true,
+        hidden = true,
+        note = "Repairable hidden selection"
+      }
+    })
+    {
+      using var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/model-organization/preference",
+        preference
+      );
+      saved.EnsureSuccessStatusCode();
+    }
+
+    using (
+      var conformance = await _environment.HttpClient.PostAsJsonAsync(
+        "api/models/conformance",
+        new
+        {
+          model = "alpha:latest",
+          restoreResidentModel = false
+        }
+      )
+    )
+    {
+      conformance.EnsureSuccessStatusCode();
+    }
+
+    using (
+      var response = await _environment.HttpClient.GetAsync(
+        "api/model-organization"
+      )
+    )
+    {
+      response.EnsureSuccessStatusCode();
+      using var organization = JsonDocument.Parse(
+        await response.Content.ReadAsStringAsync()
+      );
+      var models = organization.RootElement.GetProperty(
+        "models"
+      ).EnumerateArray().ToArray();
+      var alpha = models.Single(
+        model => model.GetProperty(
+          "qualifiedId"
+        ).GetString() == "alpha:latest"
+      );
+      var tools = models.Single(
+        model => model.GetProperty(
+          "qualifiedId"
+        ).GetString() == "command-r:latest"
+      );
+      var hidden = models.Single(
+        model => model.GetProperty(
+          "qualifiedId"
+        ).GetString() == "docs:latest"
+      );
+      Assert.AreEqual(
+        "Z Vision",
+        alpha.GetProperty(
+          "alias"
+        ).GetString()
+      );
+      Assert.AreEqual(
+        "alpha:latest",
+        alpha.GetProperty(
+          "modelId"
+        ).GetString()
+      );
+      Assert.IsTrue(
+        alpha.GetProperty(
+          "capabilities"
+        ).GetProperty(
+          "vision"
+        ).GetBoolean()
+      );
+      Assert.IsTrue(
+        alpha.GetProperty(
+          "capabilities"
+        ).GetProperty(
+          "structuredOutput"
+        ).GetBoolean()
+      );
+      Assert.IsTrue(
+        alpha.GetProperty(
+          "conformanceApproved"
+        ).GetBoolean()
+      );
+      StringAssert.Contains(
+        alpha.GetProperty(
+          "conformanceIdentity"
+        ).GetString(),
+        "0.13.5-test"
+      );
+      Assert.IsTrue(
+        tools.GetProperty(
+          "capabilities"
+        ).GetProperty(
+          "nativeTools"
+        ).GetBoolean()
+      );
+      Assert.IsTrue(
+        hidden.GetProperty(
+          "hidden"
+        ).GetBoolean()
+      );
+      var localModels = models.Where(
+        model => model.GetProperty(
+          "providerId"
+        ).GetString() == "ollama-local"
+      ).ToArray();
+      var toolsIndex = Array.FindIndex(
+        localModels,
+        model => model.GetProperty(
+          "qualifiedId"
+        ).GetString() == "command-r:latest"
+      );
+      var alphaIndex = Array.FindIndex(
+        localModels,
+        model => model.GetProperty(
+          "qualifiedId"
+        ).GetString() == "alpha:latest"
+      );
+      Assert.IsTrue(
+        toolsIndex >= 0 && toolsIndex < alphaIndex
+      );
+    }
+
+    using (
+      var unavailable = await _environment.HttpClient.PostAsJsonAsync(
+        "api/model-organization/profiles",
+        new
+        {
+          id = "unavailable-profile",
+          name = "Unavailable",
+          primaryModel = "missing:latest",
+          fallbackModel = "none",
+          routerModel = "router:latest",
+          coordinatorModel = "router:latest",
+          webPreference = "off",
+          comparisonModel = (string?)null,
+          usageWindow = (string?)null
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        unavailable.StatusCode
+      );
+      StringAssert.Contains(
+        await unavailable.Content.ReadAsStringAsync(),
+        "primary model 'missing:latest' is unavailable"
+      );
+    }
+
+    using (
+      var cloudWithoutFallback = await _environment.HttpClient.PostAsJsonAsync(
+        "api/model-organization/profiles",
+        new
+        {
+          id = "unsafe-cloud-profile",
+          name = "Unsafe cloud",
+          primaryModel = "groq::openai/gpt-oss-120b",
+          fallbackModel = "none",
+          routerModel = "router:latest",
+          coordinatorModel = "router:latest",
+          webPreference = "available",
+          comparisonModel = (string?)null,
+          usageWindow = "rolling-hour"
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        cloudWithoutFallback.StatusCode
+      );
+      StringAssert.Contains(
+        await cloudWithoutFallback.Content.ReadAsStringAsync(),
+        "cloud primary requires one available Ollama Local fallback"
+      );
+    }
+
+    var inferenceRequestsBeforeProfileSave =
+      _environment.FakeOllama.AllRequests.Count;
+    using var savedProfile = await _environment.HttpClient.PostAsJsonAsync(
+      "api/model-organization/profiles",
+      new
+      {
+        id = "balanced-cloud",
+        name = "Balanced Cloud",
+        primaryModel = "groq::openai/gpt-oss-120b",
+        fallbackModel = "alpha:latest",
+        routerModel = "command-r:latest",
+        coordinatorModel = "router:latest",
+        webPreference = "available",
+        comparisonModel = "groq::openai/gpt-oss-120b",
+        usageWindow = "rolling-seven-days"
+      }
+    );
+    savedProfile.EnsureSuccessStatusCode();
+    using var savedProfileDocument = JsonDocument.Parse(
+      await savedProfile.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      savedProfileDocument.RootElement.GetProperty(
+        "localFallbackValid"
+      ).GetBoolean()
+    );
+    Assert.HasCount(
+      inferenceRequestsBeforeProfileSave,
+      _environment.FakeOllama.AllRequests);
+
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    string workspaceName;
+    using (
+      var preferred = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/model-organization/workspaces/{workspaceId}/preferred-profile",
+        new
+        {
+          profileId = "balanced-cloud"
+        }
+      )
+    )
+    {
+      preferred.EnsureSuccessStatusCode();
+      using var workspace = JsonDocument.Parse(
+        await preferred.Content.ReadAsStringAsync()
+      );
+      var active = workspace.RootElement.GetProperty(
+        "profiles"
+      ).EnumerateArray().Single(
+        item => item.GetProperty(
+          "id"
+        ).GetString() == workspaceId
+      );
+      Assert.AreEqual(
+        "balanced-cloud",
+        active.GetProperty(
+          "preferredModelProfileId"
+        ).GetString()
+      );
+      workspaceName = active.GetProperty(
+        "name"
+      ).GetString()!;
+    }
+
+    using (
+      var preview = await _environment.HttpClient.GetAsync(
+        "api/model-organization/profiles/balanced-cloud/preview"
+      )
+    )
+    {
+      preview.EnsureSuccessStatusCode();
+      using var document = JsonDocument.Parse(
+        await preview.Content.ReadAsStringAsync()
+      );
+      CollectionAssert.Contains(
+        document.RootElement.GetProperty(
+          "affectedWorkspaces"
+        ).EnumerateArray().Select(
+          item => item.GetString()
+        ).ToArray(),
+        workspaceName
+      );
+      CollectionAssert.AreEquivalent(
+        new[]
+        {
+          "primary",
+          "fallback",
+          "router",
+          "coordinator"
+        },
+        document.RootElement.GetProperty(
+          "chain"
+        ).EnumerateArray().Select(
+          item => item.GetProperty(
+            "role"
+          ).GetString()
+        ).ToArray()
+      );
+    }
+
+    using (
+      var unconfirmed = await _environment.HttpClient.PostAsJsonAsync(
+        "api/model-organization/profiles/balanced-cloud/apply",
+        new
+        {
+          confirmed = false
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        unconfirmed.StatusCode
+      );
+    }
+
+    using (
+      var applied = await _environment.HttpClient.PostAsJsonAsync(
+        "api/model-organization/profiles/balanced-cloud/apply",
+        new
+        {
+          confirmed = true
+        }
+      )
+    )
+    {
+      applied.EnsureSuccessStatusCode();
+      using var document = JsonDocument.Parse(
+        await applied.Content.ReadAsStringAsync()
+      );
+      Assert.IsTrue(
+        document.RootElement.GetProperty(
+          "applied"
+        ).GetBoolean()
+      );
+    }
+    Assert.HasCount(
+      inferenceRequestsBeforeProfileSave,
+      _environment.FakeOllama.AllRequests);
+
+    var settings = await GetSettingsJsonAsync();
+    Assert.AreEqual(
+      "groq::openai/gpt-oss-120b",
+      settings["defaultModel"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "command-r:latest",
+      settings["routerModel"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "router:latest",
+      settings["coordinatorModel"]!.GetValue<string>()
+    );
+
+    foreach (var intention in settings["intentions"]!.AsObject())
+    {
+      Assert.AreEqual(
+        "groq::openai/gpt-oss-120b",
+        intention.Value!["model"]!.GetValue<string>()
+      );
+      Assert.AreEqual(
+        "alpha:latest",
+        intention.Value["fallbackModel"]!.GetValue<string>()
+      );
+    }
+
+    Assert.AreEqual(
+      "rolling-seven-days",
+      settings["usage"]!["selectedWindow"]!.GetValue<string>()
+    );
+
+    using (
+      var yamlResponse = await _environment.HttpClient.GetAsync(
+        "api/settings/yaml"
+      )
+    )
+    {
+      yamlResponse.EnsureSuccessStatusCode();
+      var yaml = await yamlResponse.Content.ReadAsStringAsync();
+      Assert.DoesNotContain(
+        groqKey,
+        yaml
+      );
+      Assert.DoesNotContain(
+        "Z Vision",
+        yaml
+      );
+      Assert.DoesNotContain(
+        "Balanced Cloud",
+        yaml
+      );
+      Assert.DoesNotContain(
+        "Preferred visual model",
+        yaml
+      );
+      Assert.DoesNotContain(
+        "private-history-marker-v097",
+        yaml
+      );
+    }
+
+    var storedOrganization = await File.ReadAllTextAsync(
+      Path.Combine(
+        _environment.DataDirectory,
+        "model-organization.json"
+      )
+    );
+    StringAssert.Contains(
+      storedOrganization,
+      "\"alias\": \"Z Vision\""
+    );
+    StringAssert.Contains(
+      storedOrganization,
+      "\"favorite\": true"
+    );
+    StringAssert.Contains(
+      storedOrganization,
+      "\"id\": \"balanced-cloud\""
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-selector option[value=\"docs:latest\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await Page.Locator(
+      "#model-lock"
+    ).CheckAsync();
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"models\"]"
+    ).ClickAsync();
+    await Page.Locator(
+      ".model-organization-panel"
+    ).Nth(
+      0
+    ).Locator(
+      "summary"
+    ).ClickAsync();
+
+    var organizationCards = Page.Locator(
+      "#model-organization-list .model-organization-card"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-organization-list "
+          + ".model-organization-card[data-model-identity=\"docs:latest\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Page.Locator(
+      "#model-filter-location"
+    ).SelectOptionAsync(
+      "local"
+    );
+    await Page.Locator(
+      "#model-filter-tools"
+    ).CheckAsync();
+    await Expect(
+      organizationCards
+    ).ToHaveCountAsync(
+      3
+    );
+    await Expect(
+      organizationCards.Filter(
+        new()
+        {
+          HasText = "A Tools"
+        }
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Page.Locator(
+      "#model-filter-tools"
+    ).UncheckAsync();
+    await Page.Locator(
+      "#model-filter-vision"
+    ).CheckAsync();
+    await Page.Locator(
+      "#model-filter-conformance"
+    ).CheckAsync();
+    await Expect(
+      organizationCards
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      organizationCards
+    ).ToContainTextAsync(
+      "Z Vision"
+    );
+    await Expect(
+      organizationCards
+    ).ToContainTextAsync(
+      "alpha:latest"
+    );
+    await Page.Locator(
+      "#model-filter-vision"
+    ).UncheckAsync();
+    await Page.Locator(
+      "#model-filter-conformance"
+    ).UncheckAsync();
+    await Page.Locator(
+      "#model-filter-hidden"
+    ).CheckAsync();
+    await Page.Locator(
+      "#model-filter-search"
+    ).FillAsync(
+      "Docs Hidden"
+    );
+    await Expect(
+      organizationCards
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      organizationCards
+    ).ToContainTextAsync(
+      "docs:latest"
+    );
+
+    await Page.Locator(
+      ".model-organization-panel"
+    ).Nth(
+      1
+    ).Locator(
+      "summary"
+    ).ClickAsync();
+    await Page.Locator(
+      "#model-profile-selector"
+    ).SelectOptionAsync(
+      "balanced-cloud"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-profile-preview"
+      )
+    ).ToContainTextAsync(
+      "PRIMARY"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-profile-preview"
+      )
+    ).ToContainTextAsync(
+      "Groq · openai/gpt-oss-120b"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-chain-preview"
+      )
+    ).ToContainTextAsync(
+      "Groq · openai/gpt-oss-120b"
+    );
+
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#apply-model-profile"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#model-profile-status"
+      )
+    ).ToContainTextAsync(
+      "lock da conversa atual foi preservado"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-lock"
+      )
+    ).ToBeCheckedAsync();
+    await Expect(
+      Page.Locator(
+        "#model-selector"
+      )
+    ).ToHaveValueAsync(
+      "alpha:latest"
+    );
+    Assert.HasCount(
+      inferenceRequestsBeforeProfileSave,
+      _environment.FakeOllama.AllRequests);
+
+    settings = await GetSettingsJsonAsync();
+    settings["defaultModel"] = "docs:latest";
+    using (
+      var saved = await PutSettingsJsonAsync(
+        settings
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    await Page.ReloadAsync();
+    await OpenSettingsAsync();
+    await Expect(
+      Page.Locator(
+        "#default-model"
+      )
+    ).ToHaveValueAsync(
+      "docs:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "#default-model option[value=\"docs:latest\"]"
+      )
+    ).ToContainTextAsync(
+      "indisponível"
+    );
+
+    var routed = await PostChatStreamAsync(
+      "Route normally after model organization.",
+      "alpha:latest",
+      "browser-organization-v097"
+    );
+    StringAssert.Contains(
+      routed,
+      "Hello from alpha:latest"
     );
   }
 

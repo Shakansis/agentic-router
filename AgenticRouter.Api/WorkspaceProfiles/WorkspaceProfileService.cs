@@ -739,7 +739,8 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
       profile.DefaultModel,
       profile.ValidationProfile,
       validation.Valid,
-      validation.Diagnostic
+      validation.Diagnostic,
+      profile.PreferredModelProfileId
     );
   }
 }

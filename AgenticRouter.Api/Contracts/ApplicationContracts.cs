@@ -114,7 +114,8 @@ public sealed record WorkspaceProfileView(
   string? DefaultModel,
   ValidationProfileSettings? ValidationProfile,
   bool Available,
-  string? Diagnostic
+  string? Diagnostic,
+  string? PreferredModelProfileId = null
 );
 
 public sealed record WorkspaceProfilesResponse(

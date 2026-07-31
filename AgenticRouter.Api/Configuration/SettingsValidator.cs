@@ -107,6 +107,15 @@ public sealed class SettingsValidator : ISettingsValidator
       settings.WebSearch
     );
 
+    if (settings.ModelOrganization.MaximumProfiles is < 1 or > 50)
+    {
+      AddError(
+        errors,
+        "modelOrganization.maximumProfiles",
+        "Maximum model configuration profiles must be between 1 and 50."
+      );
+    }
+
     if (!string.Equals(
       settings.Runtime.ResidentModelPolicy,
       "adaptive",

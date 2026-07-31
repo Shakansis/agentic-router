@@ -178,6 +178,21 @@ Expected billing mode is a user label, never a billing guarantee. Do not make
 background provider calls, send alerts externally, or switch providers
 proactively.
 
+Model presentation preferences are local metadata keyed by provider plus exact
+model ID. Aliases, favorites, hidden state, and notes must never replace the
+technical identity used in API calls. Hidden or unavailable saved references
+remain visible in repair flows, while ordinary selectors omit hidden models.
+Capability filters use provider metadata and exact cached conformance identity,
+never model-name inference when authoritative data exists.
+
+Named model profiles store references to existing primary, fallback, router,
+coordinator, web, comparison, and usage-window settings. Applying a profile
+requires confirmation, validates every required reference and the mandatory
+cloud-to-local fallback, and atomically replaces settings without starting a
+model request or changing the active conversation lock. Workspaces store only a
+preferred global profile ID. Portable YAML excludes local presentation metadata
+and model profiles.
+
 Conversation identity is host-generated and stable for the lifetime of a conversation. When history is enabled, persist the current snapshot successfully before creating or resuming another session; a failed save must leave the visible conversation intact. When history is disabled, meaningful content requires an explicit choice to enable and save, discard, or cancel. Never auto-resume conversations, pending approvals, or processes.
 
 ## 9. Streaming and UI Contracts

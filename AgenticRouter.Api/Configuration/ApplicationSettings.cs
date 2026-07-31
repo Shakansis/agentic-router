@@ -37,6 +37,13 @@ public sealed record ApplicationSettings
   public CloudProvidersSettings CloudProviders { get; init; } = new();
 
   public WebSearchSettings WebSearch { get; init; } = new();
+
+  public ModelOrganizationSettings ModelOrganization { get; init; } = new();
+}
+
+public sealed record ModelOrganizationSettings
+{
+  public int MaximumProfiles { get; init; } = 20;
 }
 
 public sealed record WebSearchSettings

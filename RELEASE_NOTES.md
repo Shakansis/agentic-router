@@ -1,3 +1,36 @@
+# Agentic Router v0.9.7
+
+This development version adds local model organization, authoritative
+capability filters, execution-chain previews, and reusable model configuration
+profiles.
+
+## Highlights
+
+- Adds provider-qualified aliases, favorites, hidden state, and optional notes
+  while preserving the exact provider/model identity used by every request.
+- Keeps hidden and unavailable saved references repairable, groups models by
+  provider, orders favorites deterministically, and exposes hidden models only
+  through an explicit toggle.
+- Adds Local, Cloud, Tools, Web, Vision, Structured output, exact conformance,
+  context, availability, favorites, and alias/exact-ID search filters using
+  provider metadata rather than model-name heuristics.
+- Shows the effective primary, fallback, router, and coordinator chain with
+  provider, exact ID, alias, availability, conformance, tool path, Web, Vision,
+  affected workspaces, and mandatory local-fallback validation.
+- Adds bounded global profiles for model roles, Web preference, cost
+  comparison, and usage window. Save and preview never infer; applying requires
+  confirmation and atomically updates settings without changing the active
+  browser lock.
+- Stores only a preferred global profile reference per workspace and reports
+  affected workspaces before applying profile changes.
+- Persists organization metadata atomically in a schema-versioned local store
+  while keeping aliases, notes, hidden state, profiles, secrets, workspace
+  paths, and conversation state outside portable YAML.
+- Adds deterministic fake-provider E2E coverage for identities, ordering,
+  hidden repair, authoritative filters, exact conformance, profile validation
+  and application, workspace references, secret exclusion, and unchanged
+  routing.
+
 # Agentic Router v0.9.6
 
 This development version adds application-owned provider health, bounded
