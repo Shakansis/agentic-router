@@ -78,6 +78,7 @@ public sealed class ChatController : ControllerBase
     {
       try
       {
+        _conversationSessionId = request.ConversationSessionId;
         var persisted = await _persistentSessions.BeginTurnAsync(
           request.ConversationSessionId,
           request.Message,
@@ -85,7 +86,8 @@ public sealed class ChatController : ControllerBase
           request.Model,
           cancellationToken
         );
-        _conversationSessionId = persisted?.Id;
+        _conversationSessionId = persisted?.Id
+          ?? _conversationSessionId;
         if (persisted is not null)
         {
           await WriteEventAsync(

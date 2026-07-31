@@ -30,6 +30,34 @@ public sealed class SessionsController : ControllerBase
     );
   }
 
+  [HttpPost("new")]
+  public async Task<IActionResult> Create(
+    [FromBody] CreateConversationSessionRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _sessions.CreateAsync(
+        request.BrowserSessionId,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPut("current")]
+  public async Task<IActionResult> Save(
+    [FromBody] SaveConversationSessionRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _sessions.SaveAsync(
+        request,
+        cancellationToken
+      )
+    );
+  }
+
   [HttpPost("{id}/resume")]
   public async Task<IActionResult> Resume(
     string id,

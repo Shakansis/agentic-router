@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
@@ -7,6 +8,36 @@ namespace AgenticRouter.Api.GitDelivery;
 
 public interface IGitRepositoryService
 {
+  Task<GitWorkspaceOverviewView> GetWorkspaceOverviewAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    CancellationToken cancellationToken
+  );
+
+  Task<GitIdentityApprovalView> PreviewIdentityAsync(
+    string workspaceId,
+    string workspacePath,
+    GitIdentityPreviewRequest request,
+    CancellationToken cancellationToken
+  );
+
+  Task<GitWorkspaceOverviewView> InitializeAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    GitInitializeRequest request,
+    CancellationToken cancellationToken
+  );
+
+  Task<GitWorkspaceOverviewView> SetLocalIdentityAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    GitIdentityRequest request,
+    CancellationToken cancellationToken
+  );
+
   Task<GitRepositoryStatusView> GetStatusAsync(
     string workspacePath,
     bool includeIgnored,
@@ -29,6 +60,11 @@ public interface IGitRepositoryService
   Task<GitCommitView> ShowCommitAsync(
     string workspacePath,
     string commit,
+    CancellationToken cancellationToken
+  );
+
+  Task<GitDiffView> GetLastCommitDiffAsync(
+    string workspacePath,
     CancellationToken cancellationToken
   );
 
@@ -84,6 +120,381 @@ public sealed class GitRepositoryService : IGitRepositoryService
   {
     _processExecution = processExecution;
     _settingsStore = settingsStore;
+  }
+
+  public async Task<GitWorkspaceOverviewView> GetWorkspaceOverviewAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    CancellationToken cancellationToken
+  )
+  {
+    var workspace = RequireWorkspaceRoot(
+      workspacePath
+    );
+    ProcessExecutionResult versionResult;
+
+    try
+    {
+      versionResult = await RunAsync(
+        workspace,
+        [
+          "--version"
+        ],
+        "git-version",
+        cancellationToken,
+        allowFailure: true
+      );
+    }
+    catch (LocalActionException exception)
+    {
+      return UnavailableOverview(
+        workspaceId,
+        currentSessionPaths,
+        "Git is unavailable.",
+        exception.Message
+      );
+    }
+
+    if (versionResult.ExitCode != 0)
+    {
+      return UnavailableOverview(
+        workspaceId,
+        currentSessionPaths,
+        "Git is unavailable.",
+        Sanitize(
+          versionResult.StandardError,
+          workspace
+        )
+      );
+    }
+
+    var version = versionResult.StandardOutput.Trim();
+    var executable = ResolveGitExecutable();
+    GitRepositoryStatusView status;
+
+    try
+    {
+      status = await GetStatusAsync(
+        workspace,
+        false,
+        cancellationToken
+      );
+    }
+    catch (GitDeliveryException exception) when (
+      exception.Code is "git-repository-unavailable"
+        or "git-repository-outside-workspace"
+    )
+    {
+      return new GitWorkspaceOverviewView(
+        "not-initialized",
+        "The trusted workspace is not initialized as a Git repository.",
+        null,
+        executable,
+        version,
+        null,
+        new GitIdentityValueView(
+          null,
+          "unset"
+        ),
+        new GitIdentityValueView(
+          null,
+          "unset"
+        ),
+        await ReadDefaultBranchAsync(
+          workspace,
+          cancellationToken
+        ),
+        [],
+        currentSessionPaths,
+        CreateActionId(
+          "initialize",
+          workspaceId,
+          workspace,
+          version
+        )
+      );
+    }
+
+    var repositoryRoot = Path.GetFullPath(
+      Path.Combine(
+        workspace,
+        status.RepositoryRoot
+          ?? "."
+      )
+    );
+    var userName = await ReadIdentityAsync(
+      repositoryRoot,
+      "user.name",
+      cancellationToken
+    );
+    var userEmail = await ReadIdentityAsync(
+      repositoryRoot,
+      "user.email",
+      cancellationToken
+    );
+    var latest = string.IsNullOrWhiteSpace(
+      status.Head
+    )
+      ? null
+      : (
+        await GetLogAsync(
+          workspace,
+          1,
+          cancellationToken
+        )
+      ).FirstOrDefault();
+    var remotes = await ReadRemotesAsync(
+      repositoryRoot,
+      cancellationToken
+    );
+
+    return new GitWorkspaceOverviewView(
+      "available",
+      null,
+      status,
+      executable,
+      version,
+      latest,
+      userName,
+      userEmail,
+      await ReadDefaultBranchAsync(
+        repositoryRoot,
+        cancellationToken
+      ),
+      remotes,
+      currentSessionPaths,
+      CreateActionId(
+        "initialize",
+        workspaceId,
+        workspace,
+        status.Head
+          ?? "unborn"
+      )
+    );
+  }
+
+  public async Task<GitIdentityApprovalView> PreviewIdentityAsync(
+    string workspaceId,
+    string workspacePath,
+    GitIdentityPreviewRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    var value = ValidateIdentity(
+      request.Field,
+      request.Value
+    );
+    var overview = await GetWorkspaceOverviewAsync(
+      workspaceId,
+      workspacePath,
+      [],
+      cancellationToken
+    );
+
+    if (overview.State != "available")
+    {
+      throw new GitDeliveryException(
+        "git-repository-unavailable",
+        "git-local-identity",
+        "Repository-local identity requires an initialized Git repository."
+      );
+    }
+
+    return new GitIdentityApprovalView(
+      request.Field,
+      value,
+      CreateIdentityActionId(
+        workspaceId,
+        overview,
+        request.Field,
+        value
+      )
+    );
+  }
+
+  public async Task<GitWorkspaceOverviewView> InitializeAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    GitInitializeRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    ValidatePrivilegedRequest(
+      request.BrowserSessionId,
+      request.InteractionMode,
+      request.Confirmed,
+      "git-initialize"
+    );
+    var overview = await GetWorkspaceOverviewAsync(
+      workspaceId,
+      workspacePath,
+      currentSessionPaths,
+      cancellationToken
+    );
+
+    if (overview.State != "not-initialized")
+    {
+      throw new GitDeliveryException(
+        "git-repository-already-initialized",
+        "git-initialize",
+        "The trusted workspace is already a Git repository."
+      );
+    }
+
+    if (!string.Equals(
+      request.ActionId,
+      overview.InitializeActionId,
+      StringComparison.Ordinal
+    ))
+    {
+      throw new GitDeliveryException(
+        "git-action-stale",
+        "git-initialize",
+        "The repository initialization approval is stale."
+      );
+    }
+
+    var workspace = RequireWorkspaceRoot(
+      workspacePath
+    );
+    var initialized = await RunAsync(
+      workspace,
+      [
+        "init",
+        "-b",
+        "main"
+      ],
+      "git-initialize",
+      cancellationToken,
+      allowFailure: true
+    );
+
+    if (initialized.ExitCode != 0)
+    {
+      var fallback = await RunAsync(
+        workspace,
+        [
+          "init"
+        ],
+        "git-initialize",
+        cancellationToken,
+        allowFailure: true
+      );
+      if (fallback.ExitCode != 0)
+      {
+        throw new GitDeliveryException(
+          "git-initialization-failed",
+          "git-initialize",
+          "Git could not initialize the trusted workspace.",
+          fallback.TimedOut,
+          Sanitize(
+            fallback.StandardError,
+            workspace
+          )
+        );
+      }
+      await RunAsync(
+        workspace,
+        [
+          "symbolic-ref",
+          "HEAD",
+          "refs/heads/main"
+        ],
+        "git-initialize",
+        cancellationToken
+      );
+    }
+
+    return await GetWorkspaceOverviewAsync(
+      workspaceId,
+      workspace,
+      currentSessionPaths,
+      cancellationToken
+    );
+  }
+
+  public async Task<GitWorkspaceOverviewView> SetLocalIdentityAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    GitIdentityRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    ValidatePrivilegedRequest(
+      request.BrowserSessionId,
+      request.InteractionMode,
+      request.Confirmed,
+      "git-local-identity"
+    );
+    var preview = await PreviewIdentityAsync(
+      workspaceId,
+      workspacePath,
+      new GitIdentityPreviewRequest(
+        request.Field,
+        request.Value
+      ),
+      cancellationToken
+    );
+
+    if (!string.Equals(
+      preview.ActionId,
+      request.ActionId,
+      StringComparison.Ordinal
+    ))
+    {
+      throw new GitDeliveryException(
+        "git-action-stale",
+        "git-local-identity",
+        "The repository identity approval is stale."
+      );
+    }
+
+    var repository = await ResolveRepositoryAsync(
+      workspacePath,
+      cancellationToken
+    );
+    await RunAsync(
+      repository.Root,
+      [
+        "config",
+        "--local",
+        request.Field,
+        preview.Value
+      ],
+      "git-local-identity",
+      cancellationToken
+    );
+    var refreshed = await GetWorkspaceOverviewAsync(
+      workspaceId,
+      workspacePath,
+      currentSessionPaths,
+      cancellationToken
+    );
+    var written = request.Field == "user.name"
+      ? refreshed.UserName
+      : refreshed.UserEmail;
+
+    if (
+      written.Scope != "local"
+      || !string.Equals(
+        written.Value,
+        preview.Value,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      throw new GitDeliveryException(
+        "git-local-identity-verification-failed",
+        "git-local-identity",
+        "The repository-local identity could not be verified.",
+        true
+      );
+    }
+
+    return refreshed;
   }
 
   public async Task<GitRepositoryStatusView> GetStatusAsync(
@@ -390,7 +801,17 @@ public sealed class GitRepositoryService : IGitRepositoryService
             StringComparison.Ordinal
           ),
           truncated,
-          content
+          content,
+          ResolveChangeType(
+            status.Paths.FirstOrDefault(
+              item => string.Equals(
+                item.Path,
+                path,
+                StringComparison.OrdinalIgnoreCase
+              )
+            ),
+            staged
+          )
         )
       );
     }
@@ -486,6 +907,116 @@ public sealed class GitRepositoryService : IGitRepositoryService
       ParseDate(
         fields[4]
       )
+    );
+  }
+
+  public async Task<GitDiffView> GetLastCommitDiffAsync(
+    string workspacePath,
+    CancellationToken cancellationToken
+  )
+  {
+    var settings = await _settingsStore.GetAsync(
+      cancellationToken
+    );
+    var repository = await ResolveRepositoryAsync(
+      workspacePath,
+      cancellationToken
+    );
+    var head = await RunAsync(
+      repository.Root,
+      [
+        "rev-parse",
+        "--verify",
+        "HEAD"
+      ],
+      "git-last-commit-diff",
+      cancellationToken,
+      allowFailure: true
+    );
+
+    if (head.ExitCode != 0)
+    {
+      return new GitDiffView(
+        [],
+        false
+      );
+    }
+
+    var names = await RunAsync(
+      repository.Root,
+      [
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-z",
+        "HEAD"
+      ],
+      "git-last-commit-diff",
+      cancellationToken
+    );
+    var entries = ParseNameStatus(
+      names.StandardOutput
+    );
+    var files = new List<GitDiffFileView>();
+
+    foreach (var entry in entries.Take(
+      MaximumStatusPaths
+    ))
+    {
+      var result = await RunAsync(
+        repository.Root,
+        [
+          "show",
+          "--format=",
+          "--no-ext-diff",
+          "--no-color",
+          "HEAD",
+          "--",
+          entry.Path
+        ],
+        "git-last-commit-diff",
+        cancellationToken
+      );
+      var limit = settings.GitDelivery.MaxDiffBytesPerFile;
+      var content = result.StandardOutput;
+      var truncated = content.Length > limit
+        || result.StandardOutputTruncated;
+      if (content.Length > limit)
+      {
+        content = string.Concat(
+          content.AsSpan(
+            0,
+            limit
+          ),
+          "\n[diff truncated]"
+        );
+      }
+      files.Add(
+        new GitDiffFileView(
+          entry.Path,
+          false,
+          content.Contains(
+            "Binary files ",
+            StringComparison.Ordinal
+          ) || content.Contains(
+            "GIT binary patch",
+            StringComparison.Ordinal
+          ),
+          truncated,
+          content,
+          entry.ChangeType
+        )
+      );
+    }
+
+    return new GitDiffView(
+      files,
+      entries.Count > MaximumStatusPaths
+        || files.Any(
+          file => file.Truncated
+        )
     );
   }
 
@@ -1028,9 +1559,380 @@ public sealed class GitRepositoryService : IGitRepositoryService
     return normalized;
   }
 
-  private async Task<(string Root, string Workspace)> ResolveRepositoryAsync(
-    string workspacePath,
+  private static GitWorkspaceOverviewView UnavailableOverview(
+    string workspaceId,
+    IReadOnlyList<string> currentSessionPaths,
+    string message,
+    string diagnostic
+  )
+  {
+    return new GitWorkspaceOverviewView(
+      "unavailable",
+      string.IsNullOrWhiteSpace(
+        diagnostic
+      )
+        ? message
+        : diagnostic,
+      null,
+      null,
+      null,
+      null,
+      new GitIdentityValueView(
+        null,
+        "unset"
+      ),
+      new GitIdentityValueView(
+        null,
+        "unset"
+      ),
+      null,
+      [],
+      currentSessionPaths,
+      CreateActionId(
+        "unavailable",
+        workspaceId,
+        message
+      )
+    );
+  }
+
+  private async Task<GitIdentityValueView> ReadIdentityAsync(
+    string repositoryRoot,
+    string field,
     CancellationToken cancellationToken
+  )
+  {
+    var local = await RunAsync(
+      repositoryRoot,
+      [
+        "config",
+        "--local",
+        "--get",
+        field
+      ],
+      "git-configuration",
+      cancellationToken,
+      allowFailure: true
+    );
+    if (
+      local.ExitCode == 0
+      && !string.IsNullOrWhiteSpace(
+        local.StandardOutput
+      )
+    )
+    {
+      return new GitIdentityValueView(
+        local.StandardOutput.Trim(),
+        "local"
+      );
+    }
+
+    var global = await RunAsync(
+      repositoryRoot,
+      [
+        "config",
+        "--global",
+        "--get",
+        field
+      ],
+      "git-configuration",
+      cancellationToken,
+      allowFailure: true
+    );
+    return global.ExitCode == 0
+      && !string.IsNullOrWhiteSpace(
+        global.StandardOutput
+      )
+      ? new GitIdentityValueView(
+        global.StandardOutput.Trim(),
+        "global"
+      )
+      : new GitIdentityValueView(
+        null,
+        "unset"
+      );
+  }
+
+  private async Task<string?> ReadDefaultBranchAsync(
+    string workingDirectory,
+    CancellationToken cancellationToken
+  )
+  {
+    var result = await RunAsync(
+      workingDirectory,
+      [
+        "config",
+        "--get",
+        "init.defaultBranch"
+      ],
+      "git-configuration",
+      cancellationToken,
+      allowFailure: true
+    );
+    var value = result.ExitCode == 0
+      ? result.StandardOutput.Trim()
+      : null;
+    return string.IsNullOrWhiteSpace(
+      value
+    ) || value.Length > 200 || value.Any(
+      char.IsControl
+    )
+      ? null
+      : value;
+  }
+
+  private async Task<IReadOnlyList<GitRemoteView>> ReadRemotesAsync(
+    string repositoryRoot,
+    CancellationToken cancellationToken
+  )
+  {
+    var result = await RunAsync(
+      repositoryRoot,
+      [
+        "remote"
+      ],
+      "git-configuration",
+      cancellationToken,
+      allowFailure: true
+    );
+    if (result.ExitCode != 0)
+    {
+      return [];
+    }
+
+    var remotes = new List<GitRemoteView>();
+    foreach (var name in result.StandardOutput.Split(
+      [
+        '\r',
+        '\n'
+      ],
+      StringSplitOptions.RemoveEmptyEntries
+    ).Select(
+      value => value.Trim()
+    ).Where(
+      value => value.Length is > 0 and <= 200
+        && !value.Any(
+          char.IsControl
+        )
+    ).Distinct(
+      StringComparer.Ordinal
+    ).Take(
+      20
+    ))
+    {
+      var url = await RunAsync(
+        repositoryRoot,
+        [
+          "remote",
+          "get-url",
+          name
+        ],
+        "git-configuration",
+        cancellationToken,
+        allowFailure: true
+      );
+      remotes.Add(
+        new GitRemoteView(
+          name,
+          url.ExitCode == 0
+            ? SanitizeRemoteUrl(
+              url.StandardOutput.Trim()
+            )
+            : "Unavailable"
+        )
+      );
+    }
+    return remotes;
+  }
+
+  private static string SanitizeRemoteUrl(
+    string value
+  )
+  {
+    if (
+      Uri.TryCreate(
+        value,
+        UriKind.Absolute,
+        out var uri
+      )
+    )
+    {
+      var builder = new UriBuilder(
+        uri
+      )
+      {
+        UserName = string.Empty,
+        Password = string.Empty,
+        Query = string.Empty,
+        Fragment = string.Empty
+      };
+      return builder.Uri.ToString();
+    }
+
+    var separator = value.IndexOf(
+      ':'
+    );
+    var at = value.IndexOf(
+      '@'
+    );
+    var sanitized = at > 0
+      && separator > at
+      ? string.Concat(
+        "<redacted>",
+        value.AsSpan(
+          at
+        )
+      )
+      : value;
+    return sanitized.Length <= 2_000
+      ? sanitized
+      : string.Concat(
+        sanitized.AsSpan(
+          0,
+          2_000
+        ),
+        "..."
+      );
+  }
+
+  private static string CreateIdentityActionId(
+    string workspaceId,
+    GitWorkspaceOverviewView overview,
+    string field,
+    string value
+  )
+  {
+    return CreateActionId(
+      "identity",
+      workspaceId,
+      overview.Repository?.Head
+        ?? "unborn",
+      field,
+      value,
+      overview.UserName.Scope,
+      overview.UserName.Value
+        ?? string.Empty,
+      overview.UserEmail.Scope,
+      overview.UserEmail.Value
+        ?? string.Empty
+    );
+  }
+
+  private static string CreateActionId(
+    params string[] values
+  )
+  {
+    return Convert.ToHexString(
+      SHA256.HashData(
+        Encoding.UTF8.GetBytes(
+          string.Join(
+            "\n",
+            values
+          )
+        )
+      )
+    ).ToLowerInvariant();
+  }
+
+  private static string ValidateIdentity(
+    string field,
+    string value
+  )
+  {
+    if (field is not "user.name" and not "user.email")
+    {
+      throw new GitDeliveryException(
+        "git-local-identity-invalid",
+        "git-local-identity",
+        "Only repository-local user.name and user.email can be edited."
+      );
+    }
+
+    var normalized = value.Trim();
+    var maximumLength = field == "user.email"
+      ? 254
+      : 200;
+    if (
+      normalized.Length is < 1
+      || normalized.Length > maximumLength
+      || normalized.Any(
+        char.IsControl
+      )
+      || normalized.Contains(
+        '\0',
+        StringComparison.Ordinal
+      )
+      || (
+        field == "user.email"
+        && (
+          normalized.Count(
+            character => character == '@'
+          ) != 1
+          || normalized.StartsWith(
+            '@'
+          )
+          || normalized.EndsWith(
+            '@'
+          )
+        )
+      )
+    )
+    {
+      throw new GitDeliveryException(
+        "git-local-identity-invalid",
+        "git-local-identity",
+        field == "user.email"
+          ? "Repository-local user.email is invalid."
+          : "Repository-local user.name is invalid."
+      );
+    }
+    return normalized;
+  }
+
+  private static void ValidatePrivilegedRequest(
+    string browserSessionId,
+    string interactionMode,
+    bool confirmed,
+    string stage
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(
+        browserSessionId
+      )
+      || browserSessionId.Length > 128
+    )
+    {
+      throw new GitDeliveryException(
+        "git-browser-session-invalid",
+        stage,
+        "A valid browser session identifier is required."
+      );
+    }
+    if (!string.Equals(
+      interactionMode,
+      "execute",
+      StringComparison.Ordinal
+    ))
+    {
+      throw new GitDeliveryException(
+        "git-execute-mode-required",
+        stage,
+        "This Git operation requires Execute mode."
+      );
+    }
+    if (!confirmed)
+    {
+      throw new GitDeliveryException(
+        "git-explicit-approval-required",
+        stage,
+        "This Git write always requires explicit approval."
+      );
+    }
+  }
+
+  private static string RequireWorkspaceRoot(
+    string workspacePath
   )
   {
     var workspace = Path.GetFullPath(
@@ -1054,6 +1956,164 @@ public sealed class GitRepositoryService : IGitRepositoryService
         "The trusted workspace is unavailable or is a reparse point."
       );
     }
+    return workspace;
+  }
+
+  private static string? ResolveGitExecutable()
+  {
+    var fileNames = OperatingSystem.IsWindows()
+      ? new[]
+      {
+        "git.exe",
+        "git.cmd"
+      }
+      : new[]
+      {
+        "git"
+      };
+    foreach (var directory in (
+      Environment.GetEnvironmentVariable(
+        "PATH"
+      ) ?? string.Empty
+    ).Split(
+      Path.PathSeparator,
+      StringSplitOptions.RemoveEmptyEntries
+    ))
+    {
+      foreach (var fileName in fileNames)
+      {
+        try
+        {
+          var candidate = Path.GetFullPath(
+            Path.Combine(
+              directory.Trim(
+                '"'
+              ),
+              fileName
+            )
+          );
+          if (File.Exists(
+            candidate
+          ))
+          {
+            return candidate;
+          }
+        }
+        catch (Exception exception) when (
+          exception is ArgumentException
+          or NotSupportedException
+          or PathTooLongException
+        )
+        {
+        }
+      }
+    }
+    return null;
+  }
+
+  private static string ResolveChangeType(
+    GitPathStatusView? status,
+    bool staged
+  )
+  {
+    if (status is null)
+    {
+      return "modified";
+    }
+    if (status.Conflicted)
+    {
+      return "conflicted";
+    }
+    if (status.Untracked)
+    {
+      return "added";
+    }
+    var code = staged
+      ? status.IndexStatus
+      : status.WorkingTreeStatus;
+    return code switch
+    {
+      "A" => "added",
+      "D" => "deleted",
+      "R" => "renamed",
+      "C" => "copied",
+      _ => "modified"
+    };
+  }
+
+  private static IReadOnlyList<GitNameStatus> ParseNameStatus(
+    string output
+  )
+  {
+    var values = output.Split(
+      '\0',
+      StringSplitOptions.RemoveEmptyEntries
+    );
+    var entries = new List<GitNameStatus>();
+
+    for (var index = 0; index < values.Length;)
+    {
+      var status = values[index++].Trim();
+      if (index >= values.Length)
+      {
+        break;
+      }
+      var path = values[index++].Replace(
+        '\\',
+        '/'
+      );
+      if (
+        status.StartsWith(
+          'R'
+        )
+        || status.StartsWith(
+          'C'
+        )
+      )
+      {
+        if (index >= values.Length)
+        {
+          break;
+        }
+        path = values[index++].Replace(
+          '\\',
+          '/'
+        );
+      }
+      entries.Add(
+        new GitNameStatus(
+          path,
+          status.StartsWith(
+            'A'
+          )
+            ? "added"
+            : status.StartsWith(
+              'D'
+            )
+              ? "deleted"
+              : status.StartsWith(
+                'R'
+              )
+                ? "renamed"
+                : status.StartsWith(
+                  'C'
+                )
+                  ? "copied"
+                  : "modified"
+        )
+      );
+    }
+    return entries;
+  }
+
+  private async Task<(string Root, string Workspace)> ResolveRepositoryAsync(
+    string workspacePath,
+    CancellationToken cancellationToken
+  )
+  {
+    var workspace = RequireWorkspaceRoot(
+      workspacePath
+    );
     var result = await RunAsync(
       workspace,
       [
@@ -1586,7 +2646,8 @@ public sealed class GitRepositoryService : IGitRepositoryService
         false,
         true,
         truncated,
-        "[binary untracked file]"
+        "[binary untracked file]",
+        "added"
       );
     }
     string text;
@@ -1606,7 +2667,8 @@ public sealed class GitRepositoryService : IGitRepositoryService
         false,
         true,
         truncated,
-        "[binary untracked file]"
+        "[binary untracked file]",
+        "added"
       );
     }
     var builder = new StringBuilder();
@@ -1644,7 +2706,8 @@ public sealed class GitRepositoryService : IGitRepositoryService
       false,
       false,
       truncated,
-      builder.ToString()
+      builder.ToString(),
+      "added"
     );
   }
 
@@ -1732,4 +2795,9 @@ public sealed class GitRepositoryService : IGitRepositoryService
       ? sanitized
       : sanitized[..2_000];
   }
+
+  private sealed record GitNameStatus(
+    string Path,
+    string ChangeType
+  );
 }

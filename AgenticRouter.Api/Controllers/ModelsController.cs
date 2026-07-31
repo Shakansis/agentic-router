@@ -1,7 +1,10 @@
+using System.Diagnostics;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgenticRouter.Api.Controllers;
@@ -13,18 +16,24 @@ public sealed class ModelsController : ControllerBase
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
   private readonly IModelDiagnosticService _diagnostics;
+  private readonly IToolProtocolConformanceService _toolConformance;
+  private readonly IResidentModelManager _residentModel;
   private readonly ILogger<ModelsController> _logger;
 
   public ModelsController(
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
     IModelDiagnosticService diagnostics,
+    IToolProtocolConformanceService toolConformance,
+    IResidentModelManager residentModel,
     ILogger<ModelsController> logger
   )
   {
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
     _diagnostics = diagnostics;
+    _toolConformance = toolConformance;
+    _residentModel = residentModel;
     _logger = logger;
   }
 
@@ -109,5 +118,144 @@ public sealed class ModelsController : ControllerBase
         cancellationToken
       )
     );
+  }
+
+  [HttpPost("conformance")]
+  public async Task<IActionResult> Conformance(
+    [FromBody] ModelConformanceBenchmarkRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    if (string.IsNullOrWhiteSpace(
+      request.Model
+    ))
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "The protocol benchmark could not start.",
+          new Dictionary<string, string[]>
+          {
+            ["model"] =
+            [
+              "A model must be selected."
+            ]
+          }
+        )
+      );
+    }
+
+    var settings = await _settingsStore.GetAsync(
+      cancellationToken
+    );
+    var baseUri = new Uri(
+      settings.OllamaUrl,
+      UriKind.Absolute
+    );
+    IReadOnlyList<InstalledModel> installed;
+
+    try
+    {
+      installed = await _ollamaClient.GetModelsAsync(
+        baseUri,
+        cancellationToken
+      );
+    }
+    catch (OllamaProviderException exception)
+    {
+      return StatusCode(
+        StatusCodes.Status503ServiceUnavailable,
+        new ProviderError(
+          exception.Stage,
+          exception.Message,
+          exception.TechnicalMessage,
+          HttpContext.TraceIdentifier,
+          "ollama",
+          request.Model,
+          null,
+          exception.HttpStatus,
+          exception.Recoverable
+        )
+      );
+    }
+
+    var selected = installed.FirstOrDefault(
+      model => string.Equals(
+        model.Name,
+        request.Model,
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+
+    if (selected is null)
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "The protocol benchmark could not start.",
+          new Dictionary<string, string[]>
+          {
+            ["model"] =
+            [
+              $"Model '{request.Model}' is not installed in the configured Ollama instance."
+            ]
+          }
+        )
+      );
+    }
+
+    using var requestLease = _residentModel.BeginRequest();
+    var routerEvicted = false;
+    var stopwatch = Stopwatch.StartNew();
+
+    try
+    {
+      routerEvicted = await _residentModel.EvictForRecoveryAsync(
+        selected.Name,
+        cancellationToken
+      );
+      var result = await _toolConformance.VerifyAsync(
+        baseUri,
+        selected.Name,
+        selected.Digest,
+        cancellationToken
+      );
+
+      return Ok(
+        new ModelConformanceBenchmarkResult(
+          result.Passed,
+          result.Model,
+          result.Digest,
+          result.OllamaVersion,
+          stopwatch.ElapsedMilliseconds,
+          result.Failure
+        )
+      );
+    }
+    finally
+    {
+      if (
+        routerEvicted
+        && request.RestoreResidentModel
+      )
+      {
+        try
+        {
+          await _residentModel.RestoreAfterRecoveryAsync(
+            selected.Name,
+            CancellationToken.None
+          );
+        }
+        catch (Exception exception) when (
+          exception is OllamaProviderException
+          or InvalidOperationException
+        )
+        {
+          _logger.LogWarning(
+            exception,
+            "The resident router model could not be restored after benchmarking {Model}.",
+            selected.Name
+          );
+        }
+      }
+    }
   }
 }

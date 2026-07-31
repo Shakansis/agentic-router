@@ -50,6 +50,10 @@ public interface IExecutionSessionStore
     string executionSessionId
   );
 
+  ExecutionSessionReview? GetLatestReview(
+    string workspacePath
+  );
+
   Task<UndoExecutionResponse> UndoAsync(
     string executionSessionId,
     string browserSessionId,
@@ -245,6 +249,38 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
     return Get(
       executionSessionId
     )?.CreateReview();
+  }
+
+  public ExecutionSessionReview? GetLatestReview(
+    string workspacePath
+  )
+  {
+    var canonical = Path.GetFullPath(
+      workspacePath
+    );
+
+    lock (_gate)
+    {
+      foreach (var id in _retentionOrder.Reverse())
+      {
+        if (
+          _sessions.TryGetValue(
+            id,
+            out var session
+          )
+          && string.Equals(
+            session.WorkspacePath,
+            canonical,
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+        {
+          return session.CreateReview();
+        }
+      }
+    }
+
+    return null;
   }
 
   public async Task<UndoExecutionResponse> UndoAsync(
@@ -1639,7 +1675,7 @@ public sealed class ExecutionSession
     {
       return (
         false,
-        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.0 does not rewrite Git history."
+        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.1 does not rewrite Git history."
       );
     }
 

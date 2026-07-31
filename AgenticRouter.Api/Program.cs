@@ -25,6 +25,10 @@ builder.Services.AddHttpClient<IOllamaClient, OllamaClient>(
   client => client.Timeout = Timeout.InfiniteTimeSpan
 );
 builder.Services.AddSingleton<ISettingsValidator, SettingsValidator>();
+builder.Services.AddSingleton<
+  IPortableYamlSettingsService,
+  PortableYamlSettingsService
+>();
 var configuredDirectory = builder.Configuration["AgenticRouter:DataDirectory"];
 var dataDirectory = string.IsNullOrWhiteSpace(
   configuredDirectory

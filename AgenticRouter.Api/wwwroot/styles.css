@@ -221,18 +221,110 @@ summary:focus-visible {
   color: var(--warning);
 }
 
-.workspace-manager-section,
-.local-history-data {
+.workspace-section-panel {
   display: grid;
   gap: 12px;
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
 }
 
 .workspace-profile-list {
   display: grid;
   gap: 8px;
+}
+
+.workspace-sections {
+  gap: 18px;
+}
+
+.workspace-section-shell {
+  position: relative;
+}
+
+.workspace-section-actions {
+  position: absolute;
+  z-index: 3;
+  top: -3px;
+  right: 0;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.workspace-accordion > summary {
+  display: flex;
+  min-height: 30px;
+  gap: 8px;
+  align-items: center;
+  padding-right: 76px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 650;
+  list-style: none;
+}
+
+.workspace-accordion > summary::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-accordion > summary::before {
+  content: "›";
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.workspace-accordion[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.workspace-accordion > .workspace-section-panel {
+  margin-top: 7px;
+}
+
+.new-workspace-fields,
+.local-history-data {
+  display: grid;
+  gap: 12px;
+}
+
+.workspace-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.add-workspace-button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  color: #fff;
+  background: var(--accent);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.add-workspace-button:hover,
+.add-workspace-button:focus-visible {
+  filter: brightness(1.12);
+}
+
+.workspace-usage,
+.inline-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .workspace-profile-entry.active {
@@ -340,7 +432,19 @@ summary:focus-visible {
 }
 
 .title-group {
+  display: grid;
   min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+}
+
+.title-group .eyebrow {
+  grid-column: 1 / -1;
+}
+
+.title-group .persistence-status {
+  margin-top: 2px;
 }
 
 .header-actions {
@@ -1273,12 +1377,12 @@ p {
 
 .mode-icon {
   color: var(--accent);
-  font-size: 10px;
+  font-size: 15px;
 }
 
 .code-icon {
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .mode-option.active {
@@ -1441,7 +1545,7 @@ p {
 }
 
 .button-icon {
-  font-size: 12px;
+  font-size: 20px;
   line-height: 1;
 }
 
@@ -1482,6 +1586,8 @@ p {
 
 .settings-dialog form {
   display: flex;
+  height: 100%;
+  min-height: 0;
   max-height: inherit;
   flex-direction: column;
 }
@@ -1492,12 +1598,16 @@ p {
 
 .change-review-shell {
   display: flex;
-  max-height: inherit;
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
 }
 
 .change-review-body {
+  min-height: 0;
+  flex: 1;
   gap: 14px;
+  overflow-y: auto;
 }
 
 .change-review-summary,
@@ -1558,22 +1668,10 @@ p {
   color: var(--danger);
 }
 
-.workspace-dialog {
-  width: min(680px, calc(100vw - 32px));
-}
-
-.workspace-project-section {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--panel);
-}
-
-.workspace-project-section > summary {
-  cursor: pointer;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
+.settings-dialog.workspace-dialog {
+  width: min(95dvw, 1100px);
+  height: 95dvh;
+  max-height: 95dvh;
 }
 
 .workspace-project-header {
@@ -1581,7 +1679,7 @@ p {
   gap: 12px;
   align-items: center;
   justify-content: space-between;
-  margin-top: 10px;
+  margin-top: 0;
 }
 
 .project-profile-details p,
@@ -1594,7 +1692,7 @@ p {
 .validation-profile-editor {
   display: grid;
   gap: 10px;
-  margin-top: 10px;
+  margin-top: 0;
 }
 
 .validation-profile-editor label {
@@ -2051,6 +2149,8 @@ p {
 
 .dialog-body {
   display: flex;
+  min-height: 0;
+  flex: 1;
   flex-direction: column;
   gap: 26px;
   overflow-y: auto;
@@ -2065,6 +2165,67 @@ p {
 
 .section-heading h3 {
   font-size: 14px;
+}
+
+.heading-title-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.information-button {
+  position: relative;
+  display: inline-grid;
+  z-index: 6;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  overflow: visible;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--panel-raised);
+  font: 700 12px/1 Georgia, serif;
+  cursor: help;
+}
+
+.information-button:hover,
+.information-button:focus-visible {
+  border-color: var(--accent);
+  color: #fff;
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.information-button::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 9px);
+  right: 0;
+  width: min(320px, calc(100vw - 72px));
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: #20242c;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  font: 11px/1.5 "Segoe UI", sans-serif;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.information-button:hover::after,
+.information-button:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .section-heading p {
@@ -2209,6 +2370,7 @@ p {
 }
 
 .dialog-footer {
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 9px;
   border-top: 1px solid var(--border);
@@ -2297,5 +2459,540 @@ p {
 
   .runtime-details > summary {
     max-width: 100%;
+  }
+}
+
+.sidebar {
+  overflow-y: auto;
+}
+
+.git-card.has-conflicts {
+  border-color: var(--danger);
+}
+
+.git-card.detached {
+  border-color: var(--warning);
+}
+
+.persistence-status {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.persistence-status::before {
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.persistence-status.saved {
+  color: var(--success);
+}
+
+.persistence-status.saving {
+  color: var(--warning);
+}
+
+.persistence-status.failed,
+.persistence-status.interrupted {
+  color: var(--danger);
+}
+
+.session-entry.current {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.settings-dialog {
+  width: min(95dvw, 1440px);
+  height: 95dvh;
+  max-width: none;
+  max-height: 95dvh;
+}
+
+.settings-dialog .settings-shell {
+  height: 100%;
+  max-height: none;
+}
+
+.settings-dialog .dialog-header {
+  z-index: 4;
+  flex: 0 0 auto;
+  background: var(--sidebar);
+}
+
+.dialog-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-layout {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(180px, 230px) minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.settings-navigation {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 12px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--sidebar) 90%, black);
+}
+
+.settings-navigation button {
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+}
+
+.settings-navigation button:hover {
+  color: var(--text);
+  background: var(--panel);
+}
+
+.settings-navigation button[aria-current="page"] {
+  color: #dfe6ff;
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.settings-content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 20px;
+  padding: 22px 24px 36px;
+  overflow: auto;
+  scroll-behavior: smooth;
+}
+
+.settings-content .settings-section {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+  scroll-margin-top: 12px;
+}
+
+.settings-content .settings-section:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-responsive-navigation {
+  display: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.settings-responsive-navigation label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-responsive-navigation select {
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.settings-dialog .dialog-footer {
+  z-index: 4;
+  flex: 0 0 auto;
+}
+
+.settings-summary-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--bg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-summary-card {
+  white-space: pre-line;
+}
+
+.portable-yaml-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+}
+
+.portable-yaml-panel h4 {
+  font-size: 13px;
+}
+
+.portable-yaml-description {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.portable-yaml-description code {
+  color: var(--text);
+}
+
+.portable-yaml-editor {
+  width: 100%;
+  min-height: 280px;
+  max-height: 55dvh;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 58%, black);
+  font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
+  tab-size: 2;
+}
+
+.portable-yaml-editor:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.portable-yaml-actions {
+  align-items: center;
+}
+
+.portable-yaml-status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.portable-yaml-status.error {
+  color: var(--danger);
+}
+
+.portable-yaml-status.success {
+  color: var(--success);
+}
+
+.settings-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.git-dialog {
+  width: min(95dvw, 1500px);
+  height: 95dvh;
+}
+
+.git-panel-shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.git-panel-body {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  gap: 16px;
+  padding: 18px 20px 30px;
+  overflow: auto;
+}
+
+.git-panel-section {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.git-panel-heading-row {
+  display: flex;
+  gap: 12px;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.git-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.git-overview-grid div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.git-overview-grid dt {
+  color: var(--subtle);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.git-overview-grid dd {
+  overflow: hidden;
+  margin: 5px 0 0;
+  font: 12px/1.4 "Cascadia Code", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-initialize-panel {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(233, 185, 73, 0.35);
+  border-radius: 9px;
+  background: rgba(233, 185, 73, 0.07);
+}
+
+.git-view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 14px 0 10px;
+}
+
+.git-view-tabs button {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--bg);
+  font-size: 11px;
+}
+
+.git-view-tabs button[aria-selected="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.git-diff-layout {
+  display: grid;
+  min-height: 320px;
+  grid-template-columns: minmax(190px, 280px) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+}
+
+.git-file-list {
+  min-width: 0;
+  padding: 8px;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+}
+
+.git-file-list button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+  text-align: left;
+}
+
+.git-file-list button:hover,
+.git-file-list button[aria-current="true"] {
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
+.git-file-list .git-file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-diff-viewer {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.git-diff-metadata {
+  min-height: 36px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.git-diff-viewer pre {
+  min-height: 280px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  color: #d4d4d4;
+  background: #1e1e1e;
+  font: 11px/1.5 "Cascadia Code", Consolas, monospace;
+  white-space: pre;
+}
+
+.git-remotes {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.git-remote-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 180px) minmax(0, 1fr);
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 11px;
+}
+
+.git-remote-row code {
+  overflow-wrap: anywhere;
+}
+
+.confirmation-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: 95dvh;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--sidebar);
+  box-shadow: var(--shadow);
+}
+
+.confirmation-dialog::backdrop {
+  background: rgba(5, 6, 8, 0.75);
+}
+
+.confirmation-dialog form {
+  display: flex;
+  max-height: 95dvh;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  overflow: hidden;
+}
+
+.confirmation-dialog h2,
+.confirmation-dialog p {
+  margin: 0;
+}
+
+.confirmation-dialog p {
+  min-height: 0;
+  overflow-y: auto;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.confirmation-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  .settings-dialog,
+  .git-dialog {
+    width: 95dvw;
+    height: 95dvh;
+  }
+
+  .settings-responsive-navigation {
+    display: block;
+  }
+
+  .settings-layout {
+    display: block;
+    overflow: hidden;
+  }
+
+  .settings-navigation {
+    display: none;
+  }
+
+  .settings-content {
+    height: 100%;
+  }
+
+  .git-overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .git-diff-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .git-file-list {
+    max-height: 180px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 520px) {
+  .git-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .git-panel-heading-row,
+  .confirmation-actions,
+  .workspace-project-header,
+  .workspace-picker-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workspace-section-panel {
+    padding: 12px;
   }
 }

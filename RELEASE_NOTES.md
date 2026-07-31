@@ -1,3 +1,21 @@
+# Agentic Router v0.9.1
+
+This corrective development version makes the existing Git and conversation-persistence capabilities discoverable and safe in the main browser interface.
+
+## Highlights
+
+- Adds a sidebar Git card and dedicated panel with authoritative overview plus bounded current-session, working-tree, staged, and last-commit diffs.
+- Supports explicit repository initialization on `main` and explicitly approved repository-local `user.name` and `user.email` without creating commits, staging files, or mutating remotes.
+- Gives every conversation a stable Host-generated identity, saves before switching when history is enabled, and preserves the visible conversation when persistence fails.
+- Adds explicit save, discard, and cancel choices for meaningful unsaved conversations and visible persistence status in the main interface.
+- Makes Recent conversations identify the current session and safely persist the current conversation before resume.
+- Reorganizes Settings into a responsive near-full-viewport interface with section navigation, dirty-state protection, focused validation errors, and persistent save controls.
+- Simplifies workspace management with consistent accordions, section titles outside their content panels, information tooltips for static warnings, and an explicit `+` flow that reveals the new-workspace form only when requested.
+- Keeps modal headers and action footers visible, lets dialogs grow to at most 95% of the viewport, and confines overflow scrolling to the central content area.
+- Adds portable YAML import/export for global settings, with only `primary` and `fallback` model roles, strict field-and-line validation, atomic application, and deliberate exclusion of workspace paths, conversations, validation commands, and approvals.
+- Adds an explicit Host-owned real-Ollama conformance endpoint and sequential PowerShell runner that reuse the production simple-call, nested-plan, and read-result-edit probes.
+- Records the v0.9.1 release benchmark for all 17 locally installed model digests on Ollama 0.32.5: 10 passed and 7 failed protocol conformance.
+
 # Agentic Router v0.9.0
 
 This development version adds a narrow, host-owned Git delivery workflow to Execute review.

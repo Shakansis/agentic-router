@@ -164,6 +164,35 @@ Default intents include:
 - `rpg-storytelling`
 - `review-and-testing`
 
+The **Advanced** settings section can export and atomically import a portable
+`agentic-router.yaml` backup. It includes the Ollama connection, router,
+coordinator, default and intent models, GPU choices, system prompts, context,
+runtime, execution, retention, project-awareness, and Git-delivery limits.
+Workspace paths, conversations, validation commands, and approvals remain local
+and are intentionally excluded.
+
+Model roles use only `primary` and `fallback`:
+
+```yaml
+schema_version: 1
+models:
+  router:
+    primary: qwen3:1.7b
+  coordinator:
+    primary: qwen3-coder:30b
+  software-development:
+    primary: qwen3-coder:30b
+    fallback: qwen3.6:latest
+  review-and-testing:
+    primary: devstral-small-2
+    fallback: gemma4:12b
+```
+
+Unsupported roles and keys are rejected with field and line diagnostics; the
+existing configuration is not modified when parsing or validation fails. The
+same operations are available at `GET /api/settings/yaml` and
+`PUT /api/settings/yaml`.
+
 ## 🎮 Usage
 
 ### Interface Overview
@@ -173,10 +202,13 @@ The application provides a clean, dark-themed interface with real-time status mo
 ![Main Interface](screenshots/main-interface.png)
 
 **Main Interface Features:**
-- **Sidebar Status**: Shows Ollama connection status, available local models, and detected graphics devices
+- **Sidebar Status**: Shows Ollama connection status, available local models, detected graphics devices, trusted workspace, and authoritative Git state
 - **Chat Workspace**: Main conversation area with streaming responses
 - **Model Selector**: Choose "Auto" for intent-based routing or select a specific model
+- **Workspace Manager**: Uses collapsible sections for saved workspaces, local history, project profile, and validation profile; the `+` action reveals the new-workspace form only when needed
 - **Collapsible Activity**: Routing and inference details in expandable panels
+- **Recent Conversations**: Shows saved sessions for the active workspace and supports explicit resume
+- **Git Panel**: Shows repository overview and bounded current-session, working-tree, staged, and last-commit diffs
 
 ### Configuration Dialog
 
@@ -185,9 +217,12 @@ Click the "Configurações" button to access the configuration interface:
 ![Settings Dialog](screenshots/settings-dialog.png)
 
 **Configuration Options:**
-- **General Settings**: Ollama URL, router model, default model, default GPU
+- **Section Navigation**: Uses a near-full-viewport desktop menu and a compact selector on narrow screens
+- **General Settings**: Ollama URL, router and coordinator models, default model, default GPU
 - **Intent Configuration**: Per-intent model overrides, device preferences, and system prompts
 - **Model Selection**: Choose from installed Ollama models for each intent
+- **Workspace and Git Summaries**: Opens the trusted-workspace, history, validation, and read-only Git configuration surfaces
+- **Portable YAML**: Import, copy, download, and restore global configuration without exporting workspace-local or conversation data
 
 ### Sending a Message
 
@@ -235,6 +270,24 @@ Press **Escape** to close the configuration dialog.
 dotnet test tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj
 ```
 
+### Run the real Ollama protocol benchmark
+
+Start the Release Host against the intended Ollama instance. After confirming
+that the GPU is available, run:
+
+```powershell
+.\scripts\run-real-tool-protocol-benchmark.ps1 `
+  -BaseUrl http://127.0.0.1:5294 `
+  -TimeoutSeconds 1500
+```
+
+The benchmark uses the Host's production conformance service and records a
+machine-readable JSON report plus a Markdown summary under the ignored
+`artifacts/benchmarks/` directory. It runs models sequentially and keys each
+result by exact model, digest, and Ollama version. The v0.9.1 release evidence is
+documented in
+[`docs/benchmarks/v0.9.1-ollama-0.32.5.md`](docs/benchmarks/v0.9.1-ollama-0.32.5.md).
+
 ### Test Coverage
 
 The E2E suite covers:
@@ -248,6 +301,7 @@ The E2E suite covers:
 - Next user message retains prior session context
 - Unavailable model produces useful visible error with trace ID
 - Provider failure reaches UI without generic silent fallback
+- Explicit native tool-protocol conformance uses the installed model digest and typed failures
 
 **Note**: Each test has a maximum timeout of 60 seconds. Tests exceeding this limit indicate implementation or synchronization issues that must be resolved.
 

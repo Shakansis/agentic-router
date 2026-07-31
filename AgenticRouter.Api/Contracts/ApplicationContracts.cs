@@ -144,6 +144,26 @@ public sealed record ResumeConversationSessionRequest(
   string BrowserSessionId
 );
 
+public sealed record CreateConversationSessionRequest(
+  string BrowserSessionId
+);
+
+public sealed record SaveConversationSessionRequest(
+  string SessionId,
+  IReadOnlyList<ChatMessage> Messages,
+  string InteractionMode,
+  string? SelectedModel,
+  string State
+);
+
+public sealed record ConversationPersistenceView(
+  string SessionId,
+  bool HistoryEnabled,
+  bool Persisted,
+  string Status,
+  DateTimeOffset? UpdatedAt
+);
+
 public sealed record ConversationSessionListResponse(
   IReadOnlyList<ConversationSessionSummary> Recent,
   IReadOnlyList<ConversationSessionSummary> Archived,
@@ -433,6 +453,15 @@ public sealed record ModelTestRequest(
   string Model
 );
 
+public sealed record ModelConformanceBenchmarkRequest(
+  string Model,
+  bool RestoreResidentModel = true
+);
+
+public sealed record PortableYamlSettingsRequest(
+  string Yaml
+);
+
 public sealed record ModelTestResult(
   string Model,
   bool Connected,
@@ -441,6 +470,15 @@ public sealed record ModelTestResult(
   string CompletionStatus,
   string? TraceId,
   string? Error
+);
+
+public sealed record ModelConformanceBenchmarkResult(
+  bool Passed,
+  string Model,
+  string Digest,
+  string OllamaVersion,
+  long DurationMilliseconds,
+  string? Failure
 );
 
 public sealed record ChatStreamEvent(

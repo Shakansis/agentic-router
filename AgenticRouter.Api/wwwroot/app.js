@@ -19,7 +19,18 @@ const state = {
   validationProfiles: null,
   sessions: null,
   conversationSessionId: null,
+  conversationState: "completed",
+  persistenceStatus: "Unsaved",
+  pendingConversationAction: null,
+  conversationTransitioning: false,
   browserSessionId: createSessionId(),
+  git: null,
+  activeGitView: "current-session",
+  activeGitDiff: null,
+  latestExecutionSessionId: null,
+  settingsDirty: false,
+  settingsSection: "general",
+  workspaceSaving: false,
   activeReview: null,
   activeDelivery: null,
   pendingDeliveryAction: null,
@@ -45,6 +56,7 @@ async function initialize() {
   }
 
   await refreshRuntimeStatus();
+  await ensureConversationIdentity();
   scheduleRuntimeRefresh();
   elements.messageInput.focus();
 }
@@ -70,6 +82,11 @@ function bindElements() {
     "settings-dialog",
     "settings-form",
     "settings-errors",
+    "settings-dirty",
+    "settings-navigation",
+    "settings-section-select",
+    "settings-content",
+    "save-settings",
     "save-status",
     "intentions-grid",
     "ollama-url",
@@ -97,7 +114,14 @@ function bindElements() {
     "approval-policy",
     "workspace-badge",
     "workspace-path",
+    "git-card",
+    "git-badge",
+    "git-summary",
+    "git-upstream-summary",
     "session-history",
+    "conversation-persistence",
+    "conversation-persistence-sidebar",
+    "enable-session-history",
     "recent-sessions",
     "archived-session-section",
     "archived-sessions",
@@ -105,6 +129,12 @@ function bindElements() {
     "workspace-dialog",
     "workspace-form",
     "workspace-profile-list",
+    "saved-workspaces-section",
+    "add-workspace",
+    "new-workspace-section",
+    "new-workspace-accordion",
+    "cancel-new-workspace",
+    "workspace-submit",
     "workspace-profile-name",
     "trusted-workspace-path",
     "workspace-validation",
@@ -112,13 +142,16 @@ function bindElements() {
     "clear-workspace",
     "pick-workspace",
     "workspace-history-enabled",
+    "local-history-section",
     "history-usage",
     "delete-archived-sessions",
     "delete-all-sessions",
     "project-profile-summary",
     "project-profile-details",
+    "project-profile-section",
     "refresh-project-profile",
     "detected-validation-profile",
+    "validation-profile-section",
     "validation-profile-name",
     "validation-steps",
     "add-validation-step",
@@ -133,7 +166,47 @@ function bindElements() {
     "dismiss-change-review",
     "undo-execution",
     "validate-changes",
-    "undo-status"
+    "undo-status",
+    "settings-workspace-summary",
+    "settings-git-summary",
+    "settings-validation-summary",
+    "settings-advanced-summary",
+    "settings-yaml",
+    "settings-yaml-file",
+    "settings-yaml-status",
+    "refresh-settings-yaml",
+    "open-settings-yaml-file",
+    "copy-settings-yaml",
+    "download-settings-yaml",
+    "import-settings-yaml",
+    "settings-open-workspace",
+    "settings-open-recent",
+    "settings-open-git",
+    "settings-open-validation",
+    "git-dialog",
+    "close-git",
+    "dismiss-git",
+    "git-panel-status",
+    "git-overview",
+    "git-initialize-panel",
+    "initialize-git",
+    "refresh-git",
+    "git-file-list",
+    "git-diff-metadata",
+    "git-diff-content",
+    "git-user-name",
+    "git-user-name-scope",
+    "git-user-email",
+    "git-user-email-scope",
+    "save-git-user-name",
+    "save-git-user-email",
+    "git-remotes",
+    "git-open-review",
+    "git-action-status",
+    "new-conversation-dialog",
+    "new-conversation-enable-history",
+    "new-conversation-discard",
+    "new-conversation-cancel"
   ]) {
     elements[toCamelCase(id)] = document.querySelector(`#${id}`);
   }
@@ -148,13 +221,15 @@ function bindEvents() {
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
-  elements.newConversation.addEventListener("click", startNewConversation);
-  elements.historyNewConversation.addEventListener("click", startNewConversation);
+  elements.newConversation.addEventListener("click", requestNewConversation);
+  elements.historyNewConversation.addEventListener("click", requestNewConversation);
   elements.modelSelector.addEventListener("change", handleModelSelectionChange);
   elements.modelLock.addEventListener("change", handleModelLockChange);
   elements.testModel.addEventListener("click", testSelectedModel);
   elements.approvalPolicy.addEventListener("change", handleApprovalPolicyChange);
   elements.workspaceForm.addEventListener("submit", saveWorkspace);
+  elements.addWorkspace.addEventListener("click", showNewWorkspaceForm);
+  elements.cancelNewWorkspace.addEventListener("click", hideNewWorkspaceForm);
   elements.clearWorkspace.addEventListener("click", clearWorkspace);
   elements.pickWorkspace.addEventListener("click", pickWorkspace);
   elements.workspaceHistoryEnabled.addEventListener(
@@ -190,11 +265,69 @@ function bindEvents() {
   elements.dismissChangeReview.addEventListener("click", closeChangeReview);
   elements.undoExecution.addEventListener("click", undoExecution);
   elements.validateChanges.addEventListener("click", validateChanges);
+  elements.gitCard.addEventListener("click", openGitPanel);
+  elements.closeGit.addEventListener("click", closeGitPanel);
+  elements.dismissGit.addEventListener("click", closeGitPanel);
+  elements.refreshGit.addEventListener("click", refreshGitPanel);
+  elements.initializeGit.addEventListener("click", initializeGitRepository);
+  elements.saveGitUserName.addEventListener(
+    "click",
+    () => saveGitIdentity("user.name")
+  );
+  elements.saveGitUserEmail.addEventListener(
+    "click",
+    () => saveGitIdentity("user.email")
+  );
+  elements.gitOpenReview.addEventListener("click", openLatestChangeReview);
+  document.querySelectorAll("[data-git-view]").forEach(
+    button => button.addEventListener("click", selectGitView)
+  );
+  elements.enableSessionHistory.addEventListener(
+    "click",
+    enableHistoryForCurrentWorkspace
+  );
+  elements.newConversationEnableHistory.addEventListener(
+    "click",
+    saveUnsavedConversationAndContinue
+  );
+  elements.newConversationDiscard.addEventListener(
+    "click",
+    discardUnsavedConversationAndContinue
+  );
+  elements.newConversationCancel.addEventListener(
+    "click",
+    cancelConversationTransition
+  );
+  elements.settingsNavigation.querySelectorAll("[data-settings-target]").forEach(
+    button => button.addEventListener("click", selectSettingsSection)
+  );
+  elements.settingsSectionSelect.addEventListener(
+    "change",
+    event => setSettingsSection(event.target.value, true)
+  );
+  elements.settingsForm.addEventListener("input", handleSettingsInput);
+  elements.settingsDialog.addEventListener("cancel", handleSettingsCancel);
+  elements.settingsOpenWorkspace.addEventListener("click", openWorkspaceFromSettings);
+  elements.settingsOpenRecent.addEventListener("click", openRecentFromSettings);
+  elements.settingsOpenGit.addEventListener("click", openGitFromSettings);
+  elements.settingsOpenValidation.addEventListener("click", openValidationFromSettings);
+  elements.refreshSettingsYaml.addEventListener("click", loadPortableYaml);
+  elements.openSettingsYamlFile.addEventListener(
+    "click",
+    () => elements.settingsYamlFile.click()
+  );
+  elements.settingsYamlFile.addEventListener("change", loadPortableYamlFile);
+  elements.copySettingsYaml.addEventListener("click", copyPortableYaml);
+  elements.downloadSettingsYaml.addEventListener("click", downloadPortableYaml);
+  elements.importSettingsYaml.addEventListener("click", importPortableYaml);
   document.querySelectorAll(".mode-option").forEach(
     button => button.addEventListener("click", handleModeChange)
   );
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  document.querySelector("#open-settings").addEventListener("click", openSettings);
+  document.querySelector("#open-settings").addEventListener(
+    "click",
+    () => openSettings()
+  );
   document.querySelector("#close-settings").addEventListener("click", closeSettings);
   document.querySelector("#cancel-settings").addEventListener("click", closeSettings);
   document.querySelector("#open-workspace").addEventListener("click", openWorkspace);
@@ -249,6 +382,7 @@ async function loadApplicationState() {
   renderValidationProfile();
   updateInteractionControls();
   await refreshSessions();
+  await refreshGit();
 }
 
 function updateProviderStatus(response) {
@@ -303,6 +437,402 @@ function shortenPath(path) {
   }
 
   return `…${path.slice(-45)}`;
+}
+
+async function refreshGit() {
+  if (!activeWorkspaceProfile()) {
+    state.git = {
+      state: "unavailable",
+      diagnostic: "No active trusted workspace.",
+      repository: null,
+      currentSessionPaths: [],
+      remotes: []
+    };
+    renderGitCard();
+    renderSettingsSummaries();
+    return;
+  }
+
+  try {
+    state.git = await fetchJson("/api/git");
+  } catch (error) {
+    state.git = {
+      state: "unavailable",
+      diagnostic: error.message,
+      repository: null,
+      currentSessionPaths: [],
+      remotes: []
+    };
+  }
+
+  renderGitCard();
+  renderSettingsSummaries();
+
+  if (elements.gitDialog.open) {
+    renderGitPanel();
+  }
+}
+
+function renderGitCard() {
+  const git = state.git;
+  const repository = git?.repository;
+  elements.gitCard.classList.toggle(
+    "has-conflicts",
+    (repository?.conflictedPaths?.length ?? 0) > 0
+  );
+  elements.gitCard.classList.toggle(
+    "detached",
+    Boolean(repository?.detachedHead)
+  );
+
+  if (git?.state === "available" && repository) {
+    const changes = new Set([
+      ...repository.stagedPaths,
+      ...repository.unstagedPaths,
+      ...repository.untrackedPaths
+    ]).size;
+    const branch = repository.detachedHead
+      ? `detached ${shortHash(repository.head)}`
+      : repository.branch ?? "unborn";
+    elements.gitBadge.textContent = repository.conflictedPaths.length > 0
+      ? "Conflicts"
+      : repository.clean
+        ? "Clean"
+        : `${changes} changes`;
+    elements.gitBadge.className =
+      `badge ${repository.conflictedPaths.length > 0 ? "error" : repository.clean ? "success" : "muted"}`;
+    elements.gitSummary.textContent =
+      `${branch} · ${repository.clean ? "clean" : `${changes} changes`}`;
+    elements.gitUpstreamSummary.textContent = repository.upstream
+      ? `${repository.upstream} · ahead ${repository.ahead} · behind ${repository.behind}`
+      : "No upstream";
+    elements.gitCard.setAttribute(
+      "aria-label",
+      `Git repository. ${branch}. ${changes} changes. `
+        + `${repository.conflictedPaths.length} conflicts. `
+        + `${repository.upstream ?? "No upstream"}. `
+        + `Ahead ${repository.ahead}, behind ${repository.behind}.`
+    );
+    return;
+  }
+
+  const notInitialized = git?.state === "not-initialized";
+  elements.gitBadge.textContent = notInitialized ? "Not initialized" : "Unavailable";
+  elements.gitBadge.className = `badge ${notInitialized ? "muted" : "error"}`;
+  elements.gitSummary.textContent = notInitialized
+    ? "Not initialized"
+    : "Unavailable";
+  elements.gitUpstreamSummary.textContent =
+    git?.diagnostic ?? "Open the Git panel for details.";
+  elements.gitCard.setAttribute(
+    "aria-label",
+    `Git: ${elements.gitSummary.textContent}. ${elements.gitUpstreamSummary.textContent}`
+  );
+}
+
+async function openGitPanel() {
+  elements.gitActionStatus.textContent = "";
+  await refreshGit();
+  renderGitPanel();
+  elements.gitDialog.showModal();
+  elements.closeGit.focus();
+
+  if (state.git?.state === "available") {
+    await loadGitDiff(state.activeGitView);
+  }
+}
+
+function closeGitPanel() {
+  elements.gitDialog.close();
+  elements.gitCard.focus();
+}
+
+async function refreshGitPanel() {
+  elements.gitActionStatus.textContent = "Refreshing…";
+  await refreshGit();
+  renderGitPanel();
+  if (state.git?.state === "available") {
+    await loadGitDiff(state.activeGitView);
+  }
+  elements.gitActionStatus.textContent = "Git status refreshed.";
+}
+
+function renderGitPanel() {
+  const git = state.git;
+  const repository = git?.repository;
+  elements.gitPanelStatus.textContent = git?.diagnostic
+    ?? (git?.state === "available"
+      ? "Repository state refreshed by the Host."
+      : "Git state unavailable.");
+  elements.gitOverview.replaceChildren();
+
+  const facts = git?.state === "available" && repository
+    ? [
+      ["Repository root", repository.repositoryRoot ?? "."],
+      ["Branch", repository.detachedHead ? "detached HEAD" : repository.branch ?? "unborn"],
+      ["HEAD", shortHash(repository.head)],
+      ["Latest commit", git.latestCommit
+        ? `${shortHash(git.latestCommit.hash)} · ${git.latestCommit.subject}`
+        : "No commits"],
+      ["Latest timestamp", git.latestCommit?.authoredAt
+        ? new Date(git.latestCommit.authoredAt).toLocaleString()
+        : "Unavailable"],
+      ["Working state", repository.clean ? "clean" : "dirty"],
+      ["Upstream", repository.upstream ?? "Not configured"],
+      ["Ahead / behind", `${repository.ahead} / ${repository.behind}`],
+      ["Operation", repository.operationInProgress ?? "none"],
+      ["Git executable", git.executablePath ?? "Unavailable"],
+      ["Git version", git.version ?? "Unavailable"],
+      ["Default branch", git.defaultBranch ?? "Not configured"]
+    ]
+    : [
+      ["State", git?.state ?? "unavailable"],
+      ["Git executable", git?.executablePath ?? "Unavailable"],
+      ["Git version", git?.version ?? "Unavailable"],
+      ["Default branch", git?.defaultBranch ?? "Not configured"]
+    ];
+  for (const [label, value] of facts) {
+    const item = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    description.title = value;
+    item.append(term, description);
+    elements.gitOverview.append(item);
+  }
+
+  elements.gitInitializePanel.hidden = git?.state !== "not-initialized";
+  const available = git?.state === "available";
+  elements.gitUserName.disabled = !available;
+  elements.gitUserEmail.disabled = !available;
+  elements.saveGitUserName.disabled = !available;
+  elements.saveGitUserEmail.disabled = !available;
+  elements.gitUserName.value = git?.userName?.value ?? "";
+  elements.gitUserEmail.value = git?.userEmail?.value ?? "";
+  elements.gitUserNameScope.textContent =
+    `Effective scope: ${git?.userName?.scope ?? "unset"}`;
+  elements.gitUserEmailScope.textContent =
+    `Effective scope: ${git?.userEmail?.scope ?? "unset"}`;
+  elements.gitRemotes.replaceChildren();
+  for (const remote of git?.remotes ?? []) {
+    const row = document.createElement("div");
+    row.className = "git-remote-row";
+    const name = document.createElement("strong");
+    name.textContent = remote.name;
+    const url = document.createElement("code");
+    url.textContent = remote.fetchUrl;
+    row.append(name, url);
+    elements.gitRemotes.append(row);
+  }
+  if ((git?.remotes?.length ?? 0) === 0) {
+    elements.gitRemotes.textContent = "No remotes configured.";
+  }
+  elements.gitOpenReview.disabled = !state.latestExecutionSessionId;
+}
+
+async function initializeGitRepository() {
+  if (state.interactionMode !== "execute") {
+    elements.gitActionStatus.textContent =
+      "Switch to Execute mode before initializing Git.";
+    return;
+  }
+  const facts = "Initialize Git repository at the trusted-workspace root.\n"
+    + "Initial branch: main\nNo commit, staging, remote, or project file will be created.";
+  if (!window.confirm(facts)) {
+    return;
+  }
+
+  try {
+    state.git = await fetchJson(
+      "/api/git/initialize",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          interactionMode: state.interactionMode,
+          actionId: state.git.initializeActionId,
+          confirmed: true
+        })
+      }
+    );
+    state.projectProfile = await fetchJson(
+      "/api/workspace/project-profile/refresh",
+      {
+        method: "POST"
+      }
+    );
+    renderProjectProfile();
+    renderGitCard();
+    renderGitPanel();
+    elements.gitActionStatus.textContent =
+      "Repository initialized on main. No commit or remote was created.";
+    await loadGitDiff("working-tree");
+  } catch (error) {
+    elements.gitActionStatus.textContent =
+      `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+  }
+}
+
+async function saveGitIdentity(field) {
+  if (state.interactionMode !== "execute") {
+    elements.gitActionStatus.textContent =
+      "Switch to Execute mode before changing repository identity.";
+    return;
+  }
+  const input = field === "user.name"
+    ? elements.gitUserName
+    : elements.gitUserEmail;
+  const value = input.value.trim();
+
+  try {
+    const preview = await fetchJson(
+      "/api/git/identity/preview",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          field,
+          value
+        })
+      }
+    );
+    if (!window.confirm(
+      `Write repository-local ${field} = "${preview.value}"?\n`
+      + "Global Git configuration will not be changed."
+    )) {
+      return;
+    }
+    state.git = await fetchJson(
+      "/api/git/identity",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          interactionMode: state.interactionMode,
+          actionId: preview.actionId,
+          confirmed: true,
+          field,
+          value: preview.value
+        })
+      }
+    );
+    renderGitCard();
+    renderGitPanel();
+    renderSettingsSummaries();
+    elements.gitActionStatus.textContent =
+      `${field} saved in repository-local configuration.`;
+  } catch (error) {
+    elements.gitActionStatus.textContent =
+      `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+  }
+}
+
+function selectGitView(event) {
+  state.activeGitView = event.currentTarget.dataset.gitView;
+  document.querySelectorAll("[data-git-view]").forEach(
+    button => button.setAttribute(
+      "aria-selected",
+      String(button === event.currentTarget)
+    )
+  );
+  void loadGitDiff(state.activeGitView);
+}
+
+async function loadGitDiff(view) {
+  state.activeGitView = view;
+  elements.gitDiffContent.textContent = "Loading bounded diff…";
+  elements.gitDiffMetadata.textContent = "";
+
+  try {
+    state.activeGitDiff = await fetchJson(
+      "/api/git/diff",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          view,
+          paths: []
+        })
+      }
+    );
+    renderGitDiff();
+  } catch (error) {
+    state.activeGitDiff = null;
+    elements.gitFileList.replaceChildren();
+    elements.gitDiffContent.textContent = error.message;
+    elements.gitDiffMetadata.textContent =
+      error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : "";
+  }
+}
+
+function renderGitDiff() {
+  const files = state.activeGitDiff?.files ?? [];
+  elements.gitFileList.replaceChildren();
+  elements.gitDiffMetadata.textContent = files.length === 0
+    ? state.activeGitView === "last-commit" && !state.git?.latestCommit
+      ? "No commit exists yet; an initial-tree diff is unavailable."
+      : "No files in this view."
+    : `${files.length} file(s)${state.activeGitDiff.truncated ? " · truncated" : ""}`;
+  elements.gitDiffContent.textContent = files.length === 0
+    ? "No diff available."
+    : "Select a file to expand its diff.";
+
+  for (const file of files) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-expanded", "false");
+    const type = document.createElement("span");
+    type.textContent = file.binary ? "BIN" : file.changeType.slice(0, 1).toUpperCase();
+    const path = document.createElement("span");
+    path.className = "git-file-path";
+    path.textContent = file.path;
+    path.title = file.path;
+    const flags = document.createElement("span");
+    flags.textContent = file.truncated ? "truncated" : "";
+    button.append(type, path, flags);
+    button.addEventListener(
+      "click",
+      () => {
+        const expanded = button.getAttribute("aria-expanded") === "true";
+        elements.gitFileList.querySelectorAll("button").forEach(
+          item => {
+            item.setAttribute("aria-expanded", "false");
+            item.removeAttribute("aria-current");
+          }
+        );
+        if (expanded) {
+          elements.gitDiffContent.textContent = "Diff collapsed.";
+          return;
+        }
+        button.setAttribute("aria-expanded", "true");
+        button.setAttribute("aria-current", "true");
+        elements.gitDiffMetadata.textContent =
+          `${file.path} · ${file.changeType}`
+          + `${file.binary ? " · binary" : ""}`
+          + `${file.truncated ? " · truncated" : ""}`;
+        elements.gitDiffContent.textContent = file.content || "[empty diff]";
+      }
+    );
+    elements.gitFileList.append(button);
+  }
+}
+
+function openLatestChangeReview() {
+  if (state.latestExecutionSessionId) {
+    closeGitPanel();
+    void openChangeReview(state.latestExecutionSessionId);
+  }
 }
 
 function renderWorkspaceProfiles() {
@@ -372,25 +902,31 @@ async function refreshWorkspaceState() {
   renderProjectProfile();
   renderValidationProfile();
   await refreshSessions();
+  await refreshGit();
 }
 
 async function activateWorkspace(id) {
-  elements.workspaceSaveStatus.textContent = "Ativando…";
+  await requestConversationTransition(
+    async () =>
+    {
+      elements.workspaceSaveStatus.textContent = "Ativando…";
 
-  try {
-    await fetchJson(
-      `/api/workspaces/${encodeURIComponent(id)}/activate`,
-      {
-        method: "POST"
+      try {
+        await fetchJson(
+          `/api/workspaces/${encodeURIComponent(id)}/activate`,
+          {
+            method: "POST"
+          }
+        );
+        await resetConversationForWorkspaceChange();
+        await refreshWorkspaceState();
+        elements.workspaceSaveStatus.textContent =
+          "Workspace ativado. Modo Chat e aprovação manual restaurados.";
+      } catch (error) {
+        elements.workspaceSaveStatus.textContent = error.message;
       }
-    );
-    resetConversationForWorkspaceChange();
-    await refreshWorkspaceState();
-    elements.workspaceSaveStatus.textContent =
-      "Workspace ativado. Modo Chat e aprovação manual restaurados.";
-  } catch (error) {
-    elements.workspaceSaveStatus.textContent = error.message;
-  }
+    }
+  );
 }
 
 async function renameWorkspace(profile) {
@@ -412,6 +948,13 @@ async function renameWorkspace(profile) {
       }
     );
     await refreshWorkspaceState();
+    setPersistenceStatus(
+      enabled
+        ? hasMeaningfulConversation()
+          ? "Unsaved"
+          : "Saved locally"
+        : "History disabled"
+    );
   } catch (error) {
     elements.workspaceSaveStatus.textContent = error.message;
   }
@@ -434,7 +977,7 @@ async function removeWorkspace(profile) {
     );
 
     if (profile.active) {
-      resetConversationForWorkspaceChange();
+      await resetConversationForWorkspaceChange();
     }
 
     await refreshWorkspaceState();
@@ -457,7 +1000,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.0."
+        + "pelo Agentic Router v0.9.1."
     )
   ) {
     event.currentTarget.checked = false;
@@ -482,8 +1025,11 @@ async function changeWorkspaceHistory(event) {
   }
 }
 
-function resetConversationForWorkspaceChange() {
-  startNewConversation();
+async function resetConversationForWorkspaceChange() {
+  clearConversationUi();
+  state.browserSessionId = createSessionId();
+  state.conversationSessionId = null;
+  state.latestExecutionSessionId = null;
   state.interactionMode = "chat";
   state.approvalPolicy = "ask";
   state.lockedModel = null;
@@ -491,6 +1037,7 @@ function resetConversationForWorkspaceChange() {
   elements.modelLock.checked = false;
   updateInteractionControls();
   updateModelLockControls();
+  await ensureConversationIdentity();
 }
 
 function renderProjectProfile() {
@@ -548,6 +1095,7 @@ async function refreshProjectProfile() {
     );
     renderProjectProfile();
     renderValidationProfile();
+    await refreshGit();
   } catch (error) {
     elements.projectProfileSummary.textContent = error.message;
   } finally {
@@ -753,22 +1301,56 @@ async function clearValidationProfile() {
 function openWorkspace() {
   elements.workspaceSaveStatus.textContent = "";
   renderWorkspace();
-  elements.workspaceProfileName.value = "";
-  elements.trustedWorkspacePath.value = "";
+  elements.savedWorkspacesSection.open = true;
+  elements.localHistorySection.open = true;
+  elements.projectProfileSection.open = false;
+  elements.validationProfileSection.open = false;
+  hideNewWorkspaceForm();
   elements.workspaceDialog.showModal();
-  elements.workspaceProfileName.focus();
+  elements.addWorkspace.focus();
 }
 
 function closeWorkspace() {
+  hideNewWorkspaceForm();
   elements.workspaceDialog.close();
+}
+
+function showNewWorkspaceForm() {
+  elements.newWorkspaceSection.hidden = false;
+  elements.newWorkspaceAccordion.open = true;
+  elements.workspaceProfileName.value = "";
+  elements.trustedWorkspacePath.value = "";
+  elements.workspaceValidation.textContent = "Selecione uma pasta confiável.";
+  elements.workspaceValidation.className = "workspace-validation";
+  elements.workspaceSaveStatus.textContent = "";
+  elements.newWorkspaceSection.scrollIntoView({
+    block: "nearest"
+  });
+  elements.workspaceProfileName.focus();
+}
+
+function hideNewWorkspaceForm() {
+  elements.newWorkspaceSection.hidden = true;
+  elements.workspaceProfileName.value = "";
+  elements.trustedWorkspacePath.value = "";
+  renderWorkspace();
 }
 
 async function saveWorkspace(event) {
   event.preventDefault();
+  if (
+    state.workspaceSaving
+    || elements.newWorkspaceSection.hidden
+  ) {
+    return;
+  }
   const path = elements.trustedWorkspacePath.value.trim();
   const name = elements.workspaceProfileName.value.trim()
     || path.split(/[\\/]/).filter(Boolean).at(-1)
     || "Workspace";
+  setWorkspaceSaving(
+    true
+  );
   elements.workspaceSaveStatus.textContent = "Validando…";
 
   try {
@@ -793,16 +1375,27 @@ async function saveWorkspace(event) {
         }
       );
     }
-    resetConversationForWorkspaceChange();
+    await resetConversationForWorkspaceChange();
     await refreshWorkspaceState();
     elements.workspaceSaveStatus.textContent = "Workspace adicionado e ativado";
-    elements.workspaceProfileName.value = "";
-    elements.trustedWorkspacePath.value = "";
+    hideNewWorkspaceForm();
   } catch (error) {
     elements.workspaceValidation.textContent = error.message;
     elements.workspaceValidation.className = "workspace-validation invalid";
     elements.workspaceSaveStatus.textContent = "Não foi possível salvar";
+  } finally {
+    setWorkspaceSaving(
+      false
+    );
   }
+}
+
+function setWorkspaceSaving(isSaving) {
+  state.workspaceSaving = isSaving;
+  elements.workspaceProfileName.disabled = isSaving;
+  elements.trustedWorkspacePath.disabled = isSaving;
+  elements.pickWorkspace.disabled = isSaving;
+  elements.workspaceSubmit.disabled = isSaving;
 }
 
 async function pickWorkspace() {
@@ -878,6 +1471,8 @@ function renderSessionHistory() {
         ? ` · mais recente ${new Date(usage.newestSessionAt).toLocaleDateString()}`
         : ""}`
     : "Nenhuma sessão armazenada.";
+  elements.enableSessionHistory.hidden = Boolean(usage?.enabled);
+  renderPersistenceStatus();
 
   for (const session of state.sessions?.recent ?? []) {
     elements.recentSessions.append(
@@ -893,12 +1488,18 @@ function renderSessionHistory() {
 
   elements.archivedSessionSection.hidden =
     (state.sessions?.archived?.length ?? 0) === 0;
+  renderSettingsSummaries();
 }
 
 function createSessionEntry(session) {
   const entry = document.createElement("article");
-  entry.className = "session-entry";
+  const current = state.conversationSessionId === session.id;
+  entry.className = `session-entry${current ? " current" : ""}`;
   entry.dataset.sessionId = session.id;
+  entry.setAttribute(
+    "aria-current",
+    current ? "true" : "false"
+  );
   const title = document.createElement("strong");
   title.textContent = session.title;
   const metadata = document.createElement("small");
@@ -907,6 +1508,7 @@ function createSessionEntry(session) {
   const status = document.createElement("small");
   status.className = session.interrupted ? "session-interrupted" : "";
   status.textContent = [
+    current ? "atual" : null,
     session.interrupted ? "interrompida" : null,
     session.archived ? "arquivada" : null
   ].filter(Boolean).join(" · ");
@@ -945,52 +1547,69 @@ function createSessionEntry(session) {
 }
 
 async function resumeSession(id) {
-  if (
-    state.requestController
-    || !window.confirm(
-      "Retomar esta conversa? Modo Chat, aprovação manual e modelo não fixado serão restaurados."
-    )
-  ) {
-    return;
-  }
-
-  startNewConversation();
-
-  try {
-    const session = await fetchJson(
-      `/api/sessions/${encodeURIComponent(id)}/resume`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          browserSessionId: state.browserSessionId
-        })
+  await requestConversationTransition(
+    async () =>
+    {
+      if (!window.confirm(
+        "Retomar esta conversa? Modo Chat, aprovação manual e modelo não fixado serão restaurados."
+      )) {
+        return;
       }
-    );
-    state.conversationSessionId = session.id;
-    state.history = session.messages.map(
-      message => ({
-        role: message.role,
-        content: message.content
-      })
-    );
-    state.interactionMode = "chat";
-    state.approvalPolicy = "ask";
-    state.lockedModel = null;
-    elements.modelSelector.value = session.selectedModel
-      && state.models.some(model => model.name === session.selectedModel)
-      ? session.selectedModel
-      : "auto";
-    renderRestoredConversation(session);
-    updateInteractionControls();
-    updateModelLockControls();
-    updateComposerStatus();
-    elements.workspaceDialog.close();
-  } catch (error) {
-    elements.workspaceSaveStatus.textContent = error.message;
-  }
+      const nextBrowserSessionId = createSessionId();
+
+      try {
+        const session = await fetchJson(
+          `/api/sessions/${encodeURIComponent(id)}/resume`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              browserSessionId: nextBrowserSessionId
+            })
+          }
+        );
+        clearConversationUi();
+        state.browserSessionId = nextBrowserSessionId;
+        state.conversationSessionId = session.id;
+        state.history = session.messages.map(
+          message => ({
+            role: message.role,
+            content: message.content
+          })
+        );
+        state.conversationState = session.interrupted
+          ? "interrupted"
+          : session.state;
+        state.interactionMode = "chat";
+        state.approvalPolicy = "ask";
+        state.lockedModel = null;
+        elements.modelSelector.value = session.selectedModel
+          && state.models.some(model => model.name === session.selectedModel)
+          ? session.selectedModel
+          : "auto";
+        renderRestoredConversation(session);
+        setPersistenceStatus(
+          session.interrupted
+            ? "Interrupted"
+            : "Saved locally"
+        );
+        updateInteractionControls();
+        updateModelLockControls();
+        updateComposerStatus();
+        elements.workspaceDialog.close();
+        await refreshSessions();
+        await refreshGit();
+      } catch (error) {
+        setPersistenceStatus(
+          "Save failed"
+        );
+        elements.workspaceSaveStatus.textContent =
+          `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+      }
+    }
+  );
 }
 
 function renderRestoredConversation(session) {
@@ -1035,6 +1654,7 @@ function renderRestoredConversation(session) {
 
   if (session.executionReviews.length > 0) {
     const review = session.executionReviews.at(-1);
+    state.latestExecutionSessionId = review.summary.id;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary-button";
@@ -1096,7 +1716,7 @@ async function deleteSession(session) {
   );
 
   if (state.conversationSessionId === session.id) {
-    startNewConversation();
+    await beginEmptyConversation();
   }
 
   await refreshSessions();
@@ -1131,7 +1751,7 @@ async function deleteAllSessions() {
       method: "DELETE"
     }
   );
-  startNewConversation();
+  await beginEmptyConversation();
   await refreshSessions();
 }
 
@@ -1320,6 +1940,7 @@ function handleVisibilityChange() {
     clearTimeout(state.runtimeTimer);
   } else {
     refreshRuntimeStatus();
+    void refreshGit();
     scheduleRuntimeRefresh();
   }
 }
@@ -1372,12 +1993,52 @@ function renderSettings() {
   }
 
   renderModelDiagnostics();
+  renderSettingsSummaries();
+}
+
+function renderSettingsSummaries() {
+  if (!state.settings) {
+    return;
+  }
+
+  const active = activeWorkspaceProfile();
+  const usage = state.sessions?.usage;
+  elements.settingsWorkspaceSummary.textContent = active
+    ? `Active workspace: ${active.name}\n`
+      + `History: ${active.historyEnabled ? "enabled" : "disabled"}\n`
+      + `Stored sessions: ${usage?.sessionCount ?? 0}\n`
+      + `Storage: ${formatBytes(usage?.storageBytes ?? 0)}\n`
+      + `Retention: ${state.settings.sessionHistory.maxSessionsPerWorkspace} sessions, `
+      + `${formatBytes(state.settings.sessionHistory.maxSessionBytes)} each`
+    : "No active workspace.";
+  elements.settingsGitSummary.textContent = state.git?.state === "available"
+    ? `Repository: ${state.git.repository?.repositoryRoot ?? "."}\n`
+      + `Branch: ${state.git.repository?.detachedHead ? "detached HEAD" : state.git.repository?.branch ?? "unborn"}\n`
+      + `Upstream: ${state.git.repository?.upstream ?? "not configured"}\n`
+      + `Git: ${state.git.version ?? "unavailable"}\n`
+      + `Identity: ${state.git.userName?.scope ?? "unset"} / ${state.git.userEmail?.scope ?? "unset"}`
+    : state.git?.state === "not-initialized"
+      ? "Git repository is not initialized for this workspace."
+      : `Git unavailable: ${state.git?.diagnostic ?? "unknown"}`;
+  elements.settingsValidationSummary.textContent =
+    state.validationProfiles?.active
+      ? `Active profile: ${state.validationProfiles.active.name}\n`
+        + `${state.validationProfiles.active.steps.length} structured step(s)`
+      : state.validationProfiles?.detected
+        ? `Detected suggestion: ${state.validationProfiles.detected.name}\nNo user profile is active.`
+        : "No validation profile is configured or detected.";
+  elements.settingsAdvancedSummary.textContent =
+    `Git diff limit: ${formatBytes(state.settings.gitDelivery.maxDiffBytesPerFile)} per file\n`
+    + `Git log limit: ${state.settings.gitDelivery.maxLogEntries} entries\n`
+    + `Process history output: ${formatBytes(state.settings.sessionHistory.maxStoredProcessOutputBytesPerTurn)} per turn\n`
+    + `Execution tools: ${state.settings.execution.maxToolCallsPerTurn} per turn`;
 }
 
 function modelOptions() {
   return state.models.map(model => ({
     value: model.name,
-    label: model.name
+    label: model.name,
+    group: "Instalados"
   }));
 }
 
@@ -1474,17 +2135,55 @@ function replaceOptions(select, options, selected) {
   if (selected && !normalized.some(option => option.value === selected)) {
     normalized.push({
       value: selected,
-      label: `${selected} (indisponível)`
+      label: `${selected} (indisponível)`,
+      group: "Configuração atual"
     });
   }
 
+  const nodes = [];
+  const groups = new Map();
+
+  for (const option of normalized) {
+    let parent = null;
+
+    if (option.group) {
+      parent = groups.get(option.group);
+
+      if (!parent) {
+        parent = document.createElement("optgroup");
+        parent.label = option.group;
+        groups.set(
+          option.group,
+          parent
+        );
+        nodes.push(
+          parent
+        );
+      }
+    }
+
+    const element = document.createElement("option");
+    element.value = option.value;
+    element.textContent = option.label;
+    element.disabled = Boolean(option.disabled);
+
+    if (option.title) {
+      element.title = option.title;
+    }
+
+    if (parent) {
+      parent.append(
+        element
+      );
+    } else {
+      nodes.push(
+        element
+      );
+    }
+  }
+
   select.replaceChildren(
-    ...normalized.map(option => {
-      const element = document.createElement("option");
-      element.value = option.value;
-      element.textContent = option.label;
-      return element;
-    })
+    ...nodes
   );
   select.value = selected;
 }
@@ -1551,12 +2250,16 @@ async function testSelectedModel() {
   }
 }
 
-async function openSettings() {
+async function openSettings(section = "general") {
   elements.settingsErrors.hidden = true;
   elements.saveStatus.textContent = "";
   elements.modelTestResult.textContent = "";
   renderSettings();
   elements.settingsDialog.showModal();
+  state.settingsDirty = false;
+  updateSettingsDirtyState();
+  setSettingsSection(section, false);
+  document.querySelector(`[data-settings-target="${section}"]`)?.focus();
 
   try {
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
@@ -1564,10 +2267,23 @@ async function openSettings() {
   } catch (error) {
     elements.modelContextDiagnostic.textContent = error.message;
   }
+
+  await loadPortableYaml();
 }
 
 function closeSettings() {
+  if (
+    state.settingsDirty
+    && !window.confirm(
+      "Discard unsaved settings changes?"
+    )
+  ) {
+    return;
+  }
+  state.settingsDirty = false;
+  updateSettingsDirtyState();
   elements.settingsDialog.close();
+  document.querySelector("#open-settings").focus();
 }
 
 async function saveSettings(event) {
@@ -1626,6 +2342,8 @@ async function saveSettings(event) {
       }
     );
     elements.saveStatus.textContent = "Salvo";
+    state.settingsDirty = false;
+    updateSettingsDirtyState();
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
     renderSettings();
     elements.settingsDialog.close();
@@ -1640,7 +2358,254 @@ async function saveSettings(event) {
       : error.message;
     elements.settingsErrors.hidden = false;
     elements.saveStatus.textContent = "";
+    navigateToSettingsError(
+      Object.keys(errors ?? {})[0]
+    );
   }
+}
+
+function handleSettingsInput(event) {
+  if (
+    event.target.closest("[data-ignore-settings-dirty]")
+    ||
+    event.target.id === "model-test-selector"
+    || event.target.closest(".model-test-panel") && event.target.tagName === "BUTTON"
+  ) {
+    return;
+  }
+  state.settingsDirty = true;
+  updateSettingsDirtyState();
+}
+
+function updateSettingsDirtyState() {
+  elements.settingsDirty.textContent = state.settingsDirty
+    ? "Unsaved changes"
+    : "Sem alterações";
+  elements.settingsDirty.className =
+    `badge ${state.settingsDirty ? "error" : "muted"}`;
+  elements.saveSettings.disabled = !state.settingsDirty;
+}
+
+async function loadPortableYaml() {
+  elements.settingsYamlStatus.textContent = "Carregando configuração…";
+  elements.settingsYamlStatus.className = "portable-yaml-status";
+
+  try {
+    elements.settingsYaml.value = await fetchText("/api/settings/yaml");
+    elements.settingsYamlStatus.textContent = "Configuração atual carregada.";
+  } catch (error) {
+    elements.settingsYamlStatus.textContent = error.message;
+    elements.settingsYamlStatus.className = "portable-yaml-status error";
+  }
+}
+
+async function loadPortableYamlFile(event) {
+  const [file] = event.target.files;
+  event.target.value = "";
+
+  if (!file) {
+    return;
+  }
+
+  try {
+    elements.settingsYaml.value = await file.text();
+    elements.settingsYamlStatus.textContent = `${file.name} carregado. Revise e clique em Importar e aplicar.`;
+    elements.settingsYamlStatus.className = "portable-yaml-status";
+  } catch (error) {
+    elements.settingsYamlStatus.textContent = error.message;
+    elements.settingsYamlStatus.className = "portable-yaml-status error";
+  }
+}
+
+async function copyPortableYaml() {
+  await copyText(
+    elements.settingsYaml.value,
+    elements.copySettingsYaml,
+    "YAML copiado"
+  );
+  elements.settingsYamlStatus.textContent = "YAML copiado.";
+  elements.settingsYamlStatus.className = "portable-yaml-status success";
+}
+
+function downloadPortableYaml() {
+  const yaml = elements.settingsYaml.value;
+
+  if (!yaml.trim()) {
+    elements.settingsYamlStatus.textContent = "Não há YAML para baixar.";
+    elements.settingsYamlStatus.className = "portable-yaml-status error";
+    return;
+  }
+
+  const url = URL.createObjectURL(
+    new Blob(
+      [yaml],
+      {
+        type: "application/yaml;charset=utf-8"
+      }
+    )
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "agentic-router.yaml";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  elements.settingsYamlStatus.textContent = "Arquivo agentic-router.yaml preparado.";
+  elements.settingsYamlStatus.className = "portable-yaml-status success";
+}
+
+async function importPortableYaml() {
+  const yaml = elements.settingsYaml.value;
+
+  if (!yaml.trim()) {
+    elements.settingsYamlStatus.textContent = "Informe uma configuração YAML.";
+    elements.settingsYamlStatus.className = "portable-yaml-status error";
+    return;
+  }
+
+  if (
+    state.settingsDirty
+    && !window.confirm(
+      "A importação substituirá as alterações ainda não salvas deste formulário. Continuar?"
+    )
+  ) {
+    return;
+  }
+
+  elements.importSettingsYaml.disabled = true;
+  elements.settingsYamlStatus.textContent = "Validando e aplicando…";
+  elements.settingsYamlStatus.className = "portable-yaml-status";
+
+  try {
+    state.settings = await fetchJson(
+      "/api/settings/yaml",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          yaml
+        })
+      }
+    );
+    state.settingsDirty = false;
+    updateSettingsDirtyState();
+    renderSettings();
+    await loadPortableYaml();
+    elements.settingsYamlStatus.textContent = "Configuração YAML importada e aplicada.";
+    elements.settingsYamlStatus.className = "portable-yaml-status success";
+    await refreshRuntimeStatus();
+    scheduleRuntimeRefresh();
+  } catch (error) {
+    const errors = error.payload?.errors;
+    elements.settingsYamlStatus.textContent = errors
+      ? Object.entries(errors)
+        .flatMap(([field, messages]) => messages.map(message => `${field}: ${message}`))
+        .join("\n")
+      : error.message;
+    elements.settingsYamlStatus.className = "portable-yaml-status error";
+  } finally {
+    elements.importSettingsYaml.disabled = false;
+  }
+}
+
+function selectSettingsSection(event) {
+  setSettingsSection(
+    event.currentTarget.dataset.settingsTarget,
+    true
+  );
+}
+
+function setSettingsSection(section, moveFocus) {
+  const target = document.querySelector(
+    `[data-settings-section="${section}"]`
+  );
+  if (!target) {
+    return;
+  }
+  state.settingsSection = section;
+  elements.settingsSectionSelect.value = section;
+  elements.settingsDialog.dataset.section = section;
+  elements.settingsNavigation.querySelectorAll("[data-settings-target]").forEach(
+    button => button.setAttribute(
+      "aria-current",
+      button.dataset.settingsTarget === section ? "page" : "false"
+    )
+  );
+  target.scrollIntoView({
+    block: "start"
+  });
+  if (moveFocus) {
+    target.focus({
+      preventScroll: true
+    });
+  }
+}
+
+function navigateToSettingsError(field) {
+  const section = !field
+    ? "general"
+    : field.startsWith("ollama")
+      ? "ollama"
+      : field.startsWith("router") || field.startsWith("intentions")
+        ? "models"
+        : field.startsWith("coordinator")
+          ? "coordinator"
+          : field.startsWith("execution")
+            ? "execution"
+            : field.startsWith("runtime") || field.startsWith("context")
+              ? "runtime"
+              : field.startsWith("git")
+                ? "git"
+                : field.startsWith("session")
+                  ? "workspaces"
+                  : "general";
+  setSettingsSection(
+    section,
+    true
+  );
+  elements.settingsErrors.focus();
+}
+
+function handleSettingsCancel(event) {
+  event.preventDefault();
+  closeSettings();
+}
+
+function openWorkspaceFromSettings() {
+  state.settingsDirty = false;
+  updateSettingsDirtyState();
+  elements.settingsDialog.close();
+  openWorkspace();
+}
+
+function openRecentFromSettings() {
+  state.settingsDirty = false;
+  updateSettingsDirtyState();
+  elements.settingsDialog.close();
+  elements.sessionHistory.open = true;
+  elements.sessionHistory.scrollIntoView({
+    block: "nearest"
+  });
+  elements.historyNewConversation.focus();
+}
+
+function openGitFromSettings() {
+  state.settingsDirty = false;
+  updateSettingsDirtyState();
+  elements.settingsDialog.close();
+  void openGitPanel();
+}
+
+function openValidationFromSettings() {
+  state.settingsDirty = false;
+  updateSettingsDirtyState();
+  elements.settingsDialog.close();
+  openWorkspace();
+  elements.validationProfileSection.open = true;
+  elements.validationProfileName.focus();
 }
 
 function handleModelSelectionChange() {
@@ -1671,17 +2636,18 @@ function handleApprovalPolicyChange() {
 
 function updateInteractionControls() {
   const isStreaming = Boolean(state.requestController);
+  const disabled = isStreaming || state.conversationTransitioning;
   document.querySelectorAll(".mode-option").forEach(
     button => {
       const active = button.dataset.mode === state.interactionMode;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", String(active));
-      button.disabled = isStreaming;
+      button.disabled = disabled;
     }
   );
   elements.approvalPolicy.value = state.approvalPolicy;
   elements.approvalPolicy.disabled =
-    isStreaming || state.interactionMode !== "execute";
+    disabled || state.interactionMode !== "execute";
   elements.composer.classList.toggle(
     "execute-mode",
     state.interactionMode === "execute"
@@ -1704,10 +2670,12 @@ function handleModelLockChange() {
 }
 
 function updateModelLockControls() {
-  const isStreaming = Boolean(state.requestController);
+  const disabled = Boolean(
+    state.requestController
+  ) || state.conversationTransitioning;
   const isLocked = Boolean(state.lockedModel);
-  elements.modelSelector.disabled = isStreaming || isLocked;
-  elements.modelLock.disabled = isStreaming
+  elements.modelSelector.disabled = disabled || isLocked;
+  elements.modelLock.disabled = disabled
     || (!isLocked && elements.modelSelector.value === "auto");
   elements.modelLock.checked = isLocked;
   elements.composer.classList.toggle(
@@ -1716,21 +2684,166 @@ function updateModelLockControls() {
   );
 }
 
-function startNewConversation() {
-  if (
-    state.requestController
-    && !window.confirm(
-      "Cancelar a resposta atual e iniciar uma nova conversa?"
-    )
-  ) {
+async function ensureConversationIdentity() {
+  if (state.conversationSessionId) {
+    renderPersistenceStatus();
+    return true;
+  }
+
+  try {
+    const identity = await fetchJson(
+      "/api/sessions/new",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId
+        })
+      }
+    );
+    state.conversationSessionId = identity.sessionId;
+    setPersistenceStatus(identity.status);
+    return true;
+  } catch (error) {
+    setPersistenceStatus("Save failed");
+    elements.composerStatus.textContent =
+      `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+    return false;
+  }
+}
+
+async function requestNewConversation() {
+  await requestConversationTransition(
+    beginEmptyConversation
+  );
+}
+
+async function requestConversationTransition(action) {
+  if (state.requestController) {
+    elements.composerStatus.textContent =
+      "Finish or cancel the active turn before switching conversations.";
+    return;
+  }
+  if (state.conversationTransitioning) {
     return;
   }
 
+  setConversationTransitioning(
+    true
+  );
+  const historyEnabled = Boolean(
+    activeWorkspaceProfile()?.historyEnabled
+  );
+  if (historyEnabled) {
+    try {
+      if (!await saveCurrentConversation()) {
+        return;
+      }
+      await action();
+    } finally {
+      setConversationTransitioning(
+        false
+      );
+    }
+    return;
+  }
+
+  if (hasMeaningfulConversation()) {
+    state.pendingConversationAction = action;
+    elements.newConversationDialog.showModal();
+    elements.newConversationEnableHistory.focus();
+    return;
+  }
+
+  try {
+    await action();
+  } finally {
+    setConversationTransitioning(
+      false
+    );
+  }
+}
+
+function hasMeaningfulConversation() {
+  return state.history.length > 0
+    || Boolean(state.latestExecutionSessionId);
+}
+
+async function saveCurrentConversation() {
+  if (!state.conversationSessionId && !await ensureConversationIdentity()) {
+    return false;
+  }
+  if (!activeWorkspaceProfile()?.historyEnabled) {
+    setPersistenceStatus("History disabled");
+    return false;
+  }
+
+  setPersistenceStatus("Saving");
+
+  try {
+    const result = await fetchJson(
+      "/api/sessions/current",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          sessionId: state.conversationSessionId,
+          messages: state.history,
+          interactionMode: state.interactionMode,
+          selectedModel: state.lockedModel ?? elements.modelSelector.value,
+          state: state.conversationState
+        })
+      }
+    );
+    setPersistenceStatus(result.status);
+    await refreshSessions();
+    return true;
+  } catch (error) {
+    setPersistenceStatus("Save failed");
+    elements.composerStatus.textContent =
+      `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+    return false;
+  }
+}
+
+async function beginEmptyConversation() {
+  const nextBrowserSessionId = createSessionId();
+
+  try {
+    const identity = await fetchJson(
+      "/api/sessions/new",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          browserSessionId: nextBrowserSessionId
+        })
+      }
+    );
+    clearConversationUi();
+    state.browserSessionId = nextBrowserSessionId;
+    state.conversationSessionId = identity.sessionId;
+    state.conversationState = "completed";
+    state.latestExecutionSessionId = null;
+    setPersistenceStatus(identity.status);
+    await refreshSessions();
+    await refreshGit();
+  } catch (error) {
+    setPersistenceStatus("Save failed");
+    elements.composerStatus.textContent =
+      `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+  }
+}
+
+function clearConversationUi() {
   state.conversationVersion++;
-  state.browserSessionId = createSessionId();
-  state.requestController?.abort();
   state.history = [];
-  state.conversationSessionId = null;
   state.editingTurn = null;
   state.lockedModel = null;
   state.interactionMode = "chat";
@@ -1758,6 +2871,129 @@ function startNewConversation() {
   updateComposerStatus();
   updateJumpControl();
   elements.messageInput.focus();
+}
+
+async function enableHistoryForCurrentWorkspace() {
+  const active = activeWorkspaceProfile();
+  if (!active) {
+    return false;
+  }
+
+  try {
+    await fetchJson(
+      `/api/workspaces/${encodeURIComponent(active.id)}/history`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          enabled: true
+        })
+      }
+    );
+    await refreshWorkspaceState();
+    setPersistenceStatus(
+      hasMeaningfulConversation()
+        ? "Unsaved"
+        : "Saved locally"
+    );
+    return true;
+  } catch (error) {
+    setPersistenceStatus("Save failed");
+    elements.composerStatus.textContent = error.message;
+    return false;
+  }
+}
+
+async function saveUnsavedConversationAndContinue() {
+  const action = state.pendingConversationAction;
+  elements.newConversationDialog.close();
+  state.pendingConversationAction = null;
+  try {
+    if (
+      !action
+      || !await enableHistoryForCurrentWorkspace()
+      || !await saveCurrentConversation()
+    ) {
+      return;
+    }
+    await action();
+  } finally {
+    setConversationTransitioning(
+      false
+    );
+  }
+}
+
+async function discardUnsavedConversationAndContinue() {
+  const action = state.pendingConversationAction;
+  elements.newConversationDialog.close();
+  state.pendingConversationAction = null;
+  try {
+    if (action) {
+      await action();
+    }
+  } finally {
+    setConversationTransitioning(
+      false
+    );
+  }
+}
+
+function cancelConversationTransition() {
+  state.pendingConversationAction = null;
+  elements.newConversationDialog.close();
+  setConversationTransitioning(
+    false
+  );
+  elements.newConversation.focus();
+}
+
+function setConversationTransitioning(isTransitioning) {
+  state.conversationTransitioning = isTransitioning;
+  elements.newConversation.disabled = isTransitioning;
+  elements.historyNewConversation.disabled = isTransitioning;
+  elements.messageInput.disabled = isTransitioning;
+  elements.sendButton.disabled = isTransitioning;
+  updateInteractionControls();
+  updateModelLockControls();
+  if (
+    isTransitioning
+    || state.persistenceStatus !== "Save failed"
+  ) {
+    updateComposerStatus();
+  }
+}
+
+function setPersistenceStatus(status) {
+  state.persistenceStatus = status;
+  renderPersistenceStatus();
+}
+
+function renderPersistenceStatus() {
+  const historyEnabled = Boolean(
+    activeWorkspaceProfile()?.historyEnabled
+  );
+  const status = historyEnabled
+    ? state.persistenceStatus
+    : "History disabled";
+  const className = status === "Saved locally"
+    ? "saved"
+    : status === "Saving"
+      ? "saving"
+      : status === "Save failed"
+        ? "failed"
+        : status === "Interrupted"
+          ? "interrupted"
+          : "";
+  for (const element of [
+    elements.conversationPersistence,
+    elements.conversationPersistenceSidebar
+  ]) {
+    element.textContent = status;
+    element.className = `persistence-status ${className}`.trim();
+  }
 }
 
 function createEmptyState() {
@@ -1835,6 +3071,23 @@ async function handleComposerSubmit(event) {
     elements.composer.classList.remove("editing");
   }
 
+  const requestHistory = state.history.slice(
+    0,
+    historyIndex
+  );
+  state.history = [
+    ...requestHistory,
+    {
+      role: "user",
+      content: message
+    }
+  ];
+  state.conversationState = "running";
+  setPersistenceStatus(
+    activeWorkspaceProfile()?.historyEnabled
+      ? "Saving"
+      : "History disabled"
+  );
   appendUserMessage(
     message,
     historyIndex
@@ -1863,7 +3116,7 @@ async function handleComposerSubmit(event) {
         body: JSON.stringify({
           message,
           model: selectedModel,
-          history: state.history,
+          history: requestHistory,
           modelLocked: Boolean(state.lockedModel),
           interactionMode: state.interactionMode,
           approvalPolicy: state.approvalPolicy,
@@ -1886,18 +3139,17 @@ async function handleComposerSubmit(event) {
     ) {
       state.history.push(
         {
-          role: "user",
-          content: message
-        },
-        {
           role: "assistant",
           content: outcome.answer
         }
       );
+      state.conversationState = "completed";
       await refreshSessions();
+      await refreshGit();
     }
   } catch (error) {
     if (error.name === "AbortError") {
+      state.conversationState = "cancelled";
       addActivity(
         assistant,
         {
@@ -1913,6 +3165,7 @@ async function handleComposerSubmit(event) {
         assistant
       );
     } else {
+      state.conversationState = "failed";
       addActivity(
         assistant,
         {
@@ -1934,6 +3187,8 @@ async function handleComposerSubmit(event) {
       setStreamingState(false);
       await refreshRuntimeStatus();
       scheduleRuntimeRefresh();
+      await refreshSessions();
+      await refreshGit();
     }
 
     if (
@@ -2123,6 +3378,22 @@ async function consumeEventStream(stream, assistant) {
         assistant,
         streamEvent.executionSession
       );
+
+      if (
+        streamEvent.type === "session-created"
+        || streamEvent.type === "session-persisted"
+      ) {
+        setPersistenceStatus("Saved locally");
+      } else if (
+        streamEvent.type.startsWith("session-")
+        && (
+          streamEvent.type.includes("failed")
+          || streamEvent.type.includes("invalid")
+          || streamEvent.type.includes("too-large")
+        )
+      ) {
+        setPersistenceStatus("Save failed");
+      }
 
       if (streamEvent.type === "response.delta") {
         answer += streamEvent.delta ?? "";
@@ -2427,6 +3698,7 @@ function updateExecutionSession(assistant, session) {
   }
 
   assistant.executionSession = session;
+  state.latestExecutionSessionId = session.id;
   assistant.sessionHeader.hidden = false;
   assistant.sessionHeader.replaceChildren();
   const stateLabel = document.createElement("strong");
@@ -3186,6 +4458,7 @@ async function approveDeliveryAction() {
     elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
     elements.undoStatus.textContent =
       `Git ${pending.operation} completed and repository status refreshed.`;
+    await refreshGit();
   } catch (error) {
     elements.undoStatus.textContent = error.message;
   }
@@ -3836,6 +5109,8 @@ function setStreamingState(isStreaming) {
 function updateComposerStatus() {
   if (state.requestController) {
     elements.composerStatus.textContent = "Resposta em andamento";
+  } else if (state.conversationTransitioning) {
+    elements.composerStatus.textContent = "Switching conversation safely";
   } else if (state.editingTurn) {
     elements.composerStatus.textContent = "Editando mensagem · Esc para cancelar";
   } else if (state.lockedModel) {
@@ -3933,6 +5208,27 @@ async function fetchJson(url, options) {
     const error = new Error(payload?.message ?? `HTTP ${response.status}`);
     error.payload = payload;
     throw error;
+  }
+
+  return payload;
+}
+
+async function fetchText(url, options) {
+  const response = await fetch(url, options);
+  const payload = await response.text();
+
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+
+    try {
+      message = JSON.parse(payload)?.message ?? message;
+    } catch {
+      if (payload.trim()) {
+        message = payload.trim();
+      }
+    }
+
+    throw new Error(message);
   }
 
   return payload;

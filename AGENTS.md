@@ -91,6 +91,8 @@ Approvals are host decisions. Policies may auto-approve explicitly safe operatio
 
 Review changes may prepare an explicitly selected delivery for a valid Git repository inside the trusted workspace. The host may inspect bounded status, diff, log, and commit data, and may perform only structured staging, unstaging, commit, annotated-tag, current-upstream branch push, and exact-tag push operations.
 
+The main interface exposes host-authoritative Git status and bounded Current session, Working tree, Staged, and Last commit diffs. A non-repository workspace may be initialized at the trusted root on `main`, but only in Execute mode after immutable explicit approval. Initialization must not create a commit, stage files, or add a remote. Repository identity edits are limited to explicitly approved, repository-local `user.name` and `user.email`; remotes are read-only and credential-bearing URL components must be sanitized.
+
 Every Git write always requires immutable, action-specific user approval, including under the automatic approval policy. Pre-existing user changes remain separate and unselected by default. A commit requires an exact staged-set match and a passing validation bound to current file hashes, unless a permitted explicit override is approved. Commit, tag, branch-push, and tag-push facts remain distinct in session state.
 
 Never expose arbitrary Git arguments, force push, amend, reset, checkout, switch, clean, stash, pull, merge, rebase, cherry-pick, revert, remote mutation, branch mutation, tag deletion, or history rewriting. Once a session delivery is committed, internal undo must not contradict or rewrite repository history.
@@ -117,6 +119,8 @@ Configuration includes provider URL, router and coordinator models, intent profi
 
 Persist only the data the user has enabled. Do not expose secrets, raw provider payloads, full stack traces, or unrestricted local paths in browser-visible errors.
 
+Conversation identity is host-generated and stable for the lifetime of a conversation. When history is enabled, persist the current snapshot successfully before creating or resuming another session; a failed save must leave the visible conversation intact. When history is disabled, meaningful content requires an explicit choice to enable and save, discard, or cancel. Never auto-resume conversations, pending approvals, or processes.
+
 ## 9. Streaming and UI Contracts
 
 The frontend communicates only with the local API and must never call Ollama directly.
@@ -133,6 +137,8 @@ The chat remains the primary surface. Execute mode must additionally expose:
 - conflicts, recovery decisions, and undo availability.
 
 Keep keyboard and accessibility behavior intact: Enter sends, Shift+Enter inserts a line break, Escape closes dialogs, focus remains visible, and collapsible controls expose `aria-expanded`.
+
+Settings uses a near-full-viewport dialog with one dirty-state model, persistent save controls, desktop section navigation, and a compact responsive selector. Validation errors must focus the relevant section, and closing dirty settings requires explicit discard confirmation.
 
 Use plain HTML, CSS, and JavaScript. Do not add Node.js, npm, a bundler, or a frontend framework.
 
@@ -160,6 +166,8 @@ Preserve the original exception as the logged cause. Any fallback must be explic
 The automated suite contains end-to-end tests only.
 
 Use Playwright for .NET with MSTest to exercise the browser and running API together. The default suite may replace Ollama only at its external HTTP boundary with a deterministic fake. Do not mock internal controllers, routing, execution, persistence, or browser code.
+
+Before running any benchmark, smoke test, or other validation that invokes a real Ollama model, obtain explicit permission from the user for that run. The GPU may be occupied by unrelated work, which would make timing, loading, timeout, and memory-pressure evidence unreliable. Fake-Ollama E2E tests and read-only model discovery do not require this permission.
 
 Every E2E test has a maximum timeout of 60 seconds. Do not solve slow tests by raising that limit. Use Playwright assertions and event-based waiting, avoid arbitrary sleeps, and keep tests independent.
 

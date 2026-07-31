@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 using Microsoft.Playwright.MSTest;
 
@@ -76,6 +77,20 @@ public sealed class ChatEndToEndTests : PageTest
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LoadsVersionModelsAndCleanGpuNames()
   {
+    using var modelsResponse = await _environment.HttpClient.GetAsync(
+      "api/models"
+    );
+    modelsResponse.EnsureSuccessStatusCode();
+    using var modelsDocument = JsonDocument.Parse(
+      await modelsResponse.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      6,
+      modelsDocument.RootElement.GetProperty(
+        "models"
+      ).GetArrayLength()
+    );
+
     await Page.GotoAsync(
       "/"
     );
@@ -95,7 +110,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.0"
+      "v0.9.1"
     );
     await Expect(
       Page.Locator(
@@ -103,6 +118,13 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToHaveCountAsync(
       7
+    );
+    await Expect(
+      Page.Locator(
+        "#model-count"
+      )
+    ).ToHaveTextAsync(
+      "6 instalados"
     );
 
     using var response = await _environment.HttpClient.GetAsync(
@@ -154,6 +176,79 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExplicitConformanceBenchmarkUsesInstalledDigestAndTypedFailure()
+  {
+    using var passingResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      new
+      {
+        model = "alpha:latest",
+        restoreResidentModel = false
+      }
+    );
+    passingResponse.EnsureSuccessStatusCode();
+    var passing = await passingResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsTrue(
+      passing.GetProperty(
+        "passed"
+      ).GetBoolean()
+    );
+    Assert.AreEqual(
+      "alpha:latest",
+      passing.GetProperty(
+        "model"
+      ).GetString()
+    );
+    Assert.AreNotEqual(
+      "unknown",
+      passing.GetProperty(
+        "digest"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      "0.13.5-test",
+      passing.GetProperty(
+        "ollamaVersion"
+      ).GetString()
+    );
+    CollectionAssert.DoesNotContain(
+      _environment.FakeOllama.LoadedModels.ToArray(),
+      "router:latest"
+    );
+
+    using var failingResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      new
+      {
+        model = "unused:latest",
+        restoreResidentModel = true
+      }
+    );
+    failingResponse.EnsureSuccessStatusCode();
+    var failing = await failingResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsFalse(
+      failing.GetProperty(
+        "passed"
+      ).GetBoolean()
+    );
+    StringAssert.Contains(
+      failing.GetProperty(
+        "failure"
+      ).GetString(),
+      "invalid native tool call"
+    );
+    CollectionAssert.Contains(
+      _environment.FakeOllama.LoadedModels.ToArray(),
+      "router:latest"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CompactLayoutKeepsControlsIconsAndActiveAgentIdentity()
   {
     await Page.GotoAsync(
@@ -171,7 +266,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".status-icon"
       )
     ).ToHaveCountAsync(
-      4
+      5
     );
     await Expect(
       Page.Locator(
@@ -260,13 +355,8 @@ public sealed class ChatEndToEndTests : PageTest
     ).FillAsync(
       "1536"
     );
-    await Page.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Salvar",
-        Exact = true
-      }
+    await Page.Locator(
+      "#save-settings"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -366,6 +456,523 @@ public sealed class ChatEndToEndTests : PageTest
     CollectionAssert.Contains(
       _environment.FakeOllama.LoadedModels.ToArray(),
       "beta:code"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SettingsUseViewportNavigationDirtyProtectionAndResponsiveFocus()
+  {
+    await Page.SetViewportSizeAsync(
+      1280,
+      800
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await OpenSettingsAsync();
+    var bounds = await Page.Locator(
+      "#settings-dialog"
+    ).BoundingBoxAsync();
+    Assert.IsNotNull(
+      bounds
+    );
+    Assert.IsGreaterThan(
+      0.93 * 1280,
+      bounds.Width
+    );
+    Assert.IsLessThan(
+      0.97 * 1280,
+      bounds.Width
+    );
+    Assert.IsGreaterThan(
+      0.93 * 800,
+      bounds.Height
+    );
+    Assert.IsLessThanOrEqualTo(
+      0.96 * 800,
+      bounds.Height
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-navigation"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        ".settings-responsive-navigation"
+      )
+    ).ToBeHiddenAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-dialog .information-button"
+      )
+    ).ToHaveCountAsync(
+      5
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dialog .settings-note"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    var navigationTop = await Page.Locator(
+      "#settings-navigation"
+    ).EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().top"
+    );
+    var settingsFooter = Page.Locator(
+      "#settings-dialog .dialog-footer"
+    );
+    var settingsFooterTop = await settingsFooter.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().top"
+    );
+    await Page.Locator(
+      "#settings-content"
+    ).EvaluateAsync(
+      "element => element.scrollTop = element.scrollHeight"
+    );
+    Assert.AreEqual(
+      navigationTop,
+      await Page.Locator(
+        "#settings-navigation"
+      ).EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().top"
+      ),
+      1
+    );
+    Assert.AreEqual(
+      settingsFooterTop,
+      await settingsFooter.EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().top"
+      ),
+      1
+    );
+    Assert.AreEqual(
+      await Page.Locator(
+        "#settings-dialog"
+      ).EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().bottom"
+      ),
+      await settingsFooter.EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().bottom"
+      ),
+      1
+    );
+    await Page.Locator(
+      "[data-settings-target=\"git\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-settings-target=\"git\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-current",
+      "page"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-git-summary"
+      )
+    ).ToContainTextAsync(
+      "not initialized"
+    );
+
+    await Page.Locator(
+      "[data-settings-target=\"runtime\"]"
+    ).ClickAsync();
+    await Page.Locator(
+      "#provider-context-tokens"
+    ).FillAsync(
+      "1024"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dirty"
+      )
+    ).ToHaveTextAsync(
+      "Unsaved changes"
+    );
+    await Expect(
+      Page.Locator(
+        "#save-settings"
+      )
+    ).ToBeEnabledAsync();
+    await Page.Locator(
+      "#save-settings"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-errors"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-dialog"
+      )
+    ).ToHaveAttributeAsync(
+      "data-section",
+      "runtime"
+    );
+
+    EventHandler<IDialog>? dismissDialog = null;
+    dismissDialog = async (
+      _,
+      dialog
+    ) =>
+    {
+      Page.Dialog -= dismissDialog;
+      await dialog.DismissAsync();
+    };
+    Page.Dialog += dismissDialog;
+    await Page.Keyboard.PressAsync(
+      "Escape"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dialog"
+      )
+    ).ToBeVisibleAsync();
+
+    EventHandler<IDialog>? acceptDialog = null;
+    acceptDialog = async (
+      _,
+      dialog
+    ) =>
+    {
+      Page.Dialog -= acceptDialog;
+      await dialog.AcceptAsync();
+    };
+    Page.Dialog += acceptDialog;
+    await Page.Keyboard.PressAsync(
+      "Escape"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dialog"
+      )
+    ).ToBeHiddenAsync();
+    await Expect(
+      Page.Locator(
+        "#open-settings"
+      )
+    ).ToBeFocusedAsync();
+
+    await Page.SetViewportSizeAsync(
+      700,
+      720
+    );
+    await OpenSettingsAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-navigation"
+      )
+    ).ToBeHiddenAsync();
+    await Expect(
+      Page.Locator(
+        ".settings-responsive-navigation"
+      )
+    ).ToBeVisibleAsync();
+    Assert.IsTrue(
+      await Page.EvaluateAsync<bool>(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+      )
+    );
+    await Page.Locator(
+      "#settings-section-select"
+    ).SelectOptionAsync(
+      "workspaces"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dialog"
+      )
+    ).ToHaveAttributeAsync(
+      "data-section",
+      "workspaces"
+    );
+    Assert.IsTrue(
+      await Page.EvaluateAsync<bool>(
+        "document.querySelector('#settings-dialog').contains(document.activeElement)"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PortableYamlRoundTripsAndRejectsUnsupportedModelRolesAtomically()
+  {
+    using var exportResponse = await _environment.HttpClient.GetAsync(
+      "api/settings/yaml"
+    );
+    exportResponse.EnsureSuccessStatusCode();
+    Assert.AreEqual(
+      "application/yaml",
+      exportResponse.Content.Headers.ContentType?.MediaType
+    );
+    var exported = await exportResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      exported,
+      "schema_version: 1"
+    );
+    StringAssert.Contains(
+      exported,
+      "software-development:"
+    );
+    StringAssert.Contains(
+      exported,
+      "fallback:"
+    );
+    Assert.IsFalse(
+      exported.Contains(
+        _environment.WorkspaceDirectory,
+        StringComparison.Ordinal
+      )
+    );
+    Assert.IsFalse(
+      exported.Contains(
+        "validation_profile",
+        StringComparison.Ordinal
+      )
+    );
+
+    const string yaml = """
+      schema_version: 1
+      models:
+        router:
+          primary: beta:code
+        coordinator:
+          primary: docs:latest
+        software-development:
+          primary: beta:code
+          fallback: docs:latest
+      runtime:
+        generation_timeout_seconds: 222
+      """;
+    using var importResponse = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings/yaml",
+      new
+      {
+        yaml
+      },
+      TestJson.Options
+    );
+    importResponse.EnsureSuccessStatusCode();
+    var imported = await importResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.AreEqual(
+      "beta:code",
+      imported.GetProperty(
+        "routerModel"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      "docs:latest",
+      imported.GetProperty(
+        "coordinatorModel"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      "docs:latest",
+      imported.GetProperty(
+          "intentions"
+        )
+        .GetProperty(
+          "software-development"
+        )
+        .GetProperty(
+          "fallbackModel"
+        )
+        .GetString()
+    );
+    Assert.AreEqual(
+      222,
+      imported.GetProperty(
+          "runtime"
+        )
+        .GetProperty(
+          "generationTimeoutSeconds"
+        )
+        .GetInt32()
+    );
+    Assert.AreEqual(
+      _environment.WorkspaceDirectory,
+      imported.GetProperty(
+        "trustedWorkspacePath"
+      ).GetString()
+    );
+
+    using var secondExportResponse = await _environment.HttpClient.GetAsync(
+      "api/settings/yaml"
+    );
+    secondExportResponse.EnsureSuccessStatusCode();
+    var secondExport = await secondExportResponse.Content.ReadAsStringAsync();
+    using var roundTripResponse = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings/yaml",
+      new
+      {
+        yaml = secondExport
+      },
+      TestJson.Options
+    );
+    roundTripResponse.EnsureSuccessStatusCode();
+    var beforeInvalid = await File.ReadAllTextAsync(
+      _environment.SettingsPath
+    );
+
+    const string unsupportedRoles = """
+      models:
+        software-development:
+          primary: beta:code
+          escalation: alpha:latest
+          code_documentation: docs:latest
+        review-and-testing:
+          reviewer: beta:code
+      """;
+    using var invalidResponse = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings/yaml",
+      new
+      {
+        yaml = unsupportedRoles
+      },
+      TestJson.Options
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      invalidResponse.StatusCode
+    );
+    var invalid = await invalidResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    var errors = invalid.GetProperty(
+      "errors"
+    );
+    Assert.IsTrue(
+      errors.TryGetProperty(
+        "models.software-development.escalation",
+        out _
+      )
+    );
+    Assert.IsTrue(
+      errors.TryGetProperty(
+        "models.software-development.code_documentation",
+        out _
+      )
+    );
+    Assert.IsTrue(
+      errors.TryGetProperty(
+        "models.review-and-testing.reviewer",
+        out _
+      )
+    );
+    Assert.AreEqual(
+      beforeInvalid,
+      await File.ReadAllTextAsync(
+        _environment.SettingsPath
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PortableYamlCanBeDownloadedAndAppliedFromAdvancedSettings()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"advanced\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-yaml"
+      )
+    ).ToHaveValueAsync(
+      new Regex(
+        "schema_version: 1"
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dirty"
+      )
+    ).ToHaveTextAsync(
+      "Sem alterações"
+    );
+
+    const string yaml = """
+      schema_version: 1
+      models:
+        router:
+          primary: beta:code
+        coordinator:
+          primary: docs:latest
+        software-development:
+          primary: beta:code
+          fallback: docs:latest
+      """;
+    await Page.Locator(
+      "#settings-yaml"
+    ).FillAsync(
+      yaml
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dirty"
+      )
+    ).ToHaveTextAsync(
+      "Sem alterações"
+    );
+    var download = await Page.RunAndWaitForDownloadAsync(
+      () => Page.Locator(
+        "#download-settings-yaml"
+      ).ClickAsync()
+    );
+    Assert.AreEqual(
+      "agentic-router.yaml",
+      download.SuggestedFilename
+    );
+
+    await Page.Locator(
+      "#import-settings-yaml"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-yaml-status"
+      )
+    ).ToHaveTextAsync(
+      "Configuração YAML importada e aplicada."
+    );
+    await Expect(
+      Page.Locator(
+        "#router-model"
+      )
+    ).ToHaveValueAsync(
+      "beta:code"
+    );
+    await Expect(
+      Page.Locator(
+        "#coordinator-model"
+      )
+    ).ToHaveValueAsync(
+      "docs:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-intention=\"software-development\"] .intention-fallback-model"
+      )
+    ).ToHaveValueAsync(
+      "docs:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-dirty"
+      )
+    ).ToHaveTextAsync(
+      "Sem alterações"
     );
   }
 
@@ -686,7 +1293,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task NewConversationClearsMessagesAndModelLockButPreservesSettings()
+  public async Task HistoryDisabledNewConversationRequiresExplicitDiscardAndPreservesSettings()
   {
     await Page.GotoAsync(
       "/"
@@ -710,6 +1317,14 @@ public sealed class ChatEndToEndTests : PageTest
         Exact = true
       }
     ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#new-conversation-dialog"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      "#new-conversation-discard"
+    ).ClickAsync();
 
     await Expect(
       Page.Locator(
@@ -725,10 +1340,18 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToBeVisibleAsync();
     await Expect(
       Page.Locator(
-        "#model-selector"
+        "[data-mode=\"chat\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+    await Expect(
+      Page.Locator(
+        "#approval-policy"
       )
     ).ToHaveValueAsync(
-      "auto"
+      "ask"
     );
     await Expect(
       Page.Locator(
@@ -747,7 +1370,79 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ConfirmedNewConversationCancelsActiveRequest()
+  public async Task UnsavedConversationCanBeCancelledOrSavedByExplicitlyEnablingHistory()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "Conversation saved only after consent."
+    );
+    await Page.Locator(
+      "#new-conversation"
+    ).ClickAsync();
+    await Page.Locator(
+      "#new-conversation-cancel"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToContainTextAsync(
+      "Conversation saved only after consent."
+    );
+    await Expect(
+      Page.Locator(
+        "#new-conversation-dialog"
+      )
+    ).ToBeHiddenAsync();
+
+    await Page.Locator(
+      "#new-conversation"
+    ).ClickAsync();
+    await Page.Locator(
+      "#new-conversation-enable-history"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    using var sessions = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    sessions.EnsureSuccessStatusCode();
+    using var document = JsonDocument.Parse(
+      await sessions.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      document.RootElement.GetProperty(
+        "usage"
+      ).GetProperty(
+        "enabled"
+      ).GetBoolean()
+    );
+    Assert.AreEqual(
+      1,
+      document.RootElement.GetProperty(
+        "recent"
+      ).GetArrayLength()
+    );
+    Assert.AreEqual(
+      "Conversation saved only after consent.",
+      document.RootElement.GetProperty(
+        "recent"
+      )[0].GetProperty(
+        "title"
+      ).GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ActiveTurnBlocksNewConversationUntilCancelled()
   {
     await Page.GotoAsync(
       "/"
@@ -762,10 +1457,6 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToContainTextAsync(
       "Hello"
     );
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.GetByRole(
       AriaRole.Button,
       new()
@@ -777,16 +1468,21 @@ public sealed class ChatEndToEndTests : PageTest
 
     await Expect(
       Page.Locator(
-        "#empty-state"
+        ".message.user"
       )
-    ).ToBeVisibleAsync();
+    ).ToContainTextAsync(
+      "cancel stream"
+    );
     await Expect(
       Page.Locator(
-        ".message"
+        "#send-button-label"
       )
-    ).ToHaveCountAsync(
-      0
+    ).ToHaveTextAsync(
+      "Cancelar"
     );
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
     await Expect(
       Page.Locator(
         "#send-button-label"
@@ -794,6 +1490,235 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToHaveTextAsync(
       "Enviar"
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HistoryEnabledNewConversationPersistsDistinctSessionsAndResumesSafely()
+  {
+    var activeId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{activeId}/history",
+      new
+      {
+        enabled = true
+      }
+    );
+    history.EnsureSuccessStatusCode();
+    using var invalidSession = await _environment.HttpClient.PutAsJsonAsync(
+      "api/sessions/current",
+      new
+      {
+        sessionId = "../escape",
+        messages = Array.Empty<object>(),
+        state = "completed",
+        interactionMode = "chat",
+        selectedModel = (string?)null
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      invalidSession.StatusCode
+    );
+    using var invalidDocument = JsonDocument.Parse(
+      await invalidSession.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "session-record-invalid",
+      invalidDocument.RootElement.GetProperty(
+        "code"
+      ).GetString()
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+
+    await SendMessageAsync(
+      "First durable conversation."
+    );
+    await Expect(
+      Page.Locator(
+        "#conversation-persistence"
+      )
+    ).ToContainTextAsync(
+      "Saved locally"
+    );
+    using var firstSessions = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    firstSessions.EnsureSuccessStatusCode();
+    using var firstDocument = JsonDocument.Parse(
+      await firstSessions.Content.ReadAsStringAsync()
+    );
+    var firstId = firstDocument.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+
+    await Page.Locator(
+      "#new-conversation"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await SendMessageAsync(
+      "Second durable conversation."
+    );
+    using var secondSessions = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    secondSessions.EnsureSuccessStatusCode();
+    using var secondDocument = JsonDocument.Parse(
+      await secondSessions.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      2,
+      secondDocument.RootElement.GetProperty(
+        "recent"
+      ).GetArrayLength()
+    );
+    var secondId = secondDocument.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+    Assert.AreNotEqual(
+      firstId,
+      secondId
+    );
+
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      $"#recent-sessions [data-session-id=\"{firstId}\"]"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Retomar"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      ).First
+    ).ToContainTextAsync(
+      "First durable conversation."
+    );
+    await Expect(
+      Page.Locator(
+        $"#recent-sessions [data-session-id=\"{firstId}\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-current",
+      "true"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-mode=\"chat\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+    await Expect(
+      Page.Locator(
+        "#approval-policy"
+      )
+    ).ToHaveValueAsync(
+      "ask"
+    );
+    await Expect(
+      Page.Locator(
+        "#model-lock"
+      )
+    ).Not.ToBeCheckedAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SessionSaveFailureKeepsTheVisibleConversationAndExposesTrace()
+  {
+    var activeId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{activeId}/history",
+      new
+      {
+        enabled = true
+      }
+    );
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "Conversation that must remain visible."
+    );
+    var sessionsDirectory = Path.Combine(
+      _environment.DataDirectory,
+      "workspaces",
+      activeId,
+      "sessions"
+    );
+    var backupDirectory = $"{sessionsDirectory}-backup";
+    Directory.Move(
+      sessionsDirectory,
+      backupDirectory
+    );
+    await File.WriteAllTextAsync(
+      sessionsDirectory,
+      "blocks session persistence"
+    );
+
+    try
+    {
+      await Page.Locator(
+        "#new-conversation"
+      ).ClickAsync();
+      await Expect(
+        Page.Locator(
+          ".message.user"
+        )
+      ).ToContainTextAsync(
+        "Conversation that must remain visible."
+      );
+      await Expect(
+        Page.Locator(
+          "#conversation-persistence"
+        )
+      ).ToContainTextAsync(
+        "Save failed"
+      );
+      await Expect(
+        Page.Locator(
+          "#composer-status"
+        )
+      ).ToContainTextAsync(
+        "Trace ID:"
+      );
+    }
+    finally
+    {
+      File.Delete(
+        sessionsDirectory
+      );
+      Directory.Move(
+        backupDirectory,
+        sessionsDirectory
+      );
+    }
   }
 
   [TestMethod]
@@ -2344,6 +3269,125 @@ public sealed class ChatEndToEndTests : PageTest
       "#open-workspace"
     ).ClickAsync();
     await Expect(
+      Page.Locator(
+        "#new-workspace-section"
+      )
+    ).ToBeHiddenAsync();
+    Assert.IsTrue(
+      await Page.Locator(
+        "#saved-workspaces-section"
+      ).EvaluateAsync<bool>(
+        "section => section.open"
+      )
+    );
+    Assert.IsTrue(
+      await Page.Locator(
+        "#local-history-section"
+      ).EvaluateAsync<bool>(
+        "section => section.open"
+      )
+    );
+    Assert.IsFalse(
+      await Page.Locator(
+        "#project-profile-section"
+      ).EvaluateAsync<bool>(
+        "section => section.open"
+      )
+    );
+    Assert.IsFalse(
+      await Page.Locator(
+        "#validation-profile-section"
+      ).EvaluateAsync<bool>(
+        "section => section.open"
+      )
+    );
+    var workspaceFooter = Page.Locator(
+      "#workspace-dialog .dialog-footer"
+    );
+    var workspaceFooterTop = await workspaceFooter.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().top"
+    );
+    await Page.Locator(
+      "#project-profile-section, #validation-profile-section"
+    ).EvaluateAllAsync<bool>(
+      """
+      sections => {
+        sections.forEach(section => section.open = true);
+        return true;
+      }
+      """
+    );
+    Assert.IsTrue(
+      await Page.Locator(
+        "#workspace-dialog .dialog-body"
+      ).EvaluateAsync<bool>(
+        "body => body.scrollHeight > body.clientHeight"
+      )
+    );
+    await Page.Locator(
+      "#workspace-dialog .dialog-body"
+    ).EvaluateAsync(
+      "body => body.scrollTop = body.scrollHeight"
+    );
+    Assert.AreEqual(
+      workspaceFooterTop,
+      await workspaceFooter.EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().top"
+      ),
+      1
+    );
+    Assert.AreEqual(
+      await Page.Locator(
+        "#workspace-dialog"
+      ).EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().bottom"
+      ),
+      await workspaceFooter.EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().bottom"
+      ),
+      1
+    );
+    await Page.Locator(
+      "#project-profile-section, #validation-profile-section"
+    ).EvaluateAllAsync<bool>(
+      """
+      sections => {
+        sections.forEach(section => section.open = false);
+        return true;
+      }
+      """
+    );
+    var workspaceInformation = Page.Locator(
+      ".information-button[data-tooltip="
+        + "'Somente um workspace fica ativo por vez.']"
+    );
+    await workspaceInformation.HoverAsync();
+    await Page.WaitForFunctionAsync(
+      """
+      () => getComputedStyle(
+        document.querySelector(
+          '.information-button[data-tooltip="Somente um workspace fica ativo por vez."]'
+        ),
+        '::after'
+      ).opacity === '1'
+      """
+    );
+    Assert.AreEqual(
+      "1",
+      await workspaceInformation.EvaluateAsync<string>(
+        "button => getComputedStyle(button, '::after').opacity"
+      )
+    );
+    StringAssert.Contains(
+      await workspaceInformation.EvaluateAsync<string>(
+        "button => getComputedStyle(button, '::after').content"
+      ),
+      "Somente um workspace"
+    );
+    await Page.Locator(
+      "#add-workspace"
+    ).ClickAsync();
+    await Expect(
       Page.GetByRole(
         AriaRole.Button,
         new()
@@ -2367,7 +3411,7 @@ public sealed class ChatEndToEndTests : PageTest
       AriaRole.Button,
       new()
       {
-        Name = "Adicionar workspace",
+        Name = "Salvar workspace",
         Exact = true
       }
     ).ClickAsync();
@@ -2394,7 +3438,7 @@ public sealed class ChatEndToEndTests : PageTest
       AriaRole.Button,
       new()
       {
-        Name = "Adicionar workspace",
+        Name = "Salvar workspace",
         Exact = true
       }
     ).ClickAsync();
@@ -4473,6 +5517,811 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task TwoWorkspaceCorrectiveSmokeCoversGitHistoryResumeAndSettings()
+  {
+    var plainWorkspaceId = await ActiveWorkspaceIdAsync();
+    var gitWorkspace = _environment.CreateWorkspaceDirectory(
+      $"corrective-smoke-{Guid.NewGuid():N}"
+    );
+    _ = await RunGitTextAsync(
+      gitWorkspace,
+      "init",
+      "-b",
+      "main"
+    );
+    _ = await RunGitTextAsync(
+      gitWorkspace,
+      "config",
+      "user.name",
+      "Corrective Smoke"
+    );
+    _ = await RunGitTextAsync(
+      gitWorkspace,
+      "config",
+      "user.email",
+      "corrective-smoke@example.invalid"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        gitWorkspace,
+        "smoke.txt"
+      ),
+      "baseline"
+    );
+    _ = await RunGitTextAsync(
+      gitWorkspace,
+      "add",
+      "--",
+      "smoke.txt"
+    );
+    _ = await RunGitTextAsync(
+      gitWorkspace,
+      "commit",
+      "-m",
+      "smoke baseline"
+    );
+    await File.AppendAllTextAsync(
+      Path.Combine(
+        gitWorkspace,
+        "smoke.txt"
+      ),
+      "\nworking change"
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-badge"
+      )
+    ).ToHaveTextAsync(
+      "Not initialized"
+    );
+    await OpenSettingsAsync();
+    var settingsBounds = await Page.Locator(
+      "#settings-dialog"
+    ).BoundingBoxAsync();
+    Assert.IsNotNull(
+      settingsBounds
+    );
+    Assert.IsGreaterThan(
+      0.93 * 1280,
+      settingsBounds.Width
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-navigation"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      "[data-settings-target=\"git\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-git"
+      )
+    ).ToBeInViewportAsync();
+    await Page.Locator(
+      "#cancel-settings"
+    ).ClickAsync();
+
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#add-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#workspace-profile-name"
+    ).FillAsync(
+      "Git smoke"
+    );
+    await Page.Locator(
+      "#trusted-workspace-path"
+    ).FillAsync(
+      gitWorkspace
+    );
+    await Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Salvar workspace"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-summary"
+      )
+    ).ToContainTextAsync(
+      "main"
+    );
+    await Page.Locator(
+      "#cancel-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      "#git-card"
+    ).ClickAsync();
+    await Page.Locator(
+      "[data-git-view=\"working-tree\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "smoke.txt"
+    );
+    await Page.Locator(
+      "#dismiss-git"
+    ).ClickAsync();
+
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator(
+      "#enable-session-history"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#conversation-persistence"
+      )
+    ).ToContainTextAsync(
+      "Saved locally"
+    );
+    await SendMessageAsync(
+      "Corrective smoke conversation."
+    );
+    await Expect(
+      Page.Locator(
+        "#send-button-label"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
+    );
+    await Page.Locator(
+      "#new-conversation"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "#new-conversation"
+      )
+    ).ToBeEnabledAsync();
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#recent-sessions .session-entry"
+    ).Filter(
+      new()
+      {
+        HasText = "Corrective smoke conversation."
+      }
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Retomar"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToContainTextAsync(
+      "Corrective smoke conversation."
+    );
+    await Expect(
+      Page.Locator(
+        "#new-conversation"
+      )
+    ).ToBeEnabledAsync();
+
+    await Page.Locator(
+      "#open-workspace"
+    ).ClickAsync();
+    await Page.Locator(
+      $"[data-workspace-id=\"{plainWorkspaceId}\"]"
+    ).GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Ativar"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        $"[data-workspace-id=\"{plainWorkspaceId}\"].active"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#git-badge"
+      )
+    ).ToHaveTextAsync(
+      "Not initialized"
+    );
+    await Page.Locator(
+      "#cancel-workspace"
+    ).ClickAsync();
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await Page.Locator(
+      "#git-card"
+    ).ClickAsync();
+    await Page.Locator(
+      "#initialize-git"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-summary"
+      )
+    ).ToContainTextAsync(
+      "main"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitCardAndPanelExposeAuthoritativeBoundedRepositoryViews()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "baseline.txt"
+      ),
+      "working tree change"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "staged.txt"
+      ),
+      "staged change"
+    );
+    await RunGitAsync(
+      "add",
+      "--",
+      "staged.txt"
+    );
+    await RunGitAsync(
+      "remote",
+      "set-url",
+      "origin",
+      "https://remote-user:remote-secret@example.test/repository.git?token=hidden"
+    );
+    await File.WriteAllBytesAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "binary.dat"
+      ),
+      [
+        0,
+        1,
+        2,
+        3,
+        255
+      ]
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "large.txt"
+      ),
+      new string(
+        'x',
+        80_000
+      )
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-summary"
+      )
+    ).ToContainTextAsync(
+      "main"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-badge"
+      )
+    ).ToContainTextAsync(
+      "changes"
+    );
+    await Page.Locator(
+      "#git-card"
+    ).FocusAsync();
+    await Page.Locator(
+      "#git-card"
+    ).PressAsync(
+      "Enter"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-dialog"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#git-overview"
+      )
+    ).ToContainTextAsync(
+      "Latest commit"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-overview"
+      )
+    ).ToContainTextAsync(
+      "test baseline"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-overview"
+      )
+    ).ToContainTextAsync(
+      "origin/main"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-overview"
+      )
+    ).ToContainTextAsync(
+      "Git version"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-remotes"
+      )
+    ).ToContainTextAsync(
+      "example.test/repository.git"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-remotes"
+      )
+    ).Not.ToContainTextAsync(
+      "remote-secret"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-remotes"
+      )
+    ).Not.ToContainTextAsync(
+      "token=hidden"
+    );
+
+    await Page.Locator(
+      "[data-git-view=\"working-tree\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "baseline.txt"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "binary.dat"
+    );
+    await Page.Locator(
+      "#git-file-list button"
+    ).Filter(
+      new()
+      {
+        HasText = "binary.dat"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-diff-metadata"
+      )
+    ).ToContainTextAsync(
+      "binary"
+    );
+    await Page.Locator(
+      "#git-file-list button"
+    ).Filter(
+      new()
+      {
+        HasText = "large.txt"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-diff-metadata"
+      )
+    ).ToContainTextAsync(
+      "truncated"
+    );
+
+    await Page.Locator(
+      "[data-git-view=\"staged\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "staged.txt"
+    );
+    await Page.Locator(
+      "[data-git-view=\"last-commit\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "baseline.txt"
+    );
+
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "external-refresh.txt"
+      ),
+      "external"
+    );
+    await Page.Locator(
+      "#refresh-git"
+    ).ClickAsync();
+    await Page.Locator(
+      "[data-git-view=\"working-tree\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "external-refresh.txt"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitCurrentSessionViewExcludesPreExistingWorkspaceChanges()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await File.AppendAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "preexisting.txt"
+      ),
+      "\nuser change"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+    await Page.Locator(
+      "#git-card"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).ToContainTextAsync(
+      "hello.txt"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-file-list"
+      )
+    ).Not.ToContainTextAsync(
+      "preexisting.txt"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitInitializationAndIdentityRemainExplicitAndRepositoryScoped()
+  {
+    var globalBefore = await RunGitAllowFailureAsync(
+      _environment.WorkspaceDirectory,
+      "config",
+      "--global",
+      "--list"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-badge"
+      )
+    ).ToHaveTextAsync(
+      "Not initialized"
+    );
+    await Page.Locator(
+      "#git-card"
+    ).ClickAsync();
+    await Page.Locator(
+      "#initialize-git"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-action-status"
+      )
+    ).ToContainTextAsync(
+      "Execute mode"
+    );
+    Assert.IsFalse(
+      Directory.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          ".git"
+        )
+      )
+    );
+
+    await Page.Locator(
+      "#dismiss-git"
+    ).ClickAsync();
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await Page.Locator(
+      "#git-card"
+    ).ClickAsync();
+    await Page.Locator(
+      "#initialize-git"
+    ).ClickAsync();
+    Assert.IsFalse(
+      Directory.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          ".git"
+        )
+      )
+    );
+
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#initialize-git"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-action-status"
+      )
+    ).ToContainTextAsync(
+      "Repository initialized on main"
+    );
+    Assert.AreEqual(
+      "main",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "symbolic-ref",
+        "--short",
+        "HEAD"
+      )
+    );
+    var head = await RunGitAllowFailureAsync(
+      _environment.WorkspaceDirectory,
+      "rev-parse",
+      "--verify",
+      "HEAD"
+    );
+    Assert.AreNotEqual(
+      0,
+      head.ExitCode
+    );
+    Assert.AreEqual(
+      string.Empty,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "status",
+        "--short"
+      )
+    );
+    Assert.AreEqual(
+      string.Empty,
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "remote"
+      )
+    );
+
+    await Page.Locator(
+      "#git-user-name"
+    ).FillAsync(
+      "Repository User"
+    );
+    await Page.Locator(
+      "#save-git-user-name"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-action-status"
+      )
+    ).ToContainTextAsync(
+      "user.name saved"
+    );
+    await Page.Locator(
+      "#git-user-email"
+    ).FillAsync(
+      "repository-user@example.invalid"
+    );
+    await Page.Locator(
+      "#save-git-user-email"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-action-status"
+      )
+    ).ToContainTextAsync(
+      "user.email saved"
+    );
+    Assert.AreEqual(
+      "Repository User",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "config",
+        "--local",
+        "user.name"
+      )
+    );
+    Assert.AreEqual(
+      "repository-user@example.invalid",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "config",
+        "--local",
+        "user.email"
+      )
+    );
+    var globalAfter = await RunGitAllowFailureAsync(
+      _environment.WorkspaceDirectory,
+      "config",
+      "--global",
+      "--list"
+    );
+    Assert.AreEqual(
+      globalBefore,
+      globalAfter
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitCardSurfacesDetachedHeadAndMergeConflicts()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await RunGitAsync(
+      "checkout",
+      "--detach",
+      "HEAD"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-card"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-label",
+      new Regex(
+        "detached",
+        RegexOptions.IgnoreCase
+      )
+    );
+
+    await RunGitAsync(
+      "checkout",
+      "main"
+    );
+    await RunGitAsync(
+      "checkout",
+      "-b",
+      "conflict-side"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "baseline.txt"
+      ),
+      "side"
+    );
+    await RunGitAsync(
+      "add",
+      "--",
+      "baseline.txt"
+    );
+    await RunGitAsync(
+      "commit",
+      "-m",
+      "side change"
+    );
+    await RunGitAsync(
+      "checkout",
+      "main"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "baseline.txt"
+      ),
+      "main"
+    );
+    await RunGitAsync(
+      "add",
+      "--",
+      "baseline.txt"
+    );
+    await RunGitAsync(
+      "commit",
+      "-m",
+      "main change"
+    );
+    var merge = await RunGitAllowFailureAsync(
+      _environment.WorkspaceDirectory,
+      "merge",
+      "conflict-side"
+    );
+    Assert.AreNotEqual(
+      0,
+      merge.ExitCode
+    );
+
+    await Page.Locator(
+      "#git-card"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#git-badge"
+      )
+    ).ToHaveTextAsync(
+      "Conflicts"
+    );
+    await Expect(
+      Page.Locator(
+        "#git-overview"
+      )
+    ).ToContainTextAsync(
+      "merge"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task GitBaselineDistinguishesPreExistingAndSessionChanges()
   {
     await RunGitAsync(
@@ -5321,6 +7170,13 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#change-review-body"
+      )
+    ).ToContainTextAsync(
+      "large.txt"
+    );
     var executionSessionId = await Page.EvaluateAsync<string>(
       "() => state.activeReview.summary.id"
     );
@@ -6453,6 +8309,9 @@ public sealed class ChatEndToEndTests : PageTest
         Exact = true
       }
     ).ClickAsync();
+    await Page.Locator(
+      "#new-conversation-discard"
+    ).ClickAsync();
     await SetExecuteModeAsync(
       "auto"
     );
@@ -7090,7 +8949,7 @@ public sealed class ChatEndToEndTests : PageTest
   public async Task WorkspaceManagerAddsRenamesSwitchesAndResetsSessionAuthority()
   {
     var secondPath = _environment.CreateWorkspaceDirectory(
-      "second-workspace"
+      $"second-workspace-{Guid.NewGuid():N}"
     );
     await Page.GotoAsync(
       "/"
@@ -7110,6 +8969,9 @@ public sealed class ChatEndToEndTests : PageTest
       "#open-workspace"
     ).ClickAsync();
     await Page.Locator(
+      "#add-workspace"
+    ).ClickAsync();
+    await Page.Locator(
       "#workspace-profile-name"
     ).FillAsync(
       "Second project"
@@ -7123,7 +8985,7 @@ public sealed class ChatEndToEndTests : PageTest
       AriaRole.Button,
       new()
       {
-        Name = "Adicionar workspace"
+        Name = "Salvar workspace"
       }
     ).ClickAsync();
 
@@ -7179,6 +9041,9 @@ public sealed class ChatEndToEndTests : PageTest
     );
 
     await Page.Locator(
+      "#add-workspace"
+    ).ClickAsync();
+    await Page.Locator(
       "#workspace-profile-name"
     ).FillAsync(
       "Duplicate"
@@ -7186,13 +9051,13 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       "#trusted-workspace-path"
     ).FillAsync(
-      secondPath.ToUpperInvariant()
+      secondPath
     );
     await Page.GetByRole(
       AriaRole.Button,
       new()
       {
-        Name = "Adicionar workspace"
+        Name = "Salvar workspace"
       }
     ).ClickAsync();
     await Expect(
@@ -7713,6 +9578,27 @@ public sealed class ChatEndToEndTests : PageTest
     params string[] arguments
   )
   {
+    var result = await RunGitAllowFailureAsync(
+      workingDirectory,
+      arguments
+    );
+    Assert.AreEqual(
+      0,
+      result.ExitCode,
+      result.Error
+    );
+    return result.Output;
+  }
+
+  private static async Task<(
+    int ExitCode,
+    string Output,
+    string Error
+  )> RunGitAllowFailureAsync(
+    string workingDirectory,
+    params string[] arguments
+  )
+  {
     using var process = new Process
     {
       StartInfo = new ProcessStartInfo
@@ -7736,15 +9622,18 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.IsTrue(
       process.Start()
     );
+    var outputTask = process.StandardOutput.ReadToEndAsync();
+    var errorTask = process.StandardError.ReadToEndAsync();
     await process.WaitForExitAsync();
-    Assert.AreEqual(
-      0,
-      process.ExitCode,
-      await process.StandardError.ReadToEndAsync()
-    );
     return (
-      await process.StandardOutput.ReadToEndAsync()
-    ).Trim();
+      process.ExitCode,
+      (
+        await outputTask
+      ).Trim(),
+      (
+        await errorTask
+      ).Trim()
+    );
   }
 
   private static async Task<string> InitializeDeliveryRepositoryAsync()

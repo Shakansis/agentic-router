@@ -15,6 +15,16 @@ public interface IPersistentSessionService
     CancellationToken cancellationToken
   );
 
+  Task<ConversationPersistenceView> CreateAsync(
+    string browserSessionId,
+    CancellationToken cancellationToken
+  );
+
+  Task<ConversationPersistenceView> SaveAsync(
+    SaveConversationSessionRequest request,
+    CancellationToken cancellationToken
+  );
+
   Task<ConversationSessionRecord?> BeginTurnAsync(
     string? sessionId,
     string message,
@@ -167,6 +177,189 @@ public sealed class PersistentSessionService : IPersistentSessionService
     );
   }
 
+  public async Task<ConversationPersistenceView> CreateAsync(
+    string browserSessionId,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(
+        browserSessionId
+      )
+      || browserSessionId.Length > 128
+    )
+    {
+      throw new WorkspaceProfileException(
+        "conversation-identity-invalid",
+        "conversation-create",
+        "A valid browser session identifier is required.",
+        false
+      );
+    }
+
+    if (_executionSessions.GetActive(
+      browserSessionId
+    )?.IsActive == true)
+    {
+      throw new WorkspaceProfileException(
+        "conversation-switch-blocked",
+        "conversation-create",
+        "Finish or cancel the active execution before starting another conversation.",
+        true
+      );
+    }
+
+    var active = await _profiles.GetActiveDataAsync(
+      cancellationToken
+    );
+    if (active is null)
+    {
+      return new ConversationPersistenceView(
+        Guid.NewGuid().ToString(
+          "N"
+        ),
+        false,
+        false,
+        "History disabled",
+        null
+      );
+    }
+    return new ConversationPersistenceView(
+      Guid.NewGuid().ToString(
+        "N"
+      ),
+      active.HistoryEnabled,
+      false,
+      active.HistoryEnabled
+        ? "Unsaved"
+        : "History disabled",
+      null
+    );
+  }
+
+  public async Task<ConversationPersistenceView> SaveAsync(
+    SaveConversationSessionRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    var active = await RequireActiveAsync(
+      cancellationToken
+    );
+
+    if (!active.HistoryEnabled)
+    {
+      throw new WorkspaceProfileException(
+        "history-disabled",
+        "session-persistence",
+        "Local history is disabled for the active workspace.",
+        false
+      );
+    }
+
+    ValidateSnapshot(
+      request
+    );
+    await _gate.WaitAsync(
+      cancellationToken
+    );
+
+    try
+    {
+      var limits = (
+        await _settings.GetAsync(
+          cancellationToken
+        )
+      ).SessionHistory;
+      var existing = await _store.ReadAsync(
+        active.Id,
+        request.SessionId,
+        cancellationToken
+      );
+
+      if (
+        existing is null
+        && request.Messages.Count == 0
+      )
+      {
+        return new ConversationPersistenceView(
+          request.SessionId,
+          true,
+          false,
+          "Saved locally",
+          null
+        );
+      }
+
+      if (existing is null)
+      {
+        await EnsureSessionIdAvailableAsync(
+          active.Id,
+          request.SessionId,
+          cancellationToken
+        );
+        await EnsureRetentionAvailableAsync(
+          active,
+          limits,
+          cancellationToken
+        );
+        var now = DateTimeOffset.UtcNow;
+        existing = new ConversationSessionRecord(
+          1,
+          request.SessionId,
+          active.Id,
+          CreateTitle(
+            request.Messages.First(
+              message => message.Role == "user"
+            ).Content
+          ),
+          now,
+          now,
+          false,
+          request.State,
+          request.InteractionMode,
+          NormalizeModel(
+            request.SelectedModel
+          ),
+          [],
+          [],
+          request.State == "interrupted",
+          false,
+          false,
+          0
+        );
+      }
+
+      var saved = await _store.WriteAsync(
+        existing with
+        {
+          State = request.State,
+          Interrupted = request.State == "interrupted",
+          UpdatedAt = DateTimeOffset.UtcNow,
+          LastInteractionMode = request.InteractionMode,
+          SelectedModel = NormalizeModel(
+            request.SelectedModel
+          ) ?? existing.SelectedModel,
+          Messages = request.Messages.ToArray()
+        },
+        limits.MaxSessionBytes,
+        cancellationToken
+      );
+      return new ConversationPersistenceView(
+        saved.Id,
+        true,
+        true,
+        saved.Interrupted
+          ? "Interrupted"
+          : "Saved locally",
+        saved.UpdatedAt
+      );
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
   public async Task<ConversationSessionRecord?> BeginTurnAsync(
     string? sessionId,
     string message,
@@ -244,11 +437,52 @@ public sealed class PersistentSessionService : IPersistentSessionService
       }
       else
       {
-        session = await RequireSessionAsync(
-          active,
+        var stored = await _store.ReadAsync(
+          active.Id,
           sessionId,
           cancellationToken
         );
+
+        if (stored is null)
+        {
+          await EnsureSessionIdAvailableAsync(
+            active.Id,
+            sessionId,
+            cancellationToken
+          );
+          await EnsureRetentionAvailableAsync(
+            active,
+            limits,
+            cancellationToken
+          );
+          var now = DateTimeOffset.UtcNow;
+          session = new ConversationSessionRecord(
+            1,
+            sessionId,
+            active.Id,
+            CreateTitle(
+              message
+            ),
+            now,
+            now,
+            false,
+            "running",
+            interactionMode,
+            NormalizeModel(
+              model
+            ),
+            [],
+            [],
+            false,
+            false,
+            false,
+            0
+          );
+        }
+        else
+        {
+          session = stored;
+        }
       }
 
       session = session with
@@ -791,6 +1025,105 @@ public sealed class PersistentSessionService : IPersistentSessionService
       "The session was not found in the active workspace.",
       false
     );
+  }
+
+  private async Task EnsureSessionIdAvailableAsync(
+    string activeWorkspaceId,
+    string sessionId,
+    CancellationToken cancellationToken
+  )
+  {
+    var profiles = await _profiles.GetAllAsync(
+      cancellationToken
+    );
+
+    foreach (var profile in profiles.Profiles.Where(
+      profile => !string.Equals(
+        profile.Id,
+        activeWorkspaceId,
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      if (await _store.ReadAsync(
+        profile.Id,
+        sessionId,
+        cancellationToken
+      ) is not null)
+      {
+        throw new WorkspaceProfileException(
+          "duplicate-session-id",
+          "session-persistence",
+          "The conversation identifier is already used by another workspace.",
+          false
+        );
+      }
+    }
+  }
+
+  private async Task EnsureRetentionAvailableAsync(
+    WorkspaceProfileData active,
+    SessionHistorySettings limits,
+    CancellationToken cancellationToken
+  )
+  {
+    var existing = await _store.ReadAllAsync(
+      active.Id,
+      cancellationToken
+    );
+
+    if (existing.Count >= limits.MaxSessionsPerWorkspace)
+    {
+      throw new WorkspaceProfileException(
+        "history-retention-limit-reached",
+        "session-retention",
+        "The workspace reached its session-history limit. Remove an older session first.",
+        false
+      );
+    }
+  }
+
+  private static void ValidateSnapshot(
+    SaveConversationSessionRequest request
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(
+        request.SessionId
+      )
+      || request.SessionId.Length > 64
+      || request.SessionId.Any(
+        character => !char.IsAsciiLetterOrDigit(
+          character
+        ) && character is not '-' and not '_'
+      )
+      || request.Messages.Count > 400
+      || request.Messages.Any(
+        message => message.Role is not "user" and not "assistant"
+          || string.IsNullOrWhiteSpace(
+            message.Content
+          )
+      )
+      || (
+        request.Messages.Count > 0
+        && request.Messages.All(
+          message => message.Role != "user"
+        )
+      )
+      || request.InteractionMode is not "chat" and not "execute"
+      || request.State is not "completed"
+        and not "failed"
+        and not "cancelled"
+        and not "interrupted"
+    )
+    {
+      throw new WorkspaceProfileException(
+        "session-record-invalid",
+        "session-persistence",
+        "The conversation snapshot is invalid.",
+        false
+      );
+    }
   }
 
   private static ConversationSessionSummary ToSummary(

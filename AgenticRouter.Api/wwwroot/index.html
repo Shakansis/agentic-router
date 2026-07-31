@@ -46,6 +46,19 @@
         <strong id="workspace-path">Nenhuma pasta selecionada</strong>
         <small>Configura onde o modo Execute pode atuar.</small>
       </button>
+      <button
+        id="git-card"
+        class="status-card workspace-card git-card"
+        type="button"
+        aria-label="Git: carregando estado do workspace"
+      >
+        <span class="status-heading">
+          <span class="status-label"><span class="status-icon" aria-hidden="true">⑂</span>Git</span>
+          <span id="git-badge" class="badge muted">Carregando</span>
+        </span>
+        <strong id="git-summary">Verificando repositório…</strong>
+        <small id="git-upstream-summary">Abra para ver alterações e configuração.</small>
+      </button>
     </section>
 
     <details id="session-history" class="session-history">
@@ -54,7 +67,11 @@
         <button id="history-new-conversation" class="secondary-button" type="button">
           Nova conversa
         </button>
+        <button id="enable-session-history" class="secondary-button" type="button" hidden>
+          Ativar histórico
+        </button>
       </div>
+      <p id="conversation-persistence-sidebar" class="persistence-status">Unsaved</p>
       <div id="recent-sessions" class="session-list"></div>
       <details id="archived-session-section" class="archived-session-section">
         <summary>Arquivadas</summary>
@@ -65,7 +82,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.0</span>
+    <span class="app-version">v0.9.1</span>
   </aside>
 
   <main class="workspace">
@@ -73,6 +90,9 @@
       <div class="title-group">
         <span class="eyebrow">Sessão local</span>
         <h1>Conversa</h1>
+        <span id="conversation-persistence" class="persistence-status" role="status">
+          Unsaved
+        </span>
       </div>
 
       <details id="runtime-details" class="runtime-details">
@@ -181,52 +201,194 @@
   </main>
 
   <dialog id="settings-dialog" class="settings-dialog">
-    <form id="settings-form" method="dialog">
+    <form id="settings-form" method="dialog" class="settings-shell">
       <header class="dialog-header">
         <div>
           <span class="eyebrow">Configuração local</span>
-          <h2>Modelos e intenções</h2>
+          <h2>Configurações</h2>
+          <p>Modelos, execução, workspaces, Git e armazenamento local.</p>
         </div>
+        <span id="settings-dirty" class="badge muted">Sem alterações</span>
         <button id="close-settings" class="icon-button" type="button" aria-label="Fechar">×</button>
       </header>
 
-      <div class="dialog-body">
-        <div id="settings-errors" class="settings-errors" role="alert" hidden></div>
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>Geral</h3>
-            <p>O modelo roteador é mantido residente com política adaptativa.</p>
-          </div>
-          <div class="settings-grid">
+      <div class="settings-responsive-navigation">
+        <label for="settings-section-select">Seção</label>
+        <select id="settings-section-select">
+          <option value="general">Geral</option>
+          <option value="ollama">Ollama</option>
+          <option value="models">Modelos e roteamento</option>
+          <option value="coordinator">Coordenador e recuperação</option>
+          <option value="execution">Execução e aprovações</option>
+          <option value="workspaces">Workspaces e histórico</option>
+          <option value="git">Git</option>
+          <option value="validation">Validação</option>
+          <option value="runtime">Runtime e memória</option>
+          <option value="advanced">Avançado</option>
+        </select>
+      </div>
+
+      <div class="settings-layout">
+        <nav id="settings-navigation" class="settings-navigation" aria-label="Seções de configuração">
+          <button type="button" data-settings-target="general" aria-current="page">Geral</button>
+          <button type="button" data-settings-target="ollama">Ollama</button>
+          <button type="button" data-settings-target="models">Modelos e roteamento</button>
+          <button type="button" data-settings-target="coordinator">Coordenador e recuperação</button>
+          <button type="button" data-settings-target="execution">Execução e aprovações</button>
+          <button type="button" data-settings-target="workspaces">Workspaces e histórico</button>
+          <button type="button" data-settings-target="git">Git</button>
+          <button type="button" data-settings-target="validation">Validação</button>
+          <button type="button" data-settings-target="runtime">Runtime e memória</button>
+          <button type="button" data-settings-target="advanced">Avançado</button>
+        </nav>
+
+        <div id="settings-content" class="settings-content">
+          <div id="settings-errors" class="settings-errors" role="alert" tabindex="-1" hidden></div>
+
+          <section id="settings-general" class="settings-section" data-settings-section="general" tabindex="-1">
+            <div class="section-heading">
+              <h3>Geral</h3>
+              <p>Escolhas padrão usadas quando uma conversa não fixa um modelo ou dispositivo.</p>
+            </div>
+            <div class="settings-grid">
+              <label>
+                <span>Modelo padrão</span>
+                <select id="default-model" name="defaultModel" required></select>
+              </label>
+              <label>
+                <span>GPU padrão</span>
+                <select id="default-gpu" name="defaultGpu"></select>
+              </label>
+            </div>
+          </section>
+
+          <section id="settings-ollama" class="settings-section" data-settings-section="ollama" tabindex="-1">
+            <div class="section-heading">
+              <h3>Ollama</h3>
+              <p>Conexão local, modelos instalados e diagnóstico executado fora da conversa.</p>
+            </div>
+            <div class="settings-grid">
             <label>
               <span>URL do Ollama</span>
               <input id="ollama-url" name="ollamaUrl" type="url" required>
             </label>
+            </div>
+            <div id="model-diagnostics-list" class="model-diagnostics-list"></div>
+            <p id="model-context-diagnostic">Carregando diagnóstico…</p>
+            <div class="model-test-panel">
+              <label>
+                <span>Modelo para teste</span>
+                <select id="model-test-selector"></select>
+              </label>
+              <button id="test-model" class="secondary-button" type="button">Testar modelo</button>
+              <output id="model-test-result" class="model-test-result"></output>
+            </div>
+          </section>
+
+          <section id="settings-models" class="settings-section" data-settings-section="models" tabindex="-1">
+            <div class="section-heading">
+              <h3>Modelos e roteamento</h3>
+              <p>O roteador classifica a intenção; cada intenção escolhe seu especialista.</p>
+            </div>
+            <div class="settings-grid">
             <label>
               <span>Modelo roteador residente</span>
               <select id="router-model" name="routerModel" required></select>
             </label>
+            </div>
+            <div id="intentions-grid" class="intentions-grid"></div>
+          </section>
+
+          <section id="settings-coordinator" class="settings-section" data-settings-section="coordinator" tabindex="-1">
+            <div class="section-heading">
+              <div class="heading-title-row">
+                <h3>Coordenador e recuperação</h3>
+                <button
+                  class="information-button"
+                  type="button"
+                  aria-label="Informação: coordenação direta depende do benchmark comportamental do modelo e do digest instalados. Falhas determinísticas de protocolo mudam a estratégia; retries idênticos permanecem desabilitados."
+                  data-tooltip="Coordenação direta depende do benchmark comportamental do modelo e do digest instalados. Falhas determinísticas de protocolo mudam a estratégia; retries idênticos permanecem desabilitados."
+                >i</button>
+              </div>
+            </div>
+            <div class="settings-grid">
             <label>
               <span>Modelo coordenador</span>
               <select id="coordinator-model" name="coordinatorModel" required></select>
             </label>
-            <label>
-              <span>Modelo padrão</span>
-              <select id="default-model" name="defaultModel" required></select>
-            </label>
-            <label>
-              <span>GPU padrão</span>
-              <select id="default-gpu" name="defaultGpu"></select>
-            </label>
-          </div>
-        </section>
+            </div>
+          </section>
 
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>Contexto da conversa</h3>
-            <p>Limites conservadores; a contagem de tokens é estimada.</p>
-          </div>
-          <div class="settings-grid context-settings-grid">
+          <section id="settings-execution" class="settings-section" data-settings-section="execution" tabindex="-1">
+            <div class="section-heading">
+              <div class="heading-title-row">
+                <h3>Execução e aprovações</h3>
+                <button
+                  class="information-button"
+                  type="button"
+                  aria-label="Informação: escritas Git, processos sensíveis e ações destrutivas nunca são liberados silenciosamente."
+                  data-tooltip="Limites de ferramentas e proteções de execução supervisionada. Escritas Git, processos sensíveis e ações destrutivas nunca são liberados silenciosamente."
+                >i</button>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <label>
+                <span>Saída máxima de ferramentas</span>
+                <input id="max-tool-output-tokens" type="number" min="256" max="16384" required>
+              </label>
+            </div>
+          </section>
+
+          <section id="settings-workspaces" class="settings-section" data-settings-section="workspaces" tabindex="-1">
+            <div class="section-heading">
+              <div class="heading-title-row">
+                <h3>Workspaces e histórico</h3>
+                <button
+                  class="information-button"
+                  type="button"
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.1."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.1."
+                >i</button>
+              </div>
+            </div>
+            <div id="settings-workspace-summary" class="settings-summary-card"></div>
+            <div class="settings-action-row">
+              <button id="settings-open-workspace" class="secondary-button" type="button">Gerenciar workspaces</button>
+              <button id="settings-open-recent" class="secondary-button" type="button">Abrir conversas recentes</button>
+            </div>
+          </section>
+
+          <section id="settings-git" class="settings-section" data-settings-section="git" tabindex="-1">
+            <div class="section-heading">
+              <div class="heading-title-row">
+                <h3>Git</h3>
+                <button
+                  class="information-button"
+                  type="button"
+                  aria-label="Informação: não há force push, comandos arbitrários, mutação de remotes ou reescrita de histórico."
+                  data-tooltip="Estado autoritativo do workspace e entrega segura. Não há force push, comandos arbitrários, mutação de remotes ou reescrita de histórico."
+                >i</button>
+              </div>
+            </div>
+            <div id="settings-git-summary" class="settings-summary-card"></div>
+            <button id="settings-open-git" class="secondary-button" type="button">Abrir painel Git</button>
+          </section>
+
+          <section id="settings-validation" class="settings-section" data-settings-section="validation" tabindex="-1">
+            <div class="section-heading">
+              <h3>Validação</h3>
+              <p>Perfil de validação ativo e comandos estruturados do workspace.</p>
+            </div>
+            <div id="settings-validation-summary" class="settings-summary-card"></div>
+            <button id="settings-open-validation" class="secondary-button" type="button">Editar perfil de validação</button>
+          </section>
+
+          <section id="settings-runtime" class="settings-section" data-settings-section="runtime" tabindex="-1">
+            <div class="section-heading">
+              <h3>Runtime e memória</h3>
+              <p>Limites conservadores; a contagem de tokens é estimada.</p>
+            </div>
+            <div class="settings-grid context-settings-grid">
             <label>
               <span>Contexto padrão estimado</span>
               <input id="default-context-tokens" type="number" min="1024" max="131072" required>
@@ -240,10 +402,6 @@
               <input id="reserved-response-tokens" type="number" min="256" required>
             </label>
             <label>
-              <span>Saída máxima de ferramentas</span>
-              <input id="max-tool-output-tokens" type="number" min="256" max="16384" required>
-            </label>
-            <label>
               <span>Timeout de geração (segundos)</span>
               <input id="generation-timeout-seconds" type="number" min="1" max="1800" required>
             </label>
@@ -251,38 +409,65 @@
               <span>Máximo de mensagens</span>
               <input id="max-conversation-messages" type="number" min="2" max="200" required>
             </label>
-          </div>
-        </section>
+            </div>
+          </section>
 
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>Configuração por intenção</h3>
-            <p>Em Auto, a intenção define o modelo alvo e o system prompt.</p>
-          </div>
-          <div id="intentions-grid" class="intentions-grid"></div>
-        </section>
-
-        <section class="settings-section">
-          <div class="section-heading">
-            <h3>Diagnóstico de modelos</h3>
-            <p id="model-context-diagnostic">Carregando diagnóstico…</p>
-          </div>
-          <div id="model-diagnostics-list" class="model-diagnostics-list"></div>
-          <div class="model-test-panel">
-            <label>
-              <span>Modelo para teste</span>
-              <select id="model-test-selector"></select>
-            </label>
-            <button id="test-model" class="secondary-button" type="button">Testar modelo</button>
-            <output id="model-test-result" class="model-test-result"></output>
-          </div>
-        </section>
+          <section id="settings-advanced" class="settings-section" data-settings-section="advanced" tabindex="-1">
+            <div class="section-heading">
+              <h3>Avançado</h3>
+              <p>Limites persistidos e diagnósticos que normalmente não precisam ser alterados.</p>
+            </div>
+            <div id="settings-advanced-summary" class="settings-summary-card"></div>
+            <div class="portable-yaml-panel">
+              <div class="heading-title-row">
+                <h4>Configuração portátil YAML</h4>
+                <button
+                  class="information-button"
+                  type="button"
+                  aria-label="Informação: o arquivo inclui modelos, Ollama, GPUs, prompts e limites globais. Caminhos de workspace, conversas, comandos de validação e aprovações não são exportados."
+                  data-tooltip="Inclui modelos, Ollama, GPUs, prompts e limites globais. Caminhos de workspace, conversas, comandos de validação e aprovações permanecem locais."
+                >i</button>
+              </div>
+              <p class="portable-yaml-description">
+                Edite, importe, compartilhe ou salve um backup. Papéis de agentes aceitam somente
+                <code>primary</code> e <code>fallback</code>.
+              </p>
+              <textarea
+                id="settings-yaml"
+                class="portable-yaml-editor"
+                data-ignore-settings-dirty
+                spellcheck="false"
+                aria-label="Configuração portátil YAML"
+              ></textarea>
+              <input
+                id="settings-yaml-file"
+                type="file"
+                accept=".yaml,.yml,application/yaml,text/yaml,text/x-yaml"
+                hidden
+              >
+              <div class="settings-action-row portable-yaml-actions">
+                <button id="refresh-settings-yaml" class="secondary-button" type="button">Recarregar</button>
+                <button id="open-settings-yaml-file" class="secondary-button" type="button">Abrir arquivo</button>
+                <button
+                  id="copy-settings-yaml"
+                  class="secondary-button"
+                  type="button"
+                  aria-label="Copiar YAML"
+                  data-original-label="Copiar YAML"
+                >Copiar</button>
+                <button id="download-settings-yaml" class="secondary-button" type="button">Baixar .yaml</button>
+                <button id="import-settings-yaml" class="primary-button" type="button">Importar e aplicar</button>
+              </div>
+              <output id="settings-yaml-status" class="portable-yaml-status" role="status"></output>
+            </div>
+          </section>
+        </div>
       </div>
 
       <footer class="dialog-footer">
         <span id="save-status" class="save-status"></span>
         <button id="cancel-settings" class="secondary-button" type="button">Cancelar</button>
-        <button class="primary-button" type="submit">Salvar</button>
+        <button id="save-settings" class="primary-button" type="submit">Salvar alterações</button>
       </footer>
     </form>
   </dialog>
@@ -297,110 +482,157 @@
         <button id="close-workspace" class="icon-button" type="button" aria-label="Fechar">×</button>
       </header>
 
-      <div class="dialog-body">
-        <section class="workspace-manager-section">
-          <div class="workspace-project-header">
-            <div>
-              <h3>Workspaces salvos</h3>
-              <p class="workspace-note">Somente um workspace fica ativo por vez.</p>
-            </div>
+      <div class="dialog-body workspace-sections">
+        <section class="workspace-section-shell">
+          <div class="workspace-section-actions">
+            <button
+              class="information-button"
+              type="button"
+              aria-label="Informação: somente um workspace fica ativo por vez."
+              data-tooltip="Somente um workspace fica ativo por vez."
+            >i</button>
+            <button
+              id="add-workspace"
+              class="add-workspace-button"
+              type="button"
+              aria-label="Adicionar novo workspace"
+              title="Adicionar novo workspace"
+            >+</button>
           </div>
-          <div id="workspace-profile-list" class="workspace-profile-list"></div>
+          <details id="saved-workspaces-section" class="workspace-accordion" open>
+            <summary>Workspaces salvos</summary>
+            <div class="workspace-section-panel">
+              <div id="workspace-profile-list" class="workspace-profile-list"></div>
+            </div>
+          </details>
         </section>
-        <p class="workspace-note">
-          No modo Execute, o agente só poderá ler, criar, editar e executar processos
-          dentro desta pasta. Caminhos externos e tentativas de escape serão bloqueados.
-        </p>
-        <label class="workspace-path-field">
-          <span>Nome do workspace</span>
-          <input
-            id="workspace-profile-name"
-            type="text"
-            maxlength="80"
-            autocomplete="off"
-            placeholder="Meu projeto"
-          >
-        </label>
-        <label class="workspace-path-field">
-          <span>Caminho da pasta</span>
-          <span class="workspace-picker-row">
-            <input
-              id="trusted-workspace-path"
-              type="text"
-              autocomplete="off"
-              placeholder="C:\meu-projeto"
-            >
-            <button id="pick-workspace" class="secondary-button" type="button">
-              Selecionar pasta
-            </button>
-          </span>
-        </label>
-        <div id="workspace-validation" class="workspace-validation" role="status">
-          Não configurado
-        </div>
-        <section id="local-history-data" class="local-history-data">
-          <div class="workspace-project-header">
-            <div>
-              <h3>Histórico local</h3>
-              <p id="history-usage" class="workspace-note">Nenhuma sessão armazenada.</p>
+
+        <section id="new-workspace-section" class="workspace-section-shell" hidden>
+          <div class="workspace-section-actions">
+            <button
+              class="information-button"
+              type="button"
+              aria-label="Informação: no modo Execute, o agente fica confinado à pasta confiável e caminhos externos são bloqueados."
+              data-tooltip="No modo Execute, o agente só poderá ler, criar, editar e executar processos dentro desta pasta. Caminhos externos e tentativas de escape serão bloqueados."
+            >i</button>
+          </div>
+          <details id="new-workspace-accordion" class="workspace-accordion" open>
+            <summary>Novo workspace</summary>
+            <div class="workspace-section-panel new-workspace-fields">
+              <label class="workspace-path-field">
+                <span>Nome do workspace</span>
+                <input
+                  id="workspace-profile-name"
+                  type="text"
+                  maxlength="80"
+                  autocomplete="off"
+                  placeholder="Meu projeto"
+                >
+              </label>
+              <label class="workspace-path-field">
+                <span>Caminho da pasta</span>
+                <span class="workspace-picker-row">
+                  <input
+                    id="trusted-workspace-path"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="C:\meu-projeto"
+                  >
+                  <button id="pick-workspace" class="secondary-button" type="button">
+                    Selecionar pasta
+                  </button>
+                </span>
+              </label>
+              <div id="workspace-validation" class="workspace-validation" role="status">
+                Não configurado
+              </div>
+              <div class="workspace-form-actions">
+                <button id="cancel-new-workspace" class="secondary-button" type="button">
+                  Cancelar
+                </button>
+                <button id="workspace-submit" class="primary-button" type="submit">
+                  Salvar workspace
+                </button>
+              </div>
             </div>
-            <label class="history-toggle">
-              <input id="workspace-history-enabled" type="checkbox">
-              <span>Salvar histórico neste workspace</span>
-            </label>
-          </div>
-          <p class="workspace-note">
-            O conteúdo fica somente neste computador e pode incluir prompts, respostas,
-            caminhos, diffs e saída limitada de comandos. O histórico não é criptografado
-            pelo Agentic Router v0.9.0. Desativar interrompe novas gravações, mas não apaga
-            registros existentes.
-          </p>
-          <div class="validation-profile-actions">
-            <button id="delete-archived-sessions" class="secondary-button danger-button" type="button">
-              Excluir arquivadas
-            </button>
-            <button id="delete-all-sessions" class="secondary-button danger-button" type="button">
-              Excluir todo o histórico
-            </button>
-          </div>
+          </details>
         </section>
-        <details id="project-profile-section" class="workspace-project-section">
-          <summary>Perfil do projeto</summary>
-          <div class="workspace-project-header">
-            <div id="project-profile-summary">Carregando perfil…</div>
-            <button id="refresh-project-profile" class="secondary-button" type="button">
-              Atualizar
-            </button>
+
+        <section class="workspace-section-shell">
+          <div class="workspace-section-actions">
+            <button
+              class="information-button"
+              type="button"
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.1."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.1. Desativar interrompe novas gravações, mas não apaga registros existentes."
+            >i</button>
           </div>
-          <div id="project-profile-details" class="project-profile-details"></div>
-        </details>
-        <details id="validation-profile-section" class="workspace-project-section">
-          <summary>Perfil de validação</summary>
-          <div class="validation-profile-editor">
-            <p id="detected-validation-profile" class="workspace-note"></p>
-            <label>
-              <span>Nome do perfil ativo</span>
-              <input id="validation-profile-name" type="text" maxlength="80">
-            </label>
-            <div id="validation-steps" class="validation-steps"></div>
-            <div class="validation-profile-actions">
-              <button id="add-validation-step" class="secondary-button" type="button">
-                Adicionar etapa
-              </button>
-              <button id="reset-validation-profile" class="secondary-button" type="button">
-                Usar sugestão detectada
-              </button>
-              <button id="clear-validation-profile" class="secondary-button danger-button" type="button">
-                Limpar perfil
-              </button>
-              <button id="save-validation-profile" class="primary-button" type="button">
-                Salvar perfil
-              </button>
+          <details id="local-history-section" class="workspace-accordion" open>
+            <summary>Histórico local</summary>
+            <div id="local-history-data" class="workspace-section-panel local-history-data">
+              <div class="workspace-project-header">
+                <p id="history-usage" class="workspace-usage">Nenhuma sessão armazenada.</p>
+                <label class="history-toggle">
+                  <input id="workspace-history-enabled" type="checkbox">
+                  <span>Salvar histórico neste workspace</span>
+                </label>
+              </div>
+              <div class="validation-profile-actions">
+                <button id="delete-archived-sessions" class="secondary-button danger-button" type="button">
+                  Excluir arquivadas
+                </button>
+                <button id="delete-all-sessions" class="secondary-button danger-button" type="button">
+                  Excluir todo o histórico
+                </button>
+              </div>
             </div>
-            <pre id="validation-command-preview" class="validation-command-preview"></pre>
-            <p id="validation-profile-status" class="save-status" role="status"></p>
-          </div>
-        </details>
+          </details>
+        </section>
+
+        <section class="workspace-section-shell">
+          <details id="project-profile-section" class="workspace-accordion">
+            <summary>Perfil do projeto</summary>
+            <div class="workspace-section-panel">
+              <div class="workspace-project-header">
+                <div id="project-profile-summary">Carregando perfil…</div>
+                <button id="refresh-project-profile" class="secondary-button" type="button">
+                  Atualizar
+                </button>
+              </div>
+              <div id="project-profile-details" class="project-profile-details"></div>
+            </div>
+          </details>
+        </section>
+
+        <section class="workspace-section-shell">
+          <details id="validation-profile-section" class="workspace-accordion">
+            <summary>Perfil de validação</summary>
+            <div class="workspace-section-panel validation-profile-editor">
+              <p id="detected-validation-profile" class="inline-status"></p>
+              <label>
+                <span>Nome do perfil ativo</span>
+                <input id="validation-profile-name" type="text" maxlength="80">
+              </label>
+              <div id="validation-steps" class="validation-steps"></div>
+              <div class="validation-profile-actions">
+                <button id="add-validation-step" class="secondary-button" type="button">
+                  Adicionar etapa
+                </button>
+                <button id="reset-validation-profile" class="secondary-button" type="button">
+                  Usar sugestão detectada
+                </button>
+                <button id="clear-validation-profile" class="secondary-button danger-button" type="button">
+                  Limpar perfil
+                </button>
+                <button id="save-validation-profile" class="primary-button" type="button">
+                  Salvar perfil
+                </button>
+              </div>
+              <pre id="validation-command-preview" class="validation-command-preview"></pre>
+              <p id="validation-profile-status" class="save-status" role="status"></p>
+            </div>
+          </details>
+        </section>
       </div>
 
       <footer class="dialog-footer">
@@ -408,9 +640,120 @@
         <button id="clear-workspace" class="secondary-button danger-button" type="button">
           Remover perfil ativo
         </button>
-        <button id="cancel-workspace" class="secondary-button" type="button">Cancelar</button>
-        <button class="primary-button" type="submit">Adicionar workspace</button>
+        <button id="cancel-workspace" class="secondary-button" type="button">Fechar</button>
       </footer>
+    </form>
+  </dialog>
+
+  <dialog id="git-dialog" class="settings-dialog git-dialog">
+    <section class="git-panel-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Workspace ativo</span>
+          <h2>Painel Git</h2>
+          <p id="git-panel-status">Carregando estado autoritativo…</p>
+        </div>
+        <button id="close-git" class="icon-button" type="button" aria-label="Fechar painel Git">×</button>
+      </header>
+
+      <div class="git-panel-body">
+        <section id="git-overview-section" class="git-panel-section">
+          <div class="section-heading">
+            <h3>Overview</h3>
+            <p>Branch, HEAD, upstream, operação em andamento e instalação do Git.</p>
+          </div>
+          <dl id="git-overview" class="git-overview-grid"></dl>
+          <div id="git-initialize-panel" class="git-initialize-panel" hidden>
+            <p>Este workspace ainda não possui um repositório Git.</p>
+            <button id="initialize-git" class="primary-button" type="button">
+              Initialize Git repository
+            </button>
+          </div>
+        </section>
+
+        <section id="git-changes-section" class="git-panel-section">
+          <div class="git-panel-heading-row">
+            <div class="section-heading">
+              <h3>Changes</h3>
+              <p>Diffs limitados pelo Host; nenhum terminal Git livre é exposto.</p>
+            </div>
+            <button id="refresh-git" class="secondary-button" type="button">Atualizar</button>
+          </div>
+          <div class="git-view-tabs" role="tablist" aria-label="Visualização das alterações">
+            <button type="button" role="tab" data-git-view="current-session" aria-selected="true">Current execution session</button>
+            <button type="button" role="tab" data-git-view="working-tree" aria-selected="false">Working tree</button>
+            <button type="button" role="tab" data-git-view="staged" aria-selected="false">Staged</button>
+            <button type="button" role="tab" data-git-view="last-commit" aria-selected="false">Last commit</button>
+          </div>
+          <div class="git-diff-layout">
+            <div id="git-file-list" class="git-file-list" aria-label="Arquivos alterados"></div>
+            <div class="git-diff-viewer">
+              <div id="git-diff-metadata" class="git-diff-metadata"></div>
+              <pre id="git-diff-content" tabindex="0">Selecione uma visualização.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section id="git-configuration-section" class="git-panel-section">
+          <div class="section-heading">
+            <h3>Repository configuration</h3>
+            <p>Somente identidade local pode ser alterada; remotes e upstream são somente leitura.</p>
+          </div>
+          <div class="settings-grid">
+            <label>
+              <span>Repository-local user.name</span>
+              <input id="git-user-name" type="text" maxlength="200" autocomplete="off">
+              <small id="git-user-name-scope"></small>
+            </label>
+            <label>
+              <span>Repository-local user.email</span>
+              <input id="git-user-email" type="email" maxlength="254" autocomplete="off">
+              <small id="git-user-email-scope"></small>
+            </label>
+          </div>
+          <div class="settings-action-row">
+            <button id="save-git-user-name" class="secondary-button" type="button">Salvar user.name</button>
+            <button id="save-git-user-email" class="secondary-button" type="button">Salvar user.email</button>
+          </div>
+          <div id="git-remotes" class="git-remotes"></div>
+        </section>
+
+        <section id="git-delivery-section" class="git-panel-section">
+          <div class="section-heading">
+            <h3>Delivery</h3>
+            <p>Commit, tag e push continuam vinculados a uma execução e aprovação imutável.</p>
+          </div>
+          <button id="git-open-review" class="secondary-button" type="button">
+            Open Review changes
+          </button>
+        </section>
+      </div>
+
+      <footer class="dialog-footer">
+        <span id="git-action-status" class="save-status" role="status"></span>
+        <button id="dismiss-git" class="secondary-button" type="button">Fechar</button>
+      </footer>
+    </section>
+  </dialog>
+
+  <dialog id="new-conversation-dialog" class="confirmation-dialog">
+    <form method="dialog">
+      <h2>Esta conversa não está salva</h2>
+      <p>
+        O histórico local está desativado. Se iniciar sem salvar, esta conversa
+        não poderá ser recuperada depois que o aplicativo fechar.
+      </p>
+      <div class="confirmation-actions">
+        <button id="new-conversation-enable-history" class="primary-button" type="button">
+          Enable local history and save
+        </button>
+        <button id="new-conversation-discard" class="danger-button" type="button">
+          Start without saving
+        </button>
+        <button id="new-conversation-cancel" class="secondary-button" type="button">
+          Cancel
+        </button>
+      </div>
     </form>
   </dialog>
 

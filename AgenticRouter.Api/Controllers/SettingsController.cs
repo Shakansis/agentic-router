@@ -12,6 +12,7 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class SettingsController : ControllerBase
 {
   private readonly ISettingsStore _settingsStore;
+  private readonly IPortableYamlSettingsService _portableYaml;
   private readonly IResidentModelManager _residentModel;
   private readonly ISettingsValidator _validator;
   private readonly IWorkspaceProfileService _workspaceProfiles;
@@ -19,6 +20,7 @@ public sealed class SettingsController : ControllerBase
 
   public SettingsController(
     ISettingsStore settingsStore,
+    IPortableYamlSettingsService portableYaml,
     IResidentModelManager residentModel,
     ISettingsValidator validator,
     IWorkspaceProfileService workspaceProfiles,
@@ -26,6 +28,7 @@ public sealed class SettingsController : ControllerBase
   )
   {
     _settingsStore = settingsStore;
+    _portableYaml = portableYaml;
     _residentModel = residentModel;
     _validator = validator;
     _workspaceProfiles = workspaceProfiles;
@@ -46,9 +49,73 @@ public sealed class SettingsController : ControllerBase
     );
   }
 
+  [HttpGet("yaml")]
+  public async Task<IActionResult> GetYaml(
+    CancellationToken cancellationToken
+  )
+  {
+    var settings = await _settingsStore.GetAsync(
+      cancellationToken
+    );
+
+    return Content(
+      _portableYaml.Export(
+        settings
+      ),
+      "application/yaml; charset=utf-8"
+    );
+  }
+
   [HttpPut]
   public async Task<IActionResult> Put(
     [FromBody] ApplicationSettings settings,
+    CancellationToken cancellationToken
+  )
+  {
+    return await SaveAsync(
+      settings,
+      null,
+      "Settings were not saved because validation failed.",
+      cancellationToken
+    );
+  }
+
+  [HttpPut("yaml")]
+  public async Task<IActionResult> PutYaml(
+    [FromBody] PortableYamlSettingsRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    var previous = await _settingsStore.GetAsync(
+      cancellationToken
+    );
+    var imported = _portableYaml.Import(
+      request.Yaml ?? string.Empty,
+      previous
+    );
+
+    if (imported.Errors.Count > 0 || imported.Settings is null)
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "YAML settings were not imported because the document is invalid.",
+          imported.Errors
+        )
+      );
+    }
+
+    return await SaveAsync(
+      imported.Settings,
+      previous,
+      "YAML settings were not imported because validation failed.",
+      cancellationToken
+    );
+  }
+
+  private async Task<IActionResult> SaveAsync(
+    ApplicationSettings settings,
+    ApplicationSettings? previous,
+    string validationMessage,
     CancellationToken cancellationToken
   )
   {
@@ -60,13 +127,13 @@ public sealed class SettingsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "Settings were not saved because validation failed.",
+          validationMessage,
           errors
         )
       );
     }
 
-    var previous = await _settingsStore.GetAsync(
+    previous ??= await _settingsStore.GetAsync(
       cancellationToken
     );
 

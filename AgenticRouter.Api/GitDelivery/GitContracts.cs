@@ -41,7 +41,8 @@ public sealed record GitDiffFileView(
   bool Staged,
   bool Binary,
   bool Truncated,
-  string Content
+  string Content,
+  string ChangeType = "modified"
 );
 
 public sealed record GitDiffView(
@@ -62,6 +63,63 @@ public sealed record GitCommitView(
   string Body,
   string Author,
   DateTimeOffset? AuthoredAt
+);
+
+public sealed record GitIdentityValueView(
+  string? Value,
+  string Scope
+);
+
+public sealed record GitRemoteView(
+  string Name,
+  string FetchUrl
+);
+
+public sealed record GitWorkspaceOverviewView(
+  string State,
+  string? Diagnostic,
+  GitRepositoryStatusView? Repository,
+  string? ExecutablePath,
+  string? Version,
+  GitLogEntryView? LatestCommit,
+  GitIdentityValueView UserName,
+  GitIdentityValueView UserEmail,
+  string? DefaultBranch,
+  IReadOnlyList<GitRemoteView> Remotes,
+  IReadOnlyList<string> CurrentSessionPaths,
+  string InitializeActionId
+);
+
+public sealed record GitInitializeRequest(
+  string BrowserSessionId,
+  string InteractionMode,
+  string ActionId,
+  bool Confirmed
+);
+
+public sealed record GitIdentityRequest(
+  string BrowserSessionId,
+  string InteractionMode,
+  string ActionId,
+  bool Confirmed,
+  string Field,
+  string Value
+);
+
+public sealed record GitIdentityPreviewRequest(
+  string Field,
+  string Value
+);
+
+public sealed record GitIdentityApprovalView(
+  string Field,
+  string Value,
+  string ActionId
+);
+
+public sealed record GitPanelDiffRequest(
+  string View,
+  IReadOnlyList<string> Paths
 );
 
 public sealed record DeliveryValidationBindingView(
