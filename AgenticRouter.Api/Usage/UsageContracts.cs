@@ -125,7 +125,8 @@ public sealed record UsageRecordRequest(
   long EstimatedOutputTokens,
   ProviderRateLimitSnapshot? RateLimit = null,
   string? ErrorCode = null,
-  int? HttpStatus = null
+  int? HttpStatus = null,
+  ProviderActivityMetadata? Activity = null
 );
 
 public sealed record PricingSnapshot(
@@ -207,6 +208,20 @@ public sealed record UsageEvent
   public string? ErrorCode { get; init; }
 
   public int? HttpStatus { get; init; }
+
+  public int ImageCount { get; init; }
+
+  public long ImageBytes { get; init; }
+
+  public int SearchQueryCount { get; init; }
+
+  public int GroundedRequestCount { get; init; }
+
+  public int CitationCount { get; init; }
+
+  public decimal? ProviderSearchCost { get; init; }
+
+  public string ActivityAccuracy { get; init; } = UsageAccuracy.Unavailable;
 }
 
 public sealed record UsageFilter(

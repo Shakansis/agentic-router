@@ -30,6 +30,7 @@ public interface IPersistentSessionService
     string message,
     string interactionMode,
     string? model,
+    IReadOnlyList<ChatImageAttachment>? images,
     CancellationToken cancellationToken
   );
 
@@ -365,6 +366,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string message,
     string interactionMode,
     string? model,
+    IReadOnlyList<ChatImageAttachment>? images,
     CancellationToken cancellationToken
   )
   {
@@ -497,7 +499,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
         Messages = session.Messages.Append(
           new ChatMessage(
             "user",
-            message
+            PersistedUserMessage(
+              message,
+              images
+            )
           )
         ).ToArray()
       };
@@ -511,6 +516,30 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       _gate.Release();
     }
+  }
+
+  private static string PersistedUserMessage(
+    string message,
+    IReadOnlyList<ChatImageAttachment>? images
+  )
+  {
+    if (images is null || images.Count == 0)
+    {
+      return message;
+    }
+
+    var metadata = images.Select(
+      image =>
+        $"- {Path.GetFileName(image.FileName)} ({image.MimeType}, {Math.Max(0, image.DeclaredBytes)} bytes, missing-attachment)"
+    );
+    return string.Concat(
+      message,
+      "\n\n[Attachment metadata; image bytes were not persisted]\n",
+      string.Join(
+        "\n",
+        metadata
+      )
+    );
   }
 
   public async Task<ConversationSessionRecord?> CompleteTurnAsync(

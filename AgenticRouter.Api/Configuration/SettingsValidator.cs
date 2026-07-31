@@ -102,6 +102,10 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       settings.CloudProviders
     );
+    ValidateWebSearch(
+      errors,
+      settings.WebSearch
+    );
 
     if (!string.Equals(
       settings.Runtime.ResidentModelPolicy,
@@ -291,6 +295,44 @@ public sealed class SettingsValidator : ISettingsValidator
         errors,
         field,
         "Model name must contain at most 256 characters."
+      );
+    }
+  }
+
+  private static void ValidateWebSearch(
+    IDictionary<string, List<string>> errors,
+    WebSearchSettings webSearch
+  )
+  {
+    if (webSearch.MaxResults is < 1 or > 10)
+    {
+      AddError(
+        errors,
+        "webSearch.maxResults",
+        "Maximum web-search results must be between 1 and 10."
+      );
+    }
+
+    if (webSearch.TimeoutSeconds is < 3 or > 60)
+    {
+      AddError(
+        errors,
+        "webSearch.timeoutSeconds",
+        "Web-search timeout must be between 3 and 60 seconds."
+      );
+    }
+
+    if (
+      webSearch.OllamaEnabled
+      && string.IsNullOrWhiteSpace(
+        webSearch.OllamaSecretReference
+      )
+    )
+    {
+      AddError(
+        errors,
+        "webSearch.ollamaSecretReference",
+        "Enabled Ollama Web Search requires a protected key reference."
       );
     }
   }

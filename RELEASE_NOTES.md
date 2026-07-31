@@ -1,3 +1,42 @@
+# Agentic Router v0.9.5
+
+This development version adds capability-aware chat with explicitly enabled
+web search, safe citations, and bounded image understanding across verified
+provider paths.
+
+## Highlights
+
+- Adds one unified capability contract for chat, streaming, advertised tools,
+  structured output, reasoning, vision, provider-native and
+  application-mediated search, citations, image count/byte limits, and MIME
+  types while keeping behavioral tool conformance separate.
+- Shows compact Local, Cloud, Tools, Web, Vision, Structured, Primary, and
+  Fallback tags beside the active provider/model and keeps the composer
+  responsive on narrow viewports.
+- Adds explicit Off, Available, Enabled, and Unavailable Web states. Supported
+  Gemini requests use Google Search grounding, supported Groq Compound systems
+  use provider citations, and Cerebras never receives invented search support.
+- Adds a separate DPAPI-protected Ollama Web Search integration for local
+  models. Results are bounded, treated as untrusted data, limited to HTTPS
+  citations, and cannot trigger local tools or restore Ollama Cloud models.
+- Adds file-picker, drag/drop, clipboard paste, preview, and removal for
+  verified JPEG, PNG, WebP, and GIF attachments with signature, count, decoded
+  byte, MIME, and practical dimension checks. SVG is rejected.
+- Requires a non-persisted, browser-session/provider-specific confirmation
+  before cloud image upload. Local vision needs no confirmation; text-only
+  primaries and fallbacks never receive silently stripped images.
+- Maps multimodal messages to Ollama, compatible Groq models, and Gemini.
+  Cerebras image input remains disabled unless authoritative model metadata
+  confirms it.
+- Extends metadata-only usage events with media tokens when reported, image
+  count/bytes, search queries, grounded requests, citation count, provider
+  search cost when available, and exactness without storing image or search
+  content.
+- Adds deterministic E2E coverage for capability accuracy, search/citations,
+  unsafe URLs, cancellation, image validation and persistence, privacy
+  approval, multimodal mapping, vision-aware fallback, and responsive composer
+  behavior.
+
 # Agentic Router v0.9.4
 
 This development version adds a Host-owned cloud usage dashboard and requires a

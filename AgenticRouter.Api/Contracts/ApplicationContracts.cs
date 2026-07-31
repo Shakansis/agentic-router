@@ -56,6 +56,14 @@ public sealed record ChatMessage(
   string Content
 );
 
+public sealed record ChatImageAttachment(
+  string Id,
+  string FileName,
+  string MimeType,
+  string Base64Data,
+  long DeclaredBytes
+);
+
 public sealed record ChatRequest(
   string Message,
   string Model,
@@ -64,7 +72,34 @@ public sealed record ChatRequest(
   string InteractionMode = "chat",
   string ApprovalPolicy = "ask",
   string? BrowserSessionId = null,
-  string? ConversationSessionId = null
+  string? ConversationSessionId = null,
+  bool WebSearchEnabled = false,
+  IReadOnlyList<ChatImageAttachment>? Images = null
+);
+
+public sealed record ModelCapabilityView(
+  string Model,
+  string Provider,
+  string ProviderDisplayName,
+  string Role,
+  ProviderModelCapabilities Capabilities,
+  bool WebAvailable,
+  string? WebUnavailableReason
+);
+
+public sealed record CloudImageApprovalRequest(
+  string BrowserSessionId,
+  string Provider
+);
+
+public sealed record CloudImageApprovalView(
+  string BrowserSessionId,
+  string Provider,
+  bool Approved
+);
+
+public sealed record CloudImageApprovalResetRequest(
+  string BrowserSessionId
 );
 
 public sealed record WorkspaceProfileView(
@@ -502,7 +537,8 @@ public sealed record ChatStreamEvent(
   LocalActionEvent? LocalAction = null,
   ExecutionSessionSummary? ExecutionSession = null,
   string? ConversationSessionId = null,
-  RecoveryDecisionEvent? RecoveryDecision = null
+  RecoveryDecisionEvent? RecoveryDecision = null,
+  IReadOnlyList<ProviderCitation>? Citations = null
 );
 
 public sealed record ValidationErrorsResponse(

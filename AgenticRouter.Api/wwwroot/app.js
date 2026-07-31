@@ -39,7 +39,14 @@ const state = {
   usageOverview: null,
   pricingCatalog: null,
   cloudProviders: null,
-  cloudUsageDashboard: null
+  cloudUsageDashboard: null,
+  modelCapability: null,
+  capabilityRequestId: 0,
+  webEnabled: false,
+  webControlState: "unavailable",
+  webSearch: null,
+  attachments: [],
+  cloudImageApprovals: new Set()
 };
 
 const elements = {};
@@ -78,6 +85,14 @@ function bindElements() {
     "send-button-label",
     "cancel-message-edit",
     "active-agent-label",
+    "active-provider-model",
+    "capability-tags",
+    "fallback-indicator",
+    "web-toggle",
+    "web-toggle-label",
+    "attach-image",
+    "image-input",
+    "attachment-previews",
     "composer-status",
     "provider-badge",
     "provider-detail",
@@ -258,6 +273,20 @@ function bindEvents() {
   elements.newConversation.addEventListener("click", requestNewConversation);
   elements.historyNewConversation.addEventListener("click", requestNewConversation);
   elements.modelSelector.addEventListener("change", handleModelSelectionChange);
+  elements.webToggle.addEventListener("click", toggleWebSearch);
+  elements.attachImage.addEventListener(
+    "click",
+    () => elements.imageInput.click()
+  );
+  elements.imageInput.addEventListener("change", handleImageSelection);
+  elements.messageInput.addEventListener("paste", handleImagePaste);
+  elements.composer.addEventListener("dragover", handleImageDragOver);
+  elements.composer.addEventListener("dragleave", handleImageDragLeave);
+  elements.composer.addEventListener("drop", handleImageDrop);
+  elements.attachmentPreviews.addEventListener(
+    "click",
+    handleAttachmentPreviewClick
+  );
   elements.modelLock.addEventListener("change", handleModelLockChange);
   elements.testModel.addEventListener("click", testSelectedModel);
   elements.approvalPolicy.addEventListener("change", handleApprovalPolicyChange);
@@ -411,7 +440,8 @@ async function loadApplicationState() {
     usageOverview,
     pricingCatalog,
     cloudProviders,
-    cloudUsageDashboard
+    cloudUsageDashboard,
+    webSearch
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -423,7 +453,8 @@ async function loadApplicationState() {
     fetchJson("/api/usage/overview"),
     fetchJson("/api/usage/pricing"),
     fetchJson("/api/cloud-providers"),
-    fetchJson("/api/usage/cloud-dashboard")
+    fetchJson("/api/usage/cloud-dashboard"),
+    fetchJson("/api/web-search")
   ]);
 
   state.settings = settings;
@@ -437,6 +468,7 @@ async function loadApplicationState() {
   state.pricingCatalog = pricingCatalog;
   state.cloudProviders = cloudProviders;
   state.cloudUsageDashboard = cloudUsageDashboard;
+  state.webSearch = webSearch;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
@@ -447,6 +479,7 @@ async function loadApplicationState() {
   renderProjectProfile();
   renderValidationProfile();
   updateInteractionControls();
+  await refreshSelectedModelCapabilities();
   await refreshSessions();
   await refreshGit();
 }
@@ -1066,7 +1099,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.4."
+        + "pelo Agentic Router v0.9.5."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1092,6 +1125,7 @@ async function changeWorkspaceHistory(event) {
 }
 
 async function resetConversationForWorkspaceChange() {
+  await resetCloudImagePrivacy(state.browserSessionId);
   clearConversationUi();
   state.browserSessionId = createSessionId();
   state.conversationSessionId = null;
@@ -1104,6 +1138,7 @@ async function resetConversationForWorkspaceChange() {
   updateInteractionControls();
   updateModelLockControls();
   await ensureConversationIdentity();
+  await refreshSelectedModelCapabilities();
 }
 
 function renderProjectProfile() {
@@ -1637,6 +1672,7 @@ async function resumeSession(id) {
             })
           }
         );
+        await resetCloudImagePrivacy(state.browserSessionId);
         clearConversationUi();
         state.browserSessionId = nextBrowserSessionId;
         state.conversationSessionId = session.id;
@@ -1657,6 +1693,7 @@ async function resumeSession(id) {
           ? session.selectedModel
           : "auto";
         renderRestoredConversation(session);
+        await refreshSelectedModelCapabilities();
         setPersistenceStatus(
           session.interrupted
             ? "Interrupted"
@@ -2691,6 +2728,75 @@ function renderCloudProviders() {
     card.append(summary, body);
     elements.cloudProvidersList.append(card);
   }
+
+  renderOllamaWebSearchSettings();
+}
+
+function renderOllamaWebSearchSettings() {
+  const integration = state.webSearch;
+
+  if (!integration) {
+    return;
+  }
+
+  const card = document.createElement("details");
+  card.className = "cloud-provider-card";
+  card.dataset.provider = integration.provider;
+  const summary = document.createElement("summary");
+  const title = document.createElement("span");
+  title.className = "cloud-provider-title";
+  title.textContent = integration.displayName;
+  const status = document.createElement("span");
+  status.className = `badge ${integration.state === "available"
+    ? "success"
+    : "muted"}`;
+  status.textContent = integration.state === "available"
+    ? "Disponível"
+    : "Não configurado";
+  summary.append(title, status);
+
+  const body = document.createElement("div");
+  body.className = "cloud-provider-body";
+  const note = document.createElement("p");
+  note.className = "runtime-note";
+  note.textContent =
+    "Pesquisa somente leitura para modelos locais. É separada dos modelos Ollama Cloud "
+      + "e só é usada quando Web for habilitado explicitamente no composer.";
+  const keyField = document.createElement("label");
+  const keyLabel = document.createElement("span");
+  keyLabel.textContent = integration.hasKey
+    ? "Substituir chave"
+    : "API key separada";
+  const keyInput = document.createElement("input");
+  keyInput.type = "password";
+  keyInput.autocomplete = "new-password";
+  keyInput.dataset.webSearchKey = "";
+  keyInput.dataset.ignoreSettingsDirty = "";
+  keyInput.placeholder = integration.hasKey
+    ? "Digite uma nova chave"
+    : "OLLAMA_API_KEY";
+  keyField.append(keyLabel, keyInput);
+  const actions = document.createElement("div");
+  actions.className = "settings-action-row";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "secondary-button";
+  save.dataset.webSearchAction = "save-key";
+  save.textContent = integration.hasKey ? "Substituir" : "Salvar chave";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "secondary-button danger-button";
+  remove.dataset.webSearchAction = "remove-key";
+  remove.textContent = "Remover chave";
+  remove.disabled = !integration.hasKey;
+  actions.append(save, remove);
+  const diagnostic = document.createElement("p");
+  diagnostic.className = "runtime-note cloud-provider-diagnostic";
+  diagnostic.dataset.webSearchDiagnostic = "";
+  diagnostic.textContent = integration.diagnostic ?? "";
+  body.append(note, keyField, actions, diagnostic);
+  card.append(summary, body);
+  elements.cloudProvidersList.append(card);
 }
 
 function cloudActionButton(provider, action, label, extraClass = "") {
@@ -2743,6 +2849,13 @@ function cloudConnectionLabel(stateName) {
 }
 
 async function handleCloudProviderAction(event) {
+  const webButton = event.target.closest("[data-web-search-action]");
+
+  if (webButton) {
+    await handleOllamaWebSearchAction(webButton);
+    return;
+  }
+
   const button = event.target.closest("[data-cloud-action]");
 
   if (!button) {
@@ -2812,26 +2925,83 @@ async function handleCloudProviderAction(event) {
   }
 }
 
+async function handleOllamaWebSearchAction(button) {
+  const action = button.dataset.webSearchAction;
+  const diagnostic = elements.cloudProvidersList.querySelector(
+    "[data-web-search-diagnostic]"
+  );
+  let path;
+  let options;
+
+  if (action === "save-key") {
+    const input = elements.cloudProvidersList.querySelector(
+      "[data-web-search-key]"
+    );
+    const apiKey = input.value.trim();
+
+    if (!apiKey) {
+      diagnostic.textContent = "Digite a chave separada antes de salvar.";
+      input.focus();
+      return;
+    }
+
+    path = "/api/web-search/key";
+    options = {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ apiKey })
+    };
+  } else {
+    if (!window.confirm(
+      "Remover permanentemente a chave protegida do Ollama Web Search?"
+    )) {
+      return;
+    }
+
+    path = "/api/web-search/key?confirmed=true";
+    options = { method: "DELETE" };
+  }
+
+  button.disabled = true;
+  diagnostic.textContent = "Processando…";
+
+  try {
+    state.webSearch = await fetchJson(path, options);
+    renderCloudProviders();
+    await refreshSelectedModelCapabilities();
+  } catch (error) {
+    diagnostic.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function refreshCloudProviderState() {
   const [
     cloudProviders,
     modelsResponse,
     settings,
-    cloudUsageDashboard
+    cloudUsageDashboard,
+    webSearch
   ] = await Promise.all([
     fetchJson("/api/cloud-providers"),
     fetchJson("/api/models"),
     fetchJson("/api/settings"),
-    fetchJson("/api/usage/cloud-dashboard")
+    fetchJson("/api/usage/cloud-dashboard"),
+    fetchJson("/api/web-search")
   ]);
   state.cloudProviders = cloudProviders;
   state.models = modelsResponse.models;
   state.settings = settings;
   state.cloudUsageDashboard = cloudUsageDashboard;
+  state.webSearch = webSearch;
   renderCloudProviders();
   renderComposerModels();
   renderSettings();
   renderCloudUsage();
+  await refreshSelectedModelCapabilities();
 }
 
 function gpuOptions(includeDefault) {
@@ -3422,7 +3592,7 @@ function openValidationFromSettings() {
   elements.validationProfileName.focus();
 }
 
-function handleModelSelectionChange() {
+async function handleModelSelectionChange() {
   if (elements.modelSelector.value === "auto") {
     state.lockedModel = null;
     elements.modelLock.checked = false;
@@ -3431,6 +3601,459 @@ function handleModelSelectionChange() {
   updateModelLockControls();
   updateInteractionControls();
   updateComposerStatus();
+  state.activeAgentModel = null;
+  state.activeAgentRole = null;
+  state.webEnabled = false;
+  state.webControlState = "unavailable";
+  await refreshSelectedModelCapabilities();
+}
+
+async function refreshSelectedModelCapabilities(
+  model = null,
+  role = null
+) {
+  const selected = model
+    ?? state.activeAgentModel
+    ?? state.lockedModel
+    ?? elements.modelSelector.value;
+  const capabilityModel = selected && selected !== "auto"
+    ? selected
+    : state.settings?.defaultModel;
+  const requestId = ++state.capabilityRequestId;
+
+  if (!capabilityModel) {
+    state.modelCapability = null;
+    renderCapabilityContext();
+    return;
+  }
+
+  elements.activeProviderModel.textContent = "Verificando capacidades…";
+
+  try {
+    const view = await fetchJson(
+      `/api/capabilities/model?model=${encodeURIComponent(capabilityModel)}`
+    );
+
+    if (requestId !== state.capabilityRequestId) {
+      return;
+    }
+
+    state.modelCapability = {
+      ...view,
+      role: role ?? state.activeAgentRole ?? view.role
+    };
+
+    if (!view.webAvailable) {
+      state.webEnabled = false;
+      state.webControlState = "unavailable";
+    } else if (state.webControlState === "unavailable") {
+      state.webControlState = "available";
+    }
+  } catch (error) {
+    if (requestId !== state.capabilityRequestId) {
+      return;
+    }
+
+    state.modelCapability = {
+      model: capabilityModel,
+      provider: providerFromModel(capabilityModel),
+      providerDisplayName: providerLabel(providerFromModel(capabilityModel)),
+      role: role ?? "primary",
+      capabilities: null,
+      webAvailable: false,
+      webUnavailableReason: error.message
+    };
+    state.webEnabled = false;
+    state.webControlState = "unavailable";
+  }
+
+  renderCapabilityContext();
+}
+
+function renderCapabilityContext() {
+  const view = state.modelCapability;
+  elements.capabilityTags.replaceChildren();
+
+  if (!view?.capabilities) {
+    elements.activeProviderModel.textContent =
+      view?.webUnavailableReason ?? "Capacidades indisponíveis";
+    renderWebControl();
+    elements.fallbackIndicator.hidden = true;
+    return;
+  }
+
+  const capabilities = view.capabilities;
+  elements.activeProviderModel.textContent =
+    `${view.providerDisplayName} · ${view.model}`;
+  const tags = [
+    {
+      label: view.provider === "ollama-local" ? "Local" : "Cloud",
+      kind: view.provider === "ollama-local" ? "local" : "cloud",
+      title: `Provedor: ${view.providerDisplayName}`
+    },
+    capabilities.nativeTools
+      ? {
+        label: "Tools",
+        kind: "tools",
+        title: capabilities.toolProtocolConfirmed
+          ? "Tool protocol confirmed behaviorally."
+          : `Tools advertised by ${capabilities.source}; behavioral conformance is tracked separately.`
+      }
+      : null,
+    capabilities.webSearch
+      ? {
+        label: "Web",
+        kind: "web",
+        title: capabilities.providerNativeWebSearch
+          ? "Provider-native web search; explicit enablement required."
+          : "Application-mediated read-only Ollama Web Search; explicit enablement required."
+      }
+      : null,
+    capabilities.vision
+      ? {
+        label: "Vision",
+        kind: "vision",
+        title: `Up to ${capabilities.maximumImageCount} images; ${formatBytes(capabilities.maximumImageBytes)} each.`
+      }
+      : null,
+    capabilities.structuredOutput
+      ? {
+        label: "Structured",
+        kind: "structured",
+        title: `Structured-output capability from ${capabilities.source}.`
+      }
+      : null,
+    {
+      label: view.role === "fallback" ? "Fallback" : "Primary",
+      kind: view.role === "fallback" ? "fallback" : "primary",
+      title: view.role === "fallback"
+        ? "This model is serving as the configured fallback."
+        : "This model is serving as the primary target."
+    }
+  ].filter(Boolean);
+
+  for (const tag of tags) {
+    const element = document.createElement("span");
+    element.className = "capability-tag";
+    element.dataset.kind = tag.kind;
+    element.textContent = tag.label;
+    element.title = tag.title;
+    elements.capabilityTags.append(element);
+  }
+
+  elements.fallbackIndicator.hidden =
+    view.provider === "ollama-local"
+    || !hasConfiguredLocalFallback(view.model);
+  renderWebControl();
+}
+
+function renderWebControl() {
+  const available = Boolean(state.modelCapability?.webAvailable);
+
+  if (!available) {
+    state.webEnabled = false;
+    state.webControlState = "unavailable";
+  } else if (state.webEnabled) {
+    state.webControlState = "enabled";
+  } else if (!["available", "off"].includes(state.webControlState)) {
+    state.webControlState = "available";
+  }
+
+  const labels = {
+    unavailable: "Web indisponível",
+    available: "Web disponível",
+    enabled: "Web habilitada",
+    off: "Web desligada"
+  };
+  elements.webToggle.dataset.state = state.webControlState;
+  elements.webToggleLabel.textContent = labels[state.webControlState];
+  elements.webToggle.disabled = !available || Boolean(state.requestController);
+  elements.webToggle.setAttribute(
+    "aria-pressed",
+    String(state.webEnabled)
+  );
+  elements.webToggle.title = available
+    ? state.modelCapability.capabilities.providerNativeWebSearch
+      ? "Pesquisa oficial do provedor. Clique para habilitar explicitamente nesta conversa."
+      : "Pesquisa Ollama separada e somente leitura. Clique para habilitar explicitamente nesta conversa."
+    : state.modelCapability?.webUnavailableReason
+      ?? "Nenhuma integração de pesquisa autorizada está disponível.";
+}
+
+function toggleWebSearch() {
+  if (!state.modelCapability?.webAvailable || state.requestController) {
+    return;
+  }
+
+  state.webEnabled = !state.webEnabled;
+  state.webControlState = state.webEnabled ? "enabled" : "off";
+  renderCapabilityContext();
+  updateComposerStatus();
+}
+
+function providerFromModel(model) {
+  const separator = model.indexOf("::");
+  return separator > 0 ? model.slice(0, separator) : "ollama-local";
+}
+
+function providerLabel(provider) {
+  return {
+    "ollama-local": "Ollama Local",
+    groq: "Groq",
+    "google-ai-studio": "Google AI Studio",
+    cerebras: "Cerebras"
+  }[provider] ?? provider;
+}
+
+function hasConfiguredLocalFallback(model) {
+  return Object.values(state.settings?.intentions ?? {}).some(
+    intention => {
+      const primary = intention.model === "default"
+        ? state.settings.defaultModel
+        : intention.model;
+      const fallback = intention.fallbackModel === "default"
+        ? state.settings.defaultModel
+        : intention.fallbackModel;
+      return primary === model
+        && fallback
+        && fallback !== "none"
+        && providerFromModel(fallback) === "ollama-local";
+    }
+  );
+}
+
+async function handleImageSelection(event) {
+  await addImageFiles(event.currentTarget.files);
+  event.currentTarget.value = "";
+}
+
+function handleImagePaste(event) {
+  const files = Array.from(event.clipboardData?.files ?? []).filter(
+    file => file.type.startsWith("image/")
+  );
+
+  if (files.length > 0) {
+    event.preventDefault();
+    void addImageFiles(files);
+  }
+}
+
+function handleImageDragOver(event) {
+  if (Array.from(event.dataTransfer?.items ?? []).some(
+    item => item.kind === "file"
+  )) {
+    event.preventDefault();
+    elements.composer.classList.add("drag-active");
+  }
+}
+
+function handleImageDragLeave(event) {
+  if (!elements.composer.contains(event.relatedTarget)) {
+    elements.composer.classList.remove("drag-active");
+  }
+}
+
+function handleImageDrop(event) {
+  event.preventDefault();
+  elements.composer.classList.remove("drag-active");
+  void addImageFiles(event.dataTransfer?.files);
+}
+
+async function addImageFiles(fileList) {
+  const files = Array.from(fileList ?? []);
+  const acceptedTypes = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif"
+  ]);
+
+  if (state.attachments.length + files.length > 4) {
+    elements.composerStatus.textContent = "No máximo 4 imagens por solicitação.";
+    return;
+  }
+
+  for (const file of files) {
+    if (!acceptedTypes.has(file.type)) {
+      elements.composerStatus.textContent =
+        "Somente JPEG, PNG, WebP e GIF são aceitos; SVG não é permitido.";
+      continue;
+    }
+
+    if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
+      elements.composerStatus.textContent =
+        "Cada imagem deve ter no máximo 10 MiB.";
+      continue;
+    }
+
+    const total = state.attachments.reduce(
+      (sum, attachment) => sum + attachment.declaredBytes,
+      file.size
+    );
+
+    if (total > 20 * 1024 * 1024) {
+      elements.composerStatus.textContent =
+        "As imagens combinadas devem ter no máximo 20 MiB.";
+      break;
+    }
+
+    const dataUrl = await readFileDataUrl(file);
+    state.attachments.push({
+      id: createSessionId(),
+      fileName: file.name || "clipboard-image",
+      mimeType: file.type,
+      declaredBytes: file.size,
+      base64Data: dataUrl.slice(dataUrl.indexOf(",") + 1),
+      previewUrl: URL.createObjectURL(file)
+    });
+  }
+
+  renderAttachmentPreviews();
+  updateComposerStatus();
+}
+
+function readFileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result)));
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderAttachmentPreviews() {
+  elements.attachmentPreviews.replaceChildren();
+  elements.attachmentPreviews.hidden = state.attachments.length === 0;
+
+  for (const attachment of state.attachments) {
+    const preview = document.createElement("figure");
+    preview.className = "attachment-preview";
+    const image = document.createElement("img");
+    image.src = attachment.previewUrl;
+    image.alt = attachment.fileName;
+    const caption = document.createElement("span");
+    caption.textContent = attachment.fileName;
+    caption.title = `${attachment.fileName} · ${formatBytes(attachment.declaredBytes)}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-remove";
+    remove.dataset.attachmentRemove = attachment.id;
+    remove.setAttribute("aria-label", `Remover ${attachment.fileName}`);
+    remove.title = `Remover ${attachment.fileName}`;
+    remove.textContent = "×";
+    preview.append(image, caption, remove);
+    elements.attachmentPreviews.append(preview);
+  }
+}
+
+function handleAttachmentPreviewClick(event) {
+  const button = event.target.closest("[data-attachment-remove]");
+
+  if (!button) {
+    return;
+  }
+
+  const index = state.attachments.findIndex(
+    attachment => attachment.id === button.dataset.attachmentRemove
+  );
+
+  if (index >= 0) {
+    URL.revokeObjectURL(state.attachments[index].previewUrl);
+    state.attachments.splice(index, 1);
+    renderAttachmentPreviews();
+    updateComposerStatus();
+  }
+}
+
+function clearAttachments() {
+  for (const attachment of state.attachments) {
+    URL.revokeObjectURL(attachment.previewUrl);
+  }
+
+  state.attachments = [];
+  renderAttachmentPreviews();
+}
+
+async function ensureCloudImageApproval(model) {
+  if (state.attachments.length === 0) {
+    return true;
+  }
+
+  if (!model || model === "auto") {
+    elements.composerStatus.textContent =
+      "Selecione explicitamente um modelo com Vision antes de enviar imagens.";
+    return false;
+  }
+
+  const provider = providerFromModel(model);
+
+  if (provider === "ollama-local") {
+    return true;
+  }
+
+  const key = `${state.browserSessionId}\n${provider}`;
+
+  if (state.cloudImageApprovals.has(key)) {
+    return true;
+  }
+
+  const bytes = state.attachments.reduce(
+    (sum, attachment) => sum + attachment.declaredBytes,
+    0
+  );
+  const approved = window.confirm(
+    `${providerLabel(provider)} receberá ${formatBytes(bytes)} de imagens. `
+      + "Esses bytes sairão deste computador. Autorizar para este provedor nesta sessão?"
+  );
+
+  if (!approved) {
+    elements.composerStatus.textContent = "Envio cloud de imagens não autorizado.";
+    return false;
+  }
+
+  await fetchJson(
+    "/api/privacy/cloud-images/approve",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        browserSessionId: state.browserSessionId,
+        provider
+      })
+    }
+  );
+  state.cloudImageApprovals.add(key);
+  return true;
+}
+
+async function resetCloudImagePrivacy(browserSessionId) {
+  state.cloudImageApprovals.clear();
+  state.webEnabled = false;
+  state.webControlState = state.modelCapability?.webAvailable
+    ? "available"
+    : "unavailable";
+  clearAttachments();
+
+  if (!browserSessionId) {
+    return;
+  }
+
+  try {
+    await fetchJson(
+      "/api/privacy/cloud-images/reset",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ browserSessionId })
+      }
+    );
+  } catch {
+    // The old browser-session identifier is no longer reused.
+  }
 }
 
 function handleModeChange(event) {
@@ -3640,6 +4263,7 @@ async function beginEmptyConversation() {
         })
       }
     );
+    await resetCloudImagePrivacy(state.browserSessionId);
     clearConversationUi();
     state.browserSessionId = nextBrowserSessionId;
     state.conversationSessionId = identity.sessionId;
@@ -3648,6 +4272,7 @@ async function beginEmptyConversation() {
     setPersistenceStatus(identity.status);
     await refreshSessions();
     await refreshGit();
+    await refreshSelectedModelCapabilities();
   } catch (error) {
     setPersistenceStatus("Save failed");
     elements.composerStatus.textContent =
@@ -3664,6 +4289,11 @@ function clearConversationUi() {
   state.approvalPolicy = "ask";
   state.activeAgentModel = null;
   state.activeAgentRole = null;
+  state.modelCapability = null;
+  state.webEnabled = false;
+  state.webControlState = "unavailable";
+  state.cloudImageApprovals.clear();
+  clearAttachments();
   state.autoFollow = true;
   elements.modelSelector.value = "auto";
   elements.modelLock.checked = false;
@@ -3871,6 +4501,21 @@ async function handleComposerSubmit(event) {
     return;
   }
 
+  const selectedModel = state.lockedModel ?? elements.modelSelector.value;
+
+  if (!await ensureCloudImageApproval(selectedModel)) {
+    return;
+  }
+
+  const requestAttachments = state.attachments.map(
+    attachment => ({
+      id: attachment.id,
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      base64Data: attachment.base64Data,
+      declaredBytes: attachment.declaredBytes
+    })
+  );
   state.autoFollow = true;
   updateJumpControl();
   elements.emptyState?.remove();
@@ -3905,14 +4550,15 @@ async function handleComposerSubmit(event) {
   );
   appendUserMessage(
     message,
-    historyIndex
+    historyIndex,
+    requestAttachments
   );
   const conversationVersion = state.conversationVersion;
-  const selectedModel = state.lockedModel ?? elements.modelSelector.value;
   const controller = new AbortController();
   const assistant = appendAssistantMessage();
   state.activeAssistant = assistant;
   elements.messageInput.value = "";
+  clearAttachments();
   resizeComposer();
   state.requestController = controller;
   setStreamingState(true);
@@ -3936,7 +4582,9 @@ async function handleComposerSubmit(event) {
           interactionMode: state.interactionMode,
           approvalPolicy: state.approvalPolicy,
           browserSessionId: state.browserSessionId,
-          conversationSessionId: state.conversationSessionId
+          conversationSessionId: state.conversationSessionId,
+          webSearchEnabled: state.webEnabled,
+          images: requestAttachments
         }),
         signal: controller.signal
       }
@@ -4017,12 +4665,21 @@ async function handleComposerSubmit(event) {
   }
 }
 
-function appendUserMessage(message, historyIndex) {
+function appendUserMessage(message, historyIndex, attachments = []) {
   const element = document.createElement("article");
   element.className = "message user";
   const content = document.createElement("div");
   content.className = "message-content";
   content.textContent = message;
+
+  if (attachments.length > 0) {
+    const attachmentNote = document.createElement("small");
+    attachmentNote.className = "message-attachment-note";
+    attachmentNote.textContent =
+      `${attachments.length} imagem${attachments.length === 1 ? "" : "ns"} anexada`
+      + `${attachments.length === 1 ? "" : "s"} · bytes não persistidos`;
+    content.append(document.createElement("br"), attachmentNote);
+  }
   const actions = document.createElement("div");
   actions.className = "message-actions";
   const editButton = createMessageActionButton(
@@ -4071,6 +4728,14 @@ function appendAssistantMessage() {
 
   const answer = document.createElement("div");
   answer.className = "assistant-answer pending";
+  const sources = document.createElement("details");
+  sources.className = "assistant-sources";
+  sources.hidden = true;
+  const sourcesSummary = document.createElement("summary");
+  sourcesSummary.textContent = "Fontes";
+  const sourcesList = document.createElement("ol");
+  sourcesList.className = "assistant-source-list";
+  sources.append(sourcesSummary, sourcesList);
   const actions = document.createElement("div");
   actions.className = "message-actions assistant-actions";
   const copyButton = createMessageActionButton(
@@ -4086,7 +4751,7 @@ function appendAssistantMessage() {
   reviewButton.classList.add("review-changes");
   reviewButton.hidden = true;
   actions.append(reviewButton, copyButton);
-  container.append(details, planPanel, answer, actions);
+  container.append(details, planPanel, answer, sources, actions);
   elements.messages.append(container);
 
   const assistant = {
@@ -4104,6 +4769,9 @@ function appendAssistantMessage() {
     lastClockUpdate: 0,
     recovered: false,
     rawAnswer: "",
+    sources,
+    sourcesSummary,
+    sourcesList,
     copyButton,
     reviewButton,
     executionSession: null,
@@ -4133,6 +4801,33 @@ function appendAssistantMessage() {
   resizeObserver.observe(container);
   startElapsedClock(assistant);
   return assistant;
+}
+
+function renderAssistantSources(assistant, citations) {
+  assistant.sourcesList.replaceChildren();
+  const safeCitations = (citations ?? []).filter(
+    citation => {
+      try {
+        return new URL(citation.url).protocol === "https:";
+      } catch {
+        return false;
+      }
+    }
+  );
+  assistant.sources.hidden = safeCitations.length === 0;
+  assistant.sourcesSummary.textContent =
+    `Fontes (${safeCitations.length})`;
+
+  for (const citation of safeCitations) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = citation.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = citation.title || new URL(citation.url).hostname;
+    item.append(link);
+    assistant.sourcesList.append(item);
+  }
 }
 
 function startElapsedClock(assistant) {
@@ -4188,6 +4883,10 @@ async function consumeEventStream(stream, assistant) {
         state.activeAgentModel = streamEvent.selectedModel;
         state.activeAgentRole = "primary";
         updateActiveAgentLabel();
+        void refreshSelectedModelCapabilities(
+          streamEvent.selectedModel,
+          "primary"
+        );
       } else if (
         streamEvent.type.startsWith("cloud.local-fallback")
         && streamEvent.selectedModel
@@ -4195,6 +4894,10 @@ async function consumeEventStream(stream, assistant) {
         state.activeAgentModel = streamEvent.selectedModel;
         state.activeAgentRole = "fallback";
         updateActiveAgentLabel();
+        void refreshSelectedModelCapabilities(
+          streamEvent.selectedModel,
+          "fallback"
+        );
       }
 
       updateExecutionSession(
@@ -4227,6 +4930,10 @@ async function consumeEventStream(stream, assistant) {
         );
       } else if (streamEvent.type === "response.completed") {
         completed = true;
+        renderAssistantSources(
+          assistant,
+          streamEvent.citations
+        );
         assistant.answer.classList.remove("pending");
         renderAssistantAnswer(
           assistant,
@@ -5920,6 +6627,8 @@ function setStreamingState(isStreaming) {
         : "Enviar mensagem"
   );
   elements.sendButton.classList.toggle("cancel", isStreaming);
+  elements.attachImage.disabled = isStreaming;
+  elements.imageInput.disabled = isStreaming;
   elements.cancelMessageEdit.hidden = isStreaming || !state.editingTurn;
   elements.messages.querySelectorAll(".edit-message").forEach(
     button => {
@@ -5928,6 +6637,7 @@ function setStreamingState(isStreaming) {
   );
   updateModelLockControls();
   updateComposerStatus();
+  renderWebControl();
 }
 
 function updateComposerStatus() {
@@ -5942,11 +6652,20 @@ function updateComposerStatus() {
   } else if (state.interactionMode === "execute") {
     elements.composerStatus.textContent =
       `Execute · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
+  } else if (state.attachments.length > 0 || state.webEnabled) {
+    elements.composerStatus.textContent = [
+      state.attachments.length > 0
+        ? `${state.attachments.length} imagem${state.attachments.length === 1 ? "" : "ns"}`
+        : null,
+      state.webEnabled ? "Web habilitada" : null,
+      "Enter para enviar"
+    ].filter(Boolean).join(" · ");
   } else {
     elements.composerStatus.textContent = "Enter para enviar";
   }
 
   updateActiveAgentLabel();
+  renderCapabilityContext();
 }
 
 function updateActiveAgentLabel() {

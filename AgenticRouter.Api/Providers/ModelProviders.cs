@@ -83,7 +83,54 @@ public sealed record ProviderModelCapabilities(
   bool WebSearch,
   int? ContextTokens,
   string Source,
-  bool Confirmed
+  bool Confirmed,
+  bool StructuredOutput = false,
+  bool Reasoning = false,
+  bool ProviderNativeWebSearch = false,
+  bool ApplicationWebSearch = false,
+  bool Citations = false,
+  int MaximumImageCount = 0,
+  long MaximumImageBytes = 0,
+  IReadOnlyList<string>? SupportedImageMimeTypes = null,
+  bool ToolProtocolConfirmed = false
+);
+
+public sealed record ProviderImagePayload(
+  string Id,
+  string FileName,
+  string MimeType,
+  byte[] Bytes,
+  int? Width,
+  int? Height
+);
+
+public sealed record ProviderChatOptions(
+  bool WebSearchEnabled,
+  IReadOnlyList<ProviderImagePayload> Images
+)
+{
+  public static ProviderChatOptions Empty { get; } = new(
+    false,
+    []
+  );
+}
+
+public sealed record ProviderCitation(
+  string Id,
+  string Title,
+  string Url,
+  int? StartIndex = null,
+  int? EndIndex = null
+);
+
+public sealed record ProviderActivityMetadata(
+  int ImageCount = 0,
+  long ImageBytes = 0,
+  int SearchQueryCount = 0,
+  int GroundedRequestCount = 0,
+  int CitationCount = 0,
+  decimal? ProviderSearchCost = null,
+  string Accuracy = "unavailable"
 );
 
 public sealed record ProviderModelPricing(

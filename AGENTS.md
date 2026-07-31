@@ -138,6 +138,21 @@ provider token charge. Any paid-cloud comparison is an explicitly selected
 equivalent-cost estimate using a versioned official-source price snapshot, not
 an Ollama Cloud token quota or exact savings claim.
 
+Web search is off by default and requires explicit enablement. Provider-native
+search is used only where official metadata or an explicit adapter contract
+authorizes it. Ollama Web Search is a separate, read-only integration with its
+own DPAPI-protected key; it does not add Ollama Cloud models. Search results are
+bounded untrusted data, citations must use absolute HTTPS URLs, and result
+content must never trigger local tools.
+
+Image input requires verified vision capability, MIME/signature validation,
+bounded count, bytes, and decoded dimensions. Cloud image bytes require an
+independent per-browser-session and per-provider confirmation that is never
+persisted. Conversation history stores attachment metadata and a
+`missing-attachment` marker only; the usage ledger stores counts and byte totals
+but never image or search content. Images must not be stripped to make a
+text-only primary or fallback succeed.
+
 Cloud quota and cost dashboards are local projections over provider-reported
 headers, explicitly configured quotas, cached provider metadata, and the usage
 ledger. Accuracy must remain labelled exact, estimated, or unavailable.
@@ -161,6 +176,11 @@ The chat remains the primary surface. Execute mode must additionally expose:
 - changed-file and diff review;
 - validation results;
 - conflicts, recovery decisions, and undo availability.
+
+The composer shows the active provider/model, capability and role tags, an
+explicit Web control, and bounded image attachment controls. These controls
+must remain compact, accessible, and usable without horizontal overflow at
+narrow viewport widths.
 
 Keep keyboard and accessibility behavior intact: Enter sends, Shift+Enter inserts a line break, Escape closes dialogs, focus remains visible, and collapsible controls expose `aria-expanded`.
 

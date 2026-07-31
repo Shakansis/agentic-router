@@ -35,6 +35,19 @@ public sealed record ApplicationSettings
   public UsageSettings Usage { get; init; } = new();
 
   public CloudProvidersSettings CloudProviders { get; init; } = new();
+
+  public WebSearchSettings WebSearch { get; init; } = new();
+}
+
+public sealed record WebSearchSettings
+{
+  public bool OllamaEnabled { get; init; }
+
+  public string? OllamaSecretReference { get; init; }
+
+  public int MaxResults { get; init; } = 5;
+
+  public int TimeoutSeconds { get; init; } = 15;
 }
 
 public sealed record CloudProvidersSettings

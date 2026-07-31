@@ -320,7 +320,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       HttpStatusCode.OK,
       new
       {
-        capabilities = model is "command-r:latest" or "router:latest" or "unused:latest"
+        capabilities = model == "alpha:latest"
+          ? new[]
+          {
+            "completion",
+            "vision"
+          }
+          : model is "command-r:latest" or "router:latest" or "unused:latest"
           ? new[]
           {
             "completion",
@@ -407,7 +413,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
                   ).Clone()
                 )
               ).ToArray()
-            : []
+            : [],
+          message.TryGetProperty(
+            "images",
+            out var imagesElement
+          ) && imagesElement.ValueKind == JsonValueKind.Array
+            ? imagesElement.GetArrayLength()
+            : 0
         )
       )
       .ToArray();
@@ -2613,7 +2625,8 @@ internal sealed record RecordedMessage(
   string Role,
   string Content,
   string? ToolName,
-  IReadOnlyList<RecordedToolCall> ToolCalls
+  IReadOnlyList<RecordedToolCall> ToolCalls,
+  int ImageCount
 );
 
 internal sealed record RecordedToolCall(

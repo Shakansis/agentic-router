@@ -467,6 +467,63 @@ public sealed class OllamaClient : IOllamaClient
     );
   }
 
+  public async Task<ProviderModelCapabilities> GetProviderModelCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var inspected = await GetModelCapabilitiesAsync(
+      baseUri,
+      model,
+      cancellationToken
+    );
+    var capabilities = inspected.Capabilities;
+    var chat = capabilities.Contains(
+      "completion",
+      StringComparer.OrdinalIgnoreCase
+    ) || capabilities.Contains(
+      "chat",
+      StringComparer.OrdinalIgnoreCase
+    );
+    var vision = capabilities.Contains(
+      "vision",
+      StringComparer.OrdinalIgnoreCase
+    );
+
+    return new ProviderModelCapabilities(
+      chat,
+      chat,
+      capabilities.Contains(
+        "tools",
+        StringComparer.OrdinalIgnoreCase
+      ),
+      vision,
+      false,
+      null,
+      "ollama-api-show",
+      true,
+      StructuredOutput: chat,
+      Reasoning: capabilities.Contains(
+        "thinking",
+        StringComparer.OrdinalIgnoreCase
+      ) || capabilities.Contains(
+        "reasoning",
+        StringComparer.OrdinalIgnoreCase
+      ),
+      MaximumImageCount: vision
+        ? CapabilityLimits.MaximumImageCount
+        : 0,
+      MaximumImageBytes: vision
+        ? CapabilityLimits.MaximumImageBytes
+        : 0,
+      SupportedImageMimeTypes: vision
+        ? CapabilityLimits.ImageMimeTypes
+        : [],
+      ToolProtocolConfirmed: false
+    );
+  }
+
   public async Task<string> GetVersionAsync(
     Uri baseUri,
     CancellationToken cancellationToken
@@ -600,9 +657,11 @@ public sealed class OllamaClient : IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
+    ProviderChatOptions? options,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    options ??= ProviderChatOptions.Empty;
     var stopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
@@ -625,6 +684,7 @@ public sealed class OllamaClient : IOllamaClient
       model,
       messages,
       policy,
+      options,
       timeout.Token
     ).GetAsyncEnumerator(
       timeout.Token
@@ -686,7 +746,14 @@ public sealed class OllamaClient : IOllamaClient
         status,
         providerUsage,
         estimatedInput,
-        estimatedOutput
+        estimatedOutput,
+        new ProviderActivityMetadata(
+          ImageCount: options.Images.Count,
+          ImageBytes: options.Images.Sum(
+            image => image.Bytes.LongLength
+          ),
+          Accuracy: UsageAccuracy.Exact
+        )
       );
     }
   }
@@ -696,6 +763,7 @@ public sealed class OllamaClient : IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     GenerationPolicy policy,
+    ProviderChatOptions options,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -709,7 +777,8 @@ public sealed class OllamaClient : IOllamaClient
         policy.ContextTokens,
         policy.OutputTokens
       ),
-      null
+      null,
+      images: options.Images
     );
     using var response = await SendChatAsync(
       baseUri,
@@ -970,7 +1039,8 @@ public sealed class OllamaClient : IOllamaClient
     string status,
     ProviderTokenUsage? providerUsage,
     long estimatedInput,
-    long estimatedOutput
+    long estimatedOutput,
+    ProviderActivityMetadata? activity = null
   )
   {
     await _usageRecorder.RecordAsync(
@@ -982,7 +1052,8 @@ public sealed class OllamaClient : IOllamaClient
         status,
         providerUsage,
         estimatedInput,
-        estimatedOutput
+        estimatedOutput,
+        Activity: activity
       ),
       CancellationToken.None
     );
@@ -1138,15 +1209,40 @@ public sealed class OllamaClient : IOllamaClient
     JsonElement? format,
     OllamaOptions? options,
     int? keepAlive,
-    IReadOnlyList<OllamaApiTool>? tools = null
+    IReadOnlyList<OllamaApiTool>? tools = null,
+    IReadOnlyList<ProviderImagePayload>? images = null
   )
   {
+    var lastUserIndex = -1;
+
+    for (var index = 0; index < messages.Count; index++)
+    {
+      if (string.Equals(
+        messages[index].Role,
+        "user",
+        StringComparison.Ordinal
+      ))
+      {
+        lastUserIndex = index;
+      }
+    }
+
     return new OllamaChatRequest(
       model,
       messages.Select(
-        message => new OllamaChatMessage(
+        (
+          message,
+          index
+        ) => new OllamaChatMessage(
           message.Role,
-          message.Content
+          message.Content,
+          Images: index == lastUserIndex && images is not null
+            ? images.Select(
+              image => Convert.ToBase64String(
+                image.Bytes
+              )
+            ).ToArray()
+            : null
         )
       ).ToArray(),
       stream,
@@ -1257,7 +1353,8 @@ public sealed class OllamaClient : IOllamaClient
     [property: JsonPropertyName("tool_calls")]
     IReadOnlyList<OllamaApiToolCall>? ToolCalls = null,
     [property: JsonPropertyName("tool_name")]
-    string? ToolName = null
+    string? ToolName = null,
+    IReadOnlyList<string>? Images = null
   );
 
   private sealed record OllamaApiTool(

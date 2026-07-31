@@ -112,6 +112,24 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
         "generateContent",
         StringComparer.Ordinal
       );
+      var inputModalities = ReadStringArray(
+        model,
+        "inputModalities"
+      );
+      var supportedTools = ReadStringArray(
+        model,
+        "supportedTools"
+      );
+      var vision = inputModalities.Contains(
+        "IMAGE",
+        StringComparer.OrdinalIgnoreCase
+      );
+      var webSearch = supportedTools.Contains(
+        "google_search",
+        StringComparer.OrdinalIgnoreCase
+      ) || SupportsDocumentedGoogleSearch(
+        modelId
+      );
 
       result.Add(
         new InstalledModel(
@@ -131,14 +149,26 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
               StringComparer.Ordinal
             ) || supportsChat,
             supportsChat,
-            false,
-            false,
+            vision,
+            webSearch,
             ReadInt32(
               model,
               "inputTokenLimit"
             ),
             "provider-model-metadata",
-            false
+            inputModalities.Count > 0 || supportedTools.Count > 0,
+            StructuredOutput: supportsChat,
+            ProviderNativeWebSearch: webSearch,
+            Citations: webSearch,
+            MaximumImageCount: vision
+              ? CapabilityLimits.MaximumImageCount
+              : 0,
+            MaximumImageBytes: vision
+              ? CapabilityLimits.MaximumImageBytes
+              : 0,
+            SupportedImageMimeTypes: vision
+              ? CapabilityLimits.ImageMimeTypes
+              : []
           ),
           supportsChat
         )
@@ -290,17 +320,31 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     string apiKey,
     string modelId,
     IReadOnlyList<ChatMessage> messages,
+    ProviderChatOptions? options,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    options ??= ProviderChatOptions.Empty;
     using var request = CreateJsonRequest(
       $"models/{Uri.EscapeDataString(modelId)}:streamGenerateContent?alt=sse",
       apiKey,
       new
       {
         contents = ToGeminiContents(
-          messages
-        )
+          messages,
+          options.Images
+        ),
+        tools = options.WebSearchEnabled
+          ? new object[]
+          {
+            new
+            {
+              googleSearch = new
+              {
+              }
+            }
+          }
+          : null
       }
     );
     using var response = await SendAsync(
@@ -315,6 +359,10 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     );
     ProviderTokenUsage? usage = null;
     var accepted = false;
+    var citations = new Dictionary<string, ProviderCitation>(
+      StringComparer.Ordinal
+    );
+    var searchQueries = 0;
 
     await using var stream = await response.Content.ReadAsStreamAsync(
       cancellationToken
@@ -389,6 +437,15 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
             root
           )
           ?? usage;
+        foreach (var citation in ReadGroundingCitations(
+          root
+        ))
+        {
+          citations[citation.Url] = citation;
+        }
+        searchQueries += ReadGroundingQueryCount(
+          root
+        );
         var delta = ReadOptionalText(
           root
         );
@@ -419,7 +476,20 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
       null,
       true,
       usage,
-      rateLimit
+      rateLimit,
+      citations.Values.ToArray(),
+      new ProviderActivityMetadata(
+        ImageCount: options.Images.Count,
+        ImageBytes: options.Images.Sum(
+          image => image.Bytes.LongLength
+        ),
+        SearchQueryCount: searchQueries,
+        GroundedRequestCount: options.WebSearchEnabled
+          ? 1
+          : 0,
+        CitationCount: citations.Count,
+        Accuracy: UsageAccuracy.Exact
+      )
     );
   }
 
@@ -607,28 +677,205 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
   }
 
   private static IReadOnlyList<object> ToGeminiContents(
-    IReadOnlyList<ChatMessage> messages
+    IReadOnlyList<ChatMessage> messages,
+    IReadOnlyList<ProviderImagePayload>? images = null
   )
   {
-    return messages.Select(
-      message => (object)new
+    var lastUserIndex = -1;
+
+    for (var index = 0; index < messages.Count; index++)
+    {
+      if (string.Equals(
+        messages[index].Role,
+        "user",
+        StringComparison.OrdinalIgnoreCase
+      ))
       {
-        role = string.Equals(
-          message.Role,
-          "assistant",
-          StringComparison.OrdinalIgnoreCase
-        )
-          ? "model"
-          : "user",
-        parts = new[]
+        lastUserIndex = index;
+      }
+    }
+
+    return messages.Select(
+      (
+        message,
+        index
+      ) =>
+      {
+        var parts = new List<object>
         {
           new
           {
             text = message.Content
           }
+        };
+
+        if (index == lastUserIndex && images is not null)
+        {
+          parts.AddRange(
+            images.Select(
+              image => (object)new
+              {
+                inlineData = new
+                {
+                  mimeType = image.MimeType,
+                  data = Convert.ToBase64String(
+                    image.Bytes
+                  )
+                }
+              }
+            )
+          );
         }
+
+        return (object)new
+        {
+          role = string.Equals(
+            message.Role,
+            "assistant",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? "model"
+            : "user",
+          parts
+        };
       }
     ).ToArray();
+  }
+
+  private static bool SupportsDocumentedGoogleSearch(
+    string modelId
+  )
+  {
+    return modelId.StartsWith(
+      "gemini-2.0-",
+      StringComparison.OrdinalIgnoreCase
+    ) || modelId.StartsWith(
+      "gemini-2.5-",
+      StringComparison.OrdinalIgnoreCase
+    ) || modelId.StartsWith(
+      "gemini-3",
+      StringComparison.OrdinalIgnoreCase
+    );
+  }
+
+  private static IReadOnlyList<ProviderCitation> ReadGroundingCitations(
+    JsonElement root
+  )
+  {
+    var result = new List<ProviderCitation>();
+
+    foreach (var metadata in EnumerateGroundingMetadata(
+      root
+    ))
+    {
+      if (
+        !metadata.TryGetProperty(
+          "groundingChunks",
+          out var chunks
+        )
+        || chunks.ValueKind != JsonValueKind.Array
+      )
+      {
+        continue;
+      }
+
+      foreach (var chunk in chunks.EnumerateArray())
+      {
+        if (
+          !chunk.TryGetProperty(
+            "web",
+            out var web
+          )
+        )
+        {
+          continue;
+        }
+
+        var url = ReadString(
+          web,
+          "uri"
+        );
+
+        if (
+          !Uri.TryCreate(
+            url,
+            UriKind.Absolute,
+            out var uri
+          )
+          || !string.Equals(
+            uri.Scheme,
+            Uri.UriSchemeHttps,
+            StringComparison.Ordinal
+          )
+        )
+        {
+          throw new CapabilityException(
+            "invalid-citation",
+            "provider-citations",
+            "Google AI Studio returned an unsafe citation URL.",
+            "Grounding citations must use absolute HTTPS URLs.",
+            ModelProviderIds.GoogleAiStudio,
+            null
+          );
+        }
+
+        result.Add(
+          new ProviderCitation(
+            $"source-{result.Count + 1}",
+            ReadString(
+              web,
+              "title"
+            ) ?? uri.Host,
+            uri.AbsoluteUri
+          )
+        );
+      }
+    }
+
+    return result;
+  }
+
+  private static int ReadGroundingQueryCount(
+    JsonElement root
+  )
+  {
+    return EnumerateGroundingMetadata(
+      root
+    ).Sum(
+      metadata => metadata.TryGetProperty(
+        "webSearchQueries",
+        out var queries
+      ) && queries.ValueKind == JsonValueKind.Array
+        ? queries.GetArrayLength()
+        : 0
+    );
+  }
+
+  private static IEnumerable<JsonElement> EnumerateGroundingMetadata(
+    JsonElement root
+  )
+  {
+    if (
+      !root.TryGetProperty(
+        "candidates",
+        out var candidates
+      )
+      || candidates.ValueKind != JsonValueKind.Array
+    )
+    {
+      yield break;
+    }
+
+    foreach (var candidate in candidates.EnumerateArray())
+    {
+      if (candidate.TryGetProperty(
+        "groundingMetadata",
+        out var metadata
+      ) && metadata.ValueKind == JsonValueKind.Object)
+      {
+        yield return metadata;
+      }
+    }
   }
 
   private static IReadOnlyList<object> ToGeminiToolContents(

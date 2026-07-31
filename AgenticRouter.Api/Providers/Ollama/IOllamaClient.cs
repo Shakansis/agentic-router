@@ -63,6 +63,12 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task<ProviderModelCapabilities> GetProviderModelCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  );
+
   Task<string> GetVersionAsync(
     Uri baseUri,
     CancellationToken cancellationToken
@@ -91,6 +97,7 @@ public interface IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
+    ProviderChatOptions? options,
     CancellationToken cancellationToken
   );
 }
@@ -100,7 +107,9 @@ public sealed record OllamaChatUpdate(
   string? Delta,
   bool Done = false,
   ProviderTokenUsage? Usage = null,
-  ProviderRateLimitSnapshot? RateLimit = null
+  ProviderRateLimitSnapshot? RateLimit = null,
+  IReadOnlyList<ProviderCitation>? Citations = null,
+  ProviderActivityMetadata? Activity = null
 );
 
 public sealed record OllamaToolDefinition(

@@ -2,6 +2,7 @@ using System.Text.Json;
 using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Sessions;
 using AgenticRouter.Api.WorkspaceProfiles;
@@ -20,6 +21,7 @@ public sealed class ChatController : ControllerBase
 
   private readonly IChatStreamService _chatStreamService;
   private readonly IExecutionSessionStore _executionSessions;
+  private readonly IImageAttachmentValidator _imageValidator;
   private readonly ILogger<ChatController> _logger;
   private readonly IPersistentSessionService _persistentSessions;
   private string? _executionSessionId;
@@ -30,12 +32,14 @@ public sealed class ChatController : ControllerBase
     IChatStreamService chatStreamService,
     IExecutionSessionStore executionSessions,
     IPersistentSessionService persistentSessions,
+    IImageAttachmentValidator imageValidator,
     ILogger<ChatController> logger
   )
   {
     _chatStreamService = chatStreamService;
     _executionSessions = executionSessions;
     _persistentSessions = persistentSessions;
+    _imageValidator = imageValidator;
     _logger = logger;
   }
 
@@ -78,12 +82,16 @@ public sealed class ChatController : ControllerBase
     {
       try
       {
+        _ = _imageValidator.Validate(
+          request.Images
+        );
         _conversationSessionId = request.ConversationSessionId;
         var persisted = await _persistentSessions.BeginTurnAsync(
           request.ConversationSessionId,
           request.Message,
           request.InteractionMode,
           request.Model,
+          request.Images,
           cancellationToken
         );
         _conversationSessionId = persisted?.Id
@@ -291,8 +299,17 @@ public sealed class ChatController : ControllerBase
           exception.HttpStatus,
           exception.Recoverable,
           exception,
+          details: exception is CapabilityException capability
+            ? new Dictionary<string, string?>
+            {
+              ["code"] = capability.Code,
+              ["providerTraceId"] = capability.TraceId
+            }
+            : null,
           provider: exception is RoutedProviderException routed
             ? routed.Provider
+            : exception is CapabilityException capabilityError
+              ? capabilityError.Provider ?? "ollama-local"
             : "ollama-local"
         ),
         cancellationToken

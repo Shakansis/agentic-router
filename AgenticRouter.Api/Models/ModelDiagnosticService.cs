@@ -192,6 +192,7 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
           UsageModelRoles.ModelTest,
           "model-connectivity-test"
         ),
+        null,
         timeout.Token
       ))
       {

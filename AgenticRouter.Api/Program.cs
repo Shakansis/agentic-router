@@ -88,6 +88,9 @@ builder.Services.AddSingleton<IUsageLedger>(
 );
 builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
 builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
+builder.Services.AddSingleton<IImageAttachmentValidator, ImageAttachmentValidator>();
+builder.Services.AddSingleton<ICloudImageApprovalStore, CloudImageApprovalStore>();
+builder.Services.AddSingleton<IOllamaWebSearchService, OllamaWebSearchService>();
 builder.Services.AddTransient<IOllamaClient, ProviderDispatchClient>();
 builder.Services.AddScoped<ICloudFallbackPolicy, CloudFallbackPolicy>();
 builder.Services.AddSingleton<IWorkspaceProfileStore>(

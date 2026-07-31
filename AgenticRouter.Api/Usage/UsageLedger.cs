@@ -861,6 +861,22 @@ public sealed class JsonlUsageLedger : IUsageLedger
       || usageEvent.MediaTokens < 0
       || usageEvent.DurationMilliseconds < 0
       || usageEvent.TotalTokens != usageEvent.InputTokens + usageEvent.OutputTokens
+      || usageEvent.ImageCount < 0
+      || usageEvent.ImageBytes < 0
+      || usageEvent.SearchQueryCount < 0
+      || usageEvent.GroundedRequestCount < 0
+      || usageEvent.CitationCount < 0
+      || usageEvent.ProviderSearchCost < 0
+      || (
+        !UsageAccuracy.EventValues.Contains(
+          usageEvent.ActivityAccuracy
+        )
+        && !string.Equals(
+          usageEvent.ActivityAccuracy,
+          UsageAccuracy.Unavailable,
+          StringComparison.Ordinal
+        )
+      )
       || string.IsNullOrWhiteSpace(
         usageEvent.Currency
       )

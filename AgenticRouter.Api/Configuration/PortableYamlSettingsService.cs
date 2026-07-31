@@ -36,7 +36,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     "project_awareness",
     "session_history",
     "git_delivery",
-    "usage"
+    "usage",
+    "web_search"
   ];
 
   public string Export(
@@ -438,6 +439,27 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         settings.Usage.AlertThresholds
       )
     );
+    yaml.AppendLine(
+      "web_search:"
+    );
+    Scalar(
+      yaml,
+      1,
+      "ollama_enabled",
+      settings.WebSearch.OllamaEnabled
+    );
+    Scalar(
+      yaml,
+      1,
+      "max_results",
+      settings.WebSearch.MaxResults
+    );
+    Scalar(
+      yaml,
+      1,
+      "timeout_seconds",
+      settings.WebSearch.TimeoutSeconds
+    );
 
     return yaml.ToString()
       .Replace(
@@ -827,11 +849,79 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings,
       errors
     );
-    return ApplyUsage(
+    settings = ApplyUsage(
       root,
       settings,
       errors
     );
+    return ApplyWebSearch(
+      root,
+      settings,
+      errors
+    );
+  }
+
+  private static ApplicationSettings ApplyWebSearch(
+    YamlNode root,
+    ApplicationSettings settings,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    var section = Map(
+      root,
+      "web_search",
+      "web_search",
+      errors
+    );
+
+    if (section is null)
+    {
+      return settings;
+    }
+
+    var keys = new[]
+    {
+      "ollama_enabled",
+      "max_results",
+      "timeout_seconds"
+    };
+    ValidateKeys(
+      section,
+      keys,
+      "web_search",
+      errors
+    );
+    var current = settings.WebSearch;
+    var requestedEnabled = ReadBoolean(
+      section,
+      keys[0],
+      current.OllamaEnabled,
+      $"web_search.{keys[0]}",
+      errors
+    );
+    return settings with
+    {
+      WebSearch = current with
+      {
+        OllamaEnabled = !string.IsNullOrWhiteSpace(
+          current.OllamaSecretReference
+        ) && requestedEnabled,
+        MaxResults = ReadInt(
+          section,
+          keys[1],
+          current.MaxResults,
+          $"web_search.{keys[1]}",
+          errors
+        ),
+        TimeoutSeconds = ReadInt(
+          section,
+          keys[2],
+          current.TimeoutSeconds,
+          $"web_search.{keys[2]}",
+          errors
+        )
+      }
+    };
   }
 
   private static ApplicationSettings ApplyContext(

@@ -306,18 +306,26 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     string apiKey,
     string modelId,
     IReadOnlyList<ChatMessage> messages,
+    ProviderChatOptions? options,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    options ??= ProviderChatOptions.Empty;
     using var request = CreateJsonRequest(
       "chat/completions",
       apiKey,
       new
       {
         model = modelId,
-        messages,
+        messages = ToMultimodalMessages(
+          messages,
+          options.Images
+        ),
         temperature = 0,
         stream = true,
+        citation_options = options.WebSearchEnabled
+          ? "enabled"
+          : "disabled",
         stream_options = new
         {
           include_usage = true
@@ -346,6 +354,10 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     );
     ProviderTokenUsage? finalUsage = null;
     var accepted = false;
+    var citations = new Dictionary<string, ProviderCitation>(
+      StringComparer.Ordinal
+    );
+    var searchQueries = 0;
 
     while (true)
     {
@@ -379,7 +391,20 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
           null,
           true,
           finalUsage,
-          rateLimit
+          rateLimit,
+          citations.Values.ToArray(),
+          new ProviderActivityMetadata(
+            ImageCount: options.Images.Count,
+            ImageBytes: options.Images.Sum(
+              image => image.Bytes.LongLength
+            ),
+            SearchQueryCount: searchQueries,
+            GroundedRequestCount: options.WebSearchEnabled
+              ? 1
+              : 0,
+            CitationCount: citations.Count,
+            Accuracy: UsageAccuracy.Exact
+          )
         );
         yield break;
       }
@@ -411,6 +436,15 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         finalUsage = ProviderUsageMapper.FromOpenAiCompatible(
           document.RootElement
         ) ?? finalUsage;
+        foreach (var citation in ReadCitations(
+          document.RootElement
+        ))
+        {
+          citations[citation.Url] = citation;
+        }
+        searchQueries += ReadSearchQueryCount(
+          document.RootElement
+        );
         var delta = ReadDeltaContent(
           document.RootElement
         );
@@ -441,8 +475,226 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       null,
       true,
       finalUsage,
-      rateLimit
+      rateLimit,
+      citations.Values.ToArray(),
+      new ProviderActivityMetadata(
+        ImageCount: options.Images.Count,
+        ImageBytes: options.Images.Sum(
+          image => image.Bytes.LongLength
+        ),
+        SearchQueryCount: searchQueries,
+        GroundedRequestCount: options.WebSearchEnabled
+          ? 1
+          : 0,
+        CitationCount: citations.Count,
+        Accuracy: UsageAccuracy.Exact
+      )
     );
+  }
+
+  private static IReadOnlyList<object> ToMultimodalMessages(
+    IReadOnlyList<ChatMessage> messages,
+    IReadOnlyList<ProviderImagePayload> images
+  )
+  {
+    var lastUserIndex = -1;
+
+    for (var index = 0; index < messages.Count; index++)
+    {
+      if (string.Equals(
+        messages[index].Role,
+        "user",
+        StringComparison.Ordinal
+      ))
+      {
+        lastUserIndex = index;
+      }
+    }
+
+    return messages.Select(
+      (
+        message,
+        index
+      ) =>
+      {
+        if (index != lastUserIndex || images.Count == 0)
+        {
+          return (object)new
+          {
+            message.Role,
+            message.Content
+          };
+        }
+
+        var parts = new List<object>
+        {
+          new
+          {
+            type = "text",
+            text = message.Content
+          }
+        };
+        parts.AddRange(
+          images.Select(
+            image => (object)new
+            {
+              type = "image_url",
+              image_url = new
+              {
+                url = $"data:{image.MimeType};base64,{Convert.ToBase64String(image.Bytes)}"
+              }
+            }
+          )
+        );
+        return new
+        {
+          message.Role,
+          content = parts
+        };
+      }
+    ).ToArray();
+  }
+
+  private static IReadOnlyList<ProviderCitation> ReadCitations(
+    JsonElement root
+  )
+  {
+    var result = new List<ProviderCitation>();
+    ReadCitationArray(
+      root,
+      "citations",
+      result
+    );
+
+    if (
+      root.TryGetProperty(
+        "choices",
+        out var choices
+      )
+      && choices.ValueKind == JsonValueKind.Array
+    )
+    {
+      foreach (var choice in choices.EnumerateArray())
+      {
+        if (
+          choice.TryGetProperty(
+            "delta",
+            out var delta
+          )
+        )
+        {
+          ReadCitationArray(
+            delta,
+            "citations",
+            result
+          );
+        }
+
+        if (
+          choice.TryGetProperty(
+            "message",
+            out var message
+          )
+        )
+        {
+          ReadCitationArray(
+            message,
+            "citations",
+            result
+          );
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private static void ReadCitationArray(
+    JsonElement parent,
+    string propertyName,
+    List<ProviderCitation> result
+  )
+  {
+    if (
+      parent.ValueKind != JsonValueKind.Object
+      || !parent.TryGetProperty(
+        propertyName,
+        out var citations
+      )
+      || citations.ValueKind != JsonValueKind.Array
+    )
+    {
+      return;
+    }
+
+    foreach (var item in citations.EnumerateArray())
+    {
+      var url = item.ValueKind == JsonValueKind.String
+        ? item.GetString()
+        : ReadString(
+          item,
+          "url"
+        );
+
+      if (
+        !Uri.TryCreate(
+          url,
+          UriKind.Absolute,
+          out var uri
+        )
+        || !string.Equals(
+          uri.Scheme,
+          Uri.UriSchemeHttps,
+          StringComparison.Ordinal
+        )
+      )
+      {
+        throw new CapabilityException(
+          "invalid-citation",
+          "provider-citations",
+          "The provider returned an unsafe citation URL.",
+          "Provider citations must use absolute HTTPS URLs.",
+          null,
+          null
+        );
+      }
+
+      result.Add(
+        new ProviderCitation(
+          $"source-{result.Count + 1}",
+          item.ValueKind == JsonValueKind.Object
+            ? ReadString(
+              item,
+              "title"
+            ) ?? uri.Host
+            : uri.Host,
+          uri.AbsoluteUri
+        )
+      );
+    }
+  }
+
+  private static int ReadSearchQueryCount(
+    JsonElement root
+  )
+  {
+    if (
+      root.TryGetProperty(
+        "search_query_count",
+        out var count
+      )
+      && count.TryGetInt32(
+        out var parsed
+      )
+    )
+    {
+      return Math.Max(
+        0,
+        parsed
+      );
+    }
+
+    return 0;
   }
 
   protected virtual Task<IReadOnlyList<InstalledModel>> EnrichModelsAsync(
@@ -670,6 +922,21 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       "vision",
       "image"
     );
+    var webSearch = ReadCapability(
+      capabilities,
+      "web_search",
+      "browser_search"
+    );
+    var structured = ReadCapability(
+      capabilities,
+      "structured_output",
+      "json_schema"
+    );
+    var reasoning = ReadCapability(
+      capabilities,
+      "reasoning",
+      "thinking"
+    );
     var streaming = capabilities.ValueKind == JsonValueKind.Undefined
       || ReadCapability(
         capabilities,
@@ -684,7 +951,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       streaming,
       tools,
       vision,
-      false,
+      webSearch,
       context is null
         ? null
         : Convert.ToInt32(
@@ -696,7 +963,20 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       confirmed
         ? "provider-model-metadata"
         : "provider-adapter-default",
-      confirmed
+      confirmed,
+      StructuredOutput: structured,
+      Reasoning: reasoning,
+      ProviderNativeWebSearch: webSearch,
+      Citations: webSearch,
+      MaximumImageCount: vision
+        ? CapabilityLimits.MaximumImageCount
+        : 0,
+      MaximumImageBytes: vision
+        ? CapabilityLimits.MaximumImageBytes
+        : 0,
+      SupportedImageMimeTypes: vision
+        ? CapabilityLimits.ImageMimeTypes
+        : []
     );
   }
 
@@ -1183,6 +1463,51 @@ public sealed class GroqCloudProvider : OpenAiCompatibleCloudProvider
   public override string DisplayName => "Groq";
 
   public override string ProtocolVersion => "groq-openai-v1";
+
+  protected override Task<IReadOnlyList<InstalledModel>> EnrichModelsAsync(
+    IReadOnlyList<InstalledModel> models,
+    string apiKey,
+    CancellationToken cancellationToken
+  )
+  {
+    cancellationToken.ThrowIfCancellationRequested();
+
+    return Task.FromResult<IReadOnlyList<InstalledModel>>(
+      models.Select(
+        model =>
+        {
+          var reference = ProviderModelReference.Parse(
+            model.Name
+          );
+          var webSearch = string.Equals(
+            reference.ModelId,
+            "groq/compound",
+            StringComparison.Ordinal
+          ) || string.Equals(
+            reference.ModelId,
+            "groq/compound-mini",
+            StringComparison.Ordinal
+          );
+          var capabilities = model.Capabilities;
+
+          return capabilities is null
+            ? model
+            : model with
+            {
+              Capabilities = capabilities with
+              {
+                WebSearch = webSearch,
+                ProviderNativeWebSearch = webSearch,
+                Citations = webSearch,
+                Source = webSearch
+                  ? "provider-adapter-official-compatibility"
+                  : capabilities.Source
+              }
+            };
+        }
+      ).ToArray()
+    );
+  }
 }
 
 public sealed class CerebrasCloudProvider : OpenAiCompatibleCloudProvider

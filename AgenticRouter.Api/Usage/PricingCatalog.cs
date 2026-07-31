@@ -378,7 +378,15 @@ public sealed class UsageRecorder : IUsageRecorder
         EquivalentPriceSnapshot = equivalent,
         RateLimit = request.RateLimit,
         ErrorCode = request.ErrorCode,
-        HttpStatus = request.HttpStatus
+        HttpStatus = request.HttpStatus,
+        ImageCount = request.Activity?.ImageCount ?? 0,
+        ImageBytes = request.Activity?.ImageBytes ?? 0,
+        SearchQueryCount = request.Activity?.SearchQueryCount ?? 0,
+        GroundedRequestCount = request.Activity?.GroundedRequestCount ?? 0,
+        CitationCount = request.Activity?.CitationCount ?? 0,
+        ProviderSearchCost = request.Activity?.ProviderSearchCost,
+        ActivityAccuracy = request.Activity?.Accuracy
+          ?? UsageAccuracy.Unavailable
       };
       await _ledger.AppendAsync(
         usageEvent,

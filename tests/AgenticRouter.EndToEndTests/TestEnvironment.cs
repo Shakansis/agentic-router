@@ -167,6 +167,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
     processStartInfo.Environment[
       "AgenticRouter__Providers__CerebrasPublicBaseUrl"
     ] = $"{fakeCloud.BaseUrl}/cerebras/public/v1/";
+    processStartInfo.Environment[
+      "AgenticRouter__Providers__OllamaWebSearchBaseUrl"
+    ] = $"{fakeCloud.BaseUrl}/ollama/";
     var apiProcess = new Process
     {
       StartInfo = processStartInfo,

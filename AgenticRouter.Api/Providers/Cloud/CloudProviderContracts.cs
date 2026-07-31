@@ -74,6 +74,7 @@ public interface ICloudProviderAdapter
     string apiKey,
     string modelId,
     IReadOnlyList<ChatMessage> messages,
+    ProviderChatOptions? options,
     CancellationToken cancellationToken
   );
 }

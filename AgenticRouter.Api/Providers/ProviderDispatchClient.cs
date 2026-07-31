@@ -14,18 +14,21 @@ public sealed class ProviderDispatchClient : IOllamaClient
   private readonly ICloudProviderRegistry _cloudProviders;
   private readonly IUsageRecorder _usageRecorder;
   private readonly ITokenEstimator _tokenEstimator;
+  private readonly IOllamaWebSearchService _webSearch;
 
   public ProviderDispatchClient(
     OllamaClient ollama,
     ICloudProviderRegistry cloudProviders,
     IUsageRecorder usageRecorder,
-    ITokenEstimator tokenEstimator
+    ITokenEstimator tokenEstimator,
+    IOllamaWebSearchService webSearch
   )
   {
     _ollama = ollama;
     _cloudProviders = cloudProviders;
     _usageRecorder = usageRecorder;
     _tokenEstimator = tokenEstimator;
+    _webSearch = webSearch;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -370,6 +373,62 @@ public sealed class ProviderDispatchClient : IOllamaClient
     );
   }
 
+  public async Task<ProviderModelCapabilities> GetProviderModelCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var reference = ProviderModelReference.Parse(
+      model
+    );
+
+    if (reference.IsLocal)
+    {
+      var capabilities = await _ollama.GetProviderModelCapabilitiesAsync(
+        baseUri,
+        model,
+        cancellationToken
+      );
+      var applicationWebSearch = await _webSearch.IsAvailableAsync(
+        cancellationToken
+      );
+      return capabilities with
+      {
+        WebSearch = applicationWebSearch,
+        ApplicationWebSearch = applicationWebSearch,
+        Citations = applicationWebSearch
+      };
+    }
+
+    var installed = await _cloudProviders.GetSelectableModelsAsync(
+      cancellationToken
+    );
+    var match = installed.FirstOrDefault(
+      candidate => string.Equals(
+        candidate.Name,
+        model,
+        StringComparison.Ordinal
+      )
+    );
+
+    if (match?.Capabilities is null)
+    {
+      throw new CapabilityException(
+        "unknown-capability",
+        "model-capabilities",
+        "The selected model does not expose authoritative capability metadata.",
+        "The cached provider model entry has no capability contract.",
+        reference.ProviderId,
+        reference.ModelId,
+        400,
+        false
+      );
+    }
+
+    return match.Capabilities;
+  }
+
   public Task<string> GetVersionAsync(
     Uri baseUri,
     CancellationToken cancellationToken
@@ -444,24 +503,58 @@ public sealed class ProviderDispatchClient : IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
+    ProviderChatOptions? options,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    options ??= ProviderChatOptions.Empty;
     var reference = ProviderModelReference.Parse(
       model
     );
 
     if (reference.IsLocal)
     {
+      WebSearchContext? web = null;
+
+      if (options.WebSearchEnabled)
+      {
+        web = await _webSearch.SearchAsync(
+          messages.LastOrDefault(
+            message => string.Equals(
+              message.Role,
+              "user",
+              StringComparison.Ordinal
+            )
+          )?.Content ?? string.Empty,
+          usageContext,
+          cancellationToken
+        );
+        messages = messages.Concat(
+          [
+            new ChatMessage(
+              "system",
+              web.UntrustedContext
+            )
+          ]
+        ).ToArray();
+      }
+
       await foreach (var update in _ollama.StreamChatAsync(
         baseUri,
         model,
         messages,
         usageContext,
+        options,
         cancellationToken
       ))
       {
-        yield return update;
+        yield return update.Done && web is not null
+          ? update with
+          {
+            Citations = web.Citations,
+            Activity = web.Activity
+          }
+          : update;
       }
 
       yield break;
@@ -474,6 +567,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     var output = new System.Text.StringBuilder();
     ProviderTokenUsage? providerUsage = null;
     ProviderRateLimitSnapshot? rateLimit = null;
+    ProviderActivityMetadata? activity = null;
+    IReadOnlyList<ProviderCitation>? citations = null;
 
     CloudProviderSession session;
 
@@ -521,6 +616,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
       session.ApiKey,
       reference.ModelId,
       messages,
+      options,
       cancellationToken
     ).GetAsyncEnumerator(
       cancellationToken
@@ -588,6 +684,10 @@ public sealed class ProviderDispatchClient : IOllamaClient
         ?? providerUsage;
       rateLimit = update.RateLimit
         ?? rateLimit;
+      activity = update.Activity
+        ?? activity;
+      citations = update.Citations
+        ?? citations;
       yield return update;
     }
 
@@ -601,7 +701,11 @@ public sealed class ProviderDispatchClient : IOllamaClient
       _tokenEstimator.EstimateText(
         output.ToString()
       ),
-      rateLimit
+      rateLimit,
+      activity: MergeActivity(
+        activity,
+        options
+      )
     );
   }
 
@@ -694,7 +798,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     long estimatedOutput,
     ProviderRateLimitSnapshot? rateLimit,
     string? errorCode = null,
-    int? httpStatus = null
+    int? httpStatus = null,
+    ProviderActivityMetadata? activity = null
   )
   {
     return _usageRecorder.RecordAsync(
@@ -709,9 +814,28 @@ public sealed class ProviderDispatchClient : IOllamaClient
         estimatedOutput,
         rateLimit,
         errorCode,
-        httpStatus
+        httpStatus,
+        activity
       ),
       CancellationToken.None
+    );
+  }
+
+  private static ProviderActivityMetadata MergeActivity(
+    ProviderActivityMetadata? activity,
+    ProviderChatOptions options
+  )
+  {
+    return new ProviderActivityMetadata(
+      ImageCount: options.Images.Count,
+      ImageBytes: options.Images.Sum(
+        image => image.Bytes.LongLength
+      ),
+      SearchQueryCount: activity?.SearchQueryCount ?? 0,
+      GroundedRequestCount: activity?.GroundedRequestCount ?? 0,
+      CitationCount: activity?.CitationCount ?? 0,
+      ProviderSearchCost: activity?.ProviderSearchCost,
+      Accuracy: activity?.Accuracy ?? UsageAccuracy.Exact
     );
   }
 

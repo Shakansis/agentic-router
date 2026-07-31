@@ -230,6 +230,31 @@ cost estimates, reset information, 429 warnings, and local threshold alerts.
 The expected Free tier, Paid, or Unknown billing mode changes display labels
 only and is not a guarantee from the provider.
 
+### Web search, citations, and image input
+
+The composer shows the active provider/model plus compact Local, Cloud, Tools,
+Web, Vision, Structured, Primary, and Fallback tags when supported. Capability
+evidence comes from provider metadata, Ollama `/api/show`, explicit adapter
+contracts, and separate behavioral tool conformance; model names alone do not
+prove support.
+
+Web search is always off until the user enables it. Google AI Studio uses
+Google Search grounding on supported Gemini models, Groq search is limited to
+officially supported Compound systems, and Cerebras does not advertise search
+without authoritative metadata. Local models can use a separately configured,
+DPAPI-protected Ollama Web Search key as a bounded read-only integration. It
+does not restore Ollama Cloud model discovery. Search content is treated as
+untrusted data, only absolute HTTPS citations are rendered, and results cannot
+invoke local tools.
+
+JPEG, PNG, WebP, and GIF images can be selected, dropped, or pasted into the
+composer. The Host verifies signatures, count, decoded byte limits, dimensions
+where practical, and the selected model's vision contract; SVG and mismatched
+content are rejected. Before a cloud provider receives image bytes, the user
+must confirm that upload for the current browser session and provider. History
+stores only bounded attachment metadata with a `missing-attachment` marker;
+image bytes and cloud-upload approvals are never persisted.
+
 ## 🎮 Usage
 
 ### Interface Overview

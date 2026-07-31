@@ -40,6 +40,8 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IRepositoryInstructionService _repositoryInstructions;
   private readonly IExecutionPlanService _executionPlans;
   private readonly IWorkspaceProfileService _workspaceProfiles;
+  private readonly IImageAttachmentValidator _imageValidator;
+  private readonly ICloudImageApprovalStore _cloudImageApprovals;
   private readonly ILogger<ChatStreamService> _logger;
   private ExecutionSession? _executionSession;
   private string? _usageWorkspaceId;
@@ -72,6 +74,8 @@ public sealed class ChatStreamService : IChatStreamService
     IRepositoryInstructionService repositoryInstructions,
     IExecutionPlanService executionPlans,
     IWorkspaceProfileService workspaceProfiles,
+    IImageAttachmentValidator imageValidator,
+    ICloudImageApprovalStore cloudImageApprovals,
     ILogger<ChatStreamService> logger
   )
   {
@@ -96,6 +100,8 @@ public sealed class ChatStreamService : IChatStreamService
     _repositoryInstructions = repositoryInstructions;
     _executionPlans = executionPlans;
     _workspaceProfiles = workspaceProfiles;
+    _imageValidator = imageValidator;
+    _cloudImageApprovals = cloudImageApprovals;
     _logger = logger;
   }
 
@@ -168,6 +174,9 @@ public sealed class ChatStreamService : IChatStreamService
       var intention = GeneralChat;
       var selectedModel = request.Model.Trim();
       var selectedModelRole = UsageModelRoles.Primary;
+      var images = _imageValidator.Validate(
+        request.Images
+      );
 
       if (!isAuto)
       {
@@ -391,6 +400,85 @@ public sealed class ChatStreamService : IChatStreamService
           ? intention
           : null
       );
+      var capabilityResolution = await ResolveTurnCapabilitiesAsync(
+        baseUri,
+        selectedModel,
+        request.WebSearchEnabled || images.Count > 0,
+        cancellationToken
+      );
+      var capabilities = capabilityResolution.Capabilities;
+
+      if (capabilityResolution.Warning is not null)
+      {
+        yield return Event(
+          requestId,
+          "target.capabilities-unverified",
+          "Optional capabilities could not be verified; continuing with conservative text-only capability state.",
+          stopwatch,
+          selectedModel,
+          isAuto
+            ? intention
+            : null
+        );
+      }
+
+      ValidateRequestedCapabilities(
+        request,
+        selectedModel,
+        capabilities,
+        images
+      );
+      var chatOptions = new ProviderChatOptions(
+        request.WebSearchEnabled,
+        images
+      );
+      yield return Event(
+        requestId,
+        "target.capabilities-resolved",
+        $"Capabilities from {capabilities.Source}: "
+          + string.Join(
+            ", ",
+            CapabilityLabels(
+              capabilities
+            )
+          )
+          + ".",
+        stopwatch,
+        selectedModel,
+        isAuto
+          ? intention
+          : null
+      );
+
+      if (request.WebSearchEnabled)
+      {
+        yield return Event(
+          requestId,
+          "web.search-enabled",
+          capabilities.ProviderNativeWebSearch
+            ? "Provider-native web search explicitly enabled for this request."
+            : "Application-mediated Ollama Web Search explicitly enabled for this request.",
+          stopwatch,
+          selectedModel,
+          isAuto
+            ? intention
+            : null
+        );
+      }
+
+      if (images.Count > 0)
+      {
+        yield return Event(
+          requestId,
+          "image.attachments-validated",
+          $"{images.Count} image attachment(s), {images.Sum(image => image.Bytes.LongLength)} bytes, validated for {selectedModel}.",
+          stopwatch,
+          selectedModel,
+          isAuto
+            ? intention
+            : null
+        );
+      }
       yield return Event(
         requestId,
         "ollama.connection-started",
@@ -1124,6 +1212,7 @@ public sealed class ChatStreamService : IChatStreamService
         stopwatch,
         progress,
         selectedModelRole,
+        chatOptions,
         cancellationToken
       ))
       {
@@ -1147,44 +1236,86 @@ public sealed class ChatStreamService : IChatStreamService
 
         if (localFallback is not null)
         {
-          yield return Event(
-            requestId,
-            "cloud.local-fallback-started",
-            $"{ModelProviderIds.DisplayName(cloudFailure.Provider)} could not complete the request "
-              + $"({cloudFailure.Code}); switching once to Ollama Local Â· {localFallback}.",
-            stopwatch,
-            localFallback,
-            intention
-          );
-          selectedModel = localFallback;
-          selectedModelRole = UsageModelRoles.Fallback;
-          progress.Failure = null;
-
-          await foreach (var streamEvent in StreamAttemptAsync(
+          var fallbackCapabilityResolution = await ResolveTurnCapabilitiesAsync(
             baseUri,
-            selectedModel,
-            messages,
-            requestId,
-            intention,
-            stopwatch,
-            progress,
-            selectedModelRole,
+            localFallback,
+            request.WebSearchEnabled || images.Count > 0,
             cancellationToken
-          ))
-          {
-            yield return streamEvent;
-          }
+          );
+          var fallbackCapabilities = fallbackCapabilityResolution.Capabilities;
 
-          if (progress.Failure is null)
+          if (fallbackCapabilityResolution.Warning is not null)
           {
             yield return Event(
               requestId,
-              "cloud.local-fallback-completed",
-              $"Ollama Local Â· {localFallback} completed the cloud fallback.",
+              "cloud.local-fallback-capabilities-unverified",
+              $"Optional capabilities for local fallback {localFallback} could not be verified; using conservative text-only state.",
               stopwatch,
               localFallback,
               intention
             );
+          }
+
+          if (
+            images.Count > 0
+            && !fallbackCapabilities.Vision
+            || request.WebSearchEnabled
+            && !fallbackCapabilities.WebSearch
+          )
+          {
+            yield return Event(
+              requestId,
+              "cloud.local-fallback-incompatible",
+              images.Count > 0
+                ? $"Local fallback {localFallback} is text-only; image attachments were not stripped."
+                : $"Local fallback {localFallback} cannot perform the explicitly enabled web search.",
+              stopwatch,
+              localFallback,
+              intention
+            );
+          }
+          else
+          {
+            yield return Event(
+              requestId,
+              "cloud.local-fallback-started",
+              $"{ModelProviderIds.DisplayName(cloudFailure.Provider)} could not complete the request "
+                + $"({cloudFailure.Code}); switching once to Ollama Local Â· {localFallback}.",
+              stopwatch,
+              localFallback,
+              intention
+            );
+            selectedModel = localFallback;
+            selectedModelRole = UsageModelRoles.Fallback;
+            progress.Failure = null;
+
+            await foreach (var streamEvent in StreamAttemptAsync(
+              baseUri,
+              selectedModel,
+              messages,
+              requestId,
+              intention,
+              stopwatch,
+              progress,
+              selectedModelRole,
+              chatOptions,
+              cancellationToken
+            ))
+            {
+              yield return streamEvent;
+            }
+
+            if (progress.Failure is null)
+            {
+              yield return Event(
+                requestId,
+                "cloud.local-fallback-completed",
+                $"Ollama Local Â· {localFallback} completed the cloud fallback.",
+                stopwatch,
+                localFallback,
+                intention
+              );
+            }
           }
         }
       }
@@ -1273,6 +1404,7 @@ public sealed class ChatStreamService : IChatStreamService
           stopwatch,
           progress,
           selectedModelRole,
+          chatOptions,
           cancellationToken
         ))
         {
@@ -1409,7 +1541,8 @@ public sealed class ChatStreamService : IChatStreamService
         ),
         null,
         null,
-        _executionSession?.CreateSummary()
+        _executionSession?.CreateSummary(),
+        Citations: progress.Citations
       );
     }
     finally
@@ -3054,6 +3187,7 @@ public sealed class ChatStreamService : IChatStreamService
     Stopwatch stopwatch,
     GenerationProgress progress,
     string modelRole,
+    ProviderChatOptions options,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -3066,6 +3200,7 @@ public sealed class ChatStreamService : IChatStreamService
         modelRole,
         "target-response"
       ),
+      options,
       cancellationToken
     ).GetAsyncEnumerator(
       cancellationToken
@@ -3090,7 +3225,7 @@ public sealed class ChatStreamService : IChatStreamService
         yield break;
       }
 
-      if (update.Accepted)
+      if (update.Accepted && !progress.ReceivedFirstChunk)
       {
         yield return Event(
           requestId,
@@ -3100,7 +3235,11 @@ public sealed class ChatStreamService : IChatStreamService
           model,
           intention
         );
-        continue;
+      }
+
+      if (update.Citations is not null)
+      {
+        progress.Citations = update.Citations;
       }
 
       if (string.IsNullOrEmpty(
@@ -3165,6 +3304,258 @@ public sealed class ChatStreamService : IChatStreamService
         null
       );
     }
+  }
+
+  private async Task<ProviderModelCapabilities> ResolveCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return await _ollamaClient.GetProviderModelCapabilitiesAsync(
+        baseUri,
+        model,
+        cancellationToken
+      );
+    }
+    catch (CapabilityException)
+    {
+      throw;
+    }
+    catch (OllamaProviderException exception)
+    {
+      throw new CapabilityException(
+        "unknown-capability",
+        "model-capabilities",
+        "The selected model capabilities could not be verified.",
+        exception.TechnicalMessage,
+        ProviderModelReference.Parse(
+          model
+        ).ProviderId,
+        ProviderModelReference.Parse(
+          model
+        ).ModelId,
+        exception.HttpStatus,
+        exception.Recoverable,
+        exception
+      );
+    }
+  }
+
+  private async Task<(
+    ProviderModelCapabilities Capabilities,
+    CapabilityException? Warning
+  )> ResolveTurnCapabilitiesAsync(
+    Uri baseUri,
+    string model,
+    bool requiresVerifiedOptionalCapabilities,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return (
+        await ResolveCapabilitiesAsync(
+          baseUri,
+          model,
+          cancellationToken
+        ),
+        null
+      );
+    }
+    catch (CapabilityException exception) when (
+      !requiresVerifiedOptionalCapabilities
+    )
+    {
+      return (
+        new ProviderModelCapabilities(
+          Chat: true,
+          Streaming: true,
+          NativeTools: false,
+          Vision: false,
+          WebSearch: false,
+          ContextTokens: null,
+          Source: "unverified-conservative-text-only",
+          Confirmed: false
+        ),
+        exception
+      );
+    }
+  }
+
+  private void ValidateRequestedCapabilities(
+    ChatRequest request,
+    string model,
+    ProviderModelCapabilities capabilities,
+    IReadOnlyList<ProviderImagePayload> images
+  )
+  {
+    var reference = ProviderModelReference.Parse(
+      model
+    );
+
+    if (request.WebSearchEnabled && !capabilities.WebSearch)
+    {
+      throw new CapabilityException(
+        "unsupported-web",
+        "capability-validation",
+        "Web search is unavailable for the selected model.",
+        $"Capability source '{capabilities.Source}' did not authorize web search.",
+        reference.ProviderId,
+        reference.ModelId
+      );
+    }
+
+    if (
+      !request.WebSearchEnabled
+      && capabilities.ProviderNativeWebSearch
+      && string.Equals(
+        reference.ProviderId,
+        ModelProviderIds.Groq,
+        StringComparison.Ordinal
+      )
+      && (
+        string.Equals(
+          reference.ModelId,
+          "groq/compound",
+          StringComparison.Ordinal
+        )
+        || string.Equals(
+          reference.ModelId,
+          "groq/compound-mini",
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      throw new CapabilityException(
+        "web-explicit-enable-required",
+        "capability-validation",
+        "This Groq system requires Web to be explicitly enabled.",
+        "Groq Compound may invoke provider-native search automatically; the Host will not send the request while Web is off.",
+        reference.ProviderId,
+        reference.ModelId
+      );
+    }
+
+    if (images.Count > 0 && !capabilities.Vision)
+    {
+      throw new CapabilityException(
+        "unsupported-vision",
+        "capability-validation",
+        "The selected model cannot receive image attachments.",
+        $"Capability source '{capabilities.Source}' did not authorize vision input. Images were not stripped.",
+        reference.ProviderId,
+        reference.ModelId
+      );
+    }
+
+    if (
+      images.Count > capabilities.MaximumImageCount
+      || images.Any(
+        image => image.Bytes.LongLength > capabilities.MaximumImageBytes
+      )
+      || images.Any(
+        image => !(capabilities.SupportedImageMimeTypes ?? []).Contains(
+          image.MimeType,
+          StringComparer.OrdinalIgnoreCase
+        )
+      )
+    )
+    {
+      throw new CapabilityException(
+        "unsupported-vision",
+        "capability-validation",
+        "The image attachments exceed the selected model capability contract.",
+        "The count, byte limit, or MIME type is unsupported by the selected model.",
+        reference.ProviderId,
+        reference.ModelId
+      );
+    }
+
+    if (
+      images.Count > 0
+      && !reference.IsLocal
+      && (
+        string.IsNullOrWhiteSpace(
+          request.BrowserSessionId
+        )
+        || !_cloudImageApprovals.IsApproved(
+          request.BrowserSessionId,
+          reference.ProviderId
+        )
+      )
+    )
+    {
+      throw new CapabilityException(
+        "cloud-image-approval-required",
+        "cloud-image-privacy",
+        $"Confirm that {ModelProviderIds.DisplayName(reference.ProviderId)} may receive {images.Sum(image => image.Bytes.LongLength)} image bytes.",
+        "Cloud image upload approval is required for the current browser session and provider.",
+        reference.ProviderId,
+        reference.ModelId
+      );
+    }
+  }
+
+  private static IReadOnlyList<string> CapabilityLabels(
+    ProviderModelCapabilities capabilities
+  )
+  {
+    var labels = new List<string>();
+
+    if (capabilities.Chat)
+    {
+      labels.Add(
+        "chat"
+      );
+    }
+
+    if (capabilities.Streaming)
+    {
+      labels.Add(
+        "streaming"
+      );
+    }
+
+    if (capabilities.NativeTools)
+    {
+      labels.Add(
+        "tools-advertised"
+      );
+    }
+
+    if (capabilities.StructuredOutput)
+    {
+      labels.Add(
+        "structured"
+      );
+    }
+
+    if (capabilities.Reasoning)
+    {
+      labels.Add(
+        "reasoning"
+      );
+    }
+
+    if (capabilities.WebSearch)
+    {
+      labels.Add(
+        "web"
+      );
+    }
+
+    if (capabilities.Vision)
+    {
+      labels.Add(
+        "vision"
+      );
+    }
+
+    return labels;
   }
 
   private async Task<IntentionRoutingResult> ClassifyAsync(
@@ -3447,6 +3838,7 @@ public sealed class ChatStreamService : IChatStreamService
   )
   {
     var routed = exception as RoutedProviderException;
+    var capability = exception as CapabilityException;
 
     return new ChatStageException(
       exception.Stage,
@@ -3457,18 +3849,21 @@ public sealed class ChatStreamService : IChatStreamService
       exception.HttpStatus,
       exception.Recoverable,
       exception,
-      routed is null
+      routed is null && capability is null
         ? null
         : new Dictionary<string, string?>(
           StringComparer.Ordinal
         )
         {
-          ["code"] = routed.Code,
-          ["providerTraceId"] = routed.TraceId,
-          ["requestRemaining"] = routed.RateLimit?.RequestRemaining?.ToString(),
-          ["tokenRemaining"] = routed.RateLimit?.TokenRemaining?.ToString()
+          ["code"] = routed?.Code
+            ?? capability!.Code,
+          ["providerTraceId"] = routed?.TraceId
+            ?? capability!.TraceId,
+          ["requestRemaining"] = routed?.RateLimit?.RequestRemaining?.ToString(),
+          ["tokenRemaining"] = routed?.RateLimit?.TokenRemaining?.ToString()
         },
       routed?.Provider
+        ?? capability?.Provider
         ?? ModelProviderIds.OllamaLocal
     );
   }
@@ -4436,6 +4831,8 @@ public sealed class ChatStreamService : IChatStreamService
     public bool ReceivedFirstChunk { get; set; }
 
     public OllamaProviderException? Failure { get; set; }
+
+    public IReadOnlyList<ProviderCitation>? Citations { get; set; }
   }
 
   private sealed class ExecutionProgress
