@@ -52,7 +52,10 @@ const state = {
   sessionSearchController: null,
   summarySession: null,
   summaryEstimate: null,
-  contextUsage: null
+  contextUsage: null,
+  recovery: null,
+  inspectedBackup: null,
+  inspectedBackupBase64: null
 };
 
 const elements = {};
@@ -66,6 +69,8 @@ async function initialize() {
   initializeScrollFollowing();
 
   try {
+    state.recovery = await fetchJson("/api/recovery/status");
+    renderRecoveryState();
     await loadApplicationState();
   } catch (error) {
     elements.providerBadge.textContent = "Erro";
@@ -74,7 +79,9 @@ async function initialize() {
   }
 
   await refreshRuntimeStatus();
-  await ensureConversationIdentity();
+  if (!state.recovery?.safeMode) {
+    await ensureConversationIdentity();
+  }
   scheduleRuntimeRefresh();
   elements.messageInput.focus();
 }
@@ -303,6 +310,17 @@ function bindElements() {
     "copy-settings-yaml",
     "download-settings-yaml",
     "import-settings-yaml",
+    "safe-mode-banner",
+    "safe-mode-reason",
+    "backup-conversations",
+    "backup-summaries",
+    "backup-usage",
+    "backup-reviews",
+    "backup-restore-file",
+    "create-local-backup",
+    "open-local-backup",
+    "restore-local-backup",
+    "local-backup-status",
     "settings-open-workspace",
     "settings-open-recent",
     "settings-open-git",
@@ -554,6 +572,13 @@ function bindEvents() {
   elements.copySettingsYaml.addEventListener("click", copyPortableYaml);
   elements.downloadSettingsYaml.addEventListener("click", downloadPortableYaml);
   elements.importSettingsYaml.addEventListener("click", importPortableYaml);
+  elements.createLocalBackup.addEventListener("click", createLocalBackup);
+  elements.openLocalBackup.addEventListener(
+    "click",
+    () => elements.backupRestoreFile.click()
+  );
+  elements.backupRestoreFile.addEventListener("change", inspectLocalBackup);
+  elements.restoreLocalBackup.addEventListener("click", restoreLocalBackup);
   document.querySelectorAll(".mode-option").forEach(
     button => button.addEventListener("click", handleModeChange)
   );
@@ -640,8 +665,29 @@ async function loadApplicationState() {
   updateInteractionControls();
   await refreshSelectedModelCapabilities();
   renderEstimatedContextUsage();
-  await refreshSessions();
+  if (!state.recovery?.historyAutoLoadDisabled) {
+    await refreshSessions();
+  }
   await refreshGit();
+}
+
+function renderRecoveryState() {
+  const recovery = state.recovery;
+  elements.safeModeBanner.hidden = !recovery?.safeMode;
+  document.body.dataset.historyAutoload =
+    recovery?.historyAutoLoadDisabled ? "disabled" : "enabled";
+  elements.safeModeReason.textContent = recovery?.reason
+    ?? "Execute, cloud e alteraÃ§Ãµes de configuraÃ§Ã£o estÃ£o desativados.";
+
+  if (!recovery?.safeMode) {
+    return;
+  }
+
+  document.querySelector("[data-mode=\"execute\"]").disabled = true;
+  elements.saveSettings.disabled = true;
+  elements.importSettingsYaml.disabled = true;
+  elements.messageInput.disabled = true;
+  elements.sendButton.disabled = true;
 }
 
 function updateProviderStatus(response) {
@@ -1259,7 +1305,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.8."
+        + "pelo Agentic Router v0.9.9."
     )
   ) {
     event.currentTarget.checked = false;
@@ -4659,7 +4705,8 @@ function updateSettingsDirtyState() {
     : "Sem alterações";
   elements.settingsDirty.className =
     `badge ${state.settingsDirty ? "error" : "muted"}`;
-  elements.saveSettings.disabled = !state.settingsDirty;
+  elements.saveSettings.disabled =
+    Boolean(state.recovery?.settingsReadOnly) || !state.settingsDirty;
 }
 
 async function loadPortableYaml() {
@@ -4729,6 +4776,126 @@ function downloadPortableYaml() {
   URL.revokeObjectURL(url);
   elements.settingsYamlStatus.textContent = "Arquivo agentic-router.yaml preparado.";
   elements.settingsYamlStatus.className = "portable-yaml-status success";
+}
+
+async function createLocalBackup() {
+  elements.localBackupStatus.textContent = "Criando arquivo com manifesto e hashesâ€¦";
+
+  try {
+    const response = await fetch("/api/recovery/backup", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        includeConversations: elements.backupConversations.checked,
+        includeSessionSummaries: elements.backupSummaries.checked,
+        includeUsageHistory: elements.backupUsage.checked,
+        includeReviewData: elements.backupReviews.checked
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = `agentic-router-backup-${new Date().toISOString().slice(0, 19).replaceAll(":", "-")}.zip`;
+    anchor.click();
+    URL.revokeObjectURL(href);
+    elements.localBackupStatus.textContent =
+      "Backup criado sem chaves, aprovaÃ§Ãµes ou estado de processo.";
+  } catch (error) {
+    elements.localBackupStatus.textContent = error.message;
+  }
+}
+
+async function inspectLocalBackup() {
+  const file = elements.backupRestoreFile.files?.[0];
+
+  if (!file) {
+    return;
+  }
+
+  elements.localBackupStatus.textContent = "Validando manifesto e hashesâ€¦";
+
+  try {
+    const base64 = await fileToBase64(file);
+    const inspection = await fetchJson("/api/recovery/backup/inspect", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        archiveBase64: base64
+      })
+    });
+    state.inspectedBackup = inspection;
+    state.inspectedBackupBase64 = base64;
+    elements.restoreLocalBackup.disabled = false;
+    elements.localBackupStatus.textContent =
+      `${inspection.manifest.categories.join(", ")} Â· `
+      + `${inspection.manifest.entries.length} arquivos Â· hashes vÃ¡lidos Â· `
+      + `${inspection.conflicts.length} conflitos atuais`;
+  } catch (error) {
+    state.inspectedBackup = null;
+    state.inspectedBackupBase64 = null;
+    elements.restoreLocalBackup.disabled = true;
+    elements.localBackupStatus.textContent = error.message;
+  } finally {
+    elements.backupRestoreFile.value = "";
+  }
+}
+
+async function restoreLocalBackup() {
+  const inspection = state.inspectedBackup;
+
+  if (!inspection || !state.inspectedBackupBase64) {
+    return;
+  }
+
+  const categories = inspection.manifest.categories;
+
+  if (!window.confirm(
+    `Restaurar as categorias ${categories.join(", ")}? `
+      + "O estado atual serÃ¡ salvo antes da aplicaÃ§Ã£o atÃ´mica."
+  )) {
+    return;
+  }
+
+  try {
+    const result = await fetchJson("/api/recovery/backup/restore", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        archiveBase64: state.inspectedBackupBase64,
+        categories,
+        confirmed: true
+      })
+    });
+    elements.localBackupStatus.textContent =
+      `Restaurado: ${result.restoredCategories.join(", ")}. `
+      + `Backup anterior: ${result.currentDataBackup}. Reinicie para recarregar.`;
+  } catch (error) {
+    elements.localBackupStatus.textContent = error.message;
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const value = String(reader.result);
+      resolve(value.slice(value.indexOf(",") + 1));
+    });
+    reader.addEventListener("error", () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
 }
 
 async function importPortableYaml() {

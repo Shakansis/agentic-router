@@ -259,6 +259,7 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
           cancellationToken
         );
         var state = new ProviderState(
+          1,
           models,
           DateTimeOffset.UtcNow,
           null,
@@ -293,6 +294,7 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
       catch (CloudProviderException exception)
       {
         var failed = new ProviderState(
+          1,
           [],
           DateTimeOffset.UtcNow,
           exception.RateLimit,
@@ -523,7 +525,7 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
         cancellationToken: cancellationToken
       );
 
-      if (cached is not null)
+      if (cached?.SchemaVersion == 1)
       {
         _states.TryAdd(
           providerId,
@@ -531,7 +533,9 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
         );
       }
 
-      return cached;
+      return cached?.SchemaVersion == 1
+        ? cached
+        : null;
     }
     catch (Exception exception) when (
       exception is IOException
@@ -645,6 +649,7 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
   }
 
   private sealed record ProviderState(
+    int SchemaVersion,
     IReadOnlyList<InstalledModel> Models,
     DateTimeOffset LastRefreshAt,
     ProviderRateLimitSnapshot? LastRateLimit,

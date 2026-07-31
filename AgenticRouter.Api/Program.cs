@@ -9,6 +9,7 @@ using AgenticRouter.Api.ProjectAwareness;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Recovery;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Sessions;
@@ -43,7 +44,39 @@ var dataDirectory = string.IsNullOrWhiteSpace(
   : Path.GetFullPath(
     configuredDirectory
   );
-builder.Services.AddSingleton<ISettingsStore>(
+var safeModeRequested = args.Any(
+  argument => string.Equals(
+    argument,
+    "--safe-mode",
+    StringComparison.OrdinalIgnoreCase
+  )
+) || string.Equals(
+  builder.Configuration["AgenticRouter:SafeMode"],
+  "true",
+  StringComparison.OrdinalIgnoreCase
+);
+var safeModeState = new SafeModeState(
+  safeModeRequested,
+  safeModeRequested
+    ? "Safe mode was explicitly requested for this startup."
+    : null
+);
+builder.Services.AddSingleton(
+  safeModeState
+);
+builder.Services.AddSingleton(
+  new DataMigrationService(
+    dataDirectory,
+    safeModeState
+  )
+);
+builder.Services.AddSingleton<ILocalBackupService>(
+  services => new LocalBackupService(
+    dataDirectory,
+    services.GetRequiredService<IPricingCatalog>()
+  )
+);
+builder.Services.AddSingleton<JsonSettingsStore>(
   services =>
   {
     return new JsonSettingsStore(
@@ -52,6 +85,12 @@ builder.Services.AddSingleton<ISettingsStore>(
       services.GetRequiredService<ILogger<JsonSettingsStore>>()
     );
   }
+);
+builder.Services.AddSingleton<ISettingsStore>(
+  services => new SafeModeSettingsStore(
+    services.GetRequiredService<JsonSettingsStore>(),
+    safeModeState
+  )
 );
 builder.Services.AddSingleton<IProtectedSecretStore>(
   new DpapiProtectedSecretStore(
@@ -156,9 +195,7 @@ builder.Services.AddSingleton<ResidentModelManager>();
 builder.Services.AddSingleton<IResidentModelManager>(
   services => services.GetRequiredService<ResidentModelManager>()
 );
-builder.Services.AddHostedService(
-  services => services.GetRequiredService<ResidentModelManager>()
-);
+builder.Services.AddHostedService<SafeResidentModelHostedService>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
 builder.Services.AddScoped<IChatStreamService, ChatStreamService>();
 
@@ -166,8 +203,16 @@ var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.UseMiddleware<SafeModeMiddleware>();
 app.UseAuthorization();
 app.MapControllers();
+
+var migration = await app.Services
+  .GetRequiredService<DataMigrationService>()
+  .InitializeAsync(
+    safeModeRequested,
+    CancellationToken.None
+  );
 
 await app.Services
   .GetRequiredService<ISettingsStore>()
@@ -180,11 +225,14 @@ await app.Services
   .InitializeAsync(
     CancellationToken.None
   );
-await app.Services
-  .GetRequiredService<IPersistentSessionService>()
-  .RecoverInterruptedAsync(
-    CancellationToken.None
-  );
+if (!safeModeState.Enabled)
+{
+  await app.Services
+    .GetRequiredService<IPersistentSessionService>()
+    .RecoverInterruptedAsync(
+      CancellationToken.None
+    );
+}
 await app.Services
   .GetRequiredService<IUsageReconciliationService>()
   .InitializeAsync(

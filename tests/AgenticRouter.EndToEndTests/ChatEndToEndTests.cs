@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -2875,7 +2876,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.8"
+      "v0.9.9"
     );
     await Expect(
       Page.Locator(
@@ -3273,7 +3274,7 @@ public sealed class ChatEndToEndTests : PageTest
         "#settings-dialog .information-button"
       )
     ).ToHaveCountAsync(
-      6
+      7
     );
     await Expect(
       Page.Locator(
@@ -13128,6 +13129,513 @@ public sealed class ChatEndToEndTests : PageTest
       4_096,
       completed["reservedResponseTokens"]!.GetValue<int>()
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task FullBackupUsesHashesAndIncludesConversationsOnlyWhenSelected()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "backup-session-v099",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = "Conversation selected for local recovery."
+            },
+            new
+            {
+              role = "assistant",
+              content = "Visible recovery fact."
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "alpha:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    using (
+      var summary = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/backup-session-v099/summary",
+        new
+        {
+          content = new
+          {
+            objective = "Recover the selected conversation.",
+            decisions = Array.Empty<string>(),
+            filesChanged = Array.Empty<string>(),
+            commandsAndValidation = Array.Empty<string>(),
+            unresolvedIssues = Array.Empty<string>(),
+            nextSuggestedStep = "Inspect the manifest."
+          }
+        }
+      )
+    )
+    {
+      summary.EnsureSuccessStatusCode();
+    }
+    var secretDirectory = Path.Combine(
+      _environment.DataDirectory,
+      "secrets"
+    );
+    Directory.CreateDirectory(
+      secretDirectory
+    );
+    const string secret = "gsk_never_export_this_v099";
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        secretDirectory,
+        "test.protected"
+      ),
+      secret
+    );
+
+    using var baseBackup = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/backup",
+      new
+      {
+        includeConversations = false,
+        includeSessionSummaries = false,
+        includeUsageHistory = false,
+        includeReviewData = false
+      }
+    );
+    baseBackup.EnsureSuccessStatusCode();
+    var baseBytes = await baseBackup.Content.ReadAsByteArrayAsync();
+    using (
+      var archive = new ZipArchive(
+        new MemoryStream(
+          baseBytes
+        ),
+        ZipArchiveMode.Read
+      )
+    )
+    {
+      Assert.IsNull(
+        archive.Entries.FirstOrDefault(
+          entry => entry.FullName.Contains(
+            "sessions/",
+            StringComparison.Ordinal
+          )
+        )
+      );
+      Assert.IsNotNull(
+        archive.GetEntry(
+          "data/catalog/pricing-catalog.json"
+        )
+      );
+    }
+    Assert.DoesNotContain(
+      secret,
+      Encoding.UTF8.GetString(
+        baseBytes
+      )
+    );
+
+    using var completeBackup = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/backup",
+      new
+      {
+        includeConversations = true,
+        includeSessionSummaries = true,
+        includeUsageHistory = false,
+        includeReviewData = false
+      }
+    );
+    completeBackup.EnsureSuccessStatusCode();
+    var completeBytes = await completeBackup.Content.ReadAsByteArrayAsync();
+    using var completeArchive = new ZipArchive(
+      new MemoryStream(
+        completeBytes
+      ),
+      ZipArchiveMode.Read
+    );
+    var manifestEntry = completeArchive.GetEntry(
+      "manifest.json"
+    );
+    Assert.IsNotNull(
+      manifestEntry
+    );
+    using var manifestDocument = JsonDocument.Parse(
+      manifestEntry.Open()
+    );
+    var entries = manifestDocument.RootElement.GetProperty(
+      "entries"
+    ).EnumerateArray().ToArray();
+    var sessionEntry = entries.Single(
+      entry => entry.GetProperty(
+        "path"
+      ).GetString()!.EndsWith(
+        "/backup-session-v099.json",
+        StringComparison.Ordinal
+      )
+    );
+    var sessionArchiveEntry = completeArchive.GetEntry(
+      $"data/{sessionEntry.GetProperty("path").GetString()}"
+    )!;
+    using var sessionBuffer = new MemoryStream();
+    await sessionArchiveEntry.Open().CopyToAsync(
+      sessionBuffer
+    );
+    Assert.AreEqual(
+      sessionEntry.GetProperty(
+        "sha256"
+      ).GetString(),
+      Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(
+          sessionBuffer.ToArray()
+        )
+      ).ToLowerInvariant()
+    );
+    StringAssert.Contains(
+      Encoding.UTF8.GetString(
+        sessionBuffer.ToArray()
+      ),
+      "sessionSummary"
+    );
+
+    using var inspected = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/backup/inspect",
+      new
+      {
+        archiveBase64 = Convert.ToBase64String(
+          completeBytes
+        )
+      }
+    );
+    inspected.EnsureSuccessStatusCode();
+    using var inspection = JsonDocument.Parse(
+      await inspected.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      inspection.RootElement.GetProperty(
+        "hashesValid"
+      ).GetBoolean()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BackupRejectsCorruptionAndSelectiveRestoreCreatesCurrentDataBackup()
+  {
+    using var created = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/backup",
+      new
+      {
+        includeConversations = false,
+        includeSessionSummaries = false,
+        includeUsageHistory = false,
+        includeReviewData = false
+      }
+    );
+    created.EnsureSuccessStatusCode();
+    var archive = await created.Content.ReadAsByteArrayAsync();
+    var corrupted = archive.ToArray();
+    corrupted[corrupted.Length / 2] ^= 0x5A;
+    using var rejected = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/backup/inspect",
+      new
+      {
+        archiveBase64 = Convert.ToBase64String(
+          corrupted
+        )
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      rejected.StatusCode
+    );
+
+    var changed = _environment.BaselineSettings with
+    {
+      DefaultModel = "docs:latest"
+    };
+    using (
+      var saved = await _environment.PutSettingsAsync(
+        changed
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    await using (
+      var workspaceLock = new FileStream(
+        Path.Combine(
+          _environment.DataDirectory,
+          "workspaces.json"
+        ),
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.None
+      )
+    )
+    {
+      using var failedRestore = await _environment.HttpClient.PostAsJsonAsync(
+        "api/recovery/backup/restore",
+        new
+        {
+          archiveBase64 = Convert.ToBase64String(
+            archive
+          ),
+          categories = new[]
+          {
+            "settings",
+            "workspaces"
+          },
+          confirmed = true
+        }
+      );
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        failedRestore.StatusCode
+      );
+    }
+    using (
+      var afterRollback = await _environment.HttpClient.GetAsync(
+        "api/settings"
+      )
+    )
+    {
+      afterRollback.EnsureSuccessStatusCode();
+      using var afterRollbackDocument = JsonDocument.Parse(
+        await afterRollback.Content.ReadAsStringAsync()
+      );
+      Assert.AreEqual(
+        "docs:latest",
+        afterRollbackDocument.RootElement.GetProperty(
+          "defaultModel"
+        ).GetString()
+      );
+    }
+    using var restored = await _environment.HttpClient.PostAsJsonAsync(
+      "api/recovery/backup/restore",
+      new
+      {
+        archiveBase64 = Convert.ToBase64String(
+          archive
+        ),
+        categories = new[]
+        {
+          "settings"
+        },
+        confirmed = true
+      }
+    );
+    restored.EnsureSuccessStatusCode();
+    using var restoreDocument = JsonDocument.Parse(
+      await restored.Content.ReadAsStringAsync()
+    );
+    var currentBackup = restoreDocument.RootElement.GetProperty(
+      "currentDataBackup"
+    ).GetString()!;
+    Assert.IsTrue(
+      File.Exists(
+        Path.Combine(
+          _environment.DataDirectory,
+          currentBackup.Replace(
+            '/',
+            Path.DirectorySeparatorChar
+          )
+        )
+      )
+    );
+    using var settings = await _environment.HttpClient.GetAsync(
+      "api/settings"
+    );
+    settings.EnsureSuccessStatusCode();
+    using var settingsDocument = JsonDocument.Parse(
+      await settings.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "alpha:latest",
+      settingsDocument.RootElement.GetProperty(
+        "defaultModel"
+      ).GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task MigrationBacksUpLegacyStoreAndFailureStartsSafeMode()
+  {
+    var settingsNode = JsonNode.Parse(
+      await File.ReadAllTextAsync(
+        _environment.SettingsPath
+      )
+    )!.AsObject();
+    settingsNode.Remove(
+      "schemaVersion"
+    );
+    await File.WriteAllTextAsync(
+      _environment.SettingsPath,
+      settingsNode.ToJsonString(
+        TestJson.Options
+      )
+    );
+    await _environment.RestartApplicationAsync();
+    var migratedNode = JsonNode.Parse(
+      await File.ReadAllTextAsync(
+        _environment.SettingsPath
+      )
+    )!.AsObject();
+    Assert.AreEqual(
+      1,
+      migratedNode["schemaVersion"]!.GetValue<int>()
+    );
+    Assert.IsTrue(
+      Directory.EnumerateFiles(
+        Path.Combine(
+          _environment.DataDirectory,
+          "migration-backups"
+        ),
+        "settings.json",
+        SearchOption.AllDirectories
+      ).Any()
+    );
+
+    migratedNode["schemaVersion"] = 99;
+    await File.WriteAllTextAsync(
+      _environment.SettingsPath,
+      migratedNode.ToJsonString(
+        TestJson.Options
+      )
+    );
+
+    try
+    {
+      await _environment.RestartApplicationAsync();
+      using var status = await _environment.HttpClient.GetAsync(
+        "api/recovery/status"
+      );
+      status.EnsureSuccessStatusCode();
+      using var statusDocument = JsonDocument.Parse(
+        await status.Content.ReadAsStringAsync()
+      );
+      Assert.IsTrue(
+        statusDocument.RootElement.GetProperty(
+          "safeMode"
+        ).GetBoolean()
+      );
+      Assert.IsTrue(
+        statusDocument.RootElement.GetProperty(
+          "executeDisabled"
+        ).GetBoolean()
+      );
+      using var blocked = await _environment.HttpClient.PutAsJsonAsync(
+        "api/settings",
+        _environment.BaselineSettings
+      );
+      Assert.AreEqual(
+        HttpStatusCode.Locked,
+        blocked.StatusCode
+      );
+      using var cloudBlocked = await _environment.HttpClient.PostAsync(
+        "api/cloud-providers/groq/test",
+        null
+      );
+      Assert.AreEqual(
+        HttpStatusCode.Locked,
+        cloudBlocked.StatusCode
+      );
+      using var safeBackup = await _environment.HttpClient.PostAsJsonAsync(
+        "api/recovery/backup",
+        new
+        {
+          includeConversations = false,
+          includeSessionSummaries = false,
+          includeUsageHistory = false,
+          includeReviewData = false
+        }
+      );
+      safeBackup.EnsureSuccessStatusCode();
+      Assert.IsGreaterThan(
+        0,
+        (
+          await safeBackup.Content.ReadAsByteArrayAsync()
+        ).Length
+      );
+      var preservedFailure = JsonNode.Parse(
+        await File.ReadAllTextAsync(
+          _environment.SettingsPath
+        )
+      )!.AsObject();
+      Assert.AreEqual(
+        99,
+        preservedFailure["schemaVersion"]!.GetValue<int>()
+      );
+      Assert.IsEmpty(
+        _environment.FakeOllama.Requests);
+      await Page.GotoAsync(
+        "/"
+      );
+      await Expect(
+        Page.Locator(
+          "#safe-mode-banner"
+        )
+      ).ToBeVisibleAsync();
+      await Expect(
+        Page.Locator(
+          "[data-mode=\"execute\"]"
+        )
+      ).ToBeDisabledAsync();
+      await Expect(
+        Page.Locator(
+          "#save-settings"
+        )
+      ).ToBeDisabledAsync();
+      await Expect(
+        Page.Locator(
+          "body"
+        )
+      ).ToHaveAttributeAsync(
+        "data-history-autoload",
+        "disabled"
+      );
+    }
+    finally
+    {
+      await File.WriteAllTextAsync(
+        _environment.SettingsPath,
+        _environment.BaselineSettings.ToJson()
+      );
+      var failure = Path.Combine(
+        _environment.DataDirectory,
+        "migration-failure.json"
+      );
+
+      if (File.Exists(
+        failure
+      ))
+      {
+        File.Delete(
+          failure
+        );
+      }
+
+      await _environment.RestartApplicationAsync();
+    }
   }
 
   [TestMethod]

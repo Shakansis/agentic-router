@@ -6,10 +6,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.9.8</Version>
+    <Version>0.9.9</Version>
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Remove="data\**\*" />
+    <None Remove="data\**\*" />
     <PackageReference Include="HtmlSanitizer" Version="9.1.973" />
     <PackageReference Include="Markdig" Version="1.3.2" />
     <PackageReference Include="Markdown.ColorCode" Version="3.0.1" />

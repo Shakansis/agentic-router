@@ -3751,3 +3751,30 @@ p {
     left: 0;
   }
 }
+.safe-mode-banner {
+  position: fixed;
+  z-index: 1000;
+  inset: 0 0 auto 0;
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.55rem 1rem;
+  color: #fff4cc;
+  background: #5b3b09;
+  border-bottom: 1px solid #b9801c;
+}
+
+.safe-mode-banner[hidden] {
+  display: none;
+}
+
+.safe-mode-banner:not([hidden]) ~ .sidebar,
+.safe-mode-banner:not([hidden]) ~ .workspace {
+  margin-top: 2.4rem;
+}
+
+.backup-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+}

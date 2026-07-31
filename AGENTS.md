@@ -218,6 +218,26 @@ rollbacks, validation runtime, pin/archive state, and changed-file authority.
 Markdown export is readable and bounded, redacts likely secrets and absolute
 local paths, and never exports internal runtime authority.
 
+Full local backup is distinct from portable YAML. Archives use a versioned
+manifest, per-entry SHA-256 hashes, creation time, application version, and
+explicit category options. Secrets, encrypted secret blobs, approvals, active
+processes, pending tools, image permissions, handles, temporary files, and user
+workspace file contents are never included. Restore always inspects and
+validates first, permits only selected categories, creates a current-data
+backup, writes atomically, and rolls back applied files on failure.
+
+Persisted stores declare explicit schema versions. Small sequential migrations
+inspect before mutation, preserve an original backup, validate staged output,
+and switch atomically. A recorded migration failure prevents automatic retry
+and activates safe mode without modifying the failed original.
+
+Safe mode may be requested with `--safe-mode`, the
+`AgenticRouter__SafeMode=true` environment setting, or migration failure. It
+disables Execute, provider calls, cloud mutations, automatic history loading,
+resident-model startup, and settings writes. The browser shows a persistent
+indicator and permits only read-only inspection and sanitized backup/export
+until a normal restart.
+
 ## 9. Streaming and UI Contracts
 
 The frontend communicates only with the local API and must never call Ollama directly.
@@ -287,6 +307,13 @@ Before completing a change:
 3. run the full Playwright E2E suite;
 4. run a relevant real-Ollama smoke when the required local runtime/model is available;
 5. inspect `git diff --check` and the complete intended diff.
+
+Maintainer diagnostics live only under `tools/diagnostics/`. Default execution
+is read-only and sanitized and must not invoke models, GPUs, cloud providers,
+arbitrary command text, workspace changes, or Git-history changes. Generated
+reports remain ignored. Published application artifacts must exclude
+diagnostic scripts and reports, tests, fake-provider assets, benchmarks,
+secrets, settings, workspace/session data, and usage ledgers.
 
 Never claim validation that was not executed. Report unavailable or incompatible real models as limitations, not as passing evidence.
 

@@ -1,3 +1,35 @@
+# Agentic Router v0.9.9
+
+This development version adds pre-1.0 recovery, safe backup and restore,
+schema-migration hardening, safe mode, and maintainer-only diagnostics.
+
+## Highlights
+
+- Adds a tracked read-only maintainer diagnostics tool with sanitized JSON and
+  Markdown reports, optional deterministic build/test/publish checks, and a
+  minimal support package outside the published product.
+- Adds an explicit publish verifier and project exclusions for diagnostics,
+  PowerShell scripts, tests, fake providers, secrets, local settings, sessions,
+  usage ledgers, and other local data.
+- Adds full local ZIP backup with a versioned manifest, application version,
+  creation time, per-entry SHA-256 hashes, and optional conversations,
+  summaries, usage history, and bounded review data.
+- Always excludes API keys, encrypted secret blobs, approvals, processes,
+  pending tools, rollbacks, temporary permissions, handles, and workspace file
+  contents from backup.
+- Adds inspect-before-apply, hash validation, conflict reporting, selective
+  category restore, current-data backup, atomic replacement, and rollback.
+- Adds small sequential schema migration with backup, staged validation,
+  atomic replacement, persistent result/failure state, and no automatic retry
+  loop after failure.
+- Adds explicit and failure-triggered safe mode with a visible banner,
+  read-only settings, disabled Execute/cloud/provider activity, no automatic
+  history loading, no resident-model startup, and backup/export availability.
+- Adds deterministic coverage for optional backup categories, secret
+  exclusion, manifest hashes, corruption rejection, selective restore,
+  current-data backup, migration backup, original preservation, safe mode, and
+  publish exclusion.
+
 # Agentic Router v0.9.8
 
 This development version adds local conversation productivity tools and a

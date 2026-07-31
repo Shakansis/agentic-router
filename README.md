@@ -470,6 +470,22 @@ After editing:
 4. Verify no test exceeds 60 seconds
 5. Report changed files, commands, results
 
+## Maintainer diagnostics and recovery
+
+The production UI creates and inspects full local recovery archives from
+Settings > Advanced. Conversations, summaries, usage, and bounded review facts
+are optional; secrets and active runtime authority are always excluded.
+
+The default maintainer diagnostic is read-only and does not invoke a model, GPU,
+or cloud provider:
+
+```powershell
+.\tools\diagnostics\Run-AgenticRouterDiagnostics.ps1
+```
+
+See `tools/diagnostics/README.md` and
+`docs/pre-1.0-readiness-checklist.md` for opt-in validation and release gates.
+
 ## 📄 License
 
 [Specify your license here]
