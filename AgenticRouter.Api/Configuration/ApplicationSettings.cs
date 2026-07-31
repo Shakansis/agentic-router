@@ -52,6 +52,8 @@ public sealed record CloudProviderIntegrationSettings
 
   public string? SecretReference { get; init; }
 
+  public string ExpectedBillingMode { get; init; } = "unknown";
+
   public IReadOnlyDictionary<string, CloudModelQuotaSettings> ModelQuotas
   {
     get;
@@ -99,6 +101,13 @@ public sealed record UsageSettings
   public string ComparisonModel { get; init; } = "gemini-3.5-flash-lite";
 
   public string OllamaPlanReference { get; init; } = "Free";
+
+  public IReadOnlyList<int> AlertThresholds { get; init; } =
+  [
+    70,
+    85,
+    95
+  ];
 }
 
 public sealed record GitDeliverySettings

@@ -329,6 +329,41 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       context.Response
     );
 
+    if (body.Contains(
+      "trigger-cloud-invalid-request",
+      StringComparison.Ordinal
+    ))
+    {
+      context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic invalid request\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
+
+    if (body.Contains(
+      "trigger-cloud-rate-limit",
+      StringComparison.Ordinal
+    ))
+    {
+      AddExhaustedRateLimitHeaders(
+        context.Response
+      );
+      context.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic fake rate limit\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
+
     if (stream)
     {
       context.Response.StatusCode = (int)HttpStatusCode.OK;
@@ -620,6 +655,18 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
     response.Headers["x-ratelimit-reset-requests"] = "60s";
     response.Headers["x-ratelimit-limit-tokens"] = "6000";
     response.Headers["x-ratelimit-remaining-tokens"] = "5900";
+    response.Headers["x-ratelimit-reset-tokens"] = "60s";
+  }
+
+  private static void AddExhaustedRateLimitHeaders(
+    HttpListenerResponse response
+  )
+  {
+    response.Headers["x-ratelimit-limit-requests"] = "30";
+    response.Headers["x-ratelimit-remaining-requests"] = "0";
+    response.Headers["x-ratelimit-reset-requests"] = "60s";
+    response.Headers["x-ratelimit-limit-tokens"] = "6000";
+    response.Headers["x-ratelimit-remaining-tokens"] = "0";
     response.Headers["x-ratelimit-reset-tokens"] = "60s";
   }
 

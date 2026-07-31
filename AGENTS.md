@@ -118,6 +118,13 @@ Keep configuration typed, validated, versionable, and backward-compatible when p
 
 Configuration includes provider URL, router and coordinator models, intent profiles, model/device defaults, context sizes, timeouts, execution limits, approval policy, trusted workspaces, and persistence preferences.
 
+When an intent primary resolves to a cloud provider, its configured fallback
+must resolve unambiguously to an installed Ollama Local model. The Host may
+switch once for an eligible timeout, provider outage, rate limit, quota
+exhaustion, or supported transient failure. It must not fallback for user
+cancellation, invalid requests, policy or security denials, unsupported
+capabilities, or malformed configuration.
+
 Cloud API keys are protected for the current Windows user with DPAPI. Ordinary settings and portable YAML contain no keys, and browser contracts expose only masked state and opaque secret references.
 
 Persist only the data the user has enabled. Do not expose secrets, raw provider payloads, full stack traces, or unrestricted local paths in browser-visible errors.
@@ -130,6 +137,13 @@ guidance, or secrets to the usage ledger. Local Ollama inference has zero
 provider token charge. Any paid-cloud comparison is an explicitly selected
 equivalent-cost estimate using a versioned official-source price snapshot, not
 an Ollama Cloud token quota or exact savings claim.
+
+Cloud quota and cost dashboards are local projections over provider-reported
+headers, explicitly configured quotas, cached provider metadata, and the usage
+ledger. Accuracy must remain labelled exact, estimated, or unavailable.
+Expected billing mode is a user label, never a billing guarantee. Do not make
+background provider calls, send alerts externally, or switch providers
+proactively.
 
 Conversation identity is host-generated and stable for the lifetime of a conversation. When history is enabled, persist the current snapshot successfully before creating or resuming another session; a failed save must leave the visible conversation intact. When history is disabled, meaningful content requires an explicit choice to enable and save, discard, or cancel. Never auto-resume conversations, pending approvals, or processes.
 

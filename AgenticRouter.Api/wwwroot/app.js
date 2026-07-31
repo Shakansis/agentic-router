@@ -35,9 +35,11 @@ const state = {
   activeDelivery: null,
   pendingDeliveryAction: null,
   activeAgentModel: null,
+  activeAgentRole: null,
   usageOverview: null,
   pricingCatalog: null,
-  cloudProviders: null
+  cloudProviders: null,
+  cloudUsageDashboard: null
 };
 
 const elements = {};
@@ -105,6 +107,17 @@ function bindElements() {
     "runtime-usage-summary",
     "runtime-usage-accuracy",
     "runtime-usage-details",
+    "cloud-usage-card",
+    "cloud-usage-badge",
+    "cloud-usage-summary",
+    "cloud-usage-detail",
+    "cloud-usage-dialog",
+    "cloud-usage-dashboard-summary",
+    "cloud-usage-provider-cards",
+    "cloud-usage-refresh-status",
+    "refresh-cloud-usage",
+    "close-cloud-usage",
+    "dismiss-cloud-usage",
     "new-conversation",
     "default-context-tokens",
     "provider-context-tokens",
@@ -118,6 +131,7 @@ function bindElements() {
     "usage-provider-short-minutes",
     "usage-provider-long-minutes",
     "usage-custom-minutes",
+    "usage-alert-thresholds",
     "usage-comparison-model",
     "usage-ollama-plan",
     "settings-usage-summary",
@@ -268,6 +282,17 @@ function bindEvents() {
     "click",
     purgeUsageHistory
   );
+  elements.cloudUsageCard.addEventListener("click", openCloudUsage);
+  elements.closeCloudUsage.addEventListener("click", closeCloudUsage);
+  elements.dismissCloudUsage.addEventListener("click", closeCloudUsage);
+  elements.refreshCloudUsage.addEventListener("click", refreshCloudUsage);
+  elements.cloudUsageDialog.addEventListener(
+    "cancel",
+    event => {
+      event.preventDefault();
+      closeCloudUsage();
+    }
+  );
   elements.cloudProvidersList.addEventListener(
     "click",
     handleCloudProviderAction
@@ -385,7 +410,8 @@ async function loadApplicationState() {
     workspaceProfiles,
     usageOverview,
     pricingCatalog,
-    cloudProviders
+    cloudProviders,
+    cloudUsageDashboard
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -396,7 +422,8 @@ async function loadApplicationState() {
     fetchJson("/api/workspaces"),
     fetchJson("/api/usage/overview"),
     fetchJson("/api/usage/pricing"),
-    fetchJson("/api/cloud-providers")
+    fetchJson("/api/cloud-providers"),
+    fetchJson("/api/usage/cloud-dashboard")
   ]);
 
   state.settings = settings;
@@ -409,10 +436,12 @@ async function loadApplicationState() {
   state.usageOverview = usageOverview;
   state.pricingCatalog = pricingCatalog;
   state.cloudProviders = cloudProviders;
+  state.cloudUsageDashboard = cloudUsageDashboard;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
   renderSettings();
+  renderCloudUsage();
   renderWorkspace();
   renderWorkspaceProfiles();
   renderProjectProfile();
@@ -1037,7 +1066,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.3."
+        + "pelo Agentic Router v0.9.4."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1413,9 +1442,9 @@ async function saveWorkspace(event) {
       );
     }
     await resetConversationForWorkspaceChange();
+    hideNewWorkspaceForm();
     await refreshWorkspaceState();
     elements.workspaceSaveStatus.textContent = "Workspace adicionado e ativado";
-    hideNewWorkspaceForm();
   } catch (error) {
     elements.workspaceValidation.textContent = error.message;
     elements.workspaceValidation.className = "workspace-validation invalid";
@@ -1433,6 +1462,7 @@ function setWorkspaceSaving(isSaving) {
   elements.trustedWorkspacePath.disabled = isSaving;
   elements.pickWorkspace.disabled = isSaving;
   elements.workspaceSubmit.disabled = isSaving;
+  elements.addWorkspace.disabled = isSaving;
 }
 
 async function pickWorkspace() {
@@ -1839,8 +1869,15 @@ async function refreshUsage() {
     const query = active?.id
       ? `?workspaceId=${encodeURIComponent(active.id)}`
       : "";
-    state.usageOverview = await fetchJson(`/api/usage/overview${query}`);
+    [
+      state.usageOverview,
+      state.cloudUsageDashboard
+    ] = await Promise.all([
+      fetchJson(`/api/usage/overview${query}`),
+      fetchJson("/api/usage/cloud-dashboard")
+    ]);
     renderUsageSummary();
+    renderCloudUsage();
   } catch (error) {
     elements.runtimeUsageAccuracy.textContent = "indisponível";
     elements.settingsUsageAccuracy.textContent = "indisponível";
@@ -1848,6 +1885,9 @@ async function refreshUsage() {
       `Uso indisponível · ${error.message}`;
     elements.settingsUsageDetails.textContent =
       `Uso indisponível · ${error.message}`;
+    elements.cloudUsageBadge.textContent = "indisponível";
+    elements.cloudUsageSummary.textContent = "Uso cloud indisponível";
+    elements.cloudUsageDetail.textContent = error.message;
   }
 }
 
@@ -1946,6 +1986,255 @@ function renderUsageSummary() {
     + `Referência de plano Ollama: ${plan?.plan ?? "indisponível"}\n`
     + `${planDetails}\n`
     + `Última atualização: ${lastUpdate}`;
+}
+
+function renderCloudUsage() {
+  const dashboard = state.cloudUsageDashboard;
+  const active = parseModelReference(
+    state.activeAgentModel
+      ?? state.lockedModel
+      ?? elements.modelSelector.value
+  );
+  const activeProvider = active.provider === "ollama-local"
+    ? null
+    : dashboard?.providers.find(
+      provider => provider.providerId === active.provider
+    );
+
+  delete elements.cloudUsageCard.dataset.alert;
+
+  if (!dashboard || dashboard.providers.length === 0) {
+    elements.cloudUsageBadge.textContent = "não configurado";
+    elements.cloudUsageSummary.textContent = "Cloud usage";
+    elements.cloudUsageDetail.textContent = "Not configured";
+  } else if (activeProvider) {
+    const accuracy = usageAccuracyLabel(activeProvider.accuracy);
+    elements.cloudUsageBadge.textContent = activeProvider.percentage === null
+      ? accuracy
+      : `${formatPercentage(activeProvider.percentage)} · ${accuracy}`;
+    elements.cloudUsageSummary.textContent =
+      `${activeProvider.displayName} · ${active.model}`;
+    elements.cloudUsageDetail.textContent =
+      `${state.activeAgentRole ?? "primary"} · ${activeProvider.window}`;
+
+    if (activeProvider.alertThreshold !== null) {
+      elements.cloudUsageCard.dataset.alert =
+        String(activeProvider.alertThreshold);
+    }
+  } else if (dashboard.connectedProviderCount > 0) {
+    elements.cloudUsageBadge.textContent = "inativo";
+    elements.cloudUsageSummary.textContent =
+      `${dashboard.connectedProviderCount} provedor(es) conectado(s)`;
+    elements.cloudUsageDetail.textContent = "Nenhum modelo cloud ativo";
+  } else {
+    elements.cloudUsageBadge.textContent = "desconectado";
+    elements.cloudUsageSummary.textContent =
+      `${dashboard.providers.length} provedor(es) configurado(s)`;
+    elements.cloudUsageDetail.textContent = "Nenhum modelo cloud ativo";
+  }
+
+  elements.cloudUsageDashboardSummary.textContent = dashboard
+    ? `Janela selecionada: ${dashboard.selectedWindow}\n`
+      + `Provedores conectados: ${dashboard.connectedProviderCount}\n`
+      + `Alertas locais: ${dashboard.alertThresholds.join("%, ")}%\n`
+      + `Atualizado: ${new Date(dashboard.generatedAt).toLocaleString()}`
+    : "Dashboard ainda não disponível.";
+  elements.cloudUsageProviderCards.replaceChildren();
+
+  for (const provider of dashboard?.providers ?? []) {
+    elements.cloudUsageProviderCards.append(
+      createCloudUsageProviderCard(provider)
+    );
+  }
+}
+
+function createCloudUsageProviderCard(provider) {
+  const card = document.createElement("article");
+  card.className = "cloud-usage-provider-card";
+
+  if (provider.alertThreshold !== null) {
+    card.dataset.alert = String(provider.alertThreshold);
+  }
+
+  const heading = document.createElement("div");
+  heading.className = "cloud-usage-provider-heading";
+  const headingText = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = provider.displayName;
+  const connection = document.createElement("small");
+  connection.textContent =
+    `${cloudConnectionLabel(provider.connectionState)} · `
+    + `${billingModeLabel(provider.expectedBillingMode)}`;
+  headingText.append(title, connection);
+  const quota = document.createElement("span");
+  quota.className = `usage-accuracy-badge${provider.alertThreshold !== null
+    ? " warning"
+    : ""}`;
+  quota.textContent = provider.percentage === null
+    ? usageAccuracyLabel(provider.accuracy)
+    : `${formatPercentage(provider.percentage)} · `
+      + usageAccuracyLabel(provider.accuracy);
+  heading.append(headingText, quota);
+
+  const metrics = document.createElement("div");
+  metrics.className = "cloud-usage-metrics";
+  metrics.append(
+    cloudUsageMetric("Tokens", formatInteger(provider.totalTokens)),
+    cloudUsageMetric("Requisições", formatInteger(provider.requests)),
+    cloudUsageMetric(
+      "Custo estimado",
+      formatCurrency(provider.estimatedActualCost)
+    ),
+    cloudUsageMetric(
+      "Última chamada",
+      provider.latestRequestAt
+        ? new Date(provider.latestRequestAt).toLocaleString()
+        : "nenhuma"
+    )
+  );
+
+  const quotaDetail = document.createElement("small");
+  quotaDetail.textContent =
+    `Quota: ${provider.quotaSource} · ${provider.window}`
+    + `${provider.resetAt
+      ? ` · reset ${new Date(provider.resetAt).toLocaleString()}`
+      : ""}`;
+  const billingDetail = document.createElement("small");
+  billingDetail.textContent =
+    `${billingModeLabel(provider.expectedBillingMode)} é apenas uma expectativa local; `
+    + "não garante faturamento ou gratuidade.";
+  const warning = document.createElement("small");
+  warning.hidden = !provider.hasRateLimitWarning;
+  warning.className = "cloud-provider-diagnostic";
+  warning.textContent = "Aviso: uma resposta 429 foi observada nesta janela.";
+
+  const models = document.createElement("div");
+  models.className = "cloud-usage-models";
+
+  for (const model of provider.models) {
+    const item = document.createElement("section");
+    item.className = "cloud-usage-model";
+    const modelTitle = document.createElement("h4");
+    modelTitle.textContent = `${provider.displayName} · ${model.modelId}`;
+    const details = document.createElement("small");
+    details.textContent =
+      `${formatInteger(model.inputTokens)} input · `
+      + `${formatInteger(model.outputTokens)} output · `
+      + `${formatInteger(model.requests)} chamada(s) · `
+      + `${formatCurrency(model.estimatedActualCost)} · `
+      + `${model.roles.join(", ") || "sem papel observado"}`;
+    const capabilities = document.createElement("div");
+    capabilities.className = "cloud-capability-list";
+
+    for (const capability of model.capabilities) {
+      const badge = document.createElement("span");
+      badge.className = "badge muted";
+      badge.textContent = capability;
+      capabilities.append(badge);
+    }
+
+    item.append(modelTitle, details, capabilities);
+    models.append(item);
+  }
+
+  if (provider.models.length === 0) {
+    const empty = document.createElement("small");
+    empty.textContent = "Nenhum modelo em cache ou uso observado.";
+    models.append(empty);
+  }
+
+  card.append(
+    heading,
+    metrics,
+    quotaDetail,
+    billingDetail,
+    warning,
+    models
+  );
+  return card;
+}
+
+function cloudUsageMetric(label, value) {
+  const metric = document.createElement("div");
+  metric.className = "cloud-usage-metric";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const content = document.createElement("strong");
+  content.textContent = value;
+  metric.append(name, content);
+  return metric;
+}
+
+async function openCloudUsage() {
+  await refreshCloudUsage();
+  elements.cloudUsageDialog.showModal();
+  elements.dismissCloudUsage.focus();
+}
+
+function closeCloudUsage() {
+  if (!elements.cloudUsageDialog.open) {
+    return;
+  }
+
+  elements.cloudUsageDialog.close();
+  elements.cloudUsageCard.focus();
+}
+
+async function refreshCloudUsage() {
+  elements.refreshCloudUsage.disabled = true;
+  elements.cloudUsageRefreshStatus.textContent = "Atualizando dados locais…";
+
+  try {
+    state.cloudUsageDashboard = await fetchJson("/api/usage/cloud-dashboard");
+    renderCloudUsage();
+    elements.cloudUsageRefreshStatus.textContent = "Dashboard atualizado.";
+  } catch (error) {
+    elements.cloudUsageRefreshStatus.textContent = error.message;
+  } finally {
+    elements.refreshCloudUsage.disabled = false;
+  }
+}
+
+function parseModelReference(value) {
+  const normalized = value && value !== "auto"
+    ? value
+    : "";
+  const separator = normalized.indexOf("::");
+  return separator > 0
+    ? {
+      provider: normalized.slice(0, separator),
+      model: normalized.slice(separator + 2)
+    }
+    : {
+      provider: "ollama-local",
+      model: normalized
+    };
+}
+
+function usageAccuracyLabel(accuracy) {
+  return {
+    exact: "exato",
+    estimated: "estimado",
+    mixed: "misto",
+    unavailable: "indisponível"
+  }[accuracy] ?? "indisponível";
+}
+
+function billingModeLabel(mode) {
+  return {
+    "free-tier": "Free tier esperado",
+    paid: "Pago esperado",
+    unknown: "Faturamento desconhecido"
+  }[mode] ?? "Faturamento desconhecido";
+}
+
+function formatPercentage(value) {
+  return `${Number(value).toLocaleString(
+    undefined,
+    {
+      maximumFractionDigits: 2
+    }
+  )}%`;
 }
 
 function renderRuntimeStatus(runtime) {
@@ -2187,6 +2476,8 @@ function renderSettings() {
     state.settings.usage.providerLongWindowMinutes;
   elements.usageCustomMinutes.value =
     state.settings.usage.customRollingWindowMinutes;
+  elements.usageAlertThresholds.value =
+    state.settings.usage.alertThresholds.join(", ");
   for (const option of elements.usagePinnedWindows.options) {
     option.selected = state.settings.usage.pinnedWindows.includes(option.value);
   }
@@ -2332,6 +2623,32 @@ function renderCloudProviders() {
     );
     appendDefinition(metadata, "Quota", provider.quotaSource);
 
+    const billingField = document.createElement("label");
+    billingField.className = "cloud-billing-field";
+    const billingLabel = document.createElement("span");
+    billingLabel.textContent = "Modo de faturamento esperado";
+    const billingSelect = document.createElement("select");
+    billingSelect.dataset.cloudBilling = provider.provider;
+    replaceOptions(
+      billingSelect,
+      [
+        {
+          value: "unknown",
+          label: "Desconhecido"
+        },
+        {
+          value: "free-tier",
+          label: "Free tier"
+        },
+        {
+          value: "paid",
+          label: "Pago"
+        }
+      ],
+      provider.expectedBillingMode ?? "unknown"
+    );
+    billingField.append(billingLabel, billingSelect);
+
     const keyField = document.createElement("label");
     const keyLabel = document.createElement("span");
     keyLabel.textContent = provider.hasKey ? "Substituir chave" : "API key";
@@ -2370,7 +2687,7 @@ function renderCloudProviders() {
     diagnostic.className = "runtime-note cloud-provider-diagnostic";
     diagnostic.dataset.cloudDiagnostic = provider.provider;
     diagnostic.textContent = provider.diagnostic ?? "";
-    body.append(metadata, keyField, actions, diagnostic);
+    body.append(metadata, billingField, keyField, actions, diagnostic);
     card.append(summary, body);
     elements.cloudProvidersList.append(card);
   }
@@ -2384,6 +2701,27 @@ function cloudActionButton(provider, action, label, extraClass = "") {
   button.dataset.cloudAction = action;
   button.textContent = label;
   return button;
+}
+
+function collectCloudProviderSettings() {
+  const cloud = structuredClone(state.settings.cloudProviders);
+  const keys = {
+    groq: "groq",
+    "google-ai-studio": "googleAiStudio",
+    cerebras: "cerebras"
+  };
+
+  for (const select of elements.cloudProvidersList.querySelectorAll(
+    "[data-cloud-billing]"
+  )) {
+    const key = keys[select.dataset.cloudBilling];
+
+    if (key && cloud[key]) {
+      cloud[key].expectedBillingMode = select.value;
+    }
+  }
+
+  return cloud;
 }
 
 function appendDefinition(list, term, description) {
@@ -2475,17 +2813,25 @@ async function handleCloudProviderAction(event) {
 }
 
 async function refreshCloudProviderState() {
-  const [cloudProviders, modelsResponse, settings] = await Promise.all([
+  const [
+    cloudProviders,
+    modelsResponse,
+    settings,
+    cloudUsageDashboard
+  ] = await Promise.all([
     fetchJson("/api/cloud-providers"),
     fetchJson("/api/models"),
-    fetchJson("/api/settings")
+    fetchJson("/api/settings"),
+    fetchJson("/api/usage/cloud-dashboard")
   ]);
   state.cloudProviders = cloudProviders;
   state.models = modelsResponse.models;
   state.settings = settings;
+  state.cloudUsageDashboard = cloudUsageDashboard;
   renderCloudProviders();
   renderComposerModels();
   renderSettings();
+  renderCloudUsage();
 }
 
 function gpuOptions(includeDefault) {
@@ -2785,11 +3131,15 @@ async function saveSettings(event) {
       providerShortWindowMinutes: Number(elements.usageProviderShortMinutes.value),
       providerLongWindowMinutes: Number(elements.usageProviderLongMinutes.value),
       customRollingWindowMinutes: Number(elements.usageCustomMinutes.value),
+      alertThresholds: elements.usageAlertThresholds.value
+        .split(",")
+        .map(value => Number(value.trim()))
+        .filter(value => Number.isInteger(value)),
       comparisonProvider: elements.usageComparisonModel.value.split("|")[0],
       comparisonModel: elements.usageComparisonModel.value.split("|")[1],
       ollamaPlanReference: elements.usageOllamaPlan.value
     },
-    cloudProviders: state.settings.cloudProviders
+    cloudProviders: collectCloudProviderSettings()
   };
 
   try {
@@ -3313,6 +3663,7 @@ function clearConversationUi() {
   state.interactionMode = "chat";
   state.approvalPolicy = "ask";
   state.activeAgentModel = null;
+  state.activeAgentRole = null;
   state.autoFollow = true;
   elements.modelSelector.value = "auto";
   elements.modelLock.checked = false;
@@ -3835,6 +4186,14 @@ async function consumeEventStream(stream, assistant) {
         && streamEvent.selectedModel
       ) {
         state.activeAgentModel = streamEvent.selectedModel;
+        state.activeAgentRole = "primary";
+        updateActiveAgentLabel();
+      } else if (
+        streamEvent.type.startsWith("cloud.local-fallback")
+        && streamEvent.selectedModel
+      ) {
+        state.activeAgentModel = streamEvent.selectedModel;
+        state.activeAgentRole = "fallback";
         updateActiveAgentLabel();
       }
 
@@ -5544,6 +5903,7 @@ function scrollToBottom() {
 function setStreamingState(isStreaming) {
   if (!isStreaming) {
     state.activeAgentModel = null;
+    state.activeAgentRole = null;
   }
 
   elements.sendButtonLabel.textContent = isStreaming
@@ -5601,6 +5961,7 @@ function updateActiveAgentLabel() {
     selectedModel && selectedModel !== "auto"
       ? selectedModel
       : "Auto (Roteador)";
+  renderCloudUsage();
 }
 
 function elapsedSince(assistant) {

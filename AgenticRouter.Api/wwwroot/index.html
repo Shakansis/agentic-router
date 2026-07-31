@@ -70,6 +70,24 @@
         </div>
         <span id="runtime-usage-details">Carregando uso local…</span>
       </article>
+      <button
+        id="cloud-usage-card"
+        class="status-card workspace-card cloud-usage-sidebar-card"
+        type="button"
+        aria-haspopup="dialog"
+        aria-controls="cloud-usage-dialog"
+      >
+        <span class="status-heading">
+          <span class="status-label">
+            <span class="status-icon" aria-hidden="true">☁</span>Uso cloud
+          </span>
+          <span id="cloud-usage-badge" class="usage-accuracy-badge">
+            carregando
+          </span>
+        </span>
+        <strong id="cloud-usage-summary">Carregando provedores…</strong>
+        <small id="cloud-usage-detail">Abra para ver quota, custos e modelos.</small>
+      </button>
     </section>
 
     <details id="session-history" class="session-history">
@@ -93,7 +111,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.3</span>
+    <span class="app-version">v0.9.4</span>
   </aside>
 
   <main class="workspace">
@@ -380,8 +398,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.3."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.3."
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.4."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.4."
                 >i</button>
               </div>
             </div>
@@ -482,6 +500,10 @@
             <label>
               <span>Janela personalizada (minutos)</span>
               <input id="usage-custom-minutes" type="number" min="5" max="43200" required>
+            </label>
+            <label>
+              <span>Alertas de quota (%)</span>
+              <input id="usage-alert-thresholds" type="text" inputmode="numeric" placeholder="70, 85, 95" required>
             </label>
             <label>
               <span>Comparação cloud equivalente</span>
@@ -657,8 +679,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.3."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.3. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.4."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.4. Desativar interrompe novas gravações, mas não apaga registros existentes."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
@@ -828,6 +850,30 @@
         <button id="dismiss-git" class="secondary-button" type="button">Fechar</button>
       </footer>
     </section>
+  </dialog>
+
+  <dialog id="cloud-usage-dialog" class="settings-dialog cloud-usage-dialog">
+    <div class="change-review-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Visibilidade local</span>
+          <h2>Uso de provedores cloud</h2>
+          <p>Quota observada, custos e alertas calculados pelo Host sem chamadas em segundo plano.</p>
+        </div>
+        <button id="close-cloud-usage" class="icon-button" type="button" aria-label="Fechar">×</button>
+      </header>
+      <div class="dialog-body cloud-usage-body">
+        <div id="cloud-usage-dashboard-summary" class="settings-summary-card">
+          Carregando dashboard…
+        </div>
+        <div id="cloud-usage-provider-cards" class="cloud-usage-provider-cards"></div>
+      </div>
+      <footer class="dialog-footer">
+        <span id="cloud-usage-refresh-status" class="save-status"></span>
+        <button id="refresh-cloud-usage" class="secondary-button" type="button">Atualizar dados locais</button>
+        <button id="dismiss-cloud-usage" class="primary-button" type="button">Fechar</button>
+      </footer>
+    </div>
   </dialog>
 
   <dialog id="new-conversation-dialog" class="confirmation-dialog">

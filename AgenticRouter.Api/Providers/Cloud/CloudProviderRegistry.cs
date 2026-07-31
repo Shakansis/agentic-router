@@ -15,6 +15,11 @@ public interface ICloudProviderRegistry
     CancellationToken cancellationToken
   );
 
+  Task<IReadOnlyList<InstalledModel>> GetCachedModelsAsync(
+    string providerId,
+    CancellationToken cancellationToken
+  );
+
   Task<CloudProviderOperationResult> RefreshAsync(
     string providerId,
     CancellationToken cancellationToken
@@ -155,6 +160,22 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
     }
 
     return models;
+  }
+
+  public async Task<IReadOnlyList<InstalledModel>> GetCachedModelsAsync(
+    string providerId,
+    CancellationToken cancellationToken
+  )
+  {
+    RequireAdapter(
+      providerId
+    );
+    return (
+      await GetCachedStateAsync(
+        providerId,
+        cancellationToken
+      )
+    )?.Models ?? [];
   }
 
   public Task<CloudProviderOperationResult> TestAsync(
@@ -612,6 +633,7 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
             : state is not null
               ? "connected"
               : "not-tested",
+      settings.ExpectedBillingMode,
       state?.Models.Count ?? 0,
       state?.LastRefreshAt,
       settings.ModelQuotas.Count > 0

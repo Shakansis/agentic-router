@@ -1,3 +1,4 @@
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Configuration;
@@ -207,6 +208,13 @@ public sealed class SettingsValidator : ISettingsValidator
           "Fallback model selection must contain at most 256 characters."
         );
       }
+
+      ValidateCloudFallbackShape(
+        errors,
+        intentionName,
+        intention,
+        settings.DefaultModel
+      );
 
       if (string.IsNullOrWhiteSpace(
         intention.Gpu
@@ -933,6 +941,25 @@ public sealed class SettingsValidator : ISettingsValidator
         "Ollama plan reference is required and must contain at most 40 characters."
       );
     }
+
+    if (
+      settings.AlertThresholds.Count is < 1 or > 5
+      || settings.AlertThresholds.Any(
+        threshold => threshold is < 1 or > 100
+      )
+      || settings.AlertThresholds.Distinct().Count()
+        != settings.AlertThresholds.Count
+      || !settings.AlertThresholds.SequenceEqual(
+        settings.AlertThresholds.Order()
+      )
+    )
+    {
+      AddError(
+        errors,
+        "usage.alertThresholds",
+        "Choose between one and five distinct alert thresholds in ascending order from 1 to 100."
+      );
+    }
   }
 
   private static void ValidateCloudProviders(
@@ -963,6 +990,21 @@ public sealed class SettingsValidator : ISettingsValidator
     CloudProviderIntegrationSettings provider
   )
   {
+    if (
+      provider.ExpectedBillingMode is not (
+        "free-tier"
+        or "paid"
+        or "unknown"
+      )
+    )
+    {
+      AddError(
+        errors,
+        $"{field}.expectedBillingMode",
+        "Expected billing mode must be free-tier, paid, or unknown."
+      );
+    }
+
     if (
       provider.SecretReference is not null
       && (
@@ -1031,6 +1073,69 @@ public sealed class SettingsValidator : ISettingsValidator
           "Configured quota windows are outside the supported range."
         );
       }
+    }
+  }
+
+  private static void ValidateCloudFallbackShape(
+    IDictionary<string, List<string>> errors,
+    string intentionName,
+    IntentionSettings intention,
+    string defaultModel
+  )
+  {
+    var primary = string.Equals(
+      intention.Model,
+      "default",
+      StringComparison.OrdinalIgnoreCase
+    )
+      ? defaultModel
+      : intention.Model;
+
+    if (ProviderModelReference.Parse(
+      primary
+    ).IsLocal)
+    {
+      return;
+    }
+
+    var fallbackField = $"intentions.{intentionName}.fallbackModel";
+
+    if (
+      string.IsNullOrWhiteSpace(
+        intention.FallbackModel
+      )
+      || string.Equals(
+        intention.FallbackModel,
+        "none",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      AddError(
+        errors,
+        fallbackField,
+        "A cloud primary requires an installed Ollama local fallback."
+      );
+      return;
+    }
+
+    var fallback = string.Equals(
+      intention.FallbackModel,
+      "default",
+      StringComparison.OrdinalIgnoreCase
+    )
+      ? defaultModel
+      : intention.FallbackModel;
+
+    if (!ProviderModelReference.Parse(
+      fallback
+    ).IsLocal)
+    {
+      AddError(
+        errors,
+        fallbackField,
+        "A cloud primary fallback must be an Ollama local model."
+      );
     }
   }
 

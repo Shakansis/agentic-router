@@ -123,7 +123,9 @@ public sealed record UsageRecordRequest(
   ProviderTokenUsage? ProviderUsage,
   long EstimatedInputTokens,
   long EstimatedOutputTokens,
-  ProviderRateLimitSnapshot? RateLimit = null
+  ProviderRateLimitSnapshot? RateLimit = null,
+  string? ErrorCode = null,
+  int? HttpStatus = null
 );
 
 public sealed record PricingSnapshot(
@@ -201,6 +203,10 @@ public sealed record UsageEvent
   public PricingSnapshot? EquivalentPriceSnapshot { get; init; }
 
   public ProviderRateLimitSnapshot? RateLimit { get; init; }
+
+  public string? ErrorCode { get; init; }
+
+  public int? HttpStatus { get; init; }
 }
 
 public sealed record UsageFilter(
@@ -255,6 +261,47 @@ public sealed record UsageOverview(
   string ComparisonProvider,
   string ComparisonModel,
   string PricingCatalogVersion
+);
+
+public sealed record CloudUsageModelView(
+  string ProviderId,
+  string ModelId,
+  long InputTokens,
+  long OutputTokens,
+  long TotalTokens,
+  long Requests,
+  decimal EstimatedActualCost,
+  IReadOnlyList<string> Roles,
+  IReadOnlyList<string> Capabilities
+);
+
+public sealed record CloudUsageProviderView(
+  string ProviderId,
+  string DisplayName,
+  string ConnectionState,
+  string ExpectedBillingMode,
+  string QuotaSource,
+  string Accuracy,
+  decimal? Percentage,
+  string Window,
+  DateTimeOffset? ResetAt,
+  long Requests,
+  long InputTokens,
+  long OutputTokens,
+  long TotalTokens,
+  decimal EstimatedActualCost,
+  DateTimeOffset? LatestRequestAt,
+  bool HasRateLimitWarning,
+  int? AlertThreshold,
+  IReadOnlyList<CloudUsageModelView> Models
+);
+
+public sealed record CloudUsageDashboard(
+  string SelectedWindow,
+  IReadOnlyList<int> AlertThresholds,
+  int ConnectedProviderCount,
+  IReadOnlyList<CloudUsageProviderView> Providers,
+  DateTimeOffset GeneratedAt
 );
 
 public sealed record PricingCatalogView(

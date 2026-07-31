@@ -376,7 +376,9 @@ public sealed class UsageRecorder : IUsageRecorder
         PricingCatalogVersion = _pricing.Get().Version,
         ActualPriceSnapshot = actualPrice,
         EquivalentPriceSnapshot = equivalent,
-        RateLimit = request.RateLimit
+        RateLimit = request.RateLimit,
+        ErrorCode = request.ErrorCode,
+        HttpStatus = request.HttpStatus
       };
       await _ledger.AppendAsync(
         usageEvent,

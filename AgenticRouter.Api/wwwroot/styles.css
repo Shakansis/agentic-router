@@ -2516,6 +2516,28 @@ p {
   border-color: var(--warning);
 }
 
+.cloud-usage-sidebar-card {
+  width: 100%;
+  text-align: left;
+}
+
+.cloud-usage-sidebar-card[data-alert] {
+  border-color: var(--warning);
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.cloud-usage-sidebar-card[data-alert="95"] {
+  border-color: var(--danger);
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.cloud-usage-sidebar-card strong,
+.cloud-usage-sidebar-card small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .persistence-status {
   display: inline-flex;
   width: fit-content;
@@ -2695,6 +2717,107 @@ p {
 .cloud-provider-diagnostic {
   min-height: 1.3em;
   margin: 0;
+}
+
+.cloud-billing-field {
+  display: grid;
+  gap: 5px;
+}
+
+.cloud-usage-dialog {
+  width: min(95dvw, 1280px);
+  height: min(95dvh, 920px);
+}
+
+.cloud-usage-body {
+  gap: 14px;
+}
+
+.cloud-usage-provider-cards {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.cloud-usage-provider-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+}
+
+.cloud-usage-provider-card[data-alert] {
+  border-color: var(--warning);
+}
+
+.cloud-usage-provider-card[data-alert="95"] {
+  border-color: var(--danger);
+}
+
+.cloud-usage-provider-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cloud-usage-provider-heading h3,
+.cloud-usage-model h4 {
+  margin: 0;
+}
+
+.cloud-usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cloud-usage-metric {
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.cloud-usage-metric span,
+.cloud-usage-provider-card small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.cloud-usage-metric strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.cloud-usage-models {
+  display: grid;
+  gap: 7px;
+}
+
+.cloud-usage-model {
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 11px;
+}
+
+.cloud-capability-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.cloud-capability-list .badge {
+  font-size: 9px;
 }
 
 .settings-responsive-navigation {

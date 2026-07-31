@@ -27,6 +27,13 @@ public interface IUsageLedger
     CancellationToken cancellationToken
   );
 
+  Task<IReadOnlyList<UsageEvent>> QueryAsync(
+    UsageWindow window,
+    UsageFilter filter,
+    int maximumEvents,
+    CancellationToken cancellationToken
+  );
+
   UsageWindow ResolveWindow(
     string windowId,
     UsageSettings settings,
@@ -435,6 +442,67 @@ public sealed class JsonlUsageLedger : IUsageLedger
     {
       _gate.Release();
     }
+  }
+
+  public async Task<IReadOnlyList<UsageEvent>> QueryAsync(
+    UsageWindow window,
+    UsageFilter filter,
+    int maximumEvents,
+    CancellationToken cancellationToken
+  )
+  {
+    if (maximumEvents is < 1 or > 10_000)
+    {
+      throw new UsageStorageException(
+        "usage-query-limit-invalid",
+        "usage-query",
+        "Usage query limit must be between 1 and 10000 events.",
+        false
+      );
+    }
+
+    var events = new List<UsageEvent>();
+
+    if (!Directory.Exists(
+      _usageDirectory
+    ))
+    {
+      return events;
+    }
+
+    foreach (var path in EnumerateWindowFiles(
+      window
+    ))
+    {
+      await foreach (var usageEvent in ReadEventsAsync(
+        path,
+        cancellationToken
+      ))
+      {
+        if (
+          usageEvent.TimestampUtc >= window.StartUtc
+          && usageEvent.TimestampUtc < window.EndUtc
+          && Matches(
+            usageEvent,
+            filter
+          )
+        )
+        {
+          events.Add(
+            usageEvent
+          );
+        }
+      }
+    }
+
+    return events
+      .OrderByDescending(
+        usageEvent => usageEvent.TimestampUtc
+      )
+      .Take(
+        maximumEvents
+      )
+      .ToArray();
   }
 
   public UsageWindow ResolveWindow(

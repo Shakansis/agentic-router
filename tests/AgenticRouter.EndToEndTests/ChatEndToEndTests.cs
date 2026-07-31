@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 using Microsoft.Playwright.MSTest;
@@ -235,6 +236,20 @@ public sealed class ChatEndToEndTests : PageTest
     ).SelectOptionAsync(
       "cerebras::gpt-oss-120b"
     );
+    foreach (var intention in new[]
+    {
+      "general-chat",
+      "software-development",
+      "rpg-storytelling",
+      "review-and-testing"
+    })
+    {
+      await Page.Locator(
+        $"[data-intention=\"{intention}\"] .intention-fallback-model"
+      ).SelectOptionAsync(
+        "alpha:latest"
+      );
+    }
     await Page.Locator(
       "#save-settings"
     ).ClickAsync();
@@ -543,6 +558,271 @@ public sealed class ChatEndToEndTests : PageTest
     StringAssert.Contains(
       ledger,
       "\"providerId\":\"cerebras\""
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CloudPrimaryRequiresOneUnambiguousInstalledLocalFallback()
+  {
+    await ConnectFakeCloudAsync(
+      "groq",
+      "gsk_fake_fallback_policy_094"
+    );
+    var settings = await GetSettingsJsonAsync();
+    var general = settings["intentions"]!["general-chat"]!.AsObject();
+    general["model"] = "groq::openai/gpt-oss-120b";
+    general["fallbackModel"] = "none";
+
+    using (
+      var missing = await PutSettingsJsonAsync(
+        settings
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        missing.StatusCode
+      );
+      StringAssert.Contains(
+        await missing.Content.ReadAsStringAsync(),
+        "requires an installed Ollama local fallback"
+      );
+    }
+
+    general["fallbackModel"] = "cerebras::gpt-oss-120b";
+
+    using (
+      var cloud = await PutSettingsJsonAsync(
+        settings
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        cloud.StatusCode
+      );
+      StringAssert.Contains(
+        await cloud.Content.ReadAsStringAsync(),
+        "must be an Ollama local model"
+      );
+    }
+
+    general["fallbackModel"] = "missing-local:latest";
+
+    using (
+      var unavailable = await PutSettingsJsonAsync(
+        settings
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        unavailable.StatusCode
+      );
+      StringAssert.Contains(
+        await unavailable.Content.ReadAsStringAsync(),
+        "is not installed"
+      );
+    }
+
+    general["fallbackModel"] = "alpha:latest";
+
+    using var valid = await PutSettingsJsonAsync(
+      settings
+    );
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      valid.StatusCode,
+      await valid.Content.ReadAsStringAsync()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RateLimitFallsBackOnceAndCloudDashboardShowsAccurateLocalState()
+  {
+    await ConnectFakeCloudAsync(
+      "groq",
+      "gsk_fake_rate_limit_094"
+    );
+    var settings = await GetSettingsJsonAsync();
+    var general = settings["intentions"]!["general-chat"]!.AsObject();
+    general["model"] = "groq::openai/gpt-oss-120b";
+    general["fallbackModel"] = "alpha:latest";
+    settings["cloudProviders"]!["groq"]!["expectedBillingMode"] =
+      "free-tier";
+    settings["usage"]!["alertThresholds"] = new JsonArray(
+      1,
+      50,
+      95
+    );
+
+    using (
+      var saved = await PutSettingsJsonAsync(
+        settings
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.OK,
+        saved.StatusCode,
+        await saved.Content.ReadAsStringAsync()
+      );
+    }
+
+    await Page.GotoAsync(
+      "/"
+    );
+    const string marker = "trigger-cloud-rate-limit";
+    await SendMessageAsync(
+      marker
+    );
+    await Expect(
+      Page.Locator(
+        ".message.assistant .assistant-answer"
+      ).Last
+    ).ToContainTextAsync(
+      "Hello from alpha:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"cloud.local-fallback-started\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "switching once"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"cloud.local-fallback-completed\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "completed"
+    );
+    Assert.AreEqual(
+      1,
+      _environment.FakeCloud.Requests.Count(
+        request => request.Path == "/groq/openai/v1/chat/completions"
+          && request.Body.Contains(
+            marker,
+            StringComparison.Ordinal
+          )
+      )
+    );
+
+    using var fallbackUsageResponse =
+      await _environment.HttpClient.GetAsync(
+        "api/usage/summary?window=rolling-hour&modelRole=fallback"
+      );
+    fallbackUsageResponse.EnsureSuccessStatusCode();
+    using var fallbackUsage = JsonDocument.Parse(
+      await fallbackUsageResponse.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      1L,
+      fallbackUsage.RootElement.GetProperty(
+        "requests"
+      ).GetInt64()
+    );
+
+    using var dashboardResponse = await _environment.HttpClient.GetAsync(
+      "api/usage/cloud-dashboard"
+    );
+    dashboardResponse.EnsureSuccessStatusCode();
+    using var dashboard = JsonDocument.Parse(
+      await dashboardResponse.Content.ReadAsStringAsync()
+    );
+    var provider = dashboard.RootElement.GetProperty(
+      "providers"
+    )[0];
+    Assert.AreEqual(
+      "groq",
+      provider.GetProperty(
+        "providerId"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      100m,
+      provider.GetProperty(
+        "percentage"
+      ).GetDecimal()
+    );
+    Assert.AreEqual(
+      "exact",
+      provider.GetProperty(
+        "accuracy"
+      ).GetString()
+    );
+    Assert.IsTrue(
+      provider.GetProperty(
+        "hasRateLimitWarning"
+      ).GetBoolean()
+    );
+    Assert.AreEqual(
+      95,
+      provider.GetProperty(
+        "alertThreshold"
+      ).GetInt32()
+    );
+
+    await Page.Locator(
+      "#cloud-usage-card"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#cloud-usage-dialog"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#cloud-usage-provider-cards"
+      )
+    ).ToContainTextAsync(
+      "100%"
+    );
+    await Expect(
+      Page.Locator(
+        "#cloud-usage-provider-cards"
+      )
+    ).ToContainTextAsync(
+      "não garante faturamento ou gratuidade"
+    );
+    await Page.Locator(
+      "#dismiss-cloud-usage"
+    ).ClickAsync();
+
+    _environment.FakeOllama.Reset();
+    _environment.FakeCloud.Reset();
+    await StartMessageAsync(
+      "trigger-cloud-invalid-request"
+    );
+    await Expect(
+      Page.Locator(
+        ".message.assistant .activity > summary"
+      ).Last
+    ).ToContainTextAsync(
+      "Falhou"
+    );
+    Assert.AreEqual(
+      0,
+      _environment.FakeOllama.Requests.Count(
+        request => request.Model == "alpha:latest"
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "trigger-cloud-invalid-request",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        ".message.assistant"
+      ).Last.Locator(
+        "[data-event-type=\"cloud.local-fallback-started\"]"
+      )
+    ).ToHaveCountAsync(
+      0
     );
   }
 
@@ -979,7 +1259,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.3"
+      "v0.9.4"
     );
     await Expect(
       Page.Locator(
@@ -1135,7 +1415,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".status-icon"
       )
     ).ToHaveCountAsync(
-      6
+      7
     );
     await Expect(
       Page.Locator(
@@ -10726,6 +11006,66 @@ public sealed class ChatEndToEndTests : PageTest
         Exact = true
       }
     ).ClickAsync();
+  }
+
+  private static async Task ConnectFakeCloudAsync(
+    string providerId,
+    string apiKey
+  )
+  {
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/cloud-providers/{providerId}/key",
+        new
+        {
+          apiKey
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.OK,
+        saved.StatusCode,
+        await saved.Content.ReadAsStringAsync()
+      );
+    }
+
+    using var refreshed = await _environment.HttpClient.PostAsync(
+      $"api/cloud-providers/{providerId}/models/refresh",
+      null
+    );
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      refreshed.StatusCode,
+      await refreshed.Content.ReadAsStringAsync()
+    );
+  }
+
+  private static async Task<JsonObject> GetSettingsJsonAsync()
+  {
+    using var response = await _environment.HttpClient.GetAsync(
+      "api/settings"
+    );
+    response.EnsureSuccessStatusCode();
+    return JsonNode.Parse(
+      await response.Content.ReadAsStringAsync()
+    )!.AsObject();
+  }
+
+  private static Task<HttpResponseMessage> PutSettingsJsonAsync(
+    JsonObject settings
+  )
+  {
+    return _environment.HttpClient.PutAsync(
+      "api/settings",
+      new StringContent(
+        settings.ToJsonString(
+          TestJson.Options
+        ),
+        Encoding.UTF8,
+        "application/json"
+      )
+    );
   }
 
   private async Task<double> RemainingScrollAsync()

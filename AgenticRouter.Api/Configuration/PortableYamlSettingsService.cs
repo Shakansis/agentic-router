@@ -429,6 +429,15 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "ollama_plan_reference",
       settings.Usage.OllamaPlanReference
     );
+    Scalar(
+      yaml,
+      1,
+      "alert_thresholds",
+      string.Join(
+        ",",
+        settings.Usage.AlertThresholds
+      )
+    );
 
     return yaml.ToString()
       .Replace(
@@ -1307,7 +1316,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "custom_rolling_window_minutes",
       "comparison_provider",
       "comparison_model",
-      "ollama_plan_reference"
+      "ollama_plan_reference",
+      "alert_thresholds"
     };
     ValidateKeys(
       section,
@@ -1330,6 +1340,29 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       ',',
       StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries
     );
+    var alertValue = ReadString(
+      section,
+      keys[10],
+      string.Join(
+        ",",
+        current.AlertThresholds
+      ),
+      $"usage.{keys[10]}",
+      errors
+    );
+    var alerts = alertValue.Split(
+      ',',
+      StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries
+    ).Select(
+      value => int.TryParse(
+        value,
+        NumberStyles.Integer,
+        CultureInfo.InvariantCulture,
+        out var threshold
+      )
+        ? threshold
+        : -1
+    ).ToArray();
 
     return settings with
     {
@@ -1398,7 +1431,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
           current.OllamaPlanReference,
           $"usage.{keys[9]}",
           errors
-        )
+        ),
+        AlertThresholds = alerts
       }
     };
   }

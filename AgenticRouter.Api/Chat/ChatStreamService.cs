@@ -1130,6 +1130,65 @@ public sealed class ChatStreamService : IChatStreamService
         yield return streamEvent;
       }
 
+      if (
+        progress.Failure is RoutedProviderException cloudFailure
+        && !progress.ReceivedFirstChunk
+        && isAuto
+        && CanUseLocalFallback(
+          cloudFailure
+        )
+      )
+      {
+        var localFallback = ResolveLocalFallback(
+          settings,
+          intention,
+          models
+        );
+
+        if (localFallback is not null)
+        {
+          yield return Event(
+            requestId,
+            "cloud.local-fallback-started",
+            $"{ModelProviderIds.DisplayName(cloudFailure.Provider)} could not complete the request "
+              + $"({cloudFailure.Code}); switching once to Ollama Local Â· {localFallback}.",
+            stopwatch,
+            localFallback,
+            intention
+          );
+          selectedModel = localFallback;
+          selectedModelRole = UsageModelRoles.Fallback;
+          progress.Failure = null;
+
+          await foreach (var streamEvent in StreamAttemptAsync(
+            baseUri,
+            selectedModel,
+            messages,
+            requestId,
+            intention,
+            stopwatch,
+            progress,
+            selectedModelRole,
+            cancellationToken
+          ))
+          {
+            yield return streamEvent;
+          }
+
+          if (progress.Failure is null)
+          {
+            yield return Event(
+              requestId,
+              "cloud.local-fallback-completed",
+              $"Ollama Local Â· {localFallback} completed the cloud fallback.",
+              stopwatch,
+              localFallback,
+              intention
+            );
+          }
+        }
+      }
+
       if (progress.Failure is not null)
       {
         var failure = progress.Failure;
@@ -3211,6 +3270,52 @@ public sealed class ChatStreamService : IChatStreamService
         StringComparison.OrdinalIgnoreCase
       )
     );
+  }
+
+  private static string? ResolveLocalFallback(
+    ApplicationSettings settings,
+    string intention,
+    IReadOnlyList<InstalledModel> models
+  )
+  {
+    if (!settings.Intentions.TryGetValue(
+      intention,
+      out var intentionSettings
+    ))
+    {
+      return null;
+    }
+
+    var fallback = CloudFallbackPolicy.ResolveFallback(
+      intentionSettings,
+      settings.DefaultModel
+    );
+
+    return ProviderModelReference.Parse(
+      fallback
+    ).IsLocal && ContainsModel(
+      models,
+      fallback
+    )
+      ? fallback
+      : null;
+  }
+
+  private static bool CanUseLocalFallback(
+    RoutedProviderException exception
+  )
+  {
+    if (!exception.Recoverable)
+    {
+      return false;
+    }
+
+    return exception.Code is
+      "provider-rate-limited"
+      or "provider-timeout"
+      or "provider-unavailable"
+      or "provider-disconnected"
+      or "provider-request-failed";
   }
 
   private static string FormatConfidence(

@@ -1,3 +1,32 @@
+# Agentic Router v0.9.4
+
+This development version adds a Host-owned cloud usage dashboard and requires a
+verified Ollama Local fallback whenever an intent primary resolves to cloud.
+
+## Highlights
+
+- Rejects missing, cloud, unavailable, or ambiguous fallback identities for a
+  cloud primary and verifies the exact local model through Ollama discovery
+  before settings are saved.
+- Performs at most one explicit cloud-to-local fallback for eligible provider
+  unavailability, timeout, rate-limit, quota, or transient request failures.
+  Cancellation, malformed requests, policy failures, and non-retryable errors
+  do not trigger fallback.
+- Records the local attempt with the `fallback` model role and exposes the
+  strategy change in activity instead of retrying the cloud request
+  indefinitely.
+- Adds a compact clickable cloud-usage card to the left sidebar above Recent
+  conversations and a 95%-viewport dashboard with fixed controls and central
+  scrolling.
+- Shows configured-provider connection state, exact/estimated/unavailable quota
+  accuracy, provider windows and resets, costs, latest request, observed 429
+  warnings, per-model totals, roles, and capability metadata.
+- Adds user-labelled expected billing modes and local visual quota thresholds.
+  A Free tier label is explicitly an expectation and never a billing guarantee.
+- Builds the dashboard exclusively from local provider cache and the bounded
+  usage ledger; it does not make background cloud calls or switch providers
+  proactively.
+
 # Agentic Router v0.9.3
 
 This development version adds protected, provider-qualified cloud inference

@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
@@ -17,6 +18,7 @@ public sealed class SettingsController : ControllerBase
   private readonly ISettingsValidator _validator;
   private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly ITrustedWorkspaceService _trustedWorkspace;
+  private readonly ICloudFallbackPolicy _cloudFallbackPolicy;
 
   public SettingsController(
     ISettingsStore settingsStore,
@@ -24,7 +26,8 @@ public sealed class SettingsController : ControllerBase
     IResidentModelManager residentModel,
     ISettingsValidator validator,
     IWorkspaceProfileService workspaceProfiles,
-    ITrustedWorkspaceService trustedWorkspace
+    ITrustedWorkspaceService trustedWorkspace,
+    ICloudFallbackPolicy cloudFallbackPolicy
   )
   {
     _settingsStore = settingsStore;
@@ -33,6 +36,7 @@ public sealed class SettingsController : ControllerBase
     _validator = validator;
     _workspaceProfiles = workspaceProfiles;
     _trustedWorkspace = trustedWorkspace;
+    _cloudFallbackPolicy = cloudFallbackPolicy;
   }
 
   [HttpGet]
@@ -129,6 +133,21 @@ public sealed class SettingsController : ControllerBase
         new ValidationErrorsResponse(
           validationMessage,
           errors
+        )
+      );
+    }
+
+    var fallbackErrors = await _cloudFallbackPolicy.ValidateAsync(
+      settings,
+      cancellationToken
+    );
+
+    if (fallbackErrors.Count > 0)
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "Settings were not saved because a cloud primary requires an available Ollama local fallback.",
+          fallbackErrors
         )
       );
     }

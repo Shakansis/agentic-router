@@ -18,6 +18,7 @@ public sealed record CloudProviderConnectionView(
   bool HasKey,
   string MaskedKeyState,
   string ConnectionState,
+  string ExpectedBillingMode,
   int ModelCount,
   DateTimeOffset? LastRefreshAt,
   string QuotaSource,

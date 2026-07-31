@@ -213,6 +213,23 @@ or an exact savings claim. Usage history can be queried through
 `DELETE /api/usage?confirmed=true` explicitly purges it. Portable YAML includes
 usage preferences but never exports the ledger.
 
+### Cloud usage and mandatory local fallback
+
+When an intent primary resolves to Groq, Google AI Studio, or Cerebras, its
+fallback must resolve to one exact installed Ollama Local model. Settings reject
+a missing, cloud, unavailable, or ambiguous fallback before saving. At runtime,
+an eligible timeout, provider outage, rate limit, quota failure, or supported
+transient provider error can switch once to that local model. Cancellation,
+invalid requests, policy denials, and non-retryable failures never trigger the
+fallback.
+
+The clickable **Uso cloud** card is in the left sidebar above Recent
+conversations. Its dashboard reads only the local provider cache and bounded
+usage ledger. It shows quota accuracy, provider/model totals, observed roles,
+cost estimates, reset information, 429 warnings, and local threshold alerts.
+The expected Free tier, Paid, or Unknown billing mode changes display labels
+only and is not a guarantee from the provider.
+
 ## 🎮 Usage
 
 ### Interface Overview
@@ -222,7 +239,7 @@ The application provides a clean, dark-themed interface with real-time status mo
 ![Main Interface](screenshots/main-interface.png)
 
 **Main Interface Features:**
-- **Sidebar Status**: Shows Ollama connection status, available local models, detected graphics devices, trusted workspace, and authoritative Git state
+- **Sidebar Status**: Shows Ollama connection status, available local models, detected graphics devices, trusted workspace, authoritative Git state, token usage, and clickable cloud usage
 - **Chat Workspace**: Main conversation area with streaming responses
 - **Model Selector**: Choose "Auto" for intent-based routing or select a specific model
 - **Workspace Manager**: Uses collapsible sections for saved workspaces, local history, project profile, and validation profile; the `+` action reveals the new-workspace form only when needed

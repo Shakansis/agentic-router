@@ -89,6 +89,7 @@ builder.Services.AddSingleton<IUsageLedger>(
 builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
 builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
 builder.Services.AddTransient<IOllamaClient, ProviderDispatchClient>();
+builder.Services.AddScoped<ICloudFallbackPolicy, CloudFallbackPolicy>();
 builder.Services.AddSingleton<IWorkspaceProfileStore>(
   new WorkspaceProfileStore(
     dataDirectory

@@ -264,7 +264,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
         result?.Usage,
         estimatedInput,
         0,
-        exception.RateLimit
+        exception.RateLimit,
+        exception.Code,
+        exception.HttpStatus
       );
       throw new RoutedProviderException(
         exception
@@ -658,7 +660,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
         result?.Usage,
         estimatedInput,
         0,
-        exception.RateLimit
+        exception.RateLimit,
+        exception.Code,
+        exception.HttpStatus
       );
       throw new RoutedProviderException(
         exception
@@ -688,7 +692,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
     ProviderTokenUsage? usage,
     long estimatedInput,
     long estimatedOutput,
-    ProviderRateLimitSnapshot? rateLimit
+    ProviderRateLimitSnapshot? rateLimit,
+    string? errorCode = null,
+    int? httpStatus = null
   )
   {
     return _usageRecorder.RecordAsync(
@@ -701,7 +707,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
         usage,
         estimatedInput,
         estimatedOutput,
-        rateLimit
+        rateLimit,
+        errorCode,
+        httpStatus
       ),
       CancellationToken.None
     );
@@ -730,7 +738,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
       estimatedInput,
       estimatedOutput,
       exception.RateLimit
-        ?? observedRateLimit
+        ?? observedRateLimit,
+      exception.Code,
+      exception.HttpStatus
     );
   }
 }
