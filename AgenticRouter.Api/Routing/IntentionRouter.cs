@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Routing;
 
@@ -10,6 +11,7 @@ public interface IIntentionRouter
     Uri baseUri,
     string routerModel,
     ChatRequest request,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 }
@@ -55,6 +57,7 @@ public sealed class IntentionRouter : IIntentionRouter
     Uri baseUri,
     string routerModel,
     ChatRequest request,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -66,6 +69,7 @@ public sealed class IntentionRouter : IIntentionRouter
         BuildMessages(
           request
         ),
+        usageContext,
         cancellationToken
       );
       var parsed = _parser.Parse(

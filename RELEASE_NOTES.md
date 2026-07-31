@@ -1,3 +1,28 @@
+# Agentic Router v0.9.2
+
+This development version adds local token-usage analytics and transparent
+equivalent paid-cloud cost estimates.
+
+## Highlights
+
+- Records metadata-only usage events at the Ollama provider boundary, using
+  authoritative terminal `prompt_eval_count` and `eval_count` values when
+  available and a visibly marked centralized estimate otherwise.
+- Stores bounded daily JSONL files under `data/usage/` with concurrency-safe
+  append, partial-tail recovery, configurable retention, streaming aggregation,
+  filters, windows, and confirmed purge support.
+- Separates input and output tokens, model roles, provider/model breakdowns,
+  success, failure, cancellation, exactness, and event-time price snapshots.
+- Adds Runtime views for selected and pinned windows, top models and roles,
+  local/cloud totals, last update, and equivalent paid-cloud cost.
+- Adds a versioned official-source pricing catalog and decimal cost calculation
+  against an explicitly selected Google comparison model.
+- Treats local Ollama inference as zero provider token cost and presents
+  Free/Pro/Max only as subscription references without inventing token quotas
+  or claiming exact Ollama Cloud savings.
+- Extends portable YAML with usage preferences while deliberately excluding
+  usage history.
+
 # Agentic Router v0.9.1
 
 This corrective development version makes the existing Git and conversation-persistence capabilities discoverable and safe in the main browser interface.

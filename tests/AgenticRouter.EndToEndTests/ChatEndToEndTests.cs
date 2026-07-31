@@ -75,6 +75,402 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UsageLedgerCapturesExactProviderCountsWithoutConversationContent()
+  {
+    const string privateMarker = "PRIVATE_USAGE_MARKER_74a93";
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      $"Reply briefly to {privateMarker}"
+    );
+
+    using var summaryResponse = await _environment.HttpClient.GetAsync(
+      "api/usage/summary?window=rolling-hour"
+    );
+    summaryResponse.EnsureSuccessStatusCode();
+    using var summary = JsonDocument.Parse(
+      await summaryResponse.Content.ReadAsStringAsync()
+    );
+    var root = summary.RootElement;
+    var inputTokens = root.GetProperty(
+      "inputTokens"
+    ).GetInt64();
+    var outputTokens = root.GetProperty(
+      "outputTokens"
+    ).GetInt64();
+    Assert.IsGreaterThan(
+      0L,
+      inputTokens
+    );
+    Assert.IsGreaterThan(
+      0L,
+      outputTokens
+    );
+    Assert.AreEqual(
+      "exact",
+      root.GetProperty(
+        "accuracy"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      0m,
+      root.GetProperty(
+        "estimatedActualCost"
+      ).GetDecimal()
+    );
+    Assert.IsGreaterThan(
+      0m,
+      root.GetProperty(
+        "equivalentCloudCost"
+      ).GetDecimal()
+    );
+    Assert.AreEqual(
+      inputTokens / 1_000_000m * 0.30m
+        + outputTokens / 1_000_000m * 2.50m,
+      root.GetProperty(
+        "equivalentCloudCost"
+      ).GetDecimal()
+    );
+    var roles = root.GetProperty(
+        "topRoles"
+      )
+      .EnumerateArray()
+      .Select(
+        item => item.GetProperty(
+          "key"
+        ).GetString()
+      )
+      .ToArray();
+    CollectionAssert.Contains(
+      roles,
+      "router"
+    );
+    CollectionAssert.Contains(
+      roles,
+      "primary"
+    );
+
+    var usagePath = Path.Combine(
+      _environment.DataDirectory,
+      "usage",
+      $"{DateTime.UtcNow:yyyy-MM-dd}.jsonl"
+    );
+    Assert.IsTrue(
+      File.Exists(
+        usagePath
+      )
+    );
+    var ledger = await File.ReadAllTextAsync(
+      usagePath
+    );
+    Assert.IsFalse(
+      ledger.Contains(
+        privateMarker,
+        StringComparison.Ordinal
+      )
+    );
+    Assert.IsFalse(
+      ledger.Contains(
+        "messages",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+
+    foreach (var line in await File.ReadAllLinesAsync(
+      usagePath
+    ))
+    {
+      using var usageEvent = JsonDocument.Parse(
+        line
+      );
+      Assert.AreEqual(
+        "provider",
+        usageEvent.RootElement.GetProperty(
+          "tokenCountSource"
+        ).GetString()
+      );
+      Assert.IsTrue(
+        usageEvent.RootElement.TryGetProperty(
+          "equivalentPriceSnapshot",
+          out _
+        )
+      );
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UsageLedgerRecoversPartialTailAndAppliesRetentionOnAppend()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "First usage ledger request"
+    );
+    var usageDirectory = Path.Combine(
+      _environment.DataDirectory,
+      "usage"
+    );
+    var currentPath = Path.Combine(
+      usageDirectory,
+      $"{DateTime.UtcNow:yyyy-MM-dd}.jsonl"
+    );
+    await File.AppendAllTextAsync(
+      currentPath,
+      "{\"partial\":"
+    );
+    var expiredPath = Path.Combine(
+      usageDirectory,
+      $"{DateTime.UtcNow.AddDays(-91):yyyy-MM-dd}.jsonl"
+    );
+    await File.WriteAllTextAsync(
+      expiredPath,
+      "{}\n"
+    );
+
+    await SendMessageAsync(
+      "Second usage ledger request"
+    );
+
+    Assert.IsFalse(
+      File.Exists(
+        expiredPath
+      )
+    );
+    var lines = await File.ReadAllLinesAsync(
+      currentPath
+    );
+    Assert.IsGreaterThan(
+      1,
+      lines.Length
+    );
+    foreach (var line in lines)
+    {
+      using var _ = JsonDocument.Parse(
+        line
+      );
+    }
+    Assert.IsFalse(
+      string.Join(
+        "\n",
+        lines
+      ).Contains(
+        "\"partial\"",
+        StringComparison.Ordinal
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UsageApiSupportsWindowsFiltersPricingAndRuntimePresentation()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "Populate usage dashboard"
+    );
+
+    long? baselineTotal = null;
+    foreach (var window in new[]
+    {
+      "rolling-hour",
+      "provider-short",
+      "day",
+      "provider-long",
+      "rolling-seven-days",
+      "calendar-month",
+      "custom-rolling&customMinutes=15"
+    })
+    {
+      using var response = await _environment.HttpClient.GetAsync(
+        $"api/usage/summary?window={window}"
+      );
+      response.EnsureSuccessStatusCode();
+      var aggregate = await response.Content.ReadFromJsonAsync<JsonElement>(
+        TestJson.Options
+      );
+      var total = aggregate.GetProperty(
+        "totalTokens"
+      ).GetInt64();
+      baselineTotal ??= total;
+      Assert.AreEqual(
+        baselineTotal.Value,
+        total
+      );
+    }
+
+    using var filteredResponse = await _environment.HttpClient.GetAsync(
+      "api/usage/summary?window=rolling-hour&providerId=ollama-local&modelRole=router"
+    );
+    filteredResponse.EnsureSuccessStatusCode();
+    var filtered = await filteredResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsGreaterThan(
+      0L,
+      filtered.GetProperty(
+        "totalTokens"
+      ).GetInt64()
+    );
+    Assert.IsLessThan(
+      baselineTotal!.Value,
+      filtered.GetProperty(
+        "totalTokens"
+      ).GetInt64()
+    );
+
+    using var recalculatedResponse = await _environment.HttpClient.GetAsync(
+      "api/usage/summary?window=rolling-hour&recalculate=true"
+    );
+    recalculatedResponse.EnsureSuccessStatusCode();
+    var recalculated =
+      await recalculatedResponse.Content.ReadFromJsonAsync<JsonElement>(
+        TestJson.Options
+      );
+    Assert.IsTrue(
+      recalculated.GetProperty(
+        "recalculatedWithCurrentPrices"
+      ).GetBoolean()
+    );
+
+    using var pricingResponse = await _environment.HttpClient.GetAsync(
+      "api/usage/pricing"
+    );
+    pricingResponse.EnsureSuccessStatusCode();
+    var pricing = await pricingResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.HasCount(
+      2,
+      pricing.GetProperty(
+        "comparisons"
+      ).EnumerateArray()
+    );
+    Assert.HasCount(
+      3,
+      pricing.GetProperty(
+        "ollamaPlans"
+      ).EnumerateArray()
+    );
+    Assert.IsTrue(
+      pricing.GetProperty(
+          "ollamaPlans"
+        )
+        .EnumerateArray()
+        .All(
+          plan => plan.GetProperty(
+              "tokenEquivalent"
+            )
+            .GetString()!
+            .Contains(
+              "Unavailable",
+              StringComparison.Ordinal
+            )
+        )
+    );
+
+    await Expect(
+      Page.Locator(
+        ".sidebar #runtime-usage-summary"
+      )
+    ).ToBeVisibleAsync();
+    Assert.AreEqual(
+      0,
+      await Page.Locator(
+        "#runtime-details #runtime-usage-summary"
+      ).CountAsync()
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-usage-summary"
+      )
+    ).ToContainTextAsync(
+      "exato"
+    );
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"runtime\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-usage-summary"
+      )
+    ).ToContainTextAsync(
+      "Principais modelos"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-usage-summary"
+      )
+    ).ToContainTextAsync(
+      "router"
+    );
+    Page.Dialog += async (
+      _,
+      dialog
+    ) => await dialog.AcceptAsync();
+    await Page.Locator(
+      "#purge-usage"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#usage-purge-status"
+      )
+    ).ToContainTextAsync(
+      "evento(s) de uso excluído(s)"
+    );
+    await Expect(
+      Page.Locator(
+        "#settings-usage-details"
+      )
+    ).ToContainTextAsync(
+      "Entrada / saída / total: 0 / 0 / 0"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task FailedProviderCallIsRecordedAsEstimatedFailure()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await StartMessageAsync(
+      "generic HTTP failure"
+    );
+    await Expect(
+      Page.Locator(
+        ".assistant-answer.error"
+      )
+    ).ToBeVisibleAsync();
+
+    using var response = await _environment.HttpClient.GetAsync(
+      "api/usage/summary?window=rolling-hour"
+    );
+    response.EnsureSuccessStatusCode();
+    var aggregate = await response.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsGreaterThan(
+      0L,
+      aggregate.GetProperty(
+        "failures"
+      ).GetInt64()
+    );
+    Assert.AreEqual(
+      "mixed",
+      aggregate.GetProperty(
+        "accuracy"
+      ).GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LoadsVersionModelsAndCleanGpuNames()
   {
     using var modelsResponse = await _environment.HttpClient.GetAsync(
@@ -110,7 +506,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.1"
+      "v0.9.2"
     );
     await Expect(
       Page.Locator(
@@ -266,7 +662,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".status-icon"
       )
     ).ToHaveCountAsync(
-      5
+      6
     );
     await Expect(
       Page.Locator(
@@ -723,6 +1119,26 @@ public sealed class ChatEndToEndTests : PageTest
     StringAssert.Contains(
       exported,
       "fallback:"
+    );
+    StringAssert.Contains(
+      exported,
+      "usage:"
+    );
+    StringAssert.Contains(
+      exported,
+      "retention_days: 90"
+    );
+    Assert.IsFalse(
+      exported.Contains(
+        "usage_history",
+        StringComparison.Ordinal
+      )
+    );
+    Assert.IsFalse(
+      exported.Contains(
+        "data/usage",
+        StringComparison.Ordinal
+      )
     );
     Assert.IsFalse(
       exported.Contains(
@@ -8043,6 +8459,20 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.edit-applied\"]"
       )
     ).ToBeAttachedAsync();
+    await WaitUntilAsync(
+      () => _environment.FakeOllama.Requests.Any(
+        request => request.Stream
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "cancel stream",
+              StringComparison.OrdinalIgnoreCase
+            )
+          )
+      ),
+      TimeSpan.FromSeconds(
+        5
+      )
+    );
     await Page.Locator(
       "#send-button"
     ).ClickAsync();
@@ -8059,6 +8489,37 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToHaveCountAsync(
       1
+    );
+    using var usageResponse = await _environment.HttpClient.GetAsync(
+      "api/usage/summary?window=rolling-hour"
+    );
+    usageResponse.EnsureSuccessStatusCode();
+    var usage = await usageResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsGreaterThan(
+      0L,
+      usage.GetProperty(
+        "cancellations"
+      ).GetInt64()
+    );
+    var usageRoles = usage.GetProperty(
+        "topRoles"
+      )
+      .EnumerateArray()
+      .Select(
+        item => item.GetProperty(
+          "key"
+        ).GetString()
+      )
+      .ToArray();
+    CollectionAssert.Contains(
+      usageRoles,
+      "router"
+    );
+    CollectionAssert.Contains(
+      usageRoles,
+      "coordinator"
     );
     await Expect(
       Page.Locator(

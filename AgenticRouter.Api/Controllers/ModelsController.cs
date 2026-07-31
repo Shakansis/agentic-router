@@ -5,6 +5,7 @@ using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.Usage;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgenticRouter.Api.Controllers;
@@ -216,6 +217,15 @@ public sealed class ModelsController : ControllerBase
         baseUri,
         selected.Name,
         selected.Digest,
+        new ProviderCallContext(
+          null,
+          null,
+          HttpContext.TraceIdentifier,
+          null,
+          UsageModelRoles.Benchmark,
+          "tool-protocol-conformance",
+          selected.Digest
+        ),
         cancellationToken
       );
 

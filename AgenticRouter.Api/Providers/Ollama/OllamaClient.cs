@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -5,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Providers.Ollama;
 
@@ -22,14 +24,20 @@ public sealed class OllamaClient : IOllamaClient
 
   private readonly HttpClient _httpClient;
   private readonly ISettingsStore _settingsStore;
+  private readonly ITokenEstimator _tokenEstimator;
+  private readonly IUsageRecorder _usageRecorder;
 
   public OllamaClient(
     HttpClient httpClient,
-    ISettingsStore settingsStore
+    ISettingsStore settingsStore,
+    ITokenEstimator tokenEstimator,
+    IUsageRecorder usageRecorder
   )
   {
     _httpClient = httpClient;
     _settingsStore = settingsStore;
+    _tokenEstimator = tokenEstimator;
+    _usageRecorder = usageRecorder;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -84,6 +92,7 @@ public sealed class OllamaClient : IOllamaClient
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -92,6 +101,7 @@ public sealed class OllamaClient : IOllamaClient
       model,
       messages,
       "router-classification",
+      usageContext,
       cancellationToken
     );
   }
@@ -101,6 +111,7 @@ public sealed class OllamaClient : IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -112,6 +123,7 @@ public sealed class OllamaClient : IOllamaClient
       JsonSerializer.SerializeToElement(
         "json"
       ),
+      usageContext,
       cancellationToken
     );
   }
@@ -121,6 +133,7 @@ public sealed class OllamaClient : IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -130,6 +143,7 @@ public sealed class OllamaClient : IOllamaClient
       messages,
       stage,
       null,
+      usageContext,
       cancellationToken
     );
   }
@@ -140,6 +154,7 @@ public sealed class OllamaClient : IOllamaClient
     IReadOnlyList<ChatMessage> messages,
     JsonElement schema,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -149,6 +164,7 @@ public sealed class OllamaClient : IOllamaClient
       messages,
       stage,
       schema,
+      usageContext,
       cancellationToken
     );
   }
@@ -159,87 +175,129 @@ public sealed class OllamaClient : IOllamaClient
     IReadOnlyList<OllamaToolMessage> messages,
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
-    var policy = await GetGenerationPolicyAsync(
-      true,
-      cancellationToken
+    var stopwatch = Stopwatch.StartNew();
+    var estimatedInput = _tokenEstimator.EstimateToolMessages(
+      messages
+    ) + _tokenEstimator.EstimateText(
+      JsonSerializer.Serialize(
+        tools,
+        JsonOptions
+      )
     );
-    var payload = CreateRequest(
-      model,
-      messages,
-      false,
-      null,
-      new OllamaOptions(
-        0,
-        policy.ContextTokens,
-        policy.OutputTokens
-      ),
-      null,
-      tools.Select(
-        tool => new OllamaApiTool(
-          "function",
-          new OllamaFunctionDefinition(
-            tool.Name,
-            tool.Description,
-            tool.Parameters
-          )
-        )
-      ).ToArray()
-    );
-    using var response = await SendChatAsync(
-      baseUri,
-      payload,
-      stage,
-      cancellationToken,
-      requestTimeout: policy.Timeout
-    );
-    OllamaChatChunk result;
+    long estimatedOutput = 0;
+    ProviderTokenUsage? providerUsage = null;
+    var status = UsageStatuses.Failure;
 
     try
     {
-      result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
-        JsonOptions,
+      var policy = await GetGenerationPolicyAsync(
+        true,
         cancellationToken
-      ) ?? throw new JsonException(
-        "The non-streaming /api/chat response body was empty."
       );
-    }
-    catch (JsonException exception)
-    {
-      throw new ToolProtocolException(
-        stage,
-        Sanitize(
-          exception.Message
+      var payload = CreateRequest(
+        model,
+        messages,
+        false,
+        null,
+        new OllamaOptions(
+          0,
+          policy.ContextTokens,
+          policy.OutputTokens
         ),
-        (int)response.StatusCode,
-        exception
+        null,
+        tools.Select(
+          tool => new OllamaApiTool(
+            "function",
+            new OllamaFunctionDefinition(
+              tool.Name,
+              tool.Description,
+              tool.Parameters
+            )
+          )
+        ).ToArray()
       );
-    }
-
-    if (!string.IsNullOrWhiteSpace(
-      result.Error
-    ))
-    {
-      throw ProviderError(
+      using var response = await SendChatAsync(
+        baseUri,
+        payload,
         stage,
-        "The model could not produce a response.",
-        result.Error,
-        (int)response.StatusCode
+        cancellationToken,
+        requestTimeout: policy.Timeout
+      );
+      OllamaChatChunk result;
+
+      try
+      {
+        result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
+          JsonOptions,
+          cancellationToken
+        ) ?? throw new JsonException(
+          "The non-streaming /api/chat response body was empty."
+        );
+      }
+      catch (JsonException exception)
+      {
+        throw new ToolProtocolException(
+          stage,
+          Sanitize(
+            exception.Message
+          ),
+          (int)response.StatusCode,
+          exception
+        );
+      }
+
+      if (!string.IsNullOrWhiteSpace(
+        result.Error
+      ))
+      {
+        throw ProviderError(
+          stage,
+          "The model could not produce a response.",
+          result.Error,
+          (int)response.StatusCode
+        );
+      }
+
+      var toolResponse = new OllamaToolResponse(
+        result.Message?.Content,
+        result.Message?.Thinking,
+        result.Message?.ToolCalls?.Select(
+          call => new OllamaToolCall(
+            call.Function.Name,
+            call.Function.Arguments.Clone()
+          )
+        ).ToArray() ?? []
+      );
+      estimatedOutput = _tokenEstimator.EstimateToolResponse(
+        toolResponse
+      );
+      providerUsage = ReadUsage(
+        result
+      );
+      status = UsageStatuses.Success;
+      return toolResponse;
+    }
+    finally
+    {
+      if (cancellationToken.IsCancellationRequested)
+      {
+        status = UsageStatuses.Cancellation;
+      }
+
+      await RecordUsageAsync(
+        usageContext,
+        model,
+        stopwatch,
+        status,
+        providerUsage,
+        estimatedInput,
+        estimatedOutput
       );
     }
-
-    return new OllamaToolResponse(
-      result.Message?.Content,
-      result.Message?.Thinking,
-      result.Message?.ToolCalls?.Select(
-        call => new OllamaToolCall(
-          call.Function.Name,
-          call.Function.Arguments.Clone()
-        )
-      ).ToArray() ?? []
-    );
   }
 
   private async Task<string> GenerateAsync(
@@ -248,55 +306,92 @@ public sealed class OllamaClient : IOllamaClient
     IReadOnlyList<ChatMessage> messages,
     string stage,
     JsonElement? format,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
-    var policy = await GetGenerationPolicyAsync(
-      false,
-      cancellationToken
+    var stopwatch = Stopwatch.StartNew();
+    var estimatedInput = _tokenEstimator.EstimateMessages(
+      messages
     );
-    var payload = CreateRequest(
-      model,
-      messages,
-      false,
-      format,
-      new OllamaOptions(
-        0,
-        policy.ContextTokens,
-        policy.OutputTokens
-      ),
-      null
-    );
-    using var response = await SendChatAsync(
-      baseUri,
-      payload,
-      stage,
-      cancellationToken,
-      requestTimeout: policy.Timeout
-    );
-    var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
-      JsonOptions,
-      cancellationToken
-    ) ?? throw ProviderError(
-      stage,
-      "The model returned an empty response.",
-      "The non-streaming /api/chat response body was empty.",
-      (int)response.StatusCode
-    );
+    long estimatedOutput = 0;
+    ProviderTokenUsage? providerUsage = null;
+    var status = UsageStatuses.Failure;
 
-    if (!string.IsNullOrWhiteSpace(
-      result.Error
-    ))
+    try
     {
-      throw ProviderError(
+      var policy = await GetGenerationPolicyAsync(
+        false,
+        cancellationToken
+      );
+      var payload = CreateRequest(
+        model,
+        messages,
+        false,
+        format,
+        new OllamaOptions(
+          0,
+          policy.ContextTokens,
+          policy.OutputTokens
+        ),
+        null
+      );
+      using var response = await SendChatAsync(
+        baseUri,
+        payload,
         stage,
-        "The model could not produce a response.",
-        result.Error,
+        cancellationToken,
+        requestTimeout: policy.Timeout
+      );
+      var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
+        JsonOptions,
+        cancellationToken
+      ) ?? throw ProviderError(
+        stage,
+        "The model returned an empty response.",
+        "The non-streaming /api/chat response body was empty.",
         (int)response.StatusCode
       );
-    }
 
-    return result.Message?.Content ?? string.Empty;
+      if (!string.IsNullOrWhiteSpace(
+        result.Error
+      ))
+      {
+        throw ProviderError(
+          stage,
+          "The model could not produce a response.",
+          result.Error,
+          (int)response.StatusCode
+        );
+      }
+
+      var content = result.Message?.Content ?? string.Empty;
+      estimatedOutput = _tokenEstimator.EstimateText(
+        content
+      );
+      providerUsage = ReadUsage(
+        result
+      );
+      status = UsageStatuses.Success;
+      return content;
+    }
+    finally
+    {
+      if (cancellationToken.IsCancellationRequested)
+      {
+        status = UsageStatuses.Cancellation;
+      }
+
+      await RecordUsageAsync(
+        usageContext,
+        model,
+        stopwatch,
+        status,
+        providerUsage,
+        estimatedInput,
+        estimatedOutput
+      );
+    }
   }
 
   public async Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
@@ -492,9 +587,17 @@ public sealed class OllamaClient : IOllamaClient
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
+    ProviderCallContext usageContext,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    var stopwatch = Stopwatch.StartNew();
+    var estimatedInput = _tokenEstimator.EstimateMessages(
+      messages
+    );
+    long estimatedOutput = 0;
+    ProviderTokenUsage? providerUsage = null;
+    var status = UsageStatuses.Failure;
     var policy = await GetGenerationPolicyAsync(
       false,
       cancellationToken
@@ -515,32 +618,64 @@ public sealed class OllamaClient : IOllamaClient
       timeout.Token
     );
 
-    while (true)
+    try
     {
-      bool hasNext;
+      while (true)
+      {
+        bool hasNext;
 
-      try
-      {
-        hasNext = await enumerator.MoveNextAsync();
-      }
-      catch (OperationCanceledException exception) when (
-        !cancellationToken.IsCancellationRequested
-        && timeout.IsCancellationRequested
-      )
-      {
-        throw ProviderTimeout(
-          "generation",
-          policy.Timeout,
-          exception
+        try
+        {
+          hasNext = await enumerator.MoveNextAsync();
+        }
+        catch (OperationCanceledException exception) when (
+          !cancellationToken.IsCancellationRequested
+          && timeout.IsCancellationRequested
+        )
+        {
+          throw ProviderTimeout(
+            "generation",
+            policy.Timeout,
+            exception
+          );
+        }
+
+        if (!hasNext)
+        {
+          break;
+        }
+
+        var update = enumerator.Current;
+        estimatedOutput += _tokenEstimator.EstimateText(
+          update.Delta
         );
-      }
+        providerUsage = update.Usage
+          ?? providerUsage;
 
-      if (!hasNext)
+        if (update.Done)
+        {
+          status = UsageStatuses.Success;
+        }
+
+        yield return update;
+      }
+    }
+    finally
+    {
+      if (cancellationToken.IsCancellationRequested)
       {
-        break;
+        status = UsageStatuses.Cancellation;
       }
 
-      yield return enumerator.Current;
+      await RecordUsageAsync(
+        usageContext,
+        model,
+        stopwatch,
+        status,
+        providerUsage,
+        estimatedInput,
+        estimatedOutput
+      );
     }
   }
 
@@ -648,6 +783,14 @@ public sealed class OllamaClient : IOllamaClient
 
       if (chunk.Done)
       {
+        yield return new OllamaChatUpdate(
+          false,
+          null,
+          true,
+          ReadUsage(
+            chunk
+          )
+        );
         break;
       }
     }
@@ -806,6 +949,44 @@ public sealed class OllamaClient : IOllamaClient
       true,
       exception
     );
+  }
+
+  private async Task RecordUsageAsync(
+    ProviderCallContext context,
+    string model,
+    Stopwatch stopwatch,
+    string status,
+    ProviderTokenUsage? providerUsage,
+    long estimatedInput,
+    long estimatedOutput
+  )
+  {
+    await _usageRecorder.RecordAsync(
+      new UsageRecordRequest(
+        context,
+        "ollama-local",
+        model,
+        stopwatch.ElapsedMilliseconds,
+        status,
+        providerUsage,
+        estimatedInput,
+        estimatedOutput
+      ),
+      CancellationToken.None
+    );
+  }
+
+  private static ProviderTokenUsage? ReadUsage(
+    OllamaChatChunk chunk
+  )
+  {
+    return chunk.PromptEvalCount is null
+      || chunk.EvalCount is null
+        ? null
+        : new ProviderTokenUsage(
+          chunk.PromptEvalCount.Value,
+          chunk.EvalCount.Value
+        );
   }
 
   private static OllamaProviderException ProviderError(
@@ -1091,6 +1272,8 @@ public sealed class OllamaClient : IOllamaClient
   private sealed record OllamaChatChunk(
     OllamaChatMessage? Message,
     bool Done,
-    string? Error
+    string? Error,
+    [property: JsonPropertyName("prompt_eval_count")] long? PromptEvalCount,
+    [property: JsonPropertyName("eval_count")] long? EvalCount
   );
 }

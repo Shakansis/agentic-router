@@ -9,6 +9,7 @@ using AgenticRouter.Api.ProjectAwareness;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.Usage;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Chat;
@@ -40,6 +41,13 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly ILogger<ChatStreamService> _logger;
   private ExecutionSession? _executionSession;
+  private string? _usageWorkspaceId;
+  private string? _usageConversationId;
+  private string? _usageTurnId;
+  private IReadOnlyDictionary<string, string?> _usageModelRevisions =
+    new Dictionary<string, string?>(
+      StringComparer.OrdinalIgnoreCase
+    );
 
   public ChatStreamService(
     ISettingsStore settingsStore,
@@ -138,6 +146,17 @@ public sealed class ChatStreamService : IChatStreamService
         baseUri,
         cancellationToken
       );
+      var usageWorkspace = await _workspaceProfiles.GetActiveDataAsync(
+        cancellationToken
+      );
+      _usageWorkspaceId = usageWorkspace?.Id;
+      _usageConversationId = request.ConversationSessionId;
+      _usageTurnId = requestId;
+      _usageModelRevisions = models.ToDictionary(
+        model => model.Name,
+        model => model.Digest,
+        StringComparer.OrdinalIgnoreCase
+      );
       var isAuto = string.IsNullOrWhiteSpace(
         request.Model
       ) || string.Equals(
@@ -147,6 +166,7 @@ public sealed class ChatStreamService : IChatStreamService
       );
       var intention = GeneralChat;
       var selectedModel = request.Model.Trim();
+      var selectedModelRole = UsageModelRoles.Primary;
 
       if (!isAuto)
       {
@@ -353,6 +373,11 @@ public sealed class ChatStreamService : IChatStreamService
         }
 
         selectedModel = resolution.Model;
+        selectedModelRole = resolution.Attempts.LastOrDefault(
+          attempt => attempt.Installed
+        )?.Source == "intention fallback"
+          ? UsageModelRoles.Fallback
+          : UsageModelRoles.Primary;
       }
 
       yield return Event(
@@ -640,6 +665,11 @@ public sealed class ChatStreamService : IChatStreamService
             baseUri,
             settings.CoordinatorModel,
             coordinatorIdentity.Digest,
+            UsageContext(
+              settings.CoordinatorModel,
+              UsageModelRoles.Benchmark,
+              "tool-protocol-conformance"
+            ),
             cancellationToken
           );
         }
@@ -713,6 +743,11 @@ public sealed class ChatStreamService : IChatStreamService
             baseUri,
             selectedModel,
             selectedIdentity.Digest,
+            UsageContext(
+              selectedModel,
+              UsageModelRoles.Benchmark,
+              "tool-protocol-conformance"
+            ),
             cancellationToken
           );
           targetCoordinatesDirectly = conformance.Passed;
@@ -1063,6 +1098,7 @@ public sealed class ChatStreamService : IChatStreamService
           : null,
         stopwatch,
         progress,
+        selectedModelRole,
         cancellationToken
       ))
       {
@@ -1152,6 +1188,7 @@ public sealed class ChatStreamService : IChatStreamService
             : null,
           stopwatch,
           progress,
+          selectedModelRole,
           cancellationToken
         ))
         {
@@ -1422,6 +1459,11 @@ public sealed class ChatStreamService : IChatStreamService
             _executionSession?.Plan is null,
             attempt,
             completionAllowed,
+            UsageContext(
+              model,
+              UsageModelRoles.Coordinator,
+              "local-action-planning"
+            ),
             cancellationToken
           )
         );
@@ -2927,6 +2969,7 @@ public sealed class ChatStreamService : IChatStreamService
     string? intention,
     Stopwatch stopwatch,
     GenerationProgress progress,
+    string modelRole,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -2934,6 +2977,11 @@ public sealed class ChatStreamService : IChatStreamService
       baseUri,
       model,
       messages,
+      UsageContext(
+        model,
+        modelRole,
+        "target-response"
+      ),
       cancellationToken
     ).GetAsyncEnumerator(
       cancellationToken
@@ -3046,6 +3094,11 @@ public sealed class ChatStreamService : IChatStreamService
       baseUri,
       routerModel,
       request,
+      UsageContext(
+        routerModel,
+        UsageModelRoles.Router,
+        "router-classification"
+      ),
       cancellationToken
     );
   }
@@ -3064,6 +3117,11 @@ public sealed class ChatStreamService : IChatStreamService
           baseUri,
           model,
           messages,
+          UsageContext(
+            model,
+            UsageModelRoles.Specialist,
+            "expert-execution-guidance"
+          ),
           cancellationToken
         ),
         null
@@ -3139,7 +3197,7 @@ public sealed class ChatStreamService : IChatStreamService
       : "unavailable";
   }
 
-  private static async Task<PlanningAttempt> TryPlanAsync(
+  private async Task<PlanningAttempt> TryPlanAsync(
     Func<Task<LocalActionPlanningResult>> action
   )
   {
@@ -3964,6 +4022,28 @@ public sealed class ChatStreamService : IChatStreamService
     )
       ? exception.Message
       : $"{exception.Message} Details: {technical}";
+  }
+
+  private ProviderCallContext UsageContext(
+    string model,
+    string modelRole,
+    string requestPurpose
+  )
+  {
+    _usageModelRevisions.TryGetValue(
+      model,
+      out var revision
+    );
+
+    return new ProviderCallContext(
+      _usageWorkspaceId,
+      _usageConversationId,
+      _usageTurnId,
+      _executionSession?.Id,
+      modelRole,
+      requestPurpose,
+      revision
+    );
   }
 
   private ChatStreamEvent Event(

@@ -59,6 +59,17 @@
         <strong id="git-summary">Verificando repositório…</strong>
         <small id="git-upstream-summary">Abra para ver alterações e configuração.</small>
       </button>
+      <article id="runtime-usage-summary" class="status-card usage-sidebar-card">
+        <div class="status-heading">
+          <span class="status-label">
+            <span class="status-icon" aria-hidden="true">◴</span>Uso de tokens
+          </span>
+          <span id="runtime-usage-accuracy" class="usage-accuracy-badge">
+            carregando
+          </span>
+        </div>
+        <span id="runtime-usage-details">Carregando uso local…</span>
+      </article>
     </section>
 
     <details id="session-history" class="session-history">
@@ -82,7 +93,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.1</span>
+    <span class="app-version">v0.9.2</span>
   </aside>
 
   <main class="workspace">
@@ -346,8 +357,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.1."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.1."
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.2."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.2."
                 >i</button>
               </div>
             </div>
@@ -386,7 +397,7 @@
           <section id="settings-runtime" class="settings-section" data-settings-section="runtime" tabindex="-1">
             <div class="section-heading">
               <h3>Runtime e memória</h3>
-              <p>Limites conservadores; a contagem de tokens é estimada.</p>
+              <p>Memória, uso de tokens e estimativas equivalentes com origem explícita.</p>
             </div>
             <div class="settings-grid context-settings-grid">
             <label>
@@ -409,6 +420,66 @@
               <span>Máximo de mensagens</span>
               <input id="max-conversation-messages" type="number" min="2" max="200" required>
             </label>
+            <label>
+              <span>Janela de uso selecionada</span>
+              <select id="usage-selected-window">
+                <option value="rolling-hour">Última hora</option>
+                <option value="provider-short">Janela curta do provedor</option>
+                <option value="day">Hoje (UTC)</option>
+                <option value="provider-long">Janela longa do provedor</option>
+                <option value="rolling-seven-days">Últimos 7 dias</option>
+                <option value="calendar-month">Mês atual (UTC)</option>
+                <option value="custom-rolling">Janela personalizada</option>
+              </select>
+            </label>
+            <label>
+              <span>Janelas fixadas (até 4)</span>
+              <select id="usage-pinned-windows" multiple size="4">
+                <option value="rolling-hour">Última hora</option>
+                <option value="provider-short">Janela curta do provedor</option>
+                <option value="day">Hoje (UTC)</option>
+                <option value="provider-long">Janela longa do provedor</option>
+                <option value="rolling-seven-days">Últimos 7 dias</option>
+                <option value="calendar-month">Mês atual (UTC)</option>
+                <option value="custom-rolling">Janela personalizada</option>
+              </select>
+            </label>
+            <label>
+              <span>Retenção do ledger (dias)</span>
+              <input id="usage-retention-days" type="number" min="1" max="730" required>
+            </label>
+            <label>
+              <span>Janela curta (minutos)</span>
+              <input id="usage-provider-short-minutes" type="number" min="5" max="10080" required>
+            </label>
+            <label>
+              <span>Janela longa (minutos)</span>
+              <input id="usage-provider-long-minutes" type="number" min="5" max="43200" required>
+            </label>
+            <label>
+              <span>Janela personalizada (minutos)</span>
+              <input id="usage-custom-minutes" type="number" min="5" max="43200" required>
+            </label>
+            <label>
+              <span>Comparação cloud equivalente</span>
+              <select id="usage-comparison-model"></select>
+            </label>
+            <label>
+              <span>Referência de plano Ollama</span>
+              <select id="usage-ollama-plan"></select>
+            </label>
+            </div>
+            <div id="settings-usage-summary" class="settings-summary-card usage-summary-card">
+              <span id="settings-usage-accuracy" class="usage-accuracy-badge">
+                carregando
+              </span>
+              <span id="settings-usage-details">Carregando uso de tokens…</span>
+            </div>
+            <div class="validation-profile-actions">
+              <button id="purge-usage" class="secondary-button danger-button" type="button">
+                Excluir histórico de uso
+              </button>
+              <span id="usage-purge-status" class="runtime-note" role="status"></span>
             </div>
           </section>
 
@@ -563,8 +634,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.1."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.1. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.2."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.2. Desativar interrompe novas gravações, mas não apaga registros existentes."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>

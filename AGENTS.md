@@ -33,6 +33,7 @@ The implementation uses:
 - Playwright for .NET with MSTest for browser-driven end-to-end tests;
 - one local application instance;
 - one local JSON settings store;
+- one bounded local JSONL usage ledger;
 - optional local conversation persistence;
 - trusted workspace profiles and supervised local execution.
 
@@ -118,6 +119,15 @@ Keep configuration typed, validated, versionable, and backward-compatible when p
 Configuration includes provider URL, router and coordinator models, intent profiles, model/device defaults, context sizes, timeouts, execution limits, approval policy, trusted workspaces, and persistence preferences.
 
 Persist only the data the user has enabled. Do not expose secrets, raw provider payloads, full stack traces, or unrestricted local paths in browser-visible errors.
+
+Provider calls record bounded metadata-only usage events under `data/usage/`.
+Use provider token counts when available and one centralized conservative
+estimator otherwise; exact and estimated values must remain visibly distinct.
+Never write prompts, responses, images, tool arguments, file contents, hidden
+guidance, or secrets to the usage ledger. Local Ollama inference has zero
+provider token charge. Any paid-cloud comparison is an explicitly selected
+equivalent-cost estimate using a versioned official-source price snapshot, not
+an Ollama Cloud token quota or exact savings claim.
 
 Conversation identity is host-generated and stable for the lifetime of a conversation. When history is enabled, persist the current snapshot successfully before creating or resuming another session; a failed save must leave the visible conversation intact. When history is disabled, meaningful content requires an explicit choice to enable and save, discard, or cancel. Never auto-resume conversations, pending approvals, or processes.
 

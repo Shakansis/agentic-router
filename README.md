@@ -193,6 +193,24 @@ existing configuration is not modified when parsing or validation fails. The
 same operations are available at `GET /api/settings/yaml` and
 `PUT /api/settings/yaml`.
 
+### Token usage and equivalent cost
+
+Runtime settings show token usage for rolling, daily, seven-day,
+calendar-month, provider-specific, and bounded custom windows. Up to four
+windows can be pinned. Events are stored locally as bounded daily JSONL under
+`data/usage/`; the ledger contains usage metadata only and deliberately excludes
+prompts, responses, images, tool arguments, file contents, and secrets.
+
+Ollama terminal token counts are authoritative when present. Missing counts use
+one conservative estimator and remain labeled as estimated. Local Ollama
+inference has zero provider token cost. The optional cloud value is an
+equivalent estimate against the explicitly selected comparison model and its
+versioned official-source price snapshot; it is not an Ollama Cloud token quota
+or an exact savings claim. Usage history can be queried through
+`GET /api/usage/overview` and `GET /api/usage/summary`, while
+`DELETE /api/usage?confirmed=true` explicitly purges it. Portable YAML includes
+usage preferences but never exports the ledger.
+
 ## 🎮 Usage
 
 ### Interface Overview

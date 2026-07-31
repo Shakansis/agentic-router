@@ -35,7 +35,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     "execution",
     "project_awareness",
     "session_history",
-    "git_delivery"
+    "git_delivery",
+    "usage"
   ];
 
   public string Export(
@@ -361,6 +362,72 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       1,
       "max_log_entries",
       settings.GitDelivery.MaxLogEntries
+    );
+    yaml.AppendLine(
+      "usage:"
+    );
+    Scalar(
+      yaml,
+      1,
+      "retention_days",
+      settings.Usage.RetentionDays
+    );
+    Scalar(
+      yaml,
+      1,
+      "max_event_bytes",
+      settings.Usage.MaxEventBytes
+    );
+    Scalar(
+      yaml,
+      1,
+      "selected_window",
+      settings.Usage.SelectedWindow
+    );
+    Scalar(
+      yaml,
+      1,
+      "pinned_windows",
+      string.Join(
+        ",",
+        settings.Usage.PinnedWindows
+      )
+    );
+    Scalar(
+      yaml,
+      1,
+      "provider_short_window_minutes",
+      settings.Usage.ProviderShortWindowMinutes
+    );
+    Scalar(
+      yaml,
+      1,
+      "provider_long_window_minutes",
+      settings.Usage.ProviderLongWindowMinutes
+    );
+    Scalar(
+      yaml,
+      1,
+      "custom_rolling_window_minutes",
+      settings.Usage.CustomRollingWindowMinutes
+    );
+    Scalar(
+      yaml,
+      1,
+      "comparison_provider",
+      settings.Usage.ComparisonProvider
+    );
+    Scalar(
+      yaml,
+      1,
+      "comparison_model",
+      settings.Usage.ComparisonModel
+    );
+    Scalar(
+      yaml,
+      1,
+      "ollama_plan_reference",
+      settings.Usage.OllamaPlanReference
     );
 
     return yaml.ToString()
@@ -746,7 +813,12 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings,
       errors
     );
-    return ApplyGitDelivery(
+    settings = ApplyGitDelivery(
+      root,
+      settings,
+      errors
+    );
+    return ApplyUsage(
       root,
       settings,
       errors
@@ -1200,6 +1272,131 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
           keys[4],
           current.MaxLogEntries,
           $"git_delivery.{keys[4]}",
+          errors
+        )
+      }
+    };
+  }
+
+  private static ApplicationSettings ApplyUsage(
+    YamlNode root,
+    ApplicationSettings settings,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    var section = Map(
+      root,
+      "usage",
+      "usage",
+      errors
+    );
+
+    if (section is null)
+    {
+      return settings;
+    }
+
+    var keys = new[]
+    {
+      "retention_days",
+      "max_event_bytes",
+      "selected_window",
+      "pinned_windows",
+      "provider_short_window_minutes",
+      "provider_long_window_minutes",
+      "custom_rolling_window_minutes",
+      "comparison_provider",
+      "comparison_model",
+      "ollama_plan_reference"
+    };
+    ValidateKeys(
+      section,
+      keys,
+      "usage",
+      errors
+    );
+    var current = settings.Usage;
+    var pinnedValue = ReadString(
+      section,
+      keys[3],
+      string.Join(
+        ",",
+        current.PinnedWindows
+      ),
+      $"usage.{keys[3]}",
+      errors
+    );
+    var pinned = pinnedValue.Split(
+      ',',
+      StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries
+    );
+
+    return settings with
+    {
+      Usage = current with
+      {
+        RetentionDays = ReadInt(
+          section,
+          keys[0],
+          current.RetentionDays,
+          $"usage.{keys[0]}",
+          errors
+        ),
+        MaxEventBytes = ReadInt(
+          section,
+          keys[1],
+          current.MaxEventBytes,
+          $"usage.{keys[1]}",
+          errors
+        ),
+        SelectedWindow = ReadString(
+          section,
+          keys[2],
+          current.SelectedWindow,
+          $"usage.{keys[2]}",
+          errors
+        ),
+        PinnedWindows = pinned,
+        ProviderShortWindowMinutes = ReadInt(
+          section,
+          keys[4],
+          current.ProviderShortWindowMinutes,
+          $"usage.{keys[4]}",
+          errors
+        ),
+        ProviderLongWindowMinutes = ReadInt(
+          section,
+          keys[5],
+          current.ProviderLongWindowMinutes,
+          $"usage.{keys[5]}",
+          errors
+        ),
+        CustomRollingWindowMinutes = ReadInt(
+          section,
+          keys[6],
+          current.CustomRollingWindowMinutes,
+          $"usage.{keys[6]}",
+          errors
+        ),
+        ComparisonProvider = ReadString(
+          section,
+          keys[7],
+          current.ComparisonProvider,
+          $"usage.{keys[7]}",
+          errors
+        ),
+        ComparisonModel = ReadString(
+          section,
+          keys[8],
+          current.ComparisonModel,
+          $"usage.{keys[8]}",
+          errors
+        ),
+        OllamaPlanReference = ReadString(
+          section,
+          keys[9],
+          current.OllamaPlanReference,
+          $"usage.{keys[9]}",
           errors
         )
       }

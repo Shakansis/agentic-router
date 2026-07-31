@@ -616,6 +616,48 @@ summary:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.usage-sidebar-card {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
+.usage-sidebar-card .status-heading {
+  width: 100%;
+}
+
+.usage-sidebar-card #runtime-usage-details {
+  color: var(--muted);
+}
+
+.usage-accuracy-badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 2px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.usage-sidebar-card[data-accuracy="estimated"],
+.usage-sidebar-card[data-accuracy="mixed"],
+.usage-summary-card[data-accuracy="estimated"],
+.usage-summary-card[data-accuracy="mixed"] {
+  border-color: rgba(201, 147, 40, 0.55);
+}
+
 .eyebrow {
   color: var(--subtle);
   font-size: 10px;
@@ -2638,6 +2680,25 @@ p {
 
 .settings-summary-card {
   white-space: pre-line;
+}
+
+.usage-summary-card {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 120px;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-grid select[multiple] {
+  min-height: 118px;
+  padding: 6px;
+}
+
+.settings-grid select[multiple] option {
+  padding: 5px 7px;
+  border-radius: 4px;
 }
 
 .portable-yaml-panel {

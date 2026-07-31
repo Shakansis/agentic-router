@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Providers.Ollama;
 
@@ -13,6 +14,7 @@ public interface IOllamaClient
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 
@@ -21,6 +23,7 @@ public interface IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 
@@ -29,6 +32,7 @@ public interface IOllamaClient
     string model,
     IReadOnlyList<ChatMessage> messages,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 
@@ -38,6 +42,7 @@ public interface IOllamaClient
     IReadOnlyList<ChatMessage> messages,
     System.Text.Json.JsonElement schema,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 
@@ -47,6 +52,7 @@ public interface IOllamaClient
     IReadOnlyList<OllamaToolMessage> messages,
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 
@@ -77,13 +83,16 @@ public interface IOllamaClient
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 }
 
 public sealed record OllamaChatUpdate(
   bool Accepted,
-  string? Delta
+  string? Delta,
+  bool Done = false,
+  ProviderTokenUsage? Usage = null
 );
 
 public sealed record OllamaToolDefinition(

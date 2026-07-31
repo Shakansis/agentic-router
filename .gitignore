@@ -427,6 +427,7 @@ AgenticRouter.Api/data/.settings-*.tmp
 AgenticRouter.Api/data/workspaces.json
 AgenticRouter.Api/data/.workspaces-*.tmp
 AgenticRouter.Api/data/workspaces/
+AgenticRouter.Api/data/usage/
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 # General

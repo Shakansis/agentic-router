@@ -301,6 +301,10 @@ internal sealed class TestEnvironment : IAsyncDisposable
       "api/sessions?confirmed=true"
     );
     deletedSessions.EnsureSuccessStatusCode();
+    using var purgedUsage = await HttpClient.DeleteAsync(
+      "api/usage?confirmed=true"
+    );
+    purgedUsage.EnsureSuccessStatusCode();
     _fakeOllama.Reset();
   }
 

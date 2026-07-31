@@ -121,7 +121,10 @@ public sealed class ChatController : ControllerBase
 
       var answer = new System.Text.StringBuilder();
       await foreach (var streamEvent in _chatStreamService.StreamAsync(
-        request,
+        request with
+        {
+          ConversationSessionId = _conversationSessionId
+        },
         requestId,
         cancellationToken
       ))

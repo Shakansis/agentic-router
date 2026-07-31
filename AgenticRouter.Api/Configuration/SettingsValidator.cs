@@ -1,3 +1,5 @@
+using AgenticRouter.Api.Usage;
+
 namespace AgenticRouter.Api.Configuration;
 
 public sealed class SettingsValidator : ISettingsValidator
@@ -90,6 +92,10 @@ public sealed class SettingsValidator : ISettingsValidator
     ValidateGitDelivery(
       errors,
       settings.GitDelivery
+    );
+    ValidateUsage(
+      errors,
+      settings.Usage
     );
 
     if (!string.Equals(
@@ -809,6 +815,120 @@ public sealed class SettingsValidator : ISettingsValidator
       4_096,
       1_048_576
     );
+  }
+
+  private static void ValidateUsage(
+    IDictionary<string, List<string>> errors,
+    UsageSettings settings
+  )
+  {
+    ValidateRange(
+      errors,
+      "usage.retentionDays",
+      settings.RetentionDays,
+      1,
+      730
+    );
+    ValidateRange(
+      errors,
+      "usage.maxEventBytes",
+      settings.MaxEventBytes,
+      4_096,
+      65_536
+    );
+    ValidateRange(
+      errors,
+      "usage.providerShortWindowMinutes",
+      settings.ProviderShortWindowMinutes,
+      5,
+      10_080
+    );
+    ValidateRange(
+      errors,
+      "usage.providerLongWindowMinutes",
+      settings.ProviderLongWindowMinutes,
+      settings.ProviderShortWindowMinutes,
+      43_200
+    );
+    ValidateRange(
+      errors,
+      "usage.customRollingWindowMinutes",
+      settings.CustomRollingWindowMinutes,
+      5,
+      43_200
+    );
+
+    if (!UsageWindowIds.All.Contains(
+      settings.SelectedWindow
+    ))
+    {
+      AddError(
+        errors,
+        "usage.selectedWindow",
+        "Selected usage window is not supported."
+      );
+    }
+
+    if (
+      settings.PinnedWindows.Count > 4
+      || settings.PinnedWindows.Distinct(
+        StringComparer.Ordinal
+      ).Count() != settings.PinnedWindows.Count
+      || settings.PinnedWindows.Any(
+        window => !UsageWindowIds.All.Contains(
+          window
+        )
+      )
+    )
+    {
+      AddError(
+        errors,
+        "usage.pinnedWindows",
+        "Choose up to four distinct supported usage windows."
+      );
+    }
+
+    if (
+      string.IsNullOrWhiteSpace(
+        settings.ComparisonProvider
+      )
+      || settings.ComparisonProvider.Length > 100
+    )
+    {
+      AddError(
+        errors,
+        "usage.comparisonProvider",
+        "Comparison provider is required and must contain at most 100 characters."
+      );
+    }
+
+    if (
+      string.IsNullOrWhiteSpace(
+        settings.ComparisonModel
+      )
+      || settings.ComparisonModel.Length > 256
+    )
+    {
+      AddError(
+        errors,
+        "usage.comparisonModel",
+        "Comparison model is required and must contain at most 256 characters."
+      );
+    }
+
+    if (
+      string.IsNullOrWhiteSpace(
+        settings.OllamaPlanReference
+      )
+      || settings.OllamaPlanReference.Length > 40
+    )
+    {
+      AddError(
+        errors,
+        "usage.ollamaPlanReference",
+        "Ollama plan reference is required and must contain at most 40 characters."
+      );
+    }
   }
 
   private static void ValidateInterval(

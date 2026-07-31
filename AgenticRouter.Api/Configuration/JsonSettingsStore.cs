@@ -178,6 +178,9 @@ public sealed class JsonSettingsStore : ISettingsStore
       ) || !document.RootElement.TryGetProperty(
         "gitDelivery",
         out _
+      ) || !document.RootElement.TryGetProperty(
+        "usage",
+        out _
       ) || !hasProviderContext
         || !document.RootElement.GetProperty(
           "runtime"

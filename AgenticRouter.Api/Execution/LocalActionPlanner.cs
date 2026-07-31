@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -13,6 +14,7 @@ public interface ILocalActionPlanner
     bool planRequired,
     int attemptNumber,
     bool completionAllowed,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 }
@@ -87,6 +89,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     bool planRequired,
     int attemptNumber,
     bool completionAllowed,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -126,6 +129,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       plannerMessages,
       availableTools,
       "local-action-planning",
+      usageContext,
       cancellationToken
     );
     var selectedToolCalls = response.ToolCalls.Take(

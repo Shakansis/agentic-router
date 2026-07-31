@@ -2,6 +2,7 @@ using System.Diagnostics;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Models;
 
@@ -183,6 +184,14 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
             "Reply with exactly: OK"
           )
         ],
+        new ProviderCallContext(
+          null,
+          null,
+          traceId,
+          null,
+          UsageModelRoles.ModelTest,
+          "model-connectivity-test"
+        ),
         timeout.Token
       ))
       {

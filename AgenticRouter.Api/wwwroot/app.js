@@ -34,7 +34,9 @@ const state = {
   activeReview: null,
   activeDelivery: null,
   pendingDeliveryAction: null,
-  activeAgentModel: null
+  activeAgentModel: null,
+  usageOverview: null,
+  pricingCatalog: null
 };
 
 const elements = {};
@@ -99,6 +101,9 @@ function bindElements() {
     "runtime-memory-list",
     "runtime-model-list",
     "resident-model-status",
+    "runtime-usage-summary",
+    "runtime-usage-accuracy",
+    "runtime-usage-details",
     "new-conversation",
     "default-context-tokens",
     "provider-context-tokens",
@@ -106,6 +111,19 @@ function bindElements() {
     "max-tool-output-tokens",
     "generation-timeout-seconds",
     "max-conversation-messages",
+    "usage-selected-window",
+    "usage-pinned-windows",
+    "usage-retention-days",
+    "usage-provider-short-minutes",
+    "usage-provider-long-minutes",
+    "usage-custom-minutes",
+    "usage-comparison-model",
+    "usage-ollama-plan",
+    "settings-usage-summary",
+    "settings-usage-accuracy",
+    "settings-usage-details",
+    "purge-usage",
+    "usage-purge-status",
     "model-diagnostics-list",
     "model-context-diagnostic",
     "model-test-selector",
@@ -244,6 +262,10 @@ function bindEvents() {
     "click",
     deleteAllSessions
   );
+  elements.purgeUsage.addEventListener(
+    "click",
+    purgeUsageHistory
+  );
   elements.refreshProjectProfile.addEventListener("click", refreshProjectProfile);
   elements.addValidationStep.addEventListener(
     "click",
@@ -354,7 +376,9 @@ async function loadApplicationState() {
     workspace,
     projectProfile,
     validationProfiles,
-    workspaceProfiles
+    workspaceProfiles,
+    usageOverview,
+    pricingCatalog
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -362,7 +386,9 @@ async function loadApplicationState() {
     fetchJson("/api/workspace"),
     fetchJson("/api/workspace/project-profile"),
     fetchJson("/api/workspace/validation-profile"),
-    fetchJson("/api/workspaces")
+    fetchJson("/api/workspaces"),
+    fetchJson("/api/usage/overview"),
+    fetchJson("/api/usage/pricing")
   ]);
 
   state.settings = settings;
@@ -372,6 +398,8 @@ async function loadApplicationState() {
   state.projectProfile = projectProfile;
   state.validationProfiles = validationProfiles;
   state.workspaceProfiles = workspaceProfiles;
+  state.usageOverview = usageOverview;
+  state.pricingCatalog = pricingCatalog;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
@@ -1000,7 +1028,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.1."
+        + "pelo Agentic Router v0.9.2."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1755,6 +1783,30 @@ async function deleteAllSessions() {
   await refreshSessions();
 }
 
+async function purgeUsageHistory() {
+  if (!window.confirm(
+    "Excluir todo o histórico local de uso de tokens? Esta ação não altera conversas nem arquivos do projeto."
+  )) {
+    return;
+  }
+
+  elements.usagePurgeStatus.textContent = "Excluindo histórico de uso…";
+
+  try {
+    const result = await fetchJson(
+      "/api/usage?confirmed=true",
+      {
+        method: "DELETE"
+      }
+    );
+    elements.usagePurgeStatus.textContent =
+      `${result.deletedEvents} evento(s) de uso excluído(s).`;
+    await refreshUsage();
+  } catch (error) {
+    elements.usagePurgeStatus.textContent = error.message;
+  }
+}
+
 async function refreshRuntimeStatus() {
   if (document.hidden) {
     return;
@@ -1768,6 +1820,123 @@ async function refreshRuntimeStatus() {
     elements.runtimeSummary.textContent = "Memória indisponível";
     elements.residentModelStatus.textContent = error.message;
   }
+
+  await refreshUsage();
+}
+
+async function refreshUsage() {
+  try {
+    const active = activeWorkspaceProfile();
+    const query = active?.id
+      ? `?workspaceId=${encodeURIComponent(active.id)}`
+      : "";
+    state.usageOverview = await fetchJson(`/api/usage/overview${query}`);
+    renderUsageSummary();
+  } catch (error) {
+    elements.runtimeUsageAccuracy.textContent = "indisponível";
+    elements.settingsUsageAccuracy.textContent = "indisponível";
+    elements.runtimeUsageDetails.textContent =
+      `Uso indisponível · ${error.message}`;
+    elements.settingsUsageDetails.textContent =
+      `Uso indisponível · ${error.message}`;
+  }
+}
+
+function renderUsageSummary() {
+  const overview = state.usageOverview;
+
+  if (!overview) {
+    elements.runtimeUsageAccuracy.textContent = "sem dados";
+    elements.settingsUsageAccuracy.textContent = "sem dados";
+    elements.runtimeUsageDetails.textContent = "Uso ainda não disponível.";
+    elements.settingsUsageDetails.textContent = "Uso ainda não disponível.";
+    return;
+  }
+
+  const usage = overview.selected;
+  const accuracy = usage.accuracy === "exact"
+    ? "exato"
+    : usage.accuracy === "mixed"
+      ? "misto"
+      : usage.accuracy === "estimated"
+        ? "estimado"
+        : "sem dados";
+  const lastUpdate = usage.lastUpdatedAt
+    ? new Date(usage.lastUpdatedAt).toLocaleString()
+    : "nenhuma chamada registrada";
+  const topModels = usage.topModels.length
+    ? usage.topModels.map(
+      item => `${item.key}: ${formatInteger(item.totalTokens)}`
+    ).join("\n")
+    : "Nenhum modelo no período.";
+  const topRoles = usage.topRoles.length
+    ? usage.topRoles.map(
+      item => `${item.key}: ${formatInteger(item.totalTokens)}`
+    ).join("\n")
+    : "Nenhum papel no período.";
+  const pinnedWindows = overview.pinned.length
+    ? overview.pinned.map(
+      item => `${item.window.id}: ${formatInteger(item.totalTokens)} tokens`
+    ).join("\n")
+    : "Nenhuma janela fixada.";
+  const local = usage.providerBreakdown
+    .filter(item => item.key === "ollama-local")
+    .reduce((total, item) => total + item.totalTokens, 0);
+  const cloud = usage.providerBreakdown
+    .filter(item => item.key !== "ollama-local")
+    .reduce((total, item) => total + item.totalTokens, 0);
+  const comparison =
+    `${overview.comparisonProvider} · ${overview.comparisonModel}`;
+  const comparisonPrice = state.pricingCatalog?.comparisons.find(
+    item => item.providerId === overview.comparisonProvider
+      && item.modelId === overview.comparisonModel
+  );
+  const plan = state.pricingCatalog?.ollamaPlans.find(
+    item => item.plan === state.settings?.usage.ollamaPlanReference
+  );
+  const comparisonDetails = comparisonPrice
+    ? `${formatCurrency(comparisonPrice.inputPricePerMillion)}/M entrada · `
+      + `${formatCurrency(comparisonPrice.outputPricePerMillion)}/M saída · `
+      + `catálogo ${comparisonPrice.catalogVersion} · `
+      + `atualizado ${new Date(comparisonPrice.updatedAt).toLocaleDateString()} · `
+      + `${comparisonPrice.stale ? "desatualizado" : "atual"}\n`
+      + `Fonte da comparação: ${comparisonPrice.officialSourceUrl}`
+    : "preço de comparação indisponível";
+  const planDetails = plan
+    ? `${formatCurrency(plan.monthlyPrice)}/mês · ${plan.usageDescription}\n`
+      + `${plan.tokenEquivalent}\n`
+      + `${plan.availability ? `${plan.availability}\n` : ""}`
+      + `Vigência: ${plan.effectiveDate} · `
+      + `${plan.stale ? "referência desatualizada" : "referência atual"}\n`
+      + `Fonte oficial: ${plan.officialSourceUrl}`
+    : "referência indisponível";
+  elements.runtimeUsageAccuracy.textContent = accuracy;
+  elements.settingsUsageAccuracy.textContent = accuracy;
+  elements.runtimeUsageDetails.textContent =
+    `${usage.window.id} · ${formatInteger(usage.totalTokens)} tokens\n`
+    + `Input ${formatInteger(usage.inputTokens)} · Output ${formatInteger(usage.outputTokens)}\n`
+    + `Equivalente ${formatCurrency(usage.equivalentCloudCost)} · ${comparison}\n`
+    + `Atualizado: ${lastUpdate}`;
+  elements.runtimeUsageSummary.dataset.accuracy = usage.accuracy;
+  elements.settingsUsageSummary.dataset.accuracy = usage.accuracy;
+  elements.settingsUsageDetails.textContent =
+    `Janela: ${usage.window.id}\n`
+    + `Entrada / saída / total: ${formatInteger(usage.inputTokens)} / `
+    + `${formatInteger(usage.outputTokens)} / ${formatInteger(usage.totalTokens)}\n`
+    + `Chamadas: ${usage.requests} · Sucesso: ${usage.successes} · `
+    + `Falha: ${usage.failures} · Cancelamento: ${usage.cancellations}\n`
+    + `Local / cloud: ${formatInteger(local)} / ${formatInteger(cloud)} tokens\n`
+    + `Custo estimado do provedor: ${formatCurrency(usage.estimatedActualCost)}\n`
+    + `Estimativa cloud equivalente: ${formatCurrency(usage.equivalentCloudCost)} `
+    + `contra ${comparison}\n`
+    + `Tarifas de comparação: ${comparisonDetails}\n`
+    + `Esta é uma comparação equivalente, não uma economia exata no Ollama Cloud.\n`
+    + `Principais modelos:\n${topModels}\n`
+    + `Principais papéis:\n${topRoles}\n`
+    + `Janelas fixadas:\n${pinnedWindows}\n`
+    + `Referência de plano Ollama: ${plan?.plan ?? "indisponível"}\n`
+    + `${planDetails}\n`
+    + `Última atualização: ${lastUpdate}`;
 }
 
 function renderRuntimeStatus(runtime) {
@@ -1916,6 +2085,26 @@ function loadedModelRow(model) {
   return row;
 }
 
+function formatInteger(value) {
+  return new Intl.NumberFormat().format(Number(value ?? 0));
+}
+
+function formatCurrency(value) {
+  const number = Number(value ?? 0);
+  const digits = Math.abs(number) > 0 && Math.abs(number) < 0.01
+    ? 6
+    : 2;
+  return new Intl.NumberFormat(
+    undefined,
+    {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits
+    }
+  ).format(number);
+}
+
 function scheduleRuntimeRefresh() {
   clearTimeout(state.runtimeTimer);
 
@@ -1981,6 +2170,39 @@ function renderSettings() {
   elements.maxToolOutputTokens.value = state.settings.execution.maxToolOutputTokens;
   elements.generationTimeoutSeconds.value = state.settings.runtime.generationTimeoutSeconds;
   elements.maxConversationMessages.value = state.settings.context.maxConversationMessages;
+  elements.usageSelectedWindow.value = state.settings.usage.selectedWindow;
+  elements.usageRetentionDays.value = state.settings.usage.retentionDays;
+  elements.usageProviderShortMinutes.value =
+    state.settings.usage.providerShortWindowMinutes;
+  elements.usageProviderLongMinutes.value =
+    state.settings.usage.providerLongWindowMinutes;
+  elements.usageCustomMinutes.value =
+    state.settings.usage.customRollingWindowMinutes;
+  for (const option of elements.usagePinnedWindows.options) {
+    option.selected = state.settings.usage.pinnedWindows.includes(option.value);
+  }
+  replaceOptions(
+    elements.usageComparisonModel,
+    (state.pricingCatalog?.comparisons ?? []).map(
+      entry => ({
+        value: `${entry.providerId}|${entry.modelId}`,
+        label: `${entry.providerId} · ${entry.modelId} · `
+          + `${formatCurrency(entry.inputPricePerMillion)}/M input · `
+          + `${formatCurrency(entry.outputPricePerMillion)}/M output`
+      })
+    ),
+    `${state.settings.usage.comparisonProvider}|${state.settings.usage.comparisonModel}`
+  );
+  replaceOptions(
+    elements.usageOllamaPlan,
+    (state.pricingCatalog?.ollamaPlans ?? []).map(
+      plan => ({
+        value: plan.plan,
+        label: `${plan.plan} · ${formatCurrency(plan.monthlyPrice)}/month`
+      })
+    ),
+    state.settings.usage.ollamaPlanReference
+  );
   replaceOptions(
     elements.modelTestSelector,
     modelOptions(),
@@ -1994,6 +2216,7 @@ function renderSettings() {
 
   renderModelDiagnostics();
   renderSettingsSummaries();
+  renderUsageSummary();
 }
 
 function renderSettingsSummaries() {
@@ -2327,7 +2550,22 @@ async function saveSettings(event) {
     projectAwareness: state.settings.projectAwareness,
     validationProfile: state.validationProfiles?.active ?? null,
     sessionHistory: state.settings.sessionHistory,
-    gitDelivery: state.settings.gitDelivery
+    gitDelivery: state.settings.gitDelivery,
+    usage: {
+      ...state.settings.usage,
+      retentionDays: Number(elements.usageRetentionDays.value),
+      selectedWindow: elements.usageSelectedWindow.value,
+      pinnedWindows: Array.from(
+        elements.usagePinnedWindows.selectedOptions,
+        option => option.value
+      ),
+      providerShortWindowMinutes: Number(elements.usageProviderShortMinutes.value),
+      providerLongWindowMinutes: Number(elements.usageProviderLongMinutes.value),
+      customRollingWindowMinutes: Number(elements.usageCustomMinutes.value),
+      comparisonProvider: elements.usageComparisonModel.value.split("|")[0],
+      comparisonModel: elements.usageComparisonModel.value.split("|")[1],
+      ollamaPlanReference: elements.usageOllamaPlan.value
+    }
   };
 
   try {
@@ -2557,6 +2795,8 @@ function navigateToSettingsError(field) {
             ? "execution"
             : field.startsWith("runtime") || field.startsWith("context")
               ? "runtime"
+              : field.startsWith("usage")
+                ? "runtime"
               : field.startsWith("git")
                 ? "git"
                 : field.startsWith("session")

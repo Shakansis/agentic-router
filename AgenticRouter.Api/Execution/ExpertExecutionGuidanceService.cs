@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -10,6 +11,7 @@ public interface IExpertExecutionGuidanceService
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 }
@@ -82,6 +84,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     Uri baseUri,
     string model,
     IReadOnlyList<ChatMessage> messages,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -100,6 +103,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
       guidanceMessages,
       GuidanceSchema,
       "expert-execution-guidance",
+      usageContext,
       cancellationToken
     );
 

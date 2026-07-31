@@ -10,6 +10,7 @@ using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Sessions;
+using AgenticRouter.Api.Usage;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 var builder = WebApplication.CreateBuilder(
@@ -50,6 +51,15 @@ builder.Services.AddSingleton<ISettingsStore>(
     );
   }
 );
+builder.Services.AddSingleton<IPricingCatalog, BuiltInPricingCatalog>();
+builder.Services.AddSingleton<IUsageLedger>(
+  services => new JsonlUsageLedger(
+    dataDirectory,
+    services.GetRequiredService<IPricingCatalog>()
+  )
+);
+builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
+builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
 builder.Services.AddSingleton<IWorkspaceProfileStore>(
   new WorkspaceProfileStore(
     dataDirectory

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -10,6 +11,7 @@ public interface IToolProtocolConformanceService
     Uri baseUri,
     string model,
     string? digest,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   );
 }
@@ -100,6 +102,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     Uri baseUri,
     string model,
     string? digest,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -153,16 +156,31 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       await VerifySimpleCallAsync(
         baseUri,
         model,
+        usageContext with
+        {
+          ModelRole = UsageModelRoles.Benchmark,
+          RequestPurpose = "tool-conformance-simple"
+        },
         cancellationToken
       );
       await VerifyNestedPlanAsync(
         baseUri,
         model,
+        usageContext with
+        {
+          ModelRole = UsageModelRoles.Benchmark,
+          RequestPurpose = "tool-conformance-nested-plan"
+        },
         cancellationToken
       );
       await VerifyToolResultLoopAsync(
         baseUri,
         model,
+        usageContext with
+        {
+          ModelRole = UsageModelRoles.Benchmark,
+          RequestPurpose = "tool-conformance-loop"
+        },
         cancellationToken
       );
       result = new ToolProtocolConformanceResult(
@@ -198,6 +216,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
   private async Task VerifySimpleCallAsync(
     Uri baseUri,
     string model,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -209,6 +228,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       ),
       [EchoTool],
       "tool-conformance-simple",
+      usageContext,
       cancellationToken
     );
     var call = RequireSingleCall(
@@ -224,6 +244,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
   private async Task VerifyNestedPlanAsync(
     Uri baseUri,
     string model,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -235,6 +256,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       ),
       [PlanTool],
       "tool-conformance-nested-plan",
+      usageContext,
       cancellationToken
     );
     var call = RequireSingleCall(
@@ -275,6 +297,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
   private async Task VerifyToolResultLoopAsync(
     Uri baseUri,
     string model,
+    ProviderCallContext usageContext,
     CancellationToken cancellationToken
   )
   {
@@ -287,6 +310,10 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       initialMessages,
       [ReadTool],
       "tool-conformance-loop-read",
+      usageContext with
+      {
+        RequestPurpose = "tool-conformance-loop-read"
+      },
       cancellationToken
     );
     var readCall = RequireSingleCall(
@@ -318,6 +345,10 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       loopMessages,
       [EditTool],
       "tool-conformance-loop-edit",
+      usageContext with
+      {
+        RequestPurpose = "tool-conformance-loop-edit"
+      },
       cancellationToken
     );
     var editCall = RequireSingleCall(

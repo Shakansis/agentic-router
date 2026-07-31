@@ -30,6 +30,8 @@ internal sealed record TestApplicationSettings
 
   public TestGitDeliverySettings GitDelivery { get; init; } = new();
 
+  public TestUsageSettings Usage { get; init; } = new();
+
   public static TestApplicationSettings Create(
     string ollamaUrl,
     string? trustedWorkspacePath = null
@@ -172,6 +174,34 @@ internal sealed record TestGitDeliverySettings
   public int MaxDiffBytesPerFile { get; init; } = 262_144;
 
   public int MaxLogEntries { get; init; } = 50;
+}
+
+internal sealed record TestUsageSettings
+{
+  public int RetentionDays { get; init; } = 90;
+
+  public int MaxEventBytes { get; init; } = 16_384;
+
+  public string SelectedWindow { get; init; } = "rolling-hour";
+
+  public string[] PinnedWindows { get; init; } =
+  [
+    "rolling-hour",
+    "day",
+    "rolling-seven-days",
+    "calendar-month"
+  ];
+
+  public int ProviderShortWindowMinutes { get; init; } = 300;
+
+  public int ProviderLongWindowMinutes { get; init; } = 10_080;
+
+  public int CustomRollingWindowMinutes { get; init; } = 1_440;
+
+  public string GoogleComparisonModel { get; init; } =
+    "gemini-3.5-flash-lite";
+
+  public string OllamaPlanReference { get; init; } = "Free";
 }
 
 internal static class TestJson

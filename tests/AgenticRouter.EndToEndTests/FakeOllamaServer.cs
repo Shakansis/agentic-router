@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace AgenticRouter.EndToEndTests;
 
@@ -2364,9 +2365,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         cancellationToken
       );
 
-      if (current.Contains(
-        "cancel stream",
-        StringComparison.OrdinalIgnoreCase
+      if (messages.Any(
+        message => message.Content.Contains(
+          "cancel stream",
+          StringComparison.OrdinalIgnoreCase
+        )
       ))
       {
         await Task.Delay(
@@ -2516,7 +2519,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             role = "assistant",
             content
           },
-          done
+          done,
+          prompt_eval_count = done
+            ? 120
+            : (int?)null,
+          eval_count = done
+            ? 30
+            : (int?)null
         },
         CompactJsonOptions
       ) + "\n"
@@ -2537,8 +2546,21 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
-    var bytes = JsonSerializer.SerializeToUtf8Bytes(
+    var node = JsonSerializer.SerializeToNode(
       payload,
+      TestJson.Options
+    );
+    if (
+      statusCode == HttpStatusCode.OK
+      && node is JsonObject root
+      && root["done"]?.GetValue<bool>() == true
+    )
+    {
+      root["prompt_eval_count"] ??= 40;
+      root["eval_count"] ??= 8;
+    }
+    var bytes = JsonSerializer.SerializeToUtf8Bytes(
+      node,
       TestJson.Options
     );
     response.StatusCode = (int)statusCode;
