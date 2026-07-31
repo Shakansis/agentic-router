@@ -11,6 +11,7 @@ public static class UsageModelRoles
   public const string Fallback = "fallback";
   public const string Benchmark = "benchmark";
   public const string ModelTest = "model-test";
+  public const string Summary = "summary";
 
   public static readonly IReadOnlySet<string> All = new HashSet<string>(
     [
@@ -20,7 +21,8 @@ public static class UsageModelRoles
       Primary,
       Fallback,
       Benchmark,
-      ModelTest
+      ModelTest,
+      Summary
     ],
     StringComparer.Ordinal
   );

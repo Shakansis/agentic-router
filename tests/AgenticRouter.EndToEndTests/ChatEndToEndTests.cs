@@ -2875,7 +2875,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.7"
+      "v0.9.8"
     );
     await Expect(
       Page.Locator(
@@ -12316,7 +12316,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task RetentionLimitRequiresRemovingAnOlderSession()
+  public async Task RetentionRemovesOldestUnpinnedSessionAndProtectsPinnedSessions()
   {
     using var settingsResponse = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
@@ -12337,25 +12337,40 @@ public sealed class ChatEndToEndTests : PageTest
       }
     );
     history.EnsureSuccessStatusCode();
-    await Page.GotoAsync(
-      "/"
-    );
-    await SendMessageAsync(
-      "First retained conversation."
-    );
-    await Page.Locator(
-      "#new-conversation"
-    ).ClickAsync();
-    await SendMessageAsync(
-      "Second conversation beyond the retention limit."
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"history-retention-limit-reached\"]"
-      )
-    ).ToHaveCountAsync(
-      1
-    );
+    foreach (var item in new[]
+    {
+      new
+      {
+        Id = "retention-first-v098",
+        Message = "First retained conversation."
+      },
+      new
+      {
+        Id = "retention-second-v098",
+        Message = "Second conversation beyond the retention limit."
+      }
+    })
+    {
+      using var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = item.Id,
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = item.Message
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "alpha:latest",
+          state = "completed"
+        }
+      );
+      saved.EnsureSuccessStatusCode();
+    }
     using var sessions = await _environment.HttpClient.GetAsync(
       "api/sessions"
     );
@@ -12370,12 +12385,748 @@ public sealed class ChatEndToEndTests : PageTest
       ).GetArrayLength()
     );
     Assert.AreEqual(
-      "First retained conversation.",
+      "Second conversation beyond the retention limit.",
       document.RootElement.GetProperty(
         "recent"
       )[0].GetProperty(
         "title"
       ).GetString()
+    );
+
+    var retainedId = document.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+    using (
+      var pinned = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/sessions/{retainedId}/pin",
+        new
+        {
+          pinned = true
+        }
+      )
+    )
+    {
+      pinned.EnsureSuccessStatusCode();
+    }
+    using var blocked = await _environment.HttpClient.PutAsJsonAsync(
+      "api/sessions/current",
+      new
+      {
+        sessionId = "pinned-retention-blocked",
+        messages = new[]
+        {
+          new
+          {
+            role = "user",
+            content = "Pinned sessions require an explicit deletion."
+          }
+        },
+        interactionMode = "chat",
+        selectedModel = "alpha:latest",
+        state = "completed"
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      blocked.StatusCode
+    );
+    StringAssert.Contains(
+      await blocked.Content.ReadAsStringAsync(),
+      "history-retention-limit-reached"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConversationSearchAndPinnedHistoryUseOnlySafeLocalFields()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "searchable-v098",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = "Investigate the cobalt indexing contract."
+            },
+            new
+            {
+              role = "assistant",
+              content = "The visible cobalt result is ready."
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "command-r:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    using (
+      var pinned = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/searchable-v098/pin",
+        new
+        {
+          pinned = true
+        }
+      )
+    )
+    {
+      pinned.EnsureSuccessStatusCode();
+    }
+    using var search = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/search",
+      new
+      {
+        query = "cobalt",
+        allWorkspaces = false,
+        provider = "ollama-local",
+        model = "command-r:latest",
+        pinned = true,
+        from = DateTimeOffset.UtcNow.AddMinutes(
+          -5
+        ),
+        to = DateTimeOffset.UtcNow.AddMinutes(
+          5
+        ),
+        limit = 10
+      }
+    );
+    search.EnsureSuccessStatusCode();
+    using var searchDocument = JsonDocument.Parse(
+      await search.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "active-workspace",
+      searchDocument.RootElement.GetProperty(
+        "workspaceScope"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      1,
+      searchDocument.RootElement.GetProperty(
+        "results"
+      ).GetArrayLength()
+    );
+    var result = searchDocument.RootElement.GetProperty(
+      "results"
+    )[0];
+    Assert.AreEqual(
+      "searchable-v098",
+      result.GetProperty(
+        "id"
+      ).GetString()
+    );
+    Assert.IsTrue(
+      result.GetProperty(
+        "snippet"
+      ).GetString()!.Contains(
+        "cobalt",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    Assert.IsGreaterThan(
+      0,
+      result.GetProperty(
+        "highlights"
+      ).GetArrayLength()
+    );
+    using var titleSearch = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/search",
+      new
+      {
+        query = "Investigate the cobalt",
+        limit = 10
+      }
+    );
+    titleSearch.EnsureSuccessStatusCode();
+    using var titleDocument = JsonDocument.Parse(
+      await titleSearch.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "title",
+      titleDocument.RootElement.GetProperty(
+        "results"
+      )[0].GetProperty(
+        "matchField"
+      ).GetString()
+    );
+
+    using var noHiddenMatch = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/search",
+      new
+      {
+        query = "approvalToken",
+        allWorkspaces = true,
+        limit = 10
+      }
+    );
+    noHiddenMatch.EnsureSuccessStatusCode();
+    using var noHiddenDocument = JsonDocument.Parse(
+      await noHiddenMatch.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      0,
+      noHiddenDocument.RootElement.GetProperty(
+        "results"
+      ).GetArrayLength()
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#session-history"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(
+      Page.Locator(
+        "#pinned-sessions .session-entry"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "#pinned-sessions"
+      )
+    ).ToContainTextAsync(
+      "Investigate the cobalt indexing contract."
+    );
+    await Page.Locator(
+      "#open-session-search"
+    ).ClickAsync();
+    await Page.Locator(
+      "#session-search-query"
+    ).FillAsync(
+      "cobalt"
+    );
+    await Page.Locator(
+      "#run-session-search"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#session-search-results"
+      )
+    ).ToContainTextAsync(
+      "cobalt"
+    );
+    using (
+      var unpinned = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/searchable-v098/pin",
+        new
+        {
+          pinned = false
+        }
+      )
+    )
+    {
+      unpinned.EnsureSuccessStatusCode();
+    }
+    using var afterUnpin = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    afterUnpin.EnsureSuccessStatusCode();
+    using var afterUnpinDocument = JsonDocument.Parse(
+      await afterUnpin.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      0,
+      afterUnpinDocument.RootElement.GetProperty(
+        "pinned"
+      ).GetArrayLength()
+    );
+    Assert.AreEqual(
+      "searchable-v098",
+      afterUnpinDocument.RootElement.GetProperty(
+        "recent"
+      )[0].GetProperty(
+        "id"
+      ).GetString()
+    );
+
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    await Assert.ThrowsExactlyAsync<TaskCanceledException>(
+      () => _environment.HttpClient.PostAsJsonAsync(
+        "api/sessions/search",
+        new
+        {
+          query = "cobalt",
+          allWorkspaces = true,
+          limit = 100
+        },
+        cancellation.Token
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConversationSearchFindsChangedFilesAndValidationFacts()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var profile = await _environment.HttpClient.PutAsJsonAsync(
+        "api/workspace/validation-profile",
+        new
+        {
+          name = "Searchable validation",
+          source = "user",
+          steps = new[]
+          {
+            new
+            {
+              id = "version",
+              label = "Searchable dotnet version",
+              executable = "dotnet",
+              arguments = new[]
+              {
+                "--version"
+              },
+              workingDirectory = ".",
+              timeoutSeconds = 30,
+              required = true
+            }
+          }
+        }
+      )
+    )
+    {
+      profile.EnsureSuccessStatusCode();
+    }
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file validate"
+    );
+
+    using var search = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/search",
+      new
+      {
+        query = "hello.txt",
+        fileChanged = "hello.txt",
+        validationResult = "passed",
+        limit = 10
+      }
+    );
+    search.EnsureSuccessStatusCode();
+    using var document = JsonDocument.Parse(
+      await search.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      1,
+      document.RootElement.GetProperty(
+        "results"
+      ).GetArrayLength()
+    );
+    Assert.AreEqual(
+      "file-changed",
+      document.RootElement.GetProperty(
+        "results"
+      )[0].GetProperty(
+        "matchField"
+      ).GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SessionSummaryDuplicateAndMarkdownExportAreExplicitAndBounded()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    const string secret = "gsk_fake_secret_v098";
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "summary-source-v098",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = $"Document the bounded result. Authorization: Bearer {secret}"
+            },
+            new
+            {
+              role = "assistant",
+              content = "The tested conversation outcome is visible."
+            }
+          },
+          interactionMode = "execute",
+          selectedModel = "command-r:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    var requestsBeforeEstimate = _environment.FakeOllama.AllRequests.Count;
+    using var estimate = await _environment.HttpClient.GetAsync(
+      "api/sessions/summary-source-v098/summary/estimate?model=command-r%3Alatest"
+    );
+    estimate.EnsureSuccessStatusCode();
+    using var estimateDocument = JsonDocument.Parse(
+      await estimate.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      estimateDocument.RootElement.GetProperty(
+        "permissionRequired"
+      ).GetBoolean()
+    );
+    Assert.HasCount(
+      requestsBeforeEstimate,
+      _environment.FakeOllama.AllRequests);
+
+    using var denied = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/summary-source-v098/summary",
+      new
+      {
+        model = "command-r:latest",
+        confirmed = false,
+        providerPermissionGranted = false
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      denied.StatusCode
+    );
+    Assert.HasCount(
+      requestsBeforeEstimate,
+      _environment.FakeOllama.AllRequests);
+
+    using var generated = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/summary-source-v098/summary",
+      new
+      {
+        model = "command-r:latest",
+        confirmed = true,
+        providerPermissionGranted = true
+      }
+    );
+    generated.EnsureSuccessStatusCode();
+    using var generatedDocument = JsonDocument.Parse(
+      await generated.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      "Preserve the tested conversation outcome.",
+      generatedDocument.RootElement.GetProperty(
+        "content"
+      ).GetProperty(
+        "objective"
+      ).GetString()
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "SESSION_SUMMARY_V1",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
+
+    using var edited = await _environment.HttpClient.PutAsJsonAsync(
+      "api/sessions/summary-source-v098/summary",
+      new
+      {
+        content = new
+        {
+          objective = "Keep the manually reviewed result.",
+          decisions = new[]
+          {
+            "Retain only visible facts."
+          },
+          filesChanged = Array.Empty<string>(),
+          commandsAndValidation = new[]
+          {
+            "Deterministic fake-provider test passed."
+          },
+          unresolvedIssues = Array.Empty<string>(),
+          nextSuggestedStep = "Review the duplicate."
+        }
+      }
+    );
+    edited.EnsureSuccessStatusCode();
+
+    using var duplicate = await _environment.HttpClient.PostAsync(
+      "api/sessions/summary-source-v098/duplicate",
+      null
+    );
+    duplicate.EnsureSuccessStatusCode();
+    using var duplicateDocument = JsonDocument.Parse(
+      await duplicate.Content.ReadAsStringAsync()
+    );
+    var duplicateSession = duplicateDocument.RootElement.GetProperty(
+      "session"
+    );
+    Assert.AreEqual(
+      "completed",
+      duplicateSession.GetProperty(
+        "state"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      "chat",
+      duplicateSession.GetProperty(
+        "lastInteractionMode"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      JsonValueKind.Null,
+      duplicateSession.GetProperty(
+        "selectedModel"
+      ).ValueKind
+    );
+    Assert.AreEqual(
+      0,
+      duplicateSession.GetProperty(
+        "executionReviews"
+      ).GetArrayLength()
+    );
+    Assert.IsFalse(
+      duplicateSession.GetProperty(
+        "pinned"
+      ).GetBoolean()
+    );
+    Assert.AreEqual(
+      "Keep the manually reviewed result.",
+      duplicateSession.GetProperty(
+        "sessionSummary"
+      ).GetProperty(
+        "content"
+      ).GetProperty(
+        "objective"
+      ).GetString()
+    );
+
+    using var markdownResponse = await _environment.HttpClient.GetAsync(
+      "api/sessions/summary-source-v098/export/markdown"
+        + "?includeSummary=true&includeModelMetadata=true"
+    );
+    markdownResponse.EnsureSuccessStatusCode();
+    var markdown = await markdownResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      markdown,
+      "## Session summary"
+    );
+    StringAssert.Contains(
+      markdown,
+      "## Conversation"
+    );
+    StringAssert.Contains(
+      markdown,
+      "[secret redacted]"
+    );
+    Assert.DoesNotContain(
+      secret,
+      markdown
+    );
+    Assert.DoesNotContain(
+      "approvalToken",
+      markdown
+    );
+    Assert.DoesNotContain(
+      _environment.WorkspaceDirectory,
+      markdown
+    );
+
+    using var deleted = await _environment.HttpClient.DeleteAsync(
+      "api/sessions/summary-source-v098/summary"
+    );
+    Assert.AreEqual(
+      HttpStatusCode.NoContent,
+      deleted.StatusCode
+    );
+    using var missing = await _environment.HttpClient.GetAsync(
+      "api/sessions/summary-source-v098/summary"
+    );
+    missing.EnsureSuccessStatusCode();
+    Assert.AreEqual(
+      string.Empty,
+      await missing.Content.ReadAsStringAsync()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ContextIndicatorMovesFromEstimateToExactAndReportsTrimming()
+  {
+    using var settingsResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        Context = new TestContextSettings
+        {
+          MaxConversationMessages = 2
+        }
+      }
+    );
+    settingsResponse.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#message-input"
+    ).FillAsync(
+      "Estimate this request."
+    );
+    await Expect(
+      Page.Locator(
+        "#context-usage-summary"
+      )
+    ).ToContainTextAsync(
+      "estimado"
+    );
+
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "Return exact provider usage after trimming.",
+        model = "alpha:latest",
+        history = new[]
+        {
+          new
+          {
+            role = "user",
+            content = "Old visible user message."
+          },
+          new
+          {
+            role = "assistant",
+            content = "Old visible assistant message."
+          },
+          new
+          {
+            role = "user",
+            content = "Recent visible user message."
+          },
+          new
+          {
+            role = "assistant",
+            content = "Recent visible assistant message."
+          }
+        },
+        modelLocked = true,
+        interactionMode = "chat",
+        approvalPolicy = "ask",
+        browserSessionId = "browser-context-v098",
+        conversationSessionId = (string?)null,
+        webSearchEnabled = false
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var stream = await response.Content.ReadAsStringAsync();
+    var events = stream.Split(
+      '\n',
+      StringSplitOptions.RemoveEmptyEntries
+    ).Where(
+      line => line.StartsWith(
+        "data: ",
+        StringComparison.Ordinal
+      )
+    ).Select(
+      line => JsonNode.Parse(
+        line[6..]
+      )!.AsObject()
+    ).ToArray();
+    var estimated = events.First(
+      item => item["type"]!.GetValue<string>() == "context.usage"
+    )["contextUsage"]!.AsObject();
+    Assert.AreEqual(
+      "estimated",
+      estimated["accuracy"]!.GetValue<string>()
+    );
+    Assert.IsTrue(
+      estimated["trimmed"]!.GetValue<bool>()
+    );
+    Assert.AreEqual(
+      5,
+      estimated["visibleMessages"]!.GetValue<int>()
+    );
+    Assert.AreEqual(
+      3,
+      estimated["includedMessages"]!.GetValue<int>()
+    );
+    Assert.AreEqual(
+      2,
+      estimated["omittedMessages"]!.GetValue<int>()
+    );
+    var completed = events.Last(
+      item => item["type"]!.GetValue<string>() == "response.completed"
+    )["contextUsage"]!.AsObject();
+    Assert.AreEqual(
+      "exact",
+      completed["accuracy"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      120L,
+      completed["inputTokens"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      4_096,
+      completed["reservedResponseTokens"]!.GetValue<int>()
     );
   }
 

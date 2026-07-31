@@ -161,16 +161,41 @@ public sealed class PersistentSessionService : IPersistentSessionService
     );
     var summaries = sessions.Select(
       ToSummary
+    ).ToArray();
+    var pinned = summaries.Where(
+      session => session.Pinned && !session.Archived
+    ).OrderByDescending(
+      session => session.PinnedAt
+    ).ThenByDescending(
+      session => session.UpdatedAt
+    ).ThenBy(
+      session => session.Id,
+      StringComparer.Ordinal
+    ).ToArray();
+    var recent = summaries.Where(
+      session => !session.Archived && !session.Pinned
     ).OrderByDescending(
       session => session.UpdatedAt
+    ).ThenBy(
+      session => session.Id,
+      StringComparer.Ordinal
+    ).Take(
+      20
+    ).ToArray();
+    var archived = summaries.Where(
+      session => session.Archived
+    ).OrderByDescending(
+      session => session.UpdatedAt
+    ).ThenBy(
+      session => session.Id,
+      StringComparer.Ordinal
+    ).Take(
+      20
     ).ToArray();
     return new ConversationSessionListResponse(
-      summaries.Where(
-        session => !session.Archived
-      ).ToArray(),
-      summaries.Where(
-        session => session.Archived
-      ).ToArray(),
+      recent,
+      pinned,
+      archived,
       CreateUsage(
         active,
         sessions
@@ -327,7 +352,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
           false,
           false,
           0
-        );
+        )
+        {
+          PreferredModelProfileId = active.PreferredModelProfileId
+        };
       }
 
       var saved = await _store.WriteAsync(
@@ -396,20 +424,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
         sessionId
       ))
       {
-        var existing = await _store.ReadAllAsync(
-          active.Id,
+        await EnsureRetentionAvailableAsync(
+          active,
+          limits,
           cancellationToken
         );
-
-        if (existing.Count >= limits.MaxSessionsPerWorkspace)
-        {
-          throw new WorkspaceProfileException(
-            "history-retention-limit-reached",
-            "session-retention",
-            "The workspace reached its session-history limit. Remove an older session first.",
-            false
-          );
-        }
 
         var now = DateTimeOffset.UtcNow;
         session = new ConversationSessionRecord(
@@ -435,7 +454,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
           false,
           false,
           0
-        );
+        )
+        {
+          PreferredModelProfileId = active.PreferredModelProfileId
+        };
       }
       else
       {
@@ -479,7 +501,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
             false,
             false,
             0
-          );
+          )
+          {
+            PreferredModelProfileId = active.PreferredModelProfileId
+          };
         }
         else
         {
@@ -1101,14 +1126,39 @@ public sealed class PersistentSessionService : IPersistentSessionService
       cancellationToken
     );
 
-    if (existing.Count >= limits.MaxSessionsPerWorkspace)
+    while (existing.Count >= limits.MaxSessionsPerWorkspace)
     {
-      throw new WorkspaceProfileException(
-        "history-retention-limit-reached",
-        "session-retention",
-        "The workspace reached its session-history limit. Remove an older session first.",
-        false
+      var removable = existing.Where(
+        session => !session.Pinned
+      ).OrderBy(
+        session => session.UpdatedAt
+      ).ThenBy(
+        session => session.Id,
+        StringComparer.Ordinal
+      ).FirstOrDefault();
+
+      if (removable is null)
+      {
+        throw new WorkspaceProfileException(
+          "history-retention-limit-reached",
+          "session-retention",
+          "The workspace reached its session-history limit and every retained session is pinned.",
+          false
+        );
+      }
+
+      await _store.DeleteAsync(
+        active.Id,
+        removable.Id,
+        cancellationToken
       );
+      existing = existing.Where(
+        session => !string.Equals(
+          session.Id,
+          removable.Id,
+          StringComparison.Ordinal
+        )
+      ).ToArray();
     }
   }
 
@@ -1168,7 +1218,12 @@ public sealed class PersistentSessionService : IPersistentSessionService
       session.Archived,
       session.LastInteractionMode,
       session.Interrupted,
-      session.StorageBytes
+      session.StorageBytes,
+      session.Pinned,
+      session.PinnedAt,
+      session.SessionSummary is not null,
+      session.PreferredModelProfileId,
+      session.SelectedModel
     );
   }
 

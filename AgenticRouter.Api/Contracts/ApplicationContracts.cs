@@ -155,7 +155,31 @@ public sealed record ConversationSessionSummary(
   bool Archived,
   string LastInteractionMode,
   bool Interrupted,
-  long StorageBytes
+  long StorageBytes,
+  bool Pinned = false,
+  DateTimeOffset? PinnedAt = null,
+  bool HasSummary = false,
+  string? PreferredModelProfileId = null,
+  string? SelectedModel = null
+);
+
+public sealed record SessionSummaryContent(
+  string Objective,
+  IReadOnlyList<string> Decisions,
+  IReadOnlyList<string> FilesChanged,
+  IReadOnlyList<string> CommandsAndValidation,
+  IReadOnlyList<string> UnresolvedIssues,
+  string NextSuggestedStep
+);
+
+public sealed record SessionSummaryRecord(
+  SessionSummaryContent Content,
+  string Model,
+  string Provider,
+  long EstimatedInputTokens,
+  DateTimeOffset CreatedAt,
+  DateTimeOffset UpdatedAt,
+  bool Generated
 );
 
 public sealed record ConversationSessionRecord(
@@ -175,7 +199,11 @@ public sealed record ConversationSessionRecord(
   bool ContextTruncated,
   bool ArtifactsTruncated,
   long StorageBytes,
-  IReadOnlyList<ExecutionSessionPersistenceSnapshot>? ExecutionRollbacks = null
+  IReadOnlyList<ExecutionSessionPersistenceSnapshot>? ExecutionRollbacks = null,
+  bool Pinned = false,
+  DateTimeOffset? PinnedAt = null,
+  SessionSummaryRecord? SessionSummary = null,
+  string? PreferredModelProfileId = null
 );
 
 public sealed record RenameConversationSessionRequest(
@@ -208,8 +236,97 @@ public sealed record ConversationPersistenceView(
 
 public sealed record ConversationSessionListResponse(
   IReadOnlyList<ConversationSessionSummary> Recent,
+  IReadOnlyList<ConversationSessionSummary> Pinned,
   IReadOnlyList<ConversationSessionSummary> Archived,
   WorkspaceHistoryUsage Usage
+);
+
+public sealed record ConversationSearchRequest(
+  string? Query,
+  bool AllWorkspaces = false,
+  string? Provider = null,
+  string? Model = null,
+  string? FileChanged = null,
+  string? ValidationResult = null,
+  DateTimeOffset? From = null,
+  DateTimeOffset? To = null,
+  bool? Archived = null,
+  bool? Pinned = null,
+  int Limit = 50
+);
+
+public sealed record SearchHighlightRange(
+  int Start,
+  int Length
+);
+
+public sealed record ConversationSearchResult(
+  string Id,
+  string WorkspaceId,
+  string WorkspaceName,
+  string Title,
+  DateTimeOffset UpdatedAt,
+  bool Archived,
+  bool Pinned,
+  bool HasSummary,
+  string? Provider,
+  string? Model,
+  string MatchField,
+  string Snippet,
+  IReadOnlyList<SearchHighlightRange> Highlights
+);
+
+public sealed record ConversationSearchResponse(
+  IReadOnlyList<ConversationSearchResult> Results,
+  bool Truncated,
+  int ScannedSessions,
+  string WorkspaceScope
+);
+
+public sealed record SetConversationPinnedRequest(
+  bool Pinned
+);
+
+public sealed record DuplicateConversationResponse(
+  ConversationSessionRecord Session,
+  string SourceSessionId
+);
+
+public sealed record SessionSummaryEstimate(
+  string SessionId,
+  string Model,
+  string Provider,
+  string ProviderDisplayName,
+  long EstimatedInputTokens,
+  int IncludedMessages,
+  int OmittedMessages,
+  bool PermissionRequired
+);
+
+public sealed record GenerateSessionSummaryRequest(
+  string Model,
+  bool Confirmed,
+  bool ProviderPermissionGranted
+);
+
+public sealed record UpdateSessionSummaryRequest(
+  SessionSummaryContent Content
+);
+
+public sealed record ContextUsageView(
+  int VisibleMessages,
+  int IncludedMessages,
+  int OmittedMessages,
+  long SystemInstructionTokens,
+  long CurrentUserMessageTokens,
+  long InputTokens,
+  string Accuracy,
+  int? ProviderMaximumTokens,
+  int ConfiguredProviderLimit,
+  int ApplicationLimit,
+  int ReservedResponseTokens,
+  bool Trimmed,
+  int WarningThreshold
 );
 
 public sealed record TrustedWorkspaceRequest(
@@ -539,7 +656,8 @@ public sealed record ChatStreamEvent(
   ExecutionSessionSummary? ExecutionSession = null,
   string? ConversationSessionId = null,
   RecoveryDecisionEvent? RecoveryDecision = null,
-  IReadOnlyList<ProviderCitation>? Citations = null
+  IReadOnlyList<ProviderCitation>? Citations = null,
+  ContextUsageView? ContextUsage = null
 );
 
 public sealed record ValidationErrorsResponse(

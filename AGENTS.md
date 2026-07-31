@@ -195,11 +195,41 @@ and model profiles.
 
 Conversation identity is host-generated and stable for the lifetime of a conversation. When history is enabled, persist the current snapshot successfully before creating or resuming another session; a failed save must leave the visible conversation intact. When history is disabled, meaningful content requires an explicit choice to enable and save, discard, or cancel. Never auto-resume conversations, pending approvals, or processes.
 
+Conversation search is literal, local, bounded, and cancellable. It may inspect
+titles, persisted visible user and assistant messages, workspace, exact
+provider/model identity, changed-file metadata, validation results, dates,
+archive state, and pin state. It must not use a model, embeddings, a cloud
+service, hidden instructions, raw tool results, or unrestricted process output.
+Pinned sessions remain explicitly deletable but are protected from ordinary
+retention cleanup.
+
+Session summaries are separate structured records created only after the user
+requests generation, reviews the bounded token estimate, and grants permission
+for the selected real provider or GPU. Summary input includes only bounded
+complete visible turns and authoritative bounded execution facts; exclude
+hidden prompts, raw process output, incomplete responses, credentials, and
+approval state. Summaries may be regenerated, edited, or deleted without
+rewriting conversation messages.
+
+Conversation duplication copies only safe visible messages, a valid preferred
+global profile reference, and the optional summary into a new host-generated
+identity. It must reset model lock, Execute state, approvals, processes,
+rollbacks, validation runtime, pin/archive state, and changed-file authority.
+Markdown export is readable and bounded, redacts likely secrets and absolute
+local paths, and never exports internal runtime authority.
+
 ## 9. Streaming and UI Contracts
 
 The frontend communicates only with the local API and must never call Ollama directly.
 
 Stream typed events in order and end every turn with exactly one terminal event. Only response-delta events contribute text to the visible assistant answer. Routing, model, tool, validation, retry, recovery, heartbeat, and timing events belong in collapsible activity details.
+
+The composer exposes a compact context-usage indicator. Before provider
+completion it is a conservative estimate; when the terminal provider response
+contains usage, input tokens are exact. Details distinguish visible, included,
+omitted, system, current-user, configured, provider-reported, reserved-response,
+and application limits. Warnings use the 70%, 85%, and 95% thresholds and must
+make trimming explicit.
 
 The chat remains the primary surface. Execute mode must additionally expose:
 

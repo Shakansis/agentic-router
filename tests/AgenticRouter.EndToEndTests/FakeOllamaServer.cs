@@ -567,6 +567,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   {
     if (messages.Any(
       message => message.Content.Contains(
+        "SESSION_SUMMARY_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await RespondToSessionSummaryAsync(
+        response,
+        cancellationToken
+      );
+      return;
+    }
+
+    if (messages.Any(
+      message => message.Content.Contains(
         "TOOL_PROTOCOL_CONFORMANCE_V1",
         StringComparison.Ordinal
       )
@@ -780,6 +794,49 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           content
         },
         done = true
+      },
+      cancellationToken
+    );
+  }
+
+  private static Task RespondToSessionSummaryAsync(
+    HttpListenerResponse response,
+    CancellationToken cancellationToken
+  )
+  {
+    return WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content = JsonSerializer.Serialize(
+            new
+            {
+              objective = "Preserve the tested conversation outcome.",
+              decisions = new[]
+              {
+                "Use the authoritative local session facts."
+              },
+              filesChanged = new[]
+              {
+                "hello.txt"
+              },
+              commandsAndValidation = new[]
+              {
+                "Deterministic validation passed."
+              },
+              unresolvedIssues = Array.Empty<string>(),
+              nextSuggestedStep = "Review the persisted result."
+            },
+            CompactJsonOptions
+          )
+        },
+        done = true,
+        prompt_eval_count = 72,
+        eval_count = 28
       },
       cancellationToken
     );

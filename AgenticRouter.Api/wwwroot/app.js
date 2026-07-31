@@ -48,7 +48,11 @@ const state = {
   webControlState: "unavailable",
   webSearch: null,
   attachments: [],
-  cloudImageApprovals: new Set()
+  cloudImageApprovals: new Set(),
+  sessionSearchController: null,
+  summarySession: null,
+  summaryEstimate: null,
+  contextUsage: null
 };
 
 const elements = {};
@@ -90,6 +94,10 @@ function bindElements() {
     "active-provider-model",
     "capability-tags",
     "fallback-indicator",
+    "context-usage",
+    "context-usage-summary",
+    "context-usage-warning",
+    "context-usage-details",
     "web-toggle",
     "web-toggle-label",
     "attach-image",
@@ -203,10 +211,45 @@ function bindElements() {
     "conversation-persistence",
     "conversation-persistence-sidebar",
     "enable-session-history",
+    "open-session-search",
+    "pinned-session-section",
+    "pinned-sessions",
     "recent-sessions",
     "archived-session-section",
     "archived-sessions",
     "history-new-conversation",
+    "session-search-dialog",
+    "session-search-form",
+    "session-search-query",
+    "session-search-model",
+    "session-search-file",
+    "session-search-validation",
+    "session-search-from",
+    "session-search-to",
+    "session-search-state",
+    "session-search-all-workspaces",
+    "session-search-status",
+    "session-search-results",
+    "run-session-search",
+    "close-session-search",
+    "cancel-session-search",
+    "session-summary-dialog",
+    "session-summary-form",
+    "session-summary-session-title",
+    "session-summary-model",
+    "session-summary-estimate",
+    "session-summary-objective",
+    "session-summary-decisions",
+    "session-summary-files",
+    "session-summary-validation",
+    "session-summary-unresolved",
+    "session-summary-next-step",
+    "session-summary-status",
+    "delete-session-summary",
+    "generate-session-summary",
+    "close-session-summary",
+    "cancel-session-summary",
+    "save-session-summary",
     "workspace-dialog",
     "workspace-form",
     "workspace-profile-list",
@@ -299,6 +342,7 @@ function bindEvents() {
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
   elements.messageInput.addEventListener("input", resizeComposer);
+  elements.messageInput.addEventListener("input", renderEstimatedContextUsage);
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
@@ -338,6 +382,39 @@ function bindEvents() {
   elements.deleteAllSessions.addEventListener(
     "click",
     deleteAllSessions
+  );
+  elements.openSessionSearch.addEventListener("click", openSessionSearch);
+  elements.sessionSearchForm.addEventListener("submit", runSessionSearch);
+  elements.closeSessionSearch.addEventListener("click", closeSessionSearch);
+  elements.cancelSessionSearch.addEventListener("click", closeSessionSearch);
+  elements.sessionSearchDialog.addEventListener(
+    "cancel",
+    event => {
+      event.preventDefault();
+      closeSessionSearch();
+    }
+  );
+  elements.sessionSummaryForm.addEventListener("submit", saveSessionSummary);
+  elements.sessionSummaryModel.addEventListener(
+    "change",
+    refreshSessionSummaryEstimate
+  );
+  elements.generateSessionSummary.addEventListener(
+    "click",
+    generateSessionSummary
+  );
+  elements.deleteSessionSummary.addEventListener(
+    "click",
+    deleteSessionSummary
+  );
+  elements.closeSessionSummary.addEventListener("click", closeSessionSummary);
+  elements.cancelSessionSummary.addEventListener("click", closeSessionSummary);
+  elements.sessionSummaryDialog.addEventListener(
+    "cancel",
+    event => {
+      event.preventDefault();
+      closeSessionSummary();
+    }
   );
   elements.purgeUsage.addEventListener(
     "click",
@@ -562,6 +639,7 @@ async function loadApplicationState() {
   renderValidationProfile();
   updateInteractionControls();
   await refreshSelectedModelCapabilities();
+  renderEstimatedContextUsage();
   await refreshSessions();
   await refreshGit();
 }
@@ -1181,7 +1259,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.7."
+        + "pelo Agentic Router v0.9.8."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1642,6 +1720,7 @@ async function refreshSessions() {
 }
 
 function renderSessionHistory() {
+  elements.pinnedSessions.replaceChildren();
   elements.recentSessions.replaceChildren();
   elements.archivedSessions.replaceChildren();
   const usage = state.sessions?.usage;
@@ -1658,6 +1737,12 @@ function renderSessionHistory() {
   elements.enableSessionHistory.hidden = Boolean(usage?.enabled);
   renderPersistenceStatus();
 
+  for (const session of state.sessions?.pinned ?? []) {
+    elements.pinnedSessions.append(
+      createSessionEntry(session)
+    );
+  }
+
   for (const session of state.sessions?.recent ?? []) {
     elements.recentSessions.append(
       createSessionEntry(session)
@@ -1672,6 +1757,8 @@ function renderSessionHistory() {
 
   elements.archivedSessionSection.hidden =
     (state.sessions?.archived?.length ?? 0) === 0;
+  elements.pinnedSessionSection.hidden =
+    (state.sessions?.pinned?.length ?? 0) === 0;
   renderSettingsSummaries();
 }
 
@@ -1693,6 +1780,8 @@ function createSessionEntry(session) {
   status.className = session.interrupted ? "session-interrupted" : "";
   status.textContent = [
     current ? "atual" : null,
+    session.pinned ? "fixada" : null,
+    session.hasSummary ? "com resumo" : null,
     session.interrupted ? "interrompida" : null,
     session.archived ? "arquivada" : null
   ].filter(Boolean).join(" · ");
@@ -1715,17 +1804,49 @@ function createSessionEntry(session) {
   archive.textContent = "Arquivar";
   archive.hidden = session.archived;
   archive.addEventListener("click", () => archiveSession(session.id));
+  const pin = document.createElement("button");
+  pin.type = "button";
+  pin.className = "secondary-button";
+  pin.textContent = session.pinned ? "Desafixar" : "Fixar";
+  pin.addEventListener("click", () => setSessionPinned(session));
+  const summary = document.createElement("button");
+  summary.type = "button";
+  summary.className = "secondary-button";
+  summary.textContent = session.hasSummary ? "Resumo ✓" : "Resumo";
+  summary.addEventListener("click", () => openSessionSummary(session));
+  const duplicate = document.createElement("button");
+  duplicate.type = "button";
+  duplicate.className = "secondary-button";
+  duplicate.textContent = "Duplicar";
+  duplicate.addEventListener("click", () => duplicateSession(session));
   const exportButton = document.createElement("a");
   exportButton.className = "secondary-button";
-  exportButton.textContent = "Exportar";
+  exportButton.textContent = "JSON";
   exportButton.href = `/api/sessions/${encodeURIComponent(session.id)}/export`;
   exportButton.download = "";
+  const markdown = document.createElement("a");
+  markdown.className = "secondary-button";
+  markdown.textContent = "Markdown";
+  markdown.href =
+    `/api/sessions/${encodeURIComponent(session.id)}/export/markdown`
+    + "?includeSummary=true&includeModelMetadata=true";
+  markdown.download = "";
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "secondary-button danger-button";
   remove.textContent = "Excluir";
   remove.addEventListener("click", () => deleteSession(session));
-  actions.append(resume, rename, archive, exportButton, remove);
+  actions.append(
+    resume,
+    pin,
+    summary,
+    duplicate,
+    rename,
+    archive,
+    markdown,
+    exportButton,
+    remove
+  );
   entry.append(title, metadata, status, actions);
   return entry;
 }
@@ -1885,6 +2006,402 @@ async function archiveSession(id) {
     }
   );
   await refreshSessions();
+}
+
+async function setSessionPinned(session) {
+  await fetchJson(
+    `/api/sessions/${encodeURIComponent(session.id)}/pin`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        pinned: !session.pinned
+      })
+    }
+  );
+  await refreshSessions();
+}
+
+async function duplicateSession(session) {
+  try {
+    const duplicate = await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/duplicate`,
+      {
+        method: "POST"
+      }
+    );
+    elements.sessionSearchStatus.textContent =
+      `Cópia criada: ${duplicate.session.title}`;
+    await refreshSessions();
+  } catch (error) {
+    elements.sessionSearchStatus.textContent = error.message;
+  }
+}
+
+function openSessionSearch() {
+  elements.sessionSearchStatus.textContent =
+    "A busca usa somente os arquivos locais de sessão.";
+  elements.sessionSearchResults.replaceChildren();
+  elements.sessionSearchDialog.showModal();
+  elements.sessionSearchQuery.focus();
+}
+
+function closeSessionSearch() {
+  state.sessionSearchController?.abort();
+  state.sessionSearchController = null;
+  elements.sessionSearchDialog.close();
+  elements.openSessionSearch.focus();
+}
+
+async function runSessionSearch(event) {
+  event.preventDefault();
+  state.sessionSearchController?.abort();
+  const controller = new AbortController();
+  state.sessionSearchController = controller;
+  elements.runSessionSearch.disabled = true;
+  elements.sessionSearchStatus.textContent = "Buscando registros locais…";
+  const stateFilter = elements.sessionSearchState.value;
+
+  try {
+    const result = await fetchJson(
+      "/api/sessions/search",
+      {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          query: elements.sessionSearchQuery.value.trim() || null,
+          allWorkspaces: elements.sessionSearchAllWorkspaces.checked,
+          model: elements.sessionSearchModel.value.trim() || null,
+          fileChanged: elements.sessionSearchFile.value.trim() || null,
+          validationResult:
+            elements.sessionSearchValidation.value.trim() || null,
+          from: searchDateValue(elements.sessionSearchFrom.value, false),
+          to: searchDateValue(elements.sessionSearchTo.value, true),
+          archived: stateFilter === "active"
+            ? false
+            : stateFilter === "archived"
+              ? true
+              : null,
+          pinned: stateFilter === "pinned" ? true : null,
+          limit: 50
+        })
+      }
+    );
+    renderSessionSearchResults(result);
+    elements.sessionSearchStatus.textContent =
+      `${result.results.length} resultado(s) · ${result.scannedSessions} sessão(ões) examinadas`
+      + `${result.truncated ? " · resultado limitado" : ""}`
+      + ` · ${result.workspaceScope === "active-workspace"
+        ? "workspace ativo"
+        : "todos os workspaces"}`;
+  } catch (error) {
+    elements.sessionSearchStatus.textContent = error.name === "AbortError"
+      ? "Busca cancelada."
+      : error.message;
+  } finally {
+    if (state.sessionSearchController === controller) {
+      state.sessionSearchController = null;
+    }
+
+    elements.runSessionSearch.disabled = false;
+  }
+}
+
+function searchDateValue(value, endOfDay) {
+  if (!value) {
+    return null;
+  }
+
+  return new Date(
+    `${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}`
+  ).toISOString();
+}
+
+function renderSessionSearchResults(response) {
+  elements.sessionSearchResults.replaceChildren();
+
+  for (const result of response.results) {
+    const entry = document.createElement("article");
+    entry.className = "session-search-result";
+    const title = document.createElement("strong");
+    title.textContent = result.title;
+    const metadata = document.createElement("small");
+    metadata.textContent = [
+      result.workspaceName,
+      new Date(result.updatedAt).toLocaleString(),
+      result.model,
+      result.pinned ? "fixada" : null,
+      result.archived ? "arquivada" : null
+    ].filter(Boolean).join(" · ");
+    const field = document.createElement("small");
+    field.textContent = `Correspondência: ${result.matchField}`;
+    const snippet = document.createElement("p");
+    appendHighlightedSnippet(
+      snippet,
+      result.snippet,
+      result.highlights
+    );
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "secondary-button";
+    open.textContent = "Retomar com segurança";
+    open.addEventListener(
+      "click",
+      async () => {
+        closeSessionSearch();
+        await resumeSession(result.id);
+      }
+    );
+    entry.append(title, metadata, field, snippet, open);
+    elements.sessionSearchResults.append(entry);
+  }
+
+  if (response.results.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "runtime-note";
+    empty.textContent = "Nenhuma conversa corresponde aos filtros.";
+    elements.sessionSearchResults.append(empty);
+  }
+}
+
+function appendHighlightedSnippet(container, value, ranges) {
+  let offset = 0;
+
+  for (const range of ranges ?? []) {
+    const start = Math.max(
+      offset,
+      range.start
+    );
+    const end = Math.min(
+      value.length,
+      start + range.length
+    );
+
+    if (start > offset) {
+      container.append(
+        document.createTextNode(
+          value.slice(offset, start)
+        )
+      );
+    }
+
+    const mark = document.createElement("mark");
+    mark.textContent = value.slice(start, end);
+    container.append(mark);
+    offset = end;
+  }
+
+  if (offset < value.length) {
+    container.append(
+      document.createTextNode(
+        value.slice(offset)
+      )
+    );
+  }
+}
+
+async function openSessionSummary(session) {
+  state.summarySession = session;
+  state.summaryEstimate = null;
+  elements.sessionSummarySessionTitle.textContent = session.title;
+  replaceOptions(
+    elements.sessionSummaryModel,
+    modelOptions(),
+    session.selectedModel
+      && state.models.some(model => model.name === session.selectedModel)
+      ? session.selectedModel
+      : state.settings.defaultModel
+  );
+  elements.sessionSummaryStatus.textContent =
+    "O resumo é separado das mensagens originais.";
+  elements.sessionSummaryDialog.showModal();
+
+  try {
+    const summary = await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/summary`
+    );
+    fillSessionSummary(summary?.content ?? null);
+    elements.deleteSessionSummary.disabled = !summary;
+  } catch (error) {
+    fillSessionSummary(null);
+    elements.sessionSummaryStatus.textContent = error.message;
+  }
+
+  await refreshSessionSummaryEstimate();
+  elements.sessionSummaryObjective.focus();
+}
+
+function closeSessionSummary() {
+  state.summarySession = null;
+  state.summaryEstimate = null;
+  elements.sessionSummaryDialog.close();
+}
+
+async function refreshSessionSummaryEstimate() {
+  const session = state.summarySession;
+  const model = elements.sessionSummaryModel.value;
+
+  if (!session || !model) {
+    elements.sessionSummaryEstimate.textContent = "Selecione um modelo.";
+    return;
+  }
+
+  elements.sessionSummaryEstimate.textContent = "Calculando fatos limitados…";
+
+  try {
+    state.summaryEstimate = await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/summary/estimate`
+        + `?model=${encodeURIComponent(model)}`
+    );
+    const estimate = state.summaryEstimate;
+    elements.sessionSummaryEstimate.textContent =
+      `${providerLabel(estimate.provider)} · ${estimate.model} · `
+      + `até ${formatInteger(estimate.estimatedInputTokens)} tokens estimados · `
+      + `${estimate.includedMessages} mensagens incluídas`
+      + `${estimate.omittedMessages
+        ? ` · ${estimate.omittedMessages} omitidas`
+        : ""}`;
+  } catch (error) {
+    state.summaryEstimate = null;
+    elements.sessionSummaryEstimate.textContent = error.message;
+  }
+}
+
+async function generateSessionSummary() {
+  const session = state.summarySession;
+  const estimate = state.summaryEstimate;
+
+  if (!session || !estimate) {
+    return;
+  }
+
+  if (!window.confirm(
+    `Gerar resumo com ${providerLabel(estimate.provider)} · ${estimate.model}? `
+      + `A chamada pode usar GPU ou quota real e estima até `
+      + `${formatInteger(estimate.estimatedInputTokens)} tokens de entrada.`
+  )) {
+    return;
+  }
+
+  elements.generateSessionSummary.disabled = true;
+  elements.sessionSummaryStatus.textContent = "Gerando resumo explícito…";
+
+  try {
+    const summary = await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/summary`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: estimate.model,
+          confirmed: true,
+          providerPermissionGranted: true
+        })
+      }
+    );
+    fillSessionSummary(summary.content);
+    elements.deleteSessionSummary.disabled = false;
+    elements.sessionSummaryStatus.textContent =
+      "Resumo gerado e persistido separadamente.";
+    await refreshSessions();
+  } catch (error) {
+    elements.sessionSummaryStatus.textContent = error.message;
+  } finally {
+    elements.generateSessionSummary.disabled = false;
+  }
+}
+
+async function saveSessionSummary(event) {
+  event.preventDefault();
+  const session = state.summarySession;
+
+  if (!session) {
+    return;
+  }
+
+  try {
+    const summary = await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/summary`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          content: collectSessionSummary()
+        })
+      }
+    );
+    fillSessionSummary(summary.content);
+    elements.deleteSessionSummary.disabled = false;
+    elements.sessionSummaryStatus.textContent =
+      "Edição do resumo salva sem chamar modelo.";
+    await refreshSessions();
+  } catch (error) {
+    elements.sessionSummaryStatus.textContent = error.message;
+  }
+}
+
+async function deleteSessionSummary() {
+  const session = state.summarySession;
+
+  if (!session || !window.confirm("Excluir somente o resumo desta conversa?")) {
+    return;
+  }
+
+  try {
+    await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/summary`,
+      {
+        method: "DELETE"
+      }
+    );
+    fillSessionSummary(null);
+    elements.deleteSessionSummary.disabled = true;
+    elements.sessionSummaryStatus.textContent = "Resumo excluído.";
+    await refreshSessions();
+  } catch (error) {
+    elements.sessionSummaryStatus.textContent = error.message;
+  }
+}
+
+function collectSessionSummary() {
+  return {
+    objective: elements.sessionSummaryObjective.value.trim(),
+    decisions: summaryLines(elements.sessionSummaryDecisions.value),
+    filesChanged: summaryLines(elements.sessionSummaryFiles.value),
+    commandsAndValidation:
+      summaryLines(elements.sessionSummaryValidation.value),
+    unresolvedIssues:
+      summaryLines(elements.sessionSummaryUnresolved.value),
+    nextSuggestedStep: elements.sessionSummaryNextStep.value.trim()
+  };
+}
+
+function fillSessionSummary(content) {
+  elements.sessionSummaryObjective.value = content?.objective ?? "";
+  elements.sessionSummaryDecisions.value =
+    (content?.decisions ?? []).join("\n");
+  elements.sessionSummaryFiles.value =
+    (content?.filesChanged ?? []).join("\n");
+  elements.sessionSummaryValidation.value =
+    (content?.commandsAndValidation ?? []).join("\n");
+  elements.sessionSummaryUnresolved.value =
+    (content?.unresolvedIssues ?? []).join("\n");
+  elements.sessionSummaryNextStep.value = content?.nextSuggestedStep ?? "";
+}
+
+function summaryLines(value) {
+  return value.split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
 }
 
 async function deleteSession(session) {
@@ -4445,6 +4962,7 @@ async function refreshSelectedModelCapabilities(
   }
 
   renderCapabilityContext();
+  renderEstimatedContextUsage();
 }
 
 function renderCapabilityContext() {
@@ -5067,6 +5585,7 @@ function clearConversationUi() {
   state.activeAgentModel = null;
   state.activeAgentRole = null;
   state.modelCapability = null;
+  state.contextUsage = null;
   state.webEnabled = false;
   state.webControlState = "unavailable";
   state.cloudImageApprovals.clear();
@@ -5091,6 +5610,7 @@ function clearConversationUi() {
   updateModelLockControls();
   updateInteractionControls();
   updateComposerStatus();
+  renderEstimatedContextUsage();
   updateJumpControl();
   elements.messageInput.focus();
 }
@@ -5652,6 +6172,11 @@ async function consumeEventStream(stream, assistant) {
       const streamEvent = JSON.parse(data);
       state.conversationSessionId =
         streamEvent.conversationSessionId ?? state.conversationSessionId;
+
+      if (streamEvent.contextUsage) {
+        state.contextUsage = streamEvent.contextUsage;
+        renderContextUsage();
+      }
 
       if (
         streamEvent.type === "target.model-resolved"
@@ -7415,6 +7940,169 @@ function setStreamingState(isStreaming) {
   updateModelLockControls();
   updateComposerStatus();
   renderWebControl();
+}
+
+function renderEstimatedContextUsage() {
+  if (!state.settings || state.requestController) {
+    return;
+  }
+
+  const visible = [
+    ...state.history,
+    ...(elements.messageInput.value.trim()
+      ? [
+        {
+          role: "user",
+          content: elements.messageInput.value
+        }
+      ]
+      : [])
+  ];
+  const currentUser = Math.max(
+    0,
+    Math.ceil(elements.messageInput.value.length / 4) + (
+      elements.messageInput.value ? 4 : 0
+    )
+  );
+  const system = 128;
+  const historyTokens = visible.reduce(
+    (total, message) =>
+      total + Math.max(1, Math.ceil(message.content.length / 4) + 4),
+    0
+  );
+  const applicationLimit = state.settings.context.defaultContextTokens;
+  const configuredProviderLimit =
+    state.settings.context.providerContextTokens;
+  const effective = Math.min(
+    applicationLimit,
+    configuredProviderLimit
+  );
+  const reserved = state.settings.context.reservedResponseTokens;
+  const usable = Math.max(
+    1,
+    effective - reserved
+  );
+  const inputTokens = system + historyTokens;
+  const percentage = inputTokens * 100 / usable;
+  state.contextUsage = {
+    visibleMessages: visible.length,
+    includedMessages: Math.min(
+      visible.length,
+      state.settings.context.maxConversationMessages
+    ),
+    omittedMessages: Math.max(
+      0,
+      visible.length - state.settings.context.maxConversationMessages
+    ),
+    systemInstructionTokens: system,
+    currentUserMessageTokens: currentUser,
+    inputTokens,
+    accuracy: "estimated",
+    providerMaximumTokens: state.modelCapability?.capabilities?.contextTokens ?? null,
+    configuredProviderLimit,
+    applicationLimit,
+    reservedResponseTokens: reserved,
+    trimmed: visible.length > state.settings.context.maxConversationMessages,
+    warningThreshold: percentage >= 95
+      ? 95
+      : percentage >= 85
+        ? 85
+        : percentage >= 70
+          ? 70
+          : 0
+  };
+  renderContextUsage();
+}
+
+function renderContextUsage() {
+  const usage = state.contextUsage;
+
+  if (!usage) {
+    elements.contextUsageSummary.textContent = "Contexto estimado";
+    elements.contextUsageDetails.replaceChildren();
+    return;
+  }
+
+  const providerLimit = usage.providerMaximumTokens
+    ?? usage.configuredProviderLimit;
+  const effectiveLimit = Math.min(
+    usage.applicationLimit,
+    providerLimit
+  );
+  elements.contextUsageSummary.textContent =
+    `Contexto ${formatCompactTokens(usage.inputTokens)} / `
+    + `${formatCompactTokens(effectiveLimit)} · `
+    + `${usage.accuracy === "exact" ? "exato" : "estimado"}`;
+  elements.contextUsage.dataset.accuracy = usage.accuracy;
+  elements.contextUsage.dataset.warning =
+    usage.warningThreshold ? String(usage.warningThreshold) : "";
+  elements.contextUsageWarning.hidden =
+    !usage.warningThreshold && !usage.trimmed;
+  elements.contextUsageWarning.textContent = [
+    usage.warningThreshold
+      ? `Atenção: contexto acima de ${usage.warningThreshold}% da capacidade útil.`
+      : null,
+    usage.trimmed
+      ? "Mensagens antigas foram omitidas do contexto enviado."
+      : null
+  ].filter(Boolean).join(" ");
+  elements.contextUsageDetails.replaceChildren(
+    contextDetail("Mensagens visíveis", usage.visibleMessages),
+    contextDetail("Mensagens incluídas", usage.includedMessages),
+    contextDetail("Mensagens omitidas", usage.omittedMessages),
+    contextDetail(
+      "Sistema e instruções",
+      `${formatInteger(usage.systemInstructionTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Mensagem atual",
+      `${formatInteger(usage.currentUserMessageTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Máximo do provedor",
+      usage.providerMaximumTokens == null
+        ? "não reportado"
+        : `${formatInteger(usage.providerMaximumTokens)} tokens`
+    ),
+    contextDetail(
+      "Limite de provedor configurado",
+      `${formatInteger(usage.configuredProviderLimit)} tokens`
+    ),
+    contextDetail(
+      "Limite da aplicação",
+      `${formatInteger(usage.applicationLimit)} tokens`
+    ),
+    contextDetail(
+      "Reserva de resposta",
+      `${formatInteger(usage.reservedResponseTokens)} tokens`
+    )
+  );
+}
+
+function contextDetail(label, value) {
+  const fragment = document.createDocumentFragment();
+  const term = document.createElement("dt");
+  const detail = document.createElement("dd");
+  term.textContent = label;
+  detail.textContent = value;
+  fragment.append(term, detail);
+  return fragment;
+}
+
+function formatCompactTokens(value) {
+  const numeric = Number(value) || 0;
+
+  if (numeric < 1000) {
+    return formatInteger(numeric);
+  }
+
+  return `${(numeric / 1000).toLocaleString(
+    "pt-BR",
+    {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1
+    }
+  )}k`;
 }
 
 function updateComposerStatus() {

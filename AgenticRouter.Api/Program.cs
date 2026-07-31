@@ -146,6 +146,10 @@ builder.Services.AddSingleton<IModelOrganizationService>(
     services.GetRequiredService<IWorkspaceProfileService>()
   )
 );
+builder.Services.AddSingleton<
+  IConversationProductivityService,
+  ConversationProductivityService
+>();
 builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
 builder.Services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
 builder.Services.AddSingleton<ResidentModelManager>();

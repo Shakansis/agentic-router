@@ -1,3 +1,33 @@
+# Agentic Router v0.9.8
+
+This development version adds local conversation productivity tools and a
+transparent context-usage indicator without introducing background inference.
+
+## Highlights
+
+- Adds literal, bounded, cancellable local search over conversation titles,
+  visible persisted messages, workspace, exact provider/model, changed files,
+  validation, dates, archive state, and pin state.
+- Adds pin/unpin with a stable pinned section and protects pinned conversations
+  from automatic retention cleanup while preserving explicit deletion.
+- Adds explicit structured session summaries with a pre-generation token
+  estimate and per-request provider/GPU permission. Summary facts exclude
+  hidden prompts, raw process output, incomplete responses, credentials, and
+  approval state.
+- Stores summaries separately so they can be regenerated, edited, or deleted
+  without rewriting visible conversation history.
+- Adds safe conversation duplication with new Host identity and reset runtime,
+  execution, model-lock, approval, rollback, archive, and pin state.
+- Adds readable bounded Markdown export with optional summary and model
+  metadata, secret and absolute-path redaction, and no internal runtime
+  authority.
+- Adds compact estimated/exact context usage with visible, included, omitted,
+  system, current-request, provider, configured, application, and reserved
+  response details plus 70%, 85%, 95%, and trimming warnings.
+- Adds deterministic browser/API coverage for search, highlights, pin-aware
+  retention, summary consent and persistence, safe duplication, sanitized
+  Markdown, context trimming, and exact provider usage.
+
 # Agentic Router v0.9.7
 
 This development version adds local model organization, authoritative

@@ -10,12 +10,15 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class SessionsController : ControllerBase
 {
   private readonly IPersistentSessionService _sessions;
+  private readonly IConversationProductivityService _productivity;
 
   public SessionsController(
-    IPersistentSessionService sessions
+    IPersistentSessionService sessions,
+    IConversationProductivityService productivity
   )
   {
     _sessions = sessions;
+    _productivity = productivity;
   }
 
   [HttpGet]
@@ -25,6 +28,20 @@ public sealed class SessionsController : ControllerBase
   {
     return await ExecuteAsync(
       () => _sessions.ListAsync(
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPost("search")]
+  public async Task<IActionResult> Search(
+    [FromBody] ConversationSearchRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.SearchAsync(
+        request,
         cancellationToken
       )
     );
@@ -102,6 +119,125 @@ public sealed class SessionsController : ControllerBase
         cancellationToken
       )
     );
+  }
+
+  [HttpPut("{id}/pin")]
+  public async Task<IActionResult> SetPinned(
+    string id,
+    [FromBody] SetConversationPinnedRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.SetPinnedAsync(
+        id,
+        request.Pinned,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPost("{id}/duplicate")]
+  public async Task<IActionResult> Duplicate(
+    string id,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.DuplicateAsync(
+        id,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpGet("{id}/summary/estimate")]
+  public async Task<IActionResult> EstimateSummary(
+    string id,
+    [FromQuery] string model,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.EstimateSummaryAsync(
+        id,
+        model,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpGet("{id}/summary")]
+  public async Task<IActionResult> GetSummary(
+    string id,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.GetSummaryAsync(
+        id,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPost("{id}/summary")]
+  public async Task<IActionResult> GenerateSummary(
+    string id,
+    [FromBody] GenerateSessionSummaryRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.GenerateSummaryAsync(
+        id,
+        request,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPut("{id}/summary")]
+  public async Task<IActionResult> UpdateSummary(
+    string id,
+    [FromBody] UpdateSessionSummaryRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _productivity.UpdateSummaryAsync(
+        id,
+        request.Content,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpDelete("{id}/summary")]
+  public async Task<IActionResult> DeleteSummary(
+    string id,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      await _productivity.DeleteSummaryAsync(
+        id,
+        cancellationToken
+      );
+      return NoContent();
+    }
+    catch (WorkspaceProfileException exception)
+    {
+      return BadRequest(
+        Error(
+          exception.Code,
+          exception.Stage,
+          exception.Message,
+          exception.Retryable
+        )
+      );
+    }
   }
 
   [HttpDelete("{id}")]
@@ -195,6 +331,41 @@ public sealed class SessionsController : ControllerBase
       return BadRequest(
         Error(
           "session-export-failed",
+          exception.Stage,
+          exception.Message,
+          exception.Retryable
+        )
+      );
+    }
+  }
+
+  [HttpGet("{id}/export/markdown")]
+  public async Task<IActionResult> ExportMarkdown(
+    string id,
+    [FromQuery] bool includeSummary = true,
+    [FromQuery] bool includeModelMetadata = false,
+    CancellationToken cancellationToken = default
+  )
+  {
+    try
+    {
+      var content = await _productivity.ExportMarkdownAsync(
+        id,
+        includeSummary,
+        includeModelMetadata,
+        cancellationToken
+      );
+      return File(
+        content,
+        "text/markdown; charset=utf-8",
+        $"agentic-router-session-{id}.md"
+      );
+    }
+    catch (WorkspaceProfileException exception)
+    {
+      return BadRequest(
+        Error(
+          "session-markdown-export-failed",
           exception.Stage,
           exception.Message,
           exception.Retryable

@@ -495,6 +495,27 @@ public sealed class ChatStreamService : IChatStreamService
         settings,
         intention
       );
+      var contextUsage = CreateContextUsage(
+        context,
+        capabilities,
+        settings,
+        null
+      );
+      yield return new ChatStreamEvent(
+        requestId,
+        "context.usage",
+        DateTimeOffset.UtcNow,
+        null,
+        null,
+        selectedModel,
+        isAuto
+          ? intention
+          : null,
+        stopwatch.ElapsedMilliseconds,
+        null,
+        null,
+        ContextUsage: contextUsage
+      );
 
       if (context.OmittedMessages > 0)
       {
@@ -1243,6 +1264,7 @@ public sealed class ChatStreamService : IChatStreamService
             cancellationToken
           );
           var fallbackCapabilities = fallbackCapabilityResolution.Capabilities;
+          capabilities = fallbackCapabilities;
 
           if (fallbackCapabilityResolution.Warning is not null)
           {
@@ -1525,6 +1547,12 @@ public sealed class ChatStreamService : IChatStreamService
             _executionSession.CreateSummary().CompletionStatus
           )
         );
+      contextUsage = CreateContextUsage(
+        context,
+        capabilities,
+        settings,
+        progress.Usage
+      );
       yield return new ChatStreamEvent(
         requestId,
         "response.completed",
@@ -1542,7 +1570,8 @@ public sealed class ChatStreamService : IChatStreamService
         null,
         null,
         _executionSession?.CreateSummary(),
-        Citations: progress.Citations
+        Citations: progress.Citations,
+        ContextUsage: contextUsage
       );
     }
     finally
@@ -3242,6 +3271,11 @@ public sealed class ChatStreamService : IChatStreamService
         progress.Citations = update.Citations;
       }
 
+      if (update.Usage is not null)
+      {
+        progress.Usage = update.Usage;
+      }
+
       if (!string.IsNullOrWhiteSpace(
         update.RetryActivity
       ))
@@ -3570,6 +3604,54 @@ public sealed class ChatStreamService : IChatStreamService
     }
 
     return labels;
+  }
+
+  private static ContextUsageView CreateContextUsage(
+    ConversationContextResult context,
+    ProviderModelCapabilities capabilities,
+    ApplicationSettings settings,
+    ProviderTokenUsage? providerUsage
+  )
+  {
+    var providerLimit = capabilities.ContextTokens;
+    var configuredProviderLimit = settings.Context.ProviderContextTokens;
+    var effectiveProviderLimit = providerLimit
+      ?? configuredProviderLimit;
+    var effectiveLimit = Math.Min(
+      settings.Context.DefaultContextTokens,
+      effectiveProviderLimit
+    );
+    var inputTokens = providerUsage?.InputTokens
+      ?? context.EstimatedInputTokens;
+    var usable = Math.Max(
+      1,
+      effectiveLimit - settings.Context.ReservedResponseTokens
+    );
+    var percentage = inputTokens * 100d / usable;
+    var warning = percentage >= 95
+      ? 95
+      : percentage >= 85
+        ? 85
+        : percentage >= 70
+          ? 70
+          : 0;
+    return new ContextUsageView(
+      context.VisibleMessages,
+      context.IncludedMessages,
+      context.OmittedMessages,
+      context.SystemInstructionTokens,
+      context.CurrentUserMessageTokens,
+      inputTokens,
+      providerUsage is null
+        ? "estimated"
+        : "exact",
+      providerLimit,
+      configuredProviderLimit,
+      settings.Context.DefaultContextTokens,
+      settings.Context.ReservedResponseTokens,
+      context.OmittedMessages > 0,
+      warning
+    );
   }
 
   private async Task<IntentionRoutingResult> ClassifyAsync(
@@ -4847,6 +4929,8 @@ public sealed class ChatStreamService : IChatStreamService
     public OllamaProviderException? Failure { get; set; }
 
     public IReadOnlyList<ProviderCitation>? Citations { get; set; }
+
+    public ProviderTokenUsage? Usage { get; set; }
   }
 
   private sealed class ExecutionProgress

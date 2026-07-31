@@ -96,11 +96,18 @@
         <button id="history-new-conversation" class="secondary-button" type="button">
           Nova conversa
         </button>
+        <button id="open-session-search" class="secondary-button" type="button">
+          Buscar
+        </button>
         <button id="enable-session-history" class="secondary-button" type="button" hidden>
           Ativar histórico
         </button>
       </div>
       <p id="conversation-persistence-sidebar" class="persistence-status">Unsaved</p>
+      <section id="pinned-session-section" class="pinned-session-section" hidden>
+        <h2>Fixadas</h2>
+        <div id="pinned-sessions" class="session-list"></div>
+      </section>
       <div id="recent-sessions" class="session-list"></div>
       <details id="archived-session-section" class="archived-session-section">
         <summary>Arquivadas</summary>
@@ -111,7 +118,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.7</span>
+    <span class="app-version">v0.9.8</span>
   </aside>
 
   <main class="workspace">
@@ -185,6 +192,14 @@
           <span id="fallback-indicator" class="fallback-indicator" hidden>
             Fallback local disponível
           </span>
+          <details id="context-usage" class="context-usage">
+            <summary id="context-usage-summary">Contexto estimado</summary>
+            <div class="context-usage-popover">
+              <strong id="context-usage-warning" hidden></strong>
+              <dl id="context-usage-details"></dl>
+              <small>O histórico visível pode ser maior que o contexto enviado.</small>
+            </div>
+          </details>
         </div>
         <div
           id="attachment-previews"
@@ -552,8 +567,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.7."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.7."
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.8."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.8."
                 >i</button>
               </div>
             </div>
@@ -836,8 +851,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.7."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.7. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.8."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.8. Desativar interrompe novas gravações, mas não apaga registros existentes."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
@@ -1031,6 +1046,122 @@
         <button id="dismiss-cloud-usage" class="primary-button" type="button">Fechar</button>
       </footer>
     </div>
+  </dialog>
+
+  <dialog id="session-search-dialog" class="settings-dialog productivity-dialog">
+    <form id="session-search-form" method="dialog">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Histórico local</span>
+          <h2>Buscar conversas</h2>
+          <p>Busca literal e limitada nos registros locais. Nenhum modelo é chamado.</p>
+        </div>
+        <button id="close-session-search" class="icon-button" type="button" aria-label="Fechar busca">×</button>
+      </header>
+      <div class="dialog-body productivity-dialog-body">
+        <div class="session-search-grid">
+          <label>
+            <span>Texto, título, workspace, provedor ou modelo</span>
+            <input id="session-search-query" type="search" autocomplete="off">
+          </label>
+          <label>
+            <span>Modelo</span>
+            <input id="session-search-model" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>Arquivo alterado</span>
+            <input id="session-search-file" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>Resultado de validação</span>
+            <input id="session-search-validation" type="text" autocomplete="off">
+          </label>
+          <label>
+            <span>De</span>
+            <input id="session-search-from" type="date">
+          </label>
+          <label>
+            <span>Até</span>
+            <input id="session-search-to" type="date">
+          </label>
+          <label>
+            <span>Estado</span>
+            <select id="session-search-state">
+              <option value="all">Ativas e arquivadas</option>
+              <option value="active">Somente ativas</option>
+              <option value="archived">Somente arquivadas</option>
+              <option value="pinned">Somente fixadas</option>
+            </select>
+          </label>
+          <label class="history-toggle">
+            <input id="session-search-all-workspaces" type="checkbox">
+            <span>Todos os workspaces</span>
+          </label>
+        </div>
+        <p id="session-search-status" class="runtime-note" role="status"></p>
+        <div id="session-search-results" class="session-search-results"></div>
+      </div>
+      <footer class="dialog-footer">
+        <button id="cancel-session-search" class="secondary-button" type="button">Fechar</button>
+        <button id="run-session-search" class="primary-button" type="submit">Buscar</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="session-summary-dialog" class="settings-dialog productivity-dialog">
+    <form id="session-summary-form" method="dialog">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Ação explícita</span>
+          <h2>Resumo da conversa</h2>
+          <p id="session-summary-session-title">Selecione uma conversa salva.</p>
+        </div>
+        <button id="close-session-summary" class="icon-button" type="button" aria-label="Fechar resumo">×</button>
+      </header>
+      <div class="dialog-body productivity-dialog-body">
+        <div class="settings-grid">
+          <label>
+            <span>Modelo para gerar ou regenerar</span>
+            <select id="session-summary-model"></select>
+          </label>
+          <div>
+            <span>Estimativa antes da execução</span>
+            <p id="session-summary-estimate" class="runtime-note">Selecione um modelo.</p>
+          </div>
+        </div>
+        <label>
+          <span>Objetivo</span>
+          <textarea id="session-summary-objective" rows="3" maxlength="2000"></textarea>
+        </label>
+        <label>
+          <span>Decisões — uma por linha</span>
+          <textarea id="session-summary-decisions" rows="4"></textarea>
+        </label>
+        <label>
+          <span>Arquivos alterados — um por linha</span>
+          <textarea id="session-summary-files" rows="4"></textarea>
+        </label>
+        <label>
+          <span>Comandos e validação — um por linha</span>
+          <textarea id="session-summary-validation" rows="4"></textarea>
+        </label>
+        <label>
+          <span>Questões não resolvidas — uma por linha</span>
+          <textarea id="session-summary-unresolved" rows="4"></textarea>
+        </label>
+        <label>
+          <span>Próximo passo sugerido</span>
+          <textarea id="session-summary-next-step" rows="3" maxlength="2000"></textarea>
+        </label>
+        <p id="session-summary-status" class="runtime-note" role="status"></p>
+      </div>
+      <footer class="dialog-footer">
+        <button id="delete-session-summary" class="secondary-button danger-button" type="button">Excluir resumo</button>
+        <button id="generate-session-summary" class="secondary-button" type="button">Gerar com modelo</button>
+        <button id="cancel-session-summary" class="secondary-button" type="button">Fechar</button>
+        <button id="save-session-summary" class="primary-button" type="submit">Salvar edição</button>
+      </footer>
+    </form>
   </dialog>
 
   <dialog id="new-conversation-dialog" class="confirmation-dialog">

@@ -16,7 +16,11 @@ public sealed record ConversationContextResult(
   IReadOnlyList<ChatMessage> Messages,
   int OmittedMessages,
   int EstimatedInputTokens,
-  string Diagnostic
+  string Diagnostic,
+  int VisibleMessages,
+  int IncludedMessages,
+  int SystemInstructionTokens,
+  int CurrentUserMessageTokens
 );
 
 public sealed class ConversationContextBuilder : IConversationContextBuilder
@@ -42,11 +46,13 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
       "user",
       request.Message
     );
-    var fixedTokens = systemMessages.Sum(
+    var systemInstructionTokens = systemMessages.Sum(
       EstimateTokens
-    ) + EstimateTokens(
+    );
+    var currentUserMessageTokens = EstimateTokens(
       current
     );
+    var fixedTokens = systemInstructionTokens + currentUserMessageTokens;
     var historyBudget = Math.Max(
       0,
       settings.Context.DefaultContextTokens
@@ -105,7 +111,14 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
       totalUsefulHistory - history.Length,
       fixedTokens + selectedTokens,
       "Context size and token count are conservative estimates because Ollama did not "
-        + "report a reliable model context limit."
+        + "report a reliable model context limit.",
+      (
+        request.History?.Count
+          ?? 0
+      ) + 1,
+      history.Length + 1,
+      systemInstructionTokens,
+      currentUserMessageTokens
     );
   }
 
