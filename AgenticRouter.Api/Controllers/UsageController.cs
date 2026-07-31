@@ -15,18 +15,21 @@ public sealed class UsageController : ControllerBase
   private readonly IUsageLedger _ledger;
   private readonly IPricingCatalog _pricing;
   private readonly ICloudProviderRegistry _cloudProviders;
+  private readonly IUsageReconciliationService _reconciliation;
 
   public UsageController(
     ISettingsStore settingsStore,
     IUsageLedger ledger,
     IPricingCatalog pricing,
-    ICloudProviderRegistry cloudProviders
+    ICloudProviderRegistry cloudProviders,
+    IUsageReconciliationService reconciliation
   )
   {
     _settingsStore = settingsStore;
     _ledger = ledger;
     _pricing = pricing;
     _cloudProviders = cloudProviders;
+    _reconciliation = reconciliation;
   }
 
   [HttpGet("overview")]
@@ -265,6 +268,19 @@ public sealed class UsageController : ControllerBase
   {
     return Ok(
       _pricing.Get()
+    );
+  }
+
+  [HttpPost("reconcile")]
+  public async Task<ActionResult<UsageReconciliationResult>> Reconcile(
+    CancellationToken cancellationToken
+  )
+  {
+    return Ok(
+      await _reconciliation.RebuildAsync(
+        false,
+        cancellationToken
+      )
     );
   }
 

@@ -109,7 +109,8 @@ public sealed record OllamaChatUpdate(
   ProviderTokenUsage? Usage = null,
   ProviderRateLimitSnapshot? RateLimit = null,
   IReadOnlyList<ProviderCitation>? Citations = null,
-  ProviderActivityMetadata? Activity = null
+  ProviderActivityMetadata? Activity = null,
+  string? RetryActivity = null
 );
 
 public sealed record OllamaToolDefinition(

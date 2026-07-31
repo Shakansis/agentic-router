@@ -3242,6 +3242,20 @@ public sealed class ChatStreamService : IChatStreamService
         progress.Citations = update.Citations;
       }
 
+      if (!string.IsNullOrWhiteSpace(
+        update.RetryActivity
+      ))
+      {
+        yield return Event(
+          requestId,
+          "provider.retry",
+          update.RetryActivity,
+          stopwatch,
+          model,
+          intention
+        );
+      }
+
       if (string.IsNullOrEmpty(
         update.Delta
       ))

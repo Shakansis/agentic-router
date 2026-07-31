@@ -815,6 +815,9 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       var rateLimit = ReadRateLimit(
         response
       );
+      var retryAfter = ReadRetryAfter(
+        response
+      );
       var status = (int)response.StatusCode;
       var code = response.StatusCode == HttpStatusCode.TooManyRequests
         ? "provider-rate-limited"
@@ -833,7 +836,8 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         $"{DisplayName} rejected the request. {error}",
         status,
         status is 408 or 429 or >= 500,
-        rateLimit
+        rateLimit,
+        retryAfter: retryAfter
       );
     }
 
@@ -1002,8 +1006,33 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       ReadRateLimit(
         response
       ),
-      innerException
+      innerException,
+      ReadRetryAfter(
+        response
+      )
     );
+  }
+
+  private static TimeSpan? ReadRetryAfter(
+    HttpResponseMessage response
+  )
+  {
+    var value = response.Headers.RetryAfter;
+
+    if (value?.Delta is not null)
+    {
+      return value.Delta.Value;
+    }
+
+    if (value?.Date is null)
+    {
+      return null;
+    }
+
+    var delay = value.Date.Value - DateTimeOffset.UtcNow;
+    return delay > TimeSpan.Zero
+      ? delay
+      : TimeSpan.Zero;
   }
 
   protected static string? ReadString(

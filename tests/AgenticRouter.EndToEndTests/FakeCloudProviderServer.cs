@@ -15,6 +15,9 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
   private readonly HttpListener _listener = new();
   private readonly CancellationTokenSource _shutdown = new();
   private readonly ConcurrentQueue<FakeCloudRequest> _requests = new();
+  private readonly ConcurrentDictionary<string, int> _scenarioRequests = new(
+    StringComparer.Ordinal
+  );
   private Task? _listenTask;
 
   private FakeCloudProviderServer(
@@ -46,6 +49,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
   public void Reset()
   {
     _requests.Clear();
+    _scenarioRequests.Clear();
   }
 
   public async ValueTask DisposeAsync()
@@ -324,6 +328,9 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
         await HandleOpenAiChatAsync(
           context,
           body,
+          ScenarioAttempt(
+            body
+          ),
           cancellationToken
         );
         return;
@@ -360,9 +367,40 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
     }
   }
 
+  private int ScenarioAttempt(
+    string body
+  )
+  {
+    var scenario = new[]
+    {
+      "trigger-cloud-retry-once",
+      "trigger-cloud-retry-after",
+      "trigger-cloud-bounded-retry",
+      "trigger-cloud-timeout-bounded",
+      "trigger-cloud-cancel-retry"
+    }.FirstOrDefault(
+      marker => body.Contains(
+        marker,
+        StringComparison.Ordinal
+      )
+    );
+
+    return scenario is null
+      ? 1
+      : _scenarioRequests.AddOrUpdate(
+        scenario,
+        1,
+        (
+          _,
+          count
+        ) => count + 1
+      );
+  }
+
   private static async Task HandleOpenAiChatAsync(
     HttpListenerContext context,
     string body,
+    int scenarioAttempt,
     CancellationToken cancellationToken
   )
   {
@@ -377,6 +415,97 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
     AddRateLimitHeaders(
       context.Response
     );
+
+    if (
+      body.Contains(
+        "trigger-cloud-retry-once",
+        StringComparison.Ordinal
+      )
+      && scenarioAttempt == 1
+    )
+    {
+      context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic temporary failure\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
+
+    if (
+      body.Contains(
+        "trigger-cloud-retry-after",
+        StringComparison.Ordinal
+      )
+      && scenarioAttempt == 1
+    )
+    {
+      context.Response.Headers["Retry-After"] = "1";
+      context.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic retry after\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
+
+    if (
+      body.Contains(
+        "trigger-cloud-cancel-retry",
+        StringComparison.Ordinal
+      )
+      && scenarioAttempt == 1
+    )
+    {
+      context.Response.Headers["Retry-After"] = "2";
+      context.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic cancellable retry\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
+
+    if (body.Contains(
+      "trigger-cloud-timeout-bounded",
+      StringComparison.Ordinal
+    ))
+    {
+      context.Response.StatusCode = (int)HttpStatusCode.RequestTimeout;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic timeout\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
+
+    if (body.Contains(
+      "trigger-cloud-bounded-retry",
+      StringComparison.Ordinal
+    ))
+    {
+      context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+      context.Response.ContentType = "application/json";
+      await WriteRawAsync(
+        context.Response,
+        "{\"error\":{\"message\":\"deterministic repeated temporary failure\"}}",
+        cancellationToken
+      );
+      context.Response.Close();
+      return;
+    }
 
     if (body.Contains(
       "trigger-cloud-invalid-request",

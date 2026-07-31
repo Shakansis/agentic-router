@@ -111,7 +111,7 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.5</span>
+    <span class="app-version">v0.9.6</span>
   </aside>
 
   <main class="workspace">
@@ -381,6 +381,15 @@
               </div>
               <p>Conecte apenas os provedores que deseja usar. Testes e atualização de modelos podem consumir quota.</p>
             </div>
+            <div class="provider-health-heading">
+              <h4>Saúde dos provedores</h4>
+              <button
+                id="refresh-provider-health"
+                class="secondary-button"
+                type="button"
+              >Atualizar</button>
+            </div>
+            <div id="provider-health-list" class="provider-health-list"></div>
             <div id="cloud-providers-list" class="cloud-providers-list"></div>
           </section>
 
@@ -445,8 +454,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.5."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.5."
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.6."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.6."
                 >i</button>
               </div>
             </div>
@@ -568,6 +577,9 @@
               <span id="settings-usage-details">Carregando uso de tokens…</span>
             </div>
             <div class="validation-profile-actions">
+              <button id="reconcile-usage" class="secondary-button" type="button">
+                Reconstruir agregados de uso
+              </button>
               <button id="purge-usage" class="secondary-button danger-button" type="button">
                 Excluir histórico de uso
               </button>
@@ -726,8 +738,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.5."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.5. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.6."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.6. Desativar interrompe novas gravações, mas não apaga registros existentes."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>

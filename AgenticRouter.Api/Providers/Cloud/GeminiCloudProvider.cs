@@ -237,6 +237,28 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     );
   }
 
+  private static TimeSpan? ReadRetryAfter(
+    HttpResponseMessage response
+  )
+  {
+    var value = response.Headers.RetryAfter;
+
+    if (value?.Delta is not null)
+    {
+      return value.Delta.Value;
+    }
+
+    if (value?.Date is null)
+    {
+      return null;
+    }
+
+    var delay = value.Date.Value - DateTimeOffset.UtcNow;
+    return delay > TimeSpan.Zero
+      ? delay
+      : TimeSpan.Zero;
+  }
+
   public async Task<CloudCallResult<OllamaToolResponse>> GenerateToolCallAsync(
     string apiKey,
     string modelId,
@@ -671,6 +693,9 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
         : (int)status.Value,
       retryable,
       ReadRateLimit(
+        response
+      ),
+      retryAfter: ReadRetryAfter(
         response
       )
     );

@@ -54,6 +54,10 @@ public sealed class JsonlUsageLedger : IUsageLedger
     1,
     1
   );
+  private readonly HashSet<string> _knownEventIds = new(
+    StringComparer.Ordinal
+  );
+  private bool _eventIdsLoaded;
 
   public JsonlUsageLedger(
     string dataDirectory,
@@ -75,7 +79,8 @@ public sealed class JsonlUsageLedger : IUsageLedger
   )
   {
     ValidateEvent(
-      usageEvent
+      usageEvent,
+      _pricing.Get().Version
     );
     var payload = JsonSerializer.SerializeToUtf8Bytes(
       usageEvent,
@@ -101,6 +106,22 @@ public sealed class JsonlUsageLedger : IUsageLedger
       Directory.CreateDirectory(
         _usageDirectory
       );
+      await EnsureEventIdsLoadedAsync(
+        cancellationToken
+      );
+
+      if (!_knownEventIds.Add(
+        usageEvent.EventId
+      ))
+      {
+        throw new UsageStorageException(
+          "usage-duplicate-event",
+          "usage-storage",
+          "A usage event with the same immutable event ID already exists.",
+          false
+        );
+      }
+
       await ApplyRetentionAsync(
         retentionDays,
         usageEvent.TimestampUtc,
@@ -195,7 +216,15 @@ public sealed class JsonlUsageLedger : IUsageLedger
           cancellationToken
         ))
         {
+          var validation = UsageEventValidator.Validate(
+            usageEvent,
+            _pricing.Get().Version,
+            DateTimeOffset.UtcNow
+          );
+
           if (
+            !validation.Accepted
+            ||
             usageEvent.TimestampUtc < window.StartUtc
             || usageEvent.TimestampUtc >= window.EndUtc
             || !Matches(
@@ -479,7 +508,15 @@ public sealed class JsonlUsageLedger : IUsageLedger
         cancellationToken
       ))
       {
+        var validation = UsageEventValidator.Validate(
+          usageEvent,
+          _pricing.Get().Version,
+          DateTimeOffset.UtcNow
+        );
+
         if (
+          validation.Accepted
+          &&
           usageEvent.TimestampUtc >= window.StartUtc
           && usageEvent.TimestampUtc < window.EndUtc
           && Matches(
@@ -825,65 +862,17 @@ public sealed class JsonlUsageLedger : IUsageLedger
   }
 
   private static void ValidateEvent(
-    UsageEvent usageEvent
+    UsageEvent usageEvent,
+    string pricingCatalogVersion
   )
   {
-    if (
-      usageEvent.SchemaVersion != 1
-      || string.IsNullOrWhiteSpace(
-        usageEvent.EventId
-      )
-      || string.IsNullOrWhiteSpace(
-        usageEvent.ProviderId
-      )
-      || string.IsNullOrWhiteSpace(
-        usageEvent.ModelId
-      )
-      || string.IsNullOrWhiteSpace(
-        usageEvent.RequestPurpose
-      )
-      || !UsageModelRoles.All.Contains(
-        usageEvent.ModelRole
-      )
-      || !UsageStatuses.All.Contains(
-        usageEvent.Status
-      )
-      || !TokenCountSources.All.Contains(
-        usageEvent.TokenCountSource
-      )
-      || !UsageAccuracy.EventValues.Contains(
-        usageEvent.Accuracy
-      )
-      || usageEvent.InputTokens < 0
-      || usageEvent.OutputTokens < 0
-      || usageEvent.CachedInputTokens < 0
-      || usageEvent.ReasoningTokens < 0
-      || usageEvent.MediaTokens < 0
-      || usageEvent.DurationMilliseconds < 0
-      || usageEvent.TotalTokens != usageEvent.InputTokens + usageEvent.OutputTokens
-      || usageEvent.ImageCount < 0
-      || usageEvent.ImageBytes < 0
-      || usageEvent.SearchQueryCount < 0
-      || usageEvent.GroundedRequestCount < 0
-      || usageEvent.CitationCount < 0
-      || usageEvent.ProviderSearchCost < 0
-      || (
-        !UsageAccuracy.EventValues.Contains(
-          usageEvent.ActivityAccuracy
-        )
-        && !string.Equals(
-          usageEvent.ActivityAccuracy,
-          UsageAccuracy.Unavailable,
-          StringComparison.Ordinal
-        )
-      )
-      || string.IsNullOrWhiteSpace(
-        usageEvent.Currency
-      )
-      || string.IsNullOrWhiteSpace(
-        usageEvent.PricingCatalogVersion
-      )
-    )
+    var result = UsageEventValidator.Validate(
+      usageEvent,
+      pricingCatalogVersion,
+      DateTimeOffset.UtcNow
+    );
+
+    if (!result.Accepted)
     {
       throw new UsageStorageException(
         "usage-record-invalid",
@@ -892,6 +881,45 @@ public sealed class JsonlUsageLedger : IUsageLedger
         false
       );
     }
+  }
+
+  private async Task EnsureEventIdsLoadedAsync(
+    CancellationToken cancellationToken
+  )
+  {
+    if (_eventIdsLoaded)
+    {
+      return;
+    }
+
+    if (Directory.Exists(
+      _usageDirectory
+    ))
+    {
+      foreach (var path in Directory.EnumerateFiles(
+        _usageDirectory,
+        "*.jsonl",
+        SearchOption.TopDirectoryOnly
+      ))
+      {
+        await foreach (var usageEvent in ReadEventsAsync(
+          path,
+          cancellationToken
+        ))
+        {
+          if (!string.IsNullOrWhiteSpace(
+            usageEvent.EventId
+          ))
+          {
+            _knownEventIds.Add(
+              usageEvent.EventId
+            );
+          }
+        }
+      }
+    }
+
+    _eventIdsLoaded = true;
   }
 
   private static bool Matches(

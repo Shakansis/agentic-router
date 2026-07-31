@@ -2852,6 +2852,67 @@ p {
   gap: 10px;
 }
 
+.provider-health-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.25rem 0 0.65rem;
+}
+
+.provider-health-heading h4 {
+  margin: 0;
+}
+
+.provider-health-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 1rem;
+}
+
+.provider-health-card {
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--surface-soft);
+}
+
+.provider-health-card[data-state="degraded"],
+.provider-health-card[data-state="unavailable"] {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.provider-health-card > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  cursor: pointer;
+}
+
+.provider-health-body {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.provider-health-diagnostic {
+  max-width: 100%;
+  overflow: auto;
+  margin: 0;
+  padding: 0.65rem;
+  border-radius: 0.55rem;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+}
+
+.cloud-usage-sidebar-card[data-health-warning] {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+}
+
 .cloud-provider-card {
   overflow: hidden;
   border: 1px solid var(--border);

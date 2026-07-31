@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Cloud;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,16 +12,19 @@ public sealed class CloudProvidersController : ControllerBase
   private readonly ICloudProviderRegistry _registry;
   private readonly IProtectedSecretStore _secretStore;
   private readonly ISettingsStore _settingsStore;
+  private readonly IProviderHealthMonitor _health;
 
   public CloudProvidersController(
     ICloudProviderRegistry registry,
     IProtectedSecretStore secretStore,
-    ISettingsStore settingsStore
+    ISettingsStore settingsStore,
+    IProviderHealthMonitor health
   )
   {
     _registry = registry;
     _secretStore = secretStore;
     _settingsStore = settingsStore;
+    _health = health;
   }
 
   [HttpGet]
@@ -121,6 +125,9 @@ public sealed class CloudProvidersController : ControllerBase
       _registry.Invalidate(
         providerId
       );
+      _health.Reset(
+        providerId
+      );
       return Ok(
         await _registry.GetViewAsync(
           cancellationToken
@@ -213,6 +220,9 @@ public sealed class CloudProvidersController : ControllerBase
         cancellationToken
       );
       _registry.Invalidate(
+        providerId
+      );
+      _health.Reset(
         providerId
       );
 

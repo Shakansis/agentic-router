@@ -388,6 +388,16 @@ public sealed class UsageRecorder : IUsageRecorder
         ActivityAccuracy = request.Activity?.Accuracy
           ?? UsageAccuracy.Unavailable
       };
+      var validation = UsageEventValidator.Validate(
+        usageEvent,
+        _pricing.Get().Version,
+        DateTimeOffset.UtcNow
+      );
+      usageEvent = usageEvent with
+      {
+        ValidationStatus = validation.Status,
+        ValidationWarnings = validation.Issues
+      };
       await _ledger.AppendAsync(
         usageEvent,
         settings.Usage.MaxEventBytes,

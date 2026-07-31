@@ -72,6 +72,23 @@ public static class UsageAccuracy
   );
 }
 
+public static class UsageValidationStatuses
+{
+  public const string Valid = "valid";
+  public const string ValidWithWarning = "valid-with-warning";
+  public const string Estimated = "estimated";
+  public const string Rejected = "rejected";
+
+  public static readonly IReadOnlySet<string> Accepted = new HashSet<string>(
+    [
+      Valid,
+      ValidWithWarning,
+      Estimated
+    ],
+    StringComparer.Ordinal
+  );
+}
+
 public static class UsageWindowIds
 {
   public const string RollingHour = "rolling-hour";
@@ -222,6 +239,10 @@ public sealed record UsageEvent
   public decimal? ProviderSearchCost { get; init; }
 
   public string ActivityAccuracy { get; init; } = UsageAccuracy.Unavailable;
+
+  public string ValidationStatus { get; init; } = UsageValidationStatuses.Valid;
+
+  public IReadOnlyList<string> ValidationWarnings { get; init; } = [];
 }
 
 public sealed record UsageFilter(
@@ -343,6 +364,23 @@ public sealed record UsagePurgeResult(
   int DeletedFiles,
   long DeletedEvents,
   DateTimeOffset? BeforeUtc
+);
+
+public sealed record UsageReconciliationResult(
+  int AggregateSchemaVersion,
+  long Accepted,
+  long Warned,
+  long Estimated,
+  long Rejected,
+  long Duplicates,
+  long InputTokens,
+  long OutputTokens,
+  long TotalTokens,
+  long Requests,
+  DateTimeOffset StartedAt,
+  DateTimeOffset CompletedAt,
+  string AggregateFile,
+  bool Automatic
 );
 
 public sealed class UsageStorageException : Exception

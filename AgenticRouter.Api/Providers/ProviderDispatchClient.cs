@@ -15,13 +15,17 @@ public sealed class ProviderDispatchClient : IOllamaClient
   private readonly IUsageRecorder _usageRecorder;
   private readonly ITokenEstimator _tokenEstimator;
   private readonly IOllamaWebSearchService _webSearch;
+  private readonly IProviderRetryPolicy _retryPolicy;
+  private readonly IProviderHealthMonitor _health;
 
   public ProviderDispatchClient(
     OllamaClient ollama,
     ICloudProviderRegistry cloudProviders,
     IUsageRecorder usageRecorder,
     ITokenEstimator tokenEstimator,
-    IOllamaWebSearchService webSearch
+    IOllamaWebSearchService webSearch,
+    IProviderRetryPolicy retryPolicy,
+    IProviderHealthMonitor health
   )
   {
     _ollama = ollama;
@@ -29,6 +33,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     _usageRecorder = usageRecorder;
     _tokenEstimator = tokenEstimator;
     _webSearch = webSearch;
+    _retryPolicy = retryPolicy;
+    _health = health;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -213,7 +219,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
       );
     }
 
-    var stopwatch = Stopwatch.StartNew();
+    var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateToolMessages(
       messages
     ) + tools.Sum(
@@ -225,69 +231,109 @@ public sealed class ProviderDispatchClient : IOllamaClient
         tool.Parameters.GetRawText()
       )
     );
-    CloudCallResult<OllamaToolResponse>? result = null;
+    CloudProviderSession? session = null;
 
-    try
+    for (var attempt = 1; ; attempt++)
     {
-      var session = await _cloudProviders.OpenAsync(
-        reference.ProviderId,
-        cancellationToken
-      );
-      result = await session.Adapter.GenerateToolCallAsync(
-        session.ApiKey,
-        reference.ModelId,
-        messages,
-        tools,
-        stage,
-        cancellationToken
-      );
-      await RecordAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        UsageStatuses.Success,
-        result.Usage,
-        estimatedInput,
-        _tokenEstimator.EstimateToolResponse(
-          result.Value
-        ),
-        result.RateLimit
-      );
-      return result.Value;
-    }
-    catch (CloudProviderException exception)
-    {
-      await RecordAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        cancellationToken.IsCancellationRequested
-          ? UsageStatuses.Cancellation
-          : UsageStatuses.Failure,
-        result?.Usage,
-        estimatedInput,
-        0,
-        exception.RateLimit,
-        exception.Code,
-        exception.HttpStatus
-      );
-      throw new RoutedProviderException(
-        exception
-      );
-    }
-    catch (OperationCanceledException)
-    {
-      await RecordAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        UsageStatuses.Cancellation,
-        result?.Usage,
-        estimatedInput,
-        0,
-        result?.RateLimit
-      );
-      throw;
+      var attemptStopwatch = Stopwatch.StartNew();
+      CloudCallResult<OllamaToolResponse>? result = null;
+
+      try
+      {
+        session ??= await _cloudProviders.OpenAsync(
+          reference.ProviderId,
+          cancellationToken
+        );
+        result = await session.Adapter.GenerateToolCallAsync(
+          session.ApiKey,
+          reference.ModelId,
+          messages,
+          tools,
+          stage,
+          cancellationToken
+        );
+        await RecordAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          UsageStatuses.Success,
+          result.Usage,
+          estimatedInput,
+          _tokenEstimator.EstimateToolResponse(
+            result.Value
+          ),
+          result.RateLimit
+        );
+        _health.ObserveSuccess(
+          reference.ProviderId,
+          reference.ModelId,
+          attemptStopwatch.Elapsed,
+          attemptStopwatch.Elapsed,
+          result.Usage,
+          result.RateLimit,
+          session.Adapter.ProtocolVersion,
+          "provider-request"
+        );
+        return result.Value;
+      }
+      catch (CloudProviderException exception)
+      {
+        var decision = _retryPolicy.Decide(
+          exception,
+          attempt,
+          operationStopwatch.Elapsed,
+          cancellationToken
+        );
+        await RecordAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          cancellationToken.IsCancellationRequested
+            ? UsageStatuses.Cancellation
+            : UsageStatuses.Failure,
+          result?.Usage,
+          estimatedInput,
+          0,
+          exception.RateLimit,
+          exception.Code,
+          exception.HttpStatus
+        );
+        _health.ObserveFailure(
+          reference.ProviderId,
+          reference.ModelId,
+          attemptStopwatch.Elapsed,
+          exception,
+          decision,
+          session?.Adapter.ProtocolVersion ?? "provider-resolution",
+          "provider-request"
+        );
+
+        if (!decision.Retry)
+        {
+          throw new RoutedProviderException(
+            exception
+          );
+        }
+
+        await Task.Delay(
+          decision.Delay,
+          cancellationToken
+        );
+      }
+      catch (OperationCanceledException)
+      {
+        await RecordAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          UsageStatuses.Cancellation,
+          result?.Usage,
+          estimatedInput,
+          0,
+          result?.RateLimit
+        );
+        throw;
+      }
     }
   }
 
@@ -560,153 +606,206 @@ public sealed class ProviderDispatchClient : IOllamaClient
       yield break;
     }
 
-    var stopwatch = Stopwatch.StartNew();
+    var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
     );
-    var output = new System.Text.StringBuilder();
-    ProviderTokenUsage? providerUsage = null;
-    ProviderRateLimitSnapshot? rateLimit = null;
-    ProviderActivityMetadata? activity = null;
-    IReadOnlyList<ProviderCitation>? citations = null;
+    CloudProviderSession? session = null;
 
-    CloudProviderSession session;
+    for (var attempt = 1; ; attempt++)
+    {
+      var attemptStopwatch = Stopwatch.StartNew();
+      var output = new System.Text.StringBuilder();
+      ProviderTokenUsage? providerUsage = null;
+      ProviderRateLimitSnapshot? rateLimit = null;
+      ProviderActivityMetadata? activity = null;
+      TimeSpan? timeToFirstChunk = null;
+      var emitted = false;
+      IAsyncEnumerator<OllamaChatUpdate>? updates = null;
+      CloudProviderException? failure = null;
+      var completed = false;
 
-    try
-    {
-      session = await _cloudProviders.OpenAsync(
-        reference.ProviderId,
-        cancellationToken
-      );
-    }
-    catch (CloudProviderException exception)
-    {
-      await RecordFailureAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        estimatedInput,
-        0,
-        null,
-        exception,
-        cancellationToken
-      );
-      throw new RoutedProviderException(
-        exception
-      );
-    }
-    catch (OperationCanceledException)
-    {
+      try
+      {
+        session ??= await _cloudProviders.OpenAsync(
+          reference.ProviderId,
+          cancellationToken
+        );
+        updates = session.Adapter.StreamChatAsync(
+          session.ApiKey,
+          reference.ModelId,
+          messages,
+          options,
+          cancellationToken
+        ).GetAsyncEnumerator(
+          cancellationToken
+        );
+      }
+      catch (CloudProviderException exception)
+      {
+        failure = exception;
+      }
+
+      while (failure is null && !completed)
+      {
+        OllamaChatUpdate? update = null;
+
+        try
+        {
+          if (updates is null || !await updates.MoveNextAsync())
+          {
+            completed = true;
+          }
+          else
+          {
+            update = updates.Current;
+          }
+        }
+        catch (CloudProviderException exception)
+        {
+          failure = exception;
+        }
+        catch (OperationCanceledException)
+        {
+          if (updates is not null)
+          {
+            await updates.DisposeAsync();
+          }
+
+          await RecordAsync(
+            usageContext,
+            reference,
+            attemptStopwatch,
+            UsageStatuses.Cancellation,
+            providerUsage,
+            estimatedInput,
+            _tokenEstimator.EstimateText(
+              output.ToString()
+            ),
+            rateLimit
+          );
+          throw;
+        }
+
+        if (update is null)
+        {
+          continue;
+        }
+
+        timeToFirstChunk ??= attemptStopwatch.Elapsed;
+
+        if (!string.IsNullOrEmpty(
+          update.Delta
+        ))
+        {
+          output.Append(
+            update.Delta
+          );
+        }
+
+        providerUsage = update.Usage
+          ?? providerUsage;
+        rateLimit = update.RateLimit
+          ?? rateLimit;
+        activity = update.Activity
+          ?? activity;
+        emitted = true;
+        yield return update;
+      }
+
+      if (updates is not null)
+      {
+        await updates.DisposeAsync();
+      }
+
+      if (failure is not null)
+      {
+        var evaluated = _retryPolicy.Decide(
+          failure,
+          attempt,
+          operationStopwatch.Elapsed,
+          cancellationToken
+        );
+        var decision = emitted
+          ? evaluated with
+          {
+            Retry = false,
+            Delay = TimeSpan.Zero,
+            Reason = "A streaming response already emitted content; replay is unsafe."
+          }
+          : evaluated;
+        await RecordFailureAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          estimatedInput,
+          _tokenEstimator.EstimateText(
+            output.ToString()
+          ),
+          providerUsage,
+          failure,
+          cancellationToken,
+          rateLimit
+        );
+        _health.ObserveFailure(
+          reference.ProviderId,
+          reference.ModelId,
+          attemptStopwatch.Elapsed,
+          failure,
+          decision,
+          session?.Adapter.ProtocolVersion ?? "provider-resolution",
+          "provider-stream"
+        );
+
+        if (!decision.Retry)
+        {
+          throw new RoutedProviderException(
+            failure
+          );
+        }
+
+        yield return new OllamaChatUpdate(
+          false,
+          null,
+          RetryActivity:
+          $"Provider retry {decision.Attempt + 1} of {decision.MaximumAttempts}: "
+            + $"{decision.Category}; waiting {Math.Ceiling(decision.Delay.TotalMilliseconds)} ms."
+        );
+        await Task.Delay(
+          decision.Delay,
+          cancellationToken
+        );
+        continue;
+      }
+
       await RecordAsync(
         usageContext,
         reference,
-        stopwatch,
-        UsageStatuses.Cancellation,
+        attemptStopwatch,
+        UsageStatuses.Success,
         providerUsage,
         estimatedInput,
         _tokenEstimator.EstimateText(
           output.ToString()
         ),
-        rateLimit
+        rateLimit,
+        activity: MergeActivity(
+          activity,
+          options
+        )
       );
-      throw;
+      _health.ObserveSuccess(
+        reference.ProviderId,
+        reference.ModelId,
+        attemptStopwatch.Elapsed,
+        timeToFirstChunk,
+        providerUsage,
+        rateLimit,
+        session!.Adapter.ProtocolVersion,
+        "provider-stream"
+      );
+      yield break;
     }
-
-    await using var updates = session.Adapter.StreamChatAsync(
-      session.ApiKey,
-      reference.ModelId,
-      messages,
-      options,
-      cancellationToken
-    ).GetAsyncEnumerator(
-      cancellationToken
-    );
-
-    while (true)
-    {
-      OllamaChatUpdate update;
-
-      try
-      {
-        if (!await updates.MoveNextAsync())
-        {
-          break;
-        }
-
-        update = updates.Current;
-      }
-      catch (CloudProviderException exception)
-      {
-        await RecordFailureAsync(
-          usageContext,
-          reference,
-          stopwatch,
-          estimatedInput,
-          _tokenEstimator.EstimateText(
-            output.ToString()
-          ),
-          providerUsage,
-          exception,
-          cancellationToken,
-          rateLimit
-        );
-        throw new RoutedProviderException(
-          exception
-        );
-      }
-      catch (OperationCanceledException)
-      {
-        await RecordAsync(
-          usageContext,
-          reference,
-          stopwatch,
-          UsageStatuses.Cancellation,
-          providerUsage,
-          estimatedInput,
-          _tokenEstimator.EstimateText(
-            output.ToString()
-          ),
-          rateLimit
-        );
-        throw;
-      }
-
-      if (!string.IsNullOrEmpty(
-        update.Delta
-      ))
-      {
-        output.Append(
-          update.Delta
-        );
-      }
-
-      providerUsage = update.Usage
-        ?? providerUsage;
-      rateLimit = update.RateLimit
-        ?? rateLimit;
-      activity = update.Activity
-        ?? activity;
-      citations = update.Citations
-        ?? citations;
-      yield return update;
-    }
-
-    await RecordAsync(
-      usageContext,
-      reference,
-      stopwatch,
-      UsageStatuses.Success,
-      providerUsage,
-      estimatedInput,
-      _tokenEstimator.EstimateText(
-        output.ToString()
-      ),
-      rateLimit,
-      activity: MergeActivity(
-        activity,
-        options
-      )
-    );
   }
 
   private async Task<string> GenerateCloudStructuredAsync(
@@ -718,73 +817,113 @@ public sealed class ProviderDispatchClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
-    var stopwatch = Stopwatch.StartNew();
+    var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
     );
-    CloudCallResult<string>? result = null;
+    CloudProviderSession? session = null;
 
-    try
+    for (var attempt = 1; ; attempt++)
     {
-      var session = await _cloudProviders.OpenAsync(
-        reference.ProviderId,
-        cancellationToken
-      );
-      result = await session.Adapter.GenerateStructuredAsync(
-        session.ApiKey,
-        reference.ModelId,
-        messages,
-        schema,
-        stage,
-        cancellationToken
-      );
-      await RecordAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        UsageStatuses.Success,
-        result.Usage,
-        estimatedInput,
-        _tokenEstimator.EstimateText(
-          result.Value
-        ),
-        result.RateLimit
-      );
-      return result.Value;
-    }
-    catch (CloudProviderException exception)
-    {
-      await RecordAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        cancellationToken.IsCancellationRequested
-          ? UsageStatuses.Cancellation
-          : UsageStatuses.Failure,
-        result?.Usage,
-        estimatedInput,
-        0,
-        exception.RateLimit,
-        exception.Code,
-        exception.HttpStatus
-      );
-      throw new RoutedProviderException(
-        exception
-      );
-    }
-    catch (OperationCanceledException)
-    {
-      await RecordAsync(
-        usageContext,
-        reference,
-        stopwatch,
-        UsageStatuses.Cancellation,
-        result?.Usage,
-        estimatedInput,
-        0,
-        result?.RateLimit
-      );
-      throw;
+      var attemptStopwatch = Stopwatch.StartNew();
+      CloudCallResult<string>? result = null;
+
+      try
+      {
+        session ??= await _cloudProviders.OpenAsync(
+          reference.ProviderId,
+          cancellationToken
+        );
+        result = await session.Adapter.GenerateStructuredAsync(
+          session.ApiKey,
+          reference.ModelId,
+          messages,
+          schema,
+          stage,
+          cancellationToken
+        );
+        await RecordAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          UsageStatuses.Success,
+          result.Usage,
+          estimatedInput,
+          _tokenEstimator.EstimateText(
+            result.Value
+          ),
+          result.RateLimit
+        );
+        _health.ObserveSuccess(
+          reference.ProviderId,
+          reference.ModelId,
+          attemptStopwatch.Elapsed,
+          attemptStopwatch.Elapsed,
+          result.Usage,
+          result.RateLimit,
+          session.Adapter.ProtocolVersion,
+          "provider-request"
+        );
+        return result.Value;
+      }
+      catch (CloudProviderException exception)
+      {
+        var decision = _retryPolicy.Decide(
+          exception,
+          attempt,
+          operationStopwatch.Elapsed,
+          cancellationToken
+        );
+        await RecordAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          cancellationToken.IsCancellationRequested
+            ? UsageStatuses.Cancellation
+            : UsageStatuses.Failure,
+          result?.Usage,
+          estimatedInput,
+          0,
+          exception.RateLimit,
+          exception.Code,
+          exception.HttpStatus
+        );
+        _health.ObserveFailure(
+          reference.ProviderId,
+          reference.ModelId,
+          attemptStopwatch.Elapsed,
+          exception,
+          decision,
+          session?.Adapter.ProtocolVersion ?? "provider-resolution",
+          "provider-request"
+        );
+
+        if (!decision.Retry)
+        {
+          throw new RoutedProviderException(
+            exception
+          );
+        }
+
+        await Task.Delay(
+          decision.Delay,
+          cancellationToken
+        );
+      }
+      catch (OperationCanceledException)
+      {
+        await RecordAsync(
+          usageContext,
+          reference,
+          attemptStopwatch,
+          UsageStatuses.Cancellation,
+          result?.Usage,
+          estimatedInput,
+          0,
+          result?.RateLimit
+        );
+        throw;
+      }
     }
   }
 

@@ -138,6 +138,24 @@ provider token charge. Any paid-cloud comparison is an explicitly selected
 equivalent-cost estimate using a versioned official-source price snapshot, not
 an Ollama Cloud token quota or exact savings claim.
 
+Provider health is application-owned and based on observed requests or explicit
+connection tests, never merely on key presence. Diagnostics expose only
+sanitized status, category, retry, quota, model identity, adapter, freshness,
+latency, and accuracy facts. Cloud retries are provider-aware, jittered,
+duration- and attempt-bounded, and respect valid `Retry-After` values. Never
+retry authentication, invalid requests, unsupported capabilities, security
+denials, user cancellation, or deterministic protocol/parser failures. Every
+real provider attempt records its own usage event before the existing
+cloud-to-local fallback policy is considered.
+
+Usage events are validated before storage and aggregation. Rejected or
+duplicate events must not affect derived totals, and exact provider counts are
+never silently repaired. Reconciliation reads immutable JSONL events with
+bounded memory, reports accepted, warned, estimated, rejected, and duplicate
+counts, and atomically replaces only files under `data/usage-aggregates/`.
+Automatic reconciliation is limited to a missing, invalid, or version-mismatched
+aggregate; ordinary startup must not rebuild valid aggregates.
+
 Web search is off by default and requires explicit enablement. Provider-native
 search is used only where official metadata or an explicit adapter contract
 authorizes it. Ollama Web Search is a separate, read-only integration with its

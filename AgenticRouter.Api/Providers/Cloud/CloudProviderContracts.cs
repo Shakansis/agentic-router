@@ -90,7 +90,8 @@ public sealed class CloudProviderException : Exception
     int? httpStatus,
     bool retryable,
     ProviderRateLimitSnapshot? rateLimit = null,
-    Exception? innerException = null
+    Exception? innerException = null,
+    TimeSpan? retryAfter = null
   )
     : base(
       message,
@@ -104,6 +105,7 @@ public sealed class CloudProviderException : Exception
     HttpStatus = httpStatus;
     Retryable = retryable;
     RateLimit = rateLimit;
+    RetryAfter = retryAfter;
     TraceId = Guid.NewGuid().ToString(
       "N"
     );
@@ -122,6 +124,8 @@ public sealed class CloudProviderException : Exception
   public bool Retryable { get; }
 
   public ProviderRateLimitSnapshot? RateLimit { get; }
+
+  public TimeSpan? RetryAfter { get; }
 
   public string TraceId { get; }
 }

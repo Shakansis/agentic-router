@@ -1,3 +1,31 @@
+# Agentic Router v0.9.6
+
+This development version adds application-owned provider health, bounded
+provider-aware retries, strict usage validation, and immutable-ledger
+reconciliation.
+
+## Highlights
+
+- Adds compact health views for Ollama Local, Groq, Google AI Studio, and
+  Cerebras based on observed calls and explicit tests rather than key presence.
+- Adds sanitized latency, freshness, rate-limit, quota, usage-accuracy,
+  adapter, model, status, and retry diagnostics without request content or
+  credentials.
+- Adds three-attempt/eight-second retry limits with jitter, `Retry-After`,
+  cancellation, and no retry for authentication, invalid requests, unsupported
+  capability, security, parser, or tool-protocol failures.
+- Records every real provider attempt separately and preserves the existing
+  mandatory local-fallback rules.
+- Validates usage records and excludes rejected or duplicate events from
+  derived totals without altering exact provider counts.
+- Adds explicit and schema-triggered reconciliation that streams immutable
+  JSONL events, reports validation counts, and atomically rebuilds only derived
+  aggregate files.
+- Adds deterministic E2E coverage for health transitions, staleness,
+  authentication, bounded timeout and rate-limit retry, cancellation, request
+  accounting, corruption rejection, duplicate detection, immutable source
+  preservation, sanitized diagnostics, and browser presentation.
+
 # Agentic Router v0.9.5
 
 This development version adds capability-aware chat with explicitly enabled

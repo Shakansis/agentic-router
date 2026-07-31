@@ -88,6 +88,14 @@ builder.Services.AddSingleton<IUsageLedger>(
 );
 builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
 builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
+builder.Services.AddSingleton<IProviderRetryPolicy, ConservativeProviderRetryPolicy>();
+builder.Services.AddSingleton<IProviderHealthMonitor, ProviderHealthMonitor>();
+builder.Services.AddSingleton<IUsageReconciliationService>(
+  services => new UsageReconciliationService(
+    dataDirectory,
+    services.GetRequiredService<IPricingCatalog>()
+  )
+);
 builder.Services.AddSingleton<IImageAttachmentValidator, ImageAttachmentValidator>();
 builder.Services.AddSingleton<ICloudImageApprovalStore, CloudImageApprovalStore>();
 builder.Services.AddSingleton<IOllamaWebSearchService, OllamaWebSearchService>();
@@ -160,6 +168,11 @@ await app.Services
 await app.Services
   .GetRequiredService<IPersistentSessionService>()
   .RecoverInterruptedAsync(
+    CancellationToken.None
+  );
+await app.Services
+  .GetRequiredService<IUsageReconciliationService>()
+  .InitializeAsync(
     CancellationToken.None
   );
 

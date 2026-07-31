@@ -40,6 +40,7 @@ const state = {
   pricingCatalog: null,
   cloudProviders: null,
   cloudUsageDashboard: null,
+  providerHealth: null,
   modelCapability: null,
   capabilityRequestId: 0,
   webEnabled: false,
@@ -154,6 +155,9 @@ function bindElements() {
     "settings-usage-details",
     "purge-usage",
     "usage-purge-status",
+    "reconcile-usage",
+    "provider-health-list",
+    "refresh-provider-health",
     "cloud-providers-list",
     "model-diagnostics-list",
     "model-context-diagnostic",
@@ -311,6 +315,18 @@ function bindEvents() {
     "click",
     purgeUsageHistory
   );
+  elements.reconcileUsage.addEventListener(
+    "click",
+    reconcileUsage
+  );
+  elements.refreshProviderHealth.addEventListener(
+    "click",
+    refreshProviderHealth
+  );
+  elements.providerHealthList.addEventListener(
+    "click",
+    handleProviderHealthAction
+  );
   elements.cloudUsageCard.addEventListener("click", openCloudUsage);
   elements.closeCloudUsage.addEventListener("click", closeCloudUsage);
   elements.dismissCloudUsage.addEventListener("click", closeCloudUsage);
@@ -441,7 +457,8 @@ async function loadApplicationState() {
     pricingCatalog,
     cloudProviders,
     cloudUsageDashboard,
-    webSearch
+    webSearch,
+    providerHealth
   ] = await Promise.all([
     fetchJson("/api/settings"),
     fetchJson("/api/models"),
@@ -454,7 +471,8 @@ async function loadApplicationState() {
     fetchJson("/api/usage/pricing"),
     fetchJson("/api/cloud-providers"),
     fetchJson("/api/usage/cloud-dashboard"),
-    fetchJson("/api/web-search")
+    fetchJson("/api/web-search"),
+    fetchJson("/api/provider-health")
   ]);
 
   state.settings = settings;
@@ -469,11 +487,13 @@ async function loadApplicationState() {
   state.cloudProviders = cloudProviders;
   state.cloudUsageDashboard = cloudUsageDashboard;
   state.webSearch = webSearch;
+  state.providerHealth = providerHealth;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderComposerModels();
   renderSettings();
   renderCloudUsage();
+  renderProviderHealth();
   renderWorkspace();
   renderWorkspaceProfiles();
   renderProjectProfile();
@@ -1099,7 +1119,7 @@ async function changeWorkspaceHistory(event) {
     enabled
     && !window.confirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.5."
+        + "pelo Agentic Router v0.9.6."
     )
   ) {
     event.currentTarget.checked = false;
@@ -1881,6 +1901,183 @@ async function purgeUsageHistory() {
   } catch (error) {
     elements.usagePurgeStatus.textContent = error.message;
   }
+}
+
+async function reconcileUsage() {
+  elements.reconcileUsage.disabled = true;
+  elements.usagePurgeStatus.textContent = "Validando eventos e reconstruindo agregados…";
+
+  try {
+    const result = await fetchJson(
+      "/api/usage/reconcile",
+      {
+        method: "POST"
+      }
+    );
+    elements.usagePurgeStatus.textContent =
+      `${formatInteger(result.accepted)} aceitos · `
+      + `${formatInteger(result.warned)} com aviso · `
+      + `${formatInteger(result.estimated)} estimados · `
+      + `${formatInteger(result.rejected)} rejeitados · `
+      + `${formatInteger(result.duplicates)} duplicados`;
+    await refreshUsage();
+  } catch (error) {
+    elements.usagePurgeStatus.textContent = error.message;
+  } finally {
+    elements.reconcileUsage.disabled = false;
+  }
+}
+
+function renderProviderHealth() {
+  elements.providerHealthList.replaceChildren();
+
+  for (const provider of state.providerHealth?.providers ?? []) {
+    const card = document.createElement("details");
+    card.className = "provider-health-card";
+    card.dataset.state = provider.connectionState;
+    const summary = document.createElement("summary");
+    const name = document.createElement("strong");
+    name.textContent = provider.displayName;
+    const badge = document.createElement("span");
+    badge.className =
+      `badge ${provider.connectionState === "healthy"
+        ? "success"
+        : provider.connectionState === "degraded"
+          || provider.connectionState === "unavailable"
+          ? "error"
+          : "muted"}`;
+    badge.textContent = providerHealthStateLabel(provider.connectionState);
+    summary.append(name, badge);
+
+    const body = document.createElement("div");
+    body.className = "provider-health-body";
+    const metrics = document.createElement("dl");
+    metrics.className = "cloud-provider-metadata";
+    appendDefinition(
+      metrics,
+      "Último sucesso",
+      formatProviderHealthDate(provider.lastSuccessfulRequest)
+    );
+    appendDefinition(
+      metrics,
+      "Latência",
+      provider.totalLatencyMilliseconds == null
+        ? "indisponível"
+        : `${formatInteger(provider.totalLatencyMilliseconds)} ms`
+    );
+    appendDefinition(
+      metrics,
+      "Erro recente",
+      provider.diagnostic.errorCategory ?? "nenhum"
+    );
+    appendDefinition(
+      metrics,
+      "Quota",
+      provider.quotaState
+    );
+    appendDefinition(
+      metrics,
+      "Uso",
+      usageAccuracyLabel(provider.tokenUsageAccuracy)
+    );
+
+    const actions = document.createElement("div");
+    actions.className = "settings-action-row";
+    const test = document.createElement("button");
+    test.type = "button";
+    test.className = "secondary-button";
+    test.dataset.providerHealthTest = provider.providerId;
+    test.textContent = "Testar conexão";
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "secondary-button";
+    refresh.dataset.providerHealthRefresh = "";
+    refresh.textContent = "Atualizar";
+    actions.append(test, refresh);
+
+    const diagnostic = document.createElement("pre");
+    diagnostic.className = "provider-health-diagnostic";
+    diagnostic.textContent = [
+      `status: ${provider.diagnostic.lastStatusCode ?? "indisponível"}`,
+      `retry: ${provider.diagnostic.retryDecision}`,
+      `quota: ${provider.diagnostic.quotaSource}`,
+      `contagem: ${provider.diagnostic.usageCountSource}`,
+      `modelo: ${provider.diagnostic.providerModelIdentity ?? "indisponível"}`,
+      `adapter: ${provider.diagnostic.adapterVersion}`,
+      `fonte: ${provider.healthSource}`,
+      `stale: ${provider.stale ? "sim" : "não"}`
+    ].join("\n");
+    body.append(metrics, actions, diagnostic);
+    card.append(summary, body);
+    elements.providerHealthList.append(card);
+  }
+
+  const degraded = (state.providerHealth?.providers ?? []).filter(
+    provider => provider.enabled
+      && ["degraded", "unavailable"].includes(provider.connectionState)
+  );
+  if (degraded.length > 0) {
+    elements.cloudUsageCard.dataset.healthWarning = "";
+    elements.cloudUsageDetail.textContent =
+      `${degraded.length} provedor(es) ativo(s) degradado(s) ou indisponível(is).`;
+  } else {
+    delete elements.cloudUsageCard.dataset.healthWarning;
+  }
+}
+
+async function refreshProviderHealth() {
+  elements.refreshProviderHealth.disabled = true;
+
+  try {
+    state.providerHealth = await fetchJson("/api/provider-health");
+    renderProviderHealth();
+  } finally {
+    elements.refreshProviderHealth.disabled = false;
+  }
+}
+
+async function handleProviderHealthAction(event) {
+  const test = event.target.closest("[data-provider-health-test]");
+
+  if (test) {
+    test.disabled = true;
+
+    try {
+      state.providerHealth = await fetchJson(
+        `/api/provider-health/${encodeURIComponent(test.dataset.providerHealthTest)}/test`,
+        {
+          method: "POST"
+        }
+      );
+      renderProviderHealth();
+    } catch (error) {
+      test.textContent = error.message;
+    } finally {
+      test.disabled = false;
+    }
+
+    return;
+  }
+
+  if (event.target.closest("[data-provider-health-refresh]")) {
+    await refreshProviderHealth();
+  }
+}
+
+function providerHealthStateLabel(value) {
+  return {
+    healthy: "Saudável",
+    degraded: "Degradado",
+    unavailable: "Indisponível",
+    "not-configured": "Não configurado",
+    unknown: "Desconhecido"
+  }[value] ?? value;
+}
+
+function formatProviderHealthDate(value) {
+  return value
+    ? new Date(value).toLocaleString()
+    : "ainda não observado";
 }
 
 async function refreshRuntimeStatus() {

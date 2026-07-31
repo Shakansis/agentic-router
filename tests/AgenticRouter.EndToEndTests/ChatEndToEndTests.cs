@@ -2448,6 +2448,397 @@ public sealed class ChatEndToEndTests : PageTest
   }
 
   [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ProviderHealthRetriesAndUsageReconciliationAreBoundedAndSanitized()
+  {
+    const string groqKey = "gsk_fake_health_096";
+    await ConnectFakeCloudAsync(
+      "groq",
+      groqKey
+    );
+
+    using (
+      var tested = await _environment.HttpClient.PostAsync(
+        "api/provider-health/groq/test",
+        null
+      )
+    )
+    {
+      tested.EnsureSuccessStatusCode();
+      var body = await tested.Content.ReadAsStringAsync();
+      Assert.DoesNotContain(
+        groqKey,
+        body
+      );
+      using var health = JsonDocument.Parse(
+        body
+      );
+      var groq = health.RootElement.GetProperty(
+        "providers"
+      ).EnumerateArray().Single(
+        provider => provider.GetProperty(
+          "providerId"
+        ).GetString() == "groq"
+      );
+      Assert.AreEqual(
+        "healthy",
+        groq.GetProperty(
+          "connectionState"
+        ).GetString()
+      );
+      Assert.AreEqual(
+        "groq-openai-v1",
+        groq.GetProperty(
+          "diagnostic"
+        ).GetProperty(
+          "adapterVersion"
+        ).GetString()
+      );
+    }
+
+    var beforeRetry = _environment.FakeCloud.Requests.Count(
+      request => request.Body.Contains(
+        "trigger-cloud-retry-once",
+        StringComparison.Ordinal
+      )
+    );
+    var retried = await PostChatStreamAsync(
+      "trigger-cloud-retry-once",
+      "groq::openai/gpt-oss-120b",
+      "browser-health-retry"
+    );
+    StringAssert.Contains(
+      retried,
+      "cloud answer"
+    );
+    StringAssert.Contains(
+      retried,
+      "\"type\":\"provider.retry\""
+    );
+    Assert.AreEqual(
+      beforeRetry + 2,
+      _environment.FakeCloud.Requests.Count(
+        request => request.Body.Contains(
+          "trigger-cloud-retry-once",
+          StringComparison.Ordinal
+        )
+      )
+    );
+
+    var retryAfterStopwatch = Stopwatch.StartNew();
+    var retryAfter = await PostChatStreamAsync(
+      "trigger-cloud-retry-after",
+      "groq::openai/gpt-oss-120b",
+      "browser-health-retry-after"
+    );
+    retryAfterStopwatch.Stop();
+    StringAssert.Contains(
+      retryAfter,
+      "cloud answer"
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      900,
+      retryAfterStopwatch.ElapsedMilliseconds
+    );
+    Assert.AreEqual(
+      2,
+      _environment.FakeCloud.Requests.Count(
+        request => request.Body.Contains(
+          "trigger-cloud-retry-after",
+          StringComparison.Ordinal
+        )
+      )
+    );
+
+    var bounded = await PostChatStreamAsync(
+      "trigger-cloud-bounded-retry",
+      "groq::openai/gpt-oss-120b",
+      "browser-health-bounded"
+    );
+    StringAssert.Contains(
+      bounded,
+      "\"type\":\"error\""
+    );
+    Assert.HasCount(
+      3,
+      _environment.FakeCloud.Requests.Where(
+        request => request.Body.Contains(
+          "trigger-cloud-bounded-retry",
+          StringComparison.Ordinal
+        )
+      ).ToArray()
+    );
+
+    var timedOut = await PostChatStreamAsync(
+      "trigger-cloud-timeout-bounded",
+      "groq::openai/gpt-oss-120b",
+      "browser-health-timeout"
+    );
+    StringAssert.Contains(
+      timedOut,
+      "\"type\":\"error\""
+    );
+    Assert.HasCount(
+      3,
+      _environment.FakeCloud.Requests.Where(
+        request => request.Body.Contains(
+          "trigger-cloud-timeout-bounded",
+          StringComparison.Ordinal
+        )
+      ).ToArray()
+    );
+
+    using (
+      var cancellation = new CancellationTokenSource(
+        350
+      )
+    )
+    {
+      await Assert.ThrowsExactlyAsync<TaskCanceledException>(
+        async () =>
+        {
+          using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "api/chat/stream"
+          )
+          {
+            Content = JsonContent.Create(
+              new
+              {
+                message = "trigger-cloud-cancel-retry",
+                model = "groq::openai/gpt-oss-120b",
+                history = Array.Empty<object>(),
+                modelLocked = true,
+                interactionMode = "chat",
+                approvalPolicy = "ask",
+                browserSessionId = "browser-health-cancel",
+                conversationSessionId = (string?)null
+              }
+            )
+          };
+          using var response = await _environment.HttpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellation.Token
+          );
+          await response.Content.ReadAsStringAsync(
+            cancellation.Token
+          );
+        }
+      );
+    }
+    await Task.Delay(
+      250
+    );
+    Assert.HasCount(
+      1,
+      _environment.FakeCloud.Requests.Where(
+        request => request.Body.Contains(
+          "trigger-cloud-cancel-retry",
+          StringComparison.Ordinal
+        )
+      ).ToArray()
+    );
+
+    using (
+      var summaryResponse = await _environment.HttpClient.GetAsync(
+        "api/usage/summary?window=rolling-hour&providerId=groq"
+      )
+    )
+    {
+      summaryResponse.EnsureSuccessStatusCode();
+      using var summary = JsonDocument.Parse(
+        await summaryResponse.Content.ReadAsStringAsync()
+      );
+      Assert.AreEqual(
+        11L,
+        summary.RootElement.GetProperty(
+          "requests"
+        ).GetInt64()
+      );
+      Assert.AreEqual(
+        6L,
+        summary.RootElement.GetProperty(
+          "outputTokens"
+        ).GetInt64()
+      );
+    }
+
+    const string rejectedCerebrasKey = "csk_rejected_health_096";
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/cloud-providers/cerebras/key",
+        new
+        {
+          apiKey = rejectedCerebrasKey
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    var requestsBeforeAuthenticationFailure = _environment.FakeCloud.Requests.Count;
+    using (
+      var unavailable = await _environment.HttpClient.PostAsync(
+        "api/provider-health/cerebras/test",
+        null
+      )
+    )
+    {
+      unavailable.EnsureSuccessStatusCode();
+      var body = await unavailable.Content.ReadAsStringAsync();
+      Assert.DoesNotContain(
+        rejectedCerebrasKey,
+        body
+      );
+      using var health = JsonDocument.Parse(
+        body
+      );
+      var provider = health.RootElement.GetProperty(
+        "providers"
+      ).EnumerateArray().Single(
+        item => item.GetProperty(
+          "providerId"
+        ).GetString() == "cerebras"
+      );
+      Assert.AreEqual(
+        "unavailable",
+        provider.GetProperty(
+          "connectionState"
+        ).GetString()
+      );
+      Assert.AreEqual(
+        "provider-key-invalid",
+        provider.GetProperty(
+          "diagnostic"
+        ).GetProperty(
+          "errorCategory"
+        ).GetString()
+      );
+    }
+    Assert.HasCount(
+      requestsBeforeAuthenticationFailure + 1,
+      _environment.FakeCloud.Requests
+    );
+
+    await Task.Delay(
+      1_100
+    );
+    using (
+      var staleResponse = await _environment.HttpClient.GetAsync(
+        "api/provider-health?staleAfterSeconds=1"
+      )
+    )
+    {
+      staleResponse.EnsureSuccessStatusCode();
+      using var stale = JsonDocument.Parse(
+        await staleResponse.Content.ReadAsStringAsync()
+      );
+      Assert.IsTrue(
+        stale.RootElement.GetProperty(
+          "providers"
+        ).EnumerateArray().Single(
+          provider => provider.GetProperty(
+            "providerId"
+          ).GetString() == "groq"
+        ).GetProperty(
+          "stale"
+        ).GetBoolean()
+      );
+    }
+
+    var usagePath = Directory.GetFiles(
+      Path.Combine(
+        _environment.DataDirectory,
+        "usage"
+      ),
+      "*.jsonl"
+    ).Single();
+    var firstValidLine = (
+      await File.ReadAllLinesAsync(
+        usagePath
+      )
+    ).First(
+      line => !string.IsNullOrWhiteSpace(
+        line
+      )
+    );
+    var invalid = JsonNode.Parse(
+      firstValidLine
+    )!.AsObject();
+    invalid["eventId"] = "negative-usage-v096";
+    invalid["inputTokens"] = -4;
+    invalid["totalTokens"] = -1;
+    await File.AppendAllTextAsync(
+      usagePath,
+      $"{invalid.ToJsonString()}\n{firstValidLine}\n{{malformed\n"
+    );
+    var immutableBefore = await File.ReadAllBytesAsync(
+      usagePath
+    );
+
+    using var reconciledResponse = await _environment.HttpClient.PostAsync(
+      "api/usage/reconcile",
+      null
+    );
+    reconciledResponse.EnsureSuccessStatusCode();
+    using var reconciled = JsonDocument.Parse(
+      await reconciledResponse.Content.ReadAsStringAsync()
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      2L,
+      reconciled.RootElement.GetProperty(
+        "rejected"
+      ).GetInt64()
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      1L,
+      reconciled.RootElement.GetProperty(
+        "duplicates"
+      ).GetInt64()
+    );
+    CollectionAssert.AreEqual(
+      immutableBefore,
+      await File.ReadAllBytesAsync(
+        usagePath
+      )
+    );
+    Assert.IsTrue(
+      File.Exists(
+        Path.Combine(
+          _environment.DataDirectory,
+          "usage-aggregates",
+          "aggregate-v1.json"
+        )
+      )
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#open-settings"
+    ).ClickAsync();
+    await Page.Locator(
+      "[data-settings-target=\"cloud-providers\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#provider-health-list .provider-health-card"
+      )
+    ).ToHaveCountAsync(
+      4
+    );
+    await Expect(
+      Page.Locator(
+        "#provider-health-list"
+      )
+    ).Not.ToContainTextAsync(
+      rejectedCerebrasKey
+    );
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LoadsVersionModelsAndCleanGpuNames()
   {
@@ -2484,7 +2875,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.5"
+      "v0.9.6"
     );
     await Expect(
       Page.Locator(
