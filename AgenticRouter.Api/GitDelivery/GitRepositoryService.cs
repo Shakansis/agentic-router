@@ -22,6 +22,13 @@ public interface IGitRepositoryService
     CancellationToken cancellationToken
   );
 
+  Task<GitRemoteApprovalView> PreviewRemoteAsync(
+    string workspaceId,
+    string workspacePath,
+    GitRemotePreviewRequest request,
+    CancellationToken cancellationToken
+  );
+
   Task<GitWorkspaceOverviewView> InitializeAsync(
     string workspaceId,
     string workspacePath,
@@ -35,6 +42,14 @@ public interface IGitRepositoryService
     string workspacePath,
     IReadOnlyList<string> currentSessionPaths,
     GitIdentityRequest request,
+    CancellationToken cancellationToken
+  );
+
+  Task<GitWorkspaceOverviewView> SetRemoteAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    GitRemoteRequest request,
     CancellationToken cancellationToken
   );
 
@@ -313,6 +328,54 @@ public sealed class GitRepositoryService : IGitRepositoryService
     );
   }
 
+  public async Task<GitRemoteApprovalView> PreviewRemoteAsync(
+    string workspaceId,
+    string workspacePath,
+    GitRemotePreviewRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    var remoteName = ValidateRemoteName(
+      request.RemoteName
+    );
+    var url = ValidateRemoteUrl(
+      request.Url
+    );
+    var overview = await GetWorkspaceOverviewAsync(
+      workspaceId,
+      workspacePath,
+      [],
+      cancellationToken
+    );
+    if (overview.State != "available")
+    {
+      throw new GitDeliveryException(
+        "git-repository-unavailable",
+        "git-remote-configuration",
+        "Repository remote configuration requires an initialized Git repository."
+      );
+    }
+    var current = overview.Remotes.FirstOrDefault(
+      remote => string.Equals(
+        remote.Name,
+        remoteName,
+        StringComparison.Ordinal
+      )
+    )?.FetchUrl ?? string.Empty;
+    return new GitRemoteApprovalView(
+      remoteName,
+      url,
+      CreateActionId(
+        "remote",
+        workspaceId,
+        overview.Repository?.Head ?? "unborn",
+        remoteName,
+        current,
+        url
+      )
+    );
+  }
+
   public async Task<GitWorkspaceOverviewView> InitializeAsync(
     string workspaceId,
     string workspacePath,
@@ -495,6 +558,78 @@ public sealed class GitRepositoryService : IGitRepositoryService
     }
 
     return refreshed;
+  }
+
+  public async Task<GitWorkspaceOverviewView> SetRemoteAsync(
+    string workspaceId,
+    string workspacePath,
+    IReadOnlyList<string> currentSessionPaths,
+    GitRemoteRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    ValidatePrivilegedRequest(
+      request.BrowserSessionId,
+      request.InteractionMode,
+      request.Confirmed,
+      "git-remote-configuration"
+    );
+    var preview = await PreviewRemoteAsync(
+      workspaceId,
+      workspacePath,
+      new GitRemotePreviewRequest(
+        request.RemoteName,
+        request.Url
+      ),
+      cancellationToken
+    );
+    if (!string.Equals(
+      preview.ActionId,
+      request.ActionId,
+      StringComparison.Ordinal
+    ))
+    {
+      throw new GitDeliveryException(
+        "git-action-stale",
+        "git-remote-configuration",
+        "The repository remote approval is stale."
+      );
+    }
+    var repository = await ResolveRepositoryAsync(
+      workspacePath,
+      cancellationToken
+    );
+    var existing = await ReadRemotesAsync(
+      repository.Root,
+      cancellationToken
+    );
+    IReadOnlyList<string> command = existing.Any(
+      remote => remote.Name == preview.RemoteName
+    )
+      ? [
+        "remote",
+        "set-url",
+        preview.RemoteName,
+        preview.Url
+      ]
+      : [
+        "remote",
+        "add",
+        preview.RemoteName,
+        preview.Url
+      ];
+    await RunAsync(
+      repository.Root,
+      command,
+      "git-remote-configuration",
+      cancellationToken
+    );
+    return await GetWorkspaceOverviewAsync(
+      workspaceId,
+      workspacePath,
+      currentSessionPaths,
+      cancellationToken
+    );
   }
 
   public async Task<GitRepositoryStatusView> GetStatusAsync(
@@ -1761,7 +1896,13 @@ public sealed class GitRepositoryService : IGitRepositoryService
         uri
       )
       {
-        UserName = string.Empty,
+        UserName = uri.Scheme == "ssh"
+          && !uri.UserInfo.Contains(
+            ':',
+            StringComparison.Ordinal
+          )
+            ? uri.UserInfo
+            : string.Empty,
         Password = string.Empty,
         Query = string.Empty,
         Fragment = string.Empty
@@ -1769,21 +1910,7 @@ public sealed class GitRepositoryService : IGitRepositoryService
       return builder.Uri.ToString();
     }
 
-    var separator = value.IndexOf(
-      ':'
-    );
-    var at = value.IndexOf(
-      '@'
-    );
-    var sanitized = at > 0
-      && separator > at
-      ? string.Concat(
-        "<redacted>",
-        value.AsSpan(
-          at
-        )
-      )
-      : value;
+    var sanitized = value;
     return sanitized.Length <= 2_000
       ? sanitized
       : string.Concat(
@@ -1884,6 +2011,118 @@ public sealed class GitRepositoryService : IGitRepositoryService
         field == "user.email"
           ? "Repository-local user.email is invalid."
           : "Repository-local user.name is invalid."
+      );
+    }
+    return normalized;
+  }
+
+  private static string ValidateRemoteName(
+    string value
+  )
+  {
+    if (!string.Equals(
+      value?.Trim(),
+      "origin",
+      StringComparison.Ordinal
+    ))
+    {
+      throw new GitDeliveryException(
+        "git-remote-name-invalid",
+        "git-remote-configuration",
+        "Only the repository origin address can be edited."
+      );
+    }
+    return "origin";
+  }
+
+  private static string ValidateRemoteUrl(
+    string value
+  )
+  {
+    var normalized = value?.Trim() ?? string.Empty;
+    if (
+      normalized.Length is < 1 or > 2_048
+      || normalized.Any(
+        char.IsControl
+      )
+      || normalized.Contains(
+        '\0',
+        StringComparison.Ordinal
+      )
+    )
+    {
+      throw new GitDeliveryException(
+        "git-remote-url-invalid",
+        "git-remote-configuration",
+        "The origin address is invalid."
+      );
+    }
+    if (Uri.TryCreate(
+      normalized,
+      UriKind.Absolute,
+      out var uri
+    ))
+    {
+      if (
+        uri.Scheme is not "https" and not "ssh"
+        || (
+          uri.Scheme == "https"
+          && !string.IsNullOrEmpty(
+            uri.UserInfo
+          )
+        )
+        || (
+          uri.Scheme == "ssh"
+          && (
+            uri.UserInfo.Contains(
+              ':',
+              StringComparison.Ordinal
+            )
+            || uri.UserInfo.Any(
+              character => !char.IsLetterOrDigit(character)
+                && character is not '-' and not '_' and not '.'
+            )
+          )
+        )
+        || string.IsNullOrWhiteSpace(
+          uri.Host
+        )
+        || !string.IsNullOrEmpty(
+          uri.Query
+        )
+        || !string.IsNullOrEmpty(
+          uri.Fragment
+        )
+      )
+      {
+        throw new GitDeliveryException(
+          "git-remote-url-invalid",
+          "git-remote-configuration",
+          "Use an HTTPS or SSH origin address without embedded credentials."
+        );
+      }
+      return normalized;
+    }
+    var separator = normalized.IndexOf(
+      ':'
+    );
+    var at = normalized.IndexOf(
+      '@'
+    );
+    if (
+      at < 1
+      || separator <= at + 1
+      || separator == normalized.Length - 1
+      || normalized[..at].Any(
+        character => !char.IsLetterOrDigit(character)
+          && character is not '-' and not '_' and not '.'
+      )
+    )
+    {
+      throw new GitDeliveryException(
+        "git-remote-url-invalid",
+        "git-remote-configuration",
+        "Use an HTTPS or SSH origin address without embedded credentials."
       );
     }
     return normalized;

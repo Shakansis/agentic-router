@@ -192,6 +192,7 @@ public sealed class OllamaClient : IOllamaClient
     long estimatedOutput = 0;
     ProviderTokenUsage? providerUsage = null;
     var status = UsageStatuses.Failure;
+    OllamaRuntimeProfileError? runtimeFailure = null;
 
     try
     {
@@ -287,6 +288,11 @@ public sealed class OllamaClient : IOllamaClient
       status = UsageStatuses.Success;
       return toolResponse;
     }
+    catch (OllamaRuntimeProfileException exception)
+    {
+      runtimeFailure = exception.Error;
+      throw;
+    }
     finally
     {
       if (cancellationToken.IsCancellationRequested)
@@ -301,7 +307,8 @@ public sealed class OllamaClient : IOllamaClient
         status,
         providerUsage,
         estimatedInput,
-        estimatedOutput
+        estimatedOutput,
+        runtimeFailure: runtimeFailure
       );
     }
   }
@@ -319,10 +326,11 @@ public sealed class OllamaClient : IOllamaClient
     var stopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
-    );
+    ) + (format is null ? 0 : _tokenEstimator.EstimateText(format.Value.GetRawText()));
     long estimatedOutput = 0;
     ProviderTokenUsage? providerUsage = null;
     var status = UsageStatuses.Failure;
+    OllamaRuntimeProfileError? runtimeFailure = null;
 
     try
     {
@@ -385,6 +393,11 @@ public sealed class OllamaClient : IOllamaClient
       status = UsageStatuses.Success;
       return content;
     }
+    catch (OllamaRuntimeProfileException exception)
+    {
+      runtimeFailure = exception.Error;
+      throw;
+    }
     finally
     {
       if (cancellationToken.IsCancellationRequested)
@@ -399,7 +412,8 @@ public sealed class OllamaClient : IOllamaClient
         status,
         providerUsage,
         estimatedInput,
-        estimatedOutput
+        estimatedOutput,
+        runtimeFailure: runtimeFailure
       );
     }
   }
@@ -831,25 +845,40 @@ public sealed class OllamaClient : IOllamaClient
     long estimatedOutput = 0;
     ProviderTokenUsage? providerUsage = null;
     var status = UsageStatuses.Failure;
-    var policy = await GetGenerationPolicyAsync(
-      baseUri,
-      model,
-      options.Images.Count > 0
-        ? usageContext with
-        {
-          ModelRole = UsageModelRoles.VisionRequest
-        }
-        : usageContext,
-      estimatedInput,
-      false,
-      cancellationToken
-    );
-    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
-      cancellationToken
-    );
-    timeout.CancelAfter(
-      policy.Timeout
-    );
+    GenerationPolicy policy;
+    try
+    {
+      policy = await GetGenerationPolicyAsync(
+        baseUri,
+        model,
+        options.Images.Count > 0
+          ? usageContext with
+          {
+            ModelRole = UsageModelRoles.VisionRequest
+          }
+          : usageContext,
+        estimatedInput,
+        false,
+        cancellationToken
+      );
+    }
+    catch (OllamaRuntimeProfileException exception)
+    {
+      await RecordUsageAsync(
+        usageContext,
+        model,
+        stopwatch,
+        status,
+        providerUsage,
+        estimatedInput,
+        estimatedOutput,
+        runtimeFailure: exception.Error
+      );
+      throw;
+    }
+
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(policy.Timeout);
     await using var enumerator = StreamChatCoreAsync(
       baseUri,
       model,
@@ -857,9 +886,7 @@ public sealed class OllamaClient : IOllamaClient
       policy,
       options,
       timeout.Token
-    ).GetAsyncEnumerator(
-      timeout.Token
-    );
+    ).GetAsyncEnumerator(timeout.Token);
 
     try
     {
@@ -1312,7 +1339,8 @@ public sealed class OllamaClient : IOllamaClient
     ProviderTokenUsage? providerUsage,
     long estimatedInput,
     long estimatedOutput,
-    ProviderActivityMetadata? activity = null
+    ProviderActivityMetadata? activity = null,
+    OllamaRuntimeProfileError? runtimeFailure = null
   )
   {
     await _usageRecorder.RecordAsync(
@@ -1325,7 +1353,14 @@ public sealed class OllamaClient : IOllamaClient
         providerUsage,
         estimatedInput,
         estimatedOutput,
-        Activity: activity
+        ErrorCode: runtimeFailure?.Code,
+        Activity: activity,
+        ErrorStage: runtimeFailure?.Stage,
+        EstimatedInputContextTokens: runtimeFailure?.EstimatedInputTokens,
+        ReservedOutputTokens: runtimeFailure?.ReservedOutputTokens,
+        RequiredContextTokens: runtimeFailure?.RequiredContextTokens,
+        MaximumContextTokens: runtimeFailure?.MaximumContextTokens,
+        EffectiveContextTokens: runtimeFailure?.EffectiveContextTokens
       ),
       CancellationToken.None
     );

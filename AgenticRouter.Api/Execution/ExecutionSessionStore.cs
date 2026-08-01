@@ -367,9 +367,19 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
           change.RelativePath
         );
 
-        if (!File.Exists(
-          path
-        ))
+        if (change.Operation == "deleted")
+        {
+          if (File.Exists(path) || Directory.Exists(path))
+          {
+            conflicts.Add(
+              $"{change.RelativePath}: the deleted path was recreated after the execution session."
+            );
+          }
+
+          continue;
+        }
+
+        if (!File.Exists(path))
         {
           conflicts.Add(
             $"{change.RelativePath}: the current file no longer exists."
@@ -459,11 +469,26 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
           session,
           change.RelativePath
         );
-        await WriteAtomicallyAsync(
-          path,
-          change.OriginalContent!,
-          cancellationToken
-        );
+        if (change.OriginalBinaryBase64 is not null)
+        {
+          await WriteBytesAtomicallyAsync(
+            path,
+            Convert.FromBase64String(change.OriginalBinaryBase64),
+            cancellationToken
+          );
+        }
+        else
+        {
+          var originalContent = change.OriginalContent
+            ?? throw new IOException(
+              $"Undo content is unavailable for {change.RelativePath}."
+            );
+          await WriteAtomicallyAsync(
+            path,
+            originalContent,
+            cancellationToken
+          );
+        }
         var restoredHash = await HashFileAsync(
           path,
           cancellationToken
@@ -570,11 +595,18 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
             session,
             change.RelativePath
           );
-          await WriteAtomicallyAsync(
-            path,
-            change.FinalContent,
-            CancellationToken.None
-          );
+          if (change.Operation == "deleted")
+          {
+            File.Delete(path);
+          }
+          else
+          {
+            await WriteAtomicallyAsync(
+              path,
+              change.FinalContent,
+              CancellationToken.None
+            );
+          }
         }
         catch
         {
@@ -797,6 +829,43 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
     }
   }
 
+  private static async Task WriteBytesAtomicallyAsync(
+    string path,
+    byte[] content,
+    CancellationToken cancellationToken
+  )
+  {
+    var directory = Path.GetDirectoryName(path) ?? throw new IOException(
+      "The file has no parent directory."
+    );
+    Directory.CreateDirectory(directory);
+    var temporaryPath = Path.Combine(
+      directory,
+      $".agentic-router-undo-{Guid.NewGuid():N}.tmp"
+    );
+
+    try
+    {
+      await File.WriteAllBytesAsync(
+        temporaryPath,
+        content,
+        cancellationToken
+      );
+      File.Move(
+        temporaryPath,
+        path,
+        true
+      );
+    }
+    finally
+    {
+      if (File.Exists(temporaryPath))
+      {
+        File.Delete(temporaryPath);
+      }
+    }
+  }
+
   private void Trim()
   {
     var attempts = _retentionOrder.Count;
@@ -854,6 +923,16 @@ public sealed class ExecutionSession
   private readonly List<ExecutionFileChange> _files = [];
   private readonly List<ExecutionProcessReview> _processes = [];
   private readonly List<string> _warnings = [];
+  private readonly List<ToolNameResolutionEvidence> _toolNameResolutions = [];
+  private readonly Dictionary<string, PlanActionBinding> _planActionBindings = new(
+    StringComparer.Ordinal
+  );
+  private readonly Dictionary<string, int> _verifiedEffectCounts = new(
+    StringComparer.Ordinal
+  );
+  private readonly Dictionary<string, string> _planStepExpectedEffects = new(
+    StringComparer.Ordinal
+  );
   private readonly HashSet<string> _appliedInstructions = new(
     StringComparer.OrdinalIgnoreCase
   );
@@ -877,6 +956,7 @@ public sealed class ExecutionSession
   private GitDeliveryStateView? _delivery;
   private string? _deliveryCommitHash;
   private string _completionStatus = "not-evaluated";
+  private string? _forcedCompletionStatus;
 
   public ExecutionSession(
     string id,
@@ -930,6 +1010,12 @@ public sealed class ExecutionSession
 
   public string ExecutionPath { get; private set; }
 
+  public string? ResidentModel { get; private set; }
+
+  public string? ConformanceIdentity { get; private set; }
+
+  public string? HandoffReason { get; private set; }
+
   public string State { get; private set; } = "running";
 
   public int PlanningFailureCount { get; private set; }
@@ -981,6 +1067,42 @@ public sealed class ExecutionSession
       {
         return _plan;
       }
+    }
+  }
+
+  public bool RequiresMutation
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return RequiresMutationUnsafe();
+      }
+    }
+  }
+
+  public bool HasVerifiedMutation
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return _verifiedEffectCounts.Keys.Any(
+          effect => ToolEffectRegistry.IsMutation(effect)
+            && EffectCount(effect) > 0
+        );
+      }
+    }
+  }
+
+  public bool CanCompletePlan()
+  {
+    lock (_gate)
+    {
+      return _plan is not null
+        && _plan.Steps.Count > 0
+        && _plan.Steps.All(step => step.Status == "completed")
+        && (!RequiresMutationUnsafe() || HasVerifiedMutationUnsafe());
     }
   }
 
@@ -1042,6 +1164,7 @@ public sealed class ExecutionSession
       }
 
       _plan = plan;
+      RefreshPlanExpectedEffects(plan);
     }
   }
 
@@ -1052,10 +1175,12 @@ public sealed class ExecutionSession
     lock (_gate)
     {
       _plan = plan;
+      RefreshPlanExpectedEffects(plan);
     }
   }
 
-  public void RecordPlanActionStarted(
+  public bool RecordPlanActionStarted(
+    string actionId,
     string tool
   )
   {
@@ -1063,11 +1188,18 @@ public sealed class ExecutionSession
     {
       if (_plan is null)
       {
-        return;
+        return false;
+      }
+
+      var effect = ToolEffectRegistry.ForTool(tool);
+
+      if (effect is null)
+      {
+        return false;
       }
 
       var index = FindPlanStep(
-        tool,
+        effect,
         [
           "pending",
           "in-progress"
@@ -1076,10 +1208,15 @@ public sealed class ExecutionSession
 
       if (index < 0)
       {
-        return;
+        return false;
       }
 
       var steps = _plan.Steps.ToArray();
+      _planActionBindings[actionId] = new PlanActionBinding(
+        steps[index].Id,
+        effect,
+        EffectCount(effect)
+      );
       steps[index] = steps[index] with
       {
         Status = "in-progress"
@@ -1089,10 +1226,12 @@ public sealed class ExecutionSession
         Steps = steps,
         CurrentStepId = steps[index].Id
       };
+      return true;
     }
   }
 
-  public void RecordPlanActionResult(
+  public bool RecordPlanActionResult(
+    string actionId,
     string tool,
     string status
   )
@@ -1101,20 +1240,37 @@ public sealed class ExecutionSession
     {
       if (_plan is null)
       {
-        return;
+        return false;
       }
 
-      var index = FindPlanStep(
-        tool,
-        [
-          "in-progress",
-          "pending"
-        ]
+      if (!_planActionBindings.TryGetValue(actionId, out var binding))
+      {
+        return false;
+      }
+
+      var index = _plan.Steps.ToList().FindIndex(
+        step => string.Equals(step.Id, binding.StepId, StringComparison.Ordinal)
       );
 
       if (index < 0)
       {
-        return;
+        return false;
+      }
+
+      if (
+        status == "completed"
+        && (
+          !string.Equals(
+            ToolEffectRegistry.ForTool(tool),
+            binding.ExpectedEffect,
+            StringComparison.Ordinal
+          )
+          || EffectCount(binding.ExpectedEffect) <= binding.EvidenceCountBefore
+          || !HasVerifiedEffect(binding.ExpectedEffect)
+        )
+      )
+      {
+        return false;
       }
 
       var steps = _plan.Steps.ToArray();
@@ -1132,6 +1288,8 @@ public sealed class ExecutionSession
           step => step.Status == "completed"
         )
       };
+      _planActionBindings.Remove(actionId);
+      return true;
     }
   }
 
@@ -1282,6 +1440,20 @@ public sealed class ExecutionSession
     }
   }
 
+  public void RecordCoordinationMetadata(
+    string residentModel,
+    string? conformanceIdentity,
+    string? handoffReason
+  )
+  {
+    lock (_gate)
+    {
+      ResidentModel = residentModel;
+      ConformanceIdentity = conformanceIdentity;
+      HandoffReason = handoffReason;
+    }
+  }
+
   public void RecordAction(
     ValidatedLocalAction action,
     string state,
@@ -1299,8 +1471,12 @@ public sealed class ExecutionSession
         action.Summary,
         state,
         result,
-        DateTimeOffset.UtcNow
+        DateTimeOffset.UtcNow,
+        action.OriginalTool,
+        action.ToolResolutionSource
       );
+
+      var wasCompleted = existing >= 0 && _actions[existing].State == "completed";
 
       if (existing >= 0)
       {
@@ -1312,6 +1488,46 @@ public sealed class ExecutionSession
           record
         );
       }
+
+      if (state == "completed" && !wasCompleted)
+      {
+        var effect = ToolEffectRegistry.ForTool(action.Tool);
+
+        if (effect is not null)
+        {
+          _verifiedEffectCounts[effect] = EffectCount(effect) + 1;
+        }
+      }
+    }
+  }
+
+  public void RecordToolNameResolution(
+    LocalActionProposal proposal,
+    string validationOutcome
+  )
+  {
+    var original = proposal.OriginalTool ?? proposal.Tool;
+
+    if (string.Equals(
+      original,
+      proposal.Tool,
+      StringComparison.Ordinal
+    ))
+    {
+      return;
+    }
+
+    lock (_gate)
+    {
+      _toolNameResolutions.Add(
+        new ToolNameResolutionEvidence(
+          original,
+          proposal.Tool,
+          proposal.ToolResolutionSource,
+          validationOutcome,
+          DateTimeOffset.UtcNow
+        )
+      );
     }
   }
 
@@ -1354,6 +1570,7 @@ public sealed class ExecutionSession
           ExistedBefore = original.ExistedBefore,
           OriginalHash = original.OriginalHash,
           OriginalContent = original.OriginalContent,
+          OriginalBinaryBase64 = original.OriginalBinaryBase64,
           RollbackBytes = original.RollbackBytes,
           UndoAvailable = original.UndoAvailable && change.UndoAvailable,
           UndoDiagnostic = original.UndoDiagnostic ?? change.UndoDiagnostic
@@ -1419,6 +1636,31 @@ public sealed class ExecutionSession
       if (_rollbackBytes + originalBytes > Limits.MaxRollbackBytesPerSession)
       {
         diagnostic = "The session rollback byte limit would be exceeded.";
+        return false;
+      }
+
+      diagnostic = null;
+      return true;
+    }
+  }
+
+  public bool CanTrackRollbackBatch(
+    int fileCount,
+    long originalBytes,
+    out string? diagnostic
+  )
+  {
+    lock (_gate)
+    {
+      if (_files.Count + fileCount > Limits.MaxTrackedFilesPerSession)
+      {
+        diagnostic = "The deletion would exceed the session file tracking limit.";
+        return false;
+      }
+
+      if (_rollbackBytes + originalBytes > Limits.MaxRollbackBytesPerSession)
+      {
+        diagnostic = "The deletion would exceed the session rollback byte limit.";
         return false;
       }
 
@@ -1502,6 +1744,33 @@ public sealed class ExecutionSession
     }
   }
 
+  public void MarkPartialContextExhausted()
+  {
+    lock (_gate)
+    {
+      _forcedCompletionStatus = "partial-context-exhausted";
+      if (!_warnings.Contains("Coordinator context was exhausted after bounded deterministic compaction.", StringComparer.Ordinal))
+      {
+        _warnings.Add("Coordinator context was exhausted after bounded deterministic compaction.");
+      }
+      EvaluateCompletionGate();
+    }
+  }
+
+  public string CreateCoordinatorStateSummary()
+  {
+    lock (_gate)
+    {
+      var objectiveHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Objective))).ToLowerInvariant();
+      var plan = _plan is null
+        ? "none"
+        : string.Join(",", _plan.Steps.Select(step => $"{SafeState(step.Id)}:{SafeState(step.Status)}"));
+      var actions = string.Join(",", _actions.Select(action => $"{SafeState(action.ActionId)}:{SafeState(action.OriginalTool ?? action.Tool)}->{SafeState(action.Tool)}:{SafeState(action.State)}:{Encoding.UTF8.GetByteCount(action.Result ?? string.Empty)}"));
+      var files = string.Join(",", _files.Select(file => $"{SafeState(file.RelativePath)}:{SafeState(file.Operation)}:{file.FinalSizeBytes}:{SafeState(file.FinalHash)}"));
+      return $"objectiveSha256={objectiveHash}\nplan={plan}\nactions={actions}\nfiles={files}\nvalidation={SafeState(_validation?.State ?? "not-run")}\ncompletion={SafeState(_completionStatus)}";
+    }
+  }
+
   public ExecutionSessionSummary CreateSummary()
   {
     lock (_gate)
@@ -1524,7 +1793,11 @@ public sealed class ExecutionSession
         undo.Diagnostic,
         _plan,
         _completionStatus,
-        _delivery
+        _delivery,
+        SelectedModel,
+        ResidentModel,
+        ConformanceIdentity,
+        HandoffReason
       );
     }
   }
@@ -1548,7 +1821,8 @@ public sealed class ExecutionSession
         _conflicts.ToArray(),
         _validationProfile,
         _validation,
-        _delivery
+        _delivery,
+        _toolNameResolutions.ToArray()
       );
     }
   }
@@ -1585,9 +1859,17 @@ public sealed class ExecutionSession
       _warnings.AddRange(
         snapshot.Review.Warnings
       );
+      _toolNameResolutions.AddRange(
+        snapshot.Review.ToolNameResolutions
+          ?? []
+      );
       _project = snapshot.Review.Project;
       _baseline = snapshot.Review.Baseline;
       _plan = snapshot.Review.Summary.Plan;
+      if (_plan is not null)
+      {
+        RefreshPlanExpectedEffects(_plan);
+      }
       _validationProfile = snapshot.Review.ValidationProfile;
       _validation = snapshot.Review.Validation;
       _delivery = snapshot.Review.Delivery;
@@ -1602,7 +1884,10 @@ public sealed class ExecutionSession
       );
       CoordinatorModel = snapshot.CoordinatorModel;
       ExecutionPath = snapshot.ExecutionPath;
-      State = snapshot.State is "completed" or "completed-with-warnings"
+      ResidentModel = snapshot.Review.Summary.ResidentModel;
+      ConformanceIdentity = snapshot.Review.Summary.ConformanceIdentity;
+      HandoffReason = snapshot.Review.Summary.HandoffReason;
+      State = snapshot.State is "completed" or "completed-with-warnings" or "blocked"
         ? snapshot.State
         : "interrupted";
       _completionStatus = snapshot.Review.Summary.CompletionStatus;
@@ -1675,7 +1960,7 @@ public sealed class ExecutionSession
     {
       return (
         false,
-        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.10 does not rewrite Git history."
+        $"Undo is unavailable because this delivery was committed as {_deliveryCommitHash}. v0.9.12 does not rewrite Git history."
       );
     }
 
@@ -1734,38 +2019,10 @@ public sealed class ExecutionSession
   }
 
   private int FindPlanStep(
-    string tool,
+    string effect,
     IReadOnlyCollection<string> states
   )
   {
-    string[] keywords = tool switch
-    {
-      "list_files" or "read_file" or "get_file_info" or "search_text" =>
-      [
-        "inspect",
-        "read",
-        "review",
-        "analis",
-        "ler"
-      ],
-      "run_validation_profile" =>
-      [
-        "valid",
-        "test",
-        "build",
-        "format"
-      ],
-      _ =>
-      [
-        "implement",
-        "change",
-        "edit",
-        "create",
-        "apply",
-        "alter",
-        "criar"
-      ]
-    };
     var matching = _plan!.Steps.Select(
       (
         step,
@@ -1779,34 +2036,63 @@ public sealed class ExecutionSession
       item => states.Contains(
         item.Step.Status,
         StringComparer.Ordinal
-      ) && keywords.Any(
-        keyword => item.Step.Title.Contains(
-          keyword,
-          StringComparison.OrdinalIgnoreCase
-        )
-      )
+      ) && _planStepExpectedEffects.TryGetValue(item.Step.Id, out var expected)
+        && string.Equals(expected, effect, StringComparison.Ordinal)
     );
-    return matching?.Index
-      ?? _plan.Steps.Select(
-        (
-          step,
-          index
-        ) => new
-        {
-          Step = step,
-          Index = index
-        }
-      ).FirstOrDefault(
-        item => states.Contains(
-          item.Step.Status,
-          StringComparer.Ordinal
-        )
-      )?.Index
-      ?? -1;
+    if (matching is not null)
+    {
+      return matching.Index;
+    }
+
+    var generic = _plan.Steps.Select(
+      (step, index) => new
+      {
+        Step = step,
+        Index = index
+      }
+    ).FirstOrDefault(
+      item => states.Contains(item.Step.Status, StringComparer.Ordinal)
+        && !_planStepExpectedEffects.ContainsKey(item.Step.Id)
+        && ToolEffectRegistry.IsGenericPlanStep(item.Step.Title)
+    );
+    if (generic is null)
+    {
+      return -1;
+    }
+
+    _planStepExpectedEffects[generic.Step.Id] = effect;
+    return generic.Index;
+  }
+
+  private int EffectCount(string effect)
+  {
+    return _verifiedEffectCounts.TryGetValue(effect, out var count)
+      ? count
+      : 0;
+  }
+
+  private bool HasVerifiedEffect(string effect)
+  {
+    return effect switch
+    {
+      ToolEffects.FileCreated => _files.Any(file => file.Verified && file.Operation == "created"),
+      ToolEffects.FileChanged => _files.Any(file => file.Verified && file.Operation == "modified"),
+      ToolEffects.FileDeleted => _files.Any(file => file.Verified && file.Operation == "deleted"),
+      ToolEffects.DirectoryCreated => _createdDirectories.Count > 0,
+      ToolEffects.Validated => _validation?.State is "passed" or "passed-with-warnings",
+      _ => EffectCount(effect) > 0
+    };
   }
 
   private void EvaluateCompletionGate()
   {
+    if (!string.IsNullOrWhiteSpace(_forcedCompletionStatus))
+    {
+      _completionStatus = _forcedCompletionStatus;
+      State = State == "cancelled" ? State : "completed-with-warnings";
+      return;
+    }
+
     var validationRequested = Objective.Contains(
       "valid",
       StringComparison.OrdinalIgnoreCase
@@ -1832,7 +2118,15 @@ public sealed class ExecutionSession
       )
     ) == true;
 
-    if (_files.Count > 0)
+    if (RequiresMutationUnsafe() && !HasVerifiedMutationUnsafe())
+    {
+      _completionStatus = "blocked-mutation-not-performed";
+      if (State is "completed" or "completed-with-warnings")
+      {
+        State = "blocked";
+      }
+    }
+    else if (_files.Count > 0)
     {
       _completionStatus = _validation?.State switch
       {
@@ -1842,6 +2136,17 @@ public sealed class ExecutionSession
         "cancelled" => "implemented-validation-cancelled",
         "not-configured" => "implemented-validation-not-configured",
         _ => "implemented-validation-not-run"
+      };
+    }
+    else if (HasVerifiedMutationUnsafe())
+    {
+      _completionStatus = _validation?.State switch
+      {
+        "passed" => "implemented-and-validated",
+        "passed-with-warnings" => "implemented-and-validated-with-warnings",
+        "failed" => "implemented-validation-failed",
+        "cancelled" => "implemented-validation-cancelled",
+        _ => "verified-mutation-no-file-artifacts"
       };
     }
     else if (_validation?.State is "passed" or "passed-with-warnings")
@@ -1865,12 +2170,75 @@ public sealed class ExecutionSession
       StringComparison.Ordinal
     ))
     {
-      State = State == "cancelled"
-        ? State
-        : "completed-with-warnings";
+      if (State is "completed" or "completed-with-warnings")
+      {
+        State = _completionStatus == "blocked-mutation-not-performed"
+          ? "blocked"
+          : "completed-with-warnings";
+      }
     }
   }
+
+  private bool RequiresMutationUnsafe()
+  {
+    if (_planStepExpectedEffects.Values.Any(ToolEffectRegistry.IsMutation))
+    {
+      return true;
+    }
+
+    return new[]
+    {
+      "implement", "change", "edit", "update", "fix", "create", "delete", "remove",
+      "alter", "corrig", "criar", "excluir", "apagar", "adicionar", "remover"
+    }.Any(fragment => Objective.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+  }
+
+  private void RefreshPlanExpectedEffects(ExecutionPlanView plan)
+  {
+    var previous = _planStepExpectedEffects.ToDictionary(
+      pair => pair.Key,
+      pair => pair.Value,
+      StringComparer.Ordinal
+    );
+    _planStepExpectedEffects.Clear();
+
+    foreach (var step in plan.Steps)
+    {
+      var generic = ToolEffectRegistry.IsGenericPlanStep(step.Title);
+      var effect = generic
+        ? null
+        : ToolEffectRegistry.InferExpectedEffect(step.Title);
+
+      if (effect is null && previous.TryGetValue(step.Id, out var preserved))
+      {
+        effect = preserved;
+      }
+
+      if (effect is not null)
+      {
+        _planStepExpectedEffects[step.Id] = effect;
+      }
+    }
+  }
+
+  private bool HasVerifiedMutationUnsafe()
+  {
+    return _verifiedEffectCounts.Any(
+      pair => pair.Value > 0 && ToolEffectRegistry.IsMutation(pair.Key)
+    );
+  }
+
+  private static string SafeState(string value)
+  {
+    return new string(value.Where(character => !char.IsControl(character)).Take(512).ToArray());
+  }
 }
+
+internal sealed record PlanActionBinding(
+  string StepId,
+  string ExpectedEffect,
+  int EvidenceCountBefore
+);
 
 public sealed record ExecutionActionRecord(
   string ActionId,
@@ -1878,7 +2246,9 @@ public sealed record ExecutionActionRecord(
   string Summary,
   string State,
   string? Result,
-  DateTimeOffset Timestamp
+  DateTimeOffset Timestamp,
+  string? OriginalTool = null,
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource
 );
 
 public sealed record ExecutionSessionPersistenceSnapshot(
@@ -1907,7 +2277,8 @@ public sealed record ExecutionFileChange(
   string? UndoDiagnostic,
   long RollbackBytes,
   bool PreExistingChange = false,
-  string? CurrentGitStatus = null
+  string? CurrentGitStatus = null,
+  string? OriginalBinaryBase64 = null
 )
 {
   public ExecutionFileReview ToReview()
@@ -1930,6 +2301,11 @@ public sealed record ExecutionFileChange(
 
   private string? CreateUnifiedDiff()
   {
+    if (OriginalBinaryBase64 is not null)
+    {
+      return null;
+    }
+
     if (OriginalContent is null && ExistedBefore)
     {
       return null;
@@ -1957,7 +2333,9 @@ public sealed record ExecutionFileChange(
       $"--- a/{RelativePath}"
     );
     builder.AppendLine(
-      $"+++ b/{RelativePath}"
+      Operation == "deleted"
+        ? "+++ /dev/null"
+        : $"+++ b/{RelativePath}"
     );
     builder.AppendLine(
       $"@@ -1,{oldLines.Length} +1,{newLines.Length} @@"

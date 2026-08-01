@@ -5,6 +5,7 @@ using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Models;
+using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.ProjectAwareness;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Cloud;
@@ -127,6 +128,14 @@ builder.Services.AddSingleton<IUsageLedger>(
 );
 builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
 builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
+builder.Services.AddScoped<ITraceContext, TraceContext>();
+builder.Services.AddSingleton<IIncidentJournal>(
+  services => new JsonlIncidentJournal(
+    dataDirectory,
+    services.GetRequiredService<ISettingsStore>(),
+    services.GetRequiredService<ILogger<JsonlIncidentJournal>>()
+  )
+);
 builder.Services.AddSingleton<IProviderRetryPolicy, ConservativeProviderRetryPolicy>();
 builder.Services.AddSingleton<IProviderHealthMonitor, ProviderHealthMonitor>();
 builder.Services.AddSingleton<IUsageReconciliationService>(
@@ -158,6 +167,7 @@ builder.Services.AddScoped<ITrustedWorkspaceService, TrustedWorkspaceService>();
 builder.Services.AddScoped<IProjectAwarenessService, ProjectAwarenessService>();
 builder.Services.AddScoped<IRepositoryInstructionService, RepositoryInstructionService>();
 builder.Services.AddSingleton<IFolderPickerService, WindowsFolderPickerService>();
+builder.Services.AddSingleton<IToolNameResolver, ToolNameResolver>();
 builder.Services.AddScoped<ILocalActionService, LocalActionService>();
 builder.Services.AddScoped<IApprovalPolicyService, ApprovalPolicyService>();
 builder.Services.AddSingleton<IProcessExecutionService, ProcessExecutionService>();
@@ -191,6 +201,10 @@ builder.Services.AddSingleton<
 >();
 builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
 builder.Services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
+builder.Services.AddSingleton<
+  IResidentCoordinationEligibilityService,
+  ResidentCoordinationEligibilityService
+>();
 builder.Services.AddSingleton<ResidentModelManager>();
 builder.Services.AddSingleton<IResidentModelManager>(
   services => services.GetRequiredService<ResidentModelManager>()
@@ -213,6 +227,7 @@ var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.UseMiddleware<TraceContextMiddleware>();
 app.UseMiddleware<SafeModeMiddleware>();
 app.UseAuthorization();
 app.MapControllers();

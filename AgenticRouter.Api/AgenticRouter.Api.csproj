@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.9.10</Version>
+    <Version>0.9.14</Version>
   </PropertyGroup>
 
   <ItemGroup>

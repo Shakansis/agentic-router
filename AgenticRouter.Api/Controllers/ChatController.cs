@@ -2,8 +2,10 @@ using System.Text.Json;
 using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Sessions;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
@@ -23,16 +25,21 @@ public sealed class ChatController : ControllerBase
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IImageAttachmentValidator _imageValidator;
   private readonly ILogger<ChatController> _logger;
+  private readonly IIncidentJournal _incidents;
+  private readonly ITraceContext _trace;
   private readonly IPersistentSessionService _persistentSessions;
   private string? _executionSessionId;
   private string? _conversationSessionId;
   private string? _lastExecutionCheckpoint;
+  private readonly List<Task<IncidentAppendResult>> _incidentWrites = [];
 
   public ChatController(
     IChatStreamService chatStreamService,
     IExecutionSessionStore executionSessions,
     IPersistentSessionService persistentSessions,
     IImageAttachmentValidator imageValidator,
+    IIncidentJournal incidents,
+    ITraceContext trace,
     ILogger<ChatController> logger
   )
   {
@@ -40,6 +47,8 @@ public sealed class ChatController : ControllerBase
     _executionSessions = executionSessions;
     _persistentSessions = persistentSessions;
     _imageValidator = imageValidator;
+    _incidents = incidents;
+    _trace = trace;
     _logger = logger;
   }
 
@@ -57,6 +66,7 @@ public sealed class ChatController : ControllerBase
     var requestId = Guid.NewGuid().ToString(
       "N"
     );
+    _trace.Link("requestId", requestId);
 
     if (string.IsNullOrWhiteSpace(
       request.Message
@@ -96,6 +106,7 @@ public sealed class ChatController : ControllerBase
         );
         _conversationSessionId = persisted?.Id
           ?? _conversationSessionId;
+        _trace.Link("conversationId", _conversationSessionId);
         if (persisted is not null)
         {
           await WriteEventAsync(
@@ -139,6 +150,7 @@ public sealed class ChatController : ControllerBase
       {
         _executionSessionId = streamEvent.ExecutionSession?.Id
           ?? _executionSessionId;
+        _trace.Link("executionSessionId", _executionSessionId);
         await PersistExecutionCheckpointAsync(
           streamEvent
         );
@@ -311,6 +323,38 @@ public sealed class ChatController : ControllerBase
             : exception is CapabilityException capabilityError
               ? capabilityError.Provider ?? "ollama-local"
             : "ollama-local"
+        ),
+        cancellationToken
+      );
+    }
+    catch (OllamaRuntimeProfileException exception)
+    {
+      await MarkPersistentTerminalAsync("failed");
+      _logger.LogWarning(exception, "Chat request {RequestId} failed runtime context validation.", requestId);
+      var error = exception.Error;
+      await WriteErrorAsync(
+        requestId,
+        new ChatStageException(
+          error.Stage,
+          error.Message,
+          error.Diagnostic,
+          error.Model,
+          null,
+          error.Code == "request-context-does-not-fit" ? 413 : 400,
+          error.Retryable,
+          exception,
+          new Dictionary<string, string?>(StringComparer.Ordinal)
+          {
+            ["code"] = error.Code,
+            ["providerTraceId"] = error.TraceId,
+            ["role"] = error.Role,
+            ["estimatedInputTokens"] = error.EstimatedInputTokens?.ToString(),
+            ["reservedOutputTokens"] = error.ReservedOutputTokens?.ToString(),
+            ["requiredContextTokens"] = error.RequiredContextTokens?.ToString(),
+            ["maximumContextTokens"] = error.MaximumContextTokens?.ToString(),
+            ["effectiveContextTokens"] = error.EffectiveContextTokens?.ToString()
+          },
+          error.Provider
         ),
         cancellationToken
       );
@@ -490,7 +534,10 @@ public sealed class ChatController : ControllerBase
       exception.Intention,
       exception.HttpStatus,
       exception.Recoverable,
-      exception.Details
+      exception.Details,
+      exception.Details?.TryGetValue("code", out var code) == true
+        ? code
+        : exception.Stage
     );
     var streamEvent = new ChatStreamEvent(
       requestId,
@@ -530,6 +577,48 @@ public sealed class ChatController : ControllerBase
     CancellationToken cancellationToken
   )
   {
+    streamEvent = streamEvent with
+    {
+      ConversationSessionId = streamEvent.ConversationSessionId ?? _conversationSessionId
+    };
+    var incident = IncidentEventFactory.FromChatEvent(_trace, streamEvent);
+    if (incident is not null)
+    {
+      var write = _incidents.AppendAsync(incident, CancellationToken.None);
+      _incidentWrites.Add(write);
+      var terminal = streamEvent.Type is "error" or "response.completed" or "request.cancelled";
+      IncidentAppendResult result;
+      if (terminal)
+      {
+        var results = await Task.WhenAll(_incidentWrites);
+        result = results[^1];
+        _incidentWrites.Clear();
+      }
+      else
+      {
+        result = new IncidentAppendResult(false);
+      }
+      if (streamEvent.Error is not null)
+      {
+        streamEvent = streamEvent with
+        {
+          Error = streamEvent.Error with
+          {
+            DiagnosticsPersisted = result.Persisted,
+            ContextFit = incident.ContextFit is null
+              ? null
+              : new IncidentContextFitView(
+                incident.ContextFit.EstimatedInputTokens,
+                incident.ContextFit.ReservedOutputTokens,
+                incident.ContextFit.RequiredContextTokens,
+                incident.ContextFit.MaximumContextTokens,
+                incident.ContextFit.EffectiveContextTokens
+              )
+          }
+        };
+      }
+    }
+
     var json = JsonSerializer.Serialize(
       streamEvent,
       JsonOptions

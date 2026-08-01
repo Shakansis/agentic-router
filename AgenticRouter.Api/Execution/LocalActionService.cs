@@ -24,7 +24,9 @@ public interface ILocalActionService
 public sealed record LocalActionProposal(
   string Tool,
   JsonElement Arguments,
-  string? Explanation
+  string? Explanation,
+  string? OriginalTool = null,
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource
 );
 
 public sealed record ValidatedLocalAction(
@@ -37,7 +39,10 @@ public sealed record ValidatedLocalAction(
   string? Preview,
   bool ReadOnly,
   bool RequiresExplicitApproval,
-  PendingFileChange? PendingFileChange = null
+  PendingFileChange? PendingFileChange = null,
+  string? OriginalTool = null,
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource,
+  IReadOnlyList<PendingFileChange>? PendingFileChanges = null
 );
 
 public sealed record LocalActionResult(
@@ -58,45 +63,21 @@ public sealed record PendingFileChange(
   string ExpectedFinalHash,
   long OriginalBytes,
   bool UndoAvailable,
-  string? UndoDiagnostic
+  string? UndoDiagnostic,
+  string? OriginalBinaryBase64 = null
 );
 
 public sealed class LocalActionService : ILocalActionService
 {
   private const int FileReadLimit = 128 * 1_024;
   private const int FileWriteLimit = 1024 * 1_024;
-  private static readonly HashSet<string> Tools = new(
-    [
-      "list_files",
-      "read_file",
-      "get_file_info",
-      "search_text",
-      "create_file",
-      "write_file",
-      "replace_text",
-      "apply_patch",
-      "create_directory",
-      "run_process",
-      "run_validation_profile",
-      "git_status",
-      "git_diff",
-      "git_log",
-      "git_show_commit",
-      "git_stage_files",
-      "git_unstage_files",
-      "git_create_commit",
-      "git_create_annotated_tag",
-      "git_push_current_branch",
-      "git_push_tag"
-    ],
-    StringComparer.Ordinal
-  );
   private readonly ITrustedWorkspaceService _workspace;
   private readonly IProcessExecutionService _processExecution;
   private readonly IProcessPolicyService _processPolicy;
   private readonly IValidationProfileService _validationProfiles;
   private readonly IGitRepositoryService _git;
   private readonly IGitDeliveryService _gitDelivery;
+  private readonly IToolNameResolver _toolNames;
 
   public LocalActionService(
     ITrustedWorkspaceService workspace,
@@ -104,7 +85,8 @@ public sealed class LocalActionService : ILocalActionService
     IProcessPolicyService processPolicy,
     IValidationProfileService validationProfiles,
     IGitRepositoryService git,
-    IGitDeliveryService gitDelivery
+    IGitDeliveryService gitDelivery,
+    IToolNameResolver toolNames
   )
   {
     _workspace = workspace;
@@ -113,6 +95,7 @@ public sealed class LocalActionService : ILocalActionService
     _validationProfiles = validationProfiles;
     _git = git;
     _gitDelivery = gitDelivery;
+    _toolNames = toolNames;
   }
 
   public async Task<ValidatedLocalAction> ValidateAsync(
@@ -121,15 +104,18 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
-    if (!Tools.Contains(
-      proposal.Tool
-    ))
+    var resolution = _toolNames.Resolve(
+      proposal.Tool,
+      _toolNames.ExecutableTools
+    );
+    proposal = proposal with
     {
-      throw new LocalActionException(
-        "action-validation",
-        $"Tool '{proposal.Tool}' is not available."
-      );
-    }
+      Tool = resolution.CanonicalName,
+      OriginalTool = proposal.OriginalTool ?? resolution.OriginalName,
+      ToolResolutionSource = proposal.OriginalTool is null
+        ? resolution.Source
+        : proposal.ToolResolutionSource
+    };
 
     if (proposal.Tool == "run_validation_profile")
     {
@@ -141,7 +127,8 @@ public sealed class LocalActionService : ILocalActionService
         );
       }
 
-      return new ValidatedLocalAction(
+      return AttachResolution(
+        new ValidatedLocalAction(
         Guid.NewGuid().ToString(
           "N"
         ),
@@ -153,6 +140,8 @@ public sealed class LocalActionService : ILocalActionService
         "Run the saved structured validation profile.",
         false,
         false
+        ),
+        proposal
       );
     }
 
@@ -161,14 +150,29 @@ public sealed class LocalActionService : ILocalActionService
       StringComparison.Ordinal
     ))
     {
-      return await ValidateGitActionAsync(
+      return AttachResolution(
+        await ValidateGitActionAsync(
         proposal,
         executionSession,
         cancellationToken
+        ),
+        proposal
       );
     }
 
-    return proposal.Tool == "run_process"
+    if (proposal.Tool == "delete_files")
+    {
+      return AttachResolution(
+        await ValidateDeleteFilesAsync(
+          proposal,
+          executionSession,
+          cancellationToken
+        ),
+        proposal
+      );
+    }
+
+    var validated = proposal.Tool == "run_process"
       ? await ValidateProcessAsync(
         proposal,
         cancellationToken
@@ -178,6 +182,22 @@ public sealed class LocalActionService : ILocalActionService
         executionSession,
         cancellationToken
       );
+    return AttachResolution(
+      validated,
+      proposal
+    );
+  }
+
+  private static ValidatedLocalAction AttachResolution(
+    ValidatedLocalAction action,
+    LocalActionProposal proposal
+  )
+  {
+    return action with
+    {
+      OriginalTool = proposal.OriginalTool ?? proposal.Tool,
+      ToolResolutionSource = proposal.ToolResolutionSource
+    };
   }
 
   public async Task<LocalActionResult> ExecuteAsync(
@@ -189,6 +209,11 @@ public sealed class LocalActionService : ILocalActionService
     try
     {
       await ValidatePendingFileStateAsync(
+        action,
+        executionSession,
+        cancellationToken
+      );
+      await ValidatePendingDeleteStatesAsync(
         action,
         executionSession,
         cancellationToken
@@ -230,6 +255,11 @@ public sealed class LocalActionService : ILocalActionService
           action,
           cancellationToken
         ),
+        "delete_files" => await DeleteFilesAsync(
+          action,
+          executionSession,
+          cancellationToken
+        ),
         "create_directory" => CreateDirectory(
           action
         ),
@@ -263,7 +293,15 @@ public sealed class LocalActionService : ILocalActionService
         )
       };
 
-      if (action.PendingFileChange is not null)
+      if (action.PendingFileChanges?.Count > 0)
+      {
+        await VerifyAndRecordDeletedFilesAsync(
+          action,
+          executionSession,
+          cancellationToken
+        );
+      }
+      else if (action.PendingFileChange is not null)
       {
         await VerifyAndRecordFileChangeAsync(
           action,
@@ -772,6 +810,145 @@ public sealed class LocalActionService : ILocalActionService
       readOnly,
       protectedInstructionFile && !explicitlyRequested,
       pendingFileChange
+    );
+  }
+
+  private async Task<ValidatedLocalAction> ValidateDeleteFilesAsync(
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "File deletion requires an active execution session."
+      );
+    }
+
+    var requestedPaths = GetStringArray(proposal.Arguments, "paths")
+      .Select(path => path.Trim())
+      .Where(path => path.Length > 0)
+      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+
+    if (requestedPaths.Length is < 1 or > 50)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "delete_files requires between 1 and 50 explicit unique file paths."
+      );
+    }
+
+    var prepared = new List<PendingFileChange>(requestedPaths.Length);
+    var totalOriginalBytes = 0L;
+
+    foreach (var requestedPath in requestedPaths)
+    {
+      var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
+      var relative = await GetRelativePathAsync(target, cancellationToken);
+
+      if (!File.Exists(target))
+      {
+        throw new LocalActionException(
+          "action-validation",
+          $"{relative}: delete_files accepts existing files only; directories and missing paths are rejected."
+        );
+      }
+
+      if (IsProtectedInstructionFile(relative)
+        && !executionSession.Objective.Contains(relative, StringComparison.OrdinalIgnoreCase)
+        && !executionSession.Objective.Contains(Path.GetFileName(relative), StringComparison.OrdinalIgnoreCase))
+      {
+        throw new LocalActionException(
+          "action-validation",
+          $"{relative}: protected repository instructions can be deleted only when that exact file is named in the user objective."
+        );
+      }
+
+      var info = new FileInfo(target);
+      var maximumRecoverableBytes = Math.Min(
+        FileWriteLimit,
+        executionSession.Limits.MaxRollbackBytesPerFile
+      );
+      if (info.Length > maximumRecoverableBytes)
+      {
+        throw new LocalActionException(
+          "action-validation",
+          $"{relative}: bounded recoverable deletion supports files up to {maximumRecoverableBytes} bytes."
+        );
+      }
+
+      var currentHash = await HashFileAsync(target, cancellationToken);
+      var originalBytes = await File.ReadAllBytesAsync(target, cancellationToken);
+      string? originalContent;
+      string? originalBinaryBase64;
+
+      try
+      {
+        originalContent = new UTF8Encoding(
+          false,
+          true
+        ).GetString(originalBytes);
+        originalBinaryBase64 = null;
+      }
+      catch (DecoderFallbackException)
+      {
+        originalContent = null;
+        originalBinaryBase64 = Convert.ToBase64String(originalBytes);
+      }
+      totalOriginalBytes = checked(totalOriginalBytes + info.Length);
+      prepared.Add(
+        new PendingFileChange(
+          relative,
+          "deleted",
+          true,
+          currentHash,
+          originalContent,
+          string.Empty,
+          HashText(string.Empty),
+          info.Length,
+          false,
+          null,
+          originalBinaryBase64
+        )
+      );
+    }
+
+    var undoAvailable = executionSession.CanTrackRollbackBatch(
+      prepared.Count,
+      totalOriginalBytes,
+      out var undoDiagnostic
+    );
+    if (!undoAvailable)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"delete_files cannot guarantee bounded recovery for this batch: {undoDiagnostic}"
+      );
+    }
+
+    prepared = prepared.Select(
+      pending => pending with
+      {
+        UndoAvailable = true,
+        UndoDiagnostic = null
+      }
+    ).ToList();
+
+    return new ValidatedLocalAction(
+      Guid.NewGuid().ToString("N"),
+      proposal.Tool,
+      proposal.Arguments.Clone(),
+      null,
+      null,
+      $"delete_files: {prepared.Count} explicit file(s)",
+      string.Join("\n", prepared.Select(item => item.RelativePath)),
+      false,
+      true,
+      null,
+      PendingFileChanges: prepared
     );
   }
 
@@ -1406,6 +1583,71 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
+  private async Task<LocalActionResult> DeleteFilesAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var pendingChanges = action.PendingFileChanges
+      ?? throw new LocalActionException(
+        "action-execution",
+        "delete_files did not contain a validated explicit file set."
+      );
+    var deleted = new List<(string Path, PendingFileChange Change)>();
+
+    try
+    {
+      foreach (var pending in pendingChanges)
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        var target = await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+        File.Delete(target);
+        deleted.Add((target, pending));
+      }
+    }
+    catch
+    {
+      foreach (var item in deleted.AsEnumerable().Reverse())
+      {
+        if (
+          (
+            item.Change.OriginalContent is null
+            && item.Change.OriginalBinaryBase64 is null
+          )
+          || File.Exists(item.Path)
+        )
+        {
+          continue;
+        }
+
+        if (item.Change.OriginalBinaryBase64 is not null)
+        {
+          await WriteBytesAtomicallyAsync(
+            item.Path,
+            Convert.FromBase64String(item.Change.OriginalBinaryBase64),
+            CancellationToken.None
+          );
+        }
+        else
+        {
+          await WriteAtomicallyAsync(
+            item.Path,
+            item.Change.OriginalContent!,
+            CancellationToken.None
+          );
+        }
+      }
+
+      throw;
+    }
+
+    return new LocalActionResult(
+      $"Deleted {deleted.Count} verified file(s): {string.Join(", ", pendingChanges.Select(item => item.RelativePath))}.",
+      "action.edit-applied"
+    );
+  }
+
   private async Task<LocalActionResult> RunProcessAsync(
     ValidatedLocalAction action,
     CancellationToken cancellationToken
@@ -1796,6 +2038,86 @@ public sealed class LocalActionService : ILocalActionService
           $"{pending.RelativePath}: the file changed after the action was proposed. Expected hash {pending.OriginalHash}; current hash {currentHash}."
         );
       }
+    }
+  }
+
+  private async Task ValidatePendingDeleteStatesAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    foreach (var pending in action.PendingFileChanges ?? [])
+    {
+      var target = await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+
+      if (!File.Exists(target))
+      {
+        throw new LocalActionException(
+          "file-conflict",
+          $"{pending.RelativePath}: the file no longer exists after delete_files was proposed."
+        );
+      }
+
+      var currentHash = await HashFileAsync(target, cancellationToken);
+      if (string.Equals(currentHash, pending.OriginalHash, StringComparison.Ordinal))
+      {
+        continue;
+      }
+
+      executionSession?.RecordConflict(
+        new FileConflictView(
+          pending.RelativePath,
+          pending.OriginalHash,
+          currentHash,
+          "pre-delete-execution",
+          true,
+          null
+        )
+      );
+      throw new LocalActionException(
+        "file-conflict",
+        $"{pending.RelativePath}: the file changed after delete_files was proposed."
+      );
+    }
+  }
+
+  private async Task VerifyAndRecordDeletedFilesAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    foreach (var pending in action.PendingFileChanges ?? [])
+    {
+      var target = await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+
+      if (File.Exists(target) || Directory.Exists(target))
+      {
+        throw new LocalActionException(
+          "post-delete-verification",
+          $"{pending.RelativePath}: the path still exists after delete_files completed."
+        );
+      }
+
+      executionSession?.RecordFileChange(
+        new ExecutionFileChange(
+          pending.RelativePath,
+          "deleted",
+          true,
+          pending.OriginalHash,
+          pending.ExpectedFinalHash,
+          pending.OriginalContent,
+          string.Empty,
+          0,
+          DateTimeOffset.UtcNow,
+          true,
+          pending.UndoAvailable,
+          pending.UndoDiagnostic,
+          pending.UndoAvailable ? pending.OriginalBytes : 0,
+          OriginalBinaryBase64: pending.OriginalBinaryBase64
+        )
+      );
     }
   }
 
@@ -2259,6 +2581,39 @@ public sealed class LocalActionService : ILocalActionService
         File.Delete(
           temporary
         );
+      }
+    }
+  }
+
+  private static async Task WriteBytesAtomicallyAsync(
+    string path,
+    byte[] content,
+    CancellationToken cancellationToken
+  )
+  {
+    var temporary = Path.Combine(
+      Path.GetDirectoryName(path)!,
+      $".agentic-router-{Guid.NewGuid():N}.tmp"
+    );
+
+    try
+    {
+      await File.WriteAllBytesAsync(
+        temporary,
+        content,
+        cancellationToken
+      );
+      File.Move(
+        temporary,
+        path,
+        true
+      );
+    }
+    finally
+    {
+      if (File.Exists(temporary))
+      {
+        File.Delete(temporary);
       }
     }
   }

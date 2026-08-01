@@ -5,8 +5,23 @@ using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
 
+public sealed record StructuredContextFit(
+  IReadOnlyList<ChatMessage> Messages,
+  long BeforeTokens,
+  long AfterTokens,
+  bool Compacted,
+  bool TooLarge,
+  string Outcome
+);
+
 public interface IExpertExecutionGuidanceService
 {
+  StructuredContextFit FitToBudget(
+    IReadOnlyList<ChatMessage> messages,
+    string hostStateSummary,
+    long maximumInputTokens
+  );
+
   Task<ExpertExecutionGuidance> PrepareAsync(
     Uri baseUri,
     string model,
@@ -26,7 +41,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "or process result, and any remaining limitation. Do not return a future execution "
     + "plan and do not claim an action that lacks a completed tool result.";
 
-  private const int MaximumGuidanceActions = 8;
+  private const int MaximumGuidanceActions = 1;
   private const int MaximumGuidanceLength = 48_000;
 
   private const string GuidancePrompt =
@@ -34,8 +49,9 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "You are the specialist model in a controlled local execution workflow. "
     + "Analyze the current request and return only the required structured execution brief. "
     + "You do not have tools and must not claim that you changed files or ran commands. "
-    + "When local work is required, set actionRequired to true and provide ordered actions "
-    + "with an exact supported tool name and a complete JSON arguments object. Use only "
+    + "When local work is required, set actionRequired to true and provide exactly one action "
+    + "with a short title, an exact supported tool name, and a complete JSON arguments object. "
+    + "The Host owns plan and step IDs; do not generate identifiers. Use only "
     + "paths relative to the trusted workspace, which is already the project root; never "
     + "prefix a path with the workspace display name or root directory name. For requests "
     + "to edit, fix, update, or inspect existing files, start with list_files, read_file, "
@@ -47,23 +63,6 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "When no local action is required, set actionRequired to false and return no actions. "
     + "Do not address the user and do not return Markdown or a generic prose plan.";
 
-  private static readonly HashSet<string> SupportedTools = new(
-    [
-      "list_files",
-      "read_file",
-      "get_file_info",
-      "search_text",
-      "create_file",
-      "write_file",
-      "replace_text",
-      "apply_patch",
-      "create_directory",
-      "run_process",
-      "run_validation_profile"
-    ],
-    StringComparer.Ordinal
-  );
-
   private static readonly JsonElement GuidanceSchema = CreateGuidanceSchema();
 
   private static readonly JsonSerializerOptions JsonOptions = new()
@@ -72,12 +71,69 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
   };
 
   private readonly IOllamaClient _ollamaClient;
+  private readonly IToolNameResolver _toolNames;
+  private readonly ITokenEstimator _tokenEstimator;
 
   public ExpertExecutionGuidanceService(
-    IOllamaClient ollamaClient
+    IOllamaClient ollamaClient,
+    IToolNameResolver toolNames,
+    ITokenEstimator tokenEstimator
   )
   {
     _ollamaClient = ollamaClient;
+    _toolNames = toolNames;
+    _tokenEstimator = tokenEstimator;
+  }
+
+  public StructuredContextFit FitToBudget(
+    IReadOnlyList<ChatMessage> messages,
+    string hostStateSummary,
+    long maximumInputTokens
+  )
+  {
+    var before = EstimateRequest(messages);
+    if (before <= maximumInputTokens)
+    {
+      return new StructuredContextFit(messages.ToArray(), before, before, false, false, "already-fits");
+    }
+
+    var compact = new List<ChatMessage>();
+    AddLast(compact, messages, item => item.Role == "system" && item.Content.StartsWith("APPLICATION_OWNED_PROJECT_CONTEXT", StringComparison.Ordinal));
+    AddLast(compact, messages, item => item.Role == "user" && !IsControlMessage(item.Content) && !item.Content.StartsWith(GuidanceMarker, StringComparison.Ordinal));
+    AddLast(compact, messages, item => item.Content.StartsWith(GuidanceMarker, StringComparison.Ordinal));
+    compact.Add(new ChatMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
+    AddLast(compact, messages, item => IsControlMessage(item.Content));
+    compact = compact.DistinctBy(item => $"{item.Role}:{item.Content}", StringComparer.Ordinal).ToList();
+    var after = EstimateRequest(compact);
+    var tooLarge = after > maximumInputTokens;
+    var materiallySmaller = after <= before - Math.Max(256, before / 10);
+    return new StructuredContextFit(
+      compact,
+      before,
+      after,
+      true,
+      tooLarge,
+      tooLarge ? "required-context-item-too-large" : materiallySmaller ? "compacted" : "not-materially-smaller"
+    );
+  }
+
+  private long EstimateRequest(IReadOnlyList<ChatMessage> messages)
+  {
+    var request = new[] { new ChatMessage("system", GuidancePrompt) }.Concat(messages).ToArray();
+    return _tokenEstimator.EstimateMessages(request)
+      + _tokenEstimator.EstimateText(GuidanceSchema.GetRawText());
+  }
+
+  private static void AddLast(List<ChatMessage> target, IReadOnlyList<ChatMessage> messages, Func<ChatMessage, bool> predicate)
+  {
+    var item = messages.LastOrDefault(predicate);
+    if (item is not null) target.Add(item);
+  }
+
+  private static bool IsControlMessage(string content)
+  {
+    return content.StartsWith("STRUCTURED_ACTION_CORRECTION", StringComparison.Ordinal)
+      || content.StartsWith("RECOVERY_", StringComparison.Ordinal);
   }
 
   public async Task<ExpertExecutionGuidance> PrepareAsync(
@@ -143,10 +199,9 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
       );
     }
 
-    Validate(
+    return Validate(
       guidance
     );
-    return guidance!;
   }
 
   public static string Serialize(
@@ -159,7 +214,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     );
   }
 
-  private static void Validate(
+  private ExpertExecutionGuidance Validate(
     ExpertExecutionGuidance? guidance
   )
   {
@@ -206,48 +261,49 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
       );
     }
 
-    var identifiers = new HashSet<string>(
-      StringComparer.Ordinal
-    );
+    var normalizedActions = new List<ExpertExecutionAction>();
 
     foreach (var action in guidance.Actions)
     {
       if (
         string.IsNullOrWhiteSpace(
-          action.Id
-        )
-        || string.IsNullOrWhiteSpace(
           action.Title
-        )
-        || !identifiers.Add(
-          action.Id
         )
       )
       {
         throw new LocalActionException(
           "expert-execution-guidance",
-          "Every specialist action requires a unique non-empty id and title."
+          "Every specialist action requires a non-empty normalizable title."
         );
       }
 
-      if (!SupportedTools.Contains(
-        action.Tool
-      ))
-      {
-        throw new LocalActionException(
-          "expert-execution-guidance",
-          $"The specialist requested unsupported tool '{action.Tool}'."
-        );
-      }
+      var resolution = _toolNames.Resolve(
+        action.Tool,
+        _toolNames.StructuredGuidanceTools
+      );
 
       if (action.Arguments.ValueKind != JsonValueKind.Object)
       {
         throw new LocalActionException(
           "expert-execution-guidance",
-          $"Arguments for specialist action '{action.Id}' must be a JSON object."
+          $"Arguments for specialist action '{action.Title}' must be a JSON object."
         );
       }
+
+      normalizedActions.Add(
+        action with
+        {
+          Tool = resolution.CanonicalName,
+          OriginalTool = resolution.OriginalName,
+          ToolResolutionSource = resolution.Source
+        }
+      );
     }
+
+    return guidance with
+    {
+      Actions = normalizedActions
+    };
   }
 
   private static JsonElement CreateGuidanceSchema()
@@ -275,18 +331,13 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
               type = "object",
               properties = new
               {
-                id = new
-                {
-                  type = "string"
-                },
                 title = new
                 {
                   type = "string"
                 },
                 tool = new
                 {
-                  type = "string",
-                  @enum = SupportedTools.ToArray()
+                  type = "string"
                 },
                 arguments = new
                 {
@@ -295,7 +346,6 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
               },
               required = new[]
               {
-                "id",
                 "title",
                 "tool",
                 "arguments"
@@ -331,8 +381,9 @@ public sealed record ExpertExecutionGuidance(
 );
 
 public sealed record ExpertExecutionAction(
-  string Id,
   string Title,
   string Tool,
-  JsonElement Arguments
+  JsonElement Arguments,
+  string? OriginalTool = null,
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource
 );

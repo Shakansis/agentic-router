@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Usage;
 
@@ -21,6 +22,23 @@ public interface IToolProtocolConformanceService
     string? digest,
     CancellationToken cancellationToken
   );
+
+  Task<ToolProtocolConformanceResult> VerifyPathAsync(
+    Uri baseUri,
+    string model,
+    string? providerRevision,
+    string profile,
+    ProviderCallContext usageContext,
+    CancellationToken cancellationToken
+  );
+
+  Task<ToolProtocolConformanceResult?> GetCachedPathAsync(
+    Uri baseUri,
+    string model,
+    string? providerRevision,
+    string profile,
+    CancellationToken cancellationToken
+  );
 }
 
 public sealed record ToolProtocolConformanceResult(
@@ -28,12 +46,40 @@ public sealed record ToolProtocolConformanceResult(
   string Model,
   string Digest,
   string OllamaVersion,
-  string? Failure
+  string? Failure,
+  string Profile = CoordinationConformanceProfiles.NativeStrict,
+  string Status = CoordinationConformanceProfiles.Unknown,
+  string Provider = ModelProviderIds.OllamaLocal,
+  string AdapterVersion = ToolProtocolConformanceService.AdapterContractVersion,
+  string BenchmarkVersion = ToolProtocolConformanceService.BenchmarkContractVersion,
+  string Identity = "",
+  bool AdaptiveRepairEligible = false
 );
+
+public static class CoordinationConformanceProfiles
+{
+  public const string NativeStrict = "native-strict";
+  public const string NativeAdaptive = "native-adaptive";
+  public const string StructuredAction = "structured-action";
+  public const string GuidanceOnly = "guidance-only";
+  public const string Failed = "failed";
+  public const string Unknown = "unknown";
+
+  public static bool IsKnown(
+    string profile
+  )
+  {
+    return profile is NativeStrict or NativeAdaptive or StructuredAction or GuidanceOnly;
+  }
+}
 
 public sealed class ToolProtocolConformanceService : IToolProtocolConformanceService
 {
   public const string BenchmarkMarker = "TOOL_PROTOCOL_CONFORMANCE_V1";
+  public const string NativeAdaptiveBenchmarkMarker = "NATIVE_ADAPTIVE_CONFORMANCE_V1";
+  public const string StructuredBenchmarkMarker = "STRUCTURED_ACTION_CONFORMANCE_V1";
+  public const string AdapterContractVersion = "provider-chat-adapter-v1";
+  public const string BenchmarkContractVersion = "coordination-conformance-v3";
 
   private static readonly OllamaToolDefinition EchoTool = Tool(
     "benchmark_echo",
@@ -93,6 +139,49 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     ["path", "content"]
   );
 
+  private static readonly JsonElement StructuredActionSchema =
+    JsonSerializer.SerializeToElement(
+      new
+      {
+        type = "object",
+        properties = new
+        {
+          completed = new
+          {
+            type = "boolean"
+          },
+          title = StringProperty(),
+          tool = new
+          {
+            type = "string",
+            @enum = new[]
+            {
+              "benchmark_echo"
+            }
+          },
+          arguments = new
+          {
+            type = "object",
+            properties = new
+            {
+              value = StringProperty()
+            },
+            required = new[]
+            {
+              "value"
+            }
+          }
+        },
+        required = new[]
+        {
+          "completed",
+          "title",
+          "tool",
+          "arguments"
+        }
+      }
+    );
+
   private readonly IOllamaClient _ollamaClient;
   private readonly ConcurrentDictionary<string, ToolProtocolConformanceResult> _results = new(
     StringComparer.Ordinal
@@ -113,11 +202,44 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     CancellationToken cancellationToken
   )
   {
+    return await VerifyPathAsync(
+      baseUri,
+      model,
+      digest,
+      CoordinationConformanceProfiles.NativeStrict,
+      usageContext,
+      cancellationToken
+    );
+  }
+
+  public async Task<ToolProtocolConformanceResult> VerifyPathAsync(
+    Uri baseUri,
+    string model,
+    string? providerRevision,
+    string profile,
+    ProviderCallContext usageContext,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!CoordinationConformanceProfiles.IsKnown(
+      profile
+    ))
+    {
+      throw new ArgumentOutOfRangeException(
+        nameof(profile),
+        profile,
+        "Unknown coordination conformance profile."
+      );
+    }
+
     var normalizedDigest = string.IsNullOrWhiteSpace(
-      digest
+      providerRevision
     )
       ? "unknown"
-      : digest;
+      : providerRevision;
+    var reference = ProviderModelReference.Parse(
+      model
+    );
     string version;
 
     try
@@ -138,14 +260,26 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
         model,
         normalizedDigest,
         "unavailable",
-        exception.Message
+        exception.Message,
+        profile,
+        CoordinationConformanceProfiles.Failed,
+        reference.ProviderId,
+        Identity: CreateIdentity(
+          reference.ProviderId,
+          model,
+          normalizedDigest,
+          "unavailable",
+          profile
+        )
       );
     }
 
     var key = CacheKey(
+      reference.ProviderId,
       model,
       normalizedDigest,
-      version
+      version,
+      profile
     );
 
     if (_results.TryGetValue(
@@ -160,47 +294,62 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
 
     try
     {
-      await VerifySimpleCallAsync(
-        baseUri,
-        model,
-        usageContext with
-        {
-          ModelRole = UsageModelRoles.Benchmark,
-          RequestPurpose = "tool-conformance-simple"
-        },
-        cancellationToken
-      );
-      await VerifyNestedPlanAsync(
-        baseUri,
-        model,
-        usageContext with
-        {
-          ModelRole = UsageModelRoles.Benchmark,
-          RequestPurpose = "tool-conformance-nested-plan"
-        },
-        cancellationToken
-      );
-      await VerifyToolResultLoopAsync(
-        baseUri,
-        model,
-        usageContext with
-        {
-          ModelRole = UsageModelRoles.Benchmark,
-          RequestPurpose = "tool-conformance-loop"
-        },
-        cancellationToken
-      );
+      if (profile == CoordinationConformanceProfiles.NativeStrict)
+      {
+        await VerifyNativeStrictAsync(
+          baseUri,
+          model,
+          usageContext,
+          cancellationToken
+        );
+      }
+      else if (profile == CoordinationConformanceProfiles.NativeAdaptive)
+      {
+        await VerifyNativeAdaptiveAsync(
+          baseUri,
+          model,
+          usageContext,
+          cancellationToken
+        );
+      }
+      else if (profile == CoordinationConformanceProfiles.StructuredAction)
+      {
+        await VerifyStructuredActionAsync(
+          baseUri,
+          model,
+          usageContext,
+          cancellationToken
+        );
+      }
+      else
+      {
+        throw new InvalidDataException(
+          $"The {profile} benchmark is not implemented by contract {BenchmarkContractVersion}."
+        );
+      }
+
       result = new ToolProtocolConformanceResult(
         true,
         model,
         normalizedDigest,
         version,
-        null
+        null,
+        profile,
+        profile,
+        reference.ProviderId,
+        Identity: CreateIdentity(
+          reference.ProviderId,
+          model,
+          normalizedDigest,
+          version,
+          profile
+        )
       );
     }
     catch (Exception exception) when (
       exception is OllamaProviderException
       or InvalidDataException
+      or SemanticConformanceException
       or JsonException
     )
     {
@@ -209,7 +358,18 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
         model,
         normalizedDigest,
         version,
-        exception.Message
+        exception.Message,
+        profile,
+        CoordinationConformanceProfiles.Failed,
+        reference.ProviderId,
+        Identity: CreateIdentity(
+          reference.ProviderId,
+          model,
+          normalizedDigest,
+          version,
+          profile
+        ),
+        AdaptiveRepairEligible: exception is SemanticConformanceException
       );
     }
 
@@ -227,6 +387,30 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     CancellationToken cancellationToken
   )
   {
+    return await GetCachedPathAsync(
+      baseUri,
+      model,
+      digest,
+      CoordinationConformanceProfiles.NativeStrict,
+      cancellationToken
+    );
+  }
+
+  public async Task<ToolProtocolConformanceResult?> GetCachedPathAsync(
+    Uri baseUri,
+    string model,
+    string? providerRevision,
+    string profile,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!CoordinationConformanceProfiles.IsKnown(
+      profile
+    ))
+    {
+      return null;
+    }
+
     string version;
 
     try
@@ -246,13 +430,17 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     }
 
     var key = CacheKey(
+      ProviderModelReference.Parse(
+        model
+      ).ProviderId,
       model,
       string.IsNullOrWhiteSpace(
-        digest
+        providerRevision
       )
         ? "unknown"
-        : digest,
-      version
+        : providerRevision,
+      version,
+      profile
     );
 
     return _results.TryGetValue(
@@ -264,17 +452,221 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
   }
 
   private static string CacheKey(
+    string provider,
     string model,
     string digest,
-    string version
+    string version,
+    string profile
   )
   {
     return string.Join(
       "|",
-      BenchmarkMarker,
+      BenchmarkContractVersion,
+      AdapterContractVersion,
+      provider,
       model,
       digest,
-      version
+      version,
+      profile
+    );
+  }
+
+  private async Task VerifyNativeStrictAsync(
+    Uri baseUri,
+    string model,
+    ProviderCallContext usageContext,
+    CancellationToken cancellationToken
+  )
+  {
+    await VerifySimpleCallAsync(
+      baseUri,
+      model,
+      usageContext with
+      {
+        ModelRole = UsageModelRoles.Benchmark,
+        RequestPurpose = "tool-conformance-simple"
+      },
+      cancellationToken
+    );
+    await VerifyNestedPlanAsync(
+      baseUri,
+      model,
+      usageContext with
+      {
+        ModelRole = UsageModelRoles.Benchmark,
+        RequestPurpose = "tool-conformance-nested-plan"
+      },
+      cancellationToken
+    );
+    await VerifyToolResultLoopAsync(
+      baseUri,
+      model,
+      usageContext with
+      {
+        ModelRole = UsageModelRoles.Benchmark,
+        RequestPurpose = "tool-conformance-loop"
+      },
+      cancellationToken
+    );
+  }
+
+  private async Task VerifyNativeAdaptiveAsync(
+    Uri baseUri,
+    string model,
+    ProviderCallContext usageContext,
+    CancellationToken cancellationToken
+  )
+  {
+    var rejectedArguments = JsonSerializer.SerializeToElement(
+      new
+      {
+        path = "sample.txt",
+        content = string.Empty
+      }
+    );
+    var response = await _ollamaClient.GenerateToolCallAsync(
+      baseUri,
+      model,
+      [
+        new OllamaToolMessage(
+          "system",
+          NativeAdaptiveBenchmarkMarker
+            + "\nThis is a non-executing protocol benchmark. Return exactly one corrected native tool call and no prose."
+        ),
+        new OllamaToolMessage(
+          "user",
+          "Edit the synthetic benchmark path \"sample.txt\" with content \"after\"."
+        ),
+        new OllamaToolMessage(
+          "assistant",
+          ToolCalls:
+          [
+            new OllamaToolCall(
+              "benchmark_edit",
+              rejectedArguments
+            )
+          ]
+        ),
+        new OllamaToolMessage(
+          "tool",
+          "{\"status\":\"rejected\",\"field\":\"content\",\"reason\":\"A non-empty string is required.\",\"expected\":\"after\"}",
+          ToolName: "benchmark_edit"
+        )
+      ],
+      [EditTool],
+      "tool-conformance-native-adaptive-repair",
+      usageContext with
+      {
+        ModelRole = UsageModelRoles.Benchmark,
+        RequestPurpose = "tool-conformance-native-adaptive-repair"
+      },
+      cancellationToken
+    );
+    var call = RequireSingleCall(
+      response,
+      "benchmark_edit"
+    );
+    RequireExactString(
+      call.Arguments,
+      "path",
+      "sample.txt"
+    );
+    RequireExactString(
+      call.Arguments,
+      "content",
+      "after"
+    );
+  }
+
+  private async Task VerifyStructuredActionAsync(
+    Uri baseUri,
+    string model,
+    ProviderCallContext usageContext,
+    CancellationToken cancellationToken
+  )
+  {
+    var content = await _ollamaClient.GenerateStructuredAsync(
+      baseUri,
+      model,
+      [
+        new(
+          "system",
+          StructuredBenchmarkMarker
+            + "\nReturn one structured action proposal. This benchmark never executes the action."
+        ),
+        new(
+          "user",
+          "Propose benchmark_echo with value ok and title Verify structured action."
+        )
+      ],
+      StructuredActionSchema,
+      "structured-action-conformance",
+      usageContext with
+      {
+        ModelRole = UsageModelRoles.Benchmark,
+        RequestPurpose = "structured-action-conformance"
+      },
+      cancellationToken
+    );
+    using var document = JsonDocument.Parse(
+      content
+    );
+    var root = document.RootElement;
+
+    if (
+      root.ValueKind != JsonValueKind.Object
+      || !root.TryGetProperty(
+        "completed",
+        out var completed
+      )
+      || completed.ValueKind != JsonValueKind.False
+      || !root.TryGetProperty(
+        "title",
+        out var title
+      )
+      || title.ValueKind != JsonValueKind.String
+      || string.IsNullOrWhiteSpace(
+        title.GetString()
+      )
+      || !root.TryGetProperty(
+        "tool",
+        out var tool
+      )
+      || tool.GetString() != "benchmark_echo"
+      || !root.TryGetProperty(
+        "arguments",
+        out var arguments
+      )
+    )
+    {
+      throw new InvalidDataException(
+        "The structured-action probe returned an invalid action envelope."
+      );
+    }
+
+    RequireString(
+      arguments,
+      "value"
+    );
+  }
+
+  private static string CreateIdentity(
+    string provider,
+    string model,
+    string revision,
+    string runtimeVersion,
+    string profile
+  )
+  {
+    return string.Join(
+      "|",
+      provider,
+      model,
+      revision,
+      AdapterContractVersion,
+      runtimeVersion,
+      BenchmarkContractVersion,
+      profile
     );
   }
 
@@ -487,9 +879,46 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       )
     )
     {
-      throw new InvalidDataException(
+      throw new SemanticConformanceException(
         $"The protocol probe requires a non-empty {property} string."
       );
+    }
+  }
+
+  private static void RequireExactString(
+    JsonElement arguments,
+    string property,
+    string expected
+  )
+  {
+    RequireString(
+      arguments,
+      property
+    );
+
+    if (!string.Equals(
+      arguments.GetProperty(
+        property
+      ).GetString(),
+      expected,
+      StringComparison.Ordinal
+    ))
+    {
+      throw new SemanticConformanceException(
+        $"The adaptive protocol probe requires {property} to equal \"{expected}\"."
+      );
+    }
+  }
+
+  private sealed class SemanticConformanceException : Exception
+  {
+    public SemanticConformanceException(
+      string message
+    )
+      : base(
+        message
+      )
+    {
     }
   }
 

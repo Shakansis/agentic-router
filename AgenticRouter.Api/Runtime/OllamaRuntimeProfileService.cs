@@ -1098,8 +1098,13 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     );
     AddConfigured(
       values,
-      settings.CoordinatorModel,
+      settings.ActionModel,
       OllamaRuntimeRoleIds.ResidentCoordinator
+    );
+    AddConfigured(
+      values,
+      settings.CoordinatorModel,
+      OllamaRuntimeRoleIds.Fallback
     );
     AddConfigured(
       values,
@@ -1349,7 +1354,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
   {
     return role switch
     {
-      OllamaRuntimeRoleIds.ResidentCoordinator => UsageModelRoles.Coordinator,
+      OllamaRuntimeRoleIds.ResidentCoordinator => UsageModelRoles.Action,
       OllamaRuntimeRoleIds.Router => UsageModelRoles.Router,
       OllamaRuntimeRoleIds.Specialist => UsageModelRoles.Specialist,
       OllamaRuntimeRoleIds.Fallback => UsageModelRoles.Fallback,

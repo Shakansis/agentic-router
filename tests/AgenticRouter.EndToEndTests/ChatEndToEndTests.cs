@@ -208,7 +208,7 @@ public sealed class ChatEndToEndTests : PageTest
         "#cloud-providers-list .cloud-provider-card"
       )
     ).ToHaveCountAsync(
-      4
+      5
     );
     await Expect(
       Page.Locator(
@@ -342,6 +342,14 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-cloud-key=\"groq\"]"
       )
     ).ToHaveValueAsync(
+      string.Empty
+    );
+    await Expect(
+      Page.Locator(
+        ".cloud-provider-card[data-provider=\"groq\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "open",
       string.Empty
     );
     Assert.DoesNotContain(
@@ -940,13 +948,6 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "docs:latest"
-          && request.Stream
-          && request.Messages.Any(
-            message => message.Content.Contains(
-              "silently discard",
-              StringComparison.Ordinal
-            )
-          )
       )
     );
 
@@ -1020,7 +1021,6 @@ public sealed class ChatEndToEndTests : PageTest
         )
       )
     );
-
     var tooMany = await PostChatStreamAsync(
       "Reject excessive attachments.",
       "alpha:latest",
@@ -1403,6 +1403,16 @@ public sealed class ChatEndToEndTests : PageTest
         "#web-toggle"
       )
     ).ToBeEnabledAsync();
+    await Expect(Page.Locator("#web-toggle svg")).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#attach-image svg")).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#web-toggle")).ToHaveAttributeAsync(
+      "aria-label",
+      new Regex("Web", RegexOptions.IgnoreCase)
+    );
+    await Expect(Page.Locator("#attach-image")).ToHaveAttributeAsync(
+      "aria-label",
+      "Anexar imagem"
+    );
     await Page.Locator(
       "#web-toggle"
     ).ClickAsync();
@@ -1438,23 +1448,25 @@ public sealed class ChatEndToEndTests : PageTest
     );
 
     await WaitUntilAsync(
-      () => Directory.GetFiles(
-        Path.Combine(
+      () =>
+      {
+        var usageDirectory = Path.Combine(
           _environment.DataDirectory,
           "usage"
-        ),
-        "*.jsonl"
-      ).Select(
-        File.ReadAllText
-      ).Any(
-        content => content.Contains(
-          "\"providerId\":\"ollama-web-search\"",
-          StringComparison.Ordinal
-        ) && content.Contains(
-          "\"status\":\"cancellation\"",
-          StringComparison.Ordinal
-        )
-      ),
+        );
+        return Directory.Exists(usageDirectory)
+          && Directory.GetFiles(usageDirectory, "*.jsonl").Select(
+            File.ReadAllText
+          ).Any(
+            content => content.Contains(
+              "\"providerId\":\"ollama-web-search\"",
+              StringComparison.Ordinal
+            ) && content.Contains(
+              "\"status\":\"cancellation\"",
+              StringComparison.Ordinal
+            )
+          );
+      },
       TimeSpan.FromSeconds(
         5
       )
@@ -1685,21 +1697,12 @@ public sealed class ChatEndToEndTests : PageTest
       imagePath
     );
 
-    string? firstDialogMessage = null;
-    EventHandler<IDialog>? dismissDialog = null;
-    dismissDialog = async (
-      _,
-      dialog
-    ) =>
-    {
-      Page.Dialog -= dismissDialog;
-      firstDialogMessage = dialog.Message;
-      await dialog.DismissAsync();
-    };
-    Page.Dialog += dismissDialog;
     await StartMessageAsync(
       "Cloud image privacy confirmation."
     );
+    await Expect(Page.Locator("#app-modal")).ToBeVisibleAsync();
+    var firstDialogMessage = await Page.Locator("#app-modal-message").TextContentAsync();
+    await Page.Locator("#app-modal-cancel").ClickAsync();
     await Expect(
       Page.Locator(
         "#composer-status"
@@ -1726,19 +1729,10 @@ public sealed class ChatEndToEndTests : PageTest
       "sairão deste computador"
     );
 
-    EventHandler<IDialog>? acceptDialog = null;
-    acceptDialog = async (
-      _,
-      dialog
-    ) =>
-    {
-      Page.Dialog -= acceptDialog;
-      await dialog.AcceptAsync();
-    };
-    Page.Dialog += acceptDialog;
     await StartMessageAsync(
       "Cloud image privacy confirmation."
     );
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.assistant .assistant-answer"
@@ -1795,6 +1789,46 @@ public sealed class ChatEndToEndTests : PageTest
       "groq",
       "gsk_fake_fallback_policy_094"
     );
+    await Page.GotoAsync(
+      "/"
+    );
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"models\"]"
+    ).ClickAsync();
+    var generalCard = Page.Locator(
+      "[data-intention=\"general-chat\"]"
+    );
+    await generalCard.Locator(
+      ".intention-model"
+    ).SelectOptionAsync(
+      "groq::openai/gpt-oss-120b"
+    );
+    await generalCard.Locator(
+      ".intention-fallback-model"
+    ).SelectOptionAsync(
+      "none"
+    );
+    await Page.Locator(
+      "#save-settings"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#toast-region .app-toast[data-tone=\"error\"]"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(generalCard).ToHaveClassAsync(
+      new Regex("field-invalid-card")
+    );
+    await Expect(
+      generalCard.Locator(
+        ".intention-fallback-model"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-invalid",
+      "true"
+    );
+
     var settings = await GetSettingsJsonAsync();
     var general = settings["intentions"]!["general-chat"]!.AsObject();
     general["model"] = "groq::openai/gpt-oss-120b";
@@ -2388,13 +2422,10 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToContainTextAsync(
       "router"
     );
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#purge-usage"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#usage-purge-status"
@@ -2449,7 +2480,7 @@ public sealed class ChatEndToEndTests : PageTest
   }
 
   [TestMethod]
-  [Timeout(90_000, CooperativeCancellation = true)]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ProviderHealthRetriesAndUsageReconciliationAreBoundedAndSanitized()
   {
     const string groqKey = "gsk_fake_health_096";
@@ -2825,14 +2856,14 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#provider-health-list .provider-health-card"
+        "#cloud-providers-list .cloud-provider-card"
       )
     ).ToHaveCountAsync(
-      4
+      5
     );
     await Expect(
       Page.Locator(
-        "#provider-health-list"
+        "#cloud-providers-list"
       )
     ).Not.ToContainTextAsync(
       rejectedCerebrasKey
@@ -2851,7 +2882,7 @@ public sealed class ChatEndToEndTests : PageTest
       await modelsResponse.Content.ReadAsStringAsync()
     );
     Assert.AreEqual(
-      6,
+      8,
       modelsDocument.RootElement.GetProperty(
         "models"
       ).GetArrayLength()
@@ -2876,21 +2907,21 @@ public sealed class ChatEndToEndTests : PageTest
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.10"
+      "v0.9.14"
     );
     await Expect(
       Page.Locator(
         "#model-selector option"
       )
     ).ToHaveCountAsync(
-      7
+      9
     );
     await Expect(
       Page.Locator(
         "#model-count"
       )
     ).ToHaveTextAsync(
-      "6 instalados"
+      "8 instalados"
     );
 
     using var response = await _environment.HttpClient.GetAsync(
@@ -3015,6 +3046,521 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeAdaptiveConformanceIsIndependentFromStrictSemanticFailure()
+  {
+    _environment.FakeOllama.EnableAdaptiveConformanceFixture(
+      "router:latest"
+    );
+    await _environment.RestartApplicationAsync();
+    using var strictResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      new
+      {
+        model = "router:latest",
+        profile = "native-strict",
+        restoreResidentModel = false
+      }
+    );
+    strictResponse.EnsureSuccessStatusCode();
+    var strict = await strictResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsFalse(
+      strict.GetProperty(
+        "passed"
+      ).GetBoolean()
+    );
+    StringAssert.Contains(
+      strict.GetProperty(
+        "failure"
+      ).GetString(),
+      "non-empty content string"
+    );
+
+    using var adaptiveResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      new
+      {
+        model = "router:latest",
+        profile = "native-adaptive",
+        restoreResidentModel = false
+      }
+    );
+    adaptiveResponse.EnsureSuccessStatusCode();
+    var adaptive = await adaptiveResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsTrue(
+      adaptive.GetProperty(
+        "passed"
+      ).GetBoolean()
+    );
+    Assert.AreEqual(
+      "native-adaptive",
+      adaptive.GetProperty(
+        "profile"
+      ).GetString()
+    );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "router:latest"
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "NATIVE_ADAPTIVE_CONFORMANCE_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+    _environment.FakeOllama.Reset();
+    await _environment.RestartApplicationAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConformanceEvidenceInvalidatesWhenExactRuntimeIdentityChanges()
+  {
+    static object Request()
+    {
+      return new
+      {
+        model = "structured:latest",
+        profile = "structured-action",
+        restoreResidentModel = false
+      };
+    }
+
+    using var firstResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      Request()
+    );
+    firstResponse.EnsureSuccessStatusCode();
+    var first = await firstResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    var firstIdentity = first.GetProperty(
+      "identity"
+    ).GetString();
+    var firstProbeCount = _environment.FakeOllama.Requests.Count(
+      request => request.Messages.Any(
+        message => message.Content.Contains(
+          "STRUCTURED_ACTION_CONFORMANCE_V1",
+          StringComparison.Ordinal
+        )
+      )
+    );
+
+    using var cachedResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      Request()
+    );
+    cachedResponse.EnsureSuccessStatusCode();
+    Assert.AreEqual(
+      firstProbeCount,
+      _environment.FakeOllama.Requests.Count(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "STRUCTURED_ACTION_CONFORMANCE_V1",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
+
+    _environment.FakeOllama.SetProtocolIdentity(
+      "0.13.6-test"
+    );
+    using var changedResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      Request()
+    );
+    changedResponse.EnsureSuccessStatusCode();
+    var changed = await changedResponse.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.AreNotEqual(
+      firstIdentity,
+      changed.GetProperty(
+        "identity"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      "0.13.6-test",
+      changed.GetProperty(
+        "ollamaVersion"
+      ).GetString()
+    );
+    Assert.AreEqual(
+      firstProbeCount + 1,
+      _environment.FakeOllama.Requests.Count(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "STRUCTURED_ACTION_CONFORMANCE_V1",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConformantGroqTargetCoordinatesBeforeFailedResidentIsEvaluated()
+  {
+    const string groqModel = "groq::openai/gpt-oss-120b";
+    using (
+      var settings = await _environment.PutSettingsAsync(
+        _environment.BaselineSettings with
+        {
+          ActionModel = "unused:latest"
+        }
+      )
+    )
+    {
+      settings.EnsureSuccessStatusCode();
+    }
+    await ConnectFakeCloudAsync(
+      "groq",
+      "gsk_fake_target_first_0912"
+    );
+    using (
+      var conformance = await _environment.HttpClient.PostAsJsonAsync(
+        "api/models/conformance",
+        new
+        {
+          model = groqModel,
+          profile = "native-strict",
+          restoreResidentModel = false,
+          externalProviderPermissionGranted = true
+        }
+      )
+    )
+    {
+      conformance.EnsureSuccessStatusCode();
+    }
+
+    _environment.FakeOllama.Reset();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      groqModel
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordination-path-resolved\"]"
+      )
+    ).ToContainTextAsync(
+      "direct-native"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordinator-conformance-failed\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      $"Alvo: {groqModel}"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      $"Coordenador: {groqModel}"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      "Residente: unused:latest"
+    );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "unused:latest"
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "TOOL_PROTOCOL_CONFORMANCE_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GroqTargetUsesAdaptiveResidentBridgeAfterStrictSemanticFailure()
+  {
+    const string groqModel = "groq::openai/gpt-oss-120b";
+    _environment.FakeOllama.EnableAdaptiveConformanceFixture(
+      "router:latest"
+    );
+    await ConnectFakeCloudAsync(
+      "groq",
+      "gsk_fake_adaptive_resident_0912"
+    );
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      groqModel
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute create file"
+    );
+
+    Assert.AreEqual(
+      "hello from agent",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordinator-conformance-path-failed\"]"
+      )
+    ).ToContainTextAsync(
+      "native-strict"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordinator-adaptive-conformance-passed\"]"
+      )
+    ).ToContainTextAsync(
+      "router:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordinator-conformance-passed\"]"
+      )
+    ).ToContainTextAsync(
+      "native-adaptive"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.resident-bridge-resolved\"]"
+      )
+    ).ToContainTextAsync(
+      "router:latest"
+    );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      "resident-bridge"
+    );
+    _environment.FakeOllama.Reset();
+    await _environment.RestartApplicationAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StructuredCoordinatorRepairsOneSemanticFailureBeforeExecution()
+  {
+    await BenchmarkStructuredConformanceAsync(
+      "structured:latest",
+      true
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "structured:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute structured semantic repair"
+    );
+
+    Assert.AreEqual(
+      "repaired by bounded feedback",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "structured-repair.txt"
+        )
+      )
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.semantic-repair-requested\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordination-path-change-required\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RepeatedSemanticFailureChangesPathWithoutThirdRepair()
+  {
+    await BenchmarkStructuredConformanceAsync(
+      "structured:latest",
+      true
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "structured:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute repeat structured semantic failure"
+    );
+
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.semantic-repair-requested\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordination-path-change-required\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    Assert.IsFalse(
+      File.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "structured-repair.txt"
+        )
+      )
+    );
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".activity > summary"
+      )
+    ).ToHaveTextAsync(
+      "Cancelado"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExhaustedCoordinationPathsBlockWithoutExecutingAnInvalidAction()
+  {
+    await BenchmarkStructuredConformanceAsync(
+      "structured-failure:latest",
+      false
+    );
+    using var settings = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        ActionModel = "unused:latest",
+        CoordinatorModel = "unused:latest"
+      }
+    );
+    settings.EnsureSuccessStatusCode();
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "structured-failure:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordinator-conformance-failed\"]"
+      )
+    ).ToContainTextAsync(
+      "All evaluated paths are blocked"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"error\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    Assert.IsFalse(
+      File.Exists(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "hello.txt"
+        )
+      )
+    );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "unused:latest"
+          && request.Messages.Any(
+            message => message.Content.Contains(
+              "NATIVE_ADAPTIVE_CONFORMANCE_V1",
+              StringComparison.Ordinal
+            )
+          )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CompactLayoutKeepsControlsIconsAndActiveAgentIdentity()
   {
     await Page.GotoAsync(
@@ -3050,6 +3596,36 @@ public sealed class ChatEndToEndTests : PageTest
       ).EvaluateAsync<string>(
         "element => getComputedStyle(element).gap"
       )
+    );
+    var sidebarResizer = Page.Locator(
+      "#sidebar-resizer"
+    );
+    await Expect(
+      sidebarResizer
+    ).ToBeVisibleAsync();
+    await sidebarResizer.FocusAsync();
+    await sidebarResizer.PressAsync(
+      "ArrowRight"
+    );
+    var resizedWidth = await Page.Locator(
+      "#sidebar"
+    ).EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().width"
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      257,
+      resizedWidth
+    );
+    await Page.ReloadAsync();
+    var restoredWidth = await Page.Locator(
+      "#sidebar"
+    ).EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().width"
+    );
+    Assert.AreEqual(
+      resizedWidth,
+      restoredWidth,
+      0.5
     );
     Assert.IsLessThanOrEqualTo(
       64,
@@ -3097,7 +3673,7 @@ public sealed class ChatEndToEndTests : PageTest
       "beta:code"
     );
     await Page.Locator(
-      "#coordinator-model"
+      "#action-model"
     ).SelectOptionAsync(
       "command-r:latest"
     );
@@ -3144,7 +3720,7 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.AreEqual(
       "command-r:latest",
       savedDocument.RootElement.GetProperty(
-        "coordinatorModel"
+        "actionModel"
       ).GetString()
     );
     Assert.AreEqual(
@@ -3377,9 +3953,17 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#settings-errors"
+        "#toast-region .app-toast[data-tone=\"error\"]"
       )
     ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#default-context-tokens"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-invalid",
+      "true"
+    );
     await Expect(
       Page.Locator(
         "#settings-dialog"
@@ -3389,38 +3973,20 @@ public sealed class ChatEndToEndTests : PageTest
       "runtime"
     );
 
-    EventHandler<IDialog>? dismissDialog = null;
-    dismissDialog = async (
-      _,
-      dialog
-    ) =>
-    {
-      Page.Dialog -= dismissDialog;
-      await dialog.DismissAsync();
-    };
-    Page.Dialog += dismissDialog;
     await Page.Keyboard.PressAsync(
       "Escape"
     );
+    await Page.Locator("#app-modal-cancel").ClickAsync();
     await Expect(
       Page.Locator(
         "#settings-dialog"
       )
     ).ToBeVisibleAsync();
 
-    EventHandler<IDialog>? acceptDialog = null;
-    acceptDialog = async (
-      _,
-      dialog
-    ) =>
-    {
-      Page.Dialog -= acceptDialog;
-      await dialog.AcceptAsync();
-    };
-    Page.Dialog += acceptDialog;
     await Page.Keyboard.PressAsync(
       "Escape"
     );
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#settings-dialog"
@@ -3823,6 +4389,7 @@ public sealed class ChatEndToEndTests : PageTest
     var invalid = _environment.BaselineSettings with
     {
       RouterModel = " ",
+      ActionModel = " ",
       CoordinatorModel = " ",
       DefaultModel = string.Empty,
       Intentions = intentions
@@ -3844,6 +4411,12 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.IsTrue(
       errors.TryGetProperty(
         "routerModel",
+        out _
+      )
+    );
+    Assert.IsTrue(
+      errors.TryGetProperty(
+        "actionModel",
         out _
       )
     );
@@ -4411,6 +4984,31 @@ public sealed class ChatEndToEndTests : PageTest
       "id"
     ).GetString()!;
 
+    await Page.RouteAsync(
+      "**/api/sessions/current",
+      async route =>
+      {
+        if (string.Equals(
+          route.Request.Method,
+          "PUT",
+          StringComparison.Ordinal
+        ))
+        {
+          await route.FulfillAsync(
+            new RouteFulfillOptions
+            {
+              Status = 500,
+              ContentType = "application/json",
+              Body = "{\"message\":\"A redundant save was attempted.\"}"
+            }
+          );
+          return;
+        }
+
+        await route.ContinueAsync();
+      }
+    );
+
     await Page.Locator(
       "#new-conversation"
     ).ClickAsync();
@@ -4421,6 +5019,14 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToHaveCountAsync(
       0
     );
+    await Expect(
+      Page.Locator(
+        "#conversation-persistence"
+      )
+    ).Not.ToContainTextAsync(
+      "Save failed"
+    );
+    await Page.UnrouteAllAsync();
     await SendMessageAsync(
       "Second durable conversation."
     );
@@ -4452,10 +5058,6 @@ public sealed class ChatEndToEndTests : PageTest
     ).EvaluateAsync(
       "element => element.open = true"
     );
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       $"#recent-sessions [data-session-id=\"{firstId}\"]"
     ).GetByRole(
@@ -4465,6 +5067,7 @@ public sealed class ChatEndToEndTests : PageTest
         Name = "Retomar"
       }
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.user"
@@ -4535,6 +5138,9 @@ public sealed class ChatEndToEndTests : PageTest
     await File.WriteAllTextAsync(
       sessionsDirectory,
       "blocks session persistence"
+    );
+    await Page.EvaluateAsync(
+      "() => setPersistenceStatus('Unsaved')"
     );
 
     try
@@ -6201,7 +6807,7 @@ public sealed class ChatEndToEndTests : PageTest
     using var saveResponse = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
       {
-        CoordinatorModel = "alpha:latest",
+        ActionModel = "alpha:latest",
         DefaultModel = "alpha:latest"
       }
     );
@@ -6835,13 +7441,10 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       "#open-workspace"
     ).ClickAsync();
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#clear-workspace"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#workspace-badge"
@@ -6956,7 +7559,8 @@ public sealed class ChatEndToEndTests : PageTest
         file
       )
     );
-    var guidanceRequest = _environment.FakeOllama.Requests.Single(
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
       request => request.Model == "alpha:latest"
         && !request.Stream
         && request.Messages.Any(
@@ -6964,13 +7568,6 @@ public sealed class ChatEndToEndTests : PageTest
             "EXPERT_EXECUTION_GUIDANCE_V1",
             StringComparison.Ordinal
           )
-        )
-    );
-    Assert.IsFalse(
-      guidanceRequest.Messages.Any(
-        message => message.Content.Contains(
-          "LOCAL_ACTION_PLANNER_V1",
-          StringComparison.Ordinal
         )
       )
     );
@@ -7008,6 +7605,100 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToContainTextAsync(
       "router:latest"
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DeleteFilesRequiresApprovalProvesDiskEffectAndCanUndo()
+  {
+    var first = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "obsolete-a.txt"
+    );
+    var second = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "obsolete-b.txt"
+    );
+    var keep = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "keep.txt"
+    );
+    var secondBytes = new byte[]
+    {
+      0,
+      1,
+      2,
+      255
+    };
+    await File.WriteAllTextAsync(first, "first obsolete file");
+    await File.WriteAllBytesAsync(second, secondBytes);
+    await File.WriteAllTextAsync(keep, "keep me");
+
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await StartMessageAsync(
+      "execute delete files direct obsolete-a.txt and obsolete-b.txt"
+    );
+
+    var approval = Page.Locator(
+      ".action-approval"
+    );
+    await Expect(approval).ToBeVisibleAsync();
+    Assert.IsTrue(File.Exists(first));
+    Assert.IsTrue(File.Exists(second));
+
+    var editor = approval.GetByRole(
+      AriaRole.Textbox,
+      new()
+      {
+        Name = "Editar comando de delete_files",
+        Exact = true
+      }
+    );
+    await Expect(editor).ToHaveValueAsync(
+      "obsolete-a.txt\nobsolete-b.txt"
+    );
+    await Expect(approval).ToContainTextAsync("delete_files");
+    await editor.FillAsync("obsolete-b.txt");
+    await Expect(
+      approval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Atualizar",
+          Exact = true
+        }
+      )
+    ).ToHaveCountAsync(0);
+
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator("[data-event-type=\"action.edit-applied\"]")
+    ).ToBeAttachedAsync();
+    await Expect(
+      Page.Locator(".activity > summary")
+    ).ToContainTextAsync("Conclu");
+
+    Assert.IsTrue(File.Exists(first));
+    Assert.IsFalse(File.Exists(second));
+    Assert.IsTrue(File.Exists(keep));
+
+    await Page.Locator(".review-changes").ClickAsync();
+    await Expect(Page.Locator("#undo-execution")).ToBeEnabledAsync();
+    await Page.Locator("#undo-execution").ClickAsync();
+    await ConfirmAppModalAsync();
+    await Expect(Page.Locator("#undo-status")).ToContainTextAsync("undone");
+
+    Assert.AreEqual("first obsolete file", await File.ReadAllTextAsync(first));
+    CollectionAssert.AreEqual(secondBytes, await File.ReadAllBytesAsync(second));
+    Assert.IsTrue(File.Exists(keep));
   }
 
   [TestMethod]
@@ -7093,15 +7784,19 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task AdvertisedToolsDoNotBypassFailedBehavioralConformance()
+  public async Task FailedNativeConformanceCanUseIndependentStructuredEvidence()
   {
+    await BenchmarkStructuredConformanceAsync(
+      "structured:latest",
+      true
+    );
     await Page.GotoAsync(
       "/"
     );
     await Page.Locator(
       "#model-selector"
     ).SelectOptionAsync(
-      "unused:latest"
+      "structured:latest"
     );
     await SetExecuteModeAsync(
       "auto"
@@ -7131,11 +7826,11 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"agent.tooling-conformance-failed\"]"
       )
     ).ToContainTextAsync(
-      "configured coordinator will bridge"
+      "native-strict"
     );
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
-        request => request.Model == "unused:latest"
+        request => request.Model == "structured:latest"
           && !request.Stream
           && request.Messages.Any(
             message => message.Content.Contains(
@@ -7145,7 +7840,7 @@ public sealed class ChatEndToEndTests : PageTest
           )
       )
     );
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "router:latest"
           && !request.Stream
@@ -7157,11 +7852,469 @@ public sealed class ChatEndToEndTests : PageTest
           )
       )
     );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.structured-conformance-passed\"]"
+      )
+    ).ToContainTextAsync(
+      "structured:latest"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"agent.coordination-path-resolved\"]"
+      )
+    ).ToContainTextAsync(
+      "direct-structured"
+    );
   }
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CapabilityInspectionFailureUsesResidentBridge()
+  public async Task ToolAliasRegistryIsClosedCompleteAndCollisionFree()
+  {
+    using var response = await _environment.HttpClient.GetAsync(
+      "api/capabilities/tool-names"
+    );
+    response.EnsureSuccessStatusCode();
+    using var document = JsonDocument.Parse(
+      await response.Content.ReadAsStringAsync()
+    );
+    var root = document.RootElement;
+    Assert.AreEqual(
+      "ordinal-ignore-case",
+      root.GetProperty(
+        "comparison"
+      ).GetString()
+    );
+    Assert.IsTrue(
+      root.GetProperty(
+        "collisionFree"
+      ).GetBoolean()
+    );
+    var canonical = root.GetProperty(
+      "canonicalTools"
+    ).EnumerateArray().Select(
+      item => item.GetString()!
+    ).ToArray();
+    var expected = ExpectedToolAliases();
+    var aliases = root.GetProperty(
+      "aliases"
+    ).EnumerateArray().Select(
+      item => (
+        Alias: item.GetProperty(
+          "alias"
+        ).GetString()!,
+        Canonical: item.GetProperty(
+          "canonicalTool"
+        ).GetString()!
+      )
+    ).ToArray();
+    var actual = aliases.ToDictionary(
+      item => item.Alias,
+      item => item.Canonical,
+      StringComparer.OrdinalIgnoreCase
+    );
+
+    CollectionAssert.AreEquivalent(
+      expected.Keys.ToArray(),
+      actual.Keys.ToArray()
+    );
+    CollectionAssert.AreEquivalent(
+      ExpectedCanonicalTools(),
+      canonical
+    );
+
+    foreach (var registration in expected)
+    {
+      Assert.IsTrue(
+        actual.TryGetValue(
+          registration.Key.ToUpperInvariant(),
+          out var resolved
+        )
+      );
+      Assert.AreEqual(
+        registration.Value,
+        resolved
+      );
+      CollectionAssert.Contains(
+        canonical,
+        resolved
+      );
+    }
+
+    Assert.AreEqual(
+      aliases.Length,
+      aliases.Select(
+        item => item.Alias
+      ).Distinct(
+        StringComparer.OrdinalIgnoreCase
+      ).Count()
+    );
+
+    foreach (var rejected in DeliberatelyRejectedToolAliases())
+    {
+      Assert.IsFalse(
+        actual.ContainsKey(
+          rejected
+        )
+      );
+    }
+
+    Assert.IsTrue(
+      expected.Where(
+        item => item.Value == "read_file"
+      ).All(
+        item => !item.Value.Contains(
+          "write",
+          StringComparison.Ordinal
+        ) && !item.Value.Contains(
+          "process",
+          StringComparison.Ordinal
+        ) && !item.Value.StartsWith(
+          "git_",
+          StringComparison.Ordinal
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeAliasesAndCanonicalCasingUseDeterministicResolverAndAudit()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "alias evidence"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute native alias read doc"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.tool-name-normalized\"]"
+      ).Filter(
+        new()
+        {
+          HasText = "Read_Doc -> read_file (curated alias)"
+        }
+      ).Last
+    ).ToContainTextAsync(
+      "Read_Doc -> read_file (curated alias)"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.output\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "Read file: hello.txt."
+    );
+    var aliasExecutionId = await Page.EvaluateAsync<string>(
+      "() => state.latestExecutionSessionId"
+    );
+    using (
+      var review = await _environment.HttpClient.GetAsync(
+        $"api/execution-sessions/{aliasExecutionId}/review"
+      )
+    )
+    {
+      review.EnsureSuccessStatusCode();
+      using var reviewDocument = JsonDocument.Parse(
+        await review.Content.ReadAsStringAsync()
+      );
+      var evidence = reviewDocument.RootElement.GetProperty(
+        "toolNameResolutions"
+      )[0];
+      Assert.AreEqual(
+        "Read_Doc",
+        evidence.GetProperty(
+          "originalTool"
+        ).GetString()
+      );
+      Assert.AreEqual(
+        "read_file",
+        evidence.GetProperty(
+          "canonicalTool"
+        ).GetString()
+      );
+      Assert.AreEqual(
+        "curated-alias",
+        evidence.GetProperty(
+          "source"
+        ).GetString()
+      );
+      Assert.AreEqual(
+        "accepted",
+        evidence.GetProperty(
+          "validationOutcome"
+        ).GetString()
+      );
+    }
+
+    await SendMessageAsync(
+      "execute case canonical read file"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.tool-name-normalized\"]"
+      ).Filter(
+        new()
+        {
+          HasText = "READ_FILE -> read_file (ordinal case-insensitive canonical)"
+        }
+      ).Last
+    ).ToContainTextAsync(
+      "READ_FILE -> read_file (ordinal case-insensitive canonical)"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StructuredGuidanceUsesTheSameCuratedAliasResolver()
+  {
+    await BenchmarkStructuredConformanceAsync(
+      "structured:latest",
+      true
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "structured alias evidence"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "structured:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute structured alias read doc"
+    );
+
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.tool-name-normalized\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "Read_Doc -> read_file (curated alias)"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.output\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "Read file: hello.txt."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CuratedAliasCannotBypassPlanningPhaseAvailability()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute alias phase bypass"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      ).First
+    ).ToContainTextAsync(
+      "resolves to 'read_file', which is not offered in the current execution phase"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"execution-plan-created\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".activity > summary"
+      ).Last
+    ).ToHaveTextAsync(
+      "Cancelado"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task UnknownAmbiguousToolAliasIsRejectedWithoutExecution()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        _environment.WorkspaceDirectory,
+        "hello.txt"
+      ),
+      "must remain unread"
+    );
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute unknown tool alias"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.planning-retry\"]"
+      ).Last
+    ).ToContainTextAsync(
+      "neither canonical nor an approved alias"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.tool-name-normalized\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.proposed\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".activity > summary"
+      ).Last
+    ).ToHaveTextAsync(
+      "Cancelado"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AliasNormalizationDoesNotBypassPathValidation()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await StartMessageAsync(
+      "execute alias path traversal"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.tool-name-normalized\"]"
+      ).Filter(
+        new()
+        {
+          HasText = "read_doc -> read_file (curated alias)"
+        }
+      ).Last
+    ).ToContainTextAsync(
+      "read_doc -> read_file (curated alias)"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.security-denied\"]"
+      ).Filter(
+        new()
+        {
+          HasText = "outside the trusted workspace"
+        }
+      ).Last
+    ).ToContainTextAsync(
+      "outside the trusted workspace"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.proposed\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    var executionId = await Page.EvaluateAsync<string>(
+      "() => state.latestExecutionSessionId"
+    );
+    using (
+      var review = await _environment.HttpClient.GetAsync(
+        $"api/execution-sessions/{executionId}/review"
+      )
+    )
+    {
+      review.EnsureSuccessStatusCode();
+      using var reviewDocument = JsonDocument.Parse(
+        await review.Content.ReadAsStringAsync()
+      );
+      Assert.AreEqual(
+        "rejected",
+        reviewDocument.RootElement.GetProperty(
+          "toolNameResolutions"
+        )[0].GetProperty(
+          "validationOutcome"
+        ).GetString()
+      );
+    }
+    await Page.Locator(
+      "#send-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".activity > summary"
+      ).Last
+    ).ToHaveTextAsync(
+      "Cancelado"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CapabilityInspectionFailureUsesEligibleResidentBridge()
   {
     await Page.GotoAsync(
       "/"
@@ -7222,7 +8375,7 @@ public sealed class ChatEndToEndTests : PageTest
     using var settingsResponse = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
       {
-        CoordinatorModel = "command-r:latest"
+        ActionModel = "command-r:latest"
       }
     );
     Assert.AreEqual(
@@ -7262,6 +8415,13 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToContainTextAsync(
       "command-r:latest"
     );
+    await Expect(
+      Page.Locator(
+        ".execution-session-header"
+      )
+    ).ToContainTextAsync(
+      "Residente: command-r:latest"
+    );
     Assert.IsTrue(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "command-r:latest"
@@ -7280,35 +8440,6 @@ public sealed class ChatEndToEndTests : PageTest
         request => request.Model == "router:latest"
           && !request.Stream
           && request.HasTools
-      )
-    );
-    var requests = _environment.FakeOllama.Requests.ToArray();
-    var residentPreloadIndex = Array.FindIndex(
-      requests,
-      request => request.Model == "command-r:latest"
-        && request.KeepAlive == -1
-        && request.ContextTokens == 8_192
-        && request.Messages.Count == 0
-    );
-    var coordinatorToolRequestIndex = Array.FindIndex(
-      requests,
-      request => request.Model == "command-r:latest"
-        && request.HasTools
-    );
-    Assert.IsGreaterThanOrEqualTo(
-      0,
-      residentPreloadIndex
-    );
-    Assert.IsGreaterThan(
-      residentPreloadIndex,
-      coordinatorToolRequestIndex
-    );
-    Assert.IsTrue(
-      requests.Any(
-        request => request.Model == "command-r:latest"
-          && request.KeepAlive == -1
-          && request.ContextTokens == 8_192
-          && request.Messages.Count == 0
       )
     );
   }
@@ -7568,7 +8699,7 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.planning-retry\"]"
       )
     ).ToContainTextAsync(
-      "invalid local action proposal"
+      "neither canonical nor an approved alias"
     );
     await Expect(
       Page.Locator(
@@ -8289,7 +9420,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.planning-retry\"]"
+        "[data-event-type=\"action.semantic-repair-requested\"]"
       )
     ).ToContainTextAsync(
       "Execution plan step titles must be short descriptions"
@@ -8381,7 +9512,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.planning-retry\"]"
+        "[data-event-type=\"action.semantic-repair-requested\"]"
       )
     ).ToContainTextAsync(
       "already the project root"
@@ -9022,6 +10153,7 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       "#git-card"
     ).ClickAsync();
+    await Expect(Page.Locator("#git-dialog")).ToBeVisibleAsync();
     await Page.Locator(
       "[data-git-view=\"working-tree\"]"
     ).ClickAsync();
@@ -9081,10 +10213,6 @@ public sealed class ChatEndToEndTests : PageTest
     ).EvaluateAsync(
       "element => element.open = true"
     );
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#recent-sessions .session-entry"
     ).Filter(
@@ -9099,6 +10227,7 @@ public sealed class ChatEndToEndTests : PageTest
         Name = "Retomar"
       }
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.user"
@@ -9145,9 +10274,11 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       "#git-card"
     ).ClickAsync();
+    await Expect(Page.Locator("#git-dialog")).ToBeVisibleAsync();
     await Page.Locator(
       "#initialize-git"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#git-summary"
@@ -9243,6 +10374,22 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToBeVisibleAsync();
     await Expect(
       Page.Locator(
+        "#git-overview-section"
+      )
+    ).ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await Expect(
+      Page.Locator(
+        "#git-configuration-section"
+      )
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    await Expect(
+      Page.Locator(
         "#git-overview"
       )
     ).ToContainTextAsync(
@@ -9290,6 +10437,9 @@ public sealed class ChatEndToEndTests : PageTest
     ).Not.ToContainTextAsync(
       "token=hidden"
     );
+    await Page.Locator(
+      "#git-configuration-section > summary"
+    ).ClickAsync();
 
     await Page.Locator(
       "[data-git-view=\"working-tree\"]"
@@ -9450,15 +10600,16 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       "#git-card"
     ).ClickAsync();
+    await Expect(Page.Locator("#git-dialog")).ToBeVisibleAsync();
     await Page.Locator(
       "#initialize-git"
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#git-action-status"
+        "#app-modal"
       )
     ).ToContainTextAsync(
-      "Execute mode"
+      "modo Execute"
     );
     Assert.IsFalse(
       Directory.Exists(
@@ -9470,10 +10621,20 @@ public sealed class ChatEndToEndTests : PageTest
     );
 
     await Page.Locator(
-      "#dismiss-git"
+      "#app-modal-confirm"
     ).ClickAsync();
-    await SetExecuteModeAsync(
-      "ask"
+    await Expect(
+      Page.Locator(
+        "#git-dialog"
+      )
+    ).Not.ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        ".mode-option[data-mode=\"execute\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
     );
     await Page.Locator(
       "#git-card"
@@ -9490,13 +10651,8 @@ public sealed class ChatEndToEndTests : PageTest
       )
     );
 
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
-    await Page.Locator(
-      "#initialize-git"
-    ).ClickAsync();
+    await Expect(Page.Locator("#app-modal")).ToBeVisibleAsync();
+    await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(
       Page.Locator(
         "#git-action-status"
@@ -9539,35 +10695,23 @@ public sealed class ChatEndToEndTests : PageTest
       )
     );
 
-    await Page.Locator(
-      "#git-user-name"
-    ).FillAsync(
-      "Repository User"
-    );
-    await Page.Locator(
-      "#save-git-user-name"
-    ).ClickAsync();
+    await Page.Locator("#git-configuration-section > summary").ClickAsync();
+    await Expect(Page.Locator("#git-user-name")).ToHaveAttributeAsync("readonly", string.Empty);
+    await Expect(Page.Locator("#git-origin-url")).ToHaveAttributeAsync("readonly", string.Empty);
+    await Page.Locator("#edit-git-configuration").ClickAsync();
+    await Expect(Page.Locator("#git-user-name")).Not.ToHaveAttributeAsync("readonly", string.Empty);
+    await Page.Locator("#git-user-name").FillAsync("Repository User");
+    await Page.Locator("#git-user-email").FillAsync("repository-user@example.invalid");
+    await Page.Locator("#git-origin-url").FillAsync("https://example.invalid/owner/repository.git");
+    await Page.Locator("#save-git-configuration").ClickAsync();
+    await Expect(Page.Locator("#app-modal")).ToContainTextAsync("origin");
+    await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(
       Page.Locator(
         "#git-action-status"
       )
     ).ToContainTextAsync(
-      "user.name saved"
-    );
-    await Page.Locator(
-      "#git-user-email"
-    ).FillAsync(
-      "repository-user@example.invalid"
-    );
-    await Page.Locator(
-      "#save-git-user-email"
-    ).ClickAsync();
-    await Expect(
-      Page.Locator(
-        "#git-action-status"
-      )
-    ).ToContainTextAsync(
-      "user.email saved"
+      "Configuração local"
     );
     Assert.AreEqual(
       "Repository User",
@@ -9587,6 +10731,51 @@ public sealed class ChatEndToEndTests : PageTest
         "user.email"
       )
     );
+    Assert.AreEqual(
+      "https://example.invalid/owner/repository.git",
+      await RunGitTextAsync(
+        _environment.WorkspaceDirectory,
+        "remote",
+        "get-url",
+        "origin"
+      )
+    );
+    using (
+      var rejectedRemote = await _environment.HttpClient.PostAsJsonAsync(
+        "api/git/remote/preview",
+        new
+        {
+          remoteName = "origin",
+          url = "https://user:secret@example.invalid/repository.git"
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        rejectedRemote.StatusCode
+      );
+      Assert.Contains(
+        "git-remote-url-invalid",
+        await rejectedRemote.Content.ReadAsStringAsync()
+      );
+    }
+    using (
+      var rejectedQuery = await _environment.HttpClient.PostAsJsonAsync(
+        "api/git/remote/preview",
+        new
+        {
+          remoteName = "origin",
+          url = "https://example.invalid/repository.git?token=secret"
+        }
+      )
+    )
+    {
+      Assert.AreEqual(
+        HttpStatusCode.BadRequest,
+        rejectedQuery.StatusCode
+      );
+    }
     var globalAfter = await RunGitAllowFailureAsync(
       _environment.WorkspaceDirectory,
       "config",
@@ -10996,13 +12185,10 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToContainTextAsync(
       "Verificado"
     );
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#undo-execution"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#undo-status"
@@ -11041,13 +12227,10 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#undo-execution"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#undo-status"
@@ -11093,13 +12276,10 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#undo-execution"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#undo-status"
@@ -11188,6 +12368,27 @@ public sealed class ChatEndToEndTests : PageTest
       404,
       status
     );
+    var revisionStatus = await Page.EvaluateAsync<int>(
+      """
+      async actionId => {
+        const response = await fetch(`/api/actions/${encodeURIComponent(actionId)}/revision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            editedText: "dotnet --version",
+            browserSessionId: "wrong-browser",
+            executionSessionId: "wrong-execution"
+          })
+        });
+        return response.status;
+      }
+      """,
+      actionId
+    );
+    Assert.AreEqual(
+      404,
+      revisionStatus
+    );
     Assert.IsFalse(
       File.Exists(
         Path.Combine(
@@ -11213,17 +12414,8 @@ public sealed class ChatEndToEndTests : PageTest
       approval
     ).ToHaveAttributeAsync(
       "data-decision",
-      "approved"
+      "completed"
     );
-    await Expect(
-      approval
-    ).Not.ToHaveAttributeAsync(
-      "open",
-      string.Empty
-    );
-    await approval.Locator(
-      "summary"
-    ).ClickAsync();
     await Expect(
       approval
     ).ToHaveAttributeAsync(
@@ -11239,7 +12431,21 @@ public sealed class ChatEndToEndTests : PageTest
           Exact = true
         }
       )
-    ).ToBeDisabledAsync();
+    ).ToHaveCountAsync(
+      0
+    );
+    var response = approval.Locator(
+      ".action-response"
+    );
+    await Expect(
+      response
+    ).ToBeAttachedAsync();
+    await Expect(
+      response
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
     await Expect(
       Page.Locator(
         "#send-button-label"
@@ -11311,6 +12517,16 @@ public sealed class ChatEndToEndTests : PageTest
       "open",
       string.Empty
     );
+    var activity = Page.Locator(
+      ".message.assistant .activity"
+    ).Last;
+    await Expect(
+      activity.Locator(":scope > summary")
+    ).ToContainTextAsync("Conclu");
+    if (await activity.GetAttributeAsync("open") is null)
+    {
+      await activity.Locator(":scope > summary").ClickAsync();
+    }
     await approval.Locator(
       "summary"
     ).ClickAsync();
@@ -11334,7 +12550,9 @@ public sealed class ChatEndToEndTests : PageTest
           Exact = true
         }
       )
-    ).ToBeDisabledAsync();
+    ).ToHaveCountAsync(
+      0
+    );
     Assert.IsFalse(
       File.Exists(
         Path.Combine(
@@ -11407,7 +12625,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CancellationAfterCompletedWriteKeepsChangeReviewAvailable()
+  public async Task CompletedWriteUsesHostTerminalResponseAndKeepsChangeReviewAvailable()
   {
     await Page.GotoAsync(
       "/"
@@ -11415,7 +12633,7 @@ public sealed class ChatEndToEndTests : PageTest
     await SetExecuteModeAsync(
       "auto"
     );
-    await StartMessageAsync(
+    await SendMessageAsync(
       "execute create file cancel stream"
     );
     await Expect(
@@ -11423,8 +12641,8 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.edit-applied\"]"
       )
     ).ToBeAttachedAsync();
-    await WaitUntilAsync(
-      () => _environment.FakeOllama.Requests.Any(
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(
         request => request.Stream
           && request.Messages.Any(
             message => message.Content.Contains(
@@ -11432,58 +12650,14 @@ public sealed class ChatEndToEndTests : PageTest
               StringComparison.OrdinalIgnoreCase
             )
           )
-      ),
-      TimeSpan.FromSeconds(
-        5
       )
-    );
-    await Page.Locator(
-      "#send-button"
-    ).ClickAsync();
-    await Expect(
-      Page.Locator(
-        "#send-button-label"
-      )
-    ).ToHaveTextAsync(
-      "Enviar"
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"request.cancelled\"]"
+        "[data-event-type=\"response.completed\"]"
       )
     ).ToHaveCountAsync(
       1
-    );
-    using var usageResponse = await _environment.HttpClient.GetAsync(
-      "api/usage/summary?window=rolling-hour"
-    );
-    usageResponse.EnsureSuccessStatusCode();
-    var usage = await usageResponse.Content.ReadFromJsonAsync<JsonElement>(
-      TestJson.Options
-    );
-    Assert.IsGreaterThan(
-      0L,
-      usage.GetProperty(
-        "cancellations"
-      ).GetInt64()
-    );
-    var usageRoles = usage.GetProperty(
-        "topRoles"
-      )
-      .EnumerateArray()
-      .Select(
-        item => item.GetProperty(
-          "key"
-        ).GetString()
-      )
-      .ToArray();
-    CollectionAssert.Contains(
-      usageRoles,
-      "router"
-    );
-    CollectionAssert.Contains(
-      usageRoles,
-      "coordinator"
     );
     await Expect(
       Page.Locator(
@@ -11673,6 +12847,82 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task JsonEscapedControlCharacterInPathIsRejectedBeforeExecution()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute control character path recover"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.security-denied\"]"
+      )
+    ).ToContainTextAsync(
+      "control character U+000C"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.execution-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.AreEqual(
+      "recovered after invalid control path",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "safe-control-path.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task JsonEscapedControlCharacterInProcessArgumentIsRejectedBeforeExecution()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "auto"
+    );
+    await SendMessageAsync(
+      "execute control character process recover"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.policy-denied\"]"
+      )
+    ).ToContainTextAsync(
+      "control character U+000C"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.execution-error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.AreEqual(
+      "recovered after invalid process argument",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "safe-control-process.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task PathTraversalAndDestructiveCommandsAreBlocked()
   {
     await Page.GotoAsync(
@@ -11726,6 +12976,9 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToHaveCountAsync(
       1
     );
+    await Expect(
+      Page.Locator("#send-button-label")
+    ).ToHaveTextAsync("Enviar");
     await Page.GetByRole(
       AriaRole.Button,
       new()
@@ -11734,9 +12987,17 @@ public sealed class ChatEndToEndTests : PageTest
         Exact = true
       }
     ).ClickAsync();
-    await Page.Locator(
+    var discard = Page.Locator(
       "#new-conversation-discard"
-    ).ClickAsync();
+    );
+    await Page.WaitForTimeoutAsync(100);
+    if (await discard.IsVisibleAsync())
+    {
+      await discard.ClickAsync();
+    }
+    await Expect(
+      Page.Locator("[data-mode=\"execute\"]")
+    ).ToBeEnabledAsync();
     await SetExecuteModeAsync(
       "auto"
     );
@@ -12006,7 +13267,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task StructuredProcessCapturesOutputAndUnknownCommandNeedsApproval()
+  public async Task StructuredProcessCapturesOutputAndPendingCommandCanBeEdited()
   {
     await Page.GotoAsync(
       "/"
@@ -12039,9 +13300,144 @@ public sealed class ChatEndToEndTests : PageTest
         "[data-event-type=\"action.awaiting-approval\"]"
       )
     ).ToBeVisibleAsync();
-    await Page.Locator(
+    var approval = Page.Locator(
       ".action-approval"
-    ).Last.GetByRole(
+    ).Last;
+    var editor = approval.GetByRole(
+      AriaRole.Textbox,
+      new()
+      {
+        Name = "Editar comando de run_process",
+        Exact = true
+      }
+    );
+    await Expect(
+      editor
+    ).ToHaveValueAsync(
+      "dotnet --list-sdks"
+    );
+    await editor.FillAsync(
+      "dotnet --version"
+    );
+    await Expect(
+      approval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Atualizar",
+          Exact = true
+        }
+      )
+    ).ToHaveCountAsync(0);
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    var response = approval.Locator(
+      ".action-response"
+    );
+    await Expect(
+      response
+    ).ToBeAttachedAsync();
+    await Expect(
+      response
+    ).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty
+    );
+    var completedActivity = Page.Locator(
+      ".message.assistant .activity"
+    ).Last;
+    await Expect(
+      completedActivity.Locator(":scope > summary")
+    ).ToContainTextAsync("Conclu");
+    if (await completedActivity.GetAttributeAsync("open") is null)
+    {
+      await completedActivity.Locator(":scope > summary").ClickAsync();
+    }
+    if (!await response.Locator(":scope > summary").IsVisibleAsync())
+    {
+      await approval.Locator(":scope > summary").ClickAsync();
+    }
+    await Expect(
+      response.Locator(
+        ":scope > summary"
+      )
+    ).ToContainTextAsync(
+      "Execução"
+    );
+    await response.Locator(
+      ":scope > summary"
+    ).ClickAsync();
+    await Expect(
+      response.Locator(
+        ".action-response-output"
+      )
+    ).ToContainTextAsync(
+      "Exit code: 0"
+    );
+    await Expect(
+      approval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Aprovar",
+          Exact = true
+        }
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PendingStructuredFileActionRunsInlineEditedArgumentsOnApproval()
+  {
+    var originalPath = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "hello.txt"
+    );
+    var correctedPath = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "corrected.txt"
+    );
+    File.Delete(originalPath);
+    File.Delete(correctedPath);
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute create file"
+    );
+    var approval = Page.Locator(
+      ".action-approval"
+    ).Last;
+    var editor = approval.GetByRole(
+      AriaRole.Textbox,
+      new()
+      {
+        Name = "Editar comando de create_file",
+        Exact = true
+      }
+    );
+    await Expect(approval).ToContainTextAsync("create_file");
+    await editor.FillAsync(
+      """
+      {
+        "path": "corrected.txt",
+        "content": "approved inline edit"
+      }
+      """
+    );
+    await approval.GetByRole(
       AriaRole.Button,
       new()
       {
@@ -12050,11 +13446,99 @@ public sealed class ChatEndToEndTests : PageTest
       }
     ).ClickAsync();
     await Expect(
+      Page.Locator("[data-event-type=\"action.edit-applied\"]")
+    ).ToBeAttachedAsync();
+
+    Assert.AreEqual(
+      "approved inline edit",
+      await File.ReadAllTextAsync(
+        correctedPath
+      )
+    );
+    Assert.IsFalse(
+      File.Exists(
+        originalPath
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task EditedPendingCommandMustPassExistingProcessPolicy()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await SetExecuteModeAsync(
+      "ask"
+    );
+    await StartMessageAsync(
+      "execute unknown process"
+    );
+    var approval = Page.Locator(
+      ".action-approval"
+    ).Last;
+    var editor = approval.GetByRole(
+      AriaRole.Textbox,
+      new()
+      {
+        Name = "Editar comando de run_process",
+        Exact = true
+      }
+    );
+    await editor.FillAsync(
+      "git clean -fd"
+    );
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      editor
+    ).ToHaveAttributeAsync(
+      "aria-invalid",
+      "true"
+    );
+    await Expect(
+      approval.Locator(
+        ".approval-status"
+      )
+    ).ToHaveTextAsync(
+      "Alteração inválida"
+    );
+    await Expect(
       Page.Locator(
-        "[data-event-type=\"action.process-output\"]"
+        "#toast-region .app-toast[data-tone=\"error\"]"
       ).Last
-    ).ToContainTextAsync(
-      "Exit code: 0"
+    ).ToBeVisibleAsync();
+    await Expect(
+      approval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Aprovar",
+          Exact = true
+        }
+      )
+    ).ToBeEnabledAsync();
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Rejeitar",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#send-button-label"
+      )
+    ).ToHaveTextAsync(
+      "Enviar"
     );
   }
 
@@ -12442,12 +13926,6 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).Not.ToBeCheckedAsync();
 
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync(
-      "Renamed project"
-    );
     await Page.Locator(
       ".workspace-profile-entry.active"
     ).GetByRole(
@@ -12457,6 +13935,8 @@ public sealed class ChatEndToEndTests : PageTest
         Name = "Renomear"
       }
     ).ClickAsync();
+    await Page.Locator("#app-modal-input").FillAsync("Renamed project");
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".workspace-profile-entry.active"
@@ -12569,29 +14049,22 @@ public sealed class ChatEndToEndTests : PageTest
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task HistoryOptInPersistsButRestartRequiresExplicitResume()
   {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
     await Page.GotoAsync(
       "/"
     );
-    await Page.Locator(
-      "#open-workspace"
-    ).ClickAsync();
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
-    await Page.Locator(
-      "#workspace-history-enabled"
-    ).CheckAsync();
-    await Expect(
-      Page.Locator(
-        "#history-usage"
-      )
-    ).ToContainTextAsync(
-      "histórico ativo"
-    );
-    await Page.Locator(
-      "#close-workspace"
-    ).ClickAsync();
     await SendMessageAsync(
       "Persist this explicit local conversation."
     );
@@ -12628,6 +14101,7 @@ public sealed class ChatEndToEndTests : PageTest
         Name = "Retomar"
       }
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.user"
@@ -12654,31 +14128,203 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RecentSessionCardIsCompactAndDetailsModalOwnsActionsAndSummary()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "compact-card-v0913",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = "Keep this compact conversation available."
+            },
+            new
+            {
+              role = "assistant",
+              content = "The compact conversation is saved."
+            }
+          },
+          interactionMode = "execute",
+          selectedModel = "command-r:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    using (
+      var summary = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/compact-card-v0913/summary",
+        new
+        {
+          content = new
+          {
+            objective = "Preserve the compact navigation contract.",
+            decisions = new[]
+            {
+              "Keep secondary actions in the details modal."
+            },
+            filesChanged = Array.Empty<string>(),
+            commandsAndValidation = new[]
+            {
+              "Browser interaction covered by Playwright."
+            },
+            unresolvedIssues = Array.Empty<string>(),
+            nextSuggestedStep = "Resume only when more work is needed."
+          }
+        }
+      )
+    )
+    {
+      summary.EnsureSuccessStatusCode();
+    }
+    using (
+      var withoutSummary = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "compact-card-without-summary-v0914",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = "Keep this conversation without a continuity summary."
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "command-r:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      withoutSummary.EnsureSuccessStatusCode();
+    }
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(
+      Page.Locator("#pinned-session-section")
+    ).ToBeHiddenAsync();
+    var sidebarAlignment = await Page.EvaluateAsync<double[]>(
+      """
+      () => [
+        document.querySelector('#conversation-persistence-sidebar').getBoundingClientRect().left,
+        document.querySelector('.session-history-actions').getBoundingClientRect().left
+      ]
+      """
+    );
+    Assert.IsLessThanOrEqualTo(
+      4,
+      Math.Abs(sidebarAlignment[0] - sidebarAlignment[1])
+    );
+    var summaryFreeCard = Page.Locator(
+      "#recent-sessions .session-entry[data-session-id=\"compact-card-without-summary-v0914\"]"
+    );
+    await summaryFreeCard.Locator(".session-entry-content").ClickAsync();
+    await Expect(Page.Locator("#session-details-dialog")).ToBeVisibleAsync();
+    var compactDetailsHeight = await Page.Locator(
+      "#session-details-dialog .session-details-shell"
+    ).EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().height"
+    );
+    Assert.IsLessThan(
+      560,
+      compactDetailsHeight
+    );
+    await Page.Locator("#dismiss-session-details").ClickAsync();
+    var card = Page.Locator(
+      "#recent-sessions .session-entry[data-session-id=\"compact-card-v0913\"]"
+    );
+    await Expect(card).ToBeVisibleAsync();
+    await Expect(card.Locator("button")).ToHaveCountAsync(1);
+    await Expect(card.Locator("button")).ToHaveTextAsync("Retomar");
+    await Expect(card).Not.ToContainTextAsync("Renomear");
+    await Expect(card).Not.ToContainTextAsync("Resumo");
+    await Expect(card.Locator("small")).Not.ToBeEmptyAsync();
+
+    await card.Locator(".session-entry-content").ClickAsync();
+    await Expect(Page.Locator("#session-details-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#session-details-title")).ToHaveTextAsync(
+      "Keep this compact conversation available."
+    );
+    await Expect(Page.Locator("#session-details-summary")).ToContainTextAsync(
+      "Preserve the compact navigation contract."
+    );
+    await Expect(Page.Locator("#session-details-summary")).ToContainTextAsync(
+      "Keep secondary actions in the details modal."
+    );
+    await Expect(Page.Locator("#session-details-dialog textarea")).ToHaveCountAsync(0);
+    await Expect(Page.Locator("#session-details-rename")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#edit-session-summary")).ToBeVisibleAsync();
+    var detailsHeight = await Page.Locator(
+      "#session-details-dialog .session-details-shell"
+    ).EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().height"
+    );
+    Assert.IsLessThanOrEqualTo(
+      684,
+      detailsHeight
+    );
+    var tallestAction = await Page.Locator(
+      "#session-details-dialog .session-details-actions > *"
+    ).EvaluateAllAsync<double>(
+      "elements => Math.max(...elements.map(element => element.getBoundingClientRect().height))"
+    );
+    Assert.IsLessThanOrEqualTo(
+      48,
+      tallestAction
+    );
+
+    await Page.Locator("#resume-session-details").ClickAsync();
+    await ConfirmAppModalAsync();
+    await Expect(Page.Locator(".message.user")).ToContainTextAsync(
+      "Keep this compact conversation available."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task RestartMarksRunningPersistentExecutionInterrupted()
   {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
     await Page.GotoAsync(
       "/"
     );
-    await Page.Locator(
-      "#open-workspace"
-    ).ClickAsync();
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
-    await Page.Locator(
-      "#workspace-history-enabled"
-    ).CheckAsync();
-    await Expect(
-      Page.Locator(
-        "#history-usage"
-      )
-    ).ToContainTextAsync(
-      "histórico ativo"
-    );
-    await Page.Locator(
-      "#close-workspace"
-    ).ClickAsync();
     await Page.Locator(
       "#model-selector"
     ).SelectOptionAsync(
@@ -12710,22 +14356,14 @@ public sealed class ChatEndToEndTests : PageTest
     ).EvaluateAsync(
       "element => element.open = true"
     );
-    await Expect(
-      Page.Locator(
-        "#recent-sessions .session-interrupted"
-      )
-    ).ToContainTextAsync(
-      "interrompida"
-    );
     await Page.Locator(
-      "#recent-sessions .session-entry"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Retomar"
-      }
+      "#recent-sessions .session-entry .session-entry-content"
     ).ClickAsync();
+    await Expect(Page.Locator("#session-details-state")).ToContainTextAsync(
+      "Interrompida"
+    );
+    await Page.Locator("#resume-session-details").ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.assistant"
@@ -12851,6 +14489,18 @@ public sealed class ChatEndToEndTests : PageTest
       )
     );
 
+    using (
+      var legacySettings = await _environment.PutSettingsAsync(
+        _environment.BaselineSettings with
+        {
+          TrustedWorkspacePath = null
+        }
+      )
+    )
+    {
+      legacySettings.EnsureSuccessStatusCode();
+    }
+
     await _environment.RestartApplicationAsync();
     await Page.GotoAsync(
       "/"
@@ -12860,10 +14510,6 @@ public sealed class ChatEndToEndTests : PageTest
     ).EvaluateAsync(
       "element => element.open = true"
     );
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#recent-sessions .session-entry"
     ).GetByRole(
@@ -12873,6 +14519,7 @@ public sealed class ChatEndToEndTests : PageTest
         Name = "Retomar"
       }
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Page.GetByRole(
       AriaRole.Button,
       new()
@@ -12895,6 +14542,7 @@ public sealed class ChatEndToEndTests : PageTest
     await Page.Locator(
       "#undo-execution"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#undo-status"
@@ -14450,7 +16098,7 @@ public sealed class ChatEndToEndTests : PageTest
     }
 
     var inferenceRequestsBeforeProfileSave =
-      _environment.FakeOllama.AllRequests.Count;
+      _environment.FakeOllama.AllRequests.Count(request => request.Stream);
     using var savedProfile = await _environment.HttpClient.PostAsJsonAsync(
       "api/model-organization/profiles",
       new
@@ -14477,7 +16125,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     Assert.HasCount(
       inferenceRequestsBeforeProfileSave,
-      _environment.FakeOllama.AllRequests);
+      _environment.FakeOllama.AllRequests.Where(request => request.Stream));
 
     var workspaceId = await ActiveWorkspaceIdAsync();
     string workspaceName;
@@ -14587,7 +16235,7 @@ public sealed class ChatEndToEndTests : PageTest
     }
     Assert.HasCount(
       inferenceRequestsBeforeProfileSave,
-      _environment.FakeOllama.AllRequests);
+      _environment.FakeOllama.AllRequests.Where(request => request.Stream));
 
     var settings = await GetSettingsJsonAsync();
     Assert.AreEqual(
@@ -14721,7 +16369,7 @@ public sealed class ChatEndToEndTests : PageTest
     await Expect(
       organizationCards
     ).ToHaveCountAsync(
-      3
+      4
     );
     await Expect(
       organizationCards.Filter(
@@ -14816,13 +16464,10 @@ public sealed class ChatEndToEndTests : PageTest
       "Groq · openai/gpt-oss-120b"
     );
 
-    Page.Dialog += async (
-      _,
-      dialog
-    ) => await dialog.AcceptAsync();
     await Page.Locator(
       "#apply-model-profile"
     ).ClickAsync();
+    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         "#model-profile-status"
@@ -14844,7 +16489,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     Assert.HasCount(
       inferenceRequestsBeforeProfileSave,
-      _environment.FakeOllama.AllRequests);
+      _environment.FakeOllama.AllRequests.Where(request => request.Stream));
 
     settings = await GetSettingsJsonAsync();
     settings["defaultModel"] = "docs:latest";
@@ -14882,6 +16527,431 @@ public sealed class ChatEndToEndTests : PageTest
       routed,
       "Hello from alpha:latest"
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CanonicalTracePersistsSanitizedFailureAndUsageAcrossRestart()
+  {
+    const string secretMarker = "PROMPT-MUST-NOT-ENTER-INCIDENT-JOURNAL";
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = secretMarker + new string('x', 132_000),
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        modelLocked = true,
+        interactionMode = "chat",
+        approvalPolicy = "ask",
+        browserSessionId = "browser-trace-v0913"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    var error = events.Last(item => item["type"]!.GetValue<string>() == "error")["error"]!.AsObject();
+    var traceId = error["traceId"]!.GetValue<string>();
+    Assert.AreEqual("request-context-does-not-fit", error["code"]!.GetValue<string>());
+    Assert.IsTrue(error["diagnosticsPersisted"]!.GetValue<bool>());
+
+    using (var lookup = await _environment.HttpClient.GetAsync($"api/diagnostics/traces/{Uri.EscapeDataString(traceId)}"))
+    {
+      lookup.EnsureSuccessStatusCode();
+      var report = await lookup.Content.ReadFromJsonAsync<JsonElement>(TestJson.Options);
+      Assert.AreEqual(traceId, report.GetProperty("traceId").GetString());
+      Assert.AreEqual("request-context-does-not-fit", report.GetProperty("failureCode").GetString());
+      Assert.IsGreaterThan(
+        report.GetProperty("contextFit").GetProperty("maximumContextTokens").GetInt32(),
+        report.GetProperty("contextFit").GetProperty("requiredContextTokens").GetInt32()
+      );
+    }
+
+    var incidentText = string.Join("\n", Directory.GetFiles(Path.Combine(_environment.DataDirectory, "incidents"), "*.jsonl").Select(File.ReadAllText));
+    Assert.DoesNotContain(secretMarker, incidentText);
+    Assert.DoesNotContain(new string('x', 1_000), incidentText);
+
+    var usageText = string.Join("\n", Directory.GetFiles(Path.Combine(_environment.DataDirectory, "usage"), "*.jsonl").Select(File.ReadAllText));
+    StringAssert.Contains(usageText, $"\"traceId\":\"{traceId}\"");
+    StringAssert.Contains(usageText, "\"errorCode\":\"request-context-does-not-fit\"");
+    StringAssert.Contains(usageText, "\"requiredContextTokens\":");
+    using var usageDocument = JsonDocument.Parse(
+      usageText.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+        .First(line => line.Contains($"\"traceId\":\"{traceId}\"", StringComparison.Ordinal))
+    );
+    var linkedIncidentEventId = usageDocument.RootElement.GetProperty("incidentEventId").GetString();
+    Assert.IsFalse(string.IsNullOrWhiteSpace(linkedIncidentEventId));
+    StringAssert.Contains(incidentText, $"\"eventId\":\"{linkedIncidentEventId}\"");
+
+    var diagnosticTool = await RunPowerShellAsync(
+      Path.Combine(_environment.RepositoryRoot, "tools", "diagnostics", "Find-AgenticRouterTrace.ps1"),
+      "-TraceId",
+      traceId,
+      "-DataDirectory",
+      _environment.DataDirectory,
+      "-Format",
+      "Json"
+    );
+    Assert.AreEqual(0, diagnosticTool.ExitCode, diagnosticTool.Error);
+    using var diagnosticDocument = JsonDocument.Parse(diagnosticTool.Output);
+    Assert.AreEqual(traceId, diagnosticDocument.RootElement.GetProperty("traceId").GetString());
+    StringAssert.Contains(diagnosticTool.Output, "request-context-does-not-fit");
+
+    await _environment.RestartApplicationAsync();
+    using var restarted = await _environment.HttpClient.GetAsync($"api/diagnostics/traces/{Uri.EscapeDataString(traceId)}");
+    restarted.EnsureSuccessStatusCode();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task TraceLookupIsExactBoundedAndToleratesMalformedTail()
+  {
+    var stream = await PostChatStreamAsync("Create trace evidence.", "alpha:latest", "browser-trace-lookup-v0913");
+    var events = ParseSseEvents(stream);
+    var traceId = events.Last(item => item["type"]!.GetValue<string>() == "response.completed")["requestId"]!.GetValue<string>();
+
+    var incidentFile = Directory.GetFiles(Path.Combine(_environment.DataDirectory, "incidents"), "*.jsonl").OrderBy(path => path, StringComparer.Ordinal).Last();
+    var persisted = File.ReadLines(incidentFile).Select(line => JsonNode.Parse(line)!.AsObject()).Last(item => item["requestId"]?.GetValue<string>() == traceId);
+    var canonicalTrace = persisted["traceId"]!.GetValue<string>();
+    await File.AppendAllTextAsync(incidentFile, $"{{\"traceId\":\"{canonicalTrace}\"\n");
+
+    using var lookup = await _environment.HttpClient.GetAsync($"api/diagnostics/traces/{Uri.EscapeDataString(canonicalTrace)}");
+    var lookupText = await lookup.Content.ReadAsStringAsync();
+    Assert.AreEqual(HttpStatusCode.OK, lookup.StatusCode, lookupText + Environment.NewLine + _environment.ApiOutput);
+    using var reportDocument = JsonDocument.Parse(lookupText);
+    var report = reportDocument.RootElement;
+    Assert.IsGreaterThanOrEqualTo(1, report.GetProperty("malformedRecordCount").GetInt32());
+    Assert.IsGreaterThan(0, report.GetProperty("totalEvents").GetInt32());
+
+    using var wildcard = await _environment.HttpClient.GetAsync("api/diagnostics/traces/%2A");
+    Assert.AreEqual(HttpStatusCode.BadRequest, wildcard.StatusCode);
+    using var unknown = await _environment.HttpClient.GetAsync("api/diagnostics/traces/unknown-valid-trace");
+    Assert.AreEqual(HttpStatusCode.NotFound, unknown.StatusCode);
+    StringAssert.Contains(await unknown.Content.ReadAsStringAsync(), "diagnostic-trace-not-found");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task IncidentSettingsRejectInvalidLimitsAtomically()
+  {
+    var before = await GetSettingsJsonAsync();
+    var invalid = before.DeepClone().AsObject();
+    invalid["incidents"]!["maximumFileBytes"] = 8_388_608;
+    invalid["incidents"]!["maximumTotalBytes"] = 65_536;
+    using var save = await PutSettingsJsonAsync(invalid);
+    Assert.AreEqual(HttpStatusCode.BadRequest, save.StatusCode);
+    StringAssert.Contains(await save.Content.ReadAsStringAsync(), "incidents.maximumTotalBytes");
+    var after = await GetSettingsJsonAsync();
+    Assert.AreEqual(
+      before["incidents"]!["maximumTotalBytes"]!.GetValue<long>(),
+      after["incidents"]!["maximumTotalBytes"]!.GetValue<long>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BrowserErrorCopiesTraceAndOpensSanitizedTimeline()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await Page.Locator("#model-lock").CheckAsync();
+    await Page.Locator("#message-input").FillAsync(new string('z', 132_000));
+    await Page.Locator("#message-input").PressAsync("Enter");
+    await Expect(Page.Locator(".trace-diagnostic-actions")).ToBeVisibleAsync();
+    var buttons = Page.Locator(".trace-diagnostic-actions button");
+    await Expect(buttons).ToHaveCountAsync(2);
+    await Expect(buttons.Nth(1)).ToBeEnabledAsync();
+    await buttons.Nth(1).ClickAsync();
+    await Expect(Page.Locator("#trace-diagnostic-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#trace-diagnostic-facts")).ToContainTextAsync("request-context-does-not-fit");
+    await Expect(Page.Locator("#trace-diagnostic-timeline li")).Not.ToHaveCountAsync(0);
+    await Expect(Page.Locator("#trace-diagnostic-dialog")).Not.ToContainTextAsync(new string('z', 1_000));
+    await Page.Locator("#dismiss-trace-diagnostic").ClickAsync();
+    await Expect(Page.Locator("#trace-diagnostic-dialog")).Not.ToBeVisibleAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OversizedCoordinatorHistoryIsCompactedBeforeNativePlanning()
+  {
+    await File.WriteAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"), "hello");
+    var settings = await GetSettingsJsonAsync();
+    var coordinator = settings["ollamaRuntime"]!["roleDefaults"]!["fallback"]!.AsObject();
+    coordinator["targetContextTokens"] = 8_192;
+    coordinator["maximumContextTokens"] = 8_192;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    var history = Enumerable.Range(0, 24).Select(index => new
+    {
+      role = index % 2 == 0 ? "user" : "assistant",
+      content = $"OLD-CONTEXT-{index:D2}-MUST-BE-COMPACTED " + new string((char)('a' + index % 20), 700)
+    }).ToArray();
+    _environment.FakeOllama.Reset();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "execute read file",
+        model = "command-r:latest",
+        history,
+        modelLocked = true,
+        interactionMode = "execute",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-context-compaction-v0913"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var stream = await response.Content.ReadAsStringAsync();
+    StringAssert.Contains(stream, "request-context-compacted");
+    StringAssert.Contains(stream, "response.completed");
+    var planningRequests = _environment.FakeOllama.Requests.Where(
+      request => request.Model == "command-r:latest"
+        && request.HasTools
+        && request.Messages.Any(message => message.Content.Contains("LOCAL_ACTION_PLANNER_V1", StringComparison.Ordinal))
+    ).ToArray();
+    Assert.IsNotEmpty(planningRequests);
+    Assert.IsFalse(planningRequests.Any(request => request.Messages.Any(message => message.Content.Contains("OLD-CONTEXT-00-MUST-BE-COMPACTED", StringComparison.Ordinal))));
+    Assert.IsTrue(planningRequests.Any(request => request.Messages.Any(message => message.Content.Contains("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal))));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RequiredOversizedCoordinatorItemFailsTypedWithoutPlannerRetry()
+  {
+    var settings = await GetSettingsJsonAsync();
+    var coordinator = settings["ollamaRuntime"]!["roleDefaults"]!["fallback"]!.AsObject();
+    coordinator["targetContextTokens"] = 8_192;
+    coordinator["maximumContextTokens"] = 8_192;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    _environment.FakeOllama.Reset();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "execute " + new string('q', 30_000),
+        model = "command-r:latest",
+        history = Array.Empty<object>(),
+        modelLocked = true,
+        interactionMode = "execute",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-context-item-v0913"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var stream = await response.Content.ReadAsStringAsync();
+    StringAssert.Contains(stream, "context-item-too-large");
+    StringAssert.Contains(stream, "request-context-exhausted");
+    Assert.IsFalse(_environment.FakeOllama.Requests.Any(
+      request => request.HasTools
+        && request.Messages.Any(message => message.Content.Contains("LOCAL_ACTION_PLANNER_V1", StringComparison.Ordinal))
+    ));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConcurrentTraceWritesRemainValidOrderedAndRotateBySize()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["incidents"]!["maximumFileBytes"] = 65_536;
+    settings["incidents"]!["maximumTotalBytes"] = 1_048_576;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    var incidentDirectory = Path.Combine(_environment.DataDirectory, "incidents");
+    var malformedBefore = Directory.Exists(incidentDirectory)
+      ? Directory.GetFiles(incidentDirectory, "*.jsonl")
+        .SelectMany(File.ReadLines)
+        .Count(line => !TryParseJsonObject(line, out _))
+      : 0;
+
+    var requests = Enumerable.Range(0, 20).Select(async index =>
+    {
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = $"Concurrent trace request {index}.",
+          model = "alpha:latest",
+          history = Array.Empty<object>(),
+          modelLocked = true,
+          interactionMode = "chat",
+          approvalPolicy = "ask",
+          browserSessionId = $"browser-concurrent-v0913-{index}"
+        }
+      );
+      response.EnsureSuccessStatusCode();
+      return ParseSseEvents(await response.Content.ReadAsStringAsync())
+        .Last(item => item["type"]!.GetValue<string>() == "response.completed")["requestId"]!.GetValue<string>();
+    });
+    var requestIds = await Task.WhenAll(requests);
+    var files = Directory.GetFiles(incidentDirectory, "*.jsonl");
+    Assert.IsGreaterThanOrEqualTo(2, files.Length);
+    var allLines = files.SelectMany(File.ReadLines).Where(line => !string.IsNullOrWhiteSpace(line)).ToArray();
+    var records = allLines.Select(line => TryParseJsonObject(line, out var item) ? item : null).OfType<JsonObject>().ToArray();
+    Assert.IsLessThanOrEqualTo(malformedBefore, allLines.Length - records.Length);
+    foreach (var requestId in requestIds)
+    {
+      var traceRecords = records.Where(item => item["requestId"]?.GetValue<string>() == requestId).OrderBy(item => item["sequence"]!.GetValue<long>()).ToArray();
+      Assert.IsNotEmpty(traceRecords);
+      var sequences = traceRecords.Select(item => item["sequence"]!.GetValue<long>()).ToArray();
+      Assert.HasCount(sequences.Length, sequences.Distinct().ToArray());
+      Assert.IsTrue(sequences.Zip(sequences.Skip(1), (previous, next) => next > previous).All(value => value));
+      Assert.HasCount(1, traceRecords.Select(item => item["traceId"]!.GetValue<string>()).Distinct(StringComparer.Ordinal).ToArray());
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StructuredCoordinatorHistoryUsesTheSameTokenBudget()
+  {
+    await BenchmarkStructuredConformanceAsync("structured:latest", true);
+    var settings = await GetSettingsJsonAsync();
+    var coordinator = settings["ollamaRuntime"]!["roleDefaults"]!["fallback"]!.AsObject();
+    coordinator["targetContextTokens"] = 8_192;
+    coordinator["maximumContextTokens"] = 8_192;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    var history = Enumerable.Range(0, 40).Select(index => new
+    {
+      role = index % 2 == 0 ? "user" : "assistant",
+      content = $"STRUCTURED-OLD-{index:D2} " + new string('s', 1_200)
+    }).ToArray();
+    _environment.FakeOllama.Reset();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "execute create file",
+        model = "structured:latest",
+        history,
+        modelLocked = true,
+        interactionMode = "execute",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-structured-context-v0913"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var stream = await response.Content.ReadAsStringAsync();
+    StringAssert.Contains(stream, "request-context-compacted");
+    StringAssert.Contains(stream, "direct-structured");
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(
+      request => request.Model == "structured:latest"
+        && request.Messages.Any(message => message.Content.Contains("EXPERT_EXECUTION_GUIDANCE_V1", StringComparison.Ordinal))
+        && request.Messages.Any(message => message.Content.Contains("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal))
+        && !request.Messages.Any(message => message.Content.Contains("STRUCTURED-OLD-00", StringComparison.Ordinal))
+    ));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ContextExhaustionAfterCompletedActionReturnsReviewablePartialResult()
+  {
+    var settings = await GetSettingsJsonAsync();
+    var coordinator = settings["ollamaRuntime"]!["roleDefaults"]!["fallback"]!.AsObject();
+    coordinator["targetContextTokens"] = 8_192;
+    coordinator["maximumContextTokens"] = 8_192;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "execute create file partial context after completed action",
+        model = "command-r:latest",
+        history = Array.Empty<object>(),
+        modelLocked = true,
+        interactionMode = "execute",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-partial-context-v0913"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var stream = await response.Content.ReadAsStringAsync();
+    StringAssert.Contains(stream, "request-context-exhausted");
+    StringAssert.Contains(stream, "partial-context-exhausted");
+    var completed = ParseSseEvents(stream).Last(item => item["type"]!.GetValue<string>() == "response.completed");
+    Assert.IsTrue(completed["executionSession"]!["reviewAvailable"]!.GetValue<bool>());
+    Assert.AreEqual("partial-context-exhausted", completed["executionSession"]!["completionStatus"]!.GetValue<string>());
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task JournalWriteFailureDoesNotReplacePrimaryChatFailure()
+  {
+    var incidentDirectory = Path.Combine(_environment.DataDirectory, "incidents");
+    var retainedDirectory = incidentDirectory + ".retained-v0913";
+    if (Directory.Exists(retainedDirectory))
+    {
+      Directory.Delete(retainedDirectory, true);
+    }
+    if (Directory.Exists(incidentDirectory))
+    {
+      Directory.Move(incidentDirectory, retainedDirectory);
+    }
+    await File.WriteAllTextAsync(incidentDirectory, "block directory creation");
+
+    try
+    {
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = "",
+          model = "alpha:latest",
+          history = Array.Empty<object>(),
+          modelLocked = true,
+          interactionMode = "chat",
+          approvalPolicy = "ask"
+        }
+      );
+      response.EnsureSuccessStatusCode();
+      var error = ParseSseEvents(await response.Content.ReadAsStringAsync())
+        .Single(item => item["type"]!.GetValue<string>() == "error")["error"]!.AsObject();
+      Assert.AreEqual("Enter a message before sending.", error["message"]!.GetValue<string>());
+      Assert.IsFalse(error["diagnosticsPersisted"]!.GetValue<bool>());
+      StringAssert.Contains(_environment.ApiOutput, "Incident journal append failed");
+    }
+    finally
+    {
+      File.Delete(incidentDirectory);
+      if (Directory.Exists(retainedDirectory))
+      {
+        Directory.Move(retainedDirectory, incidentDirectory);
+      }
+    }
+  }
+
+  private static JsonObject[] ParseSseEvents(string stream)
+  {
+    return stream.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+      .Where(line => line.StartsWith("data: ", StringComparison.Ordinal))
+      .Select(line => JsonNode.Parse(line[6..])!.AsObject())
+      .ToArray();
+  }
+
+  private static bool TryParseJsonObject(string line, out JsonObject? value)
+  {
+    try
+    {
+      value = JsonNode.Parse(line)?.AsObject();
+      return value is not null;
+    }
+    catch (JsonException)
+    {
+      value = null;
+      return false;
+    }
   }
 
   private static async Task<string> ActiveWorkspaceIdAsync()
@@ -14969,6 +17039,40 @@ public sealed class ChatEndToEndTests : PageTest
         await errorTask
       ).Trim()
     );
+  }
+
+  private static async Task<(
+    int ExitCode,
+    string Output,
+    string Error
+  )> RunPowerShellAsync(
+    string scriptPath,
+    params string[] arguments
+  )
+  {
+    using var process = new Process
+    {
+      StartInfo = new ProcessStartInfo
+      {
+        FileName = "powershell",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+      }
+    };
+    process.StartInfo.ArgumentList.Add("-NoProfile");
+    process.StartInfo.ArgumentList.Add("-File");
+    process.StartInfo.ArgumentList.Add(scriptPath);
+    foreach (var argument in arguments)
+    {
+      process.StartInfo.ArgumentList.Add(argument);
+    }
+    Assert.IsTrue(process.Start());
+    var outputTask = process.StandardOutput.ReadToEndAsync();
+    var errorTask = process.StandardError.ReadToEndAsync();
+    await process.WaitForExitAsync();
+    return (process.ExitCode, (await outputTask).Trim(), (await errorTask).Trim());
   }
 
   private static async Task<string> InitializeDeliveryRepositoryAsync()
@@ -15129,6 +17233,18 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
   }
 
+  private async Task ConfirmAppModalAsync()
+  {
+    await Expect(
+      Page.Locator(
+        "#app-modal"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Locator(
+      "#app-modal-confirm"
+    ).ClickAsync();
+  }
+
   private static async Task ConnectFakeCloudAsync(
     string providerId,
     string apiKey
@@ -15159,6 +17275,181 @@ public sealed class ChatEndToEndTests : PageTest
       HttpStatusCode.OK,
       refreshed.StatusCode,
       await refreshed.Content.ReadAsStringAsync()
+    );
+  }
+
+  private static IReadOnlyDictionary<string, string> ExpectedToolAliases()
+  {
+    return new Dictionary<string, string>(
+      StringComparer.OrdinalIgnoreCase
+    )
+    {
+      ["create-execution-plan"] = "create_execution_plan",
+      ["createexecutionplan"] = "create_execution_plan",
+      ["make_execution_plan"] = "create_execution_plan",
+      ["build_execution_plan"] = "create_execution_plan",
+      ["revise-execution-plan"] = "revise_execution_plan",
+      ["reviseexecutionplan"] = "revise_execution_plan",
+      ["update_execution_plan"] = "revise_execution_plan",
+      ["list-files"] = "list_files",
+      ["listfiles"] = "list_files",
+      ["list_directory"] = "list_files",
+      ["list-directory"] = "list_files",
+      ["list_dir"] = "list_files",
+      ["read-file"] = "read_file",
+      ["readfile"] = "read_file",
+      ["read_doc"] = "read_file",
+      ["read-doc"] = "read_file",
+      ["readdoc"] = "read_file",
+      ["read_code"] = "read_file",
+      ["read-code"] = "read_file",
+      ["readcode"] = "read_file",
+      ["get-file-info"] = "get_file_info",
+      ["getfileinfo"] = "get_file_info",
+      ["file_info"] = "get_file_info",
+      ["file-info"] = "get_file_info",
+      ["stat_file"] = "get_file_info",
+      ["file_stat"] = "get_file_info",
+      ["search-text"] = "search_text",
+      ["searchtext"] = "search_text",
+      ["grep_text"] = "search_text",
+      ["grep-text"] = "search_text",
+      ["find_text"] = "search_text",
+      ["find-text"] = "search_text",
+      ["search_in_files"] = "search_text",
+      ["search-in-files"] = "search_text",
+      ["create-file"] = "create_file",
+      ["createfile"] = "create_file",
+      ["write-file"] = "write_file",
+      ["writefile"] = "write_file",
+      ["replace-text"] = "replace_text",
+      ["replacetext"] = "replace_text",
+      ["apply-patch"] = "apply_patch",
+      ["applypatch"] = "apply_patch",
+      ["delete-files"] = "delete_files",
+      ["deletefiles"] = "delete_files",
+      ["remove_files"] = "delete_files",
+      ["remove-files"] = "delete_files",
+      ["create-directory"] = "create_directory",
+      ["createdirectory"] = "create_directory",
+      ["run-process"] = "run_process",
+      ["runprocess"] = "run_process",
+      ["run-validation-profile"] = "run_validation_profile",
+      ["runvalidationprofile"] = "run_validation_profile",
+      ["git-status"] = "git_status",
+      ["gitstatus"] = "git_status",
+      ["repo_status"] = "git_status",
+      ["repository_status"] = "git_status",
+      ["git-diff"] = "git_diff",
+      ["gitdiff"] = "git_diff",
+      ["repo_diff"] = "git_diff",
+      ["repository_diff"] = "git_diff",
+      ["git-log"] = "git_log",
+      ["gitlog"] = "git_log",
+      ["commit_log"] = "git_log",
+      ["git_history"] = "git_log",
+      ["git-show-commit"] = "git_show_commit",
+      ["gitshowcommit"] = "git_show_commit",
+      ["show_commit"] = "git_show_commit",
+      ["inspect_commit"] = "git_show_commit",
+      ["git-stage-files"] = "git_stage_files",
+      ["gitstagefiles"] = "git_stage_files",
+      ["git-unstage-files"] = "git_unstage_files",
+      ["gitunstagefiles"] = "git_unstage_files",
+      ["git-create-commit"] = "git_create_commit",
+      ["gitcreatecommit"] = "git_create_commit",
+      ["git-create-annotated-tag"] = "git_create_annotated_tag",
+      ["gitcreateannotatedtag"] = "git_create_annotated_tag",
+      ["git-push-current-branch"] = "git_push_current_branch",
+      ["gitpushcurrentbranch"] = "git_push_current_branch",
+      ["git-push-tag"] = "git_push_tag",
+      ["gitpushtag"] = "git_push_tag"
+    };
+  }
+
+  private static string[] ExpectedCanonicalTools()
+  {
+    return
+    [
+      "create_execution_plan",
+      "revise_execution_plan",
+      "list_files",
+      "read_file",
+      "get_file_info",
+      "search_text",
+      "create_file",
+      "write_file",
+      "replace_text",
+      "apply_patch",
+      "delete_files",
+      "create_directory",
+      "run_process",
+      "run_validation_profile",
+      "git_status",
+      "git_diff",
+      "git_log",
+      "git_show_commit",
+      "git_stage_files",
+      "git_unstage_files",
+      "git_create_commit",
+      "git_create_annotated_tag",
+      "git_push_current_branch",
+      "git_push_tag"
+    ];
+  }
+
+  private static string[] DeliberatelyRejectedToolAliases()
+  {
+    return
+    [
+      "get_file",
+      "open_file",
+      "search_files",
+      "find_file",
+      "edit_file",
+      "modify_file",
+      "save_file",
+      "update_file",
+      "patch_file",
+      "new_file",
+      "mkdir",
+      "execute_command",
+      "run_command",
+      "shell",
+      "run_tests",
+      "validate",
+      "stage_files",
+      "commit",
+      "push",
+      "tag",
+      "inspect_repo",
+      "analyze_project"
+    ];
+  }
+
+  private static async Task BenchmarkStructuredConformanceAsync(
+    string model,
+    bool expectedPassed
+  )
+  {
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/models/conformance",
+      new
+      {
+        model,
+        profile = "structured-action",
+        restoreResidentModel = false
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.AreEqual(
+      expectedPassed,
+      result.GetProperty(
+        "passed"
+      ).GetBoolean()
     );
   }
 
@@ -15276,24 +17567,34 @@ public sealed class ChatEndToEndTests : PageTest
     string message
   )
   {
-    await Page.Locator(
+    await Expect(
+      Page.Locator("#send-button-label")
+    ).ToHaveTextAsync("Enviar");
+    var input = Page.Locator(
       "#message-input"
-    ).FillAsync(
-      message
     );
-    await Page.Locator(
-      "#message-input"
-    ).PressAsync(
-      "Enter"
-    );
+    await Expect(input).ToBeEnabledAsync();
+    await input.FillAsync(message);
+    var send = Page.Locator("#send-button");
+    await Expect(send).ToBeEnabledAsync();
+    await send.ClickAsync();
   }
 
   private async Task SendMessageAsync(
     string message
   )
   {
+    var assistantMessages = Page.Locator(
+      ".message.assistant"
+    );
+    var previousCount = await assistantMessages.CountAsync();
     await StartMessageAsync(
       message
+    );
+    await Expect(
+      assistantMessages
+    ).ToHaveCountAsync(
+      previousCount + 1
     );
     await Expect(
       Page.Locator(

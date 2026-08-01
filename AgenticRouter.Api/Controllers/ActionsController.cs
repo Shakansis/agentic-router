@@ -18,31 +18,77 @@ public sealed class ActionsController : ControllerBase
   }
 
   [HttpPost("{actionId}/decision")]
-  public ActionResult<ApprovalDecisionResponse> Decide(
+  public async Task<ActionResult<ApprovalDecisionResponse>> Decide(
     string actionId,
-    [FromBody] ApprovalDecisionRequest request
+    [FromBody] ApprovalDecisionRequest request,
+    CancellationToken cancellationToken
   )
   {
-    var accepted = _approvalCoordinator.TryDecide(
+    var result = await _approvalCoordinator.TryDecideAsync(
       actionId,
       request.BrowserSessionId,
       request.ExecutionSessionId,
-      request.Approved
+      request.Approved,
+      request.EditedText,
+      cancellationToken
     );
     var response = new ApprovalDecisionResponse(
       actionId,
-      accepted,
+      result.Accepted,
       request.Approved,
-      accepted
+      result.Accepted
         ? null
-        : "The action is no longer pending or belongs to a different execution session."
+        : result.Diagnostic,
+      result.Action?.Summary,
+      result.Action?.Preview
     );
 
-    return accepted
+    if (!result.Pending)
+    {
+      return NotFound(
+        response
+      );
+    }
+
+    return result.Accepted
+      ? Ok(response)
+      : BadRequest(response);
+  }
+
+  [HttpPost("{actionId}/revision")]
+  public async Task<ActionResult<ApprovalRevisionResponse>> Revise(
+    string actionId,
+    [FromBody] ApprovalRevisionRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    var result = await _approvalCoordinator.TryReviseAsync(
+      actionId,
+      request.BrowserSessionId,
+      request.ExecutionSessionId,
+      request.EditedText,
+      cancellationToken
+    );
+    var response = new ApprovalRevisionResponse(
+      actionId,
+      result.Accepted,
+      result.Action?.Summary,
+      result.Action?.Preview,
+      result.Diagnostic
+    );
+
+    if (!result.Pending)
+    {
+      return NotFound(
+        response
+      );
+    }
+
+    return result.Accepted
       ? Ok(
         response
       )
-      : NotFound(
+      : BadRequest(
         response
       );
   }

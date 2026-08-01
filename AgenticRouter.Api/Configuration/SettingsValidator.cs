@@ -45,6 +45,11 @@ public sealed class SettingsValidator : ISettingsValidator
     );
     ValidateRequiredModel(
       errors,
+      "actionModel",
+      settings.ActionModel
+    );
+    ValidateRequiredModel(
+      errors,
       "coordinatorModel",
       settings.CoordinatorModel
     );
@@ -97,6 +102,10 @@ public sealed class SettingsValidator : ISettingsValidator
     ValidateUsage(
       errors,
       settings.Usage
+    );
+    ValidateIncidents(
+      errors,
+      settings.Incidents
     );
     ValidateCloudProviders(
       errors,
@@ -285,6 +294,33 @@ public sealed class SettingsValidator : ISettingsValidator
       pair => pair.Value.ToArray(),
       StringComparer.Ordinal
     );
+  }
+
+  private static void ValidateIncidents(
+    Dictionary<string, List<string>> errors,
+    IncidentJournalSettings settings
+  )
+  {
+    ValidateInterval(errors, "incidents.retentionDays", settings.RetentionDays, 1, 365);
+    ValidateLongRange(errors, "incidents.maximumFileBytes", settings.MaximumFileBytes, 65_536, 67_108_864);
+    ValidateLongRange(errors, "incidents.maximumTotalBytes", settings.MaximumTotalBytes, settings.MaximumFileBytes, 1_073_741_824);
+    ValidateInterval(errors, "incidents.maximumEventsPerTrace", settings.MaximumEventsPerTrace, 10, 5_000);
+    ValidateInterval(errors, "incidents.browserMaximumEvents", settings.BrowserMaximumEvents, 1, settings.MaximumEventsPerTrace);
+    ValidateLongRange(errors, "incidents.browserMaximumBytes", settings.BrowserMaximumBytes, 16_384, 4_194_304);
+  }
+
+  private static void ValidateLongRange(
+    Dictionary<string, List<string>> errors,
+    string key,
+    long value,
+    long minimum,
+    long maximum
+  )
+  {
+    if (value < minimum || value > maximum)
+    {
+      AddError(errors, key, $"Value must be between {minimum} and {maximum}.");
+    }
   }
 
   private static void ValidateRequiredModel(

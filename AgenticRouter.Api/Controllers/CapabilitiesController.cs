@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Providers.Ollama;
@@ -13,14 +14,30 @@ public sealed class CapabilitiesController : ControllerBase
 {
   private readonly IOllamaClient _providers;
   private readonly ISettingsStore _settingsStore;
+  private readonly IToolNameResolver _toolNames;
 
   public CapabilitiesController(
     IOllamaClient providers,
-    ISettingsStore settingsStore
+    ISettingsStore settingsStore,
+    IToolNameResolver toolNames
   )
   {
     _providers = providers;
     _settingsStore = settingsStore;
+    _toolNames = toolNames;
+  }
+
+  [HttpGet("tool-names")]
+  public IActionResult GetToolNames()
+  {
+    return Ok(
+      new ToolNameRegistryView(
+        "ordinal-ignore-case",
+        true,
+        _toolNames.CanonicalTools,
+        _toolNames.Aliases
+      )
+    );
   }
 
   [HttpGet("model")]

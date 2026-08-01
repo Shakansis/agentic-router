@@ -5,6 +5,7 @@ using AgenticRouter.Api.Providers;
 public static class UsageModelRoles
 {
   public const string Router = "router";
+  public const string Action = "action";
   public const string Coordinator = "coordinator";
   public const string Specialist = "specialist";
   public const string Primary = "primary";
@@ -18,6 +19,7 @@ public static class UsageModelRoles
   public static readonly IReadOnlySet<string> All = new HashSet<string>(
     [
       Router,
+      Action,
       Coordinator,
       Specialist,
       Primary,
@@ -127,7 +129,11 @@ public sealed record ProviderCallContext(
   string ModelRole,
   string RequestPurpose,
   string? ModelRevision = null,
-  int? RuntimeContextTokens = null
+  int? RuntimeContextTokens = null,
+  string? TraceId = null,
+  string? ProviderAttemptId = null,
+  string? IncidentEventId = null,
+  long? IncidentSequence = null
 );
 
 public sealed record ProviderTokenUsage(
@@ -150,7 +156,14 @@ public sealed record UsageRecordRequest(
   ProviderRateLimitSnapshot? RateLimit = null,
   string? ErrorCode = null,
   int? HttpStatus = null,
-  ProviderActivityMetadata? Activity = null
+  ProviderActivityMetadata? Activity = null,
+  string? ErrorStage = null,
+  int? EstimatedInputContextTokens = null,
+  int? ReservedOutputTokens = null,
+  int? RequiredContextTokens = null,
+  int? MaximumContextTokens = null,
+  int? EffectiveContextTokens = null,
+  string? IncidentEventId = null
 );
 
 public sealed record PricingSnapshot(
@@ -171,7 +184,7 @@ public sealed record PricingSnapshot(
 
 public sealed record UsageEvent
 {
-  public int SchemaVersion { get; init; } = 1;
+  public int SchemaVersion { get; init; } = 2;
 
   public string EventId { get; init; } = string.Empty;
 
@@ -184,6 +197,10 @@ public sealed record UsageEvent
   public string? TurnId { get; init; }
 
   public string? ExecutionSessionId { get; init; }
+
+  public string? TraceId { get; init; }
+
+  public string? ProviderAttemptId { get; init; }
 
   public string ProviderId { get; init; } = string.Empty;
 
@@ -230,6 +247,20 @@ public sealed record UsageEvent
   public ProviderRateLimitSnapshot? RateLimit { get; init; }
 
   public string? ErrorCode { get; init; }
+
+  public string? ErrorStage { get; init; }
+
+  public int? EstimatedInputContextTokens { get; init; }
+
+  public int? ReservedOutputTokens { get; init; }
+
+  public int? RequiredContextTokens { get; init; }
+
+  public int? MaximumContextTokens { get; init; }
+
+  public int? EffectiveContextTokens { get; init; }
+
+  public string? IncidentEventId { get; init; }
 
   public int? HttpStatus { get; init; }
 

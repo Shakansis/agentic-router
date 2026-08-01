@@ -117,6 +117,26 @@ public sealed record GitIdentityApprovalView(
   string ActionId
 );
 
+public sealed record GitRemotePreviewRequest(
+  string RemoteName,
+  string Url
+);
+
+public sealed record GitRemoteRequest(
+  string BrowserSessionId,
+  string InteractionMode,
+  string ActionId,
+  bool Confirmed,
+  string RemoteName,
+  string Url
+);
+
+public sealed record GitRemoteApprovalView(
+  string RemoteName,
+  string Url,
+  string ActionId
+);
+
 public sealed record GitPanelDiffRequest(
   string View,
   IReadOnlyList<string> Paths

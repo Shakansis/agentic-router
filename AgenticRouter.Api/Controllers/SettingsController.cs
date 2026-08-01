@@ -186,10 +186,10 @@ public sealed class SettingsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "Settings were not saved because the resident coordinator model could not be changed.",
+          "Settings were not saved because the resident action model could not be changed.",
           new Dictionary<string, string[]>
           {
-            ["coordinatorModel"] =
+            ["actionModel"] =
             [
               exception.Message
             ]

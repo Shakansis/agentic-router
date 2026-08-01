@@ -12,7 +12,7 @@
     <strong>Safe mode</strong>
     <span id="safe-mode-reason">Execute, cloud e alteraÃ§Ãµes de configuraÃ§Ã£o estÃ£o desativados.</span>
   </div>
-  <aside class="sidebar" aria-label="Status local">
+  <aside id="sidebar" class="sidebar" aria-label="Status local">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">AR</span>
       <div>
@@ -122,8 +122,20 @@
     <p class="sidebar-note">
       RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
     </p>
-    <span class="app-version">v0.9.10</span>
+    <span class="app-version">v0.9.14</span>
   </aside>
+
+  <div
+    id="sidebar-resizer"
+    class="sidebar-resizer"
+    role="separator"
+    aria-label="Redimensionar menu lateral"
+    aria-orientation="vertical"
+    aria-valuemin="220"
+    aria-valuemax="460"
+    aria-valuenow="248"
+    tabindex="0"
+  ></div>
 
   <main class="workspace">
     <header class="chat-header">
@@ -221,24 +233,30 @@
           <div class="capability-controls">
             <button
               id="web-toggle"
-              class="capability-control"
+              class="capability-control capability-icon-button"
               type="button"
               data-state="unavailable"
               aria-pressed="false"
+              aria-label="Web indisponível"
               title="A disponibilidade depende do modelo e da integração configurada."
               disabled
             >
-              <span aria-hidden="true">◎</span>
-              <span id="web-toggle-label">Web indisponível</span>
+              <svg aria-hidden="true" viewBox="0 0 20 20">
+                <path d="M10 18C14.4183 18 18 14.4183 18 10C18 5.58172 14.4183 2 10 2C5.58172 2 2 5.58172 2 10C2 14.4183 5.58172 18 10 18ZM10 3C10.6568 3 11.4068 3.59025 12.0218 4.90814C12.2393 5.37419 12.4283 5.90978 12.5806 6.5H7.41936C7.57172 5.90978 7.76073 5.37419 7.97822 4.90814C8.59323 3.59025 9.34315 3 10 3ZM6.19265 7.5C6.06723 8.28832 6 9.12934 6 10C6 10.8707 6.06723 11.7117 6.19265 12.5H3.45963C3.16268 11.7236 3 10.8808 3 10C3 9.1192 3.16268 8.2764 3.45963 7.5H6.19265ZM7.41936 13.5H12.5806C12.4283 14.0902 12.2393 14.6258 12.0218 15.0919C11.4068 16.4097 10.6568 17 10 17C9.34315 17 8.59323 16.4097 7.97822 15.0919C7.76073 14.6258 7.57172 14.0902 7.41936 13.5ZM12.7938 12.5H7.20617C7.07345 11.7253 7 10.8833 7 10C7 9.11669 7.07345 8.27472 7.20617 7.5H12.7938C12.9266 8.27472 13 9.11669 13 10C13 10.8833 12.9266 11.7253 12.7938 12.5ZM16.5404 12.5H13.8074C13.9328 11.7117 14 10.8707 14 10C14 9.12934 13.9328 8.28832 13.8074 7.5H16.5404C16.8373 8.2764 17 9.1192 17 10C17 10.8808 16.8373 11.7236 16.5404 12.5ZM13.6107 6.5C13.435 5.75696 13.2044 5.07753 12.928 4.48526C12.7417 4.08617 12.527 3.71222 12.2856 3.38163C13.8882 3.93497 15.2271 5.05399 16.0635 6.5H13.6107ZM6.38931 6.5H3.93648C4.77295 5.05399 6.11182 3.93497 7.71442 3.38163C7.47297 3.71222 7.25828 4.08617 7.07203 4.48526C6.79564 5.07753 6.56498 5.75696 6.38931 6.5ZM6.38931 13.5C6.56498 14.243 6.79564 14.9225 7.07203 15.5147C7.25828 15.9138 7.47297 16.2878 7.71442 16.6184C6.11182 16.065 4.77295 14.946 3.93648 13.5H6.38931ZM13.6107 13.5H16.0635C15.2271 14.946 13.8882 16.065 12.2856 16.6184C12.527 16.2878 12.7417 15.9138 12.928 15.5147C13.2044 14.9225 13.435 14.243 13.6107 13.5Z"/>
+              </svg>
+              <span id="web-toggle-label" class="visually-hidden">Web indisponível</span>
             </button>
             <button
               id="attach-image"
-              class="capability-control"
+              class="capability-control capability-icon-button"
               type="button"
+              aria-label="Anexar imagem"
               title="Anexar JPEG, PNG, WebP ou GIF"
             >
-              <span aria-hidden="true">▧</span>
-              <span>Imagem</span>
+              <svg aria-hidden="true" viewBox="0 0 20 20">
+                <path d="M14 7.5C14 8.32843 13.3284 9 12.5 9C11.6716 9 11 8.32843 11 7.5C11 6.67157 11.6716 6 12.5 6C13.3284 6 14 6.67157 14 7.5ZM13 7.5C13 7.22386 12.7761 7 12.5 7C12.2239 7 12 7.22386 12 7.5C12 7.77614 12.2239 8 12.5 8C12.7761 8 13 7.77614 13 7.5ZM3 6C3 4.34315 4.34315 3 6 3H14C15.6569 3 17 4.34315 17 6V14C17 15.6569 15.6569 17 14 17H6C4.34315 17 3 15.6569 3 14V6ZM6 4C4.89543 4 4 4.89543 4 6V14C4 14.3726 4.10191 14.7215 4.27937 15.0201L8.94868 10.432C9.53227 9.85859 10.4677 9.85859 11.0513 10.432L15.7206 15.0201C15.8981 14.7215 16 14.3726 16 14V6C16 4.89543 15.1046 4 14 4H6ZM6 16H14C14.3692 16 14.7149 15.9 15.0118 15.7256L10.3504 11.1453C10.1559 10.9542 9.84409 10.9542 9.64956 11.1453L4.98824 15.7256C5.28505 15.9 5.63085 16 6 16Z"/>
+              </svg>
+              <span class="visually-hidden">Imagem</span>
             </button>
             <input
               id="image-input"
@@ -401,14 +419,13 @@
               <p>Conecte apenas os provedores que deseja usar. Testes e atualização de modelos podem consumir quota.</p>
             </div>
             <div class="provider-health-heading">
-              <h4>Saúde dos provedores</h4>
+              <h4>Configuração e estatísticas</h4>
               <button
                 id="refresh-provider-health"
                 class="secondary-button"
                 type="button"
               >Atualizar</button>
             </div>
-            <div id="provider-health-list" class="provider-health-list"></div>
             <div id="cloud-providers-list" class="cloud-providers-list"></div>
           </section>
 
@@ -538,7 +555,12 @@
             </div>
             <div class="settings-grid">
             <label>
-              <span>Modelo coordenador</span>
+              <span>Modelo de aÃ§Ãµes residente</span>
+              <select id="action-model" name="actionModel" required></select>
+              <small>Seleciona apenas a prÃ³xima ferramenta; padrÃ£o leve: FunctionGemma 270M.</small>
+            </label>
+            <label>
+              <span>Fallback coordenador sob demanda</span>
               <select id="coordinator-model" name="coordinatorModel" required></select>
             </label>
             </div>
@@ -571,8 +593,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.10."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.10."
+                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.14."
+                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.14."
                 >i</button>
               </div>
             </div>
@@ -990,8 +1012,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.10."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.10. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.14."
+              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.14. Desativar interrompe novas gravações, mas não apaga registros existentes."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
@@ -1084,19 +1106,21 @@
       </header>
 
       <div class="git-panel-body">
-        <section id="git-overview-section" class="git-panel-section">
-          <div class="section-heading">
-            <h3>Overview</h3>
-            <p>Branch, HEAD, upstream, operação em andamento e instalação do Git.</p>
+        <details id="git-overview-section" class="git-panel-section git-panel-details" open>
+          <summary>
+            <span>Overview</span>
+            <small>Branch, HEAD, upstream, operação em andamento e instalação do Git.</small>
+          </summary>
+          <div class="git-panel-details-body">
+            <dl id="git-overview" class="git-overview-grid"></dl>
+            <div id="git-initialize-panel" class="git-initialize-panel" hidden>
+              <p>Este workspace ainda não possui um repositório Git.</p>
+              <button id="initialize-git" class="primary-button" type="button">
+                Initialize Git repository
+              </button>
+            </div>
           </div>
-          <dl id="git-overview" class="git-overview-grid"></dl>
-          <div id="git-initialize-panel" class="git-initialize-panel" hidden>
-            <p>Este workspace ainda não possui um repositório Git.</p>
-            <button id="initialize-git" class="primary-button" type="button">
-              Initialize Git repository
-            </button>
-          </div>
-        </section>
+        </details>
 
         <section id="git-changes-section" class="git-panel-section">
           <div class="git-panel-heading-row">
@@ -1121,29 +1145,37 @@
           </div>
         </section>
 
-        <section id="git-configuration-section" class="git-panel-section">
-          <div class="section-heading">
-            <h3>Repository configuration</h3>
-            <p>Somente identidade local pode ser alterada; remotes e upstream são somente leitura.</p>
-          </div>
-          <div class="settings-grid">
+        <details id="git-configuration-section" class="git-panel-section git-panel-details">
+          <summary>
+            <span>Repository configuration</span>
+            <small>Identidade local e endereço do origin, protegidos contra edição acidental.</small>
+          </summary>
+          <div class="git-panel-details-body">
+          <div class="settings-grid git-configuration-grid">
             <label>
               <span>Repository-local user.name</span>
-              <input id="git-user-name" type="text" maxlength="200" autocomplete="off">
+              <input id="git-user-name" type="text" maxlength="200" autocomplete="off" readonly>
               <small id="git-user-name-scope"></small>
             </label>
             <label>
               <span>Repository-local user.email</span>
-              <input id="git-user-email" type="email" maxlength="254" autocomplete="off">
+              <input id="git-user-email" type="email" maxlength="254" autocomplete="off" readonly>
               <small id="git-user-email-scope"></small>
+            </label>
+            <label class="git-origin-field">
+              <span>Repository address (origin)</span>
+              <input id="git-origin-url" type="text" maxlength="2048" autocomplete="off" readonly>
+              <small>HTTPS ou SSH; credenciais incorporadas são recusadas.</small>
             </label>
           </div>
           <div class="settings-action-row">
-            <button id="save-git-user-name" class="secondary-button" type="button">Salvar user.name</button>
-            <button id="save-git-user-email" class="secondary-button" type="button">Salvar user.email</button>
+            <button id="edit-git-configuration" class="secondary-button" type="button">Editar</button>
+            <button id="save-git-configuration" class="primary-button" type="button" hidden>Salvar alterações</button>
+            <button id="cancel-git-configuration" class="secondary-button" type="button" hidden>Cancelar edição</button>
           </div>
           <div id="git-remotes" class="git-remotes"></div>
-        </section>
+          </div>
+        </details>
 
         <section id="git-delivery-section" class="git-panel-section">
           <div class="section-heading">
@@ -1247,17 +1279,73 @@
     </form>
   </dialog>
 
+  <dialog id="session-details-dialog" class="settings-dialog productivity-dialog session-details-dialog">
+    <section class="session-details-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Conversa salva</span>
+          <h2 id="session-details-title">Detalhes da conversa</h2>
+          <p id="session-details-metadata">Selecione uma conversa salva.</p>
+        </div>
+        <button id="close-session-details" class="icon-button" type="button" aria-label="Fechar detalhes da conversa">×</button>
+      </header>
+      <div class="dialog-body productivity-dialog-body">
+        <section class="session-details-section" aria-labelledby="session-details-actions-title">
+          <div class="session-details-section-heading">
+            <div>
+              <h3 id="session-details-actions-title">Ações da conversa</h3>
+              <p id="session-details-state" class="runtime-note"></p>
+            </div>
+          </div>
+          <div class="session-details-actions">
+            <button id="session-details-pin" class="secondary-button" type="button">Fixar</button>
+            <button id="session-details-rename" class="secondary-button" type="button">Renomear</button>
+            <button id="session-details-duplicate" class="secondary-button" type="button">Duplicar</button>
+            <button id="session-details-archive" class="secondary-button" type="button">Arquivar</button>
+            <a id="session-details-markdown" class="secondary-button" href="#" download>Exportar Markdown</a>
+            <a id="session-details-json" class="secondary-button" href="#" download>Exportar JSON</a>
+            <button id="session-details-delete" class="secondary-button danger-button" type="button">Excluir</button>
+          </div>
+        </section>
+        <section class="session-details-section session-details-summary-section" aria-labelledby="session-details-summary-title">
+          <div class="session-details-section-heading">
+            <div>
+              <h3 id="session-details-summary-title">Resumo de continuidade</h3>
+              <p>
+                Opcional. Organiza decisões e próximos passos para exportação ou passagem de contexto;
+                não é necessário para retomar a conversa.
+              </p>
+            </div>
+            <button id="edit-session-summary" class="secondary-button" type="button">Criar ou editar resumo</button>
+          </div>
+          <div id="session-details-summary" class="session-details-summary" aria-live="polite">
+            Carregando resumo…
+          </div>
+        </section>
+      </div>
+      <footer class="dialog-footer">
+        <span id="session-details-status" class="save-status" role="status"></span>
+        <button id="dismiss-session-details" class="secondary-button" type="button">Fechar</button>
+        <button id="resume-session-details" class="primary-button" type="button">Retomar conversa</button>
+      </footer>
+    </section>
+  </dialog>
+
   <dialog id="session-summary-dialog" class="settings-dialog productivity-dialog">
     <form id="session-summary-form" method="dialog">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Ação explícita</span>
-          <h2>Resumo da conversa</h2>
+          <span class="eyebrow">Continuidade opcional</span>
+          <h2>Editar resumo da conversa</h2>
           <p id="session-summary-session-title">Selecione uma conversa salva.</p>
         </div>
         <button id="close-session-summary" class="icon-button" type="button" aria-label="Fechar resumo">×</button>
       </header>
       <div class="dialog-body productivity-dialog-body">
+        <p class="workspace-note">
+          Este registro não substitui o histórico e não é necessário para retomar. Use-o somente quando quiser
+          uma síntese revisável para exportação, duplicação ou continuidade do trabalho.
+        </p>
         <div class="settings-grid">
           <label>
             <span>Modelo para gerar ou regenerar</span>
@@ -1346,6 +1434,60 @@
       </footer>
     </section>
   </dialog>
+
+  <dialog id="trace-diagnostic-dialog" class="settings-dialog trace-diagnostic-dialog">
+    <section class="trace-diagnostic-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Diagnostico local sanitizado</span>
+          <h2>Trace da execucao</h2>
+          <p id="trace-diagnostic-id"></p>
+        </div>
+        <button id="close-trace-diagnostic" class="icon-button" type="button" aria-label="Fechar">&times;</button>
+      </header>
+      <div class="dialog-body trace-diagnostic-body">
+        <p id="trace-diagnostic-status" class="runtime-note" role="status"></p>
+        <dl id="trace-diagnostic-facts" class="trace-diagnostic-facts"></dl>
+        <ol id="trace-diagnostic-timeline" class="trace-diagnostic-timeline"></ol>
+      </div>
+      <footer class="dialog-footer">
+        <button id="copy-trace-diagnostic" class="secondary-button" type="button">Copiar trace ID</button>
+        <button id="dismiss-trace-diagnostic" class="primary-button" type="button">Fechar</button>
+      </footer>
+    </section>
+  </dialog>
+
+  <div
+    id="app-modal"
+    class="app-modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="app-modal-title"
+    hidden
+  >
+    <form id="app-modal-form" class="app-modal-card">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Confirmação</span>
+          <h2 id="app-modal-title">Confirmar ação</h2>
+        </div>
+        <button id="app-modal-close" class="icon-button" type="button" aria-label="Fechar">×</button>
+      </header>
+      <div class="dialog-body app-modal-body">
+        <p id="app-modal-message"></p>
+        <label id="app-modal-field" hidden>
+          <span id="app-modal-label"></span>
+          <input id="app-modal-input" type="text" autocomplete="off">
+        </label>
+      </div>
+      <footer class="dialog-footer">
+        <button id="app-modal-cancel" class="secondary-button" type="button">Cancelar</button>
+        <button id="app-modal-confirm" class="primary-button" type="submit">Confirmar</button>
+      </footer>
+    </form>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
   <script src="/app.js"></script>
 </body>

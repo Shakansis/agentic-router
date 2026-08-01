@@ -181,6 +181,43 @@ public sealed class GitWorkspaceController : ControllerBase
     );
   }
 
+  [HttpPost("remote/preview")]
+  public async Task<IActionResult> PreviewRemote(
+    [FromBody] GitRemotePreviewRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      "git-remote-configuration",
+      async active => await _git.PreviewRemoteAsync(
+        active.Id,
+        active.Path,
+        request,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPut("remote")]
+  public async Task<IActionResult> SetRemote(
+    [FromBody] GitRemoteRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      "git-remote-configuration",
+      async active => await _git.SetRemoteAsync(
+        active.Id,
+        active.Path,
+        CurrentSessionPaths(
+          active.Path
+        ),
+        request,
+        cancellationToken
+      )
+    );
+  }
+
   private async Task<GitDiffView> RepositoryDiffAsync(
     string workspacePath,
     IReadOnlyList<string> paths,

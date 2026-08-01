@@ -10,6 +10,8 @@ internal sealed record TestApplicationSettings
 
   public string RouterModel { get; init; } = "router:latest";
 
+  public string ActionModel { get; init; } = "router:latest";
+
   public string CoordinatorModel { get; init; } = "router:latest";
 
   public string DefaultModel { get; init; } = "alpha:latest";

@@ -77,6 +77,10 @@ public sealed class JsonSettingsStore : ISettingsStore
         "coordinatorModel",
         out _
       );
+      var hasActionModel = document.RootElement.TryGetProperty(
+        "actionModel",
+        out _
+      );
       var contextElement = document.RootElement.TryGetProperty(
         "context",
         out var savedContext
@@ -105,6 +109,14 @@ public sealed class JsonSettingsStore : ISettingsStore
         settings = settings with
         {
           CoordinatorModel = settings.RouterModel
+        };
+      }
+
+      if (!hasActionModel)
+      {
+        settings = settings with
+        {
+          ActionModel = "functiongemma:270m"
         };
       }
 
@@ -182,6 +194,9 @@ public sealed class JsonSettingsStore : ISettingsStore
         "usage",
         out _
       ) || !document.RootElement.TryGetProperty(
+        "incidents",
+        out _
+      ) || !document.RootElement.TryGetProperty(
         "cloudProviders",
         out _
       ) || !document.RootElement.TryGetProperty(
@@ -201,6 +216,7 @@ public sealed class JsonSettingsStore : ISettingsStore
           out _
         )
         || !hasCoordinatorModel
+        || !hasActionModel
         || !hasMaxRecoveryAttempts;
 
       if (

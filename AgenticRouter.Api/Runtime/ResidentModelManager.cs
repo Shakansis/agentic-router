@@ -68,8 +68,8 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
   )
   {
     var modelChanged = !string.Equals(
-      previousSettings.CoordinatorModel,
-      nextSettings.CoordinatorModel,
+      previousSettings.ActionModel,
+      nextSettings.ActionModel,
       StringComparison.OrdinalIgnoreCase
     );
     var endpointChanged = !string.Equals(
@@ -102,14 +102,14 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       );
       var installed = await RequireInstalledAsync(
         nextBaseUri,
-        nextSettings.CoordinatorModel,
+        nextSettings.ActionModel,
         cancellationToken
       );
 
       if (
         modelChanged
         && !string.IsNullOrWhiteSpace(
-          previousSettings.CoordinatorModel
+          previousSettings.ActionModel
         )
       )
       {
@@ -118,7 +118,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
             previousSettings.OllamaUrl,
             UriKind.Absolute
           ),
-          previousSettings.CoordinatorModel,
+          previousSettings.ActionModel,
           0,
           cancellationToken
         );
@@ -189,7 +189,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       );
 
       if (string.Equals(
-        settings.CoordinatorModel,
+        settings.ActionModel,
         targetModel,
         StringComparison.OrdinalIgnoreCase
       ))
@@ -202,7 +202,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         UriKind.Absolute
       );
       UpdateStatus(
-        settings.CoordinatorModel,
+        settings.ActionModel,
         null,
         "temporarily-evicted",
         false,
@@ -217,11 +217,11 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       );
       await UnloadAndVerifyAsync(
         baseUri,
-        settings.CoordinatorModel,
+        settings.ActionModel,
         cancellationToken
       );
       UpdateStatus(
-        settings.CoordinatorModel,
+        settings.ActionModel,
         null,
         "temporarily-evicted",
         false,
@@ -269,7 +269,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         UriKind.Absolute
       );
       UpdateStatus(
-        settings.CoordinatorModel,
+        settings.ActionModel,
         null,
         "reloading",
         false,
@@ -290,7 +290,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       );
       var installed = await RequireInstalledAsync(
         baseUri,
-        settings.CoordinatorModel,
+        settings.ActionModel,
         cancellationToken
       );
       var resolution = await ResolveResidentAsync(
@@ -410,7 +410,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       {
         installed = await RequireInstalledAsync(
           baseUri,
-          settings.CoordinatorModel,
+          settings.ActionModel,
           cancellationToken
         );
       }
@@ -419,7 +419,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       )
       {
         UpdateStatus(
-          settings.CoordinatorModel,
+          settings.ActionModel,
           null,
           "unavailable",
           false,
@@ -685,7 +685,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       settings,
       installed.Name,
       installed.Digest,
-      UsageModelRoles.Coordinator,
+      UsageModelRoles.Action,
       metadata.DeclaredContextTokens,
       0,
       0
@@ -927,7 +927,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
   )
   {
     var reference = Providers.ProviderModelReference.Parse(
-      settings.CoordinatorModel
+      settings.ActionModel
     );
 
     return settings.OllamaRuntime.ModelOverrides

@@ -616,11 +616,112 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       && tools.ValueKind == JsonValueKind.Array
     )
     {
-      var tool = tools[0].GetProperty(
+      var plannerRequest = body.Contains(
+        "LOCAL_ACTION_PLANNER_V1",
+        StringComparison.Ordinal
+      );
+      var priorToolNames = new List<string>();
+
+      if (root.TryGetProperty(
+        "messages",
+        out var plannerMessages
+      ))
+      {
+        foreach (var message in plannerMessages.EnumerateArray())
+        {
+          if (
+            message.TryGetProperty(
+              "name",
+              out var resultName
+            )
+            && resultName.ValueKind == JsonValueKind.String
+          )
+          {
+            priorToolNames.Add(
+              resultName.GetString()!
+            );
+          }
+
+          if (
+            message.TryGetProperty(
+              "tool_calls",
+              out var priorCalls
+            )
+            && priorCalls.ValueKind == JsonValueKind.Array
+          )
+          {
+            priorToolNames.AddRange(
+              priorCalls.EnumerateArray().Select(
+                call => call.GetProperty(
+                  "function"
+                ).GetProperty(
+                  "name"
+                ).GetString()!
+              )
+            );
+          }
+        }
+      }
+
+      if (
+        plannerRequest
+        && priorToolNames.Contains(
+          "create_file",
+          StringComparer.Ordinal
+        )
+      )
+      {
+        await WriteJsonAsync(
+          context.Response,
+          new
+          {
+            choices = new[]
+            {
+              new
+              {
+                message = new
+                {
+                  role = "assistant",
+                  content = "Completed from the authoritative Host result."
+                }
+              }
+            },
+            usage = new
+            {
+              prompt_tokens = 20,
+              completion_tokens = 4
+            }
+          },
+          cancellationToken
+        );
+        return;
+      }
+
+      var offeredTool = plannerRequest
+        ? priorToolNames.Contains(
+          "create_execution_plan",
+          StringComparer.Ordinal
+        )
+          ? "create_file"
+          : "create_execution_plan"
+        : tools[0].GetProperty(
         "function"
       ).GetProperty(
         "name"
       ).GetString()!;
+      var tool = tools.EnumerateArray().Any(
+        candidate => candidate.GetProperty(
+          "function"
+        ).GetProperty(
+          "name"
+        ).GetString() == offeredTool
+      )
+        ? offeredTool
+        : tools[0].GetProperty(
+          "function"
+        ).GetProperty(
+          "name"
+        ).GetString()!;
 
       if (
         tool == "benchmark_edit"
@@ -933,6 +1034,10 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       "benchmark_read" => "{\"path\":\"sample.txt\"}",
       "benchmark_edit" =>
         "{\"path\":\"sample.txt\",\"content\":\"after\"}",
+      "create_execution_plan" =>
+        "{\"objective\":\"create the requested file\",\"steps\":[{\"title\":\"Create the requested file\"}]}",
+      "create_file" =>
+        "{\"path\":\"hello.txt\",\"content\":\"hello from agent\"}",
       _ => "{}"
     };
   }

@@ -33,8 +33,19 @@ public static class OllamaRuntimeProfileResolver
     var configuredRoles = ConfiguredRoles(
       settings,
       model
-    );
-    var shared = configuredRoles.Count > 1;
+    ).Where(
+      configuredRole => !(
+        role == OllamaRuntimeRoleIds.ResidentCoordinator
+        && configuredRole == OllamaRuntimeRoleIds.Fallback
+      ) && !(
+        role == OllamaRuntimeRoleIds.Router
+        && configuredRole == OllamaRuntimeRoleIds.Fallback
+      ) && !(
+        role == OllamaRuntimeRoleIds.Fallback
+        && configuredRole == OllamaRuntimeRoleIds.ResidentCoordinator
+      )
+    ).ToArray();
+    var shared = configuredRoles.Length > 1;
     var configuredProfiles = configuredRoles.Select(
       configuredRole => GetConfiguredProfile(
         settings,
@@ -115,7 +126,12 @@ public static class OllamaRuntimeProfileResolver
           required,
           null,
           false,
-          $"Required {required} tokens but the configured maximum is {maximum}."
+          $"Required {required} tokens but the configured maximum is {maximum}.",
+          estimatedInputTokens: checked((int)Math.Min(int.MaxValue, requiredInputTokens)),
+          reservedOutputTokens: outputTokens,
+          requiredContextTokens: required,
+          maximumContextTokens: maximum,
+          effectiveContextTokens: effective
         );
       }
 
@@ -162,7 +178,8 @@ public static class OllamaRuntimeProfileResolver
     return usageRole switch
     {
       UsageModelRoles.Router => OllamaRuntimeRoleIds.Router,
-      UsageModelRoles.Coordinator => OllamaRuntimeRoleIds.ResidentCoordinator,
+      UsageModelRoles.Action => OllamaRuntimeRoleIds.ResidentCoordinator,
+      UsageModelRoles.Coordinator => OllamaRuntimeRoleIds.Fallback,
       UsageModelRoles.Specialist => OllamaRuntimeRoleIds.Specialist,
       UsageModelRoles.Fallback => OllamaRuntimeRoleIds.Fallback,
       UsageModelRoles.Benchmark => OllamaRuntimeRoleIds.Benchmark,
@@ -191,8 +208,14 @@ public static class OllamaRuntimeProfileResolver
     AddRole(
       roles,
       model,
-      settings.CoordinatorModel,
+      settings.ActionModel,
       OllamaRuntimeRoleIds.ResidentCoordinator
+    );
+    AddRole(
+      roles,
+      model,
+      settings.CoordinatorModel,
+      OllamaRuntimeRoleIds.Fallback
     );
     AddRole(
       roles,

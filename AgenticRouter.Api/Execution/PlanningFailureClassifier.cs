@@ -1,10 +1,12 @@
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 
 namespace AgenticRouter.Api.Execution;
 
 public enum CoordinatorFailureCategory
 {
   CorrectablePlanning,
+  ContextFit,
   Provider,
   PolicyDenied,
   SecurityDenied,
@@ -33,6 +35,14 @@ public sealed class PlanningFailureClassifier : IPlanningFailureClassifier
     if (exception is OllamaProviderException)
     {
       return CoordinatorFailureCategory.Provider;
+    }
+
+    if (
+      exception is OllamaRuntimeProfileException runtime
+      && runtime.Error.Code is "request-context-does-not-fit" or "context-item-too-large"
+    )
+    {
+      return CoordinatorFailureCategory.ContextFit;
     }
 
     if (exception is not LocalActionException localAction)

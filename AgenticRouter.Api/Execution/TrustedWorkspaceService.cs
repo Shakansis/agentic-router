@@ -142,6 +142,16 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     }
 
     var root = status.Path;
+
+    if (!string.IsNullOrWhiteSpace(
+      path
+    ))
+    {
+      EnsurePathContainsNoControlCharacters(
+        path
+      );
+    }
+
     string candidate;
 
     try
@@ -210,6 +220,27 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     );
 
     return candidate;
+  }
+
+  private static void EnsurePathContainsNoControlCharacters(
+    string path
+  )
+  {
+    foreach (var character in path)
+    {
+      if (!char.IsControl(
+        character
+      ))
+      {
+        continue;
+      }
+
+      throw new LocalActionException(
+        "path-validation",
+        $"The requested path contains control character U+{(int)character:X4}. "
+          + "Use '/' as the path separator in tool arguments; a JSON backslash must be escaped."
+      );
+    }
   }
 
   private static TrustedWorkspaceStatus Inspect(

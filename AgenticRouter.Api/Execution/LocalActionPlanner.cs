@@ -6,8 +6,26 @@ using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
 
+public sealed record CoordinatorContextFit(
+  IReadOnlyList<OllamaToolMessage> Messages,
+  long BeforeTokens,
+  long AfterTokens,
+  bool Compacted,
+  bool TooLarge,
+  string Outcome
+);
+
 public interface ILocalActionPlanner
 {
+  CoordinatorContextFit FitToBudget(
+    IReadOnlyList<OllamaToolMessage> messages,
+    string hostStateSummary,
+    long maximumInputTokens,
+    bool planRequired,
+    int attemptNumber,
+    bool completionAllowed
+  );
+
   Task<LocalActionPlanningResult> PlanAsync(
     Uri baseUri,
     string model,
@@ -50,6 +68,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "create_file {path,content}; write_file {path,content}; "
     + "replace_text {path,oldText,newText,replaceAll}; "
     + "apply_patch {path,replacements:[{oldText,newText}]}; "
+    + "delete_files {paths:[string]}; "
     + "create_directory {path}; "
     + "run_process {executable,arguments:[string],workingDirectory,timeoutSeconds}; "
     + "run_validation_profile {}; "
@@ -63,10 +82,13 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
     + "are intentionally unavailable. "
     + "The trusted workspace is already the project root. Use paths relative to it and "
-    + "never prefix a path with the workspace display name or root directory name. Before "
+    + "always use '/' as the path separator in tool arguments; never place an unescaped "
+    + "backslash in JSON paths. "
+    + "Never prefix a path with the workspace display name or root directory name. Before "
     + "editing, fixing, or updating existing files, inspect their real paths and contents. "
     + "Never use create_file as a substitute for editing an existing file. "
-    + "Never request deletion, moving, "
+    + "Deletion is available only through delete_files with an explicit list of existing file paths. "
+    + "Never request moving, "
     + "a shell interpreter, command chaining, or access outside the workspace. "
     + "Do not return a prose plan, do not claim execution, and do not stop while the "
     + "specialist guidance still contains an uncompleted local action.";
@@ -75,12 +97,70 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     CreateToolDefinitions();
 
   private readonly IOllamaClient _ollamaClient;
+  private readonly IToolNameResolver _toolNames;
+  private readonly ITokenEstimator _tokenEstimator;
 
   public LocalActionPlanner(
-    IOllamaClient ollamaClient
+    IOllamaClient ollamaClient,
+    IToolNameResolver toolNames,
+    ITokenEstimator tokenEstimator
   )
   {
     _ollamaClient = ollamaClient;
+    _toolNames = toolNames;
+    _tokenEstimator = tokenEstimator;
+  }
+
+  public CoordinatorContextFit FitToBudget(
+    IReadOnlyList<OllamaToolMessage> messages,
+    string hostStateSummary,
+    long maximumInputTokens,
+    bool planRequired,
+    int attemptNumber,
+    bool completionAllowed
+  )
+  {
+    var before = EstimateRequest(messages, planRequired, attemptNumber);
+    if (before <= maximumInputTokens)
+    {
+      return new CoordinatorContextFit(messages.ToArray(), before, before, false, false, "already-fits");
+    }
+
+    var compact = new List<OllamaToolMessage>();
+    AddLast(compact, messages, item => item.Role == "system" && item.Content?.StartsWith("APPLICATION_OWNED_PROJECT_CONTEXT", StringComparison.Ordinal) == true);
+    AddLast(compact, messages, item => item.Role == "user" && item.Content?.StartsWith(ExpertExecutionGuidanceService.GuidanceMarker, StringComparison.Ordinal) != true && !IsControlMessage(item.Content));
+    AddLast(compact, messages, item => item.Content?.StartsWith(ExpertExecutionGuidanceService.GuidanceMarker, StringComparison.Ordinal) == true);
+    compact.Add(new OllamaToolMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
+
+    var latestControl = messages.LastOrDefault(item => IsControlMessage(item.Content));
+    if (latestControl is not null)
+    {
+      compact.Add(latestControl);
+    }
+
+    var latestToolIndex = messages.Select((item, index) => (item, index)).LastOrDefault(pair => pair.item.Role == "tool").index;
+    if (
+      latestToolIndex > 0
+      && messages[latestToolIndex].Content?.StartsWith("Status: completed", StringComparison.Ordinal) != true
+    )
+    {
+      var assistant = messages.Take(latestToolIndex).LastOrDefault(item => item.Role == "assistant");
+      if (assistant is not null) compact.Add(assistant);
+      compact.Add(messages[latestToolIndex]);
+    }
+
+    compact = compact.DistinctBy(MessageFingerprint, StringComparer.Ordinal).ToList();
+    var after = EstimateRequest(compact, planRequired, attemptNumber);
+    var tooLarge = after > maximumInputTokens;
+    var materiallySmaller = after <= before - Math.Max(256, before / 10);
+    return new CoordinatorContextFit(
+      compact,
+      before,
+      after,
+      true,
+      tooLarge,
+      tooLarge ? "required-context-item-too-large" : materiallySmaller ? "compacted" : "not-materially-smaller"
+    );
   }
 
   public async Task<LocalActionPlanningResult> PlanAsync(
@@ -92,6 +172,55 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     bool completionAllowed,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken
+  )
+  {
+    var request = CreatePlanningRequest(messages, planRequired, attemptNumber);
+    var availableTools = request.Tools;
+    var plannerMessages = request.Messages;
+    var response = await _ollamaClient.GenerateToolCallAsync(
+      baseUri,
+      model,
+      plannerMessages,
+      availableTools,
+      "local-action-planning",
+      usageContext,
+      cancellationToken
+    );
+    var selectedToolCalls = response.ToolCalls.Take(
+      1
+    ).ToArray();
+    var assistantMessage = new OllamaToolMessage(
+      "assistant",
+      response.Content,
+      response.Thinking,
+      selectedToolCalls
+    );
+
+    try
+    {
+      return ParseResponse(
+        messages,
+        completionAllowed,
+        response,
+        selectedToolCalls,
+        assistantMessage,
+        availableTools
+      );
+    }
+    catch (JsonException exception)
+    {
+      throw new LocalActionException(
+        "local-action-planning",
+        "The model returned an invalid local action proposal.",
+        exception
+      );
+    }
+  }
+
+  private PlanningRequest CreatePlanningRequest(
+    IReadOnlyList<OllamaToolMessage> messages,
+    bool planRequired,
+    int attemptNumber
   )
   {
     var availableTools = planRequired
@@ -124,28 +253,55 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     }.Concat(
       messages
     ).ToArray();
-    var response = await _ollamaClient.GenerateToolCallAsync(
-      baseUri,
-      model,
-      plannerMessages,
-      availableTools,
-      "local-action-planning",
-      usageContext,
-      cancellationToken
-    );
-    var selectedToolCalls = response.ToolCalls.Take(
-      1
-    ).ToArray();
-    var assistantMessage = new OllamaToolMessage(
-      "assistant",
-      response.Content,
-      response.Thinking,
-      selectedToolCalls
-    );
+    return new PlanningRequest(plannerMessages, availableTools);
+  }
 
+  private long EstimateRequest(IReadOnlyList<OllamaToolMessage> messages, bool planRequired, int attemptNumber)
+  {
+    var request = CreatePlanningRequest(messages, planRequired, attemptNumber);
+    return _tokenEstimator.EstimateToolMessages(request.Messages)
+      + _tokenEstimator.EstimateText(JsonSerializer.Serialize(request.Tools));
+  }
+
+  private static void AddLast(
+    List<OllamaToolMessage> target,
+    IReadOnlyList<OllamaToolMessage> messages,
+    Func<OllamaToolMessage, bool> predicate
+  )
+  {
+    var item = messages.LastOrDefault(predicate);
+    if (item is not null) target.Add(item);
+  }
+
+  private static bool IsControlMessage(string? content)
+  {
+    return content?.StartsWith("LOCAL_ACTION_RESULT", StringComparison.Ordinal) == true
+      || content?.StartsWith("STRUCTURED_ACTION_CORRECTION", StringComparison.Ordinal) == true
+      || content?.StartsWith("COMPLETION_REJECTED", StringComparison.Ordinal) == true;
+  }
+
+  private static string MessageFingerprint(OllamaToolMessage message)
+  {
+    return $"{message.Role}:{message.ToolName}:{message.Content}:{message.ToolCalls?.Count ?? 0}";
+  }
+
+  private sealed record PlanningRequest(
+    IReadOnlyList<OllamaToolMessage> Messages,
+    IReadOnlyList<OllamaToolDefinition> Tools
+  );
+
+  private LocalActionPlanningResult ParseResponse(
+    IReadOnlyList<OllamaToolMessage> messages,
+    bool completionAllowed,
+    OllamaToolResponse response,
+    IReadOnlyList<OllamaToolCall> selectedToolCalls,
+    OllamaToolMessage assistantMessage,
+    IReadOnlyList<OllamaToolDefinition> availableTools
+  )
+  {
     try
     {
-      if (selectedToolCalls.Length == 0)
+      if (selectedToolCalls.Count == 0)
       {
         if (IsExplicitNoAction(
           response.Content
@@ -220,14 +376,12 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         );
       }
 
-      if (!availableTools.Any(
-        available => available.Name == tool
-      ))
-      {
-        throw new JsonException(
-          $"Tool '{tool}' was not offered for the current planning phase."
-        );
-      }
+      var resolution = _toolNames.Resolve(
+        tool,
+        availableTools.Select(
+          available => available.Name
+        )
+      );
 
       if (call.Arguments.ValueKind != JsonValueKind.Object)
       {
@@ -238,13 +392,15 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
       return new LocalActionPlanningResult(
         new LocalActionProposal(
-          tool,
+          resolution.CanonicalName,
           call.Arguments.Clone(),
-          null
+          null,
+          resolution.OriginalName,
+          resolution.Source
         ),
         assistantMessage,
         false,
-        response.ToolCalls.Count - selectedToolCalls.Length,
+        response.ToolCalls.Count - selectedToolCalls.Count,
         response.ContextResolution
       );
     }
@@ -376,6 +532,15 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           }
         },
         ["path", "replacements"]
+      ),
+      Tool(
+        "delete_files",
+        "Delete an explicit bounded list of existing files. The Host validates and snapshots every path; directories are never removed and user approval is always required.",
+        new
+        {
+          paths = StringArrayProperty()
+        },
+        ["paths"]
       ),
       Tool(
         "create_directory",

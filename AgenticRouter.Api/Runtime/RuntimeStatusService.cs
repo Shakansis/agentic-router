@@ -225,7 +225,7 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
             : "inherited"
           : "context-mismatch";
     var residentReference = ProviderModelReference.Parse(
-      settings.CoordinatorModel
+      settings.ActionModel
     );
 
     return new LoadedModelStatus(

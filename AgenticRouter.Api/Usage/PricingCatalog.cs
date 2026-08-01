@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Observability;
 
 namespace AgenticRouter.Api.Usage;
 
@@ -274,18 +275,21 @@ public sealed class UsageRecorder : IUsageRecorder
   private readonly ISettingsStore _settingsStore;
   private readonly IUsageLedger _ledger;
   private readonly IPricingCatalog _pricing;
+  private readonly IIncidentJournal _incidentJournal;
   private readonly ILogger<UsageRecorder> _logger;
 
   public UsageRecorder(
     ISettingsStore settingsStore,
     IUsageLedger ledger,
     IPricingCatalog pricing,
+    IIncidentJournal incidentJournal,
     ILogger<UsageRecorder> logger
   )
   {
     _settingsStore = settingsStore;
     _ledger = ledger;
     _pricing = pricing;
+    _incidentJournal = incidentJournal;
     _logger = logger;
   }
 
@@ -342,8 +346,13 @@ public sealed class UsageRecorder : IUsageRecorder
           usage?.CachedInputTokens,
           usage?.ReasoningTokens
         );
+      var incidentEventId = await PersistProviderIncidentAsync(
+        request,
+        cancellationToken
+      );
       var usageEvent = new UsageEvent
       {
+        SchemaVersion = string.IsNullOrWhiteSpace(request.Context.TraceId) ? 1 : 2,
         EventId = Guid.NewGuid().ToString(
           "N"
         ),
@@ -352,6 +361,8 @@ public sealed class UsageRecorder : IUsageRecorder
         ConversationId = request.Context.ConversationId,
         TurnId = request.Context.TurnId,
         ExecutionSessionId = request.Context.ExecutionSessionId,
+        TraceId = request.Context.TraceId,
+        ProviderAttemptId = request.Context.ProviderAttemptId,
         ProviderId = request.ProviderId,
         ModelId = request.ModelId,
         ModelRevision = request.Context.ModelRevision,
@@ -378,6 +389,13 @@ public sealed class UsageRecorder : IUsageRecorder
         EquivalentPriceSnapshot = equivalent,
         RateLimit = request.RateLimit,
         ErrorCode = request.ErrorCode,
+        ErrorStage = request.ErrorStage,
+        EstimatedInputContextTokens = request.EstimatedInputContextTokens,
+        ReservedOutputTokens = request.ReservedOutputTokens,
+        RequiredContextTokens = request.RequiredContextTokens,
+        MaximumContextTokens = request.MaximumContextTokens,
+        EffectiveContextTokens = request.EffectiveContextTokens,
+        IncidentEventId = request.IncidentEventId ?? incidentEventId,
         HttpStatus = request.HttpStatus,
         ImageCount = request.Activity?.ImageCount ?? 0,
         ImageBytes = request.Activity?.ImageBytes ?? 0,
@@ -413,6 +431,65 @@ public sealed class UsageRecorder : IUsageRecorder
         request.ProviderId,
         request.ModelId
       );
+    }
+  }
+
+  private async Task<string?> PersistProviderIncidentAsync(
+    UsageRecordRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    if (string.IsNullOrWhiteSpace(request.Context.TraceId)
+      || string.IsNullOrWhiteSpace(request.Context.IncidentEventId)
+      || request.Context.IncidentSequence is null)
+    {
+      return null;
+    }
+
+    try
+    {
+      var result = await _incidentJournal.AppendAsync(
+        new IncidentEvent
+        {
+          EventId = request.Context.IncidentEventId,
+          TraceId = request.Context.TraceId,
+          Sequence = request.Context.IncidentSequence.Value,
+          TimestampUtc = DateTimeOffset.UtcNow,
+          Category = "provider",
+          Stage = request.ErrorStage ?? "provider-call",
+          Code = request.ErrorCode ?? "provider-call-recorded",
+          Status = request.Status,
+          Summary = request.Status == UsageStatuses.Success
+            ? "Provider call completed."
+            : "Provider call did not complete successfully.",
+          RequestId = request.Context.TurnId,
+          ConversationId = request.Context.ConversationId,
+          TurnId = request.Context.TurnId,
+          ExecutionSessionId = request.Context.ExecutionSessionId,
+          ProviderAttemptId = request.Context.ProviderAttemptId,
+          Provider = request.ProviderId,
+          Model = request.ModelId,
+          Completed = request.Status == UsageStatuses.Success,
+          ContextFit = new IncidentContextFit(
+            request.EstimatedInputContextTokens,
+            request.ReservedOutputTokens,
+            request.RequiredContextTokens,
+            request.MaximumContextTokens,
+            request.EffectiveContextTokens
+          )
+        },
+        cancellationToken
+      );
+      return result.Persisted ? result.EventId : null;
+    }
+    catch (Exception exception)
+    {
+      _logger.LogWarning(
+        exception,
+        "Provider incident metadata could not be persisted for trace {TraceId}.",
+        request.Context.TraceId
+      );
+      return null;
     }
   }
 }

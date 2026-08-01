@@ -50,13 +50,16 @@ const state = {
   attachments: [],
   cloudImageApprovals: new Set(),
   sessionSearchController: null,
+  detailsSession: null,
   summarySession: null,
   summaryEstimate: null,
   contextUsage: null,
   recovery: null,
   inspectedBackup: null,
   inspectedBackupBase64: null,
-  runtimeProfiles: null
+  runtimeProfiles: null,
+  openCloudProviders: new Set(),
+  gitConfigurationEditing: false
 };
 
 const elements = {};
@@ -67,6 +70,7 @@ document.addEventListener("DOMContentLoaded", initialize);
 async function initialize() {
   bindElements();
   bindEvents();
+  initializeSidebarResize();
   initializeScrollFollowing();
 
   try {
@@ -90,6 +94,8 @@ async function initialize() {
 function bindElements() {
   for (const id of [
     "messages",
+    "sidebar",
+    "sidebar-resizer",
     "empty-state",
     "composer",
     "message-input",
@@ -129,6 +135,7 @@ function bindElements() {
     "intentions-grid",
     "ollama-url",
     "router-model",
+    "action-model",
     "coordinator-model",
     "default-model",
     "default-gpu",
@@ -193,7 +200,6 @@ function bindElements() {
     "measure-runtime-profile",
     "runtime-profile-result",
     "runtime-shared-model-warnings",
-    "provider-health-list",
     "refresh-provider-health",
     "cloud-providers-list",
     "model-filter-search",
@@ -261,6 +267,23 @@ function bindElements() {
     "run-session-search",
     "close-session-search",
     "cancel-session-search",
+    "session-details-dialog",
+    "session-details-title",
+    "session-details-metadata",
+    "session-details-state",
+    "session-details-summary",
+    "session-details-status",
+    "session-details-pin",
+    "session-details-rename",
+    "session-details-duplicate",
+    "session-details-archive",
+    "session-details-markdown",
+    "session-details-json",
+    "session-details-delete",
+    "edit-session-summary",
+    "close-session-details",
+    "dismiss-session-details",
+    "resume-session-details",
     "session-summary-dialog",
     "session-summary-form",
     "session-summary-session-title",
@@ -361,15 +384,36 @@ function bindElements() {
     "git-user-name-scope",
     "git-user-email",
     "git-user-email-scope",
-    "save-git-user-name",
-    "save-git-user-email",
+    "git-origin-url",
+    "edit-git-configuration",
+    "save-git-configuration",
+    "cancel-git-configuration",
     "git-remotes",
     "git-open-review",
     "git-action-status",
     "new-conversation-dialog",
     "new-conversation-enable-history",
     "new-conversation-discard",
-    "new-conversation-cancel"
+    "new-conversation-cancel",
+    "trace-diagnostic-dialog",
+    "trace-diagnostic-id",
+    "trace-diagnostic-status",
+    "trace-diagnostic-facts",
+    "trace-diagnostic-timeline",
+    "close-trace-diagnostic",
+    "dismiss-trace-diagnostic",
+    "copy-trace-diagnostic",
+    "app-modal",
+    "app-modal-form",
+    "app-modal-title",
+    "app-modal-message",
+    "app-modal-field",
+    "app-modal-label",
+    "app-modal-input",
+    "app-modal-close",
+    "app-modal-cancel",
+    "app-modal-confirm",
+    "toast-region"
   ]) {
     elements[toCamelCase(id)] = document.querySelector(`#${id}`);
   }
@@ -433,6 +477,43 @@ function bindEvents() {
       closeSessionSearch();
     }
   );
+  elements.closeSessionDetails.addEventListener("click", closeSessionDetails);
+  elements.dismissSessionDetails.addEventListener("click", closeSessionDetails);
+  elements.sessionDetailsDialog.addEventListener(
+    "cancel",
+    event => {
+      event.preventDefault();
+      closeSessionDetails();
+    }
+  );
+  elements.resumeSessionDetails.addEventListener(
+    "click",
+    resumeSelectedSession
+  );
+  elements.sessionDetailsPin.addEventListener(
+    "click",
+    toggleSelectedSessionPin
+  );
+  elements.sessionDetailsRename.addEventListener(
+    "click",
+    renameSelectedSession
+  );
+  elements.sessionDetailsDuplicate.addEventListener(
+    "click",
+    duplicateSelectedSession
+  );
+  elements.sessionDetailsArchive.addEventListener(
+    "click",
+    archiveSelectedSession
+  );
+  elements.sessionDetailsDelete.addEventListener(
+    "click",
+    deleteSelectedSession
+  );
+  elements.editSessionSummary.addEventListener(
+    "click",
+    editSelectedSessionSummary
+  );
   elements.sessionSummaryForm.addEventListener("submit", saveSessionSummary);
   elements.sessionSummaryModel.addEventListener(
     "change",
@@ -494,10 +575,6 @@ function bindEvents() {
   elements.refreshProviderHealth.addEventListener(
     "click",
     refreshProviderHealth
-  );
-  elements.providerHealthList.addEventListener(
-    "click",
-    handleProviderHealthAction
   );
   elements.cloudUsageCard.addEventListener("click", openCloudUsage);
   elements.closeCloudUsage.addEventListener("click", closeCloudUsage);
@@ -571,14 +648,9 @@ function bindEvents() {
   elements.dismissGit.addEventListener("click", closeGitPanel);
   elements.refreshGit.addEventListener("click", refreshGitPanel);
   elements.initializeGit.addEventListener("click", initializeGitRepository);
-  elements.saveGitUserName.addEventListener(
-    "click",
-    () => saveGitIdentity("user.name")
-  );
-  elements.saveGitUserEmail.addEventListener(
-    "click",
-    () => saveGitIdentity("user.email")
-  );
+  elements.editGitConfiguration.addEventListener("click", beginGitConfigurationEdit);
+  elements.saveGitConfiguration.addEventListener("click", saveGitConfiguration);
+  elements.cancelGitConfiguration.addEventListener("click", cancelGitConfigurationEdit);
   elements.gitOpenReview.addEventListener("click", openLatestChangeReview);
   document.querySelectorAll("[data-git-view]").forEach(
     button => button.addEventListener("click", selectGitView)
@@ -598,6 +670,23 @@ function bindEvents() {
   elements.newConversationCancel.addEventListener(
     "click",
     cancelConversationTransition
+  );
+  elements.closeTraceDiagnostic.addEventListener("click", closeTraceDiagnostic);
+  elements.dismissTraceDiagnostic.addEventListener("click", closeTraceDiagnostic);
+  elements.copyTraceDiagnostic.addEventListener(
+    "click",
+    () => copyText(
+      elements.traceDiagnosticDialog.dataset.traceId ?? "",
+      elements.copyTraceDiagnostic,
+      "Trace ID copiado"
+    )
+  );
+  elements.traceDiagnosticDialog.addEventListener(
+    "cancel",
+    event => {
+      event.preventDefault();
+      closeTraceDiagnostic();
+    }
   );
   elements.settingsNavigation.querySelectorAll("[data-settings-target]").forEach(
     button => button.addEventListener("click", selectSettingsSection)
@@ -641,6 +730,203 @@ function bindEvents() {
   document.querySelector("#open-workspace").addEventListener("click", openWorkspace);
   document.querySelector("#close-workspace").addEventListener("click", closeWorkspace);
   document.querySelector("#cancel-workspace").addEventListener("click", closeWorkspace);
+}
+
+function showAppModal(options) {
+  const {
+    title = "Confirmar ação",
+    message = "",
+    confirmLabel = "Confirmar",
+    cancelLabel = "Cancelar",
+    inputLabel = "",
+    inputValue = "",
+    inputType = "text",
+    danger = false
+  } = options ?? {};
+
+  if (!elements.appModal.hidden) {
+    elements.appModalCancel.click();
+  }
+
+  elements.appModalTitle.textContent = title;
+  elements.appModalMessage.textContent = message;
+  elements.appModalConfirm.textContent = confirmLabel;
+  elements.appModalCancel.textContent = cancelLabel;
+  elements.appModalConfirm.className = danger
+    ? "primary-button danger-button"
+    : "primary-button";
+  elements.appModalField.hidden = !inputLabel;
+  elements.appModalLabel.textContent = inputLabel;
+  elements.appModalInput.type = inputType;
+  elements.appModalInput.value = inputValue;
+  const previousFocus = document.activeElement;
+
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      elements.appModal.hidden = true;
+      document.body.append(elements.appModal);
+      previousFocus?.focus?.();
+      resolve(value);
+    };
+    const submit = event => {
+      event.preventDefault();
+      finish(inputLabel ? elements.appModalInput.value : true);
+    };
+    const cancel = () => finish(inputLabel ? null : false);
+    const keydown = event => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+    };
+    const cleanup = () => {
+      elements.appModalForm.removeEventListener("submit", submit);
+      elements.appModalClose.removeEventListener("click", cancel);
+      elements.appModalCancel.removeEventListener("click", cancel);
+      document.removeEventListener("keydown", keydown, true);
+    };
+    elements.appModalForm.addEventListener("submit", submit);
+    elements.appModalClose.addEventListener("click", cancel);
+    elements.appModalCancel.addEventListener("click", cancel);
+    document.addEventListener("keydown", keydown, true);
+    const modalHost = Array.from(
+      document.querySelectorAll("dialog[open]")
+    ).at(-1) ?? document.body;
+    modalHost.append(elements.appModal);
+    elements.appModal.hidden = false;
+    (inputLabel ? elements.appModalInput : elements.appModalConfirm).focus();
+  });
+}
+
+function showAppConfirm(message, options = {}) {
+  return showAppModal({
+    ...options,
+    message
+  });
+}
+
+function showAppPrompt(message, options = {}) {
+  return showAppModal({
+    ...options,
+    message,
+    inputLabel: options.inputLabel ?? "Valor"
+  });
+}
+
+function showToast(message, tone = "error", timeout = 30000) {
+  const toast = document.createElement("article");
+  toast.className = "app-toast";
+  toast.dataset.tone = tone;
+  toast.setAttribute("role", tone === "error" ? "alert" : "status");
+  const text = document.createElement("p");
+  text.textContent = message;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.setAttribute("aria-label", "Fechar notificação");
+  close.textContent = "×";
+  let timer;
+  const dismiss = () => {
+    clearTimeout(timer);
+    toast.remove();
+  };
+  close.addEventListener("click", dismiss);
+  toast.append(text, close);
+  elements.toastRegion.append(toast);
+  timer = window.setTimeout(dismiss, timeout);
+  return toast;
+}
+
+function initializeSidebarResize() {
+  const minimum = 220;
+  const maximum = 460;
+  const storageKey = "agentic-router.sidebar-width";
+  const clampWidth = value => Math.min(
+    Math.max(minimum, value),
+    Math.min(maximum, Math.max(minimum, window.innerWidth - 360))
+  );
+  const applyWidth = (value, persist = false) => {
+    const width = clampWidth(Math.round(value));
+    document.documentElement.style.setProperty(
+      "--sidebar-width",
+      `${width}px`
+    );
+    elements.sidebarResizer.setAttribute("aria-valuenow", String(width));
+    if (persist) {
+      try {
+        localStorage.setItem(storageKey, String(width));
+      } catch {
+        // A blocked localStorage must not make the sidebar unusable.
+      }
+    }
+    return width;
+  };
+
+  try {
+    const stored = Number(localStorage.getItem(storageKey));
+    if (Number.isFinite(stored) && stored > 0) {
+      applyWidth(stored);
+    }
+  } catch {
+    // Keep the CSS default when browser storage is unavailable.
+  }
+
+  elements.sidebarResizer.addEventListener(
+    "pointerdown",
+    event => {
+      if (event.button !== 0 || window.innerWidth <= 760) {
+        return;
+      }
+      event.preventDefault();
+      elements.sidebarResizer.setPointerCapture(event.pointerId);
+      document.body.classList.add("resizing-sidebar");
+    }
+  );
+  elements.sidebarResizer.addEventListener(
+    "pointermove",
+    event => {
+      if (!elements.sidebarResizer.hasPointerCapture(event.pointerId)) {
+        return;
+      }
+      applyWidth(event.clientX);
+    }
+  );
+  const finishResize = event => {
+    if (!elements.sidebarResizer.hasPointerCapture(event.pointerId)) {
+      return;
+    }
+    elements.sidebarResizer.releasePointerCapture(event.pointerId);
+    document.body.classList.remove("resizing-sidebar");
+    applyWidth(elements.sidebar.getBoundingClientRect().width, true);
+  };
+  elements.sidebarResizer.addEventListener("pointerup", finishResize);
+  elements.sidebarResizer.addEventListener("pointercancel", finishResize);
+  elements.sidebarResizer.addEventListener(
+    "dblclick",
+    () => applyWidth(248, true)
+  );
+  elements.sidebarResizer.addEventListener(
+    "keydown",
+    event => {
+      const current = elements.sidebar.getBoundingClientRect().width;
+      const increment = event.shiftKey ? 24 : 10;
+      let next = null;
+      if (event.key === "ArrowLeft") next = current - increment;
+      if (event.key === "ArrowRight") next = current + increment;
+      if (event.key === "Home") next = minimum;
+      if (event.key === "End") next = maximum;
+      if (next === null) {
+        return;
+      }
+      event.preventDefault();
+      applyWidth(next, true);
+    }
+  );
 }
 
 function initializeScrollFollowing() {
@@ -963,10 +1249,12 @@ function renderGitPanel() {
   const available = git?.state === "available";
   elements.gitUserName.disabled = !available;
   elements.gitUserEmail.disabled = !available;
-  elements.saveGitUserName.disabled = !available;
-  elements.saveGitUserEmail.disabled = !available;
+  elements.gitOriginUrl.disabled = !available;
   elements.gitUserName.value = git?.userName?.value ?? "";
   elements.gitUserEmail.value = git?.userEmail?.value ?? "";
+  elements.gitOriginUrl.value = git?.remotes?.find(
+    remote => remote.name === "origin"
+  )?.fetchUrl ?? "";
   elements.gitUserNameScope.textContent =
     `Effective scope: ${git?.userName?.scope ?? "unset"}`;
   elements.gitUserEmailScope.textContent =
@@ -985,18 +1273,36 @@ function renderGitPanel() {
   if ((git?.remotes?.length ?? 0) === 0) {
     elements.gitRemotes.textContent = "No remotes configured.";
   }
+  state.gitConfigurationEditing = false;
+  renderGitConfigurationEditState();
   elements.gitOpenReview.disabled = !state.latestExecutionSessionId;
 }
 
 async function initializeGitRepository() {
   if (state.interactionMode !== "execute") {
-    elements.gitActionStatus.textContent =
-      "Switch to Execute mode before initializing Git.";
+    const switchMode = await showAppConfirm(
+      "A criação do repositório exige o modo Execute. O painel Git será fechado e nenhuma alteração será feita até você reabri-lo e confirmar a inicialização.",
+      {
+        title: "Mudar para o modo Execute?",
+        confirmLabel: "Fechar e mudar para Execute"
+      }
+    );
+    if (switchMode) {
+      closeGitPanel();
+      setInteractionMode("execute");
+      showToast(
+        "Modo Execute ativado. Reabra o painel Git para revisar e confirmar a criação do repositório.",
+        "success"
+      );
+    }
     return;
   }
   const facts = "Initialize Git repository at the trusted-workspace root.\n"
     + "Initial branch: main\nNo commit, staging, remote, or project file will be created.";
-  if (!window.confirm(facts)) {
+  if (!await showAppConfirm(facts, {
+    title: "Inicializar repositório Git?",
+    confirmLabel: "Inicializar"
+  })) {
     return;
   }
 
@@ -1034,62 +1340,131 @@ async function initializeGitRepository() {
   }
 }
 
-async function saveGitIdentity(field) {
+function renderGitConfigurationEditState() {
+  const editing = state.gitConfigurationEditing;
+  const available = state.git?.state === "available";
+  for (const input of [
+    elements.gitUserName,
+    elements.gitUserEmail,
+    elements.gitOriginUrl
+  ]) {
+    input.readOnly = !editing;
+  }
+  elements.editGitConfiguration.hidden = editing;
+  elements.editGitConfiguration.disabled = !available;
+  elements.saveGitConfiguration.hidden = !editing;
+  elements.cancelGitConfiguration.hidden = !editing;
+}
+
+function beginGitConfigurationEdit() {
+  state.gitConfigurationEditing = true;
+  renderGitConfigurationEditState();
+  elements.gitUserName.focus();
+}
+
+function cancelGitConfigurationEdit() {
+  state.gitConfigurationEditing = false;
+  renderGitPanel();
+}
+
+async function saveGitConfiguration() {
   if (state.interactionMode !== "execute") {
-    elements.gitActionStatus.textContent =
-      "Switch to Execute mode before changing repository identity.";
+    showToast("Mude para o modo Execute antes de alterar a configuração do repositório.");
     return;
   }
-  const input = field === "user.name"
-    ? elements.gitUserName
-    : elements.gitUserEmail;
-  const value = input.value.trim();
 
   try {
-    const preview = await fetchJson(
-      "/api/git/identity/preview",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          field,
-          value
-        })
+    const changes = [];
+    const identityValues = [
+      ["user.name", elements.gitUserName.value.trim(), state.git?.userName?.value ?? ""],
+      ["user.email", elements.gitUserEmail.value.trim(), state.git?.userEmail?.value ?? ""]
+    ];
+    for (const [field, value, current] of identityValues) {
+      if (value !== current) {
+        const preview = await fetchJson("/api/git/identity/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ field, value })
+        });
+        changes.push({ kind: "identity", field, value: preview.value, preview });
       }
-    );
-    if (!window.confirm(
-      `Write repository-local ${field} = "${preview.value}"?\n`
-      + "Global Git configuration will not be changed."
+    }
+    const origin = elements.gitOriginUrl.value.trim();
+    const currentOrigin = state.git?.remotes?.find(
+      remote => remote.name === "origin"
+    )?.fetchUrl ?? "";
+    if (origin !== currentOrigin) {
+      const preview = await fetchJson("/api/git/remote/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ remoteName: "origin", url: origin })
+      });
+      changes.push({ kind: "remote", value: preview.url, preview });
+    }
+    if (changes.length === 0) {
+      state.gitConfigurationEditing = false;
+      renderGitConfigurationEditState();
+      elements.gitActionStatus.textContent = "Nenhuma alteração para salvar.";
+      return;
+    }
+    const summary = changes.map(change => change.kind === "identity"
+      ? `${change.field} = "${change.value}"`
+      : `origin = "${change.value}"`
+    ).join("\n");
+    if (!await showAppConfirm(
+      `Aplicar no repositório local:\n${summary}\n\nA configuração global do Git não será alterada.`,
+      { title: "Salvar configuração do repositório?", confirmLabel: "Salvar" }
     )) {
       return;
     }
-    state.git = await fetchJson(
-      "/api/git/identity",
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
+    for (const change of changes) {
+      const currentPreview = change.kind === "identity"
+        ? await fetchJson("/api/git/identity/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ field: change.field, value: change.value })
+        })
+        : await fetchJson("/api/git/remote/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ remoteName: "origin", url: change.value })
+        });
+      const path = change.kind === "identity"
+        ? "/api/git/identity"
+        : "/api/git/remote";
+      const body = change.kind === "identity"
+        ? {
           browserSessionId: state.browserSessionId,
           interactionMode: state.interactionMode,
-          actionId: preview.actionId,
+          actionId: currentPreview.actionId,
           confirmed: true,
-          field,
-          value: preview.value
-        })
-      }
-    );
+          field: change.field,
+          value: change.value
+        }
+        : {
+          browserSessionId: state.browserSessionId,
+          interactionMode: state.interactionMode,
+          actionId: currentPreview.actionId,
+          confirmed: true,
+          remoteName: "origin",
+          url: change.value
+        };
+      state.git = await fetchJson(path, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+    }
+    state.gitConfigurationEditing = false;
     renderGitCard();
     renderGitPanel();
     renderSettingsSummaries();
-    elements.gitActionStatus.textContent =
-      `${field} saved in repository-local configuration.`;
+    elements.gitActionStatus.textContent = "Configuração local do repositório salva.";
+    showToast("Configuração do repositório salva.", "success");
   } catch (error) {
-    elements.gitActionStatus.textContent =
-      `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+    const message = `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+    elements.gitActionStatus.textContent = message;
+    showToast(message);
   }
 }
 
@@ -1150,6 +1525,8 @@ function renderGitDiff() {
     button.type = "button";
     button.setAttribute("aria-expanded", "false");
     const type = document.createElement("span");
+    type.className = "git-file-status";
+    type.dataset.changeType = file.changeType.toLowerCase();
     type.textContent = file.binary ? "BIN" : file.changeType.slice(0, 1).toUpperCase();
     const path = document.createElement("span");
     path.className = "git-file-path";
@@ -1287,7 +1664,12 @@ async function activateWorkspace(id) {
 }
 
 async function renameWorkspace(profile) {
-  const name = window.prompt("Novo nome do workspace:", profile.name)?.trim();
+  const name = (await showAppPrompt("Informe o novo nome do workspace.", {
+    title: "Renomear workspace",
+    inputLabel: "Nome do workspace",
+    inputValue: profile.name,
+    confirmLabel: "Renomear"
+  }))?.trim();
 
   if (!name) {
     return;
@@ -1318,9 +1700,10 @@ async function renameWorkspace(profile) {
 }
 
 async function removeWorkspace(profile) {
-  if (!window.confirm(
+  if (!await showAppConfirm(
     `Remover "${profile.name}" e seu histórico local do Agentic Router? `
-      + "A pasta real e os arquivos do projeto não serão excluídos."
+      + "A pasta real e os arquivos do projeto não serão excluídos.",
+    { title: "Remover workspace?", confirmLabel: "Remover", danger: true }
   )) {
     return;
   }
@@ -1355,9 +1738,10 @@ async function changeWorkspaceHistory(event) {
 
   if (
     enabled
-    && !window.confirm(
+    && !await showAppConfirm(
       "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.10."
+        + "pelo Agentic Router v0.9.12.",
+      { title: "Ativar histórico local?", confirmLabel: "Ativar" }
     )
   ) {
     event.currentTarget.checked = false;
@@ -1865,96 +2249,263 @@ function createSessionEntry(session) {
   const current = state.conversationSessionId === session.id;
   entry.className = `session-entry${current ? " current" : ""}`;
   entry.dataset.sessionId = session.id;
+  entry.tabIndex = 0;
+  entry.setAttribute("role", "button");
+  entry.setAttribute("aria-label", `Abrir detalhes de ${session.title}`);
   entry.setAttribute(
     "aria-current",
     current ? "true" : "false"
   );
+  const content = document.createElement("div");
+  content.className = "session-entry-content";
   const title = document.createElement("strong");
   title.textContent = session.title;
   const metadata = document.createElement("small");
-  metadata.textContent =
-    `${new Date(session.updatedAt).toLocaleString()} · ${session.lastInteractionMode}`;
-  const status = document.createElement("small");
-  status.className = session.interrupted ? "session-interrupted" : "";
-  status.textContent = [
-    current ? "atual" : null,
-    session.pinned ? "fixada" : null,
-    session.hasSummary ? "com resumo" : null,
-    session.interrupted ? "interrompida" : null,
-    session.archived ? "arquivada" : null
-  ].filter(Boolean).join(" · ");
-  status.hidden = !status.textContent;
-  const actions = document.createElement("div");
-  actions.className = "session-entry-actions";
+  metadata.textContent = new Date(session.updatedAt).toLocaleDateString();
   const resume = document.createElement("button");
   resume.type = "button";
   resume.className = "secondary-button";
   resume.textContent = "Retomar";
-  resume.addEventListener("click", () => resumeSession(session.id));
-  const rename = document.createElement("button");
-  rename.type = "button";
-  rename.className = "secondary-button";
-  rename.textContent = "Renomear";
-  rename.addEventListener("click", () => renameSession(session));
-  const archive = document.createElement("button");
-  archive.type = "button";
-  archive.className = "secondary-button";
-  archive.textContent = "Arquivar";
-  archive.hidden = session.archived;
-  archive.addEventListener("click", () => archiveSession(session.id));
-  const pin = document.createElement("button");
-  pin.type = "button";
-  pin.className = "secondary-button";
-  pin.textContent = session.pinned ? "Desafixar" : "Fixar";
-  pin.addEventListener("click", () => setSessionPinned(session));
-  const summary = document.createElement("button");
-  summary.type = "button";
-  summary.className = "secondary-button";
-  summary.textContent = session.hasSummary ? "Resumo ✓" : "Resumo";
-  summary.addEventListener("click", () => openSessionSummary(session));
-  const duplicate = document.createElement("button");
-  duplicate.type = "button";
-  duplicate.className = "secondary-button";
-  duplicate.textContent = "Duplicar";
-  duplicate.addEventListener("click", () => duplicateSession(session));
-  const exportButton = document.createElement("a");
-  exportButton.className = "secondary-button";
-  exportButton.textContent = "JSON";
-  exportButton.href = `/api/sessions/${encodeURIComponent(session.id)}/export`;
-  exportButton.download = "";
-  const markdown = document.createElement("a");
-  markdown.className = "secondary-button";
-  markdown.textContent = "Markdown";
-  markdown.href =
+  resume.addEventListener(
+    "click",
+    event => {
+      event.stopPropagation();
+      resumeSession(session.id);
+    }
+  );
+  content.append(title, metadata);
+  entry.append(content, resume);
+  entry.addEventListener("click", () => openSessionDetails(session));
+  entry.addEventListener(
+    "keydown",
+    event => {
+      if (event.target !== entry || !["Enter", " "].includes(event.key)) {
+        return;
+      }
+
+      event.preventDefault();
+      openSessionDetails(session);
+    }
+  );
+  return entry;
+}
+
+async function openSessionDetails(session) {
+  state.detailsSession = session;
+  renderSessionDetails(session);
+  renderSessionDetailsSummary(null, true);
+  elements.sessionDetailsDialog.showModal();
+  elements.resumeSessionDetails.focus();
+
+  try {
+    const summary = await fetchJson(
+      `/api/sessions/${encodeURIComponent(session.id)}/summary`
+    );
+    if (state.detailsSession?.id !== session.id) {
+      return;
+    }
+
+    renderSessionDetailsSummary(summary?.content ?? null, false);
+  } catch (error) {
+    elements.sessionDetailsSummary.replaceChildren();
+    const message = document.createElement("p");
+    message.className = "runtime-note";
+    message.textContent = error.message;
+    elements.sessionDetailsSummary.append(message);
+  }
+}
+
+function renderSessionDetails(session) {
+  elements.sessionDetailsTitle.textContent = session.title;
+  elements.sessionDetailsMetadata.textContent = [
+    new Date(session.updatedAt).toLocaleString(),
+    session.lastInteractionMode === "execute" ? "Execute" : "Chat",
+    session.selectedModel
+  ].filter(Boolean).join(" · ");
+  elements.sessionDetailsState.textContent = [
+    state.conversationSessionId === session.id ? "Conversa atual" : null,
+    session.pinned ? "Fixada" : null,
+    session.hasSummary ? "Com resumo" : "Sem resumo",
+    session.interrupted ? "Interrompida" : null,
+    session.archived ? "Arquivada" : null
+  ].filter(Boolean).join(" · ");
+  elements.sessionDetailsPin.textContent = session.pinned
+    ? "Desafixar"
+    : "Fixar";
+  elements.sessionDetailsArchive.hidden = session.archived;
+  elements.sessionDetailsMarkdown.href =
     `/api/sessions/${encodeURIComponent(session.id)}/export/markdown`
     + "?includeSummary=true&includeModelMetadata=true";
-  markdown.download = "";
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "secondary-button danger-button";
-  remove.textContent = "Excluir";
-  remove.addEventListener("click", () => deleteSession(session));
-  actions.append(
-    resume,
-    pin,
-    summary,
-    duplicate,
-    rename,
-    archive,
-    markdown,
-    exportButton,
-    remove
-  );
-  entry.append(title, metadata, status, actions);
-  return entry;
+  elements.sessionDetailsJson.href =
+    `/api/sessions/${encodeURIComponent(session.id)}/export`;
+  elements.sessionDetailsStatus.textContent = "";
+}
+
+function renderSessionDetailsSummary(content, loading) {
+  elements.sessionDetailsSummary.replaceChildren();
+
+  if (loading) {
+    const message = document.createElement("p");
+    message.className = "runtime-note";
+    message.textContent = "Carregando resumo…";
+    elements.sessionDetailsSummary.append(message);
+    return;
+  }
+
+  if (!content) {
+    const empty = document.createElement("p");
+    empty.className = "runtime-note";
+    empty.textContent =
+      "Nenhum resumo foi criado. A conversa pode ser retomada normalmente sem ele.";
+    elements.sessionDetailsSummary.append(empty);
+    return;
+  }
+
+  const fields = [
+    ["Objetivo", content.objective],
+    ["Decisões", content.decisions],
+    ["Arquivos alterados", content.filesChanged],
+    ["Comandos e validação", content.commandsAndValidation],
+    ["Questões não resolvidas", content.unresolvedIssues],
+    ["Próximo passo", content.nextSuggestedStep]
+  ];
+
+  for (const [label, value] of fields) {
+    const values = Array.isArray(value)
+      ? value.filter(Boolean)
+      : value
+        ? [value]
+        : [];
+    if (values.length === 0) {
+      continue;
+    }
+
+    const item = document.createElement("section");
+    item.className = "session-summary-fact";
+    const heading = document.createElement("h4");
+    heading.textContent = label;
+    item.append(heading);
+    if (Array.isArray(value)) {
+      const list = document.createElement("ul");
+      for (const text of values) {
+        const entry = document.createElement("li");
+        entry.textContent = text;
+        list.append(entry);
+      }
+      item.append(list);
+    } else {
+      const text = document.createElement("p");
+      text.textContent = values[0];
+      item.append(text);
+    }
+    elements.sessionDetailsSummary.append(item);
+  }
+}
+
+function closeSessionDetails() {
+  state.detailsSession = null;
+  elements.sessionDetailsDialog.close();
+}
+
+function findSession(id) {
+  return [
+    ...(state.sessions?.pinned ?? []),
+    ...(state.sessions?.recent ?? []),
+    ...(state.sessions?.archived ?? [])
+  ].find(session => session.id === id) ?? null;
+}
+
+function refreshSelectedSessionDetails(id) {
+  const session = findSession(id);
+  if (!session) {
+    closeSessionDetails();
+    return;
+  }
+
+  state.detailsSession = session;
+  renderSessionDetails(session);
+}
+
+async function resumeSelectedSession() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  closeSessionDetails();
+  await resumeSession(session.id);
+}
+
+async function toggleSelectedSessionPin() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  await setSessionPinned(session);
+  refreshSelectedSessionDetails(session.id);
+}
+
+async function renameSelectedSession() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  await renameSession(session);
+  refreshSelectedSessionDetails(session.id);
+}
+
+async function duplicateSelectedSession() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  const duplicate = await duplicateSession(session);
+  elements.sessionDetailsStatus.textContent = duplicate
+    ? `Cópia criada: ${duplicate.session.title}`
+    : "A conversa não foi duplicada.";
+}
+
+async function archiveSelectedSession() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  await archiveSession(session.id);
+  closeSessionDetails();
+}
+
+async function deleteSelectedSession() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  if (await deleteSession(session)) {
+    closeSessionDetails();
+  }
+}
+
+async function editSelectedSessionSummary() {
+  const session = state.detailsSession;
+  if (!session) {
+    return;
+  }
+
+  closeSessionDetails();
+  await openSessionSummary(session);
 }
 
 async function resumeSession(id) {
   await requestConversationTransition(
     async () =>
     {
-      if (!window.confirm(
-        "Retomar esta conversa? Modo Chat, aprovação manual e modelo não fixado serão restaurados."
+      if (!await showAppConfirm(
+        "Retomar esta conversa? Modo Chat, aprovação manual e modelo não fixado serão restaurados.",
+        { title: "Retomar conversa?", confirmLabel: "Retomar" }
       )) {
         return;
       }
@@ -2077,7 +2628,12 @@ function renderRestoredConversation(session) {
 }
 
 async function renameSession(session) {
-  const title = window.prompt("Novo título:", session.title)?.trim();
+  const title = (await showAppPrompt("Informe o novo título da conversa.", {
+    title: "Renomear conversa",
+    inputLabel: "Título",
+    inputValue: session.title,
+    confirmLabel: "Renomear"
+  }))?.trim();
 
   if (!title) {
     return;
@@ -2133,8 +2689,10 @@ async function duplicateSession(session) {
     elements.sessionSearchStatus.textContent =
       `Cópia criada: ${duplicate.session.title}`;
     await refreshSessions();
+    return duplicate;
   } catch (error) {
     elements.sessionSearchStatus.textContent = error.message;
+    return null;
   }
 }
 
@@ -2378,10 +2936,11 @@ async function generateSessionSummary() {
     return;
   }
 
-  if (!window.confirm(
+  if (!await showAppConfirm(
     `Gerar resumo com ${providerLabel(estimate.provider)} · ${estimate.model}? `
       + `A chamada pode usar GPU ou quota real e estima até `
-      + `${formatInteger(estimate.estimatedInputTokens)} tokens de entrada.`
+      + `${formatInteger(estimate.estimatedInputTokens)} tokens de entrada.`,
+    { title: "Gerar resumo com modelo?", confirmLabel: "Gerar resumo" }
   )) {
     return;
   }
@@ -2450,7 +3009,10 @@ async function saveSessionSummary(event) {
 async function deleteSessionSummary() {
   const session = state.summarySession;
 
-  if (!session || !window.confirm("Excluir somente o resumo desta conversa?")) {
+  if (!session || !await showAppConfirm(
+    "Excluir somente o resumo desta conversa?",
+    { title: "Excluir resumo?", confirmLabel: "Excluir", danger: true }
+  )) {
     return;
   }
 
@@ -2503,10 +3065,11 @@ function summaryLines(value) {
 }
 
 async function deleteSession(session) {
-  if (!window.confirm(
-    `Excluir somente o registro local "${session.title}"? Os arquivos do projeto serão preservados.`
+  if (!await showAppConfirm(
+    `Excluir somente o registro local "${session.title}"? Os arquivos do projeto serão preservados.`,
+    { title: "Excluir conversa?", confirmLabel: "Excluir", danger: true }
   )) {
-    return;
+    return false;
   }
 
   await fetchJson(
@@ -2521,11 +3084,13 @@ async function deleteSession(session) {
   }
 
   await refreshSessions();
+  return true;
 }
 
 async function deleteArchivedSessions() {
-  if (!window.confirm(
-    "Excluir todas as conversas arquivadas deste workspace?"
+  if (!await showAppConfirm(
+    "Excluir todas as conversas arquivadas deste workspace?",
+    { title: "Excluir conversas arquivadas?", confirmLabel: "Excluir", danger: true }
   )) {
     return;
   }
@@ -2540,8 +3105,9 @@ async function deleteArchivedSessions() {
 }
 
 async function deleteAllSessions() {
-  if (!window.confirm(
-    "Excluir todo o histórico local deste workspace? Os arquivos do projeto serão preservados."
+  if (!await showAppConfirm(
+    "Excluir todo o histórico local deste workspace? Os arquivos do projeto serão preservados.",
+    { title: "Excluir todo o histórico?", confirmLabel: "Excluir tudo", danger: true }
   )) {
     return;
   }
@@ -2557,8 +3123,9 @@ async function deleteAllSessions() {
 }
 
 async function purgeUsageHistory() {
-  if (!window.confirm(
-    "Excluir todo o histórico local de uso de tokens? Esta ação não altera conversas nem arquivos do projeto."
+  if (!await showAppConfirm(
+    "Excluir todo o histórico local de uso de tokens? Esta ação não altera conversas nem arquivos do projeto.",
+    { title: "Excluir histórico de uso?", confirmLabel: "Excluir", danger: true }
   )) {
     return;
   }
@@ -2606,89 +3173,6 @@ async function reconcileUsage() {
 }
 
 function renderProviderHealth() {
-  elements.providerHealthList.replaceChildren();
-
-  for (const provider of state.providerHealth?.providers ?? []) {
-    const card = document.createElement("details");
-    card.className = "provider-health-card";
-    card.dataset.state = provider.connectionState;
-    const summary = document.createElement("summary");
-    const name = document.createElement("strong");
-    name.textContent = provider.displayName;
-    const badge = document.createElement("span");
-    badge.className =
-      `badge ${provider.connectionState === "healthy"
-        ? "success"
-        : provider.connectionState === "degraded"
-          || provider.connectionState === "unavailable"
-          ? "error"
-          : "muted"}`;
-    badge.textContent = providerHealthStateLabel(provider.connectionState);
-    summary.append(name, badge);
-
-    const body = document.createElement("div");
-    body.className = "provider-health-body";
-    const metrics = document.createElement("dl");
-    metrics.className = "cloud-provider-metadata";
-    appendDefinition(
-      metrics,
-      "Último sucesso",
-      formatProviderHealthDate(provider.lastSuccessfulRequest)
-    );
-    appendDefinition(
-      metrics,
-      "Latência",
-      provider.totalLatencyMilliseconds == null
-        ? "indisponível"
-        : `${formatInteger(provider.totalLatencyMilliseconds)} ms`
-    );
-    appendDefinition(
-      metrics,
-      "Erro recente",
-      provider.diagnostic.errorCategory ?? "nenhum"
-    );
-    appendDefinition(
-      metrics,
-      "Quota",
-      provider.quotaState
-    );
-    appendDefinition(
-      metrics,
-      "Uso",
-      usageAccuracyLabel(provider.tokenUsageAccuracy)
-    );
-
-    const actions = document.createElement("div");
-    actions.className = "settings-action-row";
-    const test = document.createElement("button");
-    test.type = "button";
-    test.className = "secondary-button";
-    test.dataset.providerHealthTest = provider.providerId;
-    test.textContent = "Testar conexão";
-    const refresh = document.createElement("button");
-    refresh.type = "button";
-    refresh.className = "secondary-button";
-    refresh.dataset.providerHealthRefresh = "";
-    refresh.textContent = "Atualizar";
-    actions.append(test, refresh);
-
-    const diagnostic = document.createElement("pre");
-    diagnostic.className = "provider-health-diagnostic";
-    diagnostic.textContent = [
-      `status: ${provider.diagnostic.lastStatusCode ?? "indisponível"}`,
-      `retry: ${provider.diagnostic.retryDecision}`,
-      `quota: ${provider.diagnostic.quotaSource}`,
-      `contagem: ${provider.diagnostic.usageCountSource}`,
-      `modelo: ${provider.diagnostic.providerModelIdentity ?? "indisponível"}`,
-      `adapter: ${provider.diagnostic.adapterVersion}`,
-      `fonte: ${provider.healthSource}`,
-      `stale: ${provider.stale ? "sim" : "não"}`
-    ].join("\n");
-    body.append(metrics, actions, diagnostic);
-    card.append(summary, body);
-    elements.providerHealthList.append(card);
-  }
-
   const degraded = (state.providerHealth?.providers ?? []).filter(
     provider => provider.enabled
       && ["degraded", "unavailable"].includes(provider.connectionState)
@@ -2700,6 +3184,7 @@ function renderProviderHealth() {
   } else {
     delete elements.cloudUsageCard.dataset.healthWarning;
   }
+  renderCloudProviders();
 }
 
 async function refreshProviderHealth() {
@@ -3762,7 +4247,10 @@ async function measureRuntimeProfile() {
     + "Esta ação carregará um modelo real no Ollama e poderá usar GPU, VRAM e RAM. "
     + "O Host tentará restaurar o estado residente anterior.";
 
-  if (!window.confirm(consent)) {
+  if (!await showAppConfirm(consent, {
+    title: "Executar medição real?",
+    confirmLabel: "Executar medição"
+  })) {
     return;
   }
 
@@ -3879,6 +4367,11 @@ function renderSettings() {
 
   elements.ollamaUrl.value = state.settings.ollamaUrl;
   replaceOptions(elements.routerModel, modelOptions(), state.settings.routerModel);
+  replaceOptions(
+    elements.actionModel,
+    modelOptions(),
+    state.settings.actionModel
+  );
   replaceOptions(
     elements.coordinatorModel,
     modelOptions(),
@@ -4397,8 +4890,9 @@ function renderProfilePreview(preview) {
 async function applyModelProfile() {
   const profileId = elements.modelProfileSelector.value;
 
-  if (!profileId || !window.confirm(
-    "Aplicar este perfil atomicamente às novas solicitações? A conversa atual não será reiniciada."
+  if (!profileId || !await showAppConfirm(
+    "Aplicar este perfil atomicamente às novas solicitações? A conversa atual não será reiniciada.",
+    { title: "Aplicar perfil?", confirmLabel: "Aplicar" }
   )) {
     return;
   }
@@ -4433,7 +4927,10 @@ async function applyModelProfile() {
 async function deleteModelProfile() {
   const profileId = elements.modelProfileSelector.value;
 
-  if (!profileId || !window.confirm("Excluir este perfil salvo?")) {
+  if (!profileId || !await showAppConfirm(
+    "Excluir este perfil salvo?",
+    { title: "Excluir perfil?", confirmLabel: "Excluir", danger: true }
+  )) {
     return;
   }
 
@@ -4530,10 +5027,30 @@ function renderModelChainPreview() {
 function renderCloudProviders() {
   elements.cloudProvidersList.replaceChildren();
 
+  const localHealth = (state.providerHealth?.providers ?? []).find(
+    provider => provider.providerId.startsWith("ollama")
+  );
+  if (localHealth) {
+    elements.cloudProvidersList.append(
+      createProviderHealthCard(localHealth)
+    );
+  }
+
   for (const provider of state.cloudProviders?.providers ?? []) {
+    const health = (state.providerHealth?.providers ?? []).find(
+      item => item.providerId === provider.provider
+    );
     const card = document.createElement("details");
     card.className = "cloud-provider-card";
     card.dataset.provider = provider.provider;
+    card.open = state.openCloudProviders.has(provider.provider);
+    card.addEventListener("toggle", () => {
+      if (card.open) {
+        state.openCloudProviders.add(provider.provider);
+      } else {
+        state.openCloudProviders.delete(provider.provider);
+      }
+    });
     const summary = document.createElement("summary");
     const title = document.createElement("span");
     title.className = "cloud-provider-title";
@@ -4562,6 +5079,26 @@ function renderCloudProviders() {
         : "Ainda não atualizada"
     );
     appendDefinition(metadata, "Quota", provider.quotaSource);
+    if (health) {
+      appendDefinition(
+        metadata,
+        "Saúde",
+        providerHealthStateLabel(health.connectionState)
+      );
+      appendDefinition(
+        metadata,
+        "Último sucesso",
+        formatProviderHealthDate(health.lastSuccessfulRequest)
+      );
+      appendDefinition(
+        metadata,
+        "Latência",
+        health.totalLatencyMilliseconds == null
+          ? "indisponível"
+          : `${formatInteger(health.totalLatencyMilliseconds)} ms`
+      );
+      appendDefinition(metadata, "Uso", usageAccuracyLabel(health.tokenUsageAccuracy));
+    }
 
     const billingField = document.createElement("label");
     billingField.className = "cloud-billing-field";
@@ -4627,12 +5164,67 @@ function renderCloudProviders() {
     diagnostic.className = "runtime-note cloud-provider-diagnostic";
     diagnostic.dataset.cloudDiagnostic = provider.provider;
     diagnostic.textContent = provider.diagnostic ?? "";
-    body.append(metadata, billingField, keyField, actions, diagnostic);
+    const fields = document.createElement("div");
+    fields.className = "cloud-provider-fields";
+    fields.append(keyField, billingField);
+    body.append(metadata, fields, actions, diagnostic);
     card.append(summary, body);
     elements.cloudProvidersList.append(card);
   }
 
   renderOllamaWebSearchSettings();
+}
+
+function createProviderHealthCard(provider) {
+  const card = document.createElement("details");
+  card.className = "cloud-provider-card provider-health-card";
+  card.dataset.provider = provider.providerId;
+  card.dataset.state = provider.connectionState;
+  card.open = state.openCloudProviders.has(provider.providerId);
+  card.addEventListener("toggle", () => {
+    if (card.open) {
+      state.openCloudProviders.add(provider.providerId);
+    } else {
+      state.openCloudProviders.delete(provider.providerId);
+    }
+  });
+  const summary = document.createElement("summary");
+  const title = document.createElement("span");
+  title.className = "cloud-provider-title";
+  title.textContent = provider.displayName;
+  const badge = document.createElement("span");
+  badge.className = `badge ${provider.connectionState === "healthy"
+    ? "success"
+    : ["degraded", "unavailable"].includes(provider.connectionState)
+      ? "error"
+      : "muted"}`;
+  badge.textContent = providerHealthStateLabel(provider.connectionState);
+  summary.append(title, badge);
+  const body = document.createElement("div");
+  body.className = "cloud-provider-body";
+  const metadata = document.createElement("dl");
+  metadata.className = "cloud-provider-metadata";
+  appendDefinition(metadata, "Último sucesso", formatProviderHealthDate(provider.lastSuccessfulRequest));
+  appendDefinition(
+    metadata,
+    "Latência",
+    provider.totalLatencyMilliseconds == null
+      ? "indisponível"
+      : `${formatInteger(provider.totalLatencyMilliseconds)} ms`
+  );
+  appendDefinition(metadata, "Quota", provider.quotaState);
+  appendDefinition(metadata, "Uso", usageAccuracyLabel(provider.tokenUsageAccuracy));
+  const diagnostic = document.createElement("pre");
+  diagnostic.className = "provider-health-diagnostic";
+  diagnostic.textContent = [
+    `status: ${provider.diagnostic.lastStatusCode ?? "indisponível"}`,
+    `retry: ${provider.diagnostic.retryDecision}`,
+    `fonte: ${provider.healthSource}`,
+    `stale: ${provider.stale ? "sim" : "não"}`
+  ].join("\n");
+  body.append(metadata, diagnostic);
+  card.append(summary, body);
+  return card;
 }
 
 function renderOllamaWebSearchSettings() {
@@ -4645,6 +5237,14 @@ function renderOllamaWebSearchSettings() {
   const card = document.createElement("details");
   card.className = "cloud-provider-card";
   card.dataset.provider = integration.provider;
+  card.open = state.openCloudProviders.has(integration.provider);
+  card.addEventListener("toggle", () => {
+    if (card.open) {
+      state.openCloudProviders.add(integration.provider);
+    } else {
+      state.openCloudProviders.delete(integration.provider);
+    }
+  });
   const summary = document.createElement("summary");
   const title = document.createElement("span");
   title.className = "cloud-provider-title";
@@ -4781,6 +5381,9 @@ async function handleCloudProviderAction(event) {
 
     if (!apiKey) {
       diagnostic.textContent = "Digite uma API key antes de salvar.";
+      input.classList.add("field-invalid");
+      input.setAttribute("aria-invalid", "true");
+      showToast(diagnostic.textContent);
       input.focus();
       return;
     }
@@ -4794,7 +5397,10 @@ async function handleCloudProviderAction(event) {
       body: JSON.stringify({ apiKey })
     };
   } else if (action === "remove-key") {
-    if (!window.confirm("Remover permanentemente a chave protegida deste provedor?")) {
+    if (!await showAppConfirm(
+      "Remover permanentemente a chave protegida deste provedor?",
+      { title: "Remover chave?", confirmLabel: "Remover", danger: true }
+    )) {
       return;
     }
 
@@ -4803,8 +5409,9 @@ async function handleCloudProviderAction(event) {
   } else {
     const operation = action === "test" ? "testar a conexão" : "atualizar os modelos";
 
-    if (!window.confirm(
-      `Permitir uma chamada real ao provedor para ${operation}? Essa ação pode consumir quota.`
+    if (!await showAppConfirm(
+      `Permitir uma chamada real ao provedor para ${operation}? Essa ação pode consumir quota.`,
+      { title: "Autorizar chamada ao provedor?", confirmLabel: "Autorizar" }
     )) {
       return;
     }
@@ -4821,8 +5428,10 @@ async function handleCloudProviderAction(event) {
   try {
     await fetchJson(path, options);
     await refreshCloudProviderState();
+    showToast("Ação do provedor concluída.", "success");
   } catch (error) {
     diagnostic.textContent = error.message;
+    showToast(error.message);
   } finally {
     button.disabled = false;
   }
@@ -4844,6 +5453,9 @@ async function handleOllamaWebSearchAction(button) {
 
     if (!apiKey) {
       diagnostic.textContent = "Digite a chave separada antes de salvar.";
+      input.classList.add("field-invalid");
+      input.setAttribute("aria-invalid", "true");
+      showToast(diagnostic.textContent);
       input.focus();
       return;
     }
@@ -4857,8 +5469,9 @@ async function handleOllamaWebSearchAction(button) {
       body: JSON.stringify({ apiKey })
     };
   } else {
-    if (!window.confirm(
-      "Remover permanentemente a chave protegida do Ollama Web Search?"
+    if (!await showAppConfirm(
+      "Remover permanentemente a chave protegida do Ollama Web Search?",
+      { title: "Remover chave?", confirmLabel: "Remover", danger: true }
     )) {
       return;
     }
@@ -4876,6 +5489,7 @@ async function handleOllamaWebSearchAction(button) {
     await refreshSelectedModelCapabilities();
   } catch (error) {
     diagnostic.textContent = error.message;
+    showToast(error.message);
   } finally {
     button.disabled = false;
   }
@@ -5144,11 +5758,12 @@ async function openSettings(section = "general") {
   await loadPortableYaml();
 }
 
-function closeSettings() {
+async function closeSettings() {
   if (
     state.settingsDirty
-    && !window.confirm(
-      "Discard unsaved settings changes?"
+    && !await showAppConfirm(
+      "Descartar as alterações de configuração ainda não salvas?",
+      { title: "Fechar sem salvar?", confirmLabel: "Descartar", danger: true }
     )
   ) {
     return;
@@ -5162,6 +5777,7 @@ function closeSettings() {
 async function saveSettings(event) {
   event.preventDefault();
   elements.settingsErrors.hidden = true;
+  clearSettingsValidationMarkers();
   elements.saveStatus.textContent = "Salvando…";
   const intentions = {};
 
@@ -5178,6 +5794,7 @@ async function saveSettings(event) {
     schemaVersion: state.settings.schemaVersion,
     ollamaUrl: elements.ollamaUrl.value.trim(),
     routerModel: elements.routerModel.value,
+    actionModel: elements.actionModel.value,
     coordinatorModel: elements.coordinatorModel.value,
     defaultModel: elements.defaultModel.value,
     defaultGpu: elements.defaultGpu.value,
@@ -5247,12 +5864,14 @@ async function saveSettings(event) {
     scheduleRuntimeRefresh();
   } catch (error) {
     const errors = error.payload?.errors;
-    elements.settingsErrors.textContent = errors
+    const message = errors
       ? Object.entries(errors)
         .flatMap(([field, messages]) => messages.map(message => `${field}: ${message}`))
         .join("\n")
       : error.message;
-    elements.settingsErrors.hidden = false;
+    elements.settingsErrors.textContent = message;
+    markSettingsValidationErrors(errors ?? {});
+    showToast(message, "error", 30000);
     elements.saveStatus.textContent = "";
     navigateToSettingsError(
       Object.keys(errors ?? {})[0]
@@ -5261,6 +5880,9 @@ async function saveSettings(event) {
 }
 
 function handleSettingsInput(event) {
+  event.target.classList.remove("field-invalid");
+  event.target.removeAttribute("aria-invalid");
+  event.target.closest(".intention-card")?.classList.remove("field-invalid-card");
   if (
     event.target.closest("[data-ignore-settings-dirty]")
     ||
@@ -5272,6 +5894,55 @@ function handleSettingsInput(event) {
   state.settingsDirty = true;
   updateSettingsDirtyState();
   renderModelChainPreview();
+}
+
+function clearSettingsValidationMarkers() {
+  elements.settingsForm.querySelectorAll(".field-invalid").forEach(
+    field => {
+      field.classList.remove("field-invalid");
+      field.removeAttribute("aria-invalid");
+    }
+  );
+  elements.settingsForm.querySelectorAll(".field-invalid-card").forEach(
+    card => card.classList.remove("field-invalid-card")
+  );
+}
+
+function markSettingsValidationErrors(errors) {
+  for (const field of Object.keys(errors)) {
+    let control = null;
+    const intention = field.match(/^intentions[.:]([^.:]+)/i)?.[1];
+    if (intention) {
+      const card = elements.intentionsGrid.querySelector(
+        `[data-intention="${CSS.escape(intention)}"]`
+      );
+      control = field.toLowerCase().includes("fallback")
+        ? card?.querySelector(".intention-fallback-model")
+        : card?.querySelector(".intention-model");
+      card?.classList.add("field-invalid-card");
+    } else if (field.startsWith("router")) {
+      control = elements.routerModel;
+    } else if (field.startsWith("coordinator")) {
+      control = elements.coordinatorModel;
+    } else if (field.startsWith("defaultModel")) {
+      control = elements.defaultModel;
+    } else {
+      const fieldControls = {
+        "context.defaultContextTokens": elements.defaultContextTokens,
+        "context.providerContextTokens": elements.providerContextTokens,
+        "context.reservedResponseTokens": elements.reservedResponseTokens,
+        "context.maxConversationMessages": elements.maxConversationMessages,
+        "execution.maxToolOutputTokens": elements.maxToolOutputTokens,
+        "runtime.generationTimeoutSeconds": elements.generationTimeoutSeconds,
+        ollamaUrl: elements.ollamaUrl
+      };
+      control = fieldControls[field] ?? null;
+    }
+    if (control) {
+      control.classList.add("field-invalid");
+      control.setAttribute("aria-invalid", "true");
+    }
+  }
 }
 
 function updateSettingsDirtyState() {
@@ -5434,9 +6105,10 @@ async function restoreLocalBackup() {
 
   const categories = inspection.manifest.categories;
 
-  if (!window.confirm(
+  if (!await showAppConfirm(
     `Restaurar as categorias ${categories.join(", ")}? `
-      + "O estado atual serÃ¡ salvo antes da aplicaÃ§Ã£o atÃ´mica."
+      + "O estado atual será salvo antes da aplicação atômica.",
+    { title: "Restaurar backup?", confirmLabel: "Restaurar" }
   )) {
     return;
   }
@@ -5484,8 +6156,9 @@ async function importPortableYaml() {
 
   if (
     state.settingsDirty
-    && !window.confirm(
-      "A importação substituirá as alterações ainda não salvas deste formulário. Continuar?"
+    && !await showAppConfirm(
+      "A importação substituirá as alterações ainda não salvas deste formulário. Continuar?",
+      { title: "Importar configuração?", confirmLabel: "Importar" }
     )
   ) {
     return;
@@ -5586,7 +6259,7 @@ function navigateToSettingsError(field) {
     section,
     true
   );
-  elements.settingsErrors.focus();
+  elements.settingsForm.querySelector(".field-invalid")?.focus();
 }
 
 function handleSettingsCancel(event) {
@@ -5804,6 +6477,10 @@ function renderWebControl() {
   };
   elements.webToggle.dataset.state = state.webControlState;
   elements.webToggleLabel.textContent = labels[state.webControlState];
+  elements.webToggle.setAttribute(
+    "aria-label",
+    labels[state.webControlState]
+  );
   elements.webToggle.disabled = !available || Boolean(state.requestController);
   elements.webToggle.setAttribute(
     "aria-pressed",
@@ -6038,9 +6715,10 @@ async function ensureCloudImageApproval(model) {
     (sum, attachment) => sum + attachment.declaredBytes,
     0
   );
-  const approved = window.confirm(
+  const approved = await showAppConfirm(
     `${providerLabel(provider)} receberá ${formatBytes(bytes)} de imagens. `
-      + "Esses bytes sairão deste computador. Autorizar para este provedor nesta sessão?"
+      + "Esses bytes sairão deste computador. Autorizar para este provedor nesta sessão?",
+    { title: "Autorizar envio de imagens?", confirmLabel: "Autorizar" }
   );
 
   if (!approved) {
@@ -6097,8 +6775,11 @@ function handleModeChange(event) {
   if (state.requestController) {
     return;
   }
+  setInteractionMode(event.currentTarget.dataset.mode);
+}
 
-  state.interactionMode = event.currentTarget.dataset.mode;
+function setInteractionMode(mode) {
+  state.interactionMode = mode;
   updateInteractionControls();
   updateComposerStatus();
 }
@@ -6212,7 +6893,11 @@ async function requestConversationTransition(action) {
   );
   if (historyEnabled) {
     try {
-      if (!await saveCurrentConversation()) {
+      if (
+        hasMeaningfulConversation()
+        && state.persistenceStatus !== "Saved locally"
+        && !await saveCurrentConversation()
+      ) {
         return;
       }
       await action();
@@ -6286,9 +6971,10 @@ async function saveCurrentConversation() {
 
 async function beginEmptyConversation() {
   const nextBrowserSessionId = createSessionId();
+  let identity;
 
   try {
-    const identity = await fetchJson(
+    identity = await fetchJson(
       "/api/sessions/new",
       {
         method: "POST",
@@ -6300,21 +6986,27 @@ async function beginEmptyConversation() {
         })
       }
     );
-    await resetCloudImagePrivacy(state.browserSessionId);
-    clearConversationUi();
-    state.browserSessionId = nextBrowserSessionId;
-    state.conversationSessionId = identity.sessionId;
-    state.conversationState = "completed";
-    state.latestExecutionSessionId = null;
-    setPersistenceStatus(identity.status);
-    await refreshSessions();
-    await refreshGit();
-    await refreshSelectedModelCapabilities();
   } catch (error) {
     setPersistenceStatus("Save failed");
     elements.composerStatus.textContent =
       `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
+    return;
   }
+
+  const previousBrowserSessionId = state.browserSessionId;
+  clearConversationUi();
+  state.browserSessionId = nextBrowserSessionId;
+  state.conversationSessionId = identity.sessionId;
+  state.conversationState = "completed";
+  state.latestExecutionSessionId = null;
+  setPersistenceStatus(identity.status);
+
+  await Promise.allSettled([
+    resetCloudImagePrivacy(previousBrowserSessionId),
+    refreshSessions(),
+    refreshGit(),
+    refreshSelectedModelCapabilities()
+  ]);
 }
 
 function clearConversationUi() {
@@ -6646,6 +7338,13 @@ async function handleComposerSubmit(event) {
         }
       );
       state.conversationState = "completed";
+      if (state.requestController === controller) {
+        state.requestController = null;
+        state.activeAssistant = null;
+        setStreamingState(false);
+        void refreshRuntimeStatus();
+        scheduleRuntimeRefresh();
+      }
       await refreshSessions();
       await refreshGit();
     }
@@ -7014,6 +7713,7 @@ async function consumeEventStream(stream, assistant) {
           `Falhou · ${streamEvent.error.traceId}`,
           true
         );
+        addTraceDiagnosticActions(assistant, streamEvent.error);
       } else if (streamEvent.type === "request.cancelled") {
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
@@ -7026,6 +7726,13 @@ async function consumeEventStream(stream, assistant) {
           assistant,
           streamEvent
         );
+      } else if (
+        streamEvent.localAction
+        && updateApprovalActivity(
+          assistant,
+          streamEvent
+        )
+      ) {
       } else if (
         streamEvent.type === "action.recovery-decision-required"
         && streamEvent.recoveryDecision
@@ -7062,6 +7769,89 @@ async function consumeEventStream(stream, assistant) {
     answer,
     completed
   };
+}
+
+function addTraceDiagnosticActions(assistant, error) {
+  if (!error?.traceId || assistant.container.querySelector(".trace-diagnostic-actions")) {
+    return;
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "trace-diagnostic-actions";
+  const copy = createMessageActionButton("Copiar trace", "Copiar identificador de trace");
+  const view = createMessageActionButton("Ver diagnostico", "Abrir diagnostico local sanitizado");
+  view.disabled = error.diagnosticsPersisted !== true;
+  if (view.disabled) {
+    view.title = "O journal local nao confirmou a persistencia deste diagnostico.";
+  }
+  copy.addEventListener("click", () => copyText(error.traceId, copy, "Trace ID copiado"));
+  view.addEventListener("click", () => openTraceDiagnostic(error.traceId));
+  actions.append(copy, view);
+  assistant.answer.insertAdjacentElement("afterend", actions);
+}
+
+async function openTraceDiagnostic(traceId) {
+  elements.traceDiagnosticDialog.dataset.traceId = traceId;
+  elements.traceDiagnosticId.textContent = traceId;
+  elements.traceDiagnosticStatus.textContent = "Carregando diagnostico local...";
+  elements.traceDiagnosticFacts.replaceChildren();
+  elements.traceDiagnosticTimeline.replaceChildren();
+  elements.traceDiagnosticDialog.showModal();
+
+  try {
+    const report = await fetchJson(`/api/diagnostics/traces/${encodeURIComponent(traceId)}`);
+    renderTraceDiagnostic(report);
+  } catch (error) {
+    elements.traceDiagnosticStatus.textContent = error.message;
+  }
+}
+
+function closeTraceDiagnostic() {
+  if (elements.traceDiagnosticDialog.open) {
+    elements.traceDiagnosticDialog.close();
+  }
+}
+
+function renderTraceDiagnostic(report) {
+  elements.traceDiagnosticStatus.textContent = report.truncated
+    ? `Diagnostico limitado a ${report.totalEvents} eventos seguros.`
+    : `${report.totalEvents} eventos seguros correlacionados.`;
+  const facts = [
+    ["Estado", report.status],
+    ["Codigo", report.failureCode ?? "nenhum"],
+    ["Etapa", report.failureStage ?? "nenhuma"],
+    ["Provedor / modelo", [report.provider, report.model].filter(Boolean).join(" / ") || "indisponivel"],
+    ["Coordenador", report.coordinator ?? "indisponivel"],
+    ["Caminho", report.executionPath ?? "indisponivel"],
+    ["Resultado revisavel", report.reviewAvailable ? "sim" : "nao"],
+    ["Recomendacao", report.recommendation]
+  ];
+  if (report.contextFit) {
+    facts.push([
+      "Contexto",
+      `entrada ${report.contextFit.estimatedInputTokens ?? "?"} + reserva ${report.contextFit.reservedOutputTokens ?? "?"} = requerido ${report.contextFit.requiredContextTokens ?? "?"}; maximo ${report.contextFit.maximumContextTokens ?? "?"}`
+    ]);
+  }
+
+  for (const [label, value] of facts) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    detail.textContent = value;
+    elements.traceDiagnosticFacts.append(term, detail);
+  }
+
+  for (const event of report.events ?? []) {
+    const item = document.createElement("li");
+    const heading = document.createElement("strong");
+    heading.textContent = `${event.sequence}. ${event.code}`;
+    const meta = document.createElement("span");
+    meta.textContent = `${event.stage} · ${event.status}`;
+    const summary = document.createElement("p");
+    summary.textContent = event.summary;
+    item.append(heading, meta, summary);
+    elements.traceDiagnosticTimeline.append(item);
+  }
 }
 
 function addActivity(assistant, streamEvent, isWarningOrError) {
@@ -7279,7 +8069,18 @@ function updateExecutionSession(assistant, session) {
   stateLabel.textContent = session.state;
   const coordinator = document.createElement("span");
   coordinator.textContent =
-    `${session.coordinatorModel} · ${session.executionPath}`;
+    `Alvo: ${session.selectedModel || "indisponível"} · `
+    + `Coordenador: ${session.coordinatorModel} · `
+    + `Residente: ${session.residentModel || "indisponível"} · `
+    + session.executionPath;
+  coordinator.title = [
+    session.conformanceIdentity
+      ? `Conformidade: ${session.conformanceIdentity}`
+      : null,
+    session.handoffReason
+      ? `Handoff: ${session.handoffReason}`
+      : null
+  ].filter(Boolean).join("\n");
   const counts = document.createElement("span");
   counts.textContent =
     `${session.actionCount} ações · ${session.changedFileCount} arquivos · `
@@ -7407,10 +8208,13 @@ function renderChangeReview(review) {
   const summary = document.createElement("section");
   summary.className = "change-review-summary";
   const heading = document.createElement("h3");
-  heading.textContent = `${review.summary.state} · ${review.summary.coordinatorModel}`;
+  heading.textContent =
+    `${review.summary.state} · Alvo: ${review.summary.selectedModel || "indisponível"}`;
   const metadata = document.createElement("p");
   metadata.textContent =
-    `${review.summary.executionPath} · ${review.summary.actionCount} ações · `
+    `Coordenador: ${review.summary.coordinatorModel} · `
+    + `Residente: ${review.summary.residentModel || "indisponível"} · `
+    + `${review.summary.executionPath} · ${review.summary.actionCount} ações · `
     + `${review.summary.changedFileCount} arquivos · `
     + `${formatElapsed(review.summary.elapsedMilliseconds)} · `
     + `${review.summary.completionStatus}`;
@@ -8058,8 +8862,9 @@ async function undoExecution() {
     return;
   }
 
-  if (!window.confirm(
-    "Desfazer integralmente as alterações desta sessão? O estado atual será validado antes de qualquer mudança."
+  if (!await showAppConfirm(
+    "Desfazer integralmente as alterações desta sessão? O estado atual será validado antes de qualquer mudança.",
+    { title: "Desfazer alterações?", confirmLabel: "Desfazer", danger: true }
   )) {
     return;
   }
@@ -8110,8 +8915,9 @@ async function validateChanges() {
   }
 
   const confirmed = state.approvalPolicy !== "ask"
-    || window.confirm(
-      "Executar agora todas as etapas estruturadas do perfil de validação salvo?"
+    || await showAppConfirm(
+      "Executar agora todas as etapas estruturadas do perfil de validação salvo?",
+      { title: "Executar validação?", confirmLabel: "Executar" }
     );
 
   if (!confirmed) {
@@ -8183,12 +8989,10 @@ function addApprovalActivity(assistant, streamEvent) {
   message.className = "activity-message";
   message.textContent = streamEvent.message;
   content.append(message);
+  const command = createTerminalCommand(action, title);
 
-  if (action.preview) {
-    const preview = document.createElement("pre");
-    preview.className = "action-preview";
-    preview.textContent = action.preview;
-    content.append(preview);
+  if (command.host) {
+    content.append(command.host);
   }
 
   const controls = document.createElement("div");
@@ -8206,6 +9010,21 @@ function addApprovalActivity(assistant, streamEvent) {
   row.append(summary, content);
   assistant.activityList.append(row);
   assistant.details.open = true;
+
+  if (command.input) {
+    row.dataset.editableText = command.input.value;
+    command.input.addEventListener(
+      "input",
+      () => {
+        command.input.removeAttribute("aria-invalid");
+        status.textContent = command.input.value
+          === (row.dataset.editableText ?? "")
+          ? "Aguardando decisão"
+          : "Alteração será validada ao aprovar";
+      }
+    );
+  }
+
   approve.addEventListener(
     "click",
     () => decideAction(
@@ -8215,7 +9034,8 @@ function addApprovalActivity(assistant, streamEvent) {
       approve,
       reject,
       status,
-      row
+      row,
+      command.input
     )
   );
   reject.addEventListener(
@@ -8227,9 +9047,163 @@ function addApprovalActivity(assistant, streamEvent) {
       approve,
       reject,
       status,
-      row
+      row,
+      command.input
     )
   );
+}
+
+function createTerminalCommand(action, title) {
+  if (!action.preview && !action.editableText) {
+    return { host: null, input: null };
+  }
+
+  const host = document.createElement("div");
+  host.className = "terminal-command";
+  const prompt = document.createElement("span");
+  prompt.className = "terminal-prompt";
+  prompt.textContent = "$";
+  title.classList.add("terminal-tool-title");
+
+  if (action.editable) {
+    const input = document.createElement(
+      action.tool === "run_process" ? "input" : "textarea"
+    );
+    input.className = "terminal-command-input";
+
+    if (input instanceof HTMLInputElement) {
+      input.type = "text";
+    } else {
+      input.rows = Math.min(
+        4,
+        Math.max(1, (action.editableText ?? action.preview).split("\n").length)
+      );
+    }
+
+    input.value = action.editableText ?? action.preview;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.setAttribute(
+      "aria-label",
+      `Editar comando de ${action.tool}`
+    );
+    host.append(prompt);
+
+    if (action.tool !== "run_process") {
+      const tool = document.createElement("code");
+      tool.className = "terminal-structured-tool";
+      tool.textContent = action.tool;
+      host.append(tool);
+    }
+
+    host.append(input);
+    return { host, input };
+  }
+
+  const value = document.createElement("code");
+  value.className = "terminal-command-value";
+  const match = action.preview.match(/^(\S+)([\s\S]*)$/);
+  const executablePart = document.createElement("span");
+  executablePart.className = "terminal-executable";
+  executablePart.textContent = match?.[1] ?? action.preview;
+  const argumentsPart = document.createElement("span");
+  argumentsPart.className = "terminal-arguments";
+  argumentsPart.textContent = match?.[2] ?? "";
+  value.append(executablePart, argumentsPart);
+  host.append(prompt, value);
+  return { host, input: null };
+}
+
+function updateApprovalActivity(assistant, streamEvent) {
+  const action = streamEvent.localAction;
+  const approval = assistant.activityList.querySelector(
+    `.action-approval[data-action-id="${CSS.escape(action.actionId)}"]`
+  );
+
+  if (!approval) {
+    return false;
+  }
+
+  approval.dataset.eventType = streamEvent.type;
+
+  const status = approval.querySelector(".approval-status");
+  const title = approval.querySelector(".action-approval-summary-content strong");
+  const input = approval.querySelector(".terminal-command-input");
+  const controls = approval.querySelector(".approval-controls");
+
+  if (title && action.summary) {
+    title.textContent = action.summary;
+  }
+
+  if (input && action.editableText) {
+    input.value = action.editableText;
+    input.readOnly = action.state !== "awaiting-approval"
+      && action.state !== "revised";
+    approval.dataset.editableText = action.editableText;
+  }
+
+  if (action.state === "revised") {
+    status.textContent = "Alteração validada";
+  } else if (action.state === "approved") {
+    status.textContent = "Aprovada";
+  } else if (action.state === "executing") {
+    status.textContent = "Executando…";
+  } else if (action.state === "completed") {
+    status.textContent = "Concluída";
+    approval.dataset.decision = "completed";
+    renderApprovalResponse(approval, action, false);
+  } else if (action.state === "failed") {
+    status.textContent = "Falhou";
+    approval.dataset.decision = "failed";
+    renderApprovalResponse(approval, action, true);
+  } else if (action.state === "rejected") {
+    status.textContent = "Rejeitada";
+    approval.dataset.decision = "rejected";
+  }
+
+  if (
+    action.state === "approved"
+    || action.state === "executing"
+    || action.state === "completed"
+    || action.state === "failed"
+    || action.state === "rejected"
+  ) {
+    controls?.remove();
+
+    if (input) {
+      input.readOnly = true;
+    }
+  }
+
+  if (action.state === "rejected") {
+    approval.open = false;
+  } else if (action.state === "completed" || action.state === "failed") {
+    approval.open = true;
+  }
+
+  return true;
+}
+
+function renderApprovalResponse(approval, action, failed) {
+  let response = approval.querySelector(".action-response");
+
+  if (!response) {
+    response = document.createElement("details");
+    response.className = "action-response";
+    const summary = document.createElement("summary");
+    const output = document.createElement("pre");
+    output.className = "action-response-output";
+    response.append(summary, output);
+    approval.querySelector(".action-approval-content")?.append(response);
+  }
+
+  response.dataset.state = failed ? "failed" : "completed";
+  response.open = false;
+  response.querySelector("summary").textContent = failed
+    ? "Execução · falhou"
+    : "Execução · concluída";
+  response.querySelector(".action-response-output").textContent =
+    action.resultOutput || "Concluída sem saída textual.";
 }
 
 async function decideAction(
@@ -8239,10 +9213,14 @@ async function decideAction(
   approveButton,
   rejectButton,
   status,
-  approval
+  approval,
+  input
 ) {
   approveButton.disabled = true;
   rejectButton.disabled = true;
+  if (input) {
+    input.disabled = true;
+  }
   status.textContent = approved ? "Aprovando…" : "Rejeitando…";
 
   try {
@@ -8256,17 +9234,44 @@ async function decideAction(
         body: JSON.stringify({
           approved,
           browserSessionId: state.browserSessionId,
-          executionSessionId
+          executionSessionId,
+          editedText: approved
+            && input
+            && input.value !== (approval.dataset.editableText ?? "")
+            ? input.value
+            : null
         })
       }
     );
+    if (
+      approval.dataset.decision === "completed"
+      || approval.dataset.decision === "failed"
+      || approval.dataset.decision === "rejected"
+    ) {
+      return;
+    }
+
     status.textContent = approved ? "Aprovada" : "Rejeitada";
     approval.dataset.decision = approved
       ? "approved"
       : "rejected";
-    approval.open = false;
+    approval.querySelector(".approval-controls")?.remove();
+    if (input) {
+      approval.dataset.editableText = input.value;
+      input.readOnly = true;
+      input.disabled = false;
+    }
+
+    approval.open = approved;
   } catch (error) {
-    status.textContent = error.message;
+    status.textContent = approved && input
+      ? "Alteração inválida"
+      : error.message;
+    if (input) {
+      input.disabled = false;
+      input.setAttribute("aria-invalid", "true");
+    }
+    showToast(error.message);
     approveButton.disabled = false;
     rejectButton.disabled = false;
   }

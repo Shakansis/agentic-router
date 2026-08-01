@@ -84,6 +84,12 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     );
     ModelGroup(
       yaml,
+      "action",
+      settings.ActionModel,
+      settings.CoordinatorModel
+    );
+    ModelGroup(
+      yaml,
       "coordinator",
       settings.CoordinatorModel,
       null
@@ -648,6 +654,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       new[]
       {
         "router",
+        "action",
         "coordinator",
         "default"
       }.Concat(
@@ -670,6 +677,14 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings.CoordinatorModel,
       null,
       false,
+      errors
+    );
+    var action = ReadModelGroup(
+      models,
+      "action",
+      settings.ActionModel,
+      null,
+      true,
       errors
     );
     var defaultModel = ReadModelGroup(
@@ -707,7 +722,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     return settings with
     {
       RouterModel = router.Primary,
-      CoordinatorModel = coordinator.Primary,
+      ActionModel = action.Primary,
+      CoordinatorModel = action.Fallback ?? coordinator.Primary,
       DefaultModel = defaultModel.Primary,
       Intentions = intentions
     };

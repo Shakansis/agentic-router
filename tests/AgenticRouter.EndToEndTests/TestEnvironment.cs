@@ -279,7 +279,12 @@ internal sealed class TestEnvironment : IAsyncDisposable
           BaselineSettings,
           TestJson.Options
     );
-    response.EnsureSuccessStatusCode();
+    if (!response.IsSuccessStatusCode)
+    {
+      throw new HttpRequestException(
+        $"Baseline settings reset failed with {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
+      );
+    }
     using var profilesResponse = await HttpClient.GetAsync(
       "api/workspaces"
     );
@@ -287,6 +292,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
     using var profilesDocument = JsonDocument.Parse(
       await profilesResponse.Content.ReadAsStringAsync()
     );
+    var activeWorkspaceId = profilesDocument.RootElement.GetProperty(
+      "activeWorkspaceId"
+    ).GetString();
 
     foreach (var profile in profilesDocument.RootElement
       .GetProperty(
@@ -319,11 +327,15 @@ internal sealed class TestEnvironment : IAsyncDisposable
         continue;
       }
 
-      using var activated = await HttpClient.PostAsync(
-        $"api/workspaces/{id}/activate",
-        null
-      );
-      activated.EnsureSuccessStatusCode();
+      if (!string.Equals(activeWorkspaceId, id, StringComparison.Ordinal))
+      {
+        using var activated = await HttpClient.PostAsync(
+          $"api/workspaces/{id}/activate",
+          null
+        );
+        activated.EnsureSuccessStatusCode();
+        activeWorkspaceId = id;
+      }
       using var history = await HttpClient.PutAsJsonAsync(
         $"api/workspaces/{id}/history",
         new

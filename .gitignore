@@ -429,6 +429,8 @@ AgenticRouter.Api/data/workspaces.json
 AgenticRouter.Api/data/.workspaces-*.tmp
 AgenticRouter.Api/data/workspaces/
 AgenticRouter.Api/data/usage/
+AgenticRouter.Api/data/incidents/
+AgenticRouter.Api/data/usage-aggregates/
 AgenticRouter.Api/data/secrets/
 AgenticRouter.Api/data/providers/
 

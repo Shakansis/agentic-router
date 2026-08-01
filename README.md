@@ -2,11 +2,18 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
+**Current Status**: v0.9.14 - Execute effect authority and conversation UI reliability correction. File creation is manually acceptable; editing and deletion still require corrective real-model validation.
+
 ## 🎯 Project Mission
 
-Agentic Router is a focused local LLM router with a polished chat interface. It receives user messages in a continuous chat session, identifies the message intent with a lightweight router, resolves the model and device from user configuration, streams the selected model response, and exposes concise routing and inference activity in the UI.
+Agentic Router is a local-first application that routes conversations and supervised software-development tasks to local Ollama models or explicitly configured cloud providers.
 
-The product remains intentionally smaller and simpler than a general-purpose agent orchestrator. An expert is a configured combination of intent, model, optional device preference, and system prompt—not an autonomous process, agent graph, or tool-using worker.
+The product has two user-visible modes:
+
+- **Chat** routes a turn to a configured expert and streams one continuous answer. An expert is a configured combination of intent, model, optional device preference, and system prompt—not an autonomous process, agent graph, or tool-using worker.
+- **Execute** lets a coordinator inspect a trusted workspace, propose a host-owned plan, use a constrained set of local tools, request approvals when required, validate changes, and present a reviewable result.
+
+The host, not the model, owns security boundaries, plan identity, approval decisions, retries, recovery budgets, persistence, and tool execution.
 
 ## 🏗️ Architecture Overview
 
@@ -45,6 +52,46 @@ The application follows a flexible pipeline that adapts to available hardware:
 
 **Key Point**: Local GPU selection is an Ollama preference. Cloud providers own their remote hardware allocation and require an explicitly saved, Windows-protected API key.
 
+### Execute Mode
+
+Execute mode provides supervised local tool execution within a user-approved trusted workspace:
+
+**Core Concepts:**
+- **Trusted Workspace**: A user-approved directory where all file operations are confined
+- **Host-Owned Plans**: Execution plans are created and managed by the host, not the model
+- **Effect-Based Completion**: Plan steps advance only after verified filesystem effects are observed
+- **Approval Workflow**: Sensitive operations require explicit user approval before execution
+- **Tool Effect Registry**: Post-resolution effect typing (inspection, file creation, modification, deletion, etc.)
+
+**Available Tools:**
+- `list_files` - List directory contents
+- `read_file` - Read file contents
+- `get_file_info` - Get file metadata
+- `search_text` - Search for text within files
+- `create_file` - Create new files
+- `write_file` - Write to existing files
+- `replace_text` - Replace text in files
+- `apply_patch` - Apply multiple text replacements
+- `create_directory` - Create directories
+- `run_process` - Execute allowed processes with policy validation
+- `delete_files` - Delete explicitly inspected files (requires approval)
+- `run_validation_profile` - Run configured validation profiles
+
+**Security Boundaries:**
+- All file paths are canonicalized and confined to the trusted workspace
+- Protected instruction files require explicit mention in the user objective
+- Process execution uses an allowlist policy
+- File modifications require prior inspection in the same execution session
+- Deletion always requires immutable approval and hash validation
+
+**Git Delivery:**
+Execute mode includes a safe Git workflow for committing changes:
+- Bounded status, diff, log, and commit data inspection
+- Structured staging, unstaging, commit, annotated-tag, and push operations
+- Repository initialization on `main` (Execute mode only, requires approval)
+- Repository-local `user.name`, `user.email`, and `origin` configuration
+- History-contradicting undo is disabled after commit
+
 ## 🛠️ Tech Stack
 
 ### Backend
@@ -79,15 +126,42 @@ The application follows a flexible pipeline that adapts to available hardware:
   layout-example.html          # Visual reference for UI design
   AgenticRouter.slnx           # Solution file
   AgenticRouter.Api/
-    Controllers/               # HTTP endpoints (Chat, Settings, Models, Devices)
+    Controllers/               # HTTP endpoints (Chat, Settings, Models, Devices, Execute, Git, etc.)
     Chat/                      # Chat turn coordination and streaming
     Configuration/             # Settings store, validation, and defaults
     Devices/                   # GPU discovery service
     Markdown/                  # Safe markdown rendering
+    Execution/                 # Execute mode: plans, tools, approvals, validation, Git delivery
+      ApprovalCoordinator.cs
+      ExecutionPlanService.cs
+      LocalActionService.cs
+      LocalActionPlanner.cs
+      ToolEffectRegistry.cs
+      ToolProtocolConformanceService.cs
+      ValidationProfileService.cs
+      GitDelivery/             # Git workflow integration
     Providers/
       Ollama/                  # Ollama HTTP communication
       Cloud/                   # Groq, Gemini, Cerebras, registry, and protected keys
+      CapabilityServices.cs    # Capability detection and metadata
+      ProviderDispatchClient.cs
+      ProviderHealth.cs
     Contracts/                 # Typed request/response contracts
+    Runtime/                   # GPU/memory metrics, resident model management, context profiles
+      OllamaRuntimeProfileService.cs
+      ResidentModelManager.cs
+      RuntimeStatusService.cs
+    Usage/                     # Token usage analytics, pricing, reconciliation
+      UsageLedger.cs
+      PricingCatalog.cs
+      UsageReconciliationService.cs
+    WorkspaceProfiles/          # Trusted workspace configuration
+    ProjectAwareness/           # Repository instruction detection
+    Recovery/                  # Backup, restore, safe mode, diagnostics
+    Observability/             # Incident journal, trace tracking
+    Models/                    # Model organization, favorites, profiles
+    Routing/                   # Intent classification and model resolution
+    Sessions/                  # Conversation persistence and management
     wwwroot/
       index.html               # Main chat UI
       styles.css               # Application styling
@@ -97,7 +171,11 @@ The application follows a flexible pipeline that adapts to available hardware:
     AgenticRouter.EndToEndTests/
       ChatEndToEndTests.cs     # E2E test scenarios
       FakeOllamaServer.cs      # Test double for Ollama
+      FakeCloudProviderServer.cs # Test double for cloud providers
       TestEnvironment.cs       # Test setup utilities
+  docs/                        # Decision documents and benchmarks
+  tools/
+    diagnostics/               # Maintainer diagnostics scripts
 ```
 
 ## 🚀 Getting Started
@@ -149,7 +227,8 @@ Configuration is stored in a local JSON file in the `data/` directory. The appli
 
 - Ollama base URL
 - Router model selection
-- Resident coordinator model selection
+- Action model selection (lightweight resident tool coordinator, default: `functiongemma:270m`)
+- Coordinator model selection (on-demand fallback for Execute)
 - Global default expert model
 - Global default device (or `auto`)
 - Configurable intent profiles
@@ -183,6 +262,8 @@ schema_version: 1
 models:
   router:
     primary: qwen3:1.7b
+  action:
+    primary: functiongemma:270m
   coordinator:
     primary: qwen3-coder:30b
   software-development:
@@ -395,6 +476,7 @@ The E2E suite covers:
 
 The application uses Server-Sent Events (SSE) to stream typed events:
 
+### Chat Mode Events
 - `turn.started` - Turn processing begins
 - `intent.detected` - Router identifies user intent
 - `route.selected` - Model and device resolved
@@ -404,14 +486,26 @@ The application uses Server-Sent Events (SSE) to stream typed events:
 - `response.completed` - Turn finished successfully
 - `turn.failed` - Turn failed with error
 
-Only `response.delta` contributes to the visible assistant answer. Routing, model, device, timing, and heartbeat events appear in a secondary collapsible activity area.
+### Execute Mode Events
+- `execution-plan-created` - Host-owned execution plan created
+- `execution-plan-revised` - Plan revised while preserving completed steps
+- `action.proposed` - Coordinator proposes a tool action
+- `action.approved` - User approved the action
+- `action.rejected` - User rejected the action
+- `action.started` - Tool execution begins
+- `action.completed` - Tool execution succeeded
+- `action.failed` - Tool execution failed
+- `git.staged` - Files staged for commit
+- `git.committed` - Commit created
+- `git.pushed` - Changes pushed to remote
+
+Only `response.delta` contributes to the visible assistant answer. Routing, model, device, timing, heartbeat, and all Execute events appear in a secondary collapsible activity area.
 
 ## ⚠️ Explicit Non-Goals
 
 The following are explicitly out of scope unless a later approved specification requests them:
 
-- Shell, PowerShell, process, file-system, desktop, or OS execution
-- Local tools, MCP tools, plugins, or function calling
+**For Chat Mode:**
 - Autonomous agents, recursive delegation, agent graphs, planning graphs, or approval gates
 - Workflow builders, queues, schedulers, or background job systems
 - Hugging Face training pipelines, fine-tuning, LoRA, dataset preparation, or tokenizer management
@@ -421,6 +515,15 @@ The following are explicitly out of scope unless a later approved specification 
 - Authentication, accounts, teams, permissions, billing, telemetry platforms, installers, auto-update, or release infrastructure
 - Image generation
 - Persistent chat history across application restarts
+
+**For Execute Mode:**
+- Shell interpreters, command chaining, or unrestricted filesystem access
+- MCP tools, plugins, or function calling beyond the registered tool set
+- Recursive delegation or autonomous agent graphs
+- Background job systems or long-running processes
+- Custom GPU schedulers or VRAM allocation engines (delegated to provider)
+- Remote code execution or network access beyond HTTP provider calls
+- Authentication, accounts, teams, permissions, billing, telemetry platforms, installers, auto-update, or release infrastructure
 
 **Note**: Remote model providers beyond Ollama are not implemented in v1, but the architecture leaves clean extension points for future HTTP-based providers (OpenAI, Anthropic, etc.).
 
@@ -459,6 +562,11 @@ The `IOllamaClient` interface demonstrates a clean HTTP-based provider pattern:
 - **Model Precedence**: Clear precedence rules for model selection (explicit → intent override → preferred list → global default)
 - **Device Precedence**: Clear precedence rules for device selection (request-level → intent → model → global → auto)
 - **JSON Configuration**: All settings stored in local JSON, no database required
+- **Portable YAML**: Export/import global configuration without workspace-local or conversation data
+
+### Tool Protocol Conformance
+
+Direct tool coordination is enabled only after the exact installed model passes the host's behavioral conformance benchmark. Declared Ollama `tools` capability is evidence of availability, not proof of compatibility. Tool-protocol failures (malformed XML, truncated JSON, missing native tool calls) are treated as typed recoverable protocol failures, not generic provider failures.
 
 ## �� Development Guidelines
 

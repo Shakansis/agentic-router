@@ -27,7 +27,18 @@ public sealed record ProviderError(
   string? Intention,
   int? HttpStatus,
   bool Recoverable,
-  IReadOnlyDictionary<string, string?>? Details = null
+  IReadOnlyDictionary<string, string?>? Details = null,
+  string? Code = null,
+  bool DiagnosticsPersisted = false,
+  IncidentContextFitView? ContextFit = null
+);
+
+public sealed record IncidentContextFitView(
+  int? EstimatedInputTokens,
+  int? ReservedOutputTokens,
+  int? RequiredContextTokens,
+  int? MaximumContextTokens,
+  int? EffectiveContextTokens
 );
 
 public sealed record ModelsResponse(
@@ -464,13 +475,30 @@ public sealed record RunValidationRequest(
 public sealed record ApprovalDecisionRequest(
   bool Approved,
   string BrowserSessionId,
-  string ExecutionSessionId
+  string ExecutionSessionId,
+  string? EditedText = null
 );
 
 public sealed record ApprovalDecisionResponse(
   string ActionId,
   bool Accepted,
   bool Approved,
+  string? Diagnostic = null,
+  string? Summary = null,
+  string? Preview = null
+);
+
+public sealed record ApprovalRevisionRequest(
+  string EditedText,
+  string BrowserSessionId,
+  string ExecutionSessionId
+);
+
+public sealed record ApprovalRevisionResponse(
+  string ActionId,
+  bool Accepted,
+  string? Summary,
+  string? Preview,
   string? Diagnostic = null
 );
 
@@ -509,7 +537,27 @@ public sealed record LocalActionEvent(
   bool RequiresApproval,
   string? ExecutionSessionId = null,
   bool Undoable = false,
-  string? UndoWarning = null
+  string? UndoWarning = null,
+  string? OriginalTool = null,
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource,
+  bool Editable = false,
+  string? EditableText = null,
+  string? ResultOutput = null
+);
+
+public sealed record ToolNameResolutionEvidence(
+  string OriginalTool,
+  string CanonicalTool,
+  string Source,
+  string ValidationOutcome,
+  DateTimeOffset Timestamp
+);
+
+public sealed record ToolNameRegistryView(
+  string Comparison,
+  bool CollisionFree,
+  IReadOnlyList<string> CanonicalTools,
+  IReadOnlyList<ToolAliasRegistration> Aliases
 );
 
 public sealed record ExecutionSessionSummary(
@@ -529,7 +577,11 @@ public sealed record ExecutionSessionSummary(
   string? UndoDiagnostic,
   ExecutionPlanView? Plan = null,
   string CompletionStatus = "not-evaluated",
-  GitDeliveryStateView? Delivery = null
+  GitDeliveryStateView? Delivery = null,
+  string? SelectedModel = null,
+  string? ResidentModel = null,
+  string? ConformanceIdentity = null,
+  string? HandoffReason = null
 );
 
 public sealed record ExecutionFileReview(
@@ -574,7 +626,8 @@ public sealed record ExecutionSessionReview(
   IReadOnlyList<FileConflictView>? Conflicts = null,
   ValidationProfileSettings? ValidationProfile = null,
   ValidationRunView? Validation = null,
-  GitDeliveryStateView? Delivery = null
+  GitDeliveryStateView? Delivery = null,
+  IReadOnlyList<ToolNameResolutionEvidence>? ToolNameResolutions = null
 );
 
 public sealed record UndoExecutionRequest(
@@ -615,7 +668,8 @@ public sealed record ModelTestRequest(
 public sealed record ModelConformanceBenchmarkRequest(
   string Model,
   bool RestoreResidentModel = true,
-  bool ExternalProviderPermissionGranted = false
+  bool ExternalProviderPermissionGranted = false,
+  string Profile = "native-strict"
 );
 
 public sealed record PortableYamlSettingsRequest(
@@ -638,7 +692,13 @@ public sealed record ModelConformanceBenchmarkResult(
   string Digest,
   string OllamaVersion,
   long DurationMilliseconds,
-  string? Failure
+  string? Failure,
+  string Profile = "native-strict",
+  string Status = "unknown",
+  string Provider = "ollama-local",
+  string AdapterVersion = "",
+  string BenchmarkVersion = "",
+  string Identity = ""
 );
 
 public sealed record ChatStreamEvent(
@@ -657,7 +717,8 @@ public sealed record ChatStreamEvent(
   string? ConversationSessionId = null,
   RecoveryDecisionEvent? RecoveryDecision = null,
   IReadOnlyList<ProviderCitation>? Citations = null,
-  ContextUsageView? ContextUsage = null
+  ContextUsageView? ContextUsage = null,
+  IncidentContextFitView? IncidentContextFit = null
 );
 
 public sealed record ValidationErrorsResponse(

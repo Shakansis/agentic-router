@@ -1,3 +1,156 @@
+# Agentic Router v0.9.14
+
+This version combines the Execute effect-authority correction with a focused UI
+reliability pass for conversation navigation, execution review, and the
+resizable sidebar.
+
+## Highlights
+
+- Preserves the closed deterministic alias registry and adds a post-resolution
+  effect contract: canonical tools can advance only semantically compatible
+  Host-typed plan steps after the expected effect is independently observed.
+- Blocks mutation objectives when no verified file, directory, or Git mutation
+  occurred, even if a model or tool result claims success.
+- Generates the terminal Execute response from authoritative Host review facts
+  and rejects model output that begins with reserved internal protocol markers.
+- Adds `delete_files` for explicit Host-validated paths, with mandatory approval,
+  inline path-list editing, stale-hash checks, per-file deletion evidence,
+  bounded text or binary rollback capture, partial-failure recovery, and undo.
+- Makes pending process and structured file arguments editable in place. Clicking
+  Approve atomically revalidates and executes the current text; no separate Save
+  or Update action is required, and invalid edits remain pending and unexecuted.
+- Adds `actionModel`, defaulting to `functiongemma:270m`, as the lightweight
+  resident tool-action role. `coordinatorModel` remains an on-demand fallback;
+  portable YAML exposes both as `models.action.primary` and `.fallback`.
+- Adds deterministic effect-gate tests plus browser E2E proof that deletion does
+  not occur before approval, affects only the explicit files, and restores both
+  files through undo.
+- Makes the recent-conversations sidebar keyboard- and pointer-resizable, stores
+  the chosen width locally, aligns persistence content, and hides empty pinned
+  and archived sections without allowing their grid styles to override `hidden`.
+- Keeps saved-conversation details content-sized instead of stretching action
+  controls to the modal height, while retaining the 95% viewport cap and
+  internal scrolling for genuinely long content.
+- Prevents New conversation from redundantly saving a conversation already
+  marked `Saved locally`, and isolates new-session creation failures from
+  non-blocking follow-up refresh failures.
+- Resolves Undo against the active workspace profile rather than the deprecated
+  `trustedWorkspacePath` compatibility field.
+
+## Manual acceptance status
+
+- File creation: acceptable in current real-use evaluation.
+- File editing: poor and not accepted as reliable.
+- File deletion: unacceptable in current real-use evaluation; reported as not
+  working despite deterministic Host-side coverage.
+- Automated fake-provider and filesystem tests do not override these manual
+  findings. A real-model benchmark remains required and must only run after the
+  user explicitly confirms GPU availability.
+
+# Agentic Router v0.9.13
+
+This version makes Execute failures traceable across the browser, Host,
+provider usage ledger, and a bounded local incident journal, while preventing
+coordinator action history from growing past the configured context budget.
+
+## Highlights
+
+- Uses the HTTP trace identifier as the canonical exact lookup key and keeps
+  request, conversation, turn, execution-session, provider-attempt, and action
+  identities as linked but independent authorities.
+- Adds a versioned, ignored, publish-excluded JSONL incident journal with
+  asynchronous writes, per-trace limits, UTC date/size rotation, retention,
+  total-size limits, and tolerant malformed-record reads.
+- Persists only typed operational milestones and Host-authored summaries; raw
+  prompts, responses, file content, tool arguments/results, provider payloads,
+  secrets, stack traces, and unrestricted paths are structurally absent.
+- Links usage schema v2 events to the canonical trace and records typed runtime
+  context failures with input, reserved output, required, maximum, and
+  effective-context arithmetic while retaining schema v1 compatibility.
+- Adds exact trace copy/details actions and a bounded, sanitized browser
+  timeline, plus a read-only PowerShell maintainer lookup with Console, JSON,
+  and Markdown output.
+- Budgets coordinator requests with the provider's conservative estimator,
+  including planner instructions and tool definitions, before every native
+  planning call.
+- Replaces older action history with a deterministic Host state summary while
+  preserving the objective, project context, latest guidance, plan state,
+  correction state, and latest assistant/tool pair.
+- Allows exactly one materially smaller compaction retry for a context-fit
+  rejection, then changes coordination path or returns a typed, reviewable
+  partial terminal result without increasing resident context or memory.
+
+# Agentic Router v0.9.12
+
+This version restores target-first adaptive Execute coordination while keeping
+all action authority, validation, and lifecycle transitions in the Host.
+
+## Highlights
+
+- Evaluates an approved target-native or target-structured path before resident
+  eligibility, so a failed resident cannot block an independently conformant
+  specialist.
+- Stores independent `native-strict`, `native-adaptive`, `structured-action`,
+  and `guidance-only` evidence keyed by exact provider/model revision, adapter,
+  runtime, and benchmark contract identity.
+- Lets a resident that fails strict semantic conformance qualify through an
+  independent adaptive correction probe before the Host blocks all coordination
+  paths; empty required arguments remain invalid and unexecuted.
+- Adds a supervised structured coordinator that proposes exactly one action,
+  receives the authoritative Host result, and only then proposes the next
+  action; plan and step IDs remain Host-generated.
+- Allows one precise Host-authored semantic repair, fingerprints repetition,
+  and changes coordination path instead of issuing a third identical attempt.
+- Keeps deterministic native parser failures turn-scoped and non-retriable on
+  the same protocol.
+- Combines conformance with observed runtime context, memory headroom, and
+  metadata-derived coexistence evidence before resident use or bounded
+  eviction/restoration.
+- Shows target, effective coordinator, configured resident, execution path,
+  conformance identity, and handoff reason separately in activity and review.
+- Adds deterministic fake-provider E2E coverage for target-first Groq
+  coordination, structured actions, semantic repair, repeated failure,
+  exhausted paths, and exact-identity invalidation.
+- Adds one closed deterministic tool-alias registry shared by native and
+  structured proposals, using ordinal case-insensitive lookup, phase checks,
+  preserved audit evidence, and no fuzzy or argument normalization.
+- Lets the user edit a pending structured process command or Git stage/unstage
+  path list before approval; the Host preserves the tool and action identity,
+  reparses structured arguments, and reruns the existing policy validation.
+- Keeps the terminal-styled command and a collapsed execution response in one
+  approval card, then removes decision controls after approval or rejection.
+- Adds browser coverage for valid revision, policy-rejected revision,
+  cross-session rejection, terminal state, and collapsed execution output.
+
+# Agentic Router v0.9.11
+
+This corrective version consolidates application dialogs and improves Git,
+provider, composer, and validation ergonomics without adding a frontend build
+toolchain.
+
+## Highlights
+
+- Replaces the composer Web and Image text controls with accessible inline
+  Microsoft Fluent/Windows-style SVG icons.
+- Removes browser-native alert, confirmation, and input prompts in favor of one
+  application-styled modal with a persistent footer and bounded scrolling.
+- Adds dismissible top-center error toasts with a 30-second timeout and visible
+  field/card error borders for settings validation.
+- Makes Git Overview collapsible and initially open, Repository configuration
+  collapsible and initially closed, and identity/origin fields read-only until
+  Edit is selected.
+- Adds an immutable, Execute-only Host flow for changing only the exact `origin`
+  address through validated HTTPS or SSH values without embedded credentials.
+- Guides repository initialization from Chat to Execute by closing the Git modal
+  first, then requires a separate initialization review and confirmation.
+- Increases the bounded Changes viewport and color-codes file status markers.
+- Consolidates provider configuration and observed health/statistics into one
+  accordion per provider, normalizes compatible field styling and sizing, and
+  preserves the open provider after Save, Test, or Refresh.
+- Adds deterministic E2E coverage for the new modal, toasts, icon-only controls,
+  protected Git configuration, origin mutation, collapsible sections, provider
+  consolidation, and accordion persistence.
+
 # Agentic Router v0.9.10
 
 This development version adds Host-owned Ollama runtime context and memory

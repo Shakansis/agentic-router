@@ -21,11 +21,27 @@ public static class UsageEventValidator
     var rejected = new List<string>();
     var warnings = new List<string>();
 
-    if (usageEvent.SchemaVersion != 1)
+    if (usageEvent.SchemaVersion is not 1 and not 2)
     {
       rejected.Add(
         "unsupported-schema"
       );
+    }
+
+    if (usageEvent.SchemaVersion == 2 && string.IsNullOrWhiteSpace(usageEvent.TraceId))
+    {
+      rejected.Add("missing-canonical-trace-id");
+    }
+
+    if (
+      usageEvent.EstimatedInputContextTokens < 0
+      || usageEvent.ReservedOutputTokens < 0
+      || usageEvent.RequiredContextTokens < 0
+      || usageEvent.MaximumContextTokens < 0
+      || usageEvent.EffectiveContextTokens < 0
+    )
+    {
+      rejected.Add("negative-context-arithmetic");
     }
 
     if (string.IsNullOrWhiteSpace(

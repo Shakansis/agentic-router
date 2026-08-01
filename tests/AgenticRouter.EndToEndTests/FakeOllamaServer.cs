@@ -38,6 +38,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     new(
       "command-r:latest",
       6_800_000_000L
+    ),
+    new(
+      "structured-failure:latest",
+      2_100_000_000L
+    ),
+    new(
+      "structured:latest",
+      2_200_000_000L
     )
   ];
 
@@ -46,12 +54,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private readonly ConcurrentQueue<RecordedChatRequest> _requests = new();
   private readonly ConcurrentQueue<RecordedChatRequest> _allRequests = new();
   private readonly ConcurrentQueue<string> _capabilityQueries = new();
+  private readonly ConcurrentQueue<string> _errors = new();
   private readonly ConcurrentDictionary<string, RunningModel> _loaded = new(
     StringComparer.Ordinal
   );
   private readonly ConcurrentDictionary<string, int> _generationAttempts = new(
     StringComparer.Ordinal
   );
+  private string _protocolVersion = "0.13.5-test";
+  private string? _adaptiveConformanceModel;
   private Task? _listenTask;
 
   private FakeOllamaServer(
@@ -72,6 +83,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
   public IReadOnlyList<string> CapabilityQueries => _capabilityQueries.ToArray();
 
+  public IReadOnlyList<string> Errors => _errors.ToArray();
+
   public IReadOnlyCollection<string> LoadedModels => _loaded.Keys.ToArray();
 
   public static FakeOllamaServer Start()
@@ -90,7 +103,24 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   {
     _requests.Clear();
     _capabilityQueries.Clear();
+    _errors.Clear();
     _generationAttempts.Clear();
+    _protocolVersion = "0.13.5-test";
+    _adaptiveConformanceModel = null;
+  }
+
+  public void EnableAdaptiveConformanceFixture(
+    string model
+  )
+  {
+    _adaptiveConformanceModel = model;
+  }
+
+  public void SetProtocolIdentity(
+    string version
+  )
+  {
+    _protocolVersion = version;
   }
 
   public void RemoveLoadedModel(
@@ -176,7 +206,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           HttpStatusCode.OK,
           new
           {
-            version = "0.13.5-test"
+            version = _protocolVersion
           },
           cancellationToken
         );
@@ -277,6 +307,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       context.Response.Abort();
     }
+    catch (Exception exception)
+    {
+      _errors.Enqueue(
+        exception.ToString()
+      );
+      context.Response.Abort();
+    }
   }
 
   private async Task HandleShowAsync(
@@ -359,7 +396,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             "completion",
             "vision"
           }
-          : model is "command-r:latest" or "router:latest" or "unused:latest"
+          : model is "command-r:latest" or "router:latest" or "unused:latest" or "structured:latest"
           ? new[]
           {
             "completion",
@@ -622,6 +659,25 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     if (messages.Any(
       message => message.Content.Contains(
+        "NATIVE_ADAPTIVE_CONFORMANCE_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await RespondToNativeAdaptiveConformanceAsync(
+        response,
+        string.Equals(
+          model,
+          _adaptiveConformanceModel,
+          StringComparison.Ordinal
+        ),
+        cancellationToken
+      );
+      return;
+    }
+
+    if (messages.Any(
+      message => message.Content.Contains(
         "TOOL_PROTOCOL_CONFORMANCE_V1",
         StringComparison.Ordinal
       )
@@ -631,6 +687,26 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         response,
         model,
         availableTools,
+        string.Equals(
+          model,
+          _adaptiveConformanceModel,
+          StringComparison.Ordinal
+        ),
+        cancellationToken
+      );
+      return;
+    }
+
+    if (messages.Any(
+      message => message.Content.Contains(
+        "STRUCTURED_ACTION_CONFORMANCE_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await RespondToStructuredActionConformanceAsync(
+        response,
+        model,
         cancellationToken
       );
       return;
@@ -887,12 +963,17 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     HttpListenerResponse response,
     string model,
     IReadOnlyList<string> availableTools,
+    bool adaptiveFixture,
     CancellationToken cancellationToken
   )
   {
     if (string.Equals(
       model,
       "unused:latest",
+      StringComparison.Ordinal
+    ) || string.Equals(
+      model,
+      "structured:latest",
       StringComparison.Ordinal
     ))
     {
@@ -934,6 +1015,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       {
         path = "sample.txt"
       },
+      "benchmark_edit" when adaptiveFixture => new
+      {
+        path = "sample.txt",
+        content = string.Empty
+      },
       "benchmark_edit" => new
       {
         path = "sample.txt",
@@ -963,6 +1049,98 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               }
             }
           }
+        },
+        done = true
+      },
+      cancellationToken
+    );
+  }
+
+  private static async Task RespondToNativeAdaptiveConformanceAsync(
+    HttpListenerResponse response,
+    bool adaptiveFixture,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!adaptiveFixture)
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.InternalServerError,
+        new
+        {
+          error = "xml syntax error: adaptive native tool call is unavailable"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content = string.Empty,
+          tool_calls = new[]
+          {
+            new
+            {
+              function = new
+              {
+                name = "benchmark_edit",
+                arguments = new
+                {
+                  path = "sample.txt",
+                  content = "after"
+                }
+              }
+            }
+          }
+        },
+        done = true
+      },
+      cancellationToken
+    );
+  }
+
+  private static async Task RespondToStructuredActionConformanceAsync(
+    HttpListenerResponse response,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    var content = string.Equals(
+      model,
+      "structured-failure:latest",
+      StringComparison.Ordinal
+    )
+      ? "{\"completed\":false,\"title\":\"\",\"tool\":\"benchmark_echo\",\"arguments\":{\"value\":\"\"}}"
+      : JsonSerializer.Serialize(
+        new
+        {
+          completed = false,
+          title = "Verify structured action",
+          tool = "benchmark_echo",
+          arguments = new
+          {
+            value = "ok"
+          }
+        },
+        CompactJsonOptions
+      );
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content
         },
         done = true
       },
@@ -1021,7 +1199,58 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "unchanged strategy",
       StringComparison.OrdinalIgnoreCase
     );
-    var guidance = validationFailed
+    var semanticCorrectionRequested = messages.Any(
+      message => message.Content.StartsWith(
+        "STRUCTURED_ACTION_CORRECTION",
+        StringComparison.Ordinal
+      )
+    );
+    var structuredSemanticRepair = current.Contains(
+      "structured semantic repair",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var repeatStructuredSemanticFailure = current.Contains(
+      "repeat structured semantic failure",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var completedStructuredAction = messages.Any(
+      message => message.Content.StartsWith(
+        "LOCAL_ACTION_RESULT",
+        StringComparison.Ordinal
+      )
+        && message.Content.Contains(
+          "Status: completed",
+          StringComparison.Ordinal
+        )
+        && !message.Content.Contains(
+          "Tool: create_execution_plan",
+          StringComparison.Ordinal
+        )
+        && !message.Content.Contains(
+          "Tool: revise_execution_plan",
+          StringComparison.Ordinal
+        )
+    );
+    var guidance = completedStructuredAction
+      ? JsonSerializer.Serialize(
+        new
+        {
+          actionRequired = false,
+          objective = current,
+          actions = Array.Empty<object>(),
+          completionCriteria = new[]
+          {
+            "The authoritative Host result completed the requested action."
+          }
+        },
+        CompactJsonOptions
+      )
+      : structuredSemanticRepair || repeatStructuredSemanticFailure
+        ? CreateSemanticRepairGuidance(
+          current,
+          semanticCorrectionRequested && !repeatStructuredSemanticFailure
+        )
+      : validationFailed
       ? JsonSerializer.Serialize(
         new
         {
@@ -1119,6 +1348,43 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           {
             "The requested local action completed with a verified tool result."
           }
+      },
+      CompactJsonOptions
+    );
+  }
+
+  private static string CreateSemanticRepairGuidance(
+    string current,
+    bool corrected
+  )
+  {
+    return JsonSerializer.Serialize(
+      new
+      {
+        actionRequired = true,
+        objective = current,
+        actions = new[]
+        {
+          new
+          {
+            title = "Create the structured repair file",
+            tool = "create_file",
+            arguments = corrected
+              ? (object)new
+              {
+                path = "structured-repair.txt",
+                content = "repaired by bounded feedback"
+              }
+              : new
+              {
+                path = "structured-repair.txt"
+              }
+          }
+        },
+        completionCriteria = new[]
+        {
+          "The Host accepted and executed the corrected non-empty content."
+        }
       },
       CompactJsonOptions
     );
@@ -1262,7 +1528,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     ).ToArray();
-    var hasResult = actionResults.Length > 0;
+    var hasResult = actionResults.Length > 0
+      || messages.Any(message => message.Content.StartsWith("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal)
+        && message.Content.Contains(":completed:", StringComparison.Ordinal));
     var allContent = string.Join(
       "\n",
       messages.Select(
@@ -1355,6 +1623,24 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     if (
       !hasPlan
       && current.Contains(
+        "alias phase bypass",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "read_doc",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Attempt a read alias before the execution plan phase is complete."
+      };
+    }
+    else if (
+      !hasPlan
+      && current.Contains(
         "recover rejected execution plan write file",
         StringComparison.OrdinalIgnoreCase
       )
@@ -1407,6 +1693,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         current
       );
     }
+    else if (
+      !hasResult
+      && current.Contains(
+        "delete files direct",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "delete_files",
+        arguments = new
+        {
+          paths = new[]
+          {
+            "obsolete-a.txt",
+            "obsolete-b.txt"
+          }
+        },
+        explanation = "Submit the explicit files directly for Host validation and approval."
+      };
+    }
     else if (allContent.Contains(
       "repeat denied process",
       StringComparison.OrdinalIgnoreCase
@@ -1431,6 +1739,64 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (
       hasResult
+      && current.Contains(
+        "partial context after completed action",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !allContent.Contains(
+        "STRUCTURED_ACTION_CORRECTION",
+        StringComparison.Ordinal
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          content = new string('p', 16_000)
+        },
+        explanation = "Return one intentionally invalid oversized follow-up after a completed action."
+      };
+    }
+    else if (
+      hasResult
+      && latestResult?.Contains(
+        "Status: failed",
+        StringComparison.Ordinal
+      ) == true
+      && allContent.Contains(
+        "recover failed process",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !results.Any(
+        result => result.ToolName == "revise_execution_plan"
+          || result.Content.Contains(
+            "Tool: revise_execution_plan",
+            StringComparison.Ordinal
+          )
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "revise_execution_plan",
+        arguments = new
+        {
+          objective = current,
+          steps = new[]
+          {
+            new
+            {
+              title = "Inspect workspace after failed process"
+            }
+          }
+        },
+        explanation = "Replace the blocked process strategy with a typed inspection step."
+      };
+    }
+    else if (
+      hasResult
       && latestResult?.Contains(
         "Status: failed",
         StringComparison.Ordinal
@@ -1450,6 +1816,50 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           recursive = false
         },
         explanation = "Recover from the unavailable process with the structured directory tool."
+      };
+    }
+    else if (
+      hasResult
+      && actionResults.Last().ToolName == "read_file"
+      && current.Contains(
+        "delete files",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && actionResults.Count(result => result.ToolName == "read_file") == 1
+    )
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "obsolete-b.txt"
+        },
+        explanation = "Inspect the second file before deletion."
+      };
+    }
+    else if (
+      hasResult
+      && actionResults.Last().ToolName == "read_file"
+      && current.Contains(
+        "delete files",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && actionResults.Count(result => result.ToolName == "read_file") >= 2
+    )
+    {
+      plan = new
+      {
+        tool = "delete_files",
+        arguments = new
+        {
+          paths = new[]
+          {
+            "obsolete-a.txt",
+            "obsolete-b.txt"
+          }
+        },
+        explanation = "Delete the exact inspected files after Host validation."
       };
     }
     else if (
@@ -1601,6 +2011,46 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           content = "recovered after premature prose"
         },
         explanation = "Continue with the pending file creation after the completion rejection."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "control character path recover",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && actionResults.Last().ToolName == "read_file"
+    )
+    {
+      plan = new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "safe-control-path.txt",
+          content = "recovered after invalid control path"
+        },
+        explanation = "Use a valid workspace-relative path after the malformed path was rejected."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "control character process recover",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && actionResults.Last().ToolName == "run_process"
+    )
+    {
+      plan = new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "safe-control-process.txt",
+          content = "recovered after invalid process argument"
+        },
+        explanation = "Use a structured safe action after the malformed process argument was rejected."
       };
     }
     else if (
@@ -1916,7 +2366,34 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       : "Complete the requested local action";
     var steps = new List<object>();
 
-    if (IsMutationFixture(
+    if (objective.Contains("delete files direct", StringComparison.OrdinalIgnoreCase))
+    {
+      steps.Add(
+        new
+        {
+          id = "step-1",
+          title = "Delete selected files"
+        }
+      );
+    }
+    else if (objective.Contains("delete files", StringComparison.OrdinalIgnoreCase))
+    {
+      steps.Add(
+        new
+        {
+          id = "step-1",
+          title = "Inspect files selected for deletion"
+        }
+      );
+      steps.Add(
+        new
+        {
+          id = "step-2",
+          title = "Delete inspected files"
+        }
+      );
+    }
+    else if (IsMutationFixture(
       objective
     ))
     {
@@ -1929,17 +2406,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       );
     }
 
-    steps.Add(
-      new
-      {
-        id = $"step-{steps.Count + 1}",
-        title = IsMutationFixture(
-          objective
-        )
-          ? "Implement requested file changes"
-          : "Perform requested local action"
-      }
-    );
+    if (!objective.Contains("delete files", StringComparison.OrdinalIgnoreCase))
+    {
+      steps.Add(
+        new
+        {
+          id = $"step-{steps.Count + 1}",
+          title = IsMutationFixture(
+            objective
+          )
+            ? "Implement requested file changes"
+            : "Perform requested local action"
+        }
+      );
+    }
 
     if (
       objective.Contains(
@@ -2042,6 +2522,108 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   )
   {
     if (current.Contains(
+      "unknown tool alias",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "open_file",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Return a deliberately unapproved ambiguous alias."
+      };
+    }
+
+    if (current.Contains(
+      "control character path recover",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "fireworks\firework_engine.js"
+        },
+        explanation = "Return a path containing a JSON-decoded form-feed character."
+      };
+    }
+
+    if (current.Contains(
+      "control character process recover",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "dotnet",
+          arguments = new[]
+          {
+            "fireworks\firework_engine.js"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Return a process argument containing a JSON-decoded form-feed character."
+      };
+    }
+
+    if (current.Contains(
+      "alias path traversal",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "read_doc",
+        arguments = new
+        {
+          path = "../outside.txt"
+        },
+        explanation = "Use an approved read alias with an invalid path."
+      };
+    }
+
+    if (current.Contains(
+      "case canonical read file",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "READ_FILE",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Use a casing-only canonical tool variant."
+      };
+    }
+
+    if (current.Contains(
+      "alias read doc",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "Read_Doc",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Use a curated read alias."
+      };
+    }
+
+    if (current.Contains(
       "recover premature prose after approved process",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -2098,6 +2680,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           path = "../outside.txt"
         },
         explanation = "Attempt to leave the workspace."
+      };
+    }
+
+    if (current.Contains(
+      "delete files",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "obsolete-a.txt"
+        },
+        explanation = "Inspect the first file before deletion."
       };
     }
 

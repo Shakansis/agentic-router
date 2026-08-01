@@ -150,6 +150,24 @@ public sealed class ModelsController : ControllerBase
       );
     }
 
+    if (!CoordinationConformanceProfiles.IsKnown(
+      request.Profile
+    ))
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "The protocol benchmark could not start.",
+          new Dictionary<string, string[]>
+          {
+            ["profile"] =
+            [
+              "Profile must be native-strict, native-adaptive, structured-action, or guidance-only."
+            ]
+          }
+        )
+      );
+    }
+
     var settings = await _settingsStore.GetAsync(
       cancellationToken
     );
@@ -241,10 +259,11 @@ public sealed class ModelsController : ControllerBase
           selected.Name,
           cancellationToken
         );
-      var result = await _toolConformance.VerifyAsync(
+      var result = await _toolConformance.VerifyPathAsync(
         baseUri,
         selected.Name,
         selected.Digest,
+        request.Profile,
         new ProviderCallContext(
           null,
           null,
@@ -264,7 +283,13 @@ public sealed class ModelsController : ControllerBase
           result.Digest,
           result.OllamaVersion,
           stopwatch.ElapsedMilliseconds,
-          result.Failure
+          result.Failure,
+          result.Profile,
+          result.Status,
+          result.Provider,
+          result.AdapterVersion,
+          result.BenchmarkVersion,
+          result.Identity
         )
       );
     }

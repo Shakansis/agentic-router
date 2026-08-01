@@ -36,7 +36,12 @@ public sealed record OllamaRuntimeProfileError(
   int? ActualContext,
   bool Retryable,
   string TraceId,
-  string Diagnostic
+  string Diagnostic,
+  int? EstimatedInputTokens = null,
+  int? ReservedOutputTokens = null,
+  int? RequiredContextTokens = null,
+  int? MaximumContextTokens = null,
+  int? EffectiveContextTokens = null
 );
 
 public sealed class OllamaRuntimeProfileException : Exception
@@ -52,7 +57,12 @@ public sealed class OllamaRuntimeProfileException : Exception
     int? actualContext,
     bool retryable,
     string diagnostic,
-    Exception? innerException = null
+    Exception? innerException = null,
+    int? estimatedInputTokens = null,
+    int? reservedOutputTokens = null,
+    int? requiredContextTokens = null,
+    int? maximumContextTokens = null,
+    int? effectiveContextTokens = null
   )
     : base(
       message,
@@ -75,7 +85,12 @@ public sealed class OllamaRuntimeProfileException : Exception
       ),
       Sanitize(
         diagnostic
-      )
+      ),
+      estimatedInputTokens,
+      reservedOutputTokens,
+      requiredContextTokens,
+      maximumContextTokens,
+      effectiveContextTokens
     );
   }
 

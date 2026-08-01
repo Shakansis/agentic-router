@@ -8,6 +8,8 @@ public sealed record ApplicationSettings
 
   public string RouterModel { get; init; } = "configure-model";
 
+  public string ActionModel { get; init; } = "functiongemma:270m";
+
   public string CoordinatorModel { get; init; } = "configure-model";
 
   public string DefaultModel { get; init; } = "configure-model";
@@ -36,11 +38,30 @@ public sealed record ApplicationSettings
 
   public UsageSettings Usage { get; init; } = new();
 
+  public IncidentJournalSettings Incidents { get; init; } = new();
+
   public CloudProvidersSettings CloudProviders { get; init; } = new();
 
   public WebSearchSettings WebSearch { get; init; } = new();
 
   public ModelOrganizationSettings ModelOrganization { get; init; } = new();
+}
+
+public sealed record IncidentJournalSettings
+{
+  public bool Enabled { get; init; } = true;
+
+  public int RetentionDays { get; init; } = 14;
+
+  public long MaximumFileBytes { get; init; } = 8_388_608;
+
+  public long MaximumTotalBytes { get; init; } = 67_108_864;
+
+  public int MaximumEventsPerTrace { get; init; } = 500;
+
+  public int BrowserMaximumEvents { get; init; } = 200;
+
+  public long BrowserMaximumBytes { get; init; } = 262_144;
 }
 
 public sealed record ModelOrganizationSettings

@@ -88,6 +88,11 @@ public sealed class ProcessPolicyService : IProcessPolicyService
     CancellationToken cancellationToken
   )
   {
+    EnsureContainsNoControlCharacters(
+      executable,
+      "Process executable"
+    );
+
     executable = executable.Trim();
 
     if (string.IsNullOrWhiteSpace(
@@ -145,15 +150,20 @@ public sealed class ProcessPolicyService : IProcessPolicyService
     }
 
     if (arguments.Count > 100 || arguments.Any(
-      argument => argument.Length > 2_048 || argument.Contains(
-        '\0',
-        StringComparison.Ordinal
-      )
+      argument => argument.Length > 2_048
     ))
     {
       throw new LocalActionException(
         "process-validation",
         "Process arguments exceed the supported safe limits."
+      );
+    }
+
+    foreach (var argument in arguments)
+    {
+      EnsureContainsNoControlCharacters(
+        argument,
+        "Process argument"
       );
     }
 
@@ -214,5 +224,27 @@ public sealed class ProcessPolicyService : IProcessPolicyService
       resolvedWorkingDirectory,
       !safe
     );
+  }
+
+  private static void EnsureContainsNoControlCharacters(
+    string value,
+    string label
+  )
+  {
+    foreach (var character in value)
+    {
+      if (!char.IsControl(
+        character
+      ))
+      {
+        continue;
+      }
+
+      throw new LocalActionException(
+        "process-validation",
+        $"{label} contains control character U+{(int)character:X4}. "
+          + "Use '/' for path separators in tool arguments; a JSON backslash must be escaped."
+      );
+    }
   }
 }

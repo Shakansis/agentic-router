@@ -1,6 +1,6 @@
-using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgenticRouter.Api.Controllers;
@@ -10,18 +10,18 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class ExecutionSessionsController : ControllerBase
 {
   private readonly IExecutionSessionStore _sessions;
-  private readonly ISettingsStore _settingsStore;
   private readonly IValidationProfileService _validationProfiles;
+  private readonly IWorkspaceProfileService _workspaceProfiles;
 
   public ExecutionSessionsController(
     IExecutionSessionStore sessions,
-    ISettingsStore settingsStore,
-    IValidationProfileService validationProfiles
+    IValidationProfileService validationProfiles,
+    IWorkspaceProfileService workspaceProfiles
   )
   {
     _sessions = sessions;
-    _settingsStore = settingsStore;
     _validationProfiles = validationProfiles;
+    _workspaceProfiles = workspaceProfiles;
   }
 
   [HttpPost("{executionSessionId}/validate")]
@@ -117,19 +117,19 @@ public sealed class ExecutionSessionsController : ControllerBase
     var review = _sessions.GetReview(
       executionSessionId
     );
-    var settings = await _settingsStore.GetAsync(
+    var activeWorkspace = await _workspaceProfiles.GetActiveDataAsync(
       cancellationToken
     );
 
     if (
       review is not null
-      && !string.Equals(
-        Path.GetFullPath(
-          settings.TrustedWorkspacePath
-            ?? string.Empty
-        ),
-        review.WorkspacePath,
-        StringComparison.OrdinalIgnoreCase
+      && (
+        activeWorkspace is null
+        || !string.Equals(
+          Path.GetFullPath(activeWorkspace.Path),
+          review.WorkspacePath,
+          StringComparison.OrdinalIgnoreCase
+        )
       )
     )
     {

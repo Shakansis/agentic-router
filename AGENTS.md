@@ -59,7 +59,8 @@ The host must independently validate every proposed tool call. A model response 
 Intent classification, coordination, and expert inference are separate responsibilities.
 
 - `routerModel` classifies the request.
-- `coordinatorModel` maintains an Execute turn, selects tools, and reacts to tool results.
+- `actionModel` is the lightweight resident action model that selects registered tools and reacts to authoritative tool results during Execute.
+- `coordinatorModel` is an on-demand coordination fallback; it must not be kept resident merely to make Execute possible.
 - Intent profiles resolve the expert model for Chat and specialist work.
 
 Do not silently substitute one role for another. Model and device precedence must remain deterministic and visible in activity details.
@@ -67,6 +68,25 @@ Do not silently substitute one role for another. Model and device precedence mus
 Direct tool coordination is allowed only when the exact model identity has passed the host's behavioral tool-protocol conformance checks. Declared Ollama `tools` capability is evidence of availability, not proof of compatibility.
 
 Tool-protocol failures must be typed and recoverable. Invalid XML, malformed or truncated JSON, missing native tool calls, Harmony/parser failures, and equivalent syntax failures must not be treated as generic provider failures. After a deterministic protocol failure, change strategy for the current turn instead of repeating an identical request.
+
+Execute coordination is target-first. Evaluate approved `native-strict` and
+`structured-action` evidence for the selected target before resident
+eligibility. Conformance evidence is path-specific and keyed by exact provider,
+model revision or digest, adapter version, local runtime version, and benchmark
+contract. A failure on one path must not fail another path. Structured
+coordination proposes one action at a time and receives an authoritative Host
+result before continuing. Semantic repair is limited to one materially
+different attempt; repeated invalid proposals change path.
+An eligible resident bridge may use independently approved `native-strict` or
+`native-adaptive` evidence. A strict semantic failure must evaluate the
+adaptive correction contract before the resident is declared incompatible.
+
+Tool identifiers use one Host-owned closed alias registry with
+`StringComparer.OrdinalIgnoreCase`. Resolve only exact canonical names or
+explicitly reviewed aliases, preserve original and canonical names in activity
+and audit evidence, and verify that the canonical tool is offered in the
+current phase before ordinary validation. Never use fuzzy, cultural,
+model-inferred, or argument-name normalization.
 
 ## 6. Execute Mode
 
@@ -79,24 +99,35 @@ Required behavior:
 3. Create a host-owned plan with host-generated IDs.
 4. Let the coordinator propose only registered structured tools.
 5. Revalidate paths, arguments, policy, approvals, and limits in the host.
-6. Record tool calls, results, file changes, validation, recovery, and terminal state.
-7. Present changes for review and allow supported undo operations.
+6. Bind each action to a semantically compatible Host-typed plan step and advance it only after the expected effect is independently proven.
+7. Record tool calls, results, file changes, validation, recovery, and terminal state.
+8. Generate the terminal Execute answer from Host facts; model prose may not override execution state.
+9. Present changes for review and allow supported undo operations.
 
-Supported file actions are structured operations such as listing, reading, searching, creating, writing, replacing, and applying patches. Process execution uses a separate structured contract and an allowlist policy. Never add a generic shell tool, free-form command arguments, or an unrestricted filesystem escape.
+Supported file actions are structured operations such as listing, reading, searching, creating, writing, replacing, applying patches, and deleting an explicit file list validated by the Host. `delete_files` always requires explicit approval, workspace confinement, protected-path checks, per-file postcondition evidence, and bounded recovery data before execution. Its path list may be edited inline until approval; approval atomically revalidates and binds the final list. Process execution uses a separate structured contract and an allowlist policy. Never add a generic shell tool, free-form command arguments, or an unrestricted filesystem escape.
+
+The closed tool-name registry remains the naming authority. Effect typing is a post-resolution layer: `alias -> canonical tool -> execution -> proven effect -> plan advancement`. A successful tool response without its required observed effect must not complete a plan step. Mutation objectives with no verified file, directory, or Git mutation end as blocked, never completed. Assistant output beginning with Host-reserved protocol markers is invalid model output and must not become the visible answer.
 
 All workspace paths must be canonicalized and confined to the trusted root. Reject traversal, reparse-point escapes, protected paths, invalid encodings, oversized inputs, and stale file writes. Preserve external user changes and surface conflicts for review.
 
 Approvals are host decisions. Policies may auto-approve explicitly safe operations, but ambiguous, sensitive, process, or destructive proposals must remain blocked or require the configured approval flow. Cancellation must stop active provider and process work.
 
+An editable pending approval may revise only the structured argument surface
+explicitly exposed by the Host. Keep the canonical tool and Host action ID
+fixed, parse without a shell, rerun the ordinary path, argument, and policy
+validation, and serialize revision against the final decision. A rejected
+revision must leave the previously validated pending action unexecuted and
+must not broaden its authority.
+
 ### Safe Git delivery
 
 Review changes may prepare an explicitly selected delivery for a valid Git repository inside the trusted workspace. The host may inspect bounded status, diff, log, and commit data, and may perform only structured staging, unstaging, commit, annotated-tag, current-upstream branch push, and exact-tag push operations.
 
-The main interface exposes host-authoritative Git status and bounded Current session, Working tree, Staged, and Last commit diffs. A non-repository workspace may be initialized at the trusted root on `main`, but only in Execute mode after immutable explicit approval. Initialization must not create a commit, stage files, or add a remote. Repository identity edits are limited to explicitly approved, repository-local `user.name` and `user.email`; remotes are read-only and credential-bearing URL components must be sanitized.
+The main interface exposes host-authoritative Git status and bounded Current session, Working tree, Staged, and Last commit diffs. A non-repository workspace may be initialized at the trusted root on `main`, but only in Execute mode after immutable explicit approval. Initialization must not create a commit, stage files, or add a remote. Repository configuration edits are limited to explicitly approved, repository-local `user.name`, `user.email`, and the exact `origin` address. The Host must accept only validated HTTPS or SSH origin addresses, reject embedded credentials, and use structured `remote add` or `remote set-url` arguments.
 
 Every Git write always requires immutable, action-specific user approval, including under the automatic approval policy. Pre-existing user changes remain separate and unselected by default. A commit requires an exact staged-set match and a passing validation bound to current file hashes, unless a permitted explicit override is approved. Commit, tag, branch-push, and tag-push facts remain distinct in session state.
 
-Never expose arbitrary Git arguments, force push, amend, reset, checkout, switch, clean, stash, pull, merge, rebase, cherry-pick, revert, remote mutation, branch mutation, tag deletion, or history rewriting. Once a session delivery is committed, internal undo must not contradict or rewrite repository history.
+Never expose arbitrary Git arguments, force push, amend, reset, checkout, switch, clean, stash, pull, merge, rebase, cherry-pick, revert, remote mutation other than the exact guarded `origin` address flow, branch mutation, tag deletion, or history rewriting. Once a session delivery is committed, internal undo must not contradict or rewrite repository history.
 
 ## 7. Plans, Recovery, and Limits
 
@@ -301,6 +332,8 @@ narrow viewport widths.
 
 Keep keyboard and accessibility behavior intact: Enter sends, Shift+Enter inserts a line break, Escape closes dialogs, focus remains visible, and collapsible controls expose `aria-expanded`.
 
+Never use browser-native `alert`, `confirm`, or `prompt` UI. Use the application-styled modal for confirmations and text input. Validation and action failures use dismissible top-center toasts with a 30-second timeout, while the exact invalid field or containing card receives a visible error border and `aria-invalid` where applicable.
+
 Settings uses a near-full-viewport dialog with one dirty-state model, persistent save controls, desktop section navigation, and a compact responsive selector. Validation errors must focus the relevant section, and closing dirty settings requires explicit discard confirmation.
 
 Use plain HTML, CSS, and JavaScript. Do not add Node.js, npm, a bundler, or a frontend framework.
@@ -308,6 +341,25 @@ Use plain HTML, CSS, and JavaScript. Do not add Node.js, npm, a bundler, or a fr
 ## 10. Error Handling
 
 Use stable typed errors with fields equivalent to code, message, stage, provider, model, intent, retryability, trace ID, and sanitized details.
+
+`HttpContext.TraceIdentifier` is the canonical request trace and exact incident
+lookup key. Request, conversation, turn, execution-session, provider-attempt,
+plan-step, and action IDs remain separate linked authorities. Persist only
+bounded typed milestones and Host-authored metadata summaries in the local
+incident journal. Never persist prompts, responses, source/file contents,
+diffs, raw tool arguments or output, process output, provider bodies, secrets,
+stack traces, or unrestricted paths there. Terminal and failure evidence must
+flush before diagnostics are reported as persisted; diagnostic failure must
+never replace the primary request outcome.
+
+Coordinator requests must use the same centralized conservative estimator as
+the provider adapter and fit within resolved maximum context minus reserved
+output. Compact deterministically by preserving objective, project context,
+current guidance, Host-owned plan/action/file metadata, current correction,
+and the latest complete assistant/tool pair. After a context-fit rejection,
+allow at most one materially smaller retry, then change execution path or
+return a reviewable partial terminal state. Do not increase resident context or
+memory as automatic recovery.
 
 Distinguish at least:
 
