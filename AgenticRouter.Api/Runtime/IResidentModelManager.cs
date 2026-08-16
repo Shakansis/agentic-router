@@ -3,6 +3,13 @@ using AgenticRouter.Api.Contracts;
 
 namespace AgenticRouter.Api.Runtime;
 
+public sealed record ResidentCoexistenceResult(
+  bool ResidentLoaded,
+  bool TargetLoaded,
+  bool Reasserted,
+  string Outcome
+);
+
 public interface IResidentModelManager
 {
   IDisposable BeginRequest();
@@ -23,6 +30,11 @@ public interface IResidentModelManager
   );
 
   Task<bool> RestoreAfterRecoveryAsync(
+    string targetModel,
+    CancellationToken cancellationToken
+  );
+
+  Task<ResidentCoexistenceResult> EnsureResidentAlongsideTargetAsync(
     string targetModel,
     CancellationToken cancellationToken
   );

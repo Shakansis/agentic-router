@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "preferences": [],
+  "profiles": [
+    {
+      "id": "1295349b2097488aa4d75894c4b6165c",
+      "name": "p1",
+      "primaryModel": "functiongemma:270m",
+      "fallbackModel": "none",
+      "routerModel": "functiongemma:270m",
+      "coordinatorModel": "gemma4:12b",
+      "webPreference": "off",
+      "comparisonModel": null,
+      "usageWindow": null,
+      "updatedAt": "2026-08-04T23:28:27.8421428+00:00"
+    }
+  ]
+}

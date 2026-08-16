@@ -12,7 +12,7 @@ const state = {
   conversationVersion: 0,
   modelDiagnostics: null,
   interactionMode: "chat",
-  approvalPolicy: "ask",
+  approvalPolicy: "auto",
   workspace: null,
   workspaceProfiles: null,
   projectProfile: null,
@@ -1773,7 +1773,7 @@ async function resetConversationForWorkspaceChange() {
   state.conversationSessionId = null;
   state.latestExecutionSessionId = null;
   state.interactionMode = "chat";
-  state.approvalPolicy = "ask";
+  state.approvalPolicy = "auto";
   state.lockedModel = null;
   elements.modelSelector.value = "auto";
   elements.modelLock.checked = false;
@@ -2538,7 +2538,7 @@ async function resumeSession(id) {
           ? "interrupted"
           : session.state;
         state.interactionMode = "chat";
-        state.approvalPolicy = "ask";
+        state.approvalPolicy = "auto";
         state.lockedModel = null;
         elements.modelSelector.value = session.selectedModel
           && state.models.some(model => model.name === session.selectedModel)
@@ -7015,7 +7015,7 @@ function clearConversationUi() {
   state.editingTurn = null;
   state.lockedModel = null;
   state.interactionMode = "chat";
-  state.approvalPolicy = "ask";
+  state.approvalPolicy = "auto";
   state.activeAgentModel = null;
   state.activeAgentRole = null;
   state.modelCapability = null;
@@ -8070,8 +8070,8 @@ function updateExecutionSession(assistant, session) {
   const coordinator = document.createElement("span");
   coordinator.textContent =
     `Alvo: ${session.selectedModel || "indisponível"} · `
-    + `Coordenador: ${session.coordinatorModel} · `
-    + `Residente: ${session.residentModel || "indisponível"} · `
+    + `Especialista: ${session.coordinatorModel} · `
+    + `Roteador residente: ${session.residentModel || "indisponível"} · `
     + session.executionPath;
   coordinator.title = [
     session.conformanceIdentity
@@ -8212,8 +8212,8 @@ function renderChangeReview(review) {
     `${review.summary.state} · Alvo: ${review.summary.selectedModel || "indisponível"}`;
   const metadata = document.createElement("p");
   metadata.textContent =
-    `Coordenador: ${review.summary.coordinatorModel} · `
-    + `Residente: ${review.summary.residentModel || "indisponível"} · `
+    `Especialista: ${review.summary.coordinatorModel} · `
+    + `Roteador residente: ${review.summary.residentModel || "indisponível"} · `
     + `${review.summary.executionPath} · ${review.summary.actionCount} ações · `
     + `${review.summary.changedFileCount} arquivos · `
     + `${formatElapsed(review.summary.elapsedMilliseconds)} · `

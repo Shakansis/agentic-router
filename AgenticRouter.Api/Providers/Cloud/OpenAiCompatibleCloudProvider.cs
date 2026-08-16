@@ -1097,13 +1097,14 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         }
       }
 
-      var toolCallId = message.ToolName is not null
+      var toolCallId = message.ToolCallId
+        ?? (message.ToolName is not null
         && latestCallIds.TryGetValue(
           message.ToolName,
           out var matchedId
         )
           ? matchedId
-          : message.ToolName;
+          : message.ToolName);
       result.Add(
         new
         {

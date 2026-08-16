@@ -311,7 +311,8 @@ public sealed class ToolNameResolver : IToolNameResolver
     {
       throw new LocalActionException(
         "tool-phase-validation",
-        $"Tool name '{Bounded(proposedName)}' resolves to '{canonical}', which is not offered in the current execution phase."
+        $"Tool name '{Bounded(proposedName)}' resolves to '{canonical}', which is not offered in the current execution phase.",
+        proposedCanonicalTool: canonical
       );
     }
 

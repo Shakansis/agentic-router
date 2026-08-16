@@ -54,13 +54,14 @@ The application follows a flexible pipeline that adapts to available hardware:
 
 ### Execute Mode
 
-Execute mode provides supervised local tool execution within a user-approved trusted workspace:
+Execute mode gives the selected specialist a direct, iterative tool loop inside a user-approved trusted workspace:
 
 **Core Concepts:**
 - **Trusted Workspace**: A user-approved directory where all file operations are confined
-- **Host-Owned Plans**: Execution plans are created and managed by the host, not the model
-- **Effect-Based Completion**: Plan steps advance only after verified filesystem effects are observed
-- **Approval Workflow**: Sensitive operations require explicit user approval before execution
+- **Specialist Ownership**: The selected specialist reasons, calls one tool, observes the Host result, and continues without a resident translation model
+- **Optional Progress**: A semantic plan is not required before ordinary workspace actions
+- **Effect-Based Completion**: Actions count as completed only after the Host observes the required effect
+- **Boundary-Based Approval**: Trusted-workspace actions are automatic by default; real external or elevated-risk effects remain explicit
 - **Tool Effect Registry**: Post-resolution effect typing (inspection, file creation, modification, deletion, etc.)
 
 **Available Tools:**
@@ -74,15 +75,16 @@ Execute mode provides supervised local tool execution within a user-approved tru
 - `apply_patch` - Apply multiple text replacements
 - `create_directory` - Create directories
 - `run_process` - Execute allowed processes with policy validation
-- `delete_files` - Delete explicitly inspected files (requires approval)
+- `delete_files` - Delete explicit bounded files with hash checks and undo evidence
 - `run_validation_profile` - Run configured validation profiles
 
 **Security Boundaries:**
 - All file paths are canonicalized and confined to the trusted workspace
+- Direct filesystem access to `.git` metadata is rejected; structured Git services remain separate
 - Protected instruction files require explicit mention in the user objective
 - Process execution uses an allowlist policy
-- File modifications require prior inspection in the same execution session
-- Deletion always requires immutable approval and hash validation
+- File writes use observed hashes to detect stale or external changes
+- Deletion requires explicit paths, hash validation, and bounded recovery evidence
 
 **Git Delivery:**
 Execute mode includes a safe Git workflow for committing changes:

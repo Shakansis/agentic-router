@@ -142,6 +142,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         {
           Execution = settings.Execution with
           {
+            DirectCoordinatorPlanningFailuresBeforeHandoff = 4,
             MaxRecoveryAttemptsPerTurn = 5,
             ResidentCoordinatorPlanningFailuresBeforeFailure = Math.Max(
               5,

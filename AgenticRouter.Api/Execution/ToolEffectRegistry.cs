@@ -1,5 +1,7 @@
 namespace AgenticRouter.Api.Execution;
 
+using System.Text.RegularExpressions;
+
 public static class ToolEffects
 {
   public const string Inspected = "inspected";
@@ -14,6 +16,11 @@ public static class ToolEffects
 
 public static class ToolEffectRegistry
 {
+  private static readonly Regex HostTargetMarker = new(
+    @"\[target:\s*(?<path>[^\]\r\n]+)\]",
+    RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase
+  );
+
   private static readonly IReadOnlyDictionary<string, string> Effects =
     new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -48,6 +55,31 @@ public static class ToolEffectRegistry
       : null;
   }
 
+  public static bool HasCompatibleTool(
+    string effect,
+    IEnumerable<string> availableTools
+  )
+  {
+    return availableTools.Any(
+      tool => Effects.TryGetValue(tool, out var offeredEffect)
+        && AreCompatible(effect, offeredEffect)
+    );
+  }
+
+  public static bool AreCompatible(
+    string expectedEffect,
+    string observedEffect
+  )
+  {
+    if (string.Equals(expectedEffect, observedEffect, StringComparison.Ordinal))
+    {
+      return true;
+    }
+
+    return expectedEffect is ToolEffects.FileCreated or ToolEffects.FileChanged
+      && observedEffect is ToolEffects.FileCreated or ToolEffects.FileChanged;
+  }
+
   public static string? InferExpectedEffect(string title)
   {
     var canonicalEffect = Effects
@@ -70,7 +102,19 @@ public static class ToolEffectRegistry
       return ToolEffects.GitChanged;
     }
 
-    if (ContainsAny(title, "create directory", "create folder", "criar diret", "criar pasta"))
+    if (ContainsAny(
+      title,
+      "create directory",
+      "create folder",
+      "create project directory",
+      "create project folder",
+      "directory structure",
+      "folder structure",
+      "criar diret",
+      "criar pasta",
+      "estrutura de diret",
+      "estrutura de pasta"
+    ))
     {
       return ToolEffects.DirectoryCreated;
     }
@@ -79,7 +123,7 @@ public static class ToolEffectRegistry
       {
         Candidate(title, ToolEffects.FileDeleted, "delete", "remove", "exclude", "excluir", "apagar", "delet"),
         Candidate(title, ToolEffects.FileCreated, "create", "add file", "new file", "criar", "adicionar arquivo"),
-        Candidate(title, ToolEffects.FileChanged, "implement", "change", "edit", "update", "apply", "fix", "alter", "corrig"),
+        Candidate(title, ToolEffects.FileChanged, "implement", "write", "change", "edit", "update", "apply", "fix", "alter", "corrig", "design", "style", "integrat", "generat"),
         Candidate(title, ToolEffects.Inspected, "inspect", "read", "review", "search", "list", "analis", "ler", "revis", "buscar", "listar"),
         Candidate(title, ToolEffects.ProcessExecuted, "run", "execute", "command", "process", "execut", "comando", "processo")
       }
@@ -96,6 +140,26 @@ public static class ToolEffectRegistry
       or ToolEffects.FileDeleted
       or ToolEffects.DirectoryCreated
       or ToolEffects.GitChanged;
+  }
+
+  public static string WithHostTarget(string title, string relativePath)
+  {
+    if (TryGetHostTarget(title) is not null)
+    {
+      return title;
+    }
+
+    var suffix = $" [target: {relativePath}]";
+    var maximumBaseLength = Math.Max(1, 100 - suffix.Length);
+    return title[..Math.Min(title.Length, maximumBaseLength)].TrimEnd() + suffix;
+  }
+
+  public static string? TryGetHostTarget(string title)
+  {
+    var match = HostTargetMarker.Match(title);
+    return match.Success
+      ? match.Groups["path"].Value.Trim()
+      : null;
   }
 
   public static bool IsGenericPlanStep(string title)

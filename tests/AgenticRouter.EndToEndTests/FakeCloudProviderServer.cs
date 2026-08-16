@@ -617,7 +617,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
     )
     {
       var plannerRequest = body.Contains(
-        "LOCAL_ACTION_PLANNER_V1",
+        "SPECIALIST_TOOL_LOOP_V2",
         StringComparison.Ordinal
       );
       var priorToolNames = new List<string>();
@@ -665,9 +665,15 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
 
       if (
         plannerRequest
-        && priorToolNames.Contains(
-          "create_file",
-          StringComparer.Ordinal
+        && (
+          priorToolNames.Contains(
+            "create_file",
+            StringComparer.Ordinal
+          )
+          || body.Contains(
+            "Created hello.txt",
+            StringComparison.Ordinal
+          )
         )
       )
       {
@@ -698,12 +704,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       }
 
       var offeredTool = plannerRequest
-        ? priorToolNames.Contains(
-          "create_execution_plan",
-          StringComparer.Ordinal
-        )
-          ? "create_file"
-          : "create_execution_plan"
+        ? "create_file"
         : tools[0].GetProperty(
         "function"
       ).GetProperty(

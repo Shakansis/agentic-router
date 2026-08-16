@@ -53,8 +53,12 @@ public sealed class PlanningFailureClassifier : IPlanningFailureClassifier
     return localAction.Stage switch
     {
       "local-action-planning" => CoordinatorFailureCategory.CorrectablePlanning,
+      "tool-phase-validation" => CoordinatorFailureCategory.CorrectablePlanning,
       "action-validation" => CoordinatorFailureCategory.CorrectablePlanning,
+      "plan-action-binding" => CoordinatorFailureCategory.CorrectablePlanning,
       "execution-plan" => CoordinatorFailureCategory.CorrectablePlanning,
+      "execution-plan-tool-scope" => CoordinatorFailureCategory.CorrectablePlanning,
+      "execution-plan-quality-review" => CoordinatorFailureCategory.CorrectablePlanning,
       "file-not-inspected" => CoordinatorFailureCategory.CorrectablePlanning,
       "process-validation" => CoordinatorFailureCategory.PolicyDenied,
       "path-validation" => CoordinatorFailureCategory.SecurityDenied,

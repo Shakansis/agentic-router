@@ -15,10 +15,55 @@ public interface IExecutionPlanService
     ExecutionPlanView current,
     int maximumSteps
   );
+
+  ExecutionPlanView NormalizeExistingReferencedDependencies(
+    ExecutionPlanView plan,
+    string objective,
+    string? workspacePath
+  );
 }
 
 public sealed class ExecutionPlanService : IExecutionPlanService
 {
+  private static readonly string[] ReuseIntentFragments =
+  [
+    "use",
+    "reuse",
+    "integrate",
+    "existing",
+    "supplied",
+    "inside",
+    "from",
+    "usar",
+    "reutilizar",
+    "integrar",
+    "existente",
+    "fornecido",
+    "dentro",
+    "a partir"
+  ];
+
+  private static readonly string[] ExplicitMutationFragments =
+  [
+    "edit",
+    "update",
+    "modify",
+    "change",
+    "rewrite",
+    "overwrite",
+    "replace",
+    "delete",
+    "editar",
+    "atualizar",
+    "modificar",
+    "alterar",
+    "reescrever",
+    "sobrescrever",
+    "substituir",
+    "excluir",
+    "apagar"
+  ];
+
   private static readonly string[] ExecutableFragments =
   [
     "&&",
@@ -192,6 +237,102 @@ public sealed class ExecutionPlanService : IExecutionPlanService
     );
   }
 
+  public ExecutionPlanView NormalizeExistingReferencedDependencies(
+    ExecutionPlanView plan,
+    string objective,
+    string? workspacePath
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(workspacePath)
+      || !ContainsAny(objective, ReuseIntentFragments)
+      || ContainsAny(objective, ExplicitMutationFragments)
+    )
+    {
+      return plan;
+    }
+
+    string workspaceRoot;
+    try
+    {
+      workspaceRoot = Path.GetFullPath(workspacePath);
+    }
+    catch (
+      Exception exception
+    ) when (
+      exception is ArgumentException
+      or NotSupportedException
+      or PathTooLongException
+    )
+    {
+      return plan;
+    }
+
+    var rootWithSeparator = Path.EndsInDirectorySeparator(workspaceRoot)
+      ? workspaceRoot
+      : workspaceRoot + Path.DirectorySeparatorChar;
+    var changed = false;
+    var steps = plan.Steps.Select(
+      step =>
+      {
+        var target = ToolEffectRegistry.TryGetHostTarget(step.Title);
+        if (
+          target is null
+          || ToolEffectRegistry.InferExpectedEffect(step.Title) != ToolEffects.FileCreated
+          || !ObjectiveReferencesTarget(objective, target)
+        )
+        {
+          return step;
+        }
+
+        string candidate;
+        try
+        {
+          candidate = Path.GetFullPath(
+            Path.Combine(
+              workspaceRoot,
+              target.Replace('/', Path.DirectorySeparatorChar)
+            )
+          );
+        }
+        catch (
+          Exception exception
+        ) when (
+          exception is ArgumentException
+          or NotSupportedException
+          or PathTooLongException
+        )
+        {
+          return step;
+        }
+
+        if (
+          !candidate.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase)
+          || !File.Exists(candidate)
+        )
+        {
+          return step;
+        }
+
+        changed = true;
+        return step with
+        {
+          Title = ToolEffectRegistry.WithHostTarget(
+            "Inspect existing referenced dependency",
+            target
+          )
+        };
+      }
+    ).ToArray();
+
+    return changed
+      ? plan with
+      {
+        Steps = steps
+      }
+      : plan;
+  }
+
   private static ParsedPlan ParseArguments(
     JsonElement arguments,
     int maximumSteps
@@ -297,6 +438,18 @@ public sealed class ExecutionPlanService : IExecutionPlanService
         );
       }
 
+      if (
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty("target", out var targetElement)
+        && targetElement.ValueKind == JsonValueKind.String
+        && NormalizeStepTarget(targetElement.GetString()) is
+        {
+        } target
+      )
+      {
+        title = ToolEffectRegistry.WithHostTarget(title, target);
+      }
+
       titles.Add(
         title
       );
@@ -305,6 +458,84 @@ public sealed class ExecutionPlanService : IExecutionPlanService
     return new ParsedPlan(
       objective,
       titles
+    );
+  }
+
+  private static string? NormalizeStepTarget(string? value)
+  {
+    if (string.IsNullOrWhiteSpace(value))
+    {
+      return null;
+    }
+
+    var invalid = Path.GetInvalidFileNameChars().ToHashSet();
+    var segments = new List<string>();
+    foreach (var rawSegment in value.Replace('\\', '/').Split('/'))
+    {
+      var segment = rawSegment.Trim();
+      if (
+        segment.Length == 0
+        || segment == "."
+        || segment == ".."
+        || (segment.Length == 2 && char.IsLetter(segment[0]) && segment[1] == ':')
+      )
+      {
+        continue;
+      }
+
+      var safe = new string(
+        segment.Where(
+          character => !invalid.Contains(character) && !char.IsControl(character)
+        ).ToArray()
+      ).Trim();
+      if (safe.Length > 0)
+      {
+        segments.Add(safe);
+      }
+    }
+
+    if (segments.Count == 0)
+    {
+      return null;
+    }
+
+    var normalized = string.Join('/', segments);
+    return normalized.Length <= 72
+      ? normalized
+      : normalized[^72..].TrimStart('/');
+  }
+
+  private static bool ObjectiveReferencesTarget(
+    string objective,
+    string target
+  )
+  {
+    var normalizedObjective = objective.Replace('\\', '/');
+    var normalizedTarget = target.Replace('\\', '/');
+    var fileName = Path.GetFileName(normalizedTarget);
+    return normalizedObjective.Contains(
+        normalizedTarget,
+        StringComparison.OrdinalIgnoreCase
+      )
+      || (
+        fileName.Length > 0
+        && normalizedObjective.Contains(
+          fileName,
+          StringComparison.OrdinalIgnoreCase
+        )
+      );
+  }
+
+  private static bool ContainsAny(
+    string value,
+    IEnumerable<string> fragments
+  )
+  {
+    return fragments.Any(
+      fragment => value.Contains(
+        fragment,
+        StringComparison.OrdinalIgnoreCase
+      )
     );
   }
 

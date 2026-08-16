@@ -300,7 +300,7 @@ internal static class TestOllamaRuntimeDefaults
 
 internal sealed record TestExecutionSettings
 {
-  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 2;
+  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 4;
 
   public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
 

@@ -19,6 +19,7 @@ public interface ILocalActionPlanner
 {
   CoordinatorContextFit FitToBudget(
     IReadOnlyList<OllamaToolMessage> messages,
+    SpecialistToolingProfile toolingProfile,
     string hostStateSummary,
     long maximumInputTokens,
     bool planRequired,
@@ -29,6 +30,7 @@ public interface ILocalActionPlanner
   Task<LocalActionPlanningResult> PlanAsync(
     Uri baseUri,
     string model,
+    SpecialistToolingProfile toolingProfile,
     IReadOnlyList<OllamaToolMessage> messages,
     bool planRequired,
     int attemptNumber,
@@ -40,43 +42,33 @@ public interface ILocalActionPlanner
 
 public sealed class LocalActionPlanner : ILocalActionPlanner
 {
-  public const string PlannerMarker = "LOCAL_ACTION_PLANNER_V1";
+  public const string PlannerMarker = "SPECIALIST_TOOL_LOOP_V2";
+  private const int RetainedToolPairs = 4;
 
   private const string PlannerPrompt =
     PlannerMarker + "\n"
-    + "Coordinate controlled local tools by returning exactly one safe action at a time. "
-    + "When a user message begins with EXPERT_EXECUTION_GUIDANCE_V1, you are the resident "
-    + "tooling bridge: translate the specialist model's guidance into actions and preserve "
-    + "its exact paths and file contents. Otherwise, derive the required actions directly "
-    + "from the user request and context; you may be either the confirmed target model or "
-    + "the resident agent taking over without specialist guidance. "
-    + "Re-evaluate the remaining work after every LOCAL_ACTION_RESULT and never repeat a "
+    + "You are the selected specialist and retain ownership of this task. When another local "
+    + "action is necessary, return exactly one safe tool call, observe the authoritative result, and decide the "
+    + "next action yourself. The Host executes tools and enforces deterministic boundaries; "
+    + "it does not reinterpret your intent through another model. "
+    + "Treat minor spelling and grammar mistakes as recoverable input. When a phrase is "
+    + "ambiguous or unfamiliar, use the surrounding requested assets and constraints to choose "
+    + "the most conventional coherent interpretation, keep that assumption visible in the final result, "
+    + "and continue without inventing unrelated behavior. "
+    + "Re-evaluate the remaining work after every authoritative tool result and never repeat a "
     + "completed action. "
     + "Use exactly one native tool call when a local action is required. "
-    + "Before the first local action, call create_execution_plan once with a 1 to 8 step "
-    + "checklist. When bridging structured specialist guidance, create one plan step for "
-    + "each guidance action and preserve its title and order. The Host generates stable "
-    + "step IDs; never invent or return IDs. Use revise_execution_plan only "
-    + "when execution facts require changing "
-    + "remaining steps. The plan cannot execute commands. "
-    + "Before any completed tool result, when no local action is needed, reply exactly "
-    + "NO_LOCAL_ACTION_REQUIRED without a tool call. After completed tool results, return a "
-    + "concise final response without a tool call only when every planned step is complete. "
-    + "Available tools and arguments: "
-    + "list_files {path,recursive}; read_file {path}; "
-    + "get_file_info {path}; search_text {path,query}; "
-    + "create_file {path,content}; write_file {path,content}; "
-    + "replace_text {path,oldText,newText,replaceAll}; "
-    + "apply_patch {path,replacements:[{oldText,newText}]}; "
-    + "delete_files {paths:[string]}; "
-    + "create_directory {path}; "
-    + "run_process {executable,arguments:[string],workingDirectory,timeoutSeconds}; "
-    + "run_validation_profile {}; "
-    + "git_status {}; git_diff {paths:[string],staged}; git_log {maxEntries}; "
-    + "git_show_commit {commit}; git_stage_files {paths:[string]}; "
-    + "git_unstage_files {paths:[string]}; git_create_commit {message,commitWithoutValidation}; "
-    + "git_create_annotated_tag {tag,annotation}; git_push_current_branch {}; "
-    + "git_push_tag {}. "
+    + "When the user says to use, reuse, integrate, or inspect an existing file, dependency, or "
+    + "asset, inspect it instead of creating or overwriting it. If the stated path does not "
+    + "exist, list its parent directory and inspect the actual candidate. Never create a "
+    + "duplicate file merely to make a mistaken name true. For a referenced existing folder, "
+    + "list the folder and read the relevant implementation files before integration; preserve "
+    + "them and use only public names and paths observed in their contents. Review cross-file "
+    + "references and every explicit content or behavior constraint before completion. "
+    + "A response without a tool call is a completion proposal. Return a concise final response "
+    + "without a tool call when the requested work is complete or no safe action remains. "
+    + "The Host supplies a request-specific closed tool set with native schemas. "
+    + "A tool omitted from that set is outside the Host-authorized capabilities for this turn. "
     + "Every Git write is separately approved by the user even under automatic approval. "
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
@@ -90,29 +82,32 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Deletion is available only through delete_files with an explicit list of existing file paths. "
     + "Never request moving, "
     + "a shell interpreter, command chaining, or access outside the workspace. "
-    + "Do not return a prose plan, do not claim execution, and do not stop while the "
-    + "specialist guidance still contains an uncompleted local action.";
+    + "Do not return a prose plan and do not claim execution without an authoritative tool result.";
 
-  private static readonly IReadOnlyList<OllamaToolDefinition> ToolDefinitions =
+  private static readonly IReadOnlyList<CanonicalToolDefinition> ToolDefinitions =
     CreateToolDefinitions();
 
   private readonly IOllamaClient _ollamaClient;
   private readonly IToolNameResolver _toolNames;
   private readonly ITokenEstimator _tokenEstimator;
+  private readonly ISpecialistToolingProtocol _toolingProtocol;
 
   public LocalActionPlanner(
     IOllamaClient ollamaClient,
     IToolNameResolver toolNames,
-    ITokenEstimator tokenEstimator
+    ITokenEstimator tokenEstimator,
+    ISpecialistToolingProtocol toolingProtocol
   )
   {
     _ollamaClient = ollamaClient;
     _toolNames = toolNames;
     _tokenEstimator = tokenEstimator;
+    _toolingProtocol = toolingProtocol;
   }
 
   public CoordinatorContextFit FitToBudget(
     IReadOnlyList<OllamaToolMessage> messages,
+    SpecialistToolingProfile toolingProfile,
     string hostStateSummary,
     long maximumInputTokens,
     bool planRequired,
@@ -120,8 +115,11 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     bool completionAllowed
   )
   {
-    var before = EstimateRequest(messages, planRequired, attemptNumber);
-    if (before <= maximumInputTokens)
+    var before = EstimateRequest(messages, toolingProfile, planRequired, attemptNumber);
+    var hasReplaceableHistory = messages.Count(
+      item => item.Role == "tool"
+    ) > RetainedToolPairs;
+    if (before <= maximumInputTokens && !hasReplaceableHistory)
     {
       return new CoordinatorContextFit(messages.ToArray(), before, before, false, false, "already-fits");
     }
@@ -132,25 +130,41 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     AddLast(compact, messages, item => item.Content?.StartsWith(ExpertExecutionGuidanceService.GuidanceMarker, StringComparison.Ordinal) == true);
     compact.Add(new OllamaToolMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
 
+    var retainedToolIndexes = messages.Select(
+      (item, index) => (item, index)
+    ).Where(
+      pair => pair.item.Role == "tool"
+    ).TakeLast(
+      RetainedToolPairs
+    ).Select(
+      pair => pair.index
+    ).ToArray();
+    var previousToolIndex = -1;
+    foreach (var toolIndex in retainedToolIndexes)
+    {
+      var assistant = messages.Skip(
+        previousToolIndex + 1
+      ).Take(
+        toolIndex - previousToolIndex - 1
+      ).LastOrDefault(
+        item => item.Role == "assistant"
+      );
+      if (assistant is not null)
+      {
+        compact.Add(assistant);
+      }
+      compact.Add(messages[toolIndex]);
+      previousToolIndex = toolIndex;
+    }
+
     var latestControl = messages.LastOrDefault(item => IsControlMessage(item.Content));
     if (latestControl is not null)
     {
       compact.Add(latestControl);
     }
 
-    var latestToolIndex = messages.Select((item, index) => (item, index)).LastOrDefault(pair => pair.item.Role == "tool").index;
-    if (
-      latestToolIndex > 0
-      && messages[latestToolIndex].Content?.StartsWith("Status: completed", StringComparison.Ordinal) != true
-    )
-    {
-      var assistant = messages.Take(latestToolIndex).LastOrDefault(item => item.Role == "assistant");
-      if (assistant is not null) compact.Add(assistant);
-      compact.Add(messages[latestToolIndex]);
-    }
-
     compact = compact.DistinctBy(MessageFingerprint, StringComparer.Ordinal).ToList();
-    var after = EstimateRequest(compact, planRequired, attemptNumber);
+    var after = EstimateRequest(compact, toolingProfile, planRequired, attemptNumber);
     var tooLarge = after > maximumInputTokens;
     var materiallySmaller = after <= before - Math.Max(256, before / 10);
     return new CoordinatorContextFit(
@@ -166,6 +180,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   public async Task<LocalActionPlanningResult> PlanAsync(
     Uri baseUri,
     string model,
+    SpecialistToolingProfile toolingProfile,
     IReadOnlyList<OllamaToolMessage> messages,
     bool planRequired,
     int attemptNumber,
@@ -174,7 +189,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     CancellationToken cancellationToken
   )
   {
-    var request = CreatePlanningRequest(messages, planRequired, attemptNumber);
+    var request = CreatePlanningRequest(messages, toolingProfile, planRequired, attemptNumber);
     var availableTools = request.Tools;
     var plannerMessages = request.Messages;
     var response = await _ollamaClient.GenerateToolCallAsync(
@@ -186,23 +201,15 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       usageContext,
       cancellationToken
     );
-    var selectedToolCalls = response.ToolCalls.Take(
-      1
-    ).ToArray();
-    var assistantMessage = new OllamaToolMessage(
-      "assistant",
-      response.Content,
-      response.Thinking,
-      selectedToolCalls
-    );
+    var canonicalTurn = _toolingProtocol.Normalize(toolingProfile, response);
+    var assistantMessage = _toolingProtocol.CreateAssistantMessage(canonicalTurn);
 
     try
     {
       return ParseResponse(
-        messages,
         completionAllowed,
         response,
-        selectedToolCalls,
+        canonicalTurn,
         assistantMessage,
         availableTools
       );
@@ -219,29 +226,32 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
   private PlanningRequest CreatePlanningRequest(
     IReadOnlyList<OllamaToolMessage> messages,
+    SpecialistToolingProfile toolingProfile,
     bool planRequired,
     int attemptNumber
   )
   {
-    var availableTools = planRequired
-      ? ToolDefinitions.Where(
-        tool => tool.Name == "create_execution_plan"
-      ).ToArray()
-      : ToolDefinitions.Where(
-        tool => tool.Name != "create_execution_plan"
-      ).ToArray();
+    var scope = ExecutionTurnToolPolicy.Resolve(
+      messages.Select(message => (message.Role, message.Content))
+    );
+    var canonicalTools = ToolDefinitions.Where(
+      tool => tool.Name is not "create_execution_plan" and not "revise_execution_plan"
+        && scope.Allows(tool.Name)
+    ).ToArray();
+    var availableTools = _toolingProtocol.ToOllamaDefinitions(
+      toolingProfile,
+      canonicalTools
+    );
     var prompt = PlannerPrompt
-      + (
-        planRequired
-          ? "\nNo valid execution plan is stored. Call create_execution_plan now; no other "
-            + "tool is available until that plan passes validation."
-          : "\nA valid execution plan is already stored. Do not call create_execution_plan again."
-      )
+      + $"\n{toolingProfile.PromptInstructions}"
+      + $"\nHost-owned turn constraints:\n{ExecutionTurnToolPolicy.Describe(scope)}"
+      + $"\nTools offered in this phase: {string.Join(", ", availableTools.Select(tool => tool.Name))}."
       + (
         attemptNumber > 1
           ? $"\nThis is retry attempt {attemptNumber}. The previous response was empty, invalid, "
-            + "unavailable, or rejected during action validation. Return exactly one valid native "
-            + "tool call using an available tool name."
+            + "unavailable, or rejected during action validation. Change strategy: return one valid "
+            + "available tool call when another action is necessary, or a final response without a "
+            + "tool call when the verified work is complete or no safe action remains."
           : string.Empty
       );
     var plannerMessages = new[]
@@ -256,9 +266,14 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     return new PlanningRequest(plannerMessages, availableTools);
   }
 
-  private long EstimateRequest(IReadOnlyList<OllamaToolMessage> messages, bool planRequired, int attemptNumber)
+  private long EstimateRequest(
+    IReadOnlyList<OllamaToolMessage> messages,
+    SpecialistToolingProfile toolingProfile,
+    bool planRequired,
+    int attemptNumber
+  )
   {
-    var request = CreatePlanningRequest(messages, planRequired, attemptNumber);
+    var request = CreatePlanningRequest(messages, toolingProfile, planRequired, attemptNumber);
     return _tokenEstimator.EstimateToolMessages(request.Messages)
       + _tokenEstimator.EstimateText(JsonSerializer.Serialize(request.Tools));
   }
@@ -277,7 +292,17 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   {
     return content?.StartsWith("LOCAL_ACTION_RESULT", StringComparison.Ordinal) == true
       || content?.StartsWith("STRUCTURED_ACTION_CORRECTION", StringComparison.Ordinal) == true
-      || content?.StartsWith("COMPLETION_REJECTED", StringComparison.Ordinal) == true;
+      || content?.StartsWith("LOCAL_ACTION_PLANNING_CORRECTION", StringComparison.Ordinal) == true
+      || content?.StartsWith("TOOL_PROTOCOL_CORRECTION", StringComparison.Ordinal) == true
+      || content?.StartsWith("LOCAL_ACTION_CORRECTION", StringComparison.Ordinal) == true
+      || content?.StartsWith("HOST_REVIEW_EVIDENCE_REJECTED", StringComparison.Ordinal) == true
+      || content?.StartsWith("PLAN_ACTION_NOT_BOUND", StringComparison.Ordinal) == true
+      || content?.StartsWith("EXECUTION_COMPLETION_REJECTED", StringComparison.Ordinal) == true
+      || content?.StartsWith("COMPLETION_REJECTED", StringComparison.Ordinal) == true
+      || content?.StartsWith("HOST_COMPLETION_FACTS", StringComparison.Ordinal) == true
+      || content?.StartsWith("RECOVERY_", StringComparison.Ordinal) == true
+      || content?.StartsWith("RESIDENT_", StringComparison.Ordinal) == true
+      || content?.StartsWith("AUTHORITATIVE_EXECUTION_SESSION_FACTS", StringComparison.Ordinal) == true;
   }
 
   private static string MessageFingerprint(OllamaToolMessage message)
@@ -291,81 +316,41 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   );
 
   private LocalActionPlanningResult ParseResponse(
-    IReadOnlyList<OllamaToolMessage> messages,
     bool completionAllowed,
     OllamaToolResponse response,
-    IReadOnlyList<OllamaToolCall> selectedToolCalls,
+    CanonicalSpecialistTurn canonicalTurn,
     OllamaToolMessage assistantMessage,
     IReadOnlyList<OllamaToolDefinition> availableTools
   )
   {
     try
     {
-      if (selectedToolCalls.Count == 0)
+      if (canonicalTurn.ToolCalls.Count == 0)
       {
-        if (IsExplicitNoAction(
-          response.Content
-        ))
-        {
-          return new LocalActionPlanningResult(
-            null,
-            assistantMessage,
-            true,
-            ContextResolution: response.ContextResolution
-          );
-        }
-
         if (
           completionAllowed
-          && !string.IsNullOrWhiteSpace(
-            response.Content
-          )
+          && canonicalTurn.Completion is not null
         )
         {
           return new LocalActionPlanningResult(
             null,
             assistantMessage,
             false,
-            ContextResolution: response.ContextResolution
+            ContextResolution: response.ContextResolution,
+            CallId: null
           );
         }
 
         throw new JsonException(
-          string.IsNullOrWhiteSpace(
-            response.Content
-          )
+          canonicalTurn.Completion is null
             ? "The coordinator returned neither a native tool call nor a usable final response."
-            : "The coordinator returned prose before local execution was complete. "
-              + "It must call one available tool or return the exact NO_LOCAL_ACTION_REQUIRED sentinel."
+            : "The specialist proposed completion before the Host verified the required effects. "
+              + "It must call one available tool that materially advances the objective."
         );
       }
 
-      var call = selectedToolCalls[0];
+      var call = canonicalTurn.ToolCalls[0];
       var tool = call.Name;
-
-      if (
-        tool is not null
-        && IsNoActionSentinel(
-          tool
-        )
-      )
-      {
-        if (messages.Any(
-          message => message.Role == "tool"
-        ))
-        {
-          return new LocalActionPlanningResult(
-            null,
-            assistantMessage,
-            true,
-            ContextResolution: response.ContextResolution
-          );
-        }
-
-        throw new JsonException(
-          "The coordinator returned a textual no-action sentinel as a native tool name."
-        );
-      }
 
       if (string.IsNullOrWhiteSpace(
         tool
@@ -400,8 +385,9 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         ),
         assistantMessage,
         false,
-        response.ToolCalls.Count - selectedToolCalls.Count,
-        response.ContextResolution
+        canonicalTurn.IgnoredToolCallCount,
+        response.ContextResolution,
+        call.CallId
       );
     }
     catch (JsonException exception)
@@ -414,7 +400,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     }
   }
 
-  private static IReadOnlyList<OllamaToolDefinition> CreateToolDefinitions()
+  private static IReadOnlyList<CanonicalToolDefinition> CreateToolDefinitions()
   {
     return
     [
@@ -527,7 +513,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
               {
                 "oldText",
                 "newText"
-              }
+              },
+              additionalProperties = false
             }
           }
         },
@@ -553,7 +540,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       ),
       Tool(
         "run_process",
-        "Run one structured process without a shell.",
+        "Run one structured executable and argument list without a shell only when process execution materially advances or validates the requested goal.",
         new
         {
           executable = StringProperty(),
@@ -677,14 +664,14 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     ];
   }
 
-  private static OllamaToolDefinition Tool(
+  private static CanonicalToolDefinition Tool(
     string name,
     string description,
     object properties,
     IReadOnlyList<string> required
   )
   {
-    return new OllamaToolDefinition(
+    return new CanonicalToolDefinition(
       name,
       description,
       JsonSerializer.SerializeToElement(
@@ -692,7 +679,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         {
           type = "object",
           properties,
-          required
+          required,
+          additionalProperties = false
         }
       )
     );
@@ -746,12 +734,17 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
             title = PlanStringProperty(
               100,
               "Short single-line description only; do not include commands, code, or executable content."
+            ),
+            target = PlanStringProperty(
+              72,
+              "Workspace-relative file path for this file step. If the user did not name it, choose a concise compatible filename and extension. Omit only for non-file steps."
             )
           },
           required = new[]
           {
             "title"
-          }
+          },
+          additionalProperties = false
         }
       }
     };
@@ -771,42 +764,6 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     };
   }
 
-  private static bool IsNoActionSentinel(
-    string tool
-  )
-  {
-    return tool.Trim() switch
-    {
-      var value when value.Equals(
-        "null",
-        StringComparison.OrdinalIgnoreCase
-      ) => true,
-      var value when value.Equals(
-        "none",
-        StringComparison.OrdinalIgnoreCase
-      ) => true,
-      var value when value.Equals(
-        "no_action",
-        StringComparison.OrdinalIgnoreCase
-      ) => true,
-      var value when value.Equals(
-        "no-action",
-        StringComparison.OrdinalIgnoreCase
-      ) => true,
-      _ => false
-    };
-  }
-
-  private static bool IsExplicitNoAction(
-    string? content
-  )
-  {
-    return string.Equals(
-      content?.Trim(),
-      "NO_LOCAL_ACTION_REQUIRED",
-      StringComparison.Ordinal
-    );
-  }
 }
 
 public sealed record LocalActionPlanningResult(
@@ -814,5 +771,6 @@ public sealed record LocalActionPlanningResult(
   OllamaToolMessage AssistantMessage,
   bool ExplicitNoAction,
   int IgnoredToolCallCount = 0,
-  OllamaContextResolution? ContextResolution = null
+  OllamaContextResolution? ContextResolution = null,
+  string? CallId = null
 );

@@ -146,7 +146,8 @@ public sealed record OllamaToolMessage(
   string? Content = null,
   string? Thinking = null,
   IReadOnlyList<OllamaToolCall>? ToolCalls = null,
-  string? ToolName = null
+  string? ToolName = null,
+  string? ToolCallId = null
 );
 
 public sealed record OllamaToolResponse(

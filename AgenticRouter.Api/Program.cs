@@ -168,6 +168,14 @@ builder.Services.AddScoped<IProjectAwarenessService, ProjectAwarenessService>();
 builder.Services.AddScoped<IRepositoryInstructionService, RepositoryInstructionService>();
 builder.Services.AddSingleton<IFolderPickerService, WindowsFolderPickerService>();
 builder.Services.AddSingleton<IToolNameResolver, ToolNameResolver>();
+builder.Services.AddSingleton<
+  ISpecialistToolingProfileResolver,
+  SpecialistToolingProfileResolver
+>();
+builder.Services.AddSingleton<
+  ISpecialistToolingProtocol,
+  SpecialistToolingProtocol
+>();
 builder.Services.AddScoped<ILocalActionService, LocalActionService>();
 builder.Services.AddScoped<IApprovalPolicyService, ApprovalPolicyService>();
 builder.Services.AddSingleton<IProcessExecutionService, ProcessExecutionService>();
@@ -176,6 +184,7 @@ builder.Services.AddScoped<IValidationProfileService, ValidationProfileService>(
 builder.Services.AddSingleton<IGitRepositoryService, GitRepositoryService>();
 builder.Services.AddSingleton<IGitDeliveryService, GitDeliveryService>();
 builder.Services.AddScoped<ILocalActionPlanner, LocalActionPlanner>();
+builder.Services.AddScoped<IFunctionGemmaResidentProtocol, FunctionGemmaResidentProtocol>();
 builder.Services.AddSingleton<IPlanningFailureClassifier, PlanningFailureClassifier>();
 builder.Services.AddSingleton<IToolProtocolConformanceService, ToolProtocolConformanceService>();
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();

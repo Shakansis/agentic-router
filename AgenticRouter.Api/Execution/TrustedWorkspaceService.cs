@@ -23,7 +23,19 @@ public interface ITrustedWorkspaceService
     string? path,
     CancellationToken cancellationToken
   );
+
+  Task<TrustedWorkspacePathResolution> ResolveCreationPathAsync(
+    string? path,
+    CancellationToken cancellationToken
+  );
 }
+
+public sealed record TrustedWorkspacePathResolution(
+  string FullPath,
+  string RelativePath,
+  string? OriginalPath,
+  bool RebasedToWorkspace
+);
 
 public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
 {
@@ -129,6 +141,31 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     CancellationToken cancellationToken
   )
   {
+    return (await ResolvePathCoreAsync(
+      path,
+      false,
+      cancellationToken
+    )).FullPath;
+  }
+
+  public Task<TrustedWorkspacePathResolution> ResolveCreationPathAsync(
+    string? path,
+    CancellationToken cancellationToken
+  )
+  {
+    return ResolvePathCoreAsync(
+      path,
+      true,
+      cancellationToken
+    );
+  }
+
+  private async Task<TrustedWorkspacePathResolution> ResolvePathCoreAsync(
+    string? path,
+    bool rebaseRelativeTraversal,
+    CancellationToken cancellationToken
+  )
+  {
     var status = await GetStatusAsync(
       cancellationToken
     );
@@ -189,28 +226,71 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
       candidate
     );
 
+    var outsideWorkspace = IsOutsideWorkspace(
+      relative
+    );
+    var rebased = false;
+
     if (
-      Path.IsPathFullyQualified(
-        relative
+      outsideWorkspace
+      && rebaseRelativeTraversal
+      && !string.IsNullOrWhiteSpace(
+        path
       )
-      || string.Equals(
-        relative,
-        "..",
-        StringComparison.Ordinal
-      )
-      || relative.StartsWith(
-        $"..{Path.DirectorySeparatorChar}",
-        StringComparison.Ordinal
-      )
-      || relative.StartsWith(
-        $"..{Path.AltDirectorySeparatorChar}",
-        StringComparison.Ordinal
+      && !Path.IsPathFullyQualified(
+        path
       )
     )
+    {
+      var rebasedRelative = ClampRelativePathToWorkspace(
+        path
+      );
+
+      try
+      {
+        candidate = Path.GetFullPath(
+          Path.Combine(
+            root,
+            rebasedRelative
+          )
+        );
+      }
+      catch (Exception exception) when (
+        exception is ArgumentException
+        or NotSupportedException
+        or PathTooLongException
+      )
+      {
+        throw new LocalActionException(
+          "path-validation",
+          "The requested path is invalid.",
+          exception
+        );
+      }
+
+      relative = Path.GetRelativePath(
+        root,
+        candidate
+      );
+      rebased = true;
+      outsideWorkspace = IsOutsideWorkspace(
+        relative
+      );
+    }
+
+    if (outsideWorkspace)
     {
       throw new LocalActionException(
         "path-validation",
         "The requested path is outside the trusted workspace."
+      );
+    }
+
+    if (ContainsGitMetadataSegment(relative))
+    {
+      throw new LocalActionException(
+        "path-validation",
+        "Direct filesystem access to .git metadata is not allowed. Use the structured Git tools."
       );
     }
 
@@ -219,7 +299,89 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
       relative
     );
 
-    return candidate;
+    return new TrustedWorkspacePathResolution(
+      candidate,
+      relative,
+      path,
+      rebased
+    );
+  }
+
+  private static bool ContainsGitMetadataSegment(string relative)
+  {
+    return relative.Split(
+      [
+        Path.DirectorySeparatorChar,
+        Path.AltDirectorySeparatorChar
+      ],
+      StringSplitOptions.RemoveEmptyEntries
+    ).Any(segment => string.Equals(
+      segment,
+      ".git",
+      StringComparison.OrdinalIgnoreCase
+    ));
+  }
+
+  private static bool IsOutsideWorkspace(
+    string relative
+  )
+  {
+    return Path.IsPathFullyQualified(
+      relative
+    ) || string.Equals(
+      relative,
+      "..",
+      StringComparison.Ordinal
+    ) || relative.StartsWith(
+      $"..{Path.DirectorySeparatorChar}",
+      StringComparison.Ordinal
+    ) || relative.StartsWith(
+      $"..{Path.AltDirectorySeparatorChar}",
+      StringComparison.Ordinal
+    );
+  }
+
+  private static string ClampRelativePathToWorkspace(
+    string path
+  )
+  {
+    var segments = new List<string>();
+
+    foreach (var segment in path.Split(
+      [
+        Path.DirectorySeparatorChar,
+        Path.AltDirectorySeparatorChar
+      ],
+      StringSplitOptions.RemoveEmptyEntries
+    ))
+    {
+      if (segment == ".")
+      {
+        continue;
+      }
+
+      if (segment == "..")
+      {
+        if (segments.Count > 0)
+        {
+          segments.RemoveAt(
+            segments.Count - 1
+          );
+        }
+
+        continue;
+      }
+
+      segments.Add(
+        segment
+      );
+    }
+
+    return segments.Count == 0
+      ? "."
+      : Path.Combine(
+        segments.ToArray()
+      );
   }
 
   private static void EnsurePathContainsNoControlCharacters(
@@ -388,7 +550,8 @@ public sealed class LocalActionException : Exception
   public LocalActionException(
     string stage,
     string message,
-    Exception? innerException = null
+    Exception? innerException = null,
+    string? proposedCanonicalTool = null
   )
     : base(
       message,
@@ -396,7 +559,10 @@ public sealed class LocalActionException : Exception
     )
   {
     Stage = stage;
+    ProposedCanonicalTool = proposedCanonicalTool;
   }
 
   public string Stage { get; }
+
+  public string? ProposedCanonicalTool { get; }
 }

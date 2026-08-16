@@ -1095,6 +1095,86 @@ public sealed class ExecutionSession
     }
   }
 
+  public bool HasReviewedChangedFiles
+  {
+    get
+    {
+      lock (_gate)
+      {
+        var latestChanges = LatestVerifiedChangedFilesUnsafe();
+        return latestChanges.Length > 0
+          && UnreviewedChangedFilesUnsafe(latestChanges).Length == 0;
+      }
+    }
+  }
+
+  public IReadOnlyList<string> UnreviewedChangedFiles
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return UnreviewedChangedFilesUnsafe(
+          LatestVerifiedChangedFilesUnsafe()
+        );
+      }
+    }
+  }
+
+  public IReadOnlyList<string> UnresolvedChangedFileReferences
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return UnresolvedChangedFileReferencesUnsafe(
+          LatestVerifiedChangedFilesUnsafe()
+        );
+      }
+    }
+  }
+
+  public IReadOnlyList<string> StaticCompletionIssues
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return StaticCompletionIssuesUnsafe(
+          LatestVerifiedChangedFilesUnsafe()
+        );
+      }
+    }
+  }
+
+  public bool HasVerifiedChangedFiles
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return _files.Any(
+          file => file.Verified
+        );
+      }
+    }
+  }
+
+  public bool HasPendingMutationPlanStep
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return _plan?.Steps.Any(
+          step => step.Status is "pending" or "in-progress"
+            && _planStepExpectedEffects.TryGetValue(step.Id, out var expected)
+            && ToolEffectRegistry.IsMutation(expected)
+        ) == true;
+      }
+    }
+  }
+
   public bool CanCompletePlan()
   {
     lock (_gate)
@@ -1181,7 +1261,8 @@ public sealed class ExecutionSession
 
   public bool RecordPlanActionStarted(
     string actionId,
-    string tool
+    string tool,
+    string? targetPath = null
   )
   {
     lock (_gate)
@@ -1203,7 +1284,8 @@ public sealed class ExecutionSession
         [
           "pending",
           "in-progress"
-        ]
+        ],
+        targetPath
       );
 
       if (index < 0)
@@ -1227,6 +1309,138 @@ public sealed class ExecutionSession
         CurrentStepId = steps[index].Id
       };
       return true;
+    }
+  }
+
+  public string? ValidateUnboundPlanSupport(
+    ValidatedLocalAction action
+  )
+  {
+    lock (_gate)
+    {
+      if (
+        _plan is null
+        || !action.ReadOnly
+        || action.TargetPath is null
+        || action.Tool is not (
+          "list_files"
+          or "read_file"
+          or "get_file_info"
+          or "search_text"
+        )
+      )
+      {
+        return null;
+      }
+
+      var nextStep = _plan.Steps.FirstOrDefault(
+        step => step.Status is "pending" or "in-progress"
+          && ToolEffectRegistry.TryGetHostTarget(step.Title) is not null
+      );
+      var nextTarget = nextStep is null
+        ? null
+        : ToolEffectRegistry.TryGetHostTarget(nextStep.Title);
+      if (nextTarget is null)
+      {
+        return null;
+      }
+
+      var relativeTarget = Path.GetRelativePath(
+        WorkspacePath,
+        action.TargetPath
+      ).Replace(
+        Path.DirectorySeparatorChar,
+        '/'
+      );
+      var expectedPath = Path.GetFullPath(
+        Path.Combine(
+          WorkspacePath,
+          nextTarget.Replace('/', Path.DirectorySeparatorChar)
+        )
+      );
+      var exactTarget = string.Equals(
+        nextTarget.Replace('\\', '/'),
+        relativeTarget,
+        StringComparison.OrdinalIgnoreCase
+      );
+      var expectedExists = File.Exists(expectedPath)
+        || Directory.Exists(expectedPath);
+      var sameParentCandidate = !expectedExists
+        && string.Equals(
+          Path.GetDirectoryName(expectedPath),
+          action.Tool == "list_files"
+            ? action.TargetPath
+            : Path.GetDirectoryName(action.TargetPath),
+          StringComparison.OrdinalIgnoreCase
+        );
+
+      if (!exactTarget && !sameParentCandidate)
+      {
+        return $"The read-only action targets '{relativeTarget}', but the next pending plan "
+          + $"step is bound to '{nextTarget}'. Inspect that target, perform its required mutation, "
+          + "or revise the plan before exploring another file.";
+      }
+
+      var latestInspection = _actions.Where(
+        item => item.State == "completed"
+          && item.Tool is "list_files" or "read_file" or "get_file_info" or "search_text"
+          && string.Equals(
+            SummaryTarget(item.Summary),
+            relativeTarget,
+            StringComparison.OrdinalIgnoreCase
+          )
+      ).OrderByDescending(
+        item => item.Timestamp
+      ).FirstOrDefault();
+      if (latestInspection is null)
+      {
+        return null;
+      }
+
+      var changedAfterInspection = _files.Any(
+        file => string.Equals(
+          file.RelativePath.Replace('\\', '/'),
+          relativeTarget,
+          StringComparison.OrdinalIgnoreCase
+        ) && file.VerifiedAt > latestInspection.Timestamp
+      );
+      if (changedAfterInspection)
+      {
+        return null;
+      }
+
+      return $"'{relativeTarget}' was already inspected and has not changed. Do not repeat the "
+        + $"inspection; perform the mutation required by the next plan step for '{nextTarget}' "
+        + "or revise the plan.";
+    }
+  }
+
+  public bool CanBindPlanAction(
+    string tool,
+    string? targetPath
+  )
+  {
+    lock (_gate)
+    {
+      if (_plan is null || ToolEffectRegistry.ForTool(tool) is not
+        {
+        } effect)
+      {
+        return false;
+      }
+
+      return _plan.Steps.Select(
+        (step, index) => (step, index)
+      ).Any(
+        item => item.step.Status is "pending" or "in-progress"
+          && (
+            _planStepExpectedEffects.TryGetValue(item.step.Id, out var expected)
+              ? ToolEffectRegistry.AreCompatible(expected, effect)
+                && MatchesHostPlanTarget(item.step, targetPath)
+                && CanStartInspectionStep(item.index, effect)
+              : ToolEffectRegistry.IsGenericPlanStep(item.step.Title)
+          )
+      );
     }
   }
 
@@ -1260,10 +1474,9 @@ public sealed class ExecutionSession
       if (
         status == "completed"
         && (
-          !string.Equals(
-            ToolEffectRegistry.ForTool(tool),
-            binding.ExpectedEffect,
-            StringComparison.Ordinal
+          !ToolEffectRegistry.AreCompatible(
+            ToolEffectRegistry.ForTool(tool) ?? string.Empty,
+            binding.ExpectedEffect
           )
           || EffectCount(binding.ExpectedEffect) <= binding.EvidenceCountBefore
           || !HasVerifiedEffect(binding.ExpectedEffect)
@@ -1287,6 +1500,200 @@ public sealed class ExecutionSession
         CompletedStepCount = steps.Count(
           step => step.Status == "completed"
         )
+      };
+      _planActionBindings.Remove(actionId);
+      return true;
+    }
+  }
+
+  public string? ValidatePlanActionEvidence(
+    string actionId,
+    string tool,
+    string output
+  )
+  {
+    lock (_gate)
+    {
+      if (
+        tool != "read_file"
+        || _plan is null
+        || !_planActionBindings.TryGetValue(actionId, out var binding)
+      )
+      {
+        return null;
+      }
+
+      var step = _plan.Steps.FirstOrDefault(
+        candidate => string.Equals(candidate.Id, binding.StepId, StringComparison.Ordinal)
+      );
+      if (
+        step is null
+        || !ContainsCollectionSignal(step.Title)
+        || !ContainsCollectionSignal(Objective)
+      )
+      {
+        return null;
+      }
+
+      var expectedMatch = System.Text.RegularExpressions.Regex.Match(
+        step.Title,
+        @"verify\s+exact\s+(?<count>\d+)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase
+          | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+      );
+      if (
+        !expectedMatch.Success
+        || !int.TryParse(expectedMatch.Groups["count"].Value, out var expectedCount)
+      )
+      {
+        return null;
+      }
+
+      var actualCount = CountTopLevelArrayItems(output);
+      if (actualCount == expectedCount)
+      {
+        return null;
+      }
+
+      return actualCount is null
+        ? $"Host static review could not find a bounded array in the inspected artifact; the plan requires exactly {expectedCount} collection items. "
+          + "Correct the bound data file before completing this review step."
+        : $"Host static review counted {actualCount} top-level array items; the plan requires exactly {expectedCount}. "
+        + "Correct the bound data file before completing this review step.";
+    }
+  }
+
+  private static bool ContainsCollectionSignal(string value)
+  {
+    return new[]
+    {
+      "collection", "list", "array", "data", "coleção", "colecao", "lista", "dados"
+    }.Any(signal => value.Contains(signal, StringComparison.OrdinalIgnoreCase));
+  }
+
+  private static int? CountTopLevelArrayItems(string value)
+  {
+    var start = value.IndexOf('[');
+    if (start < 0)
+    {
+      return null;
+    }
+
+    var arrayDepth = 0;
+    var objectDepth = 0;
+    var parenthesisDepth = 0;
+    var itemCount = 0;
+    var hasItemContent = false;
+    var inString = false;
+    var escaped = false;
+    var quote = '\0';
+
+    for (var index = start; index < value.Length; index++)
+    {
+      var character = value[index];
+      if (inString)
+      {
+        if (escaped)
+        {
+          escaped = false;
+        }
+        else if (character == '\\')
+        {
+          escaped = true;
+        }
+        else if (character == quote)
+        {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (character is '\'' or '"' or '`')
+      {
+        inString = true;
+        quote = character;
+        if (arrayDepth == 1) hasItemContent = true;
+        continue;
+      }
+
+      switch (character)
+      {
+        case '[':
+          arrayDepth++;
+          if (arrayDepth > 1) hasItemContent = true;
+          break;
+        case ']':
+          if (arrayDepth == 1)
+          {
+            return hasItemContent
+              ? itemCount + 1
+              : 0;
+          }
+          arrayDepth--;
+          break;
+        case '{':
+          if (arrayDepth == 1) hasItemContent = true;
+          objectDepth++;
+          break;
+        case '}':
+          objectDepth = Math.Max(0, objectDepth - 1);
+          break;
+        case '(':
+          if (arrayDepth == 1) hasItemContent = true;
+          parenthesisDepth++;
+          break;
+        case ')':
+          parenthesisDepth = Math.Max(0, parenthesisDepth - 1);
+          break;
+        case ',' when arrayDepth == 1 && objectDepth == 0 && parenthesisDepth == 0:
+          if (hasItemContent)
+          {
+            itemCount++;
+            hasItemContent = false;
+          }
+          break;
+        default:
+          if (arrayDepth == 1 && !char.IsWhiteSpace(character))
+          {
+            hasItemContent = true;
+          }
+          break;
+      }
+    }
+
+    return null;
+  }
+
+  public bool RejectPlanActionEvidence(string actionId)
+  {
+    lock (_gate)
+    {
+      if (
+        _plan is null
+        || !_planActionBindings.TryGetValue(actionId, out var binding)
+      )
+      {
+        return false;
+      }
+
+      var steps = _plan.Steps.ToArray();
+      var index = Array.FindIndex(
+        steps,
+        step => string.Equals(step.Id, binding.StepId, StringComparison.Ordinal)
+      );
+      if (index < 0)
+      {
+        return false;
+      }
+
+      steps[index] = steps[index] with
+      {
+        Status = "pending"
+      };
+      _plan = _plan with
+      {
+        Steps = steps,
+        CurrentStepId = null
       };
       _planActionBindings.Remove(actionId);
       return true;
@@ -2020,7 +2427,8 @@ public sealed class ExecutionSession
 
   private int FindPlanStep(
     string effect,
-    IReadOnlyCollection<string> states
+    IReadOnlyCollection<string> states,
+    string? targetPath
   )
   {
     var matching = _plan!.Steps.Select(
@@ -2037,7 +2445,9 @@ public sealed class ExecutionSession
         item.Step.Status,
         StringComparer.Ordinal
       ) && _planStepExpectedEffects.TryGetValue(item.Step.Id, out var expected)
-        && string.Equals(expected, effect, StringComparison.Ordinal)
+        && ToolEffectRegistry.AreCompatible(expected, effect)
+        && MatchesHostPlanTarget(item.Step, targetPath)
+        && CanStartInspectionStep(item.Index, effect)
     );
     if (matching is not null)
     {
@@ -2062,6 +2472,50 @@ public sealed class ExecutionSession
 
     _planStepExpectedEffects[generic.Step.Id] = effect;
     return generic.Index;
+  }
+
+  private bool MatchesHostPlanTarget(
+    ExecutionPlanStep step,
+    string? targetPath
+  )
+  {
+    var expectedTarget = ToolEffectRegistry.TryGetHostTarget(step.Title);
+    if (expectedTarget is null)
+    {
+      return true;
+    }
+
+    if (string.IsNullOrWhiteSpace(targetPath))
+    {
+      return false;
+    }
+
+    var relativeTarget = Path.GetRelativePath(
+      WorkspacePath,
+      targetPath
+    ).Replace(
+      Path.DirectorySeparatorChar,
+      '/'
+    );
+    return string.Equals(
+      expectedTarget.Replace('\\', '/'),
+      relativeTarget,
+      StringComparison.OrdinalIgnoreCase
+    );
+  }
+
+  private bool CanStartInspectionStep(int candidateIndex, string effect)
+  {
+    if (effect != ToolEffects.Inspected)
+    {
+      return true;
+    }
+
+    return !_plan!.Steps.Take(candidateIndex).Any(
+      step => (step.Status is "pending" or "in-progress")
+        && _planStepExpectedEffects.TryGetValue(step.Id, out var expected)
+        && ToolEffectRegistry.IsMutation(expected)
+    );
   }
 
   private int EffectCount(string effect)
@@ -2093,7 +2547,11 @@ public sealed class ExecutionSession
       return;
     }
 
-    var validationRequested = Objective.Contains(
+    var turnScope = ExecutionTurnToolPolicy.Resolve(
+      Objective,
+      _validationProfile is not null
+    );
+    var validationRequested = !turnScope.ManualValidationRequested && (Objective.Contains(
       "valid",
       StringComparison.OrdinalIgnoreCase
     ) || Objective.Contains(
@@ -2116,7 +2574,7 @@ public sealed class ExecutionSession
         "build",
         StringComparison.OrdinalIgnoreCase
       )
-    ) == true;
+    ) == true);
 
     if (RequiresMutationUnsafe() && !HasVerifiedMutationUnsafe())
     {
@@ -2228,10 +2686,287 @@ public sealed class ExecutionSession
     );
   }
 
+  private static string SummaryTarget(string summary)
+  {
+    var separator = summary.IndexOf(": ", StringComparison.Ordinal);
+    return separator < 0
+      ? summary
+      : summary[(separator + 2)..].Replace('\\', '/');
+  }
+
+  private ExecutionFileChange[] LatestVerifiedChangedFilesUnsafe()
+  {
+    return _files.Where(
+      file => file.Verified && file.Operation != "deleted"
+    ).GroupBy(
+      file => file.RelativePath,
+      StringComparer.OrdinalIgnoreCase
+    ).Select(
+      group => group.Last()
+    ).ToArray();
+  }
+
+  private string[] UnreviewedChangedFilesUnsafe(
+    IReadOnlyList<ExecutionFileChange> latestChanges
+  )
+  {
+    return latestChanges.Where(
+      change => !_actions.Any(
+        action => action.State == "completed"
+          && action.Tool is "read_file" or "get_file_info"
+          && action.Timestamp >= change.VerifiedAt
+          && string.Equals(
+            SummaryTarget(action.Summary),
+            change.RelativePath,
+            StringComparison.OrdinalIgnoreCase
+          )
+      )
+    ).Select(
+      change => change.RelativePath
+    ).OrderBy(
+      path => path,
+      StringComparer.OrdinalIgnoreCase
+    ).ToArray();
+  }
+
+  private string[] UnresolvedChangedFileReferencesUnsafe(
+    IReadOnlyList<ExecutionFileChange> latestChanges
+  )
+  {
+    var root = Path.GetFullPath(WorkspacePath);
+    var rootPrefix = root.TrimEnd(
+      Path.DirectorySeparatorChar,
+      Path.AltDirectorySeparatorChar
+    ) + Path.DirectorySeparatorChar;
+    var unresolved = new HashSet<string>(
+      StringComparer.OrdinalIgnoreCase
+    );
+    var referencePattern = new System.Text.RegularExpressions.Regex(
+      "\\b(?:src|href)\\s*=\\s*[\\\"'](?<path>[^\\\"']+)[\\\"']",
+      System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+    );
+
+    foreach (var change in latestChanges.Where(
+      file => Path.GetExtension(file.RelativePath) is ".html" or ".htm"
+    ))
+    {
+      var sourceDirectory = Path.GetDirectoryName(
+        change.RelativePath.Replace(
+          '/',
+          Path.DirectorySeparatorChar
+        )
+      ) ?? string.Empty;
+      foreach (System.Text.RegularExpressions.Match match in referencePattern.Matches(
+        change.FinalContent
+      ))
+      {
+        var reference = match.Groups["path"].Value.Trim();
+        if (
+          reference.Length == 0
+          || reference.StartsWith('#')
+          || reference.StartsWith("//", StringComparison.Ordinal)
+          || Uri.TryCreate(reference, UriKind.Absolute, out _)
+        )
+        {
+          continue;
+        }
+
+        var suffixIndex = reference.IndexOfAny(['?', '#']);
+        var pathOnly = suffixIndex < 0
+          ? reference
+          : reference[..suffixIndex];
+        var extension = Path.GetExtension(pathOnly);
+        if (extension is not ".js" and not ".css" and not ".html" and not ".htm" and not ".json")
+        {
+          continue;
+        }
+
+        try
+        {
+          var candidate = Path.GetFullPath(
+            Path.Combine(
+              root,
+              sourceDirectory,
+              pathOnly.Replace(
+                '/',
+                Path.DirectorySeparatorChar
+              )
+            )
+          );
+          if (
+            !string.Equals(candidate, root, StringComparison.OrdinalIgnoreCase)
+            && !candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase)
+          )
+          {
+            unresolved.Add(reference);
+            continue;
+          }
+
+          if (!File.Exists(candidate))
+          {
+            unresolved.Add(
+              Path.GetRelativePath(root, candidate).Replace(
+                Path.DirectorySeparatorChar,
+                '/'
+              )
+            );
+          }
+        }
+        catch (Exception exception) when (
+          exception is ArgumentException
+            or NotSupportedException
+            or PathTooLongException
+        )
+        {
+          unresolved.Add(reference);
+        }
+      }
+    }
+
+    return unresolved.OrderBy(
+      path => path,
+      StringComparer.OrdinalIgnoreCase
+    ).ToArray();
+  }
+
+  private string[] StaticCompletionIssuesUnsafe(
+    IReadOnlyList<ExecutionFileChange> latestChanges
+  )
+  {
+    var issues = new List<string>();
+    var expectedMatch = System.Text.RegularExpressions.Regex.Match(
+      Objective,
+      @"\b(?:collection|list|array|colecao|coleção|lista)\b[^\d]{0,32}(?:of\s+)?(?<count>\d+)\b",
+      System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+    );
+    if (
+      expectedMatch.Success
+      && int.TryParse(expectedMatch.Groups["count"].Value, out var expectedCount)
+    )
+    {
+      var candidates = latestChanges.Where(
+        file => Path.GetExtension(file.RelativePath).Equals(".js", StringComparison.OrdinalIgnoreCase)
+          || Path.GetExtension(file.RelativePath).Equals(".json", StringComparison.OrdinalIgnoreCase)
+      ).Select(
+        file => new
+        {
+          file.RelativePath,
+          file.FinalContent,
+          Count = CountTopLevelArrayItems(file.FinalContent)
+        }
+      ).Where(candidate => candidate.Count is not null).OrderByDescending(
+        candidate => candidate.Count
+      ).ToArray();
+      var candidate = candidates.FirstOrDefault();
+      if (candidate is null)
+      {
+        issues.Add(
+          $"The objective requires a fixed collection of exactly {expectedCount} items, but no bounded JavaScript or JSON array was found in the changed files."
+        );
+      }
+      else if (candidate.Count != expectedCount)
+      {
+        issues.Add(
+          $"The objective requires exactly {expectedCount} collection items, but Host static review counted {candidate.Count} in {candidate.RelativePath}."
+        );
+      }
+      else if (Objective.Contains("word", StringComparison.OrdinalIgnoreCase))
+      {
+        var strings = ExtractTopLevelArrayWords(candidate.FinalContent);
+        var unique = strings.Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        if (strings.Count != expectedCount || unique != expectedCount)
+        {
+          issues.Add(
+            $"The objective requires {expectedCount} fixed substantive words; {candidate.RelativePath} contains {strings.Count} word strings and {unique} unique values."
+          );
+        }
+      }
+    }
+
+    var htmlFiles = latestChanges.Where(
+      file => Path.GetExtension(file.RelativePath).Equals(".html", StringComparison.OrdinalIgnoreCase)
+        || Path.GetExtension(file.RelativePath).Equals(".htm", StringComparison.OrdinalIgnoreCase)
+    ).ToArray();
+    var scriptFiles = latestChanges.Where(
+      file => Path.GetExtension(file.RelativePath).Equals(".js", StringComparison.OrdinalIgnoreCase)
+    ).ToArray();
+    if (
+      htmlFiles.Length > 0
+      && scriptFiles.Length > 0
+      && Objective.Contains("game", StringComparison.OrdinalIgnoreCase)
+    )
+    {
+      var html = string.Join("\n", htmlFiles.Select(file => file.FinalContent));
+      var script = string.Join("\n", scriptFiles.Select(file => file.FinalContent));
+      var htmlIds = System.Text.RegularExpressions.Regex.Matches(
+        html,
+        "\\bid\\s*=\\s*[\\\"'](?<id>[^\\\"']+)[\\\"']",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase
+          | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+      ).Select(match => match.Groups["id"].Value).ToHashSet(StringComparer.Ordinal);
+      var referencedIds = System.Text.RegularExpressions.Regex.Matches(
+        script,
+        "getElementById\\(\\s*[\\\"'](?<id>[^\\\"']+)[\\\"']\\s*\\)",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant
+      ).Select(match => match.Groups["id"].Value).Concat(
+        System.Text.RegularExpressions.Regex.Matches(
+          script,
+          "querySelector(?:All)?\\(\\s*[\\\"']#(?<id>[A-Za-z][A-Za-z0-9_:-]*)[\\\"']\\s*\\)",
+          System.Text.RegularExpressions.RegexOptions.CultureInvariant
+        ).Select(match => match.Groups["id"].Value)
+      ).Distinct(StringComparer.Ordinal).ToArray();
+      var missingIds = referencedIds.Where(id => !htmlIds.Contains(id)).ToArray();
+      if (missingIds.Length > 0)
+      {
+        issues.Add(
+          "JavaScript references DOM IDs that are absent from changed HTML: "
+            + string.Join(", ", missingIds)
+            + "."
+        );
+      }
+
+      var controlIds = System.Text.RegularExpressions.Regex.Matches(
+        html,
+        "<(?:button|input|select|textarea)\\b[^>]*\\bid\\s*=\\s*[\\\"'](?<id>[^\\\"']+)[\\\"']",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase
+          | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+      ).Select(match => match.Groups["id"].Value).Distinct(StringComparer.Ordinal).ToArray();
+      var unboundControls = controlIds.Where(
+        id => !referencedIds.Contains(id, StringComparer.Ordinal)
+      ).ToArray();
+      if (unboundControls.Length > 0)
+      {
+        issues.Add(
+          "Interactive controls are not referenced by changed JavaScript: "
+            + string.Join(", ", unboundControls)
+            + "."
+        );
+      }
+    }
+
+    return issues.ToArray();
+  }
+
+  private static IReadOnlyList<string> ExtractTopLevelArrayWords(string value)
+  {
+    var start = value.IndexOf('[');
+    if (start < 0) return [];
+    var end = value.IndexOf(']', start + 1);
+    if (end < 0) return [];
+    return System.Text.RegularExpressions.Regex.Matches(
+      value[(start + 1)..end],
+      "[\\\"'](?<word>[A-Za-z][A-Za-z-]*)[\\\"']",
+      System.Text.RegularExpressions.RegexOptions.CultureInvariant
+    ).Select(match => match.Groups["word"].Value).ToArray();
+  }
+
   private static string SafeState(string value)
   {
     return new string(value.Where(character => !char.IsControl(character)).Take(512).ToArray());
   }
+
 }
 
 internal sealed record PlanActionBinding(

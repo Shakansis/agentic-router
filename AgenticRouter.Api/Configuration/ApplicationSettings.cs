@@ -411,7 +411,7 @@ public static class OllamaRuntimeDefaults
 
 public sealed record ExecutionSettings
 {
-  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 2;
+  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 4;
 
   public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
 

@@ -60,6 +60,9 @@ public sealed class ConservativeTokenEstimator : ITokenEstimator
         + EstimateText(
           message.ToolName
         )
+        + EstimateText(
+          message.ToolCallId
+        )
         + (
           message.ToolCalls?.Sum(
             call => EstimateText(

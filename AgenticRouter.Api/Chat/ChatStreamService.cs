@@ -31,6 +31,9 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IConversationContextBuilder _contextBuilder;
   private readonly ITrustedWorkspaceService _workspace;
   private readonly ILocalActionPlanner _actionPlanner;
+  private readonly ISpecialistToolingProfileResolver _toolingProfiles;
+  private readonly ISpecialistToolingProtocol _toolingProtocol;
+  private readonly IFunctionGemmaResidentProtocol _functionGemma;
   private readonly IExpertExecutionGuidanceService _expertGuidance;
   private readonly ILocalActionService _actionService;
   private readonly IPlanningFailureClassifier _planningFailureClassifier;
@@ -67,6 +70,8 @@ public sealed class ChatStreamService : IChatStreamService
     IConversationContextBuilder contextBuilder,
     ITrustedWorkspaceService workspace,
     ILocalActionPlanner actionPlanner,
+    ISpecialistToolingProfileResolver toolingProfiles,
+    ISpecialistToolingProtocol toolingProtocol,
     IExpertExecutionGuidanceService expertGuidance,
     ILocalActionService actionService,
     IPlanningFailureClassifier planningFailureClassifier,
@@ -78,6 +83,7 @@ public sealed class ChatStreamService : IChatStreamService
     IProjectAwarenessService projectAwareness,
     IRepositoryInstructionService repositoryInstructions,
     IExecutionPlanService executionPlans,
+    IFunctionGemmaResidentProtocol functionGemma,
     IWorkspaceProfileService workspaceProfiles,
     IImageAttachmentValidator imageValidator,
     ICloudImageApprovalStore cloudImageApprovals,
@@ -95,6 +101,8 @@ public sealed class ChatStreamService : IChatStreamService
     _contextBuilder = contextBuilder;
     _workspace = workspace;
     _actionPlanner = actionPlanner;
+    _toolingProfiles = toolingProfiles;
+    _toolingProtocol = toolingProtocol;
     _expertGuidance = expertGuidance;
     _actionService = actionService;
     _planningFailureClassifier = planningFailureClassifier;
@@ -106,6 +114,7 @@ public sealed class ChatStreamService : IChatStreamService
     _projectAwareness = projectAwareness;
     _repositoryInstructions = repositoryInstructions;
     _executionPlans = executionPlans;
+    _functionGemma = functionGemma;
     _workspaceProfiles = workspaceProfiles;
     _imageValidator = imageValidator;
     _cloudImageApprovals = cloudImageApprovals;
@@ -148,6 +157,15 @@ public sealed class ChatStreamService : IChatStreamService
           CoordinatorModel = settings.ActionModel
         };
       }
+      var functionGemmaProtocolActive = string.Equals(
+        request.InteractionMode,
+        "execute",
+        StringComparison.Ordinal
+      ) && _functionGemma.Supports(
+        settings.ActionModel
+      );
+      IReadOnlyList<FunctionGemmaTeacher> functionGemmaTeacherCatalog =
+        Array.Empty<FunctionGemmaTeacher>();
       var baseUri = new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
@@ -267,6 +285,22 @@ public sealed class ChatStreamService : IChatStreamService
             stopwatch,
             settings.RouterModel,
             GeneralChat
+          );
+        }
+        else if (
+          functionGemmaProtocolActive
+          && _functionGemma.Supports(
+            settings.RouterModel
+          )
+        )
+        {
+          yield return Event(
+            requestId,
+            "router.functiongemma-contract-deferred",
+            $"Router {settings.RouterModel} uses the trained route_to_teacher contract in Execute; the incompatible generic intention parser was bypassed.",
+            stopwatch,
+            settings.RouterModel,
+            intention
           );
         }
         else
@@ -405,6 +439,223 @@ public sealed class ChatStreamService : IChatStreamService
         )?.Source == "intention fallback"
           ? UsageModelRoles.Fallback
           : UsageModelRoles.Primary;
+      }
+
+      if (functionGemmaProtocolActive)
+      {
+        if (ContainsModel(
+          models,
+          settings.ActionModel
+        ))
+        {
+          functionGemmaTeacherCatalog = _functionGemma.CreateTeacherCatalog(
+            models,
+            selectedModel,
+            intention
+          );
+          yield return Event(
+            requestId,
+            "agent.functiongemma-routing-started",
+            $"Resident {settings.ActionModel} is applying the trained {FunctionGemmaResidentProtocol.RouteTool} contract.",
+            stopwatch,
+            settings.ActionModel,
+            intention
+          );
+
+          FunctionGemmaRouteDecision? residentRoute = null;
+          Exception? routeFailure = null;
+          try
+          {
+            residentRoute = await _functionGemma.RouteAsync(
+              baseUri,
+              settings.ActionModel,
+              request.Message,
+              functionGemmaTeacherCatalog,
+              UsageContext(
+                settings.ActionModel,
+                UsageModelRoles.Action,
+                "functiongemma-routing"
+              ),
+              cancellationToken
+            );
+          }
+          catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+          {
+            throw;
+          }
+          catch (Exception exception)
+          {
+            routeFailure = exception;
+            _logger.LogWarning(
+              exception,
+              "FunctionGemma routing contract failed for request {RequestId}; preserving the configured target route.",
+              requestId
+            );
+          }
+
+          if (
+            residentRoute is null
+            && routeFailure is FunctionGemmaProtocolException protocolFailure
+            && functionGemmaTeacherCatalog.Count > 0
+          )
+          {
+            yield return Event(
+              requestId,
+              "agent.functiongemma-routing-repair-started",
+              $"The first FunctionGemma route was rejected: {protocolFailure.Message} The Host will make one materially different correction attempt with the same closed Teacher catalog.",
+              stopwatch,
+              settings.ActionModel,
+              intention
+            );
+            try
+            {
+              residentRoute = await _functionGemma.RouteAsync(
+                baseUri,
+                settings.ActionModel,
+                "ROUTING_CORRECTION\nThe previous route was rejected by the Host because: "
+                  + protocolFailure.Message
+                  + " Return exactly one complete route_to_teacher call. Select teacher_model from the closed catalog; its intent must be the intent printed for that same Teacher.\n\nORIGINAL_REQUEST:\n"
+                  + request.Message,
+                functionGemmaTeacherCatalog,
+                UsageContext(
+                  settings.ActionModel,
+                  UsageModelRoles.Action,
+                  "functiongemma-routing-repair"
+                ),
+                cancellationToken
+              );
+              routeFailure = null;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+              throw;
+            }
+            catch (Exception exception)
+            {
+              routeFailure = exception;
+              _logger.LogWarning(
+                exception,
+                "FunctionGemma routing correction failed for request {RequestId}; preserving the configured target route.",
+                requestId
+              );
+            }
+          }
+
+          if (residentRoute is not null)
+          {
+            if (residentRoute.HostNormalization is not null)
+            {
+              yield return Event(
+                requestId,
+                "agent.functiongemma-route-normalized",
+                residentRoute.HostNormalization,
+                stopwatch,
+                settings.ActionModel,
+                residentRoute.Intent
+              );
+            }
+            yield return Event(
+              requestId,
+              isAuto
+                ? "agent.functiongemma-route-selected"
+                : "agent.functiongemma-route-advisory",
+              isAuto
+                ? $"FunctionGemma selected Teacher {residentRoute.TeacherModel} for {residentRoute.Intent}. Reason: {residentRoute.Reason}"
+                : $"FunctionGemma recommended Teacher {residentRoute.TeacherModel} for {residentRoute.Intent}; the explicit user model {selectedModel} remains authoritative.",
+              stopwatch,
+              settings.ActionModel,
+              residentRoute.Intent
+            );
+
+            if (isAuto)
+            {
+              selectedModel = residentRoute.TeacherModel;
+              intention = residentRoute.Intent;
+              selectedModelRole = UsageModelRoles.Specialist;
+            }
+          }
+          else
+          {
+            var routeFailureDetail = routeFailure is FunctionGemmaProtocolException rejected
+              ? $" Reason: {rejected.Message}"
+              : string.Empty;
+            yield return Event(
+              requestId,
+              "agent.functiongemma-contract-warning",
+              $"FunctionGemma routing was rejected at {FunctionGemmaFailureStage(routeFailure!)}.{routeFailureDetail} The configured specialist {selectedModel} remains selected and Execute will continue.",
+              stopwatch,
+              settings.ActionModel,
+              intention
+            );
+          }
+        }
+        else
+        {
+          yield return Event(
+            requestId,
+            "agent.functiongemma-contract-warning",
+            $"Configured resident {settings.ActionModel} is unavailable; the configured specialist route will continue without the trained resident contract.",
+            stopwatch,
+            settings.ActionModel,
+            intention
+          );
+        }
+      }
+
+      if (
+        functionGemmaProtocolActive
+        && _functionGemma.Supports(
+          configuredCoordinatorFallback
+        )
+      )
+      {
+        var executionFallback = functionGemmaTeacherCatalog
+          .Where(
+            teacher => teacher.Trained
+              && !string.Equals(
+                teacher.Model,
+                selectedModel,
+                StringComparison.OrdinalIgnoreCase
+              )
+          )
+          .OrderBy(
+            teacher => string.Equals(
+              teacher.Intent,
+              "review-and-testing",
+              StringComparison.Ordinal
+            )
+              ? 0
+              : 1
+          )
+          .ThenBy(
+            teacher => teacher.Model,
+            StringComparer.Ordinal
+          )
+          .FirstOrDefault();
+
+        if (executionFallback is not null)
+        {
+          yield return Event(
+            requestId,
+            "agent.functiongemma-execution-fallback-corrected",
+            $"Configured fallback {configuredCoordinatorFallback} is another FunctionGemma supervisor, not a generic action executor. For this turn the Host selected installed Teacher {executionFallback.Model} as the bounded on-demand execution fallback.",
+            stopwatch,
+            executionFallback.Model,
+            executionFallback.Intent
+          );
+          configuredCoordinatorFallback = executionFallback.Model;
+        }
+        else
+        {
+          yield return Event(
+            requestId,
+            "agent.functiongemma-contract-warning",
+            $"Configured fallback {configuredCoordinatorFallback} is supervisory and no distinct installed Teacher is available for execution takeover. The active Teacher path will continue, but FunctionGemma will not be used as a generic executor.",
+            stopwatch,
+            configuredCoordinatorFallback,
+            intention
+          );
+        }
       }
 
       yield return Event(
@@ -643,9 +894,14 @@ public sealed class ChatStreamService : IChatStreamService
         var activeWorkspace = await _workspaceProfiles.GetActiveDataAsync(
           cancellationToken
         );
+        var activeValidationProfile = activeWorkspace?.ValidationProfile
+          ?? settings.ValidationProfile;
         _executionSession.SelectValidationProfile(
-          activeWorkspace?.ValidationProfile
-            ?? settings.ValidationProfile
+          activeValidationProfile
+        );
+        var executionToolScope = ExecutionTurnToolPolicy.Resolve(
+          request.Message,
+          activeValidationProfile is not null
         );
         yield return Event(
           requestId,
@@ -673,6 +929,24 @@ public sealed class ChatStreamService : IChatStreamService
             ? $"Git baseline captured on {project.Repository.Branch ?? "detached branch"} with "
               + $"{project.Repository.DirtyPaths.Count} pre-existing dirty paths."
             : "Workspace baseline captured; Git repository was not detected.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
+        yield return Event(
+          requestId,
+          "execution-tool-scope-resolved",
+          $"Host offered {executionToolScope.AvailableTools.Count} request-relevant action tools. "
+            + (
+              executionToolScope.ProcessExecutionAllowed
+                ? "Structured process execution is available but not implied."
+                : "Process execution is unavailable for this turn."
+            )
+            + (
+              executionToolScope.ManualValidationRequested
+                ? " Validation remains manual as requested."
+                : string.Empty
+            ),
           stopwatch,
           selectedModel,
           intention
@@ -707,25 +981,17 @@ public sealed class ChatStreamService : IChatStreamService
             "system",
             CreateProjectContext(
               project,
-              rootInstructions
+              rootInstructions,
+              executionToolScope
             )
           )
         ).ToArray();
 
-        var tooling = await InspectToolingAsync(
-          baseUri,
-          selectedModel,
-          cancellationToken
-        );
-        string coordinatorModel;
-        List<ChatMessage> executionMessages;
+        var coordinatorModel = selectedModel;
+        var executionMessages = messages.ToList();
         ExpertExecutionGuidance? executionGuidance = null;
-        var toolingAdvertised =
-          tooling.Capabilities?.ToolingConfirmed == true;
-        var targetCoordinatesDirectly = false;
-        var structuredCoordination = false;
-        var residentConformanceApproved = false;
-        string? effectiveConformanceIdentity = null;
+        var structuredCoordination = !capabilities.NativeTools
+          && capabilities.StructuredOutput;
         var selectedIdentity = models.First(
           installed => string.Equals(
             installed.Name,
@@ -736,536 +1002,41 @@ public sealed class ChatStreamService : IChatStreamService
         var selectedReference = ProviderModelReference.Parse(
           selectedModel
         );
-        ToolProtocolConformanceResult? nativeConformance = null;
-        ToolProtocolConformanceResult? structuredConformance = null;
-
-        if (toolingAdvertised)
-        {
-          yield return Event(
-            requestId,
-            "agent.tooling-advertised",
-            $"Ollama advertises tooling for {selectedModel}; behavioral conformance must pass before direct coordination.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-          yield return Event(
-            requestId,
-            "agent.tooling-conformance-started",
-            $"Running native tool protocol conformance for {selectedModel}.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-          nativeConformance = selectedReference.IsLocal
-            ? await _toolConformance.VerifyAsync(
-              baseUri,
-              selectedModel,
-              selectedIdentity.Digest,
-              UsageContext(
-                selectedModel,
-                UsageModelRoles.Benchmark,
-                "tool-protocol-conformance"
-              ),
-              cancellationToken
-            )
-            : await _toolConformance.GetCachedAsync(
-              baseUri,
-              selectedModel,
-              selectedIdentity.Digest,
-              cancellationToken
-            );
-          targetCoordinatesDirectly = nativeConformance?.Passed == true;
-          yield return Event(
-            requestId,
-            nativeConformance?.Passed == true
-              ? "agent.tooling-conformance-passed"
-              : "agent.tooling-conformance-failed",
-            nativeConformance?.Passed == true
-              ? $"native-strict conformance passed for target {selectedModel}; identity {nativeConformance.Identity}."
-              : $"native-strict conformance is unavailable for target {selectedModel}: {nativeConformance?.Failure ?? "explicit cloud benchmark permission is required"}.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-        }
-
-        if (
-          !targetCoordinatesDirectly
-          && capabilities.StructuredOutput
-        )
-        {
-          structuredConformance = await _toolConformance.GetCachedPathAsync(
-            baseUri,
+        var toolingProfile = _toolingProfiles.Resolve(
+          new SpecialistToolingIdentity(
+            selectedReference.ProviderId,
             selectedModel,
             selectedIdentity.Digest,
-            CoordinationConformanceProfiles.StructuredAction,
-            cancellationToken
-          );
-          structuredCoordination = structuredConformance?.Passed == true;
-          targetCoordinatesDirectly = structuredCoordination;
-          yield return Event(
-            requestId,
-            structuredCoordination
-              ? "agent.structured-conformance-passed"
-              : "agent.structured-conformance-unavailable",
-            structuredCoordination
-              ? $"structured-action conformance passed for target {selectedModel}; identity {structuredConformance!.Identity}."
-              : $"structured-action conformance is unavailable for target {selectedModel}: "
-                + $"{structuredConformance?.Failure ?? "no approved evidence for this exact identity"}.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-        }
-
-        if (targetCoordinatesDirectly)
-        {
-          coordinatorModel = selectedModel;
-          executionMessages = messages.ToList();
-          effectiveConformanceIdentity = structuredCoordination
-            ? structuredConformance?.Identity
-            : nativeConformance?.Identity;
-          yield return Event(
-            requestId,
-            "agent.coordination-path-resolved",
-            $"Target {selectedModel} is the effective coordinator through "
-              + $"{(structuredCoordination ? "direct-structured" : "direct-native")}; "
-              + $"resident {settings.CoordinatorModel} is not a prerequisite.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-        }
-        else
-        {
-          var capabilityMessage = tooling.Failure is null
-            ? $"Ollama did not confirm tooling for {selectedModel}; the resident agent will bridge the specialist guidance."
-            : $"Tooling capability could not be confirmed for {selectedModel}; the resident agent will bridge the specialist guidance.";
-          yield return Event(
-            requestId,
-            "agent.tooling-unconfirmed",
-            capabilityMessage,
-            stopwatch,
-            selectedModel,
-            intention
-          );
-
-          if (
-            !ContainsModel(models, settings.CoordinatorModel)
-            && ContainsModel(models, configuredCoordinatorFallback)
+            capabilities.NativeTools,
+            capabilities.StructuredOutput,
+            capabilities.ToolProtocolConfirmed
           )
-          {
-            yield return Event(
-              requestId,
-              "agent.action-model-fallback",
-              $"Resident action model '{settings.CoordinatorModel}' is not installed; using configured on-demand coordinator fallback '{configuredCoordinatorFallback}'.",
-              stopwatch,
-              configuredCoordinatorFallback,
-              intention
-            );
-            settings = settings with
-            {
-              CoordinatorModel = configuredCoordinatorFallback
-            };
-          }
+        );
 
-          if (!ContainsModel(
-            models,
-            settings.CoordinatorModel
-          ))
-          {
-            yield return Event(
-              requestId,
-              "action.validation-error",
-              $"Tooling coordinator '{settings.CoordinatorModel}' is not installed.",
-              stopwatch,
-              settings.CoordinatorModel,
-              intention
-            );
-            throw new ChatStageException(
-              "resident-agent-resolution",
-              "The tooling coordinator is unavailable.",
-              $"Configured coordinator model '{settings.CoordinatorModel}' was not present in the installed model list.",
-              settings.CoordinatorModel,
-              intention,
-              400,
-              true
-            );
-          }
+        yield return Event(
+          requestId,
+          "agent.tooling-profile-resolved",
+          $"Resolved specialist tooling profile {toolingProfile.Identity} through {toolingProfile.ResolutionSource}; transport {toolingProfile.Transport}.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
 
-          var configuredCoordinatorReference = ProviderModelReference.Parse(
-            settings.CoordinatorModel
-          );
-          var coordinatorTooling = string.Equals(
-            settings.CoordinatorModel,
-            selectedModel,
-            StringComparison.OrdinalIgnoreCase
-          )
-            ? tooling
-            : await InspectToolingAsync(
-              baseUri,
-              settings.CoordinatorModel,
-              cancellationToken
-            );
-          ToolProtocolConformanceResult? coordinatorConformance = null;
-          ToolProtocolConformanceResult? coordinatorAdaptiveConformance = null;
-          var coordinatorIdentity = models.First(
-            installed => string.Equals(
-              installed.Name,
-              settings.CoordinatorModel,
-              StringComparison.OrdinalIgnoreCase
-            )
-          );
-
-          if (coordinatorTooling.Capabilities?.ToolingConfirmed == true)
-          {
-            coordinatorConformance = configuredCoordinatorReference.IsLocal
-              ? await _toolConformance.VerifyAsync(
-                baseUri,
-                settings.CoordinatorModel,
-                coordinatorIdentity.Digest,
-                UsageContext(
-                  settings.CoordinatorModel,
-                  UsageModelRoles.Benchmark,
-                  "tool-protocol-conformance"
-                ),
-                cancellationToken
-              )
-              : await _toolConformance.GetCachedAsync(
-                baseUri,
-                settings.CoordinatorModel,
-                coordinatorIdentity.Digest,
-                cancellationToken
-              );
-
-            if (coordinatorConformance?.Passed != true)
-            {
-              yield return Event(
-                requestId,
-                "agent.coordinator-conformance-path-failed",
-                $"Resident {settings.CoordinatorModel} failed native-strict conformance: "
-                  + $"{coordinatorConformance?.Failure ?? "no approved evidence for this exact identity"}. "
-                  + (coordinatorConformance?.AdaptiveRepairEligible == true
-                    ? "The Host will evaluate native-adaptive independently."
-                    : "The failure is not semantically repairable; another native path will not be attempted."),
-                stopwatch,
-                settings.CoordinatorModel,
-                intention
-              );
-
-              if (coordinatorConformance?.AdaptiveRepairEligible == true)
-              {
-                yield return Event(
-                  requestId,
-                  "agent.coordinator-adaptive-conformance-started",
-                  configuredCoordinatorReference.IsLocal
-                    ? $"Running native-adaptive conformance for resident {settings.CoordinatorModel}."
-                    : $"Loading cached native-adaptive conformance for resident {settings.CoordinatorModel}; no cloud benchmark will be started implicitly.",
-                  stopwatch,
-                  settings.CoordinatorModel,
-                  intention
-                );
-                coordinatorAdaptiveConformance = configuredCoordinatorReference.IsLocal
-                  ? await _toolConformance.VerifyPathAsync(
-                    baseUri,
-                    settings.CoordinatorModel,
-                    coordinatorIdentity.Digest,
-                    CoordinationConformanceProfiles.NativeAdaptive,
-                    UsageContext(
-                      settings.CoordinatorModel,
-                      UsageModelRoles.Benchmark,
-                      "tool-protocol-native-adaptive-conformance"
-                    ),
-                    cancellationToken
-                  )
-                  : await _toolConformance.GetCachedPathAsync(
-                    baseUri,
-                    settings.CoordinatorModel,
-                    coordinatorIdentity.Digest,
-                    CoordinationConformanceProfiles.NativeAdaptive,
-                    cancellationToken
-                  );
-                yield return Event(
-                  requestId,
-                  coordinatorAdaptiveConformance?.Passed == true
-                    ? "agent.coordinator-adaptive-conformance-passed"
-                    : "agent.coordinator-adaptive-conformance-failed",
-                  coordinatorAdaptiveConformance?.Passed == true
-                    ? $"Resident {settings.CoordinatorModel} passed native-adaptive conformance; identity "
-                      + $"{coordinatorAdaptiveConformance.Identity}."
-                    : $"Resident {settings.CoordinatorModel} did not pass native-adaptive conformance: "
-                      + $"{coordinatorAdaptiveConformance?.Failure ?? "no approved evidence for this exact identity"}.",
-                  stopwatch,
-                  settings.CoordinatorModel,
-                  intention
-                );
-              }
-            }
-          }
-
-          var approvedCoordinatorConformance = coordinatorConformance?.Passed == true
-            ? coordinatorConformance
-            : coordinatorAdaptiveConformance?.Passed == true
-              ? coordinatorAdaptiveConformance
-              : null;
-
-          if (
-            approvedCoordinatorConformance is null
-            && !string.Equals(
-              settings.CoordinatorModel,
-              configuredCoordinatorFallback,
-              StringComparison.OrdinalIgnoreCase
-            )
-            && ContainsModel(models, configuredCoordinatorFallback)
-          )
-          {
-            yield return Event(
-              requestId,
-              "agent.action-model-conformance-fallback-started",
-              $"Action model {settings.CoordinatorModel} has no approved path; evaluating on-demand coordinator fallback {configuredCoordinatorFallback}.",
-              stopwatch,
-              configuredCoordinatorFallback,
-              intention
-            );
-            var fallbackTooling = await InspectToolingAsync(
-              baseUri,
-              configuredCoordinatorFallback,
-              cancellationToken
-            );
-            var fallbackIdentity = models.First(
-              installed => string.Equals(
-                installed.Name,
-                configuredCoordinatorFallback,
-                StringComparison.OrdinalIgnoreCase
-              )
-            );
-            var fallbackReference = ProviderModelReference.Parse(configuredCoordinatorFallback);
-            ToolProtocolConformanceResult? fallbackStrict = null;
-            ToolProtocolConformanceResult? fallbackAdaptive = null;
-
-            if (fallbackTooling.Capabilities?.ToolingConfirmed == true)
-            {
-              fallbackStrict = fallbackReference.IsLocal
-                ? await _toolConformance.VerifyAsync(
-                  baseUri,
-                  configuredCoordinatorFallback,
-                  fallbackIdentity.Digest,
-                  UsageContext(
-                    configuredCoordinatorFallback,
-                    UsageModelRoles.Benchmark,
-                    "tool-protocol-conformance"
-                  ),
-                  cancellationToken
-                )
-                : await _toolConformance.GetCachedAsync(
-                  baseUri,
-                  configuredCoordinatorFallback,
-                  fallbackIdentity.Digest,
-                  cancellationToken
-                );
-
-              if (fallbackStrict?.Passed != true && fallbackStrict?.AdaptiveRepairEligible == true)
-              {
-                fallbackAdaptive = fallbackReference.IsLocal
-                  ? await _toolConformance.VerifyPathAsync(
-                    baseUri,
-                    configuredCoordinatorFallback,
-                    fallbackIdentity.Digest,
-                    CoordinationConformanceProfiles.NativeAdaptive,
-                    UsageContext(
-                      configuredCoordinatorFallback,
-                      UsageModelRoles.Benchmark,
-                      "tool-protocol-native-adaptive-conformance"
-                    ),
-                    cancellationToken
-                  )
-                  : await _toolConformance.GetCachedPathAsync(
-                    baseUri,
-                    configuredCoordinatorFallback,
-                    fallbackIdentity.Digest,
-                    CoordinationConformanceProfiles.NativeAdaptive,
-                    cancellationToken
-                  );
-              }
-            }
-
-            approvedCoordinatorConformance = fallbackStrict?.Passed == true
-              ? fallbackStrict
-              : fallbackAdaptive?.Passed == true
-                ? fallbackAdaptive
-                : null;
-
-            if (approvedCoordinatorConformance is not null)
-            {
-              if (fallbackReference.IsLocal && _residentModel.GetStatus().Loaded)
-              {
-                yield return Event(
-                  requestId,
-                  "resident-model-eviction-started",
-                  $"Evicting action model {settings.ActionModel} before loading on-demand coordinator fallback {configuredCoordinatorFallback}.",
-                  stopwatch,
-                  settings.ActionModel,
-                  intention
-                );
-                recoveryActive = await _residentModel.EvictForRecoveryAsync(
-                  configuredCoordinatorFallback,
-                  cancellationToken
-                );
-                recoveryTarget = configuredCoordinatorFallback;
-
-                if (!recoveryActive)
-                {
-                  throw new ChatStageException(
-                    "resident-model-eviction",
-                    "The resident action model could not be evicted for the on-demand coordinator fallback.",
-                    $"Action model {settings.ActionModel} remained resident while fallback {configuredCoordinatorFallback} required the local runtime.",
-                    settings.ActionModel,
-                    intention,
-                    null,
-                    true
-                  );
-                }
-              }
-
-              settings = settings with
-              {
-                CoordinatorModel = configuredCoordinatorFallback
-              };
-              yield return Event(
-                requestId,
-                "agent.action-model-conformance-fallback-passed",
-                $"On-demand coordinator fallback {configuredCoordinatorFallback} passed {approvedCoordinatorConformance.Profile} conformance.",
-                stopwatch,
-                configuredCoordinatorFallback,
-                intention
-              );
-            }
-          }
-
-          if (approvedCoordinatorConformance is null)
-          {
-            var coordinatorFailure = coordinatorTooling.Capabilities?.ToolingConfirmed != true
-              ? coordinatorTooling.Failure?.Message
-                ?? "Native tooling support is not approved for this exact resident identity."
-              : $"native-strict: {coordinatorConformance?.Failure ?? "no approved evidence"}; "
-                + $"native-adaptive: {coordinatorAdaptiveConformance?.Failure ?? (coordinatorConformance?.AdaptiveRepairEligible == true ? "no approved evidence" : "not attempted because the strict failure was not semantically repairable")}";
-            yield return Event(
-              requestId,
-              "agent.coordinator-conformance-failed",
-              $"Target {selectedModel} had no approved direct path. Resident {settings.CoordinatorModel} "
-                + $"failed native-strict conformance: {coordinatorFailure}. All evaluated paths are blocked.",
-              stopwatch,
-              settings.CoordinatorModel,
-              intention
-            );
-            throw new ChatStageException(
-              "coordination-paths-exhausted",
-              "No approved Execute coordination path is available.",
-              coordinatorFailure,
-              settings.CoordinatorModel,
-              intention,
-              null,
-              true,
-              details: new Dictionary<string, string?>
-              {
-                ["targetModel"] = selectedModel,
-                ["residentModel"] = settings.CoordinatorModel,
-                ["nativeTargetStatus"] = nativeConformance?.Status
-                  ?? CoordinationConformanceProfiles.Unknown,
-                ["structuredTargetStatus"] = structuredConformance?.Status
-                  ?? CoordinationConformanceProfiles.Unknown,
-                ["residentStrictStatus"] = coordinatorConformance?.Status
-                  ?? CoordinationConformanceProfiles.Unknown,
-                ["residentAdaptiveStatus"] = coordinatorAdaptiveConformance?.Status
-                  ?? CoordinationConformanceProfiles.Unknown,
-                ["executionPath"] = "blocked"
-              }
-            );
-          }
-
-          yield return Event(
-            requestId,
-            "agent.coordinator-conformance-passed",
-            $"Resident {settings.CoordinatorModel} passed {approvedCoordinatorConformance.Profile} conformance; identity "
-              + $"{approvedCoordinatorConformance.Identity}.",
-            stopwatch,
-            settings.CoordinatorModel,
-            intention
-          );
-          residentConformanceApproved = true;
-          effectiveConformanceIdentity = approvedCoordinatorConformance.Identity;
-
-          yield return Event(
-            requestId,
-            "agent.expert-guidance-started",
-            $"Specialist model {selectedModel} is preparing execution guidance.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-          var guidance = await TryPrepareGuidanceAsync(
-            baseUri,
-            selectedModel,
-            messages,
-            cancellationToken
-          );
-
-          if (guidance.Guidance is not null)
-          {
-            yield return Event(
-              requestId,
-              "agent.expert-guidance-prepared",
-              $"Execution guidance received from specialist model {selectedModel}.",
-              stopwatch,
-              selectedModel,
-              intention
-            );
-            executionMessages = messages.Concat(
-              [
-                GuidanceMessage(
-                  selectedModel,
-                  guidance.Guidance
-                )
-              ]
-            ).ToList();
-            executionGuidance = guidance.Guidance;
-          }
-          else
-          {
-            _logger.LogWarning(
-              guidance.Failure,
-              "Specialist guidance was unavailable for model {Model}; the resident agent will plan directly.",
-              selectedModel
-            );
-            yield return Event(
-              requestId,
-              "agent.expert-guidance-unavailable",
-              $"Specialist guidance was unavailable: {guidance.Failure!.Message} "
-                + "The resident agent will continue directly from the conversation context.",
-              stopwatch,
-              selectedModel,
-              intention
-            );
-            executionMessages = messages.ToList();
-          }
-
-          yield return Event(
-            requestId,
-            "agent.resident-bridge-resolved",
-            $"Tooling coordinator: {settings.CoordinatorModel}.",
-            stopwatch,
-            settings.CoordinatorModel,
-            intention
-          );
-          coordinatorModel = settings.CoordinatorModel;
-        }
-
+        yield return Event(
+          requestId,
+          "agent.coordination-path-resolved",
+          $"Target {selectedModel} owns the reasoning and tool loop through "
+            + $"{(structuredCoordination ? "direct-structured" : "direct-native")}; "
+            + $"router resident {settings.CoordinatorModel} is not an execution coordinator.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
         var residentEligibility = _residentEligibility.Evaluate(
           settings,
           selectedIdentity,
           _residentModel.GetStatus(),
-          residentConformanceApproved
+          false
         );
         yield return Event(
           requestId,
@@ -1278,24 +1049,7 @@ public sealed class ChatStreamService : IChatStreamService
         );
 
         if (
-          !targetCoordinatesDirectly
-          && !residentEligibility.ResidentEligible
-        )
-        {
-          throw new ChatStageException(
-            "resident-memory-eligibility",
-            "The configured resident is not eligible for this coordination path.",
-            residentEligibility.MemoryConsequence,
-            settings.CoordinatorModel,
-            intention,
-            null,
-            true
-          );
-        }
-
-        if (
-          targetCoordinatesDirectly
-          && selectedReference.IsLocal
+          selectedReference.IsLocal
           && residentEligibility.RequiresResidentEviction
         )
         {
@@ -1338,30 +1092,21 @@ public sealed class ChatStreamService : IChatStreamService
 
         _executionSession.ResolveCoordinator(
           coordinatorModel,
-          targetCoordinatesDirectly
-            ? structuredCoordination
-              ? "direct-structured"
-              : "direct-native"
-            : "resident-bridge"
+          structuredCoordination
+            ? "direct-structured"
+            : "direct-native"
         );
         _executionSession.RecordCoordinationMetadata(
           settings.CoordinatorModel,
-          effectiveConformanceIdentity,
-          targetCoordinatesDirectly
-            ? null
-            : $"Target {selectedModel} had no approved direct coordination path."
+          null,
+          null
         );
-
-        if (!targetCoordinatesDirectly)
-        {
-          executionMessages = CompactCoordinatorMessages(
-            executionMessages
-          );
-        }
 
         var execution = new ExecutionProgress(
           executionMessages,
-          executionGuidance
+          toolingProfile,
+          executionGuidance,
+          executionToolScope
         );
 
         await foreach (var streamEvent in ExecuteActionsAsync(
@@ -1373,14 +1118,9 @@ public sealed class ChatStreamService : IChatStreamService
           stopwatch,
           execution,
           structuredCoordination,
-          targetCoordinatesDirectly
-            ? null
-            : selectedModel,
-          targetCoordinatesDirectly
-            ? settings.Execution.DirectCoordinatorPlanningFailuresBeforeHandoff
-            : settings.Execution.ResidentCoordinatorPlanningFailuresBeforeFailure,
-          targetCoordinatesDirectly
-            && settings.Execution.MaxCoordinatorHandoffsPerTurn > 0,
+          null,
+          settings.Execution.DirectCoordinatorPlanningFailuresBeforeHandoff,
+          false,
           settings,
           settings.Execution,
           settings.ProjectAwareness,
@@ -1390,252 +1130,10 @@ public sealed class ChatStreamService : IChatStreamService
           yield return streamEvent;
         }
 
-        if (
-          targetCoordinatesDirectly
-          && execution.PlanningFailure is not null
-        )
+        if (execution.PlanningFailure is not null)
         {
-          if (!ContainsModel(
-            models,
-            settings.CoordinatorModel
-          ))
-          {
-            yield return Event(
-              requestId,
-              "action.validation-error",
-              $"Tooling coordinator '{settings.CoordinatorModel}' is not installed.",
-              stopwatch,
-              settings.CoordinatorModel,
-              intention
-            );
-            throw new ChatStageException(
-              "resident-agent-resolution",
-              "The tooling coordinator is unavailable.",
-              $"Configured coordinator model '{settings.CoordinatorModel}' was not present in the installed model list.",
-              settings.CoordinatorModel,
-              intention,
-              400,
-              true
-            );
-          }
-
-          if (recoveryActive && recoveryTarget is not null)
-          {
-            yield return Event(
-              requestId,
-              "resident-model-reload-started",
-              $"Restoring resident {settings.CoordinatorModel} before takeover evaluation.",
-              stopwatch,
-              settings.CoordinatorModel,
-              intention
-            );
-            var restoredForTakeover = await _residentModel.RestoreAfterRecoveryAsync(
-              recoveryTarget,
-              cancellationToken
-            );
-            recoveryActive = false;
-
-            if (!restoredForTakeover)
-            {
-              throw new ChatStageException(
-                "resident-model-reload",
-                "The resident could not be restored for coordinator takeover.",
-                $"Resident {settings.CoordinatorModel} restoration failed after target path failure.",
-                settings.CoordinatorModel,
-                intention,
-                null,
-                true
-              );
-            }
-          }
-
-          var takeoverTooling = await InspectToolingAsync(
-            baseUri,
-            settings.CoordinatorModel,
-            cancellationToken
-          );
-          var takeoverIdentity = models.First(
-            installed => string.Equals(
-              installed.Name,
-              settings.CoordinatorModel,
-              StringComparison.OrdinalIgnoreCase
-            )
-          );
-          var takeoverReference = ProviderModelReference.Parse(
-            settings.CoordinatorModel
-          );
-          var takeoverConformance = takeoverTooling.Capabilities?.ToolingConfirmed == true
-            ? takeoverReference.IsLocal
-              ? await _toolConformance.VerifyAsync(
-                baseUri,
-                settings.CoordinatorModel,
-                takeoverIdentity.Digest,
-                UsageContext(
-                  settings.CoordinatorModel,
-                  UsageModelRoles.Benchmark,
-                  "tool-protocol-conformance"
-                ),
-                cancellationToken
-              )
-              : await _toolConformance.GetCachedAsync(
-                baseUri,
-                settings.CoordinatorModel,
-                takeoverIdentity.Digest,
-                cancellationToken
-              )
-            : null;
-          var takeoverEligibility = _residentEligibility.Evaluate(
-            settings,
-            selectedIdentity,
-            _residentModel.GetStatus(),
-            takeoverConformance?.Passed == true
-          );
-
-          if (
-            takeoverConformance?.Passed != true
-            || !takeoverEligibility.ResidentEligible
-          )
-          {
-            var takeoverFailure = takeoverConformance?.Failure
-              ?? takeoverTooling.Failure?.Message
-              ?? takeoverEligibility.MemoryConsequence;
-            yield return Event(
-              requestId,
-              "agent.coordinator-conformance-failed",
-              $"Target {selectedModel} failed its active path and resident {settings.CoordinatorModel} "
-                + $"is not eligible for takeover: {takeoverFailure}",
-              stopwatch,
-              settings.CoordinatorModel,
-              intention
-            );
-            throw new ChatStageException(
-              "coordination-paths-exhausted",
-              "All approved Execute coordination paths were exhausted.",
-              takeoverFailure,
-              settings.CoordinatorModel,
-              intention,
-              null,
-              true
-            );
-          }
-
-          yield return Event(
-            requestId,
-            "agent.expert-guidance-started",
-            $"Specialist model {selectedModel} is preparing execution guidance for the resident takeover.",
-            stopwatch,
-            selectedModel,
-            intention
-          );
-          var guidance = await TryPrepareGuidanceAsync(
-            baseUri,
-            selectedModel,
-            execution.Messages,
-            cancellationToken
-          );
-          var residentMessages = execution.Messages.ToList();
-          var residentToolMessages = execution.ToolMessages.ToList();
-          ExpertExecutionGuidance? takeoverGuidance = null;
-
-          if (guidance.Guidance is not null)
-          {
-            yield return Event(
-              requestId,
-              "agent.expert-guidance-prepared",
-              $"Execution guidance received from specialist model {selectedModel}.",
-              stopwatch,
-              selectedModel,
-              intention
-            );
-            residentMessages.Add(
-              GuidanceMessage(
-                selectedModel,
-                guidance.Guidance
-              )
-            );
-            residentToolMessages.Add(
-              ToToolMessage(
-                GuidanceMessage(
-                  selectedModel,
-                  guidance.Guidance
-                )
-              )
-            );
-            takeoverGuidance = guidance.Guidance;
-          }
-          else
-          {
-            _logger.LogWarning(
-              guidance.Failure,
-              "Takeover guidance was unavailable for model {Model}; the resident agent will plan directly.",
-              selectedModel
-            );
-            yield return Event(
-              requestId,
-              "agent.expert-guidance-unavailable",
-              $"Specialist guidance was unavailable: {guidance.Failure!.Message} "
-                + "The resident agent will take over directly from the conversation and completed action results.",
-              stopwatch,
-              selectedModel,
-              intention
-            );
-          }
-
-          yield return Event(
-            requestId,
-            "agent.resident-bridge-resolved",
-            $"Tooling coordinator {settings.CoordinatorModel} took over with a reset planning error counter.",
-            stopwatch,
-            settings.CoordinatorModel,
-            intention
-          );
-          _executionSession.RecordHandoff(
-            settings.CoordinatorModel,
-            "coordinator-takeover"
-          );
-          _executionSession.RecordCoordinationMetadata(
-            settings.CoordinatorModel,
-            takeoverConformance.Identity,
-            $"Target {selectedModel} failed its active coordination path: {execution.PlanningFailure.Message}"
-          );
-          var recoveryAttemptCount = execution.RecoveryAttemptCount;
-          residentMessages = CompactCoordinatorMessages(
-            residentMessages
-          );
-          residentToolMessages = CompactCoordinatorToolMessages(
-            residentToolMessages
-          );
-          execution = new ExecutionProgress(
-            residentMessages,
-            takeoverGuidance,
-            residentToolMessages
-          )
-          {
-            RecoveryAttemptCount = recoveryAttemptCount
-          };
-
-          await foreach (var streamEvent in ExecuteActionsAsync(
-            baseUri,
-            settings.CoordinatorModel,
-            request,
-            requestId,
-            intention,
-            stopwatch,
-            execution,
-            false,
-            selectedModel,
-            settings.Execution.ResidentCoordinatorPlanningFailuresBeforeFailure,
-            false,
-            settings,
-            settings.Execution,
-            settings.ProjectAwareness,
-            cancellationToken
-          ))
-          {
-            yield return streamEvent;
-          }
+          throw execution.PlanningFailure;
         }
-
         if (execution.Failure is not null)
         {
           throw execution.Failure;
@@ -2125,6 +1623,7 @@ public sealed class ChatStreamService : IChatStreamService
     var deniedFingerprints = new HashSet<string>(
       StringComparer.Ordinal
     );
+    var protocolRepairAttempted = false;
     var semanticRepairAttempted = false;
     string? semanticFailureFingerprint = null;
 
@@ -2228,6 +1727,7 @@ public sealed class ChatStreamService : IChatStreamService
         {
           preflightFit = _actionPlanner.FitToBudget(
             progress.ToolMessages,
+            progress.ToolingProfile,
             _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
             budget.MaximumInputTokens,
             _executionSession?.Plan is null,
@@ -2279,6 +1779,7 @@ public sealed class ChatStreamService : IChatStreamService
               : _actionPlanner.PlanAsync(
                 baseUri,
                 model,
+                progress.ToolingProfile,
                 progress.ToolMessages,
                 _executionSession?.Plan is null,
                 attempt,
@@ -2295,6 +1796,30 @@ public sealed class ChatStreamService : IChatStreamService
 
         if (planning.Failure is not null)
         {
+          if (CanCompleteAfterRejectedUnavailableTool(
+            planning.Failure,
+            progress
+          ))
+          {
+            const string warning =
+              "The specialist proposed an unavailable tool after the Host verified the required mutation effect with no pending mutation step. "
+              + "The Host preserved the user's tool-scope boundary and completed from verified workspace facts without executing the rejected proposal.";
+            _executionSession?.AddWarning(
+              warning
+            );
+            yield return Event(
+              requestId,
+              "action.out-of-scope-proposal-skipped",
+              warning,
+              stopwatch,
+              model,
+              intention
+            );
+            noActionRequired = true;
+            exhaustedFailure = null;
+            break;
+          }
+
           var planningFailureCategory = _planningFailureClassifier.Classify(
             planning.Failure
           );
@@ -2337,6 +1862,7 @@ public sealed class ChatStreamService : IChatStreamService
               {
                 var recoveryFit = _actionPlanner.FitToBudget(
                   progress.ToolMessages,
+                  progress.ToolingProfile,
                   _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
                   Math.Max(1, maximum - reserved),
                   _executionSession?.Plan is null,
@@ -2437,6 +1963,30 @@ public sealed class ChatStreamService : IChatStreamService
               intention
             );
 
+            var protocolReview = await TryReviewFunctionGemmaFailureAsync(
+              baseUri,
+              request,
+              applicationSettings,
+              settings,
+              progress,
+              protocolFailure,
+              "invalid_native_protocol",
+              "protocol_error",
+              null,
+              "none",
+              cancellationToken
+            );
+            foreach (var reviewEvent in FunctionGemmaReviewEvents(
+              protocolReview,
+              requestId,
+              stopwatch,
+              applicationSettings.ActionModel,
+              intention
+            ))
+            {
+              yield return reviewEvent;
+            }
+
             if (fallbackToResident)
             {
               yield return Event(
@@ -2452,12 +2002,57 @@ public sealed class ChatStreamService : IChatStreamService
               yield break;
             }
 
+            var protocolRecoveryLimitFailure = RecordRecoveryAttempt(
+              progress,
+              settings,
+              protocolFailure.Message,
+              model,
+              intention
+            );
+
+            if (
+              !protocolRepairAttempted
+              && protocolRecoveryLimitFailure is null
+              && planningFailures + 1 < maximumPlanningAttempts
+            )
+            {
+              protocolRepairAttempted = true;
+              planningFailures++;
+              var protocolCorrection = CreatePlanningCorrection(
+                "TOOL_PROTOCOL_CORRECTION",
+                protocolFailure
+              );
+              progress.Messages.Add(
+                new ChatMessage(
+                  "user",
+                  protocolCorrection
+                )
+              );
+              progress.ToolMessages.Add(
+                new OllamaToolMessage(
+                  "user",
+                  protocolCorrection
+                )
+              );
+              yield return Event(
+                requestId,
+                "action.tool-protocol-repair-requested",
+                $"Model {model} received one materially different Host correction after its invalid native tool call. Recovery budget: "
+                  + $"{progress.RecoveryAttemptCount}/{settings.MaxRecoveryAttemptsPerTurn}.",
+                stopwatch,
+                model,
+                intention
+              );
+              continue;
+            }
+
             var checkpoint = CreateRecoveryCheckpoint(
               requestId,
               stopwatch,
               model,
               intention,
-              protocolFailure.TechnicalMessage,
+              protocolRecoveryLimitFailure?.TechnicalMessage
+                ?? protocolFailure.TechnicalMessage,
               recoverySpecialistModel,
               cancellationToken
             );
@@ -2509,6 +2104,39 @@ public sealed class ChatStreamService : IChatStreamService
               intention
             );
             yield break;
+          }
+
+          if (
+            planningFailureCategory != CoordinatorFailureCategory.CorrectablePlanning
+            || planningFailures + 1 >= maximumPlanningAttempts
+          )
+          {
+            var planningReview = await TryReviewFunctionGemmaFailureAsync(
+              baseUri,
+              request,
+              applicationSettings,
+              settings,
+              progress,
+              planning.Failure,
+              FunctionGemmaFailureCode(
+                planning.Failure,
+                planningFailureCategory
+              ),
+              "invalid_proposal",
+              null,
+              "none",
+              cancellationToken
+            );
+            foreach (var reviewEvent in FunctionGemmaReviewEvents(
+              planningReview,
+              requestId,
+              stopwatch,
+              applicationSettings.ActionModel,
+              intention
+            ))
+            {
+              yield return reviewEvent;
+            }
           }
 
           planningFailures++;
@@ -2585,13 +2213,32 @@ public sealed class ChatStreamService : IChatStreamService
 
           if (
             planningFailureCategory == CoordinatorFailureCategory.CorrectablePlanning
-            && !completionAllowed
             && planningFailures < maximumPlanningAttempts
           )
           {
-            progress.ToolMessages.Add(
-              CreateCompletionRejectedMessage()
+            var planningCorrection = CreatePlanningCorrection(
+              "LOCAL_ACTION_PLANNING_CORRECTION",
+              planning.Failure
             );
+            progress.Messages.Add(
+              new ChatMessage(
+                "user",
+                planningCorrection
+              )
+            );
+            progress.ToolMessages.Add(
+              new OllamaToolMessage(
+                "user",
+                planningCorrection
+              )
+            );
+
+            if (!completionAllowed)
+            {
+              progress.ToolMessages.Add(
+                CreateCompletionRejectedMessage()
+              );
+            }
           }
 
           if (planningFailures < maximumPlanningAttempts)
@@ -2625,6 +2272,34 @@ public sealed class ChatStreamService : IChatStreamService
 
         var planningResult = planning.Result!;
         var proposal = planningResult.Proposal;
+
+        if (
+          UsesFunctionGemmaSupervision(
+            applicationSettings,
+            model
+          )
+        )
+        {
+          progress.ResidentCoexistenceChecked = true;
+          var coexistence = await _residentModel.EnsureResidentAlongsideTargetAsync(
+            model,
+            cancellationToken
+          );
+          yield return Event(
+            requestId,
+            coexistence.ResidentLoaded && coexistence.TargetLoaded
+              ? "agent.functiongemma-supervision-ready"
+              : "agent.functiongemma-supervision-unavailable",
+            coexistence.ResidentLoaded && coexistence.TargetLoaded
+              ? coexistence.Reasserted
+                ? $"FunctionGemma resident {applicationSettings.ActionModel} was reasserted after Teacher {model} loaded; both exact models are verified concurrently in Ollama."
+                : $"FunctionGemma resident {applicationSettings.ActionModel} and Teacher {model} are verified concurrently in Ollama."
+              : $"FunctionGemma resident coexistence with Teacher {model} was not verified ({coexistence.Outcome}); the Host will continue the Teacher path without a reload loop.",
+            stopwatch,
+            applicationSettings.ActionModel,
+            intention
+          );
+        }
 
         if (
           !progress.RuntimeContextReported
@@ -2754,6 +2429,63 @@ public sealed class ChatStreamService : IChatStreamService
         progress.ToolMessages.Add(
           planningResult.AssistantMessage
         );
+        progress.ActiveToolCallId = planningResult.CallId;
+
+        if (ShouldRejectReadOnlyProposalWhileCompletionBlocked(proposal))
+        {
+          var completionFailure = new LocalActionException(
+            "completion-facts",
+            "The proposed read-only action cannot resolve the Host-verified completion issues."
+          );
+          _executionSession?.RecordToolNameResolution(
+            proposal,
+            "rejected-read-only-while-completion-blocked"
+          );
+          progress.ToolMessages.Add(
+            NativeToolResultMessage(
+              progress,
+              proposal.Tool,
+              "rejected",
+              completionFailure.Message
+            )
+          );
+          progress.ToolMessages.Add(CreateCompletionRejectedMessage());
+          planningFailures++;
+          _executionSession?.RecordPlanningFailure();
+          exhaustedFailure = completionFailure;
+          yield return Event(
+            requestId,
+            "action.read-only-completion-correction",
+            "Host rejected a redundant read-only proposal and returned the exact unresolved completion facts. The specialist must make a materially different mutation or state a safe blocker.",
+            stopwatch,
+            model,
+            intention
+          );
+          continue;
+        }
+
+        if (CanCompleteAfterRedundantReadOnlyProposal(proposal, progress))
+        {
+          const string warning =
+            "The specialist proposed another read-only action after the Host verified the requested mutation, reviewed every latest changed file, and found no unresolved completion issue. "
+            + "The Host skipped the redundant proposal and completed from verified workspace facts.";
+          _executionSession?.RecordToolNameResolution(
+            proposal,
+            "skipped-redundant-after-completion"
+          );
+          _executionSession?.AddWarning(warning);
+          yield return Event(
+            requestId,
+            "action.redundant-read-skipped",
+            warning,
+            stopwatch,
+            model,
+            intention
+          );
+          noActionRequired = true;
+          exhaustedFailure = null;
+          break;
+        }
 
         if (
           proposal.OriginalTool is not null
@@ -2795,6 +2527,7 @@ public sealed class ChatStreamService : IChatStreamService
           var planFailure = TryApplyExecutionPlan(
             proposal,
             projectAwareness,
+            progress.ToolScope,
             out var plan
           );
           _executionSession?.RecordToolNameResolution(
@@ -2830,6 +2563,7 @@ public sealed class ChatStreamService : IChatStreamService
             );
             progress.ToolMessages.Add(
               NativeToolResultMessage(
+                progress,
                 proposal.Tool,
                 "completed",
                 $"Visible plan accepted with {plan!.Steps.Count} steps."
@@ -2847,35 +2581,35 @@ public sealed class ChatStreamService : IChatStreamService
         }
         else
         {
-          var instructionFailure = await ApplyInstructionsForProposalAsync(
-            proposal,
-            cancellationToken
-          );
-          validation = instructionFailure is null
-            ? await TryValidateAsync(
-              () => _actionService.ValidateAsync(
-                proposal,
-                _executionSession,
-                cancellationToken
-              )
-            )
-            : new ValidationAttempt(
-              null,
-              instructionFailure
-            );
-
-          if (
-            validation.Failure is null
-            && _executionSession?.Plan is null
-          )
+          if (!progress.ToolScope.Allows(proposal.Tool))
           {
             validation = new ValidationAttempt(
               null,
               new LocalActionException(
-                "execution-plan",
-                "Create a valid visible execution plan before proposing a local action."
+                "action-tool-scope",
+                $"Tool '{proposal.Tool}' is outside the Host-owned tool scope for this user request. "
+                  + "Choose one of the tools offered for the current turn."
               )
             );
+          }
+          else
+          {
+            var instructionFailure = await ApplyInstructionsForProposalAsync(
+              proposal,
+              cancellationToken
+            );
+            validation = instructionFailure is null
+              ? await TryValidateAsync(
+                () => _actionService.ValidateAsync(
+                  proposal,
+                  _executionSession,
+                  cancellationToken
+                )
+              )
+              : new ValidationAttempt(
+                null,
+                instructionFailure
+              );
           }
 
           _executionSession?.RecordToolNameResolution(
@@ -2889,6 +2623,7 @@ public sealed class ChatStreamService : IChatStreamService
         if (validation.Failure is null)
         {
           planningFailures = 0;
+          protocolRepairAttempted = false;
           semanticRepairAttempted = false;
           semanticFailureFingerprint = null;
           _executionSession?.ResetPlanningFailures();
@@ -2899,6 +2634,7 @@ public sealed class ChatStreamService : IChatStreamService
         var exception = validation.Failure;
         progress.ToolMessages.Add(
           NativeToolResultMessage(
+            progress,
             proposal.Tool,
             "rejected",
             exception.Message
@@ -2914,7 +2650,6 @@ public sealed class ChatStreamService : IChatStreamService
         var failureCategory = _planningFailureClassifier.Classify(
           exception
         );
-
         if (
           failureCategory is CoordinatorFailureCategory.PolicyDenied
             or CoordinatorFailureCategory.ToolExecution
@@ -2962,8 +2697,11 @@ public sealed class ChatStreamService : IChatStreamService
               denialMessage
             );
             progress.ToolMessages.Add(
-              ToToolMessage(
-                denialMessage
+              NativeToolResultMessage(
+                progress,
+                proposal.Tool,
+                "policy-denied",
+                exception.Message
               )
             );
             var checkpoint = CreateRecoveryCheckpoint(
@@ -3075,6 +2813,14 @@ public sealed class ChatStreamService : IChatStreamService
                 + "Do not repeat the denied proposal; choose a safe alternative inside the trusted workspace."
             )
           );
+          progress.ToolMessages.Add(
+            NativeToolResultMessage(
+              progress,
+              proposal.Tool,
+              "policy-denied",
+              exception.Message
+            )
+          );
           await DelayBeforeRecoveryRetryAsync(
             progress.RecoveryAttemptCount,
             cancellationToken
@@ -3112,6 +2858,33 @@ public sealed class ChatStreamService : IChatStreamService
 
         if (semanticRepairAttempted)
         {
+          var validationReview = await TryReviewFunctionGemmaFailureAsync(
+            baseUri,
+            request,
+            applicationSettings,
+            settings,
+            progress,
+            exception,
+            FunctionGemmaFailureCode(
+              exception,
+              failureCategory
+            ),
+            "tool_call",
+            proposal.Tool,
+            proposal.Tool,
+            cancellationToken
+          );
+          foreach (var reviewEvent in FunctionGemmaReviewEvents(
+            validationReview,
+            requestId,
+            stopwatch,
+            applicationSettings.ActionModel,
+            intention
+          ))
+          {
+            yield return reviewEvent;
+          }
+
           var repeated = string.Equals(
             semanticFailureFingerprint,
             semanticFingerprint,
@@ -3260,6 +3033,44 @@ public sealed class ChatStreamService : IChatStreamService
       }
 
       var action = validatedAction;
+
+      foreach (var correction in action.Corrections ?? [])
+      {
+        var correctionSummary = $"Host corrected {action.Tool}.{correction.Field} from "
+          + $"'{BoundedCorrectionValue(correction.OriginalValue)}' to "
+          + $"'{BoundedCorrectionValue(correction.EffectiveValue)}'. {correction.Reason}";
+        _executionSession?.AddWarning(
+          correctionSummary
+        );
+        var correctionMessage = "LOCAL_ACTION_CORRECTION\n"
+          + $"Tool: {action.Tool}\n"
+          + $"Field: {correction.Field}\n"
+          + $"Original: {BoundedCorrectionValue(correction.OriginalValue)}\n"
+          + $"Effective: {BoundedCorrectionValue(correction.EffectiveValue)}\n"
+          + $"Reason: {correction.Reason}\n"
+          + "The Host will execute only the effective value inside the trusted workspace. Continue from that effective value.";
+        progress.Messages.Add(
+          new ChatMessage(
+            "user",
+            correctionMessage
+          )
+        );
+        progress.ToolMessages.Add(
+          new OllamaToolMessage(
+            "user",
+            correctionMessage
+          )
+        );
+        yield return Event(
+          requestId,
+          "action.input-corrected",
+          correctionSummary,
+          stopwatch,
+          model,
+          intention
+        );
+      }
+
       var appliedInstructions = _executionSession?.CreateReview()
         .AppliedInstructionFiles;
 
@@ -3277,7 +3088,8 @@ public sealed class ChatStreamService : IChatStreamService
 
       var planStepStarted = _executionSession?.RecordPlanActionStarted(
         action.ActionId,
-        action.Tool
+        action.Tool,
+        action.TargetPath
       ) == true;
       if (planStepStarted)
       {
@@ -3289,6 +3101,50 @@ public sealed class ChatStreamService : IChatStreamService
           model,
           intention
         );
+      }
+      else if (_executionSession?.ValidateUnboundPlanSupport(action) is { } planSupportRejection)
+      {
+        _executionSession.RecordAction(
+          action,
+          "rejected",
+          planSupportRejection
+        );
+        var planSupportCorrection = "PLAN_ACTION_NOT_BOUND\n"
+          + $"Tool: {action.Tool}\n"
+          + $"Reason: {planSupportRejection}\n"
+          + "The Host did not execute the action. Choose one materially different action that advances the next pending step.";
+        progress.ToolMessages.Add(
+          NativeToolResultMessage(
+            progress,
+            action.Tool,
+            "rejected",
+            planSupportRejection
+          )
+        );
+        progress.Messages.Add(
+          new ChatMessage(
+            "user",
+            planSupportCorrection
+          )
+        );
+        progress.ToolMessages.Add(
+          new OllamaToolMessage(
+            "user",
+            planSupportCorrection
+          )
+        );
+        yield return ActionEvent(
+          requestId,
+          "action.plan-support-rejected",
+          planSupportRejection,
+          stopwatch,
+          model,
+          intention,
+          action,
+          "rejected",
+          false
+        );
+        continue;
       }
       _executionSession?.RecordAction(
         action,
@@ -3396,6 +3252,7 @@ public sealed class ChatStreamService : IChatStreamService
           );
           progress.ToolMessages.Add(
             NativeToolResultMessage(
+              progress,
               action.Tool,
               "rejected",
               "The user rejected this action. It was not executed."
@@ -3552,6 +3409,7 @@ public sealed class ChatStreamService : IChatStreamService
         );
         progress.ToolMessages.Add(
           NativeToolResultMessage(
+            progress,
             action.Tool,
             "completed",
             result.Output
@@ -3564,23 +3422,51 @@ public sealed class ChatStreamService : IChatStreamService
         );
         _executionSession?.RecordToolSuccess();
         progress.RecoveryAttemptCount = 0;
-        var planStepCompleted = _executionSession?.RecordPlanActionResult(
-          action.ActionId,
-          action.Tool,
-          "completed"
-        ) == true;
-        yield return Event(
-          requestId,
-          planStepCompleted
-            ? "execution-step-completed"
-            : "execution-step-effect-unmatched",
-          planStepCompleted
-            ? $"Plan step completed from a compatible verified effect: {action.Summary}."
-            : $"Verified action did not advance any plan step because no compatible expected effect was pending: {action.Summary}.",
-          stopwatch,
-          model,
-          intention
-        );
+        if (_executionSession?.Plan is not null)
+        {
+          var evidenceFailure = _executionSession.ValidatePlanActionEvidence(
+            action.ActionId,
+            action.Tool,
+            result.Output
+          );
+          var planStepCompleted = false;
+          if (evidenceFailure is null)
+          {
+            planStepCompleted = _executionSession.RecordPlanActionResult(
+              action.ActionId,
+              action.Tool,
+              "completed"
+            );
+          }
+          else
+          {
+            _executionSession.RejectPlanActionEvidence(action.ActionId);
+            _executionSession.AddWarning(evidenceFailure);
+            var evidenceCorrection = "HOST_REVIEW_EVIDENCE_REJECTED\n"
+              + $"Tool: {action.Tool}\n"
+              + $"Target: {Path.GetFileName(action.TargetPath)}\n"
+              + $"Reason: {evidenceFailure}\n"
+              + "The read succeeded, but the review step remains pending. Propose a corrective mutation for the bound target.";
+            progress.Messages.Add(new ChatMessage("user", evidenceCorrection));
+            progress.ToolMessages.Add(new OllamaToolMessage("user", evidenceCorrection));
+          }
+          yield return Event(
+            requestId,
+            evidenceFailure is not null
+              ? "execution-step-evidence-rejected"
+              : planStepCompleted
+                ? "execution-step-completed"
+                : "execution-step-effect-unmatched",
+            evidenceFailure is not null
+              ? evidenceFailure
+              : planStepCompleted
+                ? $"Plan step completed from a compatible verified effect: {action.Summary}."
+                : $"Verified action did not advance any plan step because no compatible expected effect was pending: {action.Summary}.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
       }
       else
       {
@@ -3671,6 +3557,7 @@ public sealed class ChatStreamService : IChatStreamService
         );
         progress.ToolMessages.Add(
           NativeToolResultMessage(
+            progress,
             action.Tool,
             "failed",
             failureOutput
@@ -3900,7 +3787,7 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "action.recovery-planning",
-          $"Execution failed for {action.Tool}; the result was returned to the active coordinator for replanning. "
+          $"Execution failed for {action.Tool}; the result was returned to the active specialist for replanning. "
             + $"Recovery budget: {progress.RecoveryAttemptCount}/{settings.MaxRecoveryAttemptsPerTurn}.",
           stopwatch,
           model,
@@ -4658,10 +4545,7 @@ public sealed class ChatStreamService : IChatStreamService
       action.ToolResolutionSource
     );
     var currentPlan = _executionSession?.Plan;
-    var requiresHostPlan = currentPlan is null
-      || currentPlan.Steps.All(
-        step => step.Status is "completed" or "failed" or "blocked"
-      );
+    var requiresHostPlan = false;
 
     if (!requiresHostPlan)
     {
@@ -5555,21 +5439,28 @@ public sealed class ChatStreamService : IChatStreamService
     );
   }
 
-  private static OllamaToolMessage NativeToolResultMessage(
+  private OllamaToolMessage NativeToolResultMessage(
+    ExecutionProgress progress,
     string tool,
     string status,
     string output
   )
   {
-    const int limit = 16_000;
-    var safeOutput = output.Length <= limit
-      ? output
-      : $"{output[..limit]}\n[tool result truncated]";
-
-    return new OllamaToolMessage(
-      "tool",
-      $"Status: {status}\nOutput:\n{safeOutput}",
-      ToolName: tool
+    var succeeded = string.Equals(
+      status,
+      "completed",
+      StringComparison.Ordinal
+    );
+    return _toolingProtocol.CreateToolResultMessage(
+      progress.ToolingProfile,
+      new CanonicalToolResult(
+        progress.ActiveToolCallId ?? $"host_{Guid.NewGuid():N}",
+        tool,
+        status,
+        output,
+        succeeded,
+        succeeded
+      )
     );
   }
 
@@ -5765,13 +5656,7 @@ public sealed class ChatStreamService : IChatStreamService
   private static string CoordinationUsageRole(
     ApplicationSettings settings,
     string model
-  ) => string.Equals(
-    model,
-    settings.ActionModel,
-    StringComparison.OrdinalIgnoreCase
-  )
-    ? UsageModelRoles.Action
-    : UsageModelRoles.Coordinator;
+  ) => UsageModelRoles.Specialist;
 
   private static void ReplaceMessages(
     List<OllamaToolMessage> target,
@@ -5851,8 +5736,12 @@ public sealed class ChatStreamService : IChatStreamService
       || new[]
       {
         "LOCAL_ACTION_RESULT",
+        "LOCAL_ACTION_PLANNING_CORRECTION",
+        "LOCAL_ACTION_CORRECTION",
         "STRUCTURED_ACTION_CORRECTION",
+        "TOOL_PROTOCOL_CORRECTION",
         "EXECUTION_COMPLETION_REJECTED",
+        "HOST_COMPLETION_FACTS",
         "RECOVERY_",
         "RESIDENT_",
         "AUTHORITATIVE_EXECUTION_SESSION_FACTS"
@@ -5878,16 +5767,46 @@ public sealed class ChatStreamService : IChatStreamService
     ExecutionProgress progress
   )
   {
+    var plan = _executionSession?.Plan;
+
+    if (
+      _executionSession?.RequiresMutation == true
+      && _executionSession.HasVerifiedMutation == false
+    )
+    {
+      return false;
+    }
+
+    if (
+      _executionSession?.HasVerifiedChangedFiles == true
+      && _executionSession.HasReviewedChangedFiles == false
+    )
+    {
+      return false;
+    }
+
+    if (_executionSession?.UnresolvedChangedFileReferences.Count > 0)
+    {
+      return false;
+    }
+
+    if (_executionSession?.StaticCompletionIssues.Count > 0)
+    {
+      return false;
+    }
+
     if (progress.Guidance?.ActionRequired == false)
     {
       return true;
     }
 
-    var plan = _executionSession?.Plan;
+    if (plan is null)
+    {
+      return true;
+    }
 
     if (
-      plan is null
-      || plan.Steps.Count == 0
+      plan.Steps.Count == 0
       || plan.Steps.Any(
         step => step.Status != "completed"
       )
@@ -5907,6 +5826,99 @@ public sealed class ChatStreamService : IChatStreamService
       : completedActions >= progress.Guidance.Actions.Count;
   }
 
+  private bool CanCompleteAfterRejectedUnavailableTool(
+    Exception failure,
+    ExecutionProgress progress
+  )
+  {
+    if (
+      failure is not LocalActionException localAction
+      || !string.Equals(
+        localAction.Stage,
+        "tool-phase-validation",
+        StringComparison.Ordinal
+      )
+      || string.IsNullOrWhiteSpace(localAction.ProposedCanonicalTool)
+      || progress.ToolScope.Allows(localAction.ProposedCanonicalTool)
+    )
+    {
+      return false;
+    }
+
+    var session = _executionSession;
+    return session is not null
+      && session.RequiresMutation
+      && session.HasVerifiedMutation
+      && session.HasReviewedChangedFiles
+      && session.UnresolvedChangedFileReferences.Count == 0
+      && session.StaticCompletionIssues.Count == 0
+      && !session.HasPendingMutationPlanStep;
+  }
+
+  private bool CanCompleteAfterRedundantReadOnlyProposal(
+    LocalActionProposal proposal,
+    ExecutionProgress progress
+  )
+  {
+    if (!IsReadOnlyInspectionTool(proposal.Tool))
+    {
+      return false;
+    }
+
+    var session = _executionSession;
+    return session is not null
+      && session.RequiresMutation
+      && session.HasVerifiedMutation
+      && session.HasReviewedChangedFiles
+      && session.UnresolvedChangedFileReferences.Count == 0
+      && session.StaticCompletionIssues.Count == 0
+      && !session.HasPendingMutationPlanStep
+      && CanCompletePlanning(progress);
+  }
+
+  private bool ShouldRejectReadOnlyProposalWhileCompletionBlocked(
+    LocalActionProposal proposal
+  )
+  {
+    var session = _executionSession;
+    return session is not null
+      && IsReadOnlyInspectionTool(proposal.Tool)
+      && session.HasVerifiedChangedFiles
+      && session.HasReviewedChangedFiles
+      && (
+        session.UnresolvedChangedFileReferences.Count > 0
+          || session.StaticCompletionIssues.Count > 0
+      );
+  }
+
+  private static bool IsReadOnlyInspectionTool(string tool)
+  {
+    return tool is "list_files"
+      or "read_file"
+      or "get_file_info"
+      or "search_text"
+      or "git_status"
+      or "git_diff"
+      or "git_log"
+      or "git_show_commit";
+  }
+
+  private static bool FunctionGemmaFailureReviewEnabled => false;
+
+  private bool UsesFunctionGemmaSupervision(
+    ApplicationSettings settings,
+    string targetModel
+  )
+  {
+    return FunctionGemmaFailureReviewEnabled && _functionGemma.Supports(
+      settings.ActionModel
+    ) && !string.Equals(
+      settings.ActionModel,
+      targetModel,
+      StringComparison.OrdinalIgnoreCase
+    );
+  }
+
   private OllamaToolMessage CreateCompletionRejectedMessage()
   {
     var pendingSteps = _executionSession?.Plan?.Steps.Where(
@@ -5914,17 +5926,305 @@ public sealed class ChatStreamService : IChatStreamService
     ).Select(
       step => $"{step.Id}: {step.Title}"
     ).ToArray() ?? [];
-    var requirement = pendingSteps.Length == 0
-      ? _executionSession?.RequiresMutation == true
-        && _executionSession.HasVerifiedMutation == false
-        ? "The objective requires a mutation, but the Host has no verified mutation effect. Revise the plan and call an edit, create, delete, directory, or Git mutation tool."
-        : "No valid completed execution plan is stored. Call create_execution_plan with the required remaining work."
-      : $"The visible execution plan still has pending steps: {string.Join("; ", pendingSteps)}. "
-        + "Call exactly one available tool for the next required step.";
+    string requirement;
+    if (pendingSteps.Length > 0)
+    {
+      requirement = $"The visible execution plan still has pending steps: {string.Join("; ", pendingSteps)}. "
+        + "Use one available tool only if it can materially advance the next required step.";
+    }
+    else if (
+      _executionSession?.RequiresMutation == true
+      && _executionSession.HasVerifiedMutation == false
+    )
+    {
+      requirement = "The objective requires a mutation, but the Host has no verified mutation effect. Use an available mutation tool only if the requested effect can be completed safely.";
+    }
+    else if (
+      _executionSession?.HasVerifiedChangedFiles == true
+      && _executionSession.HasReviewedChangedFiles == false
+    )
+    {
+      requirement = "The latest changed files have not all been inspected after their latest mutation: "
+        + string.Join(", ", _executionSession.UnreviewedChangedFiles)
+        + ". Use read_file on one listed path, verify its explicit content and cross-file references against the objective, then continue any missing work.";
+    }
+    else if (_executionSession?.UnresolvedChangedFileReferences.Count > 0)
+    {
+      requirement = "Changed HTML contains unresolved local asset references: "
+        + string.Join(", ", _executionSession.UnresolvedChangedFileReferences)
+        + ". Create or correct one referenced HTML, CSS, or JavaScript asset, then inspect the latest changed file before completion.";
+    }
+    else if (_executionSession?.StaticCompletionIssues.Count > 0)
+    {
+      requirement = "Host static completion review found: "
+        + string.Join(" ", _executionSession.StaticCompletionIssues)
+        + " Correct one reported content or cross-file behavior issue, then inspect every latest changed file before completion.";
+    }
+    else
+    {
+      requirement = "The Host still lacks a required verified effect for this objective.";
+    }
     return new OllamaToolMessage(
       "user",
-      $"EXECUTION_COMPLETION_REJECTED\n{requirement} Do not answer with prose."
+      $"HOST_COMPLETION_FACTS\nCompletion accepted: false\nMissing requirement: {requirement} "
+        + "Change strategy. Propose one available tool only if it materially advances the objective; otherwise return a concise final response that states the safe blocker."
     );
+  }
+
+  private async Task<FunctionGemmaReviewAttempt?> TryReviewFunctionGemmaFailureAsync(
+    Uri baseUri,
+    ChatRequest request,
+    ApplicationSettings applicationSettings,
+    ExecutionSettings executionSettings,
+    ExecutionProgress progress,
+    Exception failure,
+    string failureCode,
+    string observedKind,
+    string? observedTool,
+    string expectedTool,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!FunctionGemmaFailureReviewEnabled || !_functionGemma.Supports(
+      applicationSettings.ActionModel
+    ))
+    {
+      return null;
+    }
+
+    var resident = _residentModel.GetStatus();
+    if (
+      !resident.Loaded
+      || !string.Equals(
+        resident.ConfiguredModel,
+        applicationSettings.ActionModel,
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      return new FunctionGemmaReviewAttempt(
+        null,
+        null,
+        "The FunctionGemma resident is not currently loaded; the Host will continue with its typed recovery policy."
+      );
+    }
+
+    var failedStep = _executionSession?.Plan?.Steps.FirstOrDefault(
+      step => step.Status != "completed"
+    )?.Id ?? "none";
+    var criteria = _executionSession?.Plan?.Steps.Select(
+      step => step.Title
+    ).Take(
+      8
+    ).ToArray() ??
+    [
+      "Complete the user objective using only verified Host effects."
+    ];
+    var availableTools = expectedTool == "none"
+      ? Array.Empty<string>()
+      : new[]
+      {
+        expectedTool
+      };
+
+    try
+    {
+      var review = await _functionGemma.ReviewFailureAsync(
+        baseUri,
+        applicationSettings.ActionModel,
+        new FunctionGemmaFailureContext(
+          request.Message,
+          failureCode,
+          failedStep,
+          FunctionGemmaFailureStage(
+            failure
+          ),
+          failure.InnerException?.Message ?? failure.Message,
+          observedKind,
+          observedTool,
+          expectedTool,
+          availableTools,
+          criteria,
+          Math.Max(
+            0,
+            executionSettings.MaxRecoveryAttemptsPerTurn
+              - progress.RecoveryAttemptCount
+          )
+        ),
+        UsageContext(
+          applicationSettings.ActionModel,
+          UsageModelRoles.Action,
+          "functiongemma-evaluator"
+        ),
+        UsageContext(
+          applicationSettings.ActionModel,
+          UsageModelRoles.Action,
+          "functiongemma-recovery"
+        ),
+        cancellationToken
+      );
+      return new FunctionGemmaReviewAttempt(
+        review,
+        null,
+        null
+      );
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      _logger.LogWarning(
+        exception,
+        "FunctionGemma evaluator or recovery contract failed for request {RequestId}; Host recovery remains authoritative.",
+        _usageTurnId
+      );
+      return new FunctionGemmaReviewAttempt(
+        null,
+        exception,
+        null
+      );
+    }
+  }
+
+  private IEnumerable<ChatStreamEvent> FunctionGemmaReviewEvents(
+    FunctionGemmaReviewAttempt? attempt,
+    string requestId,
+    Stopwatch stopwatch,
+    string model,
+    string intention
+  )
+  {
+    if (attempt?.Review is not null)
+    {
+      yield return Event(
+        requestId,
+        "agent.functiongemma-evaluation-explained",
+        $"FunctionGemma explained the Host-owned NACK: {attempt.Review.EvaluationReason}",
+        stopwatch,
+        model,
+        intention
+      );
+      yield return Event(
+        requestId,
+        "agent.functiongemma-recovery-selected",
+        $"FunctionGemma copied Host recovery policy {attempt.Review.Recovery.Action} for {attempt.Review.Recovery.FailureCode}; next tool: {attempt.Review.Recovery.NextTool}. Reason: {attempt.Review.Recovery.Reason}",
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
+
+    if (attempt?.Failure is not null)
+    {
+      yield return Event(
+        requestId,
+        "agent.functiongemma-contract-warning",
+        $"FunctionGemma evaluator/recovery output was rejected at {FunctionGemmaFailureStage(attempt.Failure)}; the Host-owned recovery path will continue.",
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
+
+    if (attempt?.SkippedReason is not null)
+    {
+      yield return Event(
+        requestId,
+        "agent.functiongemma-review-skipped",
+        attempt.SkippedReason,
+        stopwatch,
+        model,
+        intention
+      );
+    }
+  }
+
+  private static string FunctionGemmaFailureCode(
+    Exception failure,
+    CoordinatorFailureCategory category
+  )
+  {
+    var stage = FunctionGemmaFailureStage(
+      failure
+    );
+    return category switch
+    {
+      CoordinatorFailureCategory.SecurityDenied => "unsafe_security_boundary",
+      CoordinatorFailureCategory.PolicyDenied => "approval_or_policy_denied",
+      CoordinatorFailureCategory.ToolExecution => "tool_execution_failed",
+      CoordinatorFailureCategory.ContextFit => "context_fit_failed",
+      CoordinatorFailureCategory.Provider => "provider_failed",
+      _ when stage.Contains("tool-name", StringComparison.Ordinal) => "wrong_tool",
+      _ when stage.Contains("path", StringComparison.Ordinal) => "invalid_path",
+      _ when stage.Contains("stale", StringComparison.Ordinal)
+        || stage.Contains("conflict", StringComparison.Ordinal) => "stale_state",
+      _ when failure is ToolProtocolException => "invalid_native_protocol",
+      _ => "invalid_proposal"
+    };
+  }
+
+  private static string FunctionGemmaFailureStage(
+    Exception failure
+  )
+  {
+    return failure switch
+    {
+      FunctionGemmaProtocolException protocol => protocol.Stage,
+      LocalActionException localAction => localAction.Stage,
+      OllamaProviderException provider => provider.Stage,
+      _ => "functiongemma-contract"
+    };
+  }
+
+  private static string CreatePlanningCorrection(
+    string marker,
+    Exception failure
+  )
+  {
+    var stage = failure is LocalActionException localAction
+      ? localAction.Stage
+      : failure is OllamaProviderException provider
+        ? provider.Stage
+        : "local-action-planning";
+    var detail = failure.InnerException?.Message ?? failure.Message;
+    var unavailableToolCorrection = failure is LocalActionException
+      {
+        Stage: "tool-phase-validation",
+        ProposedCanonicalTool: not null
+      } unavailableTool
+        ? $" The specific tool '{BoundedCorrectionValue(unavailableTool.ProposedCanonicalTool)}' is not offered for this turn; do not call it again. Use only a native tool definition present in the current request."
+        : string.Empty;
+    return $"{marker}\n"
+      + $"Rejected stage: {BoundedCorrectionValue(stage)}\n"
+      + $"Exact correction: {BoundedCorrectionValue(detail)}\n"
+      + "The rejected output was not executed. Keep the user objective, but change the proposal. "
+      + unavailableToolCorrection
+      + "Return one available native tool call with a complete JSON object only when another action is necessary, "
+      + "or return a concise final response without a tool call when the verified work is complete or no safe action remains. "
+      + "Correct tool spelling, required fields, value types, and JSON structure; do not repeat the rejected output.";
+  }
+
+  private static string BoundedCorrectionValue(
+    string value
+  )
+  {
+    const int maximumLength = 1_000;
+    var sanitized = new string(
+      value.Select(
+        character => char.IsControl(
+          character
+        )
+          ? ' '
+          : character
+      ).ToArray()
+    ).Trim();
+    return sanitized.Length <= maximumLength
+      ? sanitized
+      : sanitized[..maximumLength] + "...";
   }
 
   private RecoveryCheckpoint CreateRecoveryCheckpoint(
@@ -6532,8 +6832,18 @@ public sealed class ChatStreamService : IChatStreamService
 
     try
     {
+      var instructionPath = pathElement.GetString();
+
+      if (proposal.Tool is "create_file" or "create_directory")
+      {
+        instructionPath = (await _workspace.ResolveCreationPathAsync(
+          instructionPath,
+          cancellationToken
+        )).RelativePath;
+      }
+
       var instructions = await _repositoryInstructions.ResolveAsync(
-        pathElement.GetString(),
+        instructionPath,
         cancellationToken
       );
       _executionSession?.ApplyInstructions(
@@ -6561,6 +6871,7 @@ public sealed class ChatStreamService : IChatStreamService
   private LocalActionException? TryApplyExecutionPlan(
     LocalActionProposal proposal,
     ProjectAwarenessSettings projectAwareness,
+    ExecutionTurnToolScope toolScope,
     out ExecutionPlanView? plan
   )
   {
@@ -6582,9 +6893,27 @@ public sealed class ChatStreamService : IChatStreamService
           proposal.Arguments,
           projectAwareness.MaxPlanSteps
         );
+        plan = _executionPlans.NormalizeExistingReferencedDependencies(
+          plan,
+          _executionSession?.Objective ?? plan.Objective,
+          _executionSession?.WorkspacePath
+        );
+        ValidatePlanToolScope(plan, toolScope);
+        var normalization = NormalizePlanStaticReview(
+          plan,
+          _executionSession?.Objective ?? plan.Objective,
+          projectAwareness.MaxPlanSteps
+        );
+        plan = normalization.Plan;
         _executionSession?.CreatePlan(
           plan
         );
+        if (normalization.Note is not null)
+        {
+          _executionSession?.AddWarning(
+            normalization.Note
+          );
+        }
         return null;
       }
 
@@ -6609,9 +6938,27 @@ public sealed class ChatStreamService : IChatStreamService
         current,
         projectAwareness.MaxPlanSteps
       );
+      plan = _executionPlans.NormalizeExistingReferencedDependencies(
+        plan,
+        _executionSession?.Objective ?? plan.Objective,
+        _executionSession?.WorkspacePath
+      );
+      ValidatePlanToolScope(plan, toolScope);
+      var revisionNormalization = NormalizePlanStaticReview(
+        plan,
+        _executionSession?.Objective ?? plan.Objective,
+        projectAwareness.MaxPlanSteps
+      );
+      plan = revisionNormalization.Plan;
       _executionSession?.RevisePlan(
         plan
       );
+      if (revisionNormalization.Note is not null)
+      {
+        _executionSession?.AddWarning(
+          revisionNormalization.Note
+        );
+      }
       return null;
     }
     catch (LocalActionException failure)
@@ -6621,9 +6968,223 @@ public sealed class ChatStreamService : IChatStreamService
     }
   }
 
+  private static void ValidatePlanToolScope(
+    ExecutionPlanView plan,
+    ExecutionTurnToolScope toolScope
+  )
+  {
+    var unavailable = plan.Steps.Select(
+      step => new
+      {
+        step.Title,
+        Effect = ToolEffectRegistry.InferExpectedEffect(step.Title)
+      }
+    ).Where(
+      step => step.Effect is not null
+        && !ToolEffectRegistry.HasCompatibleTool(
+          step.Effect,
+          toolScope.AvailableTools
+        )
+    ).Select(
+      step => step.Title
+    ).ToArray();
+
+    if (unavailable.Length == 0) return;
+
+    throw new LocalActionException(
+      "execution-plan-tool-scope",
+      "The plan contains work outside the Host-owned tool scope for this request: "
+        + string.Join("; ", unavailable)
+        + ". Remove those steps and keep only work the user requested."
+    );
+  }
+
+  private static PlanStaticReviewNormalization NormalizePlanStaticReview(
+    ExecutionPlanView plan,
+    string objective,
+    int maximumSteps
+  )
+  {
+    var steps = plan.Steps.ToList();
+    var indexedEffects = steps.Select(
+      (
+        step,
+        index
+      ) => new
+      {
+        step.Title,
+        Index = index,
+        Effect = ToolEffectRegistry.InferExpectedEffect(step.Title)
+      }
+    ).ToArray();
+    var mutationIndexes = indexedEffects.Where(
+      step => step.Effect is not null
+        && ToolEffectRegistry.IsMutation(step.Effect)
+    ).Select(
+      step => step.Index
+    ).ToArray();
+
+    if (mutationIndexes.Length < 2)
+    {
+      return new PlanStaticReviewNormalization(
+        plan,
+        null
+      );
+    }
+
+    var lastMutation = mutationIndexes.Max();
+    var finalReviewIndexes = indexedEffects.Where(
+      step => step.Index > lastMutation
+        && step.Effect == ToolEffects.Inspected
+    ).Select(
+      step => step.Index
+    ).ToList();
+
+    var numericConstraints = System.Text.RegularExpressions.Regex.Matches(
+      objective,
+      @"\b\d+\b"
+    ).Select(
+      match => match.Value
+    ).Distinct(
+      StringComparer.Ordinal
+    ).ToArray();
+    var constraintSuffix = numericConstraints.Length == 0
+      ? string.Empty
+      : $"; verify exact {string.Join("/", numericConstraints)}";
+    var mutationTargets = mutationIndexes.Select(
+      index => new
+      {
+        Target = ToolEffectRegistry.TryGetHostTarget(steps[index].Title),
+        Constrained = numericConstraints.Any(
+          value => steps[index].Title.Contains(value, StringComparison.Ordinal)
+        )
+      }
+    ).Where(
+      item => item.Target is not null
+    ).ToArray();
+    var constraintTarget = mutationTargets.FirstOrDefault(
+      item => item.Constrained
+    )?.Target ?? mutationTargets.LastOrDefault()?.Target;
+    var integrationTarget = mutationTargets.FirstOrDefault(
+      item => !string.Equals(
+        item.Target,
+        constraintTarget,
+        StringComparison.OrdinalIgnoreCase
+      )
+    )?.Target ?? mutationTargets.FirstOrDefault()?.Target;
+    var usedIds = steps.Select(
+      step => step.Id
+    ).ToHashSet(
+      StringComparer.Ordinal
+    );
+    var added = 0;
+
+    while (
+      finalReviewIndexes.Count < 2
+      && steps.Count < maximumSteps
+    )
+    {
+      var title = finalReviewIndexes.Count == 0
+        ? $"Review integrated entrypoint and cross-file references{constraintSuffix}"
+        : $"Review constraint-heavy data or code file{constraintSuffix}";
+      var reviewTarget = finalReviewIndexes.Count == 0
+        ? integrationTarget
+        : constraintTarget;
+      if (reviewTarget is not null)
+      {
+        title = ToolEffectRegistry.WithHostTarget(title, reviewTarget);
+      }
+      var nextId = NextPlanStepId(
+        usedIds
+      );
+      usedIds.Add(
+        nextId
+      );
+      steps.Add(
+        new ExecutionPlanStep(
+          nextId,
+          title.Length <= 100
+            ? title
+            : title[..100],
+          "pending"
+        )
+      );
+      finalReviewIndexes.Add(
+        steps.Count - 1
+      );
+      added++;
+    }
+
+    var numericText = string.Join(
+      " ",
+      numericConstraints
+    );
+    var numericAdded = false;
+    if (
+      numericConstraints.Length > 0
+      && finalReviewIndexes.Count > 0
+      && !string.Join(
+        " ",
+        finalReviewIndexes.Select(index => steps[index].Title)
+      ).Contains(
+        numericText,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      var index = finalReviewIndexes[^1];
+      var suffix = $" (verify {numericText})";
+      var maximumBaseLength = Math.Max(
+        1,
+        100 - suffix.Length
+      );
+      var currentTitle = steps[index].Title;
+      steps[index] = steps[index] with
+      {
+        Title = currentTitle[..Math.Min(currentTitle.Length, maximumBaseLength)] + suffix
+      };
+      numericAdded = true;
+    }
+
+    if (added == 0 && !numericAdded)
+    {
+      return new PlanStaticReviewNormalization(
+        plan,
+        null
+      );
+    }
+
+    var normalized = plan with
+    {
+      Steps = steps
+    };
+    return new PlanStaticReviewNormalization(
+      normalized,
+      $"Host normalized the multi-file plan with {added} bounded static review step(s)"
+        + (numericAdded
+          ? " and preserved its exact numeric constraint in the review title."
+          : ".")
+    );
+  }
+
+  private static string NextPlanStepId(
+    IReadOnlySet<string> usedIds
+  )
+  {
+    for (var index = 1; ; index++)
+    {
+      var candidate = $"step-{index}";
+      if (!usedIds.Contains(candidate))
+      {
+        return candidate;
+      }
+    }
+  }
+
   private static string CreateProjectContext(
     ProjectProfile project,
-    RepositoryInstructionSet instructions
+    RepositoryInstructionSet instructions,
+    ExecutionTurnToolScope toolScope
   )
   {
     var markers = project.DetectedFiles.Count == 0
@@ -6642,8 +7203,16 @@ public sealed class ChatStreamService : IChatStreamService
       + $"Workspace display name: {project.DisplayName ?? "workspace"}\n"
       + $"Project types: {string.Join(", ", project.ProjectTypes.DefaultIfEmpty("none"))}\n"
       + $"Detected markers: {markers}\n"
+      + $"Validation profile: {(toolScope.ValidationProfileAvailable ? "configured" : "none")}\n"
       + $"Git branch: {project.Repository.Branch ?? "unavailable"}\n"
       + $"Pre-existing dirty paths: {dirty}\n"
+      + "The trusted workspace is already the existing project root. Do not create a wrapper project directory unless the user explicitly requested a subdirectory.\n"
+      + (
+        project.ProjectTypes.Contains("vanilla-web", StringComparer.OrdinalIgnoreCase)
+          ? "This is a vanilla web project. Work with its HTML, CSS, and browser JavaScript directly; do not invent Node, npm, a build system, or a development server.\n"
+          : string.Empty
+      )
+      + $"Host-owned turn constraints:\n{ExecutionTurnToolPolicy.Describe(toolScope)}\n"
       + "Pre-existing dirty files must not be claimed as changes made solely by this turn.\n"
       + "Existing files must be inspected before modification and may conflict if their hash changes.\n"
       + (
@@ -6761,6 +7330,7 @@ public sealed class ChatStreamService : IChatStreamService
     "LOCAL_ACTION_RESULT",
     "STRUCTURED_ACTION_CORRECTION",
     "EXECUTION_COMPLETION_REJECTED",
+    "HOST_COMPLETION_FACTS",
     "RECOVERY_",
     "RESIDENT_",
     "AUTHORITATIVE_EXECUTION_SESSION_FACTS"
@@ -6790,12 +7360,18 @@ public sealed class ChatStreamService : IChatStreamService
   {
     public ExecutionProgress(
       List<ChatMessage> messages,
+      SpecialistToolingProfile toolingProfile,
       ExpertExecutionGuidance? guidance = null,
+      ExecutionTurnToolScope? toolScope = null,
       List<OllamaToolMessage>? toolMessages = null
     )
     {
       Messages = messages;
+      ToolingProfile = toolingProfile;
       Guidance = guidance;
+      ToolScope = toolScope ?? ExecutionTurnToolPolicy.Resolve(
+        messages.Select(message => (message.Role, (string?)message.Content))
+      );
       ToolMessages = toolMessages ?? messages.Select(
         ToToolMessage
       ).ToList();
@@ -6805,7 +7381,13 @@ public sealed class ChatStreamService : IChatStreamService
 
     public List<OllamaToolMessage> ToolMessages { get; }
 
+    public SpecialistToolingProfile ToolingProfile { get; }
+
+    public string? ActiveToolCallId { get; set; }
+
     public ExpertExecutionGuidance? Guidance { get; set; }
+
+    public ExecutionTurnToolScope ToolScope { get; }
 
     public bool ToolingValidated { get; set; }
 
@@ -6824,6 +7406,8 @@ public sealed class ChatStreamService : IChatStreamService
     public bool ContextFailureCompactionAttempted { get; set; }
 
     public bool PartialContextExhausted { get; set; }
+
+    public bool ResidentCoexistenceChecked { get; set; }
   }
 
   private sealed record PlanningAttempt(
@@ -6843,6 +7427,11 @@ public sealed class ChatStreamService : IChatStreamService
     LocalActionException? Failure
   );
 
+  private sealed record PlanStaticReviewNormalization(
+    ExecutionPlanView Plan,
+    string? Note
+  );
+
   private sealed record RecoveryCheckpoint(
     ChatStreamEvent Event,
     Task<string> DecisionTask,
@@ -6858,6 +7447,12 @@ public sealed class ChatStreamService : IChatStreamService
     LocalActionResult? Result,
     LocalActionException? Failure,
     long DurationMilliseconds
+  );
+
+  private sealed record FunctionGemmaReviewAttempt(
+    FunctionGemmaFailureReview? Review,
+    Exception? Failure,
+    string? SkippedReason
   );
 
   private sealed record ToolingInspection(

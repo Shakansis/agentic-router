@@ -20,6 +20,18 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       1_000_000_000L
     ),
     new(
+      "functiongemma:270m",
+      270_000_000L
+    ),
+    new(
+      "qwen3-coder:30b",
+      18_000_000_000L
+    ),
+    new(
+      "gpt-oss:20b",
+      14_000_000_000L
+    ),
+    new(
       "alpha:latest",
       4_200_000_000L
     ),
@@ -61,8 +73,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private readonly ConcurrentDictionary<string, int> _generationAttempts = new(
     StringComparer.Ordinal
   );
+  private readonly object _residencyGate = new();
   private string _protocolVersion = "0.13.5-test";
   private string? _adaptiveConformanceModel;
+  private string? _evictOnNextLoadedModel;
+  private string? _evictOnNextRemovedModel;
   private Task? _listenTask;
 
   private FakeOllamaServer(
@@ -107,6 +122,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     _generationAttempts.Clear();
     _protocolVersion = "0.13.5-test";
     _adaptiveConformanceModel = null;
+    _evictOnNextLoadedModel = null;
+    _evictOnNextRemovedModel = null;
+  }
+
+  public void EvictModelOnNextLoad(
+    string loadedModel,
+    string removedModel
+  )
+  {
+    lock (_residencyGate)
+    {
+      _evictOnNextLoadedModel = loadedModel;
+      _evictOnNextRemovedModel = removedModel;
+    }
   }
 
   public void EnableAdaptiveConformanceFixture(
@@ -396,7 +425,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             "completion",
             "vision"
           }
-          : model is "command-r:latest" or "router:latest" or "unused:latest" or "structured:latest"
+          : model is "command-r:latest" or "router:latest" or "functiongemma:270m" or "qwen3-coder:30b" or "gpt-oss:20b" or "unused:latest" or "structured:latest"
           ? new[]
           {
             "completion",
@@ -617,21 +646,41 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     int? contextTokens = null
   )
   {
-    var definition = Models.Single(
-      candidate => candidate.Name == model
-    );
-    _loaded[model] = new RunningModel(
-      model,
-      $"digest-{model}",
-      definition.Size,
-      definition.Size * 3 / 4,
-      contextTokens ?? 8_192,
-      keepAlive < 0
-        ? null
-        : DateTimeOffset.UtcNow.AddMinutes(
-          5
-        )
-    );
+    lock (_residencyGate)
+    {
+      var definition = Models.Single(
+        candidate => candidate.Name == model
+      );
+      _loaded[model] = new RunningModel(
+        model,
+        $"digest-{model}",
+        definition.Size,
+        definition.Size * 3 / 4,
+        contextTokens ?? 8_192,
+        keepAlive < 0
+          ? null
+          : DateTimeOffset.UtcNow.AddMinutes(
+            5
+          )
+      );
+
+      if (string.Equals(
+        model,
+        _evictOnNextLoadedModel,
+        StringComparison.Ordinal
+      ))
+      {
+        if (!string.IsNullOrWhiteSpace(_evictOnNextRemovedModel))
+        {
+          _loaded.TryRemove(
+            _evictOnNextRemovedModel,
+            out _
+          );
+        }
+        _evictOnNextLoadedModel = null;
+        _evictOnNextRemovedModel = null;
+      }
+    }
   }
 
   private async Task ClassifyAsync(
@@ -712,9 +761,107 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       return;
     }
 
+    if (availableTools.Contains(
+      "route_to_teacher",
+      StringComparer.Ordinal
+    ))
+    {
+      var request = messages.Last().Content;
+      await RespondWithToolCallAsync(
+        response,
+        "route_to_teacher",
+        new
+        {
+          teacher_model = request.Contains(
+            "route repair required",
+            StringComparison.OrdinalIgnoreCase
+          ) && !request.Contains(
+            "ROUTING_CORRECTION",
+            StringComparison.Ordinal
+          )
+            ? " unavailable-teacher "
+            : request.Contains(
+            "functiongemma resident contract",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? " qwen3-coder:30b "
+            : " alpha:latest ",
+          intent = request.Contains(
+            "mismatched route pair",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? " file-operations "
+            : request.Contains(
+            "functiongemma resident contract",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? " software-development "
+            : " general-chat ",
+          reason = "Selected through the trained FunctionGemma routing contract."
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    if (availableTools.Contains(
+      "explain_teacher_trace",
+      StringComparer.Ordinal
+    ))
+    {
+      await RespondWithToolCallAsync(
+        response,
+        "explain_teacher_trace",
+        new
+        {
+          reason = "The Host rejected the first invalid step using authoritative comparison facts."
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    if (availableTools.Contains(
+      "recover_teacher_trace",
+      StringComparer.Ordinal
+    ))
+    {
+      var recoveryPrompt = messages.Last().Content;
+      var failureCode = ExtractRequiredPolicyValue(
+        recoveryPrompt,
+        "failure_code"
+      );
+      var failedStep = ExtractRequiredPolicyValue(
+        recoveryPrompt,
+        "failed_step"
+      );
+      var action = ExtractRequiredPolicyValue(
+        recoveryPrompt,
+        "action"
+      );
+      var nextTool = ExtractRequiredPolicyValue(
+        recoveryPrompt,
+        "next_tool"
+      );
+      await RespondWithToolCallAsync(
+        response,
+        "recover_teacher_trace",
+        new
+        {
+          action = $" {action} ",
+          failure_code = $" {failureCode} ",
+          failed_step = $" {failedStep} ",
+          next_tool = $" {nextTool} ",
+          reason = $"Apply {action} after {failureCode}."
+        },
+        cancellationToken
+      );
+      return;
+    }
+
     if (messages.Any(
       message => message.Content.Contains(
-        "LOCAL_ACTION_PLANNER_V1",
+        "SPECIALIST_TOOL_LOOP_V2",
         StringComparison.Ordinal
       )
     ))
@@ -1154,23 +1301,26 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
-    var current = messages.Where(
-      message => message.Role == "user"
-        && message.Content.StartsWith(
-          "execute",
-          StringComparison.OrdinalIgnoreCase
-        )
-        && message.Content.Length <= 240
-        && !message.Content.StartsWith(
-          "LOCAL_ACTION_RESULT",
-          StringComparison.Ordinal
-        )
-        && !message.Content.StartsWith(
-          "EXPERT_EXECUTION_GUIDANCE_V1",
-          StringComparison.Ordinal
-        )
-    ).Last().Content;
-    var validationFailed = messages.Any(
+    var currentEntry = messages.Select(
+      (message, index) => (message, index)
+    ).Where(
+      entry => IsExecuteObjective(entry.message)
+    ).Last();
+    var current = currentEntry.message.Content;
+    var activeMessages = messages.Skip(
+      currentEntry.index + 1
+    ).ToArray();
+    if (current.Contains(
+      "configurable planner timeout",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      await Task.Delay(
+        1_250,
+        cancellationToken
+      );
+    }
+    var validationFailed = activeMessages.Any(
       message => (
         message.ToolName == "run_validation_profile"
         || message.Content.Contains(
@@ -1183,13 +1333,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     );
-    var revisionRequested = messages.Any(
+    var revisionRequested = activeMessages.Any(
       message => message.Content.StartsWith(
         "RECOVERY_STRATEGY_REVISION",
         StringComparison.Ordinal
       )
     );
-    var supervisionRequested = messages.Any(
+    var supervisionRequested = activeMessages.Any(
       message => message.Content.StartsWith(
         "RESIDENT_STRATEGY_SUPERVISION",
         StringComparison.Ordinal
@@ -1199,11 +1349,25 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "unchanged strategy",
       StringComparison.OrdinalIgnoreCase
     );
-    var semanticCorrectionRequested = messages.Any(
+    var semanticCorrectionRequested = activeMessages.Any(
       message => message.Content.StartsWith(
-        "STRUCTURED_ACTION_CORRECTION",
+          "STRUCTURED_ACTION_CORRECTION",
+          StringComparison.Ordinal
+        )
+        || message.Content.StartsWith(
+          "LOCAL_ACTION_CORRECTION",
+          StringComparison.Ordinal
+        )
+    );
+    var policyCorrectionRequested = activeMessages.Any(
+      message => message.Content.StartsWith(
+        "LOCAL_ACTION_RESULT",
         StringComparison.Ordinal
       )
+        && message.Content.Contains(
+          "Status: policy-denied",
+          StringComparison.Ordinal
+        )
     );
     var structuredSemanticRepair = current.Contains(
       "structured semantic repair",
@@ -1213,7 +1377,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "repeat structured semantic failure",
       StringComparison.OrdinalIgnoreCase
     );
-    var completedStructuredAction = messages.Any(
+    var completedStructuredAction = activeMessages.Any(
       message => message.Content.StartsWith(
         "LOCAL_ACTION_RESULT",
         StringComparison.Ordinal
@@ -1231,7 +1395,237 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     );
-    var guidance = completedStructuredAction
+    var completedStructuredInspection = activeMessages.Any(
+      message => message.Content.StartsWith(
+        "LOCAL_ACTION_RESULT",
+        StringComparison.Ordinal
+      )
+        && message.Content.Contains(
+          "Tool: read_file",
+          StringComparison.Ordinal
+        )
+        && message.Content.Contains(
+          "Status: completed",
+          StringComparison.Ordinal
+        )
+    );
+    var completedStructuredMutation = activeMessages.Any(
+      message => message.Content.StartsWith(
+        "LOCAL_ACTION_RESULT",
+        StringComparison.Ordinal
+      )
+        && (
+          message.Content.Contains("Tool: write_file", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: replace_text", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
+        )
+        && message.Content.Contains(
+          "Status: completed",
+          StringComparison.Ordinal
+        )
+    );
+    var completedStructuredReads = activeMessages.Count(
+      message => message.Content.Contains("Tool: read_file", StringComparison.Ordinal)
+        && message.Content.Contains("Status: completed", StringComparison.Ordinal)
+    );
+    var completedStructuredDeletion = activeMessages.Any(
+      message => message.Content.Contains("Tool: delete_files", StringComparison.Ordinal)
+        && message.Content.Contains("Status: completed", StringComparison.Ordinal)
+    );
+    var completedStructuredValidation = activeMessages.Any(
+      message => message.Content.Contains("Tool: run_validation_profile", StringComparison.Ordinal)
+        && (
+          message.Content.Contains("Status: completed", StringComparison.Ordinal)
+          || message.Content.Contains("Status: failed", StringComparison.Ordinal)
+        )
+    );
+    var failedStructuredProcess = activeMessages.Any(
+      message => message.Content.Contains("Tool: run_process", StringComparison.Ordinal)
+        && message.Content.Contains("Status: failed", StringComparison.Ordinal)
+    );
+    var completedStructuredPatchCount = activeMessages.Count(
+      message => message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
+        && message.Content.Contains("Status: completed", StringComparison.Ordinal)
+    );
+    object NextDeleteProposal()
+    {
+      if (completedStructuredReads == 0)
+      {
+        return CreateLocalActionPlan(current);
+      }
+
+      if (completedStructuredReads == 1)
+      {
+        return new
+        {
+          tool = "read_file",
+          arguments = new
+          {
+            path = "obsolete-b.txt"
+          },
+          explanation = "Inspect the second file before deletion."
+        };
+      }
+
+      return new
+      {
+        tool = "delete_files",
+        arguments = new
+        {
+          paths = new[]
+          {
+            "obsolete-a.txt",
+            "obsolete-b.txt"
+          }
+        },
+        explanation = "Delete the exact inspected files after Host validation."
+      };
+    }
+
+    var guidance = current.Contains("duplicate workspace root edit", StringComparison.OrdinalIgnoreCase)
+      && !completedStructuredMutation
+      ? CreateStructuredGuidance(
+        current,
+        completedStructuredInspection
+          ? new
+          {
+            tool = "write_file",
+            arguments = new
+            {
+              path = "hello.txt",
+              content = "edited existing root file"
+            },
+            explanation = "Edit the inspected file at the actual workspace root."
+          }
+          : semanticCorrectionRequested
+            ? new
+            {
+              tool = "read_file",
+              arguments = new
+              {
+                path = "hello.txt"
+              },
+              explanation = "Inspect the existing file at the actual workspace root."
+            }
+            : CreateLocalActionPlan(current)
+      )
+      : failedStructuredProcess && !completedStructuredAction
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "list_files",
+            arguments = new
+            {
+              path = ".",
+              recursive = false
+            },
+            explanation = "Recover from the unavailable process with a bounded workspace inspection."
+          }
+        )
+      : (semanticCorrectionRequested || policyCorrectionRequested)
+        && !completedStructuredAction
+        && current.Contains("control character path recover", StringComparison.OrdinalIgnoreCase)
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "create_file",
+            arguments = new
+            {
+              path = "safe-control-path.txt",
+              content = "recovered after invalid control path"
+            },
+            explanation = "Use a valid workspace-relative path after the malformed path was rejected."
+          }
+        )
+      : (semanticCorrectionRequested || policyCorrectionRequested)
+        && !completedStructuredAction
+        && current.Contains("control character process recover", StringComparison.OrdinalIgnoreCase)
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "create_file",
+            arguments = new
+            {
+              path = "safe-control-process.txt",
+              content = "recovered after invalid process argument"
+            },
+            explanation = "Use a structured safe action after the malformed process argument was rejected."
+          }
+        )
+      : (semanticCorrectionRequested || policyCorrectionRequested)
+        && !completedStructuredAction
+        && current.Contains("path traversal recover", StringComparison.OrdinalIgnoreCase)
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "create_file",
+            arguments = new
+            {
+              path = "safe.txt",
+              content = "recovered inside trusted workspace"
+            },
+            explanation = "Use a safe path inside the trusted workspace."
+          }
+        )
+      : current.Contains("delete files", StringComparison.OrdinalIgnoreCase)
+      && !completedStructuredDeletion
+      ? CreateStructuredGuidance(current, NextDeleteProposal())
+      : current.Contains("sequential apply patch", StringComparison.OrdinalIgnoreCase)
+        && completedStructuredPatchCount == 1
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "apply_patch",
+            arguments = new
+            {
+              path = "hello.txt",
+              replacements = new[]
+              {
+                new
+                {
+                  oldText = "patched",
+                  newText = "patched twice"
+                }
+              }
+            },
+            explanation = "Apply the second edit after observing the first verified patch."
+          }
+        )
+      : IsMutationFixture(current) && !completedStructuredMutation
+      ? CreateStructuredGuidance(
+        current,
+        completedStructuredInspection
+          ? CreateLocalActionPlan(current)
+          : new
+          {
+            tool = "read_file",
+            arguments = new
+            {
+              path = current.Contains("coding task", StringComparison.OrdinalIgnoreCase)
+                ? "Program.cs"
+                : "hello.txt"
+            },
+            explanation = "Inspect the existing file before modification."
+          }
+      )
+      : current.Contains("validate", StringComparison.OrdinalIgnoreCase)
+        && completedStructuredAction
+        && !completedStructuredValidation
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "run_validation_profile",
+            arguments = new { },
+            explanation = "Run the saved build and test validation profile."
+          }
+        )
+      : completedStructuredAction
       ? JsonSerializer.Serialize(
         new
         {
@@ -1297,13 +1691,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   }
 
   private static string CreateStructuredGuidance(
-    string current
+    string current,
+    object? structuredProposal = null
   )
   {
     var proposal = JsonSerializer.SerializeToElement(
-      CreateLocalActionPlan(
-        current
-      ),
+      structuredProposal ?? CreateLocalActionPlan(current),
       CompactJsonOptions
     );
     var tool = proposal.TryGetProperty(
@@ -1448,6 +1841,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
+  private static bool IsExecuteObjective(RecordedMessage message)
+  {
+    if (!string.Equals(message.Role, "user", StringComparison.Ordinal))
+    {
+      return false;
+    }
+
+    return !message.Content.StartsWith("LOCAL_ACTION_", StringComparison.Ordinal)
+      && !message.Content.StartsWith("STRUCTURED_ACTION_", StringComparison.Ordinal)
+      && !message.Content.StartsWith("TOOL_PROTOCOL_", StringComparison.Ordinal)
+      && !message.Content.StartsWith("EXECUTION_", StringComparison.Ordinal)
+      && !message.Content.StartsWith("COMPLETION_", StringComparison.Ordinal)
+      && !message.Content.StartsWith("HOST_COMPLETION_FACTS", StringComparison.Ordinal)
+      && !message.Content.StartsWith("RECOVERY_", StringComparison.Ordinal)
+      && !message.Content.StartsWith("EXPERT_EXECUTION_GUIDANCE_V1", StringComparison.Ordinal);
+  }
+
   private async Task PlanLocalActionAsync(
     HttpListenerResponse response,
     string model,
@@ -1457,22 +1867,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
-    var current = messages.Where(
-      message => message.Role == "user"
-        && message.Content.StartsWith(
-          "execute",
-          StringComparison.OrdinalIgnoreCase
-        )
-        && message.Content.Length <= 240
-        && !message.Content.StartsWith(
-          "LOCAL_ACTION_RESULT",
-          StringComparison.Ordinal
-        )
-        && !message.Content.StartsWith(
-          "EXPERT_EXECUTION_GUIDANCE_V1",
-          StringComparison.Ordinal
-        )
-    ).Last().Content;
+    var currentEntry = messages.Select(
+      (message, index) => (message, index)
+    ).Where(
+      entry => IsExecuteObjective(entry.message)
+    ).Last();
+    var current = currentEntry.message.Content;
+    var activeMessages = messages.Skip(
+      currentEntry.index + 1
+    ).ToArray();
     var attempt = _generationAttempts.AddOrUpdate(
       $"planner:{model}:{current}",
       1,
@@ -1481,14 +1884,17 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         count
       ) => count + 1
     );
-    var results = messages.Where(
+    var results = activeMessages.Where(
       message => message.Role == "tool"
         || message.Content.StartsWith(
           "LOCAL_ACTION_RESULT",
           StringComparison.Ordinal
         )
     ).ToArray();
-    var hasPlan = results.Any(
+    var hasPlan = !availableTools.Contains(
+      "create_execution_plan",
+      StringComparer.Ordinal
+    ) || results.Any(
       message => (
         message.ToolName == "create_execution_plan"
         && message.Content.StartsWith(
@@ -1529,12 +1935,17 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         )
     ).ToArray();
     var hasResult = actionResults.Length > 0
-      || messages.Any(message => message.Content.StartsWith("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal)
+      || activeMessages.Any(message => message.Content.StartsWith("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal)
         && message.Content.Contains(":completed:", StringComparison.Ordinal));
     var allContent = string.Join(
       "\n",
-      messages.Select(
-        message => message.Content
+      new[]
+      {
+        current
+      }.Concat(
+        activeMessages.Select(
+          message => message.Content
+        )
       )
     );
     var humanRecoveryNeedsInvalidPlan = current.Contains(
@@ -1586,6 +1997,31 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         new
         {
           error = "xml syntax error on line 1: element <parameter> closed by </function>"
+        },
+        cancellationToken
+      );
+      return;
+    }
+
+    if (
+      string.Equals(
+        model,
+        "router:latest",
+        StringComparison.Ordinal
+      )
+      && current.Contains(
+        "resident protocol correction",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && attempt == 1
+    )
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.InternalServerError,
+        new
+        {
+          error = "error parsing tool call: unexpected end of JSON input"
         },
         cancellationToken
       );
@@ -1687,6 +2123,109 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         current
       );
     }
+    else if (
+      !hasPlan
+      && allContent.Contains(
+        "vanilla manual scope",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = CreateExecutionPlan(
+        allContent
+      );
+    }
+    else if (
+      !hasPlan
+      && allContent.Contains(
+        "multi file static review",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = CreateExecutionPlan(
+        allContent
+      );
+    }
+    else if (
+      hasPlan
+      && ForkGameExecutionFixture.Matches(current)
+    )
+    {
+      plan = CreateForkGameAction(attempt - 1);
+    }
+    else if (
+      hasPlan
+      && current.Contains(
+        "multi file static review",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = actionResults.Length switch
+      {
+        0 => new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "review.html",
+            content = "<!doctype html><script src=\"review-data.js\"></script>"
+          },
+          explanation = "Create the static entrypoint."
+        },
+        1 => new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "review-data.js",
+            content = "window.items = ['one', 'two'];"
+          },
+          explanation = "Create the constrained data file."
+        },
+        2 => new
+        {
+          tool = (string?)"read_file",
+          arguments = (object)new
+          {
+            path = "review.html"
+          },
+          explanation = "Inspect entrypoint integration."
+        },
+        3 => new
+        {
+          tool = (string?)"read_file",
+          arguments = (object)new
+          {
+            path = "review-data.js"
+          },
+          explanation = "Inspect the data integration."
+        },
+        _ => new
+        {
+          tool = (string?)null,
+          arguments = (object)new { },
+          explanation = "The bounded static review plan is complete."
+        }
+      };
+    }
+    else if (
+      hasPlan
+      && string.Equals(
+        model,
+        "qwen3-coder:30b",
+        StringComparison.Ordinal
+      )
+      && IsQwenToolingMatrixFixture(current)
+    )
+    {
+      plan = CreateQwenToolingMatrixAction(
+        current,
+        actionResults,
+        allContent
+      );
+    }
     else if (!hasPlan)
     {
       plan = CreateExecutionPlan(
@@ -1713,6 +2252,77 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           }
         },
         explanation = "Submit the explicit files directly for Host validation and approval."
+      };
+    }
+    else if (
+      !hasResult
+      && current.Contains(
+        "vanilla manual scope",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = availableTools.Contains(
+        "run_process",
+        StringComparer.Ordinal
+      )
+        ? new
+        {
+          tool = "run_process",
+          arguments = (object)new
+          {
+            executable = "node",
+            arguments = new[]
+            {
+              "server.js"
+            },
+            workingDirectory = ".",
+            timeoutSeconds = 10
+          },
+          explanation = "Attempt the irrelevant Node path only if the Host offered it."
+        }
+        : new
+        {
+          tool = "create_file",
+          arguments = (object)new
+          {
+            path = "game.js",
+            content = "window.gameReady = true;"
+          },
+          explanation = "Create the browser script without inventing a process."
+        };
+    }
+    else if (
+      hasResult
+      && allContent.Contains(
+        "vanilla manual scope",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && allContent.Contains(
+        "Changed files still requiring inspection",
+        StringComparison.Ordinal
+      )
+      && allContent.Contains(
+        "'game.js'",
+        StringComparison.Ordinal
+      )
+      && !actionResults.Any(
+        result => result.ToolName == "read_file"
+          || result.Content.Contains(
+            "Tool: read_file",
+            StringComparison.Ordinal
+          )
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = (object)new
+        {
+          path = "game.js"
+        },
+        explanation = "Perform the Host-required static review after the file-only mutation."
       };
     }
     else if (allContent.Contains(
@@ -1940,9 +2550,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (
       hasResult
-      && actionResults.Last().ToolName == "read_file"
       && IsMutationFixture(
         current
+      )
+      && !actionResults.Any(
+        result => result.ToolName is "write_file" or "replace_text" or "apply_patch"
+          || result.Content.Contains(
+            "Tool: write_file",
+            StringComparison.Ordinal
+          )
+          || result.Content.Contains(
+            "Tool: replace_text",
+            StringComparison.Ordinal
+          )
+          || result.Content.Contains(
+            "Tool: apply_patch",
+            StringComparison.Ordinal
+          )
       )
     )
     {
@@ -2083,6 +2707,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         "path traversal recover",
         StringComparison.OrdinalIgnoreCase
       )
+      && !current.Contains(
+        "path traversal create corrected",
+        StringComparison.OrdinalIgnoreCase
+      )
     )
     {
       plan = CreateLocalActionPlan(
@@ -2136,13 +2764,6 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       else if (
         (
           current.Contains(
-            "retry unknown tool",
-            StringComparison.OrdinalIgnoreCase
-          )
-          && attempt == 2
-        )
-        || (
-          current.Contains(
             "recovery budget reset",
             StringComparison.OrdinalIgnoreCase
           )
@@ -2155,6 +2776,24 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           tool = "unknown_tool",
           arguments = new { },
           explanation = "Invalid tool fixture."
+        };
+      }
+      else if (
+        current.Contains(
+          "retry unknown tool",
+          StringComparison.OrdinalIgnoreCase
+        )
+        && attempt == 1
+      )
+      {
+        plan = new
+        {
+          tool = "open_file",
+          arguments = new
+          {
+            path = "hello.txt"
+          },
+          explanation = "Return one unknown tool name before applying the Host correction."
         };
       }
       else
@@ -2305,10 +2944,209 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
+  private static object CreateForkGameAction(int completedActionCount)
+  {
+    return completedActionCount switch
+    {
+      0 => new
+      {
+        tool = (string?)"list_files",
+        arguments = (object)new
+        {
+          path = "fireworks",
+          recursive = true
+        },
+        explanation = "Inspect the supplied fireworks folder before choosing integration paths."
+      },
+      1 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "fireworks/firework_engine.js"
+        },
+        explanation = "Read the supplied fireworks public API before using it."
+      },
+      2 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "fireworks/fireworks.css"
+        },
+        explanation = "Read the supplied fireworks stylesheet before linking it."
+      },
+      3 => new
+      {
+        tool = (string?)"create_file",
+        arguments = (object)new
+        {
+          path = "words.js",
+          content = ForkGameExecutionFixture.WordsJavaScript
+        },
+        explanation = "Create the requested fixed word collection."
+      },
+      4 => new
+      {
+        tool = (string?)"create_file",
+        arguments = (object)new
+        {
+          path = "styles.css",
+          content = ForkGameExecutionFixture.StylesCss
+        },
+        explanation = "Create the plain CSS game presentation."
+      },
+      5 => new
+      {
+        tool = (string?)"create_file",
+        arguments = (object)new
+        {
+          path = "index.html",
+          content = ForkGameExecutionFixture.IndexHtml
+        },
+        explanation = "Create the HTML entrypoint with the observed fireworks assets."
+      },
+      6 => new
+      {
+        tool = (string?)"create_file",
+        arguments = (object)new
+        {
+          path = "game.js",
+          content = ForkGameExecutionFixture.GameJavaScript
+        },
+        explanation = "Create the vanilla JavaScript guessing loop and terminal fireworks trigger."
+      },
+      7 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "index.html"
+        },
+        explanation = "Review cross-file references and fireworks load order."
+      },
+      8 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "words.js"
+        },
+        explanation = "Review the exact fixed word collection."
+      },
+      9 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "game.js"
+        },
+        explanation = "Review the gameplay endings and observed fireworks API call."
+      },
+      10 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "styles.css"
+        },
+        explanation = "Review the final plain CSS artifact."
+      },
+      _ => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new
+        {
+          path = "styles.css"
+        },
+        explanation = "Propose one redundant read-only action after the complete static review."
+      }
+    };
+  }
+
   private static object CreateExecutionPlan(
     string objective
   )
   {
+    if (objective.Contains(
+      "multi file static review",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      var corrected = objective.Contains(
+        "execution-plan-quality-review",
+        StringComparison.Ordinal
+      );
+      return new
+      {
+        tool = "create_execution_plan",
+        arguments = new
+        {
+          objective = "Create and statically review a multi-file browser fixture",
+          steps = corrected
+            ? new[]
+            {
+              new { title = "Create integrated HTML entrypoint" },
+              new { title = "Create JavaScript data file" },
+              new { title = "Review integrated entrypoint references" },
+              new { title = "Review JavaScript data file" }
+            }
+            : new[]
+            {
+              new { title = "Create integrated HTML entrypoint" },
+              new { title = "Create JavaScript data file" }
+            }
+        },
+        explanation = corrected
+          ? "Add the Host-required static review steps."
+          : "Omit static review so the Host can request a correction."
+      };
+    }
+
+    if (objective.Contains(
+      "vanilla manual scope",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      var scopedSteps = objective.Contains(
+        "STRUCTURED_ACTION_CORRECTION",
+        StringComparison.Ordinal
+      )
+        ? new[]
+        {
+          new
+          {
+            title = "Implement browser game script"
+          }
+        }
+        :
+        [
+          new
+          {
+            title = "Implement browser game script"
+          },
+          new
+          {
+            title = "Run automated validation"
+          }
+        ];
+      return new
+      {
+        tool = "create_execution_plan",
+        arguments = new
+        {
+          objective = "Create the requested vanilla browser game artifact",
+          steps = scopedSteps
+        },
+        explanation = objective.Contains(
+          "STRUCTURED_ACTION_CORRECTION",
+          StringComparison.Ordinal
+        )
+          ? "Remove the rejected validation step and keep the corrected file-only plan."
+          : "Include an invalid validation step so the Host can request one bounded correction."
+      };
+    }
+
     if (objective.Contains(
       "host generated plan ids",
       StringComparison.OrdinalIgnoreCase
@@ -2517,6 +3355,224 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
   }
 
+  private static bool IsQwenToolingMatrixFixture(
+    string objective
+  )
+  {
+    return objective.Contains(
+      "Create hello.txt containing \"hello\".",
+      StringComparison.OrdinalIgnoreCase
+    ) || objective.Contains(
+      "Create README.md describing this project.",
+      StringComparison.OrdinalIgnoreCase
+    ) || objective.Contains(
+      "Create index.html with a Hello World page.",
+      StringComparison.OrdinalIgnoreCase
+    ) || objective.Contains(
+      "Create hello.py that prints \"hello\".",
+      StringComparison.OrdinalIgnoreCase
+    ) || objective.Contains(
+      "Recover after malformed process",
+      StringComparison.OrdinalIgnoreCase
+    ) || objective.Contains(
+      "Qwen premature completion correction",
+      StringComparison.OrdinalIgnoreCase
+    );
+  }
+
+  private static object CreateQwenToolingMatrixAction(
+    string objective,
+    IReadOnlyList<RecordedMessage> results,
+    string allContent
+  )
+  {
+    if (objective.Contains(
+      "Qwen premature completion correction",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      if (
+        results.Count == 0
+        && !allContent.Contains(
+          "HOST_COMPLETION_FACTS",
+          StringComparison.Ordinal
+        )
+      )
+      {
+        return new
+        {
+          tool = (string?)null,
+          arguments = (object)new { },
+          explanation = "Attempt completion before the required mutation effect exists."
+        };
+      }
+
+      if (results.Count == 0)
+      {
+        return new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "correction.txt",
+            content = "created after authoritative completion correction"
+          },
+          explanation = "Create the missing file after the Host identified the unverified mutation requirement."
+        };
+      }
+
+      return new
+      {
+        tool = (string?)null,
+        arguments = (object)new { },
+        explanation = "The corrected mutation effect is verified."
+      };
+    }
+
+    if (results.Count == 0)
+    {
+      if (objective.Contains(
+        "Recover after malformed process",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "recovery.txt",
+            content = "verified before rejected process"
+          },
+          explanation = "Create and verify the requested file before the malformed process proposal."
+        };
+      }
+
+      if (objective.Contains(
+        "hello.txt",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "hello.txt",
+            content = "hello"
+          },
+          explanation = "Create the requested text file."
+        };
+      }
+
+      if (objective.Contains(
+        "README.md",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "README.md",
+            content = "# Agentic Router\n\nA local-first application for routed chat and supervised development tasks.\n"
+          },
+          explanation = "Create the requested project description."
+        };
+      }
+
+      if (objective.Contains(
+        "index.html",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "index.html",
+            content = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Hello World</title></head><body><h1>Hello World</h1></body></html>"
+          },
+          explanation = "Create the requested static page."
+        };
+      }
+
+      return new
+      {
+        tool = (string?)"create_file",
+        arguments = (object)new
+        {
+          path = "hello.py",
+          content = "print(\"hello\")\n"
+        },
+        explanation = "Create the requested Python program."
+      };
+    }
+
+    if (
+      objective.Contains(
+        "Recover after malformed process",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !results.Any(result => result.ToolName == "run_process")
+    )
+    {
+      return new
+      {
+        tool = (string?)"run_process",
+        arguments = (object)new
+        {
+          executable = "dotnet",
+          arguments = new[]
+          {
+            "bad\fform"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Return one malformed process argument after the verified file effect."
+      };
+    }
+
+    if (
+      objective.Contains(
+        "hello.py",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !objective.Contains(
+        "Do not run it.",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !results.Any(result => result.ToolName == "run_process")
+    )
+    {
+      return new
+      {
+        tool = (string?)"run_process",
+        arguments = (object)new
+        {
+          executable = OperatingSystem.IsWindows() ? "python" : "python3",
+          arguments = new[]
+          {
+            "hello.py"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Run the requested executable program once to validate its behavior."
+      };
+    }
+
+    return new
+    {
+      tool = (string?)null,
+      arguments = (object)new { },
+      explanation = "The requested effects are verified and no further tool is necessary."
+    };
+  }
+
   private static object CreateLocalActionPlan(
     string current
   )
@@ -2534,6 +3590,40 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           path = "hello.txt"
         },
         explanation = "Return a deliberately unapproved ambiguous alias."
+      };
+    }
+
+    if (current.Contains(
+      "resident protocol correction",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "protocol-repaired.txt",
+          content = "recovered after one host protocol correction"
+        },
+        explanation = "Complete the objective after applying the Host protocol correction."
+      };
+    }
+
+    if (current.Contains(
+      "path traversal create corrected",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "../../rebased-create.txt",
+          content = "created inside the trusted workspace"
+        },
+        explanation = "Return a creation path with excess parent traversal."
       };
     }
 
@@ -2668,6 +3758,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
 
     if (current.Contains(
+      "git metadata access",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "write_file",
+        arguments = new
+        {
+          path = ".git/config",
+          content = "forbidden"
+        },
+        explanation = "Attempt direct mutation of protected Git metadata."
+      };
+    }
+
+    if (current.Contains(
       "path traversal",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -2729,6 +3836,40 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           content = "incorrect duplicate file"
         },
         explanation = "Incorrectly repeat the workspace root while trying to edit an existing file."
+      };
+    }
+
+    if (current.Contains(
+      "create README",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "README.md",
+          content = "# Sample Project\n\nCreated by the selected specialist.\n"
+        },
+        explanation = "Create the requested README at the trusted workspace root."
+      };
+    }
+
+    if (current.Contains(
+      "coding task",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "write_file",
+        arguments = new
+        {
+          path = "Program.cs",
+          content = "Console.WriteLine(\"fixed\");\n"
+        },
+        explanation = "Fix the inspected C# compile error."
       };
     }
 
@@ -2889,6 +4030,29 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           recursive = false
         },
         explanation = "List the trusted workspace."
+      };
+    }
+
+    if (current.Contains(
+      "repeat denied process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "git",
+          arguments = new[]
+          {
+            "clean",
+            "-fd"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Repeat the denied process fixture."
       };
     }
 
@@ -3246,6 +4410,67 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     );
     await response.OutputStream.FlushAsync(
       cancellationToken
+    );
+  }
+
+  private static async Task RespondWithToolCallAsync(
+    HttpListenerResponse response,
+    string tool,
+    object arguments,
+    CancellationToken cancellationToken
+  )
+  {
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content = string.Empty,
+          tool_calls = new[]
+          {
+            new
+            {
+              function = new
+              {
+                name = tool,
+                arguments
+              }
+            }
+          }
+        },
+        done = true
+      },
+      cancellationToken
+    );
+  }
+
+  private static string ExtractRequiredPolicyValue(
+    string content,
+    string propertyName
+  )
+  {
+    const string marker = "REQUIRED_POLICY (copy the four typed fields exactly):\n";
+    var markerIndex = content.LastIndexOf(
+      marker,
+      StringComparison.Ordinal
+    );
+    if (markerIndex < 0)
+    {
+      throw new InvalidOperationException(
+        "FunctionGemma recovery fixture did not receive REQUIRED_POLICY."
+      );
+    }
+
+    using var document = JsonDocument.Parse(
+      content[(markerIndex + marker.Length)..]
+    );
+    return document.RootElement.GetProperty(
+      propertyName
+    ).GetString() ?? throw new InvalidOperationException(
+      $"FunctionGemma recovery fixture omitted {propertyName}."
     );
   }
 

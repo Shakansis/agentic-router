@@ -59,27 +59,21 @@ The host must independently validate every proposed tool call. A model response 
 Intent classification, coordination, and expert inference are separate responsibilities.
 
 - `routerModel` classifies the request.
-- `actionModel` is the lightweight resident action model that selects registered tools and reacts to authoritative tool results during Execute.
-- `coordinatorModel` is an on-demand coordination fallback; it must not be kept resident merely to make Execute possible.
+- `actionModel` is an optional lightweight resident router/capability selector. A `functiongemma:*` action model may use the stable `route_to_teacher` contract, but it is not an execution planner, recovery supervisor, or tooling intermediary.
+- `coordinatorModel` is a legacy on-demand compatibility fallback. It must never sit between a capable selected specialist and the runtime during normal Execute work.
 - Intent profiles resolve the expert model for Chat and specialist work.
+
+FunctionGemma output normalization must trim surrounding whitespace from required string arguments before exact closed-catalog comparison, but never fuzzy-match or rewrite an internal token. Because each offered Teacher owns one Host-authoritative intent, an exact offered `teacher_model` with a cross-paired or unknown intent may be corrected to that Teacher's catalog intent and surfaced in activity. Other typed routing rejections receive at most one materially different correction attempt before the configured specialist continues.
 
 Do not silently substitute one role for another. Model and device precedence must remain deterministic and visible in activity details.
 
-Direct tool coordination is allowed only when the exact model identity has passed the host's behavioral tool-protocol conformance checks. Declared Ollama `tools` capability is evidence of availability, not proof of compatibility.
+The FunctionGemma activation developer message is exactly `You can do function calling with the following functions:`. Task instructions and the closed Teacher catalog belong in the user message. Accept exactly one native call with a JSON object, require every typed field, and reject a Teacher outside the offered model/intent pair.
+
+The selected specialist owns the reasoning and tool-use loop. Provider capabilities select an available native-tool or structured-action transport; cached conformance is diagnostic evidence, not a prerequisite that inserts another model into the request path.
 
 Tool-protocol failures must be typed and recoverable. Invalid XML, malformed or truncated JSON, missing native tool calls, Harmony/parser failures, and equivalent syntax failures must not be treated as generic provider failures. After a deterministic protocol failure, change strategy for the current turn instead of repeating an identical request.
 
-Execute coordination is target-first. Evaluate approved `native-strict` and
-`structured-action` evidence for the selected target before resident
-eligibility. Conformance evidence is path-specific and keyed by exact provider,
-model revision or digest, adapter version, local runtime version, and benchmark
-contract. A failure on one path must not fail another path. Structured
-coordination proposes one action at a time and receives an authoritative Host
-result before continuing. Semantic repair is limited to one materially
-different attempt; repeated invalid proposals change path.
-An eligible resident bridge may use independently approved `native-strict` or
-`native-adaptive` evidence. A strict semantic failure must evaluate the
-adaptive correction contract before the resident is declared incompatible.
+Execute coordination is specialist-first. The selected specialist proposes one action at a time and receives an authoritative Host result before continuing. Semantic repair is limited to one materially different attempt; repeated invalid proposals stop with a reviewable typed result. Another model may take over only after a demonstrated transport incompatibility and an explicit recovery decision.
 
 Tool identifiers use one Host-owned closed alias registry with
 `StringComparer.OrdinalIgnoreCase`. Resolve only exact canonical names or
@@ -96,21 +90,23 @@ Required behavior:
 
 1. Resolve and validate the active workspace profile.
 2. Inspect repository instructions and project metadata.
-3. Create a host-owned plan with host-generated IDs.
-4. Let the coordinator propose only registered structured tools.
+3. Create bounded session state; a visible plan is optional and must never gate ordinary actions.
+4. Let the selected specialist propose only registered structured tools.
 5. Revalidate paths, arguments, policy, approvals, and limits in the host.
-6. Bind each action to a semantically compatible Host-typed plan step and advance it only after the expected effect is independently proven.
+6. Independently prove each action's required effect before recording it as completed.
 7. Record tool calls, results, file changes, validation, recovery, and terminal state.
 8. Generate the terminal Execute answer from Host facts; model prose may not override execution state.
 9. Present changes for review and allow supported undo operations.
 
 Supported file actions are structured operations such as listing, reading, searching, creating, writing, replacing, applying patches, and deleting an explicit file list validated by the Host. `delete_files` always requires explicit approval, workspace confinement, protected-path checks, per-file postcondition evidence, and bounded recovery data before execution. Its path list may be edited inline until approval; approval atomically revalidates and binds the final list. Process execution uses a separate structured contract and an allowlist policy. Never add a generic shell tool, free-form command arguments, or an unrestricted filesystem escape.
 
-The closed tool-name registry remains the naming authority. Effect typing is a post-resolution layer: `alias -> canonical tool -> execution -> proven effect -> plan advancement`. A successful tool response without its required observed effect must not complete a plan step. Mutation objectives with no verified file, directory, or Git mutation end as blocked, never completed. Assistant output beginning with Host-reserved protocol markers is invalid model output and must not become the visible answer.
+The closed tool-name registry remains the naming authority. Effect typing is a post-resolution layer: `alias -> canonical tool -> execution -> proven effect`. A successful tool response without its required observed effect must not be recorded as completed. Mutation objectives with no verified file, directory, or Git mutation end as blocked, never completed. Assistant output beginning with Host-reserved protocol markers is invalid model output and must not become the visible answer.
 
-All workspace paths must be canonicalized and confined to the trusted root. Reject traversal, reparse-point escapes, protected paths, invalid encodings, oversized inputs, and stale file writes. Preserve external user changes and surface conflicts for review.
+All workspace paths must be canonicalized and confined to the trusted root. No effective action may escape that root. For `create_file` and `create_directory` only, the Host may recover an otherwise valid relative path whose excess `..` segments would cross the root by clamping those segments at the trusted root, replacing the action argument with the effective internal path, and recording the original and effective values as a visible correction. Never apply that correction to absolute external paths, reads, edits, deletion, processes, or Git. Reject reparse-point escapes, protected paths, invalid encodings, oversized inputs, stale file writes, and every path that cannot be reinterpreted unambiguously inside the trusted root. Preserve external user changes and surface conflicts for review.
 
-Approvals are host decisions. Policies may auto-approve explicitly safe operations, but ambiguous, sensitive, process, or destructive proposals must remain blocked or require the configured approval flow. Cancellation must stop active provider and process work.
+A rejected proposal is not automatically a failed objective. For recoverable tool names, JSON shape, required fields, protocol syntax, relative creation paths, stale state, or equivalent proposal defects, return bounded authoritative correction facts to the active model and continue with a materially different proposal or execution path. Keep the correction visible in activity and review evidence without presenting it as a terminal user error. Stop the objective only when the safe alternatives and recovery budget are exhausted, explicit approval is required or denied, or no interpretation can preserve the trusted-workspace and policy boundaries.
+
+Trusted-workspace actions use deterministic validation and are automatically approved by default. Ask only for operations whose effects cross a real boundary, such as guarded Git writes, external publication, protected policy files, or processes outside the reviewed safe set. Cancellation must stop active provider and process work.
 
 An editable pending approval may revise only the structured argument surface
 explicitly exposed by the Host. Keep the canonical tool and Host action ID
@@ -138,6 +134,7 @@ Recovery must be bounded and observable:
 - classify failures by typed stage and reason;
 - checkpoint enough state to continue safely;
 - choose a materially different strategy after deterministic failures;
+- allow one bounded Host-corrected native protocol retry for the active resident before requiring a user recovery decision, while target-path protocol failures may hand off immediately to a different eligible coordinator;
 - respect retry, tool-call, iteration, elapsed-time, and recovery budgets;
 - terminate with a useful blocked or failed result when safe progress is impossible.
 

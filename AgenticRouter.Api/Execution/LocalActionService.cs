@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.GitDelivery;
 
@@ -42,7 +43,15 @@ public sealed record ValidatedLocalAction(
   PendingFileChange? PendingFileChange = null,
   string? OriginalTool = null,
   string ToolResolutionSource = ToolNameResolver.CanonicalSource,
-  IReadOnlyList<PendingFileChange>? PendingFileChanges = null
+  IReadOnlyList<PendingFileChange>? PendingFileChanges = null,
+  IReadOnlyList<LocalActionCorrection>? Corrections = null
+);
+
+public sealed record LocalActionCorrection(
+  string Field,
+  string OriginalValue,
+  string EffectiveValue,
+  string Reason
 );
 
 public sealed record LocalActionResult(
@@ -418,7 +427,7 @@ public sealed class LocalActionService : ILocalActionService
       ),
       _ => proposal.Tool
     };
-    return new ValidatedLocalAction(
+    var action = new ValidatedLocalAction(
       Guid.NewGuid().ToString(
         "N"
       ),
@@ -433,6 +442,7 @@ public sealed class LocalActionService : ILocalActionService
       readOnly,
       !readOnly
     );
+    return action;
   }
 
   private async Task<LocalActionResult> RunGitActionAsync(
@@ -713,6 +723,41 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
+    var corrections = new List<LocalActionCorrection>();
+    var requestedPath = GetOptionalString(
+      proposal.Arguments,
+      "path"
+    );
+    if (
+      IsPlanTargetBoundFileTool(proposal.Tool)
+      && TryInferHostPlanTarget(
+        proposal.Tool,
+        executionSession,
+        out var inferredPath
+      )
+      && !MatchesHostPlanTarget(requestedPath, inferredPath)
+    )
+    {
+      proposal = proposal with
+      {
+        Arguments = ReplaceStringArgument(
+          proposal.Arguments,
+          "path",
+          inferredPath
+        )
+      };
+      corrections.Add(
+        new LocalActionCorrection(
+          "path",
+          requestedPath ?? string.Empty,
+          inferredPath,
+          IsWorkspaceRootPlaceholder(requestedPath)
+            ? "The model omitted the file target; the Host used the explicit target bound to the compatible pending plan step."
+            : "The proposed file did not match the compatible pending plan step; the Host kept execution on that step's explicit workspace-confined target."
+        )
+      );
+    }
+
     var path = NormalizeWorkspaceRootAlias(
       proposal.Tool,
       GetOptionalString(
@@ -721,14 +766,125 @@ public sealed class LocalActionService : ILocalActionService
       ),
       executionSession
     );
-    var targetPath = await _workspace.ResolvePathAsync(
-      path,
-      cancellationToken
-    );
-    var relativePath = await GetRelativePathAsync(
-      targetPath,
-      cancellationToken
-    );
+    TrustedWorkspacePathResolution? creationResolution = null;
+    string targetPath;
+
+    if (proposal.Tool is "create_file" or "create_directory")
+    {
+      creationResolution = await _workspace.ResolveCreationPathAsync(
+        path,
+        cancellationToken
+      );
+      targetPath = creationResolution.FullPath;
+    }
+    else
+    {
+      targetPath = await _workspace.ResolvePathAsync(
+        path,
+        cancellationToken
+      );
+    }
+
+    var relativePath = creationResolution?.RelativePath
+      ?? await GetRelativePathAsync(
+        targetPath,
+        cancellationToken
+      );
+
+    if (
+      proposal.Tool == "create_file"
+      && File.Exists(targetPath)
+    )
+    {
+      var effectivePath = relativePath.Replace(
+        Path.DirectorySeparatorChar,
+        '/'
+      );
+      if (
+        executionSession is not null
+        && executionSession.TryGetObservedFile(
+          relativePath,
+          out var observed
+        )
+        && observed is not null
+      )
+      {
+        proposal = proposal with
+        {
+          Tool = "write_file"
+        };
+        corrections.Add(
+          new LocalActionCorrection(
+            "tool",
+            "create_file",
+            "write_file",
+            "The exact plan target already exists and was inspected during this session. The Host changed the repeated creation proposal to a stale-write-protected replacement using the model-supplied content."
+          )
+        );
+      }
+      else
+      {
+        corrections.Add(
+          new LocalActionCorrection(
+            "tool",
+            "create_file",
+            "read_file",
+            "The exact plan target already exists. The Host changed this proposal to a safe inspection; after receiving its content, use write_file or a bounded edit instead of retrying create_file."
+          )
+        );
+        return new ValidatedLocalAction(
+          Guid.NewGuid().ToString("N"),
+          "read_file",
+          JsonSerializer.SerializeToElement(new
+          {
+            path = effectivePath
+          }),
+          targetPath,
+          null,
+          $"read_file: {relativePath}",
+          null,
+          true,
+          false,
+          Corrections: corrections
+        );
+      }
+    }
+
+    if (
+      proposal.Tool is "create_file" or "create_directory"
+      && relativePath == "."
+    )
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"{proposal.Tool} must name a target inside the trusted workspace."
+      );
+    }
+
+    if (creationResolution?.RebasedToWorkspace == true)
+    {
+      var effectivePath = relativePath.Replace(
+        Path.DirectorySeparatorChar,
+        '/'
+      );
+      var originalPath = creationResolution.OriginalPath ?? string.Empty;
+      proposal = proposal with
+      {
+        Arguments = ReplaceStringArgument(
+          proposal.Arguments,
+          "path",
+          effectivePath
+        )
+      };
+      corrections.Add(
+        new LocalActionCorrection(
+          "path",
+          originalPath,
+          effectivePath,
+          "The relative traversal would leave the trusted workspace, so the Host rebased the creation inside its root."
+        )
+      );
+    }
     ValidateWorkspaceRootAlias(
       proposal,
       relativePath,
@@ -797,7 +953,7 @@ public sealed class LocalActionService : ILocalActionService
         + preview;
     }
 
-    return new ValidatedLocalAction(
+    var action = new ValidatedLocalAction(
       Guid.NewGuid().ToString(
         "N"
       ),
@@ -809,7 +965,137 @@ public sealed class LocalActionService : ILocalActionService
       preview,
       readOnly,
       protectedInstructionFile && !explicitlyRequested,
-      pendingFileChange
+      pendingFileChange,
+      Corrections: corrections.Count == 0
+        ? null
+        : corrections
+    );
+    if (
+      executionSession is not null
+      && !executionSession.CanBindPlanAction(
+        action.Tool,
+        action.TargetPath
+      )
+      && executionSession.ValidateUnboundPlanSupport(action) is
+      {
+      } planSupportRejection
+    )
+    {
+      throw new LocalActionException(
+        "plan-action-binding",
+        planSupportRejection
+      );
+    }
+
+    return action;
+  }
+
+  private static bool IsWorkspaceRootPlaceholder(string? path)
+  {
+    return string.IsNullOrWhiteSpace(path)
+      || path.Trim() is "." or "./" or ".\\";
+  }
+
+  private static bool IsPlanTargetBoundFileTool(string tool)
+  {
+    return tool is "create_file"
+      or "write_file"
+      or "replace_text"
+      or "apply_patch"
+      or "read_file"
+      or "get_file_info"
+      or "search_text";
+  }
+
+  private static bool MatchesHostPlanTarget(
+    string? requestedPath,
+    string inferredPath
+  )
+  {
+    return !string.IsNullOrWhiteSpace(requestedPath)
+      && string.Equals(
+        requestedPath.Trim().Replace('\\', '/').TrimStart('/', '.'),
+        inferredPath.Replace('\\', '/').TrimStart('/', '.'),
+        StringComparison.OrdinalIgnoreCase
+      );
+  }
+
+  private static bool TryInferHostPlanTarget(
+    string tool,
+    ExecutionSession? executionSession,
+    out string path
+  )
+  {
+    path = string.Empty;
+    var effect = ToolEffectRegistry.ForTool(tool);
+    var plan = executionSession?.Plan;
+    if (effect is null || plan is null)
+    {
+      return false;
+    }
+
+    string? target = null;
+    for (var index = 0; index < plan.Steps.Count; index++)
+    {
+      var step = plan.Steps[index];
+      if (step.Status is not "pending" and not "in-progress")
+      {
+        continue;
+      }
+
+      var expected = ToolEffectRegistry.InferExpectedEffect(step.Title);
+      var candidate = ToolEffectRegistry.TryGetHostTarget(step.Title);
+      if (
+        expected is null
+        || candidate is null
+        || !ToolEffectRegistry.AreCompatible(expected, effect)
+      )
+      {
+        continue;
+      }
+
+      if (
+        effect == ToolEffects.Inspected
+        && plan.Steps.Take(index).Any(
+          earlier => (earlier.Status is "pending" or "in-progress")
+            && ToolEffectRegistry.InferExpectedEffect(earlier.Title) is
+            {
+            } earlierEffect
+            && ToolEffectRegistry.IsMutation(earlierEffect)
+        )
+      )
+      {
+        continue;
+      }
+
+      target = candidate;
+      break;
+    }
+
+    if (string.IsNullOrWhiteSpace(target))
+    {
+      return false;
+    }
+
+    path = target;
+    return true;
+  }
+
+  private static JsonElement ReplaceStringArgument(
+    JsonElement arguments,
+    string propertyName,
+    string value
+  )
+  {
+    var objectNode = JsonNode.Parse(
+      arguments.GetRawText()
+    ) as JsonObject ?? throw new LocalActionException(
+      "action-validation",
+      "Native tool-call arguments must be a JSON object."
+    );
+    objectNode[propertyName] = value;
+    return JsonSerializer.SerializeToElement(
+      objectNode
     );
   }
 
@@ -946,7 +1232,7 @@ public sealed class LocalActionService : ILocalActionService
       $"delete_files: {prepared.Count} explicit file(s)",
       string.Join("\n", prepared.Select(item => item.RelativePath)),
       false,
-      true,
+      false,
       null,
       PendingFileChanges: prepared
     );

@@ -326,6 +326,191 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     }
   }
 
+  public async Task<ResidentCoexistenceResult> EnsureResidentAlongsideTargetAsync(
+    string targetModel,
+    CancellationToken cancellationToken
+  )
+  {
+    await _lifecycleGate.WaitAsync(
+      cancellationToken
+    );
+
+    try
+    {
+      var settings = await _settingsStore.GetAsync(
+        cancellationToken
+      );
+      var residentModel = settings.ActionModel;
+      var sameModel = string.Equals(
+        residentModel,
+        targetModel,
+        StringComparison.OrdinalIgnoreCase
+      );
+      var baseUri = new Uri(
+        settings.OllamaUrl,
+        UriKind.Absolute
+      );
+      var running = await _ollamaClient.GetRunningModelsAsync(
+        baseUri,
+        cancellationToken
+      );
+      var target = FindModel(
+        running,
+        targetModel
+      );
+      var resident = FindModel(
+        running,
+        residentModel
+      );
+
+      if (sameModel)
+      {
+        return new ResidentCoexistenceResult(
+          resident is not null,
+          resident is not null,
+          false,
+          resident is null
+            ? "shared-model-not-loaded"
+            : "shared-model-ready"
+        );
+      }
+
+      if (target is null)
+      {
+        return new ResidentCoexistenceResult(
+          resident is not null,
+          false,
+          false,
+          "target-not-loaded"
+        );
+      }
+
+      var installed = await RequireInstalledAsync(
+        baseUri,
+        residentModel,
+        cancellationToken
+      );
+      var resolution = await ResolveResidentAsync(
+        baseUri,
+        settings,
+        installed,
+        cancellationToken
+      );
+
+      if (
+        resident is not null
+        && resident.ContextLength == resolution.EffectiveContextTokens
+      )
+      {
+        SetVerifiedStatus(
+          installed,
+          resident,
+          resolution
+        );
+        return new ResidentCoexistenceResult(
+          true,
+          true,
+          false,
+          "already-coexisting"
+        );
+      }
+
+      if (resident is not null)
+      {
+        return new ResidentCoexistenceResult(
+          true,
+          true,
+          false,
+          "resident-context-mismatch"
+        );
+      }
+
+      await PreloadAndVerifyAsync(
+        baseUri,
+        installed,
+        resolution,
+        "reasserting",
+        cancellationToken
+      );
+      running = await _ollamaClient.GetRunningModelsAsync(
+        baseUri,
+        cancellationToken
+      );
+      resident = FindModel(
+        running,
+        residentModel
+      );
+      target = FindModel(
+        running,
+        targetModel
+      );
+
+      if (resident is not null && target is not null)
+      {
+        return new ResidentCoexistenceResult(
+          true,
+          true,
+          true,
+          "reasserted-and-verified"
+        );
+      }
+
+      if (resident is not null && target is null)
+      {
+        await UnloadAndVerifyAsync(
+          baseUri,
+          residentModel,
+          cancellationToken
+        );
+        UpdateStatus(
+          residentModel,
+          installed.Digest,
+          "temporarily-evicted",
+          false,
+          resolution.EffectiveContextTokens,
+          null,
+          null,
+          null,
+          null,
+          "coexistence-rejected",
+          "Reasserting the resident displaced the active target; the resident was rolled back for this turn.",
+          null
+        );
+      }
+
+      return new ResidentCoexistenceResult(
+        false,
+        target is not null,
+        true,
+        target is null
+          ? "target-displaced-resident-rolled-back"
+          : "resident-reassertion-not-verified"
+      );
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      _logger.LogWarning(
+        exception,
+        "Resident coexistence verification failed for target {TargetModel}.",
+        targetModel
+      );
+      return new ResidentCoexistenceResult(
+        false,
+        false,
+        false,
+        "coexistence-verification-failed"
+      );
+    }
+    finally
+    {
+      _lifecycleGate.Release();
+    }
+  }
+
   protected override async Task ExecuteAsync(
     CancellationToken stoppingToken
   )

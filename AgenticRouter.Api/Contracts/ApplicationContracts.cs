@@ -81,7 +81,7 @@ public sealed record ChatRequest(
   IReadOnlyList<ChatMessage>? History,
   bool ModelLocked = false,
   string InteractionMode = "chat",
-  string ApprovalPolicy = "ask",
+  string ApprovalPolicy = "auto",
   string? BrowserSessionId = null,
   string? ConversationSessionId = null,
   bool WebSearchEnabled = false,

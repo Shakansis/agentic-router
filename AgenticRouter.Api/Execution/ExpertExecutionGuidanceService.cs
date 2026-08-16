@@ -49,6 +49,9 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "You are the specialist model in a controlled local execution workflow. "
     + "Analyze the current request and return only the required structured execution brief. "
     + "You do not have tools and must not claim that you changed files or ran commands. "
+    + "Treat minor spelling and grammar mistakes as recoverable input. Resolve an ambiguous phrase "
+    + "from the surrounding requested assets and constraints, state the chosen conventional interpretation "
+    + "in the objective, and do not invent unrelated behavior. "
     + "When local work is required, set actionRequired to true and provide exactly one action "
     + "with a short title, an exact supported tool name, and a complete JSON arguments object. "
     + "The Host owns plan and step IDs; do not generate identifiers. Use only "
@@ -56,9 +59,11 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "prefix a path with the workspace display name or root directory name. For requests "
     + "to edit, fix, update, or inspect existing files, start with list_files, read_file, "
     + "get_file_info, or search_text and let the tooling agent choose the mutation after "
-    + "observing the result. Never use create_file as a substitute for editing an existing "
-    + "file. Preserve complete file contents, exact replacement text, process arguments, "
-    + "and ordering dependencies. A statement such as "
+    + "observing the result. When integrating an existing folder, list it and inspect the "
+    + "relevant implementation before using its observed paths or public API; preserve the "
+    + "supplied assets. Never use create_file as a substitute for editing an existing file. "
+    + "Preserve complete file contents, explicit constraints, exact replacement text, "
+    + "process arguments, and ordering dependencies. A statement such as "
     + "'I cannot access the disk' is not a valid substitute for execution guidance. "
     + "When no local action is required, set actionRequired to false and return no actions. "
     + "Do not address the user and do not return Markdown or a generic prose plan.";
@@ -91,7 +96,10 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     long maximumInputTokens
   )
   {
-    var before = EstimateRequest(messages);
+    var scope = ExecutionTurnToolPolicy.Resolve(
+      messages.Select(message => (message.Role, (string?)message.Content))
+    );
+    var before = EstimateRequest(messages, scope);
     if (before <= maximumInputTokens)
     {
       return new StructuredContextFit(messages.ToArray(), before, before, false, false, "already-fits");
@@ -104,7 +112,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     compact.Add(new ChatMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
     AddLast(compact, messages, item => IsControlMessage(item.Content));
     compact = compact.DistinctBy(item => $"{item.Role}:{item.Content}", StringComparer.Ordinal).ToList();
-    var after = EstimateRequest(compact);
+    var after = EstimateRequest(compact, scope);
     var tooLarge = after > maximumInputTokens;
     var materiallySmaller = after <= before - Math.Max(256, before / 10);
     return new StructuredContextFit(
@@ -117,9 +125,18 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     );
   }
 
-  private long EstimateRequest(IReadOnlyList<ChatMessage> messages)
+  private long EstimateRequest(
+    IReadOnlyList<ChatMessage> messages,
+    ExecutionTurnToolScope scope
+  )
   {
-    var request = new[] { new ChatMessage("system", GuidancePrompt) }.Concat(messages).ToArray();
+    var request = new[]
+    {
+      new ChatMessage(
+        "system",
+        CreateGuidancePrompt(scope)
+      )
+    }.Concat(messages).ToArray();
     return _tokenEstimator.EstimateMessages(request)
       + _tokenEstimator.EstimateText(GuidanceSchema.GetRawText());
   }
@@ -144,11 +161,14 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     CancellationToken cancellationToken
   )
   {
+    var scope = ExecutionTurnToolPolicy.Resolve(
+      messages.Select(message => (message.Role, (string?)message.Content))
+    );
     var guidanceMessages = new[]
     {
       new ChatMessage(
         "system",
-        GuidancePrompt
+        CreateGuidancePrompt(scope)
       )
     }.Concat(
       messages
@@ -200,8 +220,16 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     }
 
     return Validate(
-      guidance
+      guidance,
+      scope.AvailableTools
     );
+  }
+
+  private static string CreateGuidancePrompt(ExecutionTurnToolScope scope)
+  {
+    return GuidancePrompt
+      + $"\nHost-owned turn constraints:\n{ExecutionTurnToolPolicy.Describe(scope)}"
+      + $"\nSupported tools for this turn: {string.Join(", ", scope.AvailableTools)}.";
   }
 
   public static string Serialize(
@@ -215,7 +243,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
   }
 
   private ExpertExecutionGuidance Validate(
-    ExpertExecutionGuidance? guidance
+    ExpertExecutionGuidance? guidance,
+    IReadOnlyCollection<string> availableTools
   )
   {
     if (
@@ -279,7 +308,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
 
       var resolution = _toolNames.Resolve(
         action.Tool,
-        _toolNames.StructuredGuidanceTools
+        availableTools
       );
 
       if (action.Arguments.ValueKind != JsonValueKind.Object)
