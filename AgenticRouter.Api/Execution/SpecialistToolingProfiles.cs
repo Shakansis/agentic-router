@@ -33,7 +33,8 @@ public sealed record CanonicalToolCompletion(
 public sealed record CanonicalSpecialistTurn(
   IReadOnlyList<CanonicalToolCall> ToolCalls,
   CanonicalToolCompletion? Completion,
-  int IgnoredToolCallCount
+  int IgnoredToolCallCount,
+  string? Thinking = null
 );
 
 public sealed record SpecialistToolingIdentity(
@@ -227,7 +228,8 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
     return new CanonicalSpecialistTurn(
       calls,
       completion,
-      response.ToolCalls.Count - calls.Length
+      response.ToolCalls.Count - calls.Length,
+      response.Thinking
     );
   }
 
@@ -238,7 +240,7 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
     return new OllamaToolMessage(
       "assistant",
       turn.Completion?.Content,
-      turn.Completion?.Thinking,
+      turn.Thinking,
       turn.ToolCalls.Select(
         call => new OllamaToolCall(
           call.Name,

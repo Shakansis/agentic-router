@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
@@ -20,11 +21,21 @@ public interface ILocalActionPlanner
   CoordinatorContextFit FitToBudget(
     IReadOnlyList<OllamaToolMessage> messages,
     SpecialistToolingProfile toolingProfile,
+    IReadOnlyCollection<string> grantedTools,
     string hostStateSummary,
     long maximumInputTokens,
     bool planRequired,
     int attemptNumber,
-    bool completionAllowed
+    bool completionAllowed,
+    bool forceCompaction = false
+  );
+
+  SpecialistContextMeasurement MeasureRequest(
+    IReadOnlyList<OllamaToolMessage> messages,
+    SpecialistToolingProfile toolingProfile,
+    IReadOnlyCollection<string> grantedTools,
+    bool planRequired,
+    int attemptNumber
   );
 
   Task<LocalActionPlanningResult> PlanAsync(
@@ -32,17 +43,21 @@ public interface ILocalActionPlanner
     string model,
     SpecialistToolingProfile toolingProfile,
     IReadOnlyList<OllamaToolMessage> messages,
+    IReadOnlyCollection<string> grantedTools,
     bool planRequired,
     int attemptNumber,
     bool completionAllowed,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
   );
 }
 
 public sealed class LocalActionPlanner : ILocalActionPlanner
 {
   public const string PlannerMarker = "SPECIALIST_TOOL_LOOP_V2";
+  public const string RequestToolsetTool = "request_toolset";
+  public const string ToolCatalogMarker = "HOST_TOOL_CATALOG_V1";
   private const int RetainedToolPairs = 4;
 
   private const string PlannerPrompt =
@@ -67,8 +82,13 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "references and every explicit content or behavior constraint before completion. "
     + "A response without a tool call is a completion proposal. Return a concise final response "
     + "without a tool call when the requested work is complete or no safe action remains. "
-    + "The Host supplies a request-specific closed tool set with native schemas. "
-    + "A tool omitted from that set is outside the Host-authorized capabilities for this turn. "
+    + "The Host supplies a compact catalog of available capabilities. Request the smallest set "
+    + "of schemas needed through request_toolset before calling an executable tool. A catalog "
+    + "entry is discoverable but cannot be called until its schema is granted. Requesting a "
+    + "schema performs no workspace action and grants no approval to execute it. "
+    + "An execution plan is optional. For a task that benefits from visible multi-step tracking, "
+    + "you may request and call create_execution_plan with your own objective, titles, steps, and "
+    + "dependencies. For a simple task, continue without a plan. The Host never invents plan steps. "
     + "Every Git write is separately approved by the user even under automatic approval. "
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
@@ -86,6 +106,9 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
   private static readonly IReadOnlyList<CanonicalToolDefinition> ToolDefinitions =
     CreateToolDefinitions();
+
+  private static readonly CanonicalToolDefinition RequestToolsetDefinition =
+    CreateRequestToolsetDefinition();
 
   private readonly IOllamaClient _ollamaClient;
   private readonly IToolNameResolver _toolNames;
@@ -108,18 +131,23 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   public CoordinatorContextFit FitToBudget(
     IReadOnlyList<OllamaToolMessage> messages,
     SpecialistToolingProfile toolingProfile,
+    IReadOnlyCollection<string> grantedTools,
     string hostStateSummary,
     long maximumInputTokens,
     bool planRequired,
     int attemptNumber,
-    bool completionAllowed
+    bool completionAllowed,
+    bool forceCompaction = false
   )
   {
-    var before = EstimateRequest(messages, toolingProfile, planRequired, attemptNumber);
-    var hasReplaceableHistory = messages.Count(
-      item => item.Role == "tool"
-    ) > RetainedToolPairs;
-    if (before <= maximumInputTokens && !hasReplaceableHistory)
+    var before = EstimateRequest(
+      messages,
+      toolingProfile,
+      grantedTools,
+      planRequired,
+      attemptNumber
+    );
+    if (before <= maximumInputTokens && !forceCompaction)
     {
       return new CoordinatorContextFit(messages.ToArray(), before, before, false, false, "already-fits");
     }
@@ -151,7 +179,12 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       );
       if (assistant is not null)
       {
-        compact.Add(assistant);
+        compact.Add(
+          assistant with
+          {
+            Thinking = null
+          }
+        );
       }
       compact.Add(messages[toolIndex]);
       previousToolIndex = toolIndex;
@@ -164,7 +197,13 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     }
 
     compact = compact.DistinctBy(MessageFingerprint, StringComparer.Ordinal).ToList();
-    var after = EstimateRequest(compact, toolingProfile, planRequired, attemptNumber);
+    var after = EstimateRequest(
+      compact,
+      toolingProfile,
+      grantedTools,
+      planRequired,
+      attemptNumber
+    );
     var tooLarge = after > maximumInputTokens;
     var materiallySmaller = after <= before - Math.Max(256, before / 10);
     return new CoordinatorContextFit(
@@ -182,14 +221,22 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     string model,
     SpecialistToolingProfile toolingProfile,
     IReadOnlyList<OllamaToolMessage> messages,
+    IReadOnlyCollection<string> grantedTools,
     bool planRequired,
     int attemptNumber,
     bool completionAllowed,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
   )
   {
-    var request = CreatePlanningRequest(messages, toolingProfile, planRequired, attemptNumber);
+    var request = CreatePlanningRequest(
+      messages,
+      toolingProfile,
+      grantedTools,
+      planRequired,
+      attemptNumber
+    );
     var availableTools = request.Tools;
     var plannerMessages = request.Messages;
     var response = await _ollamaClient.GenerateToolCallAsync(
@@ -199,7 +246,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       availableTools,
       "local-action-planning",
       usageContext,
-      cancellationToken
+      cancellationToken,
+      onThinkingDelta
     );
     var canonicalTurn = _toolingProtocol.Normalize(toolingProfile, response);
     var assistantMessage = _toolingProtocol.CreateAssistantMessage(canonicalTurn);
@@ -227,6 +275,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   private PlanningRequest CreatePlanningRequest(
     IReadOnlyList<OllamaToolMessage> messages,
     SpecialistToolingProfile toolingProfile,
+    IReadOnlyCollection<string> grantedTools,
     bool planRequired,
     int attemptNumber
   )
@@ -234,18 +283,35 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     var scope = ExecutionTurnToolPolicy.Resolve(
       messages.Select(message => (message.Role, message.Content))
     );
-    var canonicalTools = ToolDefinitions.Where(
-      tool => tool.Name is not "create_execution_plan" and not "revise_execution_plan"
-        && scope.Allows(tool.Name)
+    var catalogTools = ToolDefinitions.Where(
+      tool => scope.Allows(tool.Name)
+    ).ToArray();
+    var granted = new HashSet<string>(
+      grantedTools,
+      StringComparer.OrdinalIgnoreCase
+    );
+    var canonicalTools = new[]
+    {
+      RequestToolsetDefinition
+    }.Concat(
+      catalogTools.Where(
+        tool => granted.Contains(
+          tool.Name
+        )
+      ).Select(
+        tool => !planRequired && tool.Name is not "create_execution_plan" and not "revise_execution_plan"
+          ? AddPlanStepBinding(tool)
+          : tool
+      )
     ).ToArray();
     var availableTools = _toolingProtocol.ToOllamaDefinitions(
       toolingProfile,
       canonicalTools
     );
-    var prompt = PlannerPrompt
+    var instructionText = PlannerPrompt
       + $"\n{toolingProfile.PromptInstructions}"
       + $"\nHost-owned turn constraints:\n{ExecutionTurnToolPolicy.Describe(scope)}"
-      + $"\nTools offered in this phase: {string.Join(", ", availableTools.Select(tool => tool.Name))}."
+      + $"\nNative schemas enabled now: {string.Join(", ", availableTools.Select(tool => tool.Name))}."
       + (
         attemptNumber > 1
           ? $"\nThis is retry attempt {attemptNumber}. The previous response was empty, invalid, "
@@ -253,29 +319,180 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
             + "available tool call when another action is necessary, or a final response without a "
             + "tool call when the verified work is complete or no safe action remains."
           : string.Empty
-      );
+      )
+      + (!planRequired
+        ? "\nAn accepted Host plan exists. Every executable action must include the exact stepId returned by the Host; the Host will reject missing, unknown, terminal, or dependency-blocked step IDs."
+        : string.Empty);
+    var toolCatalogText = $"{ToolCatalogMarker}\n{CreateCompactCatalog(catalogTools)}";
+    var prompt = $"{instructionText}\n{toolCatalogText}";
+    var systemPrompt = string.Join(
+      "\n\n",
+      new[]
+      {
+        prompt
+      }.Concat(
+        messages.Where(
+          message => string.Equals(
+            message.Role,
+            "system",
+            StringComparison.Ordinal
+          ) && !string.IsNullOrWhiteSpace(
+            message.Content
+          )
+        ).Select(
+          message => message.Content!
+        )
+      )
+    );
     var plannerMessages = new[]
     {
       new OllamaToolMessage(
         "system",
-        prompt
+        systemPrompt
       )
     }.Concat(
-      messages
+      messages.Where(
+        message => !string.Equals(
+          message.Role,
+          "system",
+          StringComparison.Ordinal
+        )
+      ).Select(
+        message => message.Thinking is null
+          ? message
+          : message with
+          {
+            Thinking = null
+          }
+      )
     ).ToArray();
-    return new PlanningRequest(plannerMessages, availableTools);
+    return new PlanningRequest(
+      plannerMessages,
+      availableTools,
+      instructionText,
+      toolCatalogText
+    );
   }
 
   private long EstimateRequest(
     IReadOnlyList<OllamaToolMessage> messages,
     SpecialistToolingProfile toolingProfile,
+    IReadOnlyCollection<string> grantedTools,
     bool planRequired,
     int attemptNumber
   )
   {
-    var request = CreatePlanningRequest(messages, toolingProfile, planRequired, attemptNumber);
+    var request = CreatePlanningRequest(
+      messages,
+      toolingProfile,
+      grantedTools,
+      planRequired,
+      attemptNumber
+    );
     return _tokenEstimator.EstimateToolMessages(request.Messages)
       + _tokenEstimator.EstimateText(JsonSerializer.Serialize(request.Tools));
+  }
+
+  public SpecialistContextMeasurement MeasureRequest(
+    IReadOnlyList<OllamaToolMessage> messages,
+    SpecialistToolingProfile toolingProfile,
+    IReadOnlyCollection<string> grantedTools,
+    bool planRequired,
+    int attemptNumber
+  )
+  {
+    var request = CreatePlanningRequest(
+      messages,
+      toolingProfile,
+      grantedTools,
+      planRequired,
+      attemptNumber
+    );
+    var total = _tokenEstimator.EstimateToolMessages(request.Messages)
+      + _tokenEstimator.EstimateText(JsonSerializer.Serialize(request.Tools));
+    var sourceMessages = request.Messages.Skip(1).ToArray();
+    var project = sourceMessages.Where(
+      message => message.Role == "system"
+        && message.Content?.StartsWith(
+          "APPLICATION_OWNED_PROJECT_CONTEXT",
+          StringComparison.Ordinal
+        ) == true
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+    );
+    var host = sourceMessages.Where(
+      message => message.Role == "tool" || IsControlMessage(message.Content)
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+        + _tokenEstimator.EstimateText(message.ToolName)
+        + _tokenEstimator.EstimateText(message.ToolCallId)
+        + (message.ToolCalls?.Sum(
+          call => _tokenEstimator.EstimateText(call.Name)
+            + _tokenEstimator.EstimateText(call.Arguments.GetRawText())
+        ) ?? 0)
+    );
+    var conversation = sourceMessages.Where(
+      message => message.Role != "system"
+        && message.Role != "tool"
+        && !IsControlMessage(message.Content)
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+        + (message.ToolCalls?.Sum(
+          call => _tokenEstimator.EstimateText(call.Name)
+            + _tokenEstimator.EstimateText(call.Arguments.GetRawText())
+        ) ?? 0)
+    );
+    var currentUser = sourceMessages.LastOrDefault(
+      message => message.Role == "user" && !IsControlMessage(message.Content)
+    );
+    var requestTool = request.Tools.First(
+      tool => tool.Name == RequestToolsetTool
+    );
+    var discovery = _tokenEstimator.EstimateText(request.ToolCatalogText)
+      + EstimateToolDefinition(requestTool);
+    var grantedSchemas = request.Tools.Where(
+      tool => tool.Name != RequestToolsetTool
+    ).Sum(
+      EstimateToolDefinition
+    );
+    var additionalSystem = sourceMessages.Where(
+      message => message.Role == "system"
+        && message.Content?.StartsWith(
+          "APPLICATION_OWNED_PROJECT_CONTEXT",
+          StringComparison.Ordinal
+        ) != true
+        && !IsControlMessage(message.Content)
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+    );
+    var system = _tokenEstimator.EstimateText(request.InstructionText)
+      + additionalSystem;
+    var categorized = conversation + system + project + discovery + grantedSchemas + host;
+    return new SpecialistContextMeasurement(
+      conversation,
+      system,
+      _tokenEstimator.EstimateText(currentUser?.Content),
+      project,
+      discovery,
+      grantedSchemas,
+      host,
+      Math.Max(0, total - categorized),
+      total,
+      request.Messages.Count,
+      0,
+      messages.Count(message => message.Role == "tool") > 1
+        || messages.Count(message => message.Role == "user" && !IsControlMessage(message.Content)) > 1,
+      "conservative-char-v1"
+    );
+  }
+
+  private long EstimateToolDefinition(
+    OllamaToolDefinition tool
+  )
+  {
+    return _tokenEstimator.EstimateText(tool.Name)
+      + _tokenEstimator.EstimateText(tool.Description)
+      + _tokenEstimator.EstimateText(tool.Parameters.GetRawText());
   }
 
   private static void AddLast(
@@ -312,7 +529,9 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
   private sealed record PlanningRequest(
     IReadOnlyList<OllamaToolMessage> Messages,
-    IReadOnlyList<OllamaToolDefinition> Tools
+    IReadOnlyList<OllamaToolDefinition> Tools,
+    string InstructionText,
+    string ToolCatalogText
   );
 
   private LocalActionPlanningResult ParseResponse(
@@ -337,7 +556,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
             assistantMessage,
             false,
             ContextResolution: response.ContextResolution,
-            CallId: null
+            CallId: null,
+            Usage: response.Usage
           );
         }
 
@@ -375,19 +595,32 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         );
       }
 
+      var planStepId = call.Arguments.TryGetProperty(
+        "stepId",
+        out var stepIdElement
+      ) && stepIdElement.ValueKind == JsonValueKind.String
+        ? stepIdElement.GetString()
+        : null;
+      var actionArguments = RemoveProperty(
+        call.Arguments,
+        "stepId"
+      );
+
       return new LocalActionPlanningResult(
         new LocalActionProposal(
           resolution.CanonicalName,
-          call.Arguments.Clone(),
+          actionArguments,
           null,
           resolution.OriginalName,
-          resolution.Source
+          resolution.Source,
+          planStepId
         ),
         assistantMessage,
         false,
         canonicalTurn.IgnoredToolCallCount,
         response.ContextResolution,
-        call.CallId
+        call.CallId,
+        response.Usage
       );
     }
     catch (JsonException exception)
@@ -406,7 +639,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     [
       Tool(
         "create_execution_plan",
-        "Create the visible bounded checklist before the first local action.",
+        "Optionally propose a visible bounded checklist for a multi-step task.",
         PlanProperties(),
         [
           "objective",
@@ -664,6 +897,97 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     ];
   }
 
+  private static JsonElement RemoveProperty(
+    JsonElement arguments,
+    string propertyName
+  )
+  {
+    if (!arguments.TryGetProperty(propertyName, out _))
+    {
+      return arguments.Clone();
+    }
+    var value = JsonNode.Parse(
+      arguments.GetRawText()
+    )!.AsObject();
+    value.Remove(
+      propertyName
+    );
+    return JsonSerializer.SerializeToElement(
+      value
+    );
+  }
+
+  private static CanonicalToolDefinition CreateRequestToolsetDefinition()
+  {
+    return Tool(
+      RequestToolsetTool,
+      "Request the smallest set of Host tools needed to continue the current objective. This enables schemas but performs no workspace action.",
+      new
+      {
+        tools = new
+        {
+          type = "array",
+          minItems = 1,
+          maxItems = 8,
+          uniqueItems = true,
+          items = StringProperty()
+        },
+        reason = StringProperty()
+      },
+      ["tools"]
+    );
+  }
+
+  private static CanonicalToolDefinition AddPlanStepBinding(
+    CanonicalToolDefinition definition
+  )
+  {
+    var parameters = JsonNode.Parse(
+      definition.Parameters.GetRawText()
+    )!.AsObject();
+    parameters["properties"]!.AsObject()["stepId"] = new JsonObject
+    {
+      ["type"] = "string",
+      ["description"] = "Exact Host-owned ID of the accepted plan step this action advances."
+    };
+    var required = parameters["required"]!.AsArray();
+    required.Add(
+      "stepId"
+    );
+    return definition with
+    {
+      Parameters = JsonSerializer.SerializeToElement(
+        parameters
+      )
+    };
+  }
+
+  private static string CreateCompactCatalog(
+    IReadOnlyList<CanonicalToolDefinition> tools
+  )
+  {
+    return string.Join(
+      "\n",
+      tools.Select(
+        tool => $"{tool.Name}({string.Join(", ", tool.Parameters.GetProperty("properties").EnumerateObject().Select(property => property.Name))}) - {CompactDescription(tool.Description)}"
+      )
+    );
+  }
+
+  private static string CompactDescription(string description)
+  {
+    var sentenceEnd = description.IndexOf(
+      '.',
+      StringComparison.Ordinal
+    );
+    var compact = sentenceEnd >= 0
+      ? description[..sentenceEnd]
+      : description;
+    return compact.Length <= 140
+      ? compact
+      : compact[..140];
+  }
+
   private static CanonicalToolDefinition Tool(
     string name,
     string description,
@@ -735,10 +1059,18 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
               100,
               "Short single-line description only; do not include commands, code, or executable content."
             ),
-            target = PlanStringProperty(
-              72,
-              "Workspace-relative file path for this file step. If the user did not name it, choose a concise compatible filename and extension. Omit only for non-file steps."
-            )
+            dependsOn = new
+            {
+              type = "array",
+              maxItems = 8,
+              uniqueItems = true,
+              items = new
+              {
+                type = "integer",
+                minimum = 1
+              },
+              description = "Optional one-based indexes of earlier proposed steps that must complete first."
+            }
           },
           required = new[]
           {
@@ -772,5 +1104,6 @@ public sealed record LocalActionPlanningResult(
   bool ExplicitNoAction,
   int IgnoredToolCallCount = 0,
   OllamaContextResolution? ContextResolution = null,
-  string? CallId = null
+  string? CallId = null,
+  ProviderTokenUsage? Usage = null
 );

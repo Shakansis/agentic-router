@@ -85,7 +85,8 @@ public sealed record ChatRequest(
   string? BrowserSessionId = null,
   string? ConversationSessionId = null,
   bool WebSearchEnabled = false,
-  IReadOnlyList<ChatImageAttachment>? Images = null
+  IReadOnlyList<ChatImageAttachment>? Images = null,
+  bool CompactContext = false
 );
 
 public sealed record ModelCapabilityView(
@@ -337,7 +338,22 @@ public sealed record ContextUsageView(
   int ApplicationLimit,
   int ReservedResponseTokens,
   bool Trimmed,
-  int WarningThreshold
+  int WarningThreshold,
+  long ConversationTokens = 0,
+  long ProjectContextTokens = 0,
+  long ToolDiscoveryTokens = 0,
+  long GrantedToolSchemaTokens = 0,
+  long HostStateTokens = 0,
+  long StructuralOverheadTokens = 0,
+  long RequiredContextTokens = 0,
+  int EffectiveLimitTokens = 0,
+  string Estimator = "conservative-char-v1",
+  int InferenceSequence = 0,
+  bool Compacted = false,
+  bool CompactionEligible = false,
+  long? BeforeCompactionTokens = null,
+  long? AfterCompactionTokens = null,
+  int OmittedBlocks = 0
 );
 
 public sealed record TrustedWorkspaceRequest(
@@ -397,7 +413,8 @@ public sealed record RepositoryInstructionSet(
 public sealed record ExecutionPlanStep(
   string Id,
   string Title,
-  string Status
+  string Status,
+  IReadOnlyList<string>? Dependencies = null
 );
 
 public sealed record ExecutionPlanView(
@@ -718,7 +735,8 @@ public sealed record ChatStreamEvent(
   RecoveryDecisionEvent? RecoveryDecision = null,
   IReadOnlyList<ProviderCitation>? Citations = null,
   ContextUsageView? ContextUsage = null,
-  IncidentContextFitView? IncidentContextFit = null
+  IncidentContextFitView? IncidentContextFit = null,
+  string? ReasoningDelta = null
 );
 
 public sealed record ValidationErrorsResponse(

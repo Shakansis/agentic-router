@@ -45,7 +45,8 @@ public interface IOllamaClient
     System.Text.Json.JsonElement schema,
     string stage,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Action<ProviderTokenUsage?>? usageObserver = null
   );
 
   Task<OllamaToolResponse> GenerateToolCallAsync(
@@ -55,7 +56,8 @@ public interface IOllamaClient
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
   );
 
   Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
@@ -126,7 +128,8 @@ public sealed record OllamaChatUpdate(
   IReadOnlyList<ProviderCitation>? Citations = null,
   ProviderActivityMetadata? Activity = null,
   string? RetryActivity = null,
-  OllamaContextResolution? ContextResolution = null
+  OllamaContextResolution? ContextResolution = null,
+  string? ThinkingDelta = null
 );
 
 public sealed record OllamaToolDefinition(
@@ -154,7 +157,8 @@ public sealed record OllamaToolResponse(
   string? Content,
   string? Thinking,
   IReadOnlyList<OllamaToolCall> ToolCalls,
-  OllamaContextResolution? ContextResolution = null
+  OllamaContextResolution? ContextResolution = null,
+  ProviderTokenUsage? Usage = null
 );
 
 public sealed record OllamaRunningModel(

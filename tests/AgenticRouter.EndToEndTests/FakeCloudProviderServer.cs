@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Execution;
 
 namespace AgenticRouter.EndToEndTests;
 
@@ -621,6 +622,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
         StringComparison.Ordinal
       );
       var priorToolNames = new List<string>();
+      var observedReadResult = false;
 
       if (root.TryGetProperty(
         "messages",
@@ -629,6 +631,21 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       {
         foreach (var message in plannerMessages.EnumerateArray())
         {
+          observedReadResult |=
+            message.TryGetProperty(
+              "role",
+              out var resultRole
+            )
+            && resultRole.GetString() == "tool"
+            && message.TryGetProperty(
+              "content",
+              out var resultContent
+            )
+            && resultContent.GetString()?.Contains(
+              "Output:\nhello from agent",
+              StringComparison.Ordinal
+            ) == true;
+
           if (
             message.TryGetProperty(
               "name",
@@ -675,6 +692,21 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
             StringComparison.Ordinal
           )
         )
+        && (
+          !body.Contains(
+            "The latest changed files have not all been inspected after their latest mutation:",
+            StringComparison.Ordinal
+          )
+          || priorToolNames.Contains(
+            "read_file",
+            StringComparer.Ordinal
+          )
+          || body.Contains(
+            "Read file: hello.txt",
+            StringComparison.Ordinal
+          )
+          || observedReadResult
+        )
       )
       {
         await WriteJsonAsync(
@@ -703,8 +735,14 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
         return;
       }
 
+      var requestedPlannerTool = body.Contains(
+          "The latest changed files have not all been inspected after their latest mutation:",
+          StringComparison.Ordinal
+        )
+        ? "read_file"
+        : "create_file";
       var offeredTool = plannerRequest
-        ? "create_file"
+        ? requestedPlannerTool
         : tools[0].GetProperty(
         "function"
       ).GetProperty(
@@ -718,11 +756,33 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
         ).GetString() == offeredTool
       )
         ? offeredTool
-        : tools[0].GetProperty(
-          "function"
-        ).GetProperty(
-          "name"
-        ).GetString()!;
+        : plannerRequest && tools.EnumerateArray().Any(
+          candidate => candidate.GetProperty(
+            "function"
+          ).GetProperty(
+            "name"
+          ).GetString() == LocalActionPlanner.RequestToolsetTool
+        )
+          ? LocalActionPlanner.RequestToolsetTool
+          : tools[0].GetProperty(
+            "function"
+          ).GetProperty(
+            "name"
+          ).GetString()!;
+      var toolArguments = tool == LocalActionPlanner.RequestToolsetTool
+        ? JsonSerializer.Serialize(
+          new
+          {
+            tools = new[]
+            {
+              requestedPlannerTool
+            },
+            reason = $"The specialist needs {requestedPlannerTool} to continue the current objective."
+          }
+        )
+        : ToolArguments(
+          tool
+        );
 
       if (
         tool == "benchmark_edit"
@@ -778,9 +838,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
                     function = new
                     {
                       name = tool,
-                      arguments = ToolArguments(
-                        tool
-                      )
+                      arguments = toolArguments
                     }
                   }
                 }
@@ -1039,6 +1097,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
         "{\"objective\":\"create the requested file\",\"steps\":[{\"title\":\"Create the requested file\"}]}",
       "create_file" =>
         "{\"path\":\"hello.txt\",\"content\":\"hello from agent\"}",
+      "read_file" => "{\"path\":\"hello.txt\"}",
       _ => "{}"
     };
   }

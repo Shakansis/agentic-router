@@ -50,6 +50,11 @@ public sealed class ToolNameResolver : IToolNameResolver
     "revise_execution_plan"
   ];
 
+  private static readonly string[] MetaTools =
+  [
+    LocalActionPlanner.RequestToolsetTool
+  ];
+
   private static readonly string[] ActionTools =
   [
     "list_files",
@@ -181,9 +186,9 @@ public sealed class ToolNameResolver : IToolNameResolver
 
   public ToolNameResolver()
   {
-    CanonicalTools = PlanningTools.Concat(
-      ActionTools
-    ).ToArray();
+    CanonicalTools = MetaTools.Concat(
+      PlanningTools
+    ).Concat(ActionTools).ToArray();
     ExecutableTools = ActionTools;
     StructuredGuidanceTools = GuidanceTools;
     Aliases = InitialAliases;

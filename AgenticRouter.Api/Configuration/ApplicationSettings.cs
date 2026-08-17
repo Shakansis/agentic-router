@@ -411,7 +411,7 @@ public static class OllamaRuntimeDefaults
 
 public sealed record ExecutionSettings
 {
-  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 4;
+  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 5;
 
   public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
 
@@ -421,7 +421,7 @@ public sealed record ExecutionSettings
 
   public int MaxConsecutiveToolFailures { get; init; } = 5;
 
-  public int MaxRecoveryAttemptsPerTurn { get; init; } = 5;
+  public int MaxRecoveryAttemptsPerTurn { get; init; } = 10;
 
   public int MaxTrackedFilesPerSession { get; init; } = 50;
 

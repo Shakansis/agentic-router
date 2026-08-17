@@ -26,6 +26,8 @@ public static class ExecutionTurnToolPolicy
 {
   private static readonly string[] CoreTools =
   [
+    "create_execution_plan",
+    "revise_execution_plan",
     "list_files",
     "read_file",
     "get_file_info",

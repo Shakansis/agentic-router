@@ -16,54 +16,10 @@ public interface IExecutionPlanService
     int maximumSteps
   );
 
-  ExecutionPlanView NormalizeExistingReferencedDependencies(
-    ExecutionPlanView plan,
-    string objective,
-    string? workspacePath
-  );
 }
 
 public sealed class ExecutionPlanService : IExecutionPlanService
 {
-  private static readonly string[] ReuseIntentFragments =
-  [
-    "use",
-    "reuse",
-    "integrate",
-    "existing",
-    "supplied",
-    "inside",
-    "from",
-    "usar",
-    "reutilizar",
-    "integrar",
-    "existente",
-    "fornecido",
-    "dentro",
-    "a partir"
-  ];
-
-  private static readonly string[] ExplicitMutationFragments =
-  [
-    "edit",
-    "update",
-    "modify",
-    "change",
-    "rewrite",
-    "overwrite",
-    "replace",
-    "delete",
-    "editar",
-    "atualizar",
-    "modificar",
-    "alterar",
-    "reescrever",
-    "sobrescrever",
-    "substituir",
-    "excluir",
-    "apagar"
-  ];
-
   private static readonly string[] ExecutableFragments =
   [
     "&&",
@@ -84,16 +40,19 @@ public sealed class ExecutionPlanService : IExecutionPlanService
       arguments,
       maximumSteps
     );
-    var steps = parsed.Titles.Select(
+    var steps = parsed.Steps.Select(
       (
-        title,
+        step,
         index
       ) => new ExecutionPlanStep(
         CreateStepId(
           index + 1
         ),
-        title,
-        "pending"
+        step.Title,
+        "pending",
+        step.Dependencies.Select(
+          CreateStepId
+        ).ToArray()
       )
     ).ToArray();
 
@@ -126,9 +85,13 @@ public sealed class ExecutionPlanService : IExecutionPlanService
     );
     var steps = new List<ExecutionPlanStep>();
 
-    for (var index = 0; index < parsed.Titles.Count; index++)
+    var proposedDependencies = new Dictionary<string, IReadOnlyList<int>>(
+      StringComparer.Ordinal
+    );
+    for (var index = 0; index < parsed.Steps.Count; index++)
     {
-      var title = parsed.Titles[index];
+      var proposed = parsed.Steps[index];
+      var title = proposed.Title;
       var existing = current.Steps.FirstOrDefault(
         step => !usedIds.Contains(
           step.Id
@@ -166,6 +129,7 @@ public sealed class ExecutionPlanService : IExecutionPlanService
               Title = title
             }
         );
+        proposedDependencies[existing.Id] = proposed.Dependencies;
         continue;
       }
 
@@ -185,7 +149,19 @@ public sealed class ExecutionPlanService : IExecutionPlanService
           "pending"
         )
       );
+      proposedDependencies[generatedId] = proposed.Dependencies;
     }
+
+    steps = steps.Select(
+      step => proposedDependencies.TryGetValue(step.Id, out var dependencies)
+        ? step with
+        {
+          Dependencies = dependencies.Select(
+            dependency => steps[dependency - 1].Id
+          ).ToArray()
+        }
+        : step
+    ).ToList();
 
     var omittedTerminalSteps = current.Steps.Select(
       (
@@ -235,102 +211,6 @@ public sealed class ExecutionPlanService : IExecutionPlanService
       ),
       current.RevisionCount + 1
     );
-  }
-
-  public ExecutionPlanView NormalizeExistingReferencedDependencies(
-    ExecutionPlanView plan,
-    string objective,
-    string? workspacePath
-  )
-  {
-    if (
-      string.IsNullOrWhiteSpace(workspacePath)
-      || !ContainsAny(objective, ReuseIntentFragments)
-      || ContainsAny(objective, ExplicitMutationFragments)
-    )
-    {
-      return plan;
-    }
-
-    string workspaceRoot;
-    try
-    {
-      workspaceRoot = Path.GetFullPath(workspacePath);
-    }
-    catch (
-      Exception exception
-    ) when (
-      exception is ArgumentException
-      or NotSupportedException
-      or PathTooLongException
-    )
-    {
-      return plan;
-    }
-
-    var rootWithSeparator = Path.EndsInDirectorySeparator(workspaceRoot)
-      ? workspaceRoot
-      : workspaceRoot + Path.DirectorySeparatorChar;
-    var changed = false;
-    var steps = plan.Steps.Select(
-      step =>
-      {
-        var target = ToolEffectRegistry.TryGetHostTarget(step.Title);
-        if (
-          target is null
-          || ToolEffectRegistry.InferExpectedEffect(step.Title) != ToolEffects.FileCreated
-          || !ObjectiveReferencesTarget(objective, target)
-        )
-        {
-          return step;
-        }
-
-        string candidate;
-        try
-        {
-          candidate = Path.GetFullPath(
-            Path.Combine(
-              workspaceRoot,
-              target.Replace('/', Path.DirectorySeparatorChar)
-            )
-          );
-        }
-        catch (
-          Exception exception
-        ) when (
-          exception is ArgumentException
-          or NotSupportedException
-          or PathTooLongException
-        )
-        {
-          return step;
-        }
-
-        if (
-          !candidate.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase)
-          || !File.Exists(candidate)
-        )
-        {
-          return step;
-        }
-
-        changed = true;
-        return step with
-        {
-          Title = ToolEffectRegistry.WithHostTarget(
-            "Inspect existing referenced dependency",
-            target
-          )
-        };
-      }
-    ).ToArray();
-
-    return changed
-      ? plan with
-      {
-        Steps = steps
-      }
-      : plan;
   }
 
   private static ParsedPlan ParseArguments(
@@ -387,10 +267,11 @@ public sealed class ExecutionPlanService : IExecutionPlanService
       );
     }
 
-    var titles = new List<string>();
+    var steps = new List<ParsedStep>();
 
-    foreach (var element in elements)
+    for (var index = 0; index < elements.Length; index++)
     {
+      var element = elements[index];
       JsonElement titleElement;
 
       if (element.ValueKind == JsonValueKind.String)
@@ -438,104 +319,54 @@ public sealed class ExecutionPlanService : IExecutionPlanService
         );
       }
 
+      var dependencies = Array.Empty<int>();
       if (
         element.ValueKind == JsonValueKind.Object
-        && element.TryGetProperty("target", out var targetElement)
-        && targetElement.ValueKind == JsonValueKind.String
-        && NormalizeStepTarget(targetElement.GetString()) is
-        {
-        } target
+        && element.TryGetProperty(
+          "dependsOn",
+          out var dependsOn
+        )
       )
       {
-        title = ToolEffectRegistry.WithHostTarget(title, target);
+        if (dependsOn.ValueKind != JsonValueKind.Array)
+        {
+          throw new LocalActionException(
+            "execution-plan",
+            "Execution plan step dependencies must be an array of one-based earlier step indexes."
+          );
+        }
+
+        dependencies = dependsOn.EnumerateArray().Select(
+          dependency => dependency.ValueKind == JsonValueKind.Number
+            && dependency.TryGetInt32(out var value)
+            ? value
+            : 0
+        ).ToArray();
+        if (
+          dependencies.Any(
+            dependency => dependency < 1 || dependency > index
+          )
+          || dependencies.Distinct().Count() != dependencies.Length
+        )
+        {
+          throw new LocalActionException(
+            "execution-plan",
+            "Execution plan dependencies must be unique one-based indexes of earlier proposed steps."
+          );
+        }
       }
 
-      titles.Add(
-        title
+      steps.Add(
+        new ParsedStep(
+          title,
+          dependencies
+        )
       );
     }
 
     return new ParsedPlan(
       objective,
-      titles
-    );
-  }
-
-  private static string? NormalizeStepTarget(string? value)
-  {
-    if (string.IsNullOrWhiteSpace(value))
-    {
-      return null;
-    }
-
-    var invalid = Path.GetInvalidFileNameChars().ToHashSet();
-    var segments = new List<string>();
-    foreach (var rawSegment in value.Replace('\\', '/').Split('/'))
-    {
-      var segment = rawSegment.Trim();
-      if (
-        segment.Length == 0
-        || segment == "."
-        || segment == ".."
-        || (segment.Length == 2 && char.IsLetter(segment[0]) && segment[1] == ':')
-      )
-      {
-        continue;
-      }
-
-      var safe = new string(
-        segment.Where(
-          character => !invalid.Contains(character) && !char.IsControl(character)
-        ).ToArray()
-      ).Trim();
-      if (safe.Length > 0)
-      {
-        segments.Add(safe);
-      }
-    }
-
-    if (segments.Count == 0)
-    {
-      return null;
-    }
-
-    var normalized = string.Join('/', segments);
-    return normalized.Length <= 72
-      ? normalized
-      : normalized[^72..].TrimStart('/');
-  }
-
-  private static bool ObjectiveReferencesTarget(
-    string objective,
-    string target
-  )
-  {
-    var normalizedObjective = objective.Replace('\\', '/');
-    var normalizedTarget = target.Replace('\\', '/');
-    var fileName = Path.GetFileName(normalizedTarget);
-    return normalizedObjective.Contains(
-        normalizedTarget,
-        StringComparison.OrdinalIgnoreCase
-      )
-      || (
-        fileName.Length > 0
-        && normalizedObjective.Contains(
-          fileName,
-          StringComparison.OrdinalIgnoreCase
-        )
-      );
-  }
-
-  private static bool ContainsAny(
-    string value,
-    IEnumerable<string> fragments
-  )
-  {
-    return fragments.Any(
-      fragment => value.Contains(
-        fragment,
-        StringComparison.OrdinalIgnoreCase
-      )
+      steps
     );
   }
 
@@ -567,6 +398,11 @@ public sealed class ExecutionPlanService : IExecutionPlanService
 
   private sealed record ParsedPlan(
     string Objective,
-    IReadOnlyList<string> Titles
+    IReadOnlyList<ParsedStep> Steps
+  );
+
+  private sealed record ParsedStep(
+    string Title,
+    IReadOnlyList<int> Dependencies
   );
 }

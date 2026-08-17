@@ -930,9 +930,6 @@ public sealed class ExecutionSession
   private readonly Dictionary<string, int> _verifiedEffectCounts = new(
     StringComparer.Ordinal
   );
-  private readonly Dictionary<string, string> _planStepExpectedEffects = new(
-    StringComparer.Ordinal
-  );
   private readonly HashSet<string> _appliedInstructions = new(
     StringComparer.OrdinalIgnoreCase
   );
@@ -1102,8 +1099,11 @@ public sealed class ExecutionSession
       lock (_gate)
       {
         var latestChanges = LatestVerifiedChangedFilesUnsafe();
-        return latestChanges.Length > 0
-          && UnreviewedChangedFilesUnsafe(latestChanges).Length == 0;
+        return latestChanges.Length == 0
+          ? _files.Any(
+            file => file.Verified && file.Operation == "deleted"
+          )
+          : UnreviewedChangedFilesUnsafe(latestChanges).Length == 0;
       }
     }
   }
@@ -1166,11 +1166,13 @@ public sealed class ExecutionSession
     {
       lock (_gate)
       {
-        return _plan?.Steps.Any(
-          step => step.Status is "pending" or "in-progress"
-            && _planStepExpectedEffects.TryGetValue(step.Id, out var expected)
-            && ToolEffectRegistry.IsMutation(expected)
-        ) == true;
+        return _planActionBindings.Values.Any(
+          binding => ToolEffectRegistry.IsMutation(binding.ExpectedEffect)
+            && _plan?.Steps.Any(
+              step => step.Id == binding.StepId
+                && step.Status is "pending" or "in-progress"
+            ) == true
+        );
       }
     }
   }
@@ -1244,7 +1246,6 @@ public sealed class ExecutionSession
       }
 
       _plan = plan;
-      RefreshPlanExpectedEffects(plan);
     }
   }
 
@@ -1255,14 +1256,14 @@ public sealed class ExecutionSession
     lock (_gate)
     {
       _plan = plan;
-      RefreshPlanExpectedEffects(plan);
     }
   }
 
   public bool RecordPlanActionStarted(
     string actionId,
     string tool,
-    string? targetPath = null
+    string? targetPath = null,
+    string? stepId = null
   )
   {
     lock (_gate)
@@ -1279,21 +1280,26 @@ public sealed class ExecutionSession
         return false;
       }
 
-      var index = FindPlanStep(
-        effect,
-        [
-          "pending",
-          "in-progress"
-        ],
-        targetPath
+      var bindingFailure = ValidatePlanStepBindingUnsafe(
+        stepId
       );
-
-      if (index < 0)
+      if (bindingFailure is not null)
       {
-        return false;
+        throw new LocalActionException(
+          "plan-action-binding",
+          bindingFailure
+        );
       }
 
       var steps = _plan.Steps.ToArray();
+      var index = Array.FindIndex(
+        steps,
+        step => string.Equals(
+          step.Id,
+          stepId,
+          StringComparison.Ordinal
+        )
+      );
       _planActionBindings[actionId] = new PlanActionBinding(
         steps[index].Id,
         effect,
@@ -1312,136 +1318,59 @@ public sealed class ExecutionSession
     }
   }
 
-  public string? ValidateUnboundPlanSupport(
-    ValidatedLocalAction action
+  public string? ValidatePlanStepBinding(
+    string? stepId
   )
   {
     lock (_gate)
     {
-      if (
-        _plan is null
-        || !action.ReadOnly
-        || action.TargetPath is null
-        || action.Tool is not (
-          "list_files"
-          or "read_file"
-          or "get_file_info"
-          or "search_text"
-        )
-      )
-      {
-        return null;
-      }
-
-      var nextStep = _plan.Steps.FirstOrDefault(
-        step => step.Status is "pending" or "in-progress"
-          && ToolEffectRegistry.TryGetHostTarget(step.Title) is not null
+      return ValidatePlanStepBindingUnsafe(
+        stepId
       );
-      var nextTarget = nextStep is null
-        ? null
-        : ToolEffectRegistry.TryGetHostTarget(nextStep.Title);
-      if (nextTarget is null)
-      {
-        return null;
-      }
-
-      var relativeTarget = Path.GetRelativePath(
-        WorkspacePath,
-        action.TargetPath
-      ).Replace(
-        Path.DirectorySeparatorChar,
-        '/'
-      );
-      var expectedPath = Path.GetFullPath(
-        Path.Combine(
-          WorkspacePath,
-          nextTarget.Replace('/', Path.DirectorySeparatorChar)
-        )
-      );
-      var exactTarget = string.Equals(
-        nextTarget.Replace('\\', '/'),
-        relativeTarget,
-        StringComparison.OrdinalIgnoreCase
-      );
-      var expectedExists = File.Exists(expectedPath)
-        || Directory.Exists(expectedPath);
-      var sameParentCandidate = !expectedExists
-        && string.Equals(
-          Path.GetDirectoryName(expectedPath),
-          action.Tool == "list_files"
-            ? action.TargetPath
-            : Path.GetDirectoryName(action.TargetPath),
-          StringComparison.OrdinalIgnoreCase
-        );
-
-      if (!exactTarget && !sameParentCandidate)
-      {
-        return $"The read-only action targets '{relativeTarget}', but the next pending plan "
-          + $"step is bound to '{nextTarget}'. Inspect that target, perform its required mutation, "
-          + "or revise the plan before exploring another file.";
-      }
-
-      var latestInspection = _actions.Where(
-        item => item.State == "completed"
-          && item.Tool is "list_files" or "read_file" or "get_file_info" or "search_text"
-          && string.Equals(
-            SummaryTarget(item.Summary),
-            relativeTarget,
-            StringComparison.OrdinalIgnoreCase
-          )
-      ).OrderByDescending(
-        item => item.Timestamp
-      ).FirstOrDefault();
-      if (latestInspection is null)
-      {
-        return null;
-      }
-
-      var changedAfterInspection = _files.Any(
-        file => string.Equals(
-          file.RelativePath.Replace('\\', '/'),
-          relativeTarget,
-          StringComparison.OrdinalIgnoreCase
-        ) && file.VerifiedAt > latestInspection.Timestamp
-      );
-      if (changedAfterInspection)
-      {
-        return null;
-      }
-
-      return $"'{relativeTarget}' was already inspected and has not changed. Do not repeat the "
-        + $"inspection; perform the mutation required by the next plan step for '{nextTarget}' "
-        + "or revise the plan.";
     }
   }
 
-  public bool CanBindPlanAction(
-    string tool,
-    string? targetPath
+  private string? ValidatePlanStepBindingUnsafe(
+    string? stepId
   )
   {
-    lock (_gate)
+    if (_plan is null)
     {
-      if (_plan is null || ToolEffectRegistry.ForTool(tool) is not
-        {
-        } effect)
-      {
-        return false;
-      }
-
-      return _plan.Steps.Select(
-        (step, index) => (step, index)
-      ).Any(
-        item => item.step.Status is "pending" or "in-progress"
-          && (
-            _planStepExpectedEffects.TryGetValue(item.step.Id, out var expected)
-              ? ToolEffectRegistry.AreCompatible(expected, effect)
-                && MatchesHostPlanTarget(item.step, targetPath)
-                && CanStartInspectionStep(item.index, effect)
-              : ToolEffectRegistry.IsGenericPlanStep(item.step.Title)
-          )
-      );
+      return stepId is null
+        ? null
+        : "An action cannot bind to a plan step because this execution has no accepted plan.";
     }
+    if (string.IsNullOrWhiteSpace(stepId))
+    {
+      return "The specialist must bind every action to an exact Host-owned stepId while an accepted plan exists.";
+    }
+    var step = _plan.Steps.FirstOrDefault(
+      candidate => string.Equals(
+        candidate.Id,
+        stepId,
+        StringComparison.Ordinal
+      )
+    );
+    if (step is null)
+    {
+      return $"Plan step '{stepId}' does not exist in the accepted Host plan.";
+    }
+    if (step.Status is "completed" or "failed" or "blocked" or "skipped")
+    {
+      return $"Plan step '{stepId}' is already terminal ({step.Status}).";
+    }
+    var blockedDependencies = (step.Dependencies ?? []).Where(
+      dependency => _plan.Steps.FirstOrDefault(
+        candidate => string.Equals(
+          candidate.Id,
+          dependency,
+          StringComparison.Ordinal
+        )
+      )?.Status != "completed"
+    ).ToArray();
+    return blockedDependencies.Length == 0
+      ? null
+      : $"Plan step '{stepId}' is waiting for completed dependencies: {string.Join(", ", blockedDependencies)}.";
   }
 
   public bool RecordPlanActionResult(
@@ -1504,71 +1433,6 @@ public sealed class ExecutionSession
       _planActionBindings.Remove(actionId);
       return true;
     }
-  }
-
-  public string? ValidatePlanActionEvidence(
-    string actionId,
-    string tool,
-    string output
-  )
-  {
-    lock (_gate)
-    {
-      if (
-        tool != "read_file"
-        || _plan is null
-        || !_planActionBindings.TryGetValue(actionId, out var binding)
-      )
-      {
-        return null;
-      }
-
-      var step = _plan.Steps.FirstOrDefault(
-        candidate => string.Equals(candidate.Id, binding.StepId, StringComparison.Ordinal)
-      );
-      if (
-        step is null
-        || !ContainsCollectionSignal(step.Title)
-        || !ContainsCollectionSignal(Objective)
-      )
-      {
-        return null;
-      }
-
-      var expectedMatch = System.Text.RegularExpressions.Regex.Match(
-        step.Title,
-        @"verify\s+exact\s+(?<count>\d+)",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase
-          | System.Text.RegularExpressions.RegexOptions.CultureInvariant
-      );
-      if (
-        !expectedMatch.Success
-        || !int.TryParse(expectedMatch.Groups["count"].Value, out var expectedCount)
-      )
-      {
-        return null;
-      }
-
-      var actualCount = CountTopLevelArrayItems(output);
-      if (actualCount == expectedCount)
-      {
-        return null;
-      }
-
-      return actualCount is null
-        ? $"Host static review could not find a bounded array in the inspected artifact; the plan requires exactly {expectedCount} collection items. "
-          + "Correct the bound data file before completing this review step."
-        : $"Host static review counted {actualCount} top-level array items; the plan requires exactly {expectedCount}. "
-        + "Correct the bound data file before completing this review step.";
-    }
-  }
-
-  private static bool ContainsCollectionSignal(string value)
-  {
-    return new[]
-    {
-      "collection", "list", "array", "data", "coleção", "colecao", "lista", "dados"
-    }.Any(signal => value.Contains(signal, StringComparison.OrdinalIgnoreCase));
   }
 
   private static int? CountTopLevelArrayItems(string value)
@@ -1662,42 +1526,6 @@ public sealed class ExecutionSession
     }
 
     return null;
-  }
-
-  public bool RejectPlanActionEvidence(string actionId)
-  {
-    lock (_gate)
-    {
-      if (
-        _plan is null
-        || !_planActionBindings.TryGetValue(actionId, out var binding)
-      )
-      {
-        return false;
-      }
-
-      var steps = _plan.Steps.ToArray();
-      var index = Array.FindIndex(
-        steps,
-        step => string.Equals(step.Id, binding.StepId, StringComparison.Ordinal)
-      );
-      if (index < 0)
-      {
-        return false;
-      }
-
-      steps[index] = steps[index] with
-      {
-        Status = "pending"
-      };
-      _plan = _plan with
-      {
-        Steps = steps,
-        CurrentStepId = null
-      };
-      _planActionBindings.Remove(actionId);
-      return true;
-    }
   }
 
   public void RecordObservedFile(
@@ -2273,10 +2101,6 @@ public sealed class ExecutionSession
       _project = snapshot.Review.Project;
       _baseline = snapshot.Review.Baseline;
       _plan = snapshot.Review.Summary.Plan;
-      if (_plan is not null)
-      {
-        RefreshPlanExpectedEffects(_plan);
-      }
       _validationProfile = snapshot.Review.ValidationProfile;
       _validation = snapshot.Review.Validation;
       _delivery = snapshot.Review.Delivery;
@@ -2425,99 +2249,6 @@ public sealed class ExecutionSession
     );
   }
 
-  private int FindPlanStep(
-    string effect,
-    IReadOnlyCollection<string> states,
-    string? targetPath
-  )
-  {
-    var matching = _plan!.Steps.Select(
-      (
-        step,
-        index
-      ) => new
-      {
-        Step = step,
-        Index = index
-      }
-    ).FirstOrDefault(
-      item => states.Contains(
-        item.Step.Status,
-        StringComparer.Ordinal
-      ) && _planStepExpectedEffects.TryGetValue(item.Step.Id, out var expected)
-        && ToolEffectRegistry.AreCompatible(expected, effect)
-        && MatchesHostPlanTarget(item.Step, targetPath)
-        && CanStartInspectionStep(item.Index, effect)
-    );
-    if (matching is not null)
-    {
-      return matching.Index;
-    }
-
-    var generic = _plan.Steps.Select(
-      (step, index) => new
-      {
-        Step = step,
-        Index = index
-      }
-    ).FirstOrDefault(
-      item => states.Contains(item.Step.Status, StringComparer.Ordinal)
-        && !_planStepExpectedEffects.ContainsKey(item.Step.Id)
-        && ToolEffectRegistry.IsGenericPlanStep(item.Step.Title)
-    );
-    if (generic is null)
-    {
-      return -1;
-    }
-
-    _planStepExpectedEffects[generic.Step.Id] = effect;
-    return generic.Index;
-  }
-
-  private bool MatchesHostPlanTarget(
-    ExecutionPlanStep step,
-    string? targetPath
-  )
-  {
-    var expectedTarget = ToolEffectRegistry.TryGetHostTarget(step.Title);
-    if (expectedTarget is null)
-    {
-      return true;
-    }
-
-    if (string.IsNullOrWhiteSpace(targetPath))
-    {
-      return false;
-    }
-
-    var relativeTarget = Path.GetRelativePath(
-      WorkspacePath,
-      targetPath
-    ).Replace(
-      Path.DirectorySeparatorChar,
-      '/'
-    );
-    return string.Equals(
-      expectedTarget.Replace('\\', '/'),
-      relativeTarget,
-      StringComparison.OrdinalIgnoreCase
-    );
-  }
-
-  private bool CanStartInspectionStep(int candidateIndex, string effect)
-  {
-    if (effect != ToolEffects.Inspected)
-    {
-      return true;
-    }
-
-    return !_plan!.Steps.Take(candidateIndex).Any(
-      step => (step.Status is "pending" or "in-progress")
-        && _planStepExpectedEffects.TryGetValue(step.Id, out var expected)
-        && ToolEffectRegistry.IsMutation(expected)
-    );
-  }
-
   private int EffectCount(string effect)
   {
     return _verifiedEffectCounts.TryGetValue(effect, out var count)
@@ -2639,44 +2370,11 @@ public sealed class ExecutionSession
 
   private bool RequiresMutationUnsafe()
   {
-    if (_planStepExpectedEffects.Values.Any(ToolEffectRegistry.IsMutation))
-    {
-      return true;
-    }
-
     return new[]
     {
       "implement", "change", "edit", "update", "fix", "create", "delete", "remove",
       "alter", "corrig", "criar", "excluir", "apagar", "adicionar", "remover"
     }.Any(fragment => Objective.Contains(fragment, StringComparison.OrdinalIgnoreCase));
-  }
-
-  private void RefreshPlanExpectedEffects(ExecutionPlanView plan)
-  {
-    var previous = _planStepExpectedEffects.ToDictionary(
-      pair => pair.Key,
-      pair => pair.Value,
-      StringComparer.Ordinal
-    );
-    _planStepExpectedEffects.Clear();
-
-    foreach (var step in plan.Steps)
-    {
-      var generic = ToolEffectRegistry.IsGenericPlanStep(step.Title);
-      var effect = generic
-        ? null
-        : ToolEffectRegistry.InferExpectedEffect(step.Title);
-
-      if (effect is null && previous.TryGetValue(step.Id, out var preserved))
-      {
-        effect = preserved;
-      }
-
-      if (effect is not null)
-      {
-        _planStepExpectedEffects[step.Id] = effect;
-      }
-    }
   }
 
   private bool HasVerifiedMutationUnsafe()
@@ -2697,12 +2395,14 @@ public sealed class ExecutionSession
   private ExecutionFileChange[] LatestVerifiedChangedFilesUnsafe()
   {
     return _files.Where(
-      file => file.Verified && file.Operation != "deleted"
+      file => file.Verified
     ).GroupBy(
       file => file.RelativePath,
       StringComparer.OrdinalIgnoreCase
     ).Select(
       group => group.Last()
+    ).Where(
+      file => file.Operation != "deleted"
     ).ToArray();
   }
 
@@ -2717,7 +2417,7 @@ public sealed class ExecutionSession
           && action.Timestamp >= change.VerifiedAt
           && string.Equals(
             SummaryTarget(action.Summary),
-            change.RelativePath,
+            change.RelativePath.Replace('\\', '/'),
             StringComparison.OrdinalIgnoreCase
           )
       )

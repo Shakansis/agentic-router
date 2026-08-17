@@ -214,6 +214,12 @@
               <strong id="context-usage-warning" hidden></strong>
               <dl id="context-usage-details"></dl>
               <small>O histórico visível pode ser maior que o contexto enviado.</small>
+              <button
+                id="compact-context"
+                class="secondary-button compact-context-button"
+                type="button"
+                hidden
+              >Compactar contexto</button>
             </div>
           </details>
         </div>
@@ -303,9 +309,15 @@
               title="Cancelar edição (Esc)"
               hidden
             >×</button>
-            <button id="send-button" class="primary-button" type="submit">
+            <button
+              id="send-button"
+              class="primary-button"
+              type="submit"
+              aria-label="Enviar mensagem"
+              title="Enviar mensagem"
+            >
               <span id="send-button-label">Enviar</span>
-              <span class="button-icon send-icon" aria-hidden="true">➤</span>
+              <span class="button-icon send-icon" aria-hidden="true">↑</span>
             </button>
           </div>
         </div>

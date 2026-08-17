@@ -300,7 +300,7 @@ internal static class TestOllamaRuntimeDefaults
 
 internal sealed record TestExecutionSettings
 {
-  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 4;
+  public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 5;
 
   public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
 
@@ -310,7 +310,7 @@ internal sealed record TestExecutionSettings
 
   public int MaxConsecutiveToolFailures { get; init; } = 5;
 
-  public int MaxRecoveryAttemptsPerTurn { get; init; } = 5;
+  public int MaxRecoveryAttemptsPerTurn { get; init; } = 10;
 
   public int MaxTrackedFilesPerSession { get; init; } = 50;
 

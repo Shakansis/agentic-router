@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgenticRouter.Api.Execution;
 
 namespace AgenticRouter.EndToEndTests;
 
@@ -12,6 +13,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private static readonly JsonSerializerOptions CompactJsonOptions = new(
     JsonSerializerDefaults.Web
   );
+  private static readonly ToolNameResolver ToolNames = new();
 
   private static readonly ModelDefinition[] Models =
   [
@@ -609,6 +611,33 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       return;
     }
 
+    if (
+      hasTools
+      && messages.Any(
+        message => message.Content.Contains(
+          "SPECIALIST_TOOL_LOOP_V2",
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      AddLoadedModel(
+        model,
+        -1,
+        contextTokens
+      );
+      await PlanLocalActionAsync(
+        context.Response,
+        model,
+        messages,
+        hasTools,
+        availableTools,
+        true,
+        cancellationToken
+      );
+      return;
+    }
+
     await StreamTargetAsync(
       context.Response,
       model,
@@ -872,6 +901,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         messages,
         hasTools,
         availableTools,
+        false,
         cancellationToken
       );
       return;
@@ -1447,6 +1477,50 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       message => message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
         && message.Content.Contains("Status: completed", StringComparison.Ordinal)
     );
+    var latestStructuredMutationIndex = Array.FindLastIndex(
+      activeMessages,
+      message => message.Content.StartsWith(
+          "LOCAL_ACTION_RESULT",
+          StringComparison.Ordinal
+        )
+        && message.Content.Contains(
+          "Status: completed",
+          StringComparison.Ordinal
+        )
+        && (
+          message.Content.Contains("Tool: create_file", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: write_file", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: replace_text", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
+        )
+    );
+    var latestStructuredReadIndex = Array.FindLastIndex(
+      activeMessages,
+      message => message.Content.StartsWith(
+          "LOCAL_ACTION_RESULT",
+          StringComparison.Ordinal
+        )
+        && message.Content.Contains(
+          "Tool: read_file",
+          StringComparison.Ordinal
+        )
+        && message.Content.Contains(
+          "Status: completed",
+          StringComparison.Ordinal
+        )
+    );
+    var activeContent = string.Join(
+      "\n",
+      activeMessages.Select(
+        message => message.Content
+      )
+    );
+    var structuredCompletionReviewRequested = latestStructuredMutationIndex
+      > latestStructuredReadIndex
+      && activeContent.Contains(
+        "The latest changed files have not all been inspected after their latest mutation:",
+        StringComparison.Ordinal
+      );
     object NextDeleteProposal()
     {
       if (completedStructuredReads == 0)
@@ -1623,6 +1697,21 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             tool = "run_validation_profile",
             arguments = new { },
             explanation = "Run the saved build and test validation profile."
+          }
+        )
+      : structuredCompletionReviewRequested
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "read_file",
+            arguments = new
+            {
+              path = ExtractCompletionReviewPath(
+                activeContent
+              )
+            },
+            explanation = "Inspect the latest changed file after the Host rejected premature completion."
           }
         )
       : completedStructuredAction
@@ -1864,6 +1953,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     IReadOnlyList<RecordedMessage> messages,
     bool hasTools,
     IReadOnlyList<string> availableTools,
+    bool stream,
     CancellationToken cancellationToken
   )
   {
@@ -1891,15 +1981,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     ).ToArray();
-    var hasPlan = !availableTools.Contains(
-      "create_execution_plan",
-      StringComparer.Ordinal
-    ) || results.Any(
+    var trackedPlanFixture = current.Contains(
+      "specialist tracked plan",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var hasPlan = !trackedPlanFixture || results.Any(
       message => (
         message.ToolName == "create_execution_plan"
-        && message.Content.StartsWith(
-          "Status: completed",
-          StringComparison.Ordinal
+        && (
+          message.Content.StartsWith(
+            "Status: completed",
+            StringComparison.Ordinal
+          )
+          || message.Content.Contains(
+            "Accepted Host plan",
+            StringComparison.Ordinal
+          )
         )
       )
         || message.Content.Contains(
@@ -1923,8 +2020,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
 
     var actionResults = results.Where(
-      message => message.ToolName is not "create_execution_plan"
+      message => message.ToolName is not LocalActionPlanner.RequestToolsetTool
+        and not "create_execution_plan"
         and not "revise_execution_plan"
+        && !message.Content.Contains(
+          $"Tool: {LocalActionPlanner.RequestToolsetTool}",
+          StringComparison.Ordinal
+        )
         && !message.Content.Contains(
           "Tool: create_execution_plan",
           StringComparison.Ordinal
@@ -2056,7 +2158,51 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var planOnly = availableTools.Count == 1
       && availableTools[0] == "create_execution_plan";
 
-    if (
+    if (current.Contains(
+      "chronological thinking stream",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      var completedChronologicalActions = actionResults.Count(
+        result => string.Equals(
+          result.ToolName,
+          "create_file",
+          StringComparison.Ordinal
+        ) || result.Content.Contains(
+          "Tool: create_file",
+          StringComparison.Ordinal
+        )
+      );
+      plan = completedChronologicalActions == 0
+        ? new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "chrono-one.txt",
+            content = "first chronological action"
+          },
+          explanation = "Create the first chronological fixture."
+        }
+        : completedChronologicalActions == 1
+          ? new
+          {
+            tool = (string?)"create_file",
+            arguments = (object)new
+            {
+              path = "chrono-two.txt",
+              content = "second chronological action"
+            },
+            explanation = "Create the second chronological fixture."
+          }
+          : new
+          {
+            tool = (string?)null,
+            arguments = (object)new { },
+            explanation = "Both chronological fixtures are complete."
+          };
+    }
+    else if (
       !hasPlan
       && current.Contains(
         "alias phase bypass",
@@ -2152,7 +2298,37 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       && ForkGameExecutionFixture.Matches(current)
     )
     {
-      plan = CreateForkGameAction(attempt - 1);
+      plan = CreateForkGameAction(
+        Math.Max(
+          0,
+          attempt - availableTools.Count
+        )
+      );
+    }
+    else if (
+      hasPlan
+      && trackedPlanFixture
+    )
+    {
+      plan = actionResults.Length switch
+      {
+        0 => CreateLocalActionPlan(current),
+        1 => new
+        {
+          tool = (string?)"read_file",
+          arguments = (object)new
+          {
+            path = "tracked-plan.txt"
+          },
+          explanation = "Inspect the latest changed fixture in the second specialist plan step."
+        },
+        _ => new
+        {
+          tool = (string?)null,
+          arguments = (object)new { },
+          explanation = "Both specialist-proposed plan steps have proven effects."
+        }
+      };
     }
     else if (
       hasPlan
@@ -2208,6 +2384,33 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           arguments = (object)new { },
           explanation = "The bounded static review plan is complete."
         }
+      };
+    }
+    else if (
+      hasResult
+      && allContent.Contains(
+        "The latest changed files have not all been inspected after their latest mutation:",
+        StringComparison.Ordinal
+      )
+      && !actionResults.Any(
+        result => result.ToolName == "read_file"
+          || result.Content.Contains(
+            "Tool: read_file",
+            StringComparison.Ordinal
+          )
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = (object)new
+        {
+          path = ExtractCompletionReviewPath(
+            allContent
+          )
+        },
+        explanation = "Inspect the latest changed file after the Host rejected premature completion."
       };
     }
     else if (
@@ -2863,6 +3066,73 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       : JsonSerializer.SerializeToElement(
         new { }
       );
+    if (
+      hasTools
+      && toolName is not null
+      && !availableTools.Contains(
+        toolName,
+        StringComparer.OrdinalIgnoreCase
+      )
+    )
+    {
+      try
+      {
+        toolName = ToolNames.Resolve(
+          toolName,
+          availableTools
+        ).CanonicalName;
+      }
+      catch (LocalActionException)
+      {
+      }
+    }
+    if (
+      hasTools
+      && toolName is not null
+      && !availableTools.Contains(
+        toolName,
+        StringComparer.OrdinalIgnoreCase
+      )
+      && availableTools.Contains(
+        LocalActionPlanner.RequestToolsetTool,
+        StringComparer.Ordinal
+      )
+    )
+    {
+      var requestedTool = toolName;
+      toolName = LocalActionPlanner.RequestToolsetTool;
+      arguments = JsonSerializer.SerializeToElement(
+        new
+        {
+          tools = new[]
+          {
+            requestedTool
+          },
+          reason = $"The specialist needs {requestedTool} to continue the current objective."
+        },
+        CompactJsonOptions
+      );
+    }
+    if (
+      trackedPlanFixture
+      && hasPlan
+      && toolName is not null
+      && toolName is not LocalActionPlanner.RequestToolsetTool
+        and not "create_execution_plan"
+        and not "revise_execution_plan"
+    )
+    {
+      var boundArguments = JsonNode.Parse(
+        arguments.GetRawText()
+      )!.AsObject();
+      boundArguments["stepId"] = actionResults.Length == 0
+        ? "step-1"
+        : "step-2";
+      arguments = JsonSerializer.SerializeToElement(
+        boundArguments,
+        CompactJsonOptions
+      );
+    }
     var validationFailed = actionResults.LastOrDefault() is
     {
       ToolName: "run_validation_profile"
@@ -2927,21 +3197,72 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       ];
     }
 
-    await WriteJsonAsync(
-      response,
-      HttpStatusCode.OK,
-      new
-      {
-        message = new
+    var thinking = toolCalls is null
+      ? null
+      : $"I will use the Host tool {toolName} and inspect its authoritative result.";
+
+    if (stream)
+    {
+      await WriteStreamingToolResponseAsync(
+        response,
+        model,
+        content,
+        thinking,
+        toolCalls,
+        current.Contains(
+          "chronological thinking stream",
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? 800
+          : 0,
+        cancellationToken
+      );
+    }
+    else
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.OK,
+        new
         {
-          role = "assistant",
-          content,
-          tool_calls = toolCalls
+          message = new
+          {
+            role = "assistant",
+            content,
+            thinking,
+            tool_calls = toolCalls
+          },
+          done = true
         },
-        done = true
-      },
-      cancellationToken
+        cancellationToken
+      );
+    }
+  }
+
+  private static string ExtractCompletionReviewPath(string content)
+  {
+    const string marker =
+      "The latest changed files have not all been inspected after their latest mutation: ";
+    var markerIndex = content.LastIndexOf(
+      marker,
+      StringComparison.Ordinal
     );
+    if (markerIndex < 0)
+    {
+      return "hello.txt";
+    }
+
+    var start = markerIndex + marker.Length;
+    var end = content.IndexOf(
+      ". Use read_file",
+      start,
+      StringComparison.Ordinal
+    );
+    var paths = content[start..(end < 0 ? content.Length : end)];
+    return paths.Split(
+      ',',
+      StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+    )[0];
   }
 
   private static object CreateForkGameAction(int completedActionCount)
@@ -3068,6 +3389,37 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string objective
   )
   {
+    if (objective.Contains(
+      "specialist tracked plan",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_execution_plan",
+        arguments = new
+        {
+          objective = "Create and inspect a tracked fixture",
+          steps = new object[]
+          {
+            new
+            {
+              title = "Create tracked fixture"
+            },
+            new
+            {
+              title = "Inspect tracked fixture",
+              dependsOn = new[]
+              {
+                1
+              }
+            }
+          }
+        },
+        explanation = "The selected specialist proposes its own objective, steps, titles, and dependency."
+      };
+    }
+
     if (objective.Contains(
       "multi file static review",
       StringComparison.OrdinalIgnoreCase
@@ -3577,6 +3929,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (current.Contains(
+      "specialist tracked plan",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "tracked-plan.txt",
+          content = "created through a specialist-proposed plan"
+        },
+        explanation = "Create the fixture bound to the specialist-proposed plan step."
+      };
+    }
+
     if (current.Contains(
       "unknown tool alias",
       StringComparison.OrdinalIgnoreCase
@@ -4228,6 +4597,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     response.StatusCode = (int)HttpStatusCode.OK;
     response.ContentType = "application/x-ndjson";
     response.SendChunked = true;
+    var includeThinking = current.Contains(
+      "show thinking",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var partIndex = 0;
 
     foreach (var part in parts)
     {
@@ -4236,8 +4610,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         model,
         part,
         false,
-        cancellationToken
+        cancellationToken,
+        includeThinking
+          ? partIndex == 0
+            ? "I need to inspect the request and choose the relevant response. "
+            : "The response should remain concise and grounded."
+          : null
       );
+      partIndex++;
 
       if (messages.Any(
         message => message.Content.Contains(
@@ -4380,7 +4760,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string model,
     string content,
     bool done,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? thinking = null
   )
   {
     var bytes = Encoding.UTF8.GetBytes(
@@ -4391,7 +4772,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           message = new
           {
             role = "assistant",
-            content
+            content,
+            thinking
           },
           done,
           prompt_eval_count = done
@@ -4403,6 +4785,111 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         },
         CompactJsonOptions
       ) + "\n"
+    );
+    await response.OutputStream.WriteAsync(
+      bytes,
+      cancellationToken
+    );
+    await response.OutputStream.FlushAsync(
+      cancellationToken
+    );
+  }
+
+  private static async Task WriteStreamingToolResponseAsync(
+    HttpListenerResponse response,
+    string model,
+    string content,
+    string? thinking,
+    object? toolCalls,
+    int thinkingDelayMilliseconds,
+    CancellationToken cancellationToken
+  )
+  {
+    response.StatusCode = (int)HttpStatusCode.OK;
+    response.ContentType = "application/x-ndjson";
+    response.SendChunked = true;
+
+    if (!string.IsNullOrEmpty(
+      thinking
+    ))
+    {
+      var split = Math.Max(
+        1,
+        thinking.Length / 2
+      );
+      await WriteToolChunkAsync(
+        response,
+        model,
+        string.Empty,
+        thinking[..split],
+        null,
+        false,
+        cancellationToken
+      );
+
+      if (thinkingDelayMilliseconds > 0)
+      {
+        await Task.Delay(
+          thinkingDelayMilliseconds,
+          cancellationToken
+        );
+      }
+
+      await WriteToolChunkAsync(
+        response,
+        model,
+        string.Empty,
+        thinking[split..],
+        null,
+        false,
+        cancellationToken
+      );
+    }
+
+    await WriteToolChunkAsync(
+      response,
+      model,
+      content,
+      null,
+      toolCalls,
+      true,
+      cancellationToken
+    );
+  }
+
+  private static async Task WriteToolChunkAsync(
+    HttpListenerResponse response,
+    string model,
+    string content,
+    string? thinking,
+    object? toolCalls,
+    bool done,
+    CancellationToken cancellationToken
+  )
+  {
+    var json = JsonSerializer.Serialize(
+        new
+        {
+          model,
+          message = new
+          {
+            role = "assistant",
+            content,
+            thinking,
+            tool_calls = toolCalls
+          },
+          done,
+          prompt_eval_count = done
+            ? 120
+            : (int?)null,
+          eval_count = done
+            ? 30
+            : (int?)null
+        },
+        CompactJsonOptions
+      );
+    var bytes = Encoding.UTF8.GetBytes(
+      json + "\n"
     );
     await response.OutputStream.WriteAsync(
       bytes,
@@ -4429,6 +4916,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         {
           role = "assistant",
           content = string.Empty,
+          thinking = $"I will use the Host tool {tool} and inspect its authoritative result.",
           tool_calls = new[]
           {
             new

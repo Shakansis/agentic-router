@@ -19,7 +19,12 @@ public interface IExpertExecutionGuidanceService
   StructuredContextFit FitToBudget(
     IReadOnlyList<ChatMessage> messages,
     string hostStateSummary,
-    long maximumInputTokens
+    long maximumInputTokens,
+    bool forceCompaction = false
+  );
+
+  SpecialistContextMeasurement MeasureRequest(
+    IReadOnlyList<ChatMessage> messages
   );
 
   Task<ExpertExecutionGuidance> PrepareAsync(
@@ -27,7 +32,8 @@ public interface IExpertExecutionGuidanceService
     string model,
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Action<ProviderTokenUsage?>? usageObserver = null
   );
 }
 
@@ -93,14 +99,18 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
   public StructuredContextFit FitToBudget(
     IReadOnlyList<ChatMessage> messages,
     string hostStateSummary,
-    long maximumInputTokens
+    long maximumInputTokens,
+    bool forceCompaction = false
   )
   {
     var scope = ExecutionTurnToolPolicy.Resolve(
       messages.Select(message => (message.Role, (string?)message.Content))
     );
-    var before = EstimateRequest(messages, scope);
-    if (before <= maximumInputTokens)
+    var before = MeasureRequest(
+      messages,
+      scope
+    ).InputTokens;
+    if (before <= maximumInputTokens && !forceCompaction)
     {
       return new StructuredContextFit(messages.ToArray(), before, before, false, false, "already-fits");
     }
@@ -112,7 +122,10 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     compact.Add(new ChatMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
     AddLast(compact, messages, item => IsControlMessage(item.Content));
     compact = compact.DistinctBy(item => $"{item.Role}:{item.Content}", StringComparer.Ordinal).ToList();
-    var after = EstimateRequest(compact, scope);
+    var after = MeasureRequest(
+      compact,
+      scope
+    ).InputTokens;
     var tooLarge = after > maximumInputTokens;
     var materiallySmaller = after <= before - Math.Max(256, before / 10);
     return new StructuredContextFit(
@@ -125,11 +138,26 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     );
   }
 
-  private long EstimateRequest(
+  public SpecialistContextMeasurement MeasureRequest(
+    IReadOnlyList<ChatMessage> messages
+  )
+  {
+    var scope = ExecutionTurnToolPolicy.Resolve(
+      messages.Select(message => (message.Role, (string?)message.Content))
+    );
+    return MeasureRequest(
+      messages,
+      scope
+    );
+  }
+
+  private SpecialistContextMeasurement MeasureRequest(
     IReadOnlyList<ChatMessage> messages,
     ExecutionTurnToolScope scope
   )
   {
+    var supportedTools = $"Supported tools for this turn: {string.Join(", ", scope.AvailableTools)}.";
+    var policy = $"Host-owned turn constraints:\n{ExecutionTurnToolPolicy.Describe(scope)}";
     var request = new[]
     {
       new ChatMessage(
@@ -137,8 +165,59 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
         CreateGuidancePrompt(scope)
       )
     }.Concat(messages).ToArray();
-    return _tokenEstimator.EstimateMessages(request)
+    var total = _tokenEstimator.EstimateMessages(request)
       + _tokenEstimator.EstimateText(GuidanceSchema.GetRawText());
+    var project = messages.Where(
+      message => message.Role == "system"
+        && message.Content.StartsWith(
+          "APPLICATION_OWNED_PROJECT_CONTEXT",
+          StringComparison.Ordinal
+        )
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+    );
+    var host = messages.Where(
+      message => IsControlMessage(message.Content)
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+    );
+    var conversation = messages.Where(
+      message => message.Role != "system" && !IsControlMessage(message.Content)
+    ).Sum(
+      message => _tokenEstimator.EstimateText(message.Content)
+    );
+    var currentUser = messages.LastOrDefault(
+      message => message.Role == "user" && !IsControlMessage(message.Content)
+    );
+    var discovery = _tokenEstimator.EstimateText(supportedTools);
+    var system = _tokenEstimator.EstimateText(GuidancePrompt)
+      + _tokenEstimator.EstimateText(policy)
+      + _tokenEstimator.EstimateText(GuidanceSchema.GetRawText())
+      + messages.Where(
+        message => message.Role == "system"
+          && !message.Content.StartsWith(
+            "APPLICATION_OWNED_PROJECT_CONTEXT",
+            StringComparison.Ordinal
+          )
+      ).Sum(
+        message => _tokenEstimator.EstimateText(message.Content)
+      );
+    var categorized = conversation + system + project + discovery + host;
+    return new SpecialistContextMeasurement(
+      conversation,
+      system,
+      _tokenEstimator.EstimateText(currentUser?.Content),
+      project,
+      discovery,
+      0,
+      host,
+      Math.Max(0, total - categorized),
+      total,
+      request.Length,
+      0,
+      messages.Count > 4,
+      "conservative-char-v1"
+    );
   }
 
   private static void AddLast(List<ChatMessage> target, IReadOnlyList<ChatMessage> messages, Func<ChatMessage, bool> predicate)
@@ -149,8 +228,14 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
 
   private static bool IsControlMessage(string content)
   {
-    return content.StartsWith("STRUCTURED_ACTION_CORRECTION", StringComparison.Ordinal)
-      || content.StartsWith("RECOVERY_", StringComparison.Ordinal);
+    return content.StartsWith("LOCAL_ACTION_", StringComparison.Ordinal)
+      || content.StartsWith("STRUCTURED_ACTION_", StringComparison.Ordinal)
+      || content.StartsWith("TOOL_PROTOCOL_", StringComparison.Ordinal)
+      || content.StartsWith("EXECUTION_", StringComparison.Ordinal)
+      || content.StartsWith("COMPLETION_", StringComparison.Ordinal)
+      || content.StartsWith("HOST_", StringComparison.Ordinal)
+      || content.StartsWith("RECOVERY_", StringComparison.Ordinal)
+      || content.StartsWith("RESIDENT_", StringComparison.Ordinal);
   }
 
   public async Task<ExpertExecutionGuidance> PrepareAsync(
@@ -158,7 +243,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     string model,
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Action<ProviderTokenUsage?>? usageObserver = null
   )
   {
     var scope = ExecutionTurnToolPolicy.Resolve(
@@ -180,7 +266,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
       GuidanceSchema,
       "expert-execution-guidance",
       usageContext,
-      cancellationToken
+      cancellationToken,
+      usageObserver
     );
 
     if (string.IsNullOrWhiteSpace(

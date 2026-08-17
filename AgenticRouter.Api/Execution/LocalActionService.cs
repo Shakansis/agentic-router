@@ -27,7 +27,8 @@ public sealed record LocalActionProposal(
   JsonElement Arguments,
   string? Explanation,
   string? OriginalTool = null,
-  string ToolResolutionSource = ToolNameResolver.CanonicalSource
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource,
+  string? PlanStepId = null
 );
 
 public sealed record ValidatedLocalAction(
@@ -44,7 +45,8 @@ public sealed record ValidatedLocalAction(
   string? OriginalTool = null,
   string ToolResolutionSource = ToolNameResolver.CanonicalSource,
   IReadOnlyList<PendingFileChange>? PendingFileChanges = null,
-  IReadOnlyList<LocalActionCorrection>? Corrections = null
+  IReadOnlyList<LocalActionCorrection>? Corrections = null,
+  string? PlanStepId = null
 );
 
 public sealed record LocalActionCorrection(
@@ -136,7 +138,7 @@ public sealed class LocalActionService : ILocalActionService
         );
       }
 
-      return AttachResolution(
+      return AttachAndValidatePlanBinding(
         new ValidatedLocalAction(
         Guid.NewGuid().ToString(
           "N"
@@ -150,7 +152,8 @@ public sealed class LocalActionService : ILocalActionService
         false,
         false
         ),
-        proposal
+        proposal,
+        executionSession
       );
     }
 
@@ -159,25 +162,27 @@ public sealed class LocalActionService : ILocalActionService
       StringComparison.Ordinal
     ))
     {
-      return AttachResolution(
+      return AttachAndValidatePlanBinding(
         await ValidateGitActionAsync(
         proposal,
         executionSession,
         cancellationToken
         ),
-        proposal
+        proposal,
+        executionSession
       );
     }
 
     if (proposal.Tool == "delete_files")
     {
-      return AttachResolution(
+      return AttachAndValidatePlanBinding(
         await ValidateDeleteFilesAsync(
           proposal,
           executionSession,
           cancellationToken
         ),
-        proposal
+        proposal,
+        executionSession
       );
     }
 
@@ -191,22 +196,36 @@ public sealed class LocalActionService : ILocalActionService
         executionSession,
         cancellationToken
       );
-    return AttachResolution(
+    return AttachAndValidatePlanBinding(
       validated,
-      proposal
+      proposal,
+      executionSession
     );
   }
 
-  private static ValidatedLocalAction AttachResolution(
+  private static ValidatedLocalAction AttachAndValidatePlanBinding(
     ValidatedLocalAction action,
-    LocalActionProposal proposal
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession
   )
   {
-    return action with
+    var validated = action with
     {
       OriginalTool = proposal.OriginalTool ?? proposal.Tool,
-      ToolResolutionSource = proposal.ToolResolutionSource
+      ToolResolutionSource = proposal.ToolResolutionSource,
+      PlanStepId = proposal.PlanStepId
     };
+    var bindingFailure = executionSession?.ValidatePlanStepBinding(
+      proposal.PlanStepId
+    );
+    if (bindingFailure is not null)
+    {
+      throw new LocalActionException(
+        "plan-action-binding",
+        bindingFailure
+      );
+    }
+    return validated;
   }
 
   public async Task<LocalActionResult> ExecuteAsync(
@@ -970,23 +989,6 @@ public sealed class LocalActionService : ILocalActionService
         ? null
         : corrections
     );
-    if (
-      executionSession is not null
-      && !executionSession.CanBindPlanAction(
-        action.Tool,
-        action.TargetPath
-      )
-      && executionSession.ValidateUnboundPlanSupport(action) is
-      {
-      } planSupportRejection
-    )
-    {
-      throw new LocalActionException(
-        "plan-action-binding",
-        planSupportRejection
-      );
-    }
-
     return action;
   }
 
@@ -3159,9 +3161,16 @@ public sealed class LocalActionService : ILocalActionService
   {
     const int limit = 4_000;
 
-    return value.Length <= limit
-      ? value
-      : $"{value[..limit]}\n[preview truncated]";
+    if (value.Length <= limit)
+    {
+      return value;
+    }
+
+    const string marker = "\n[preview middle omitted]\n";
+    var retained = limit - marker.Length;
+    var headLength = retained / 2;
+    var tailLength = retained - headLength;
+    return $"{value[..headLength]}{marker}{value[^tailLength..]}";
   }
 
   private static string QuoteArgument(

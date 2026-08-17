@@ -166,7 +166,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     JsonElement schema,
     string stage,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Action<ProviderTokenUsage?>? usageObserver = null
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -181,7 +182,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         schema,
         stage,
         usageContext,
-        cancellationToken
+        cancellationToken,
+        usageObserver
       )
       : GenerateCloudStructuredAsync(
         reference,
@@ -189,7 +191,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         schema,
         stage,
         usageContext,
-        cancellationToken
+        cancellationToken,
+        usageObserver
       );
   }
 
@@ -200,7 +203,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -216,7 +220,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         tools,
         stage,
         usageContext,
-        cancellationToken
+        cancellationToken,
+        onThinkingDelta
       );
     }
 
@@ -275,7 +280,10 @@ public sealed class ProviderDispatchClient : IOllamaClient
           session.Adapter.ProtocolVersion,
           "provider-request"
         );
-        return result.Value;
+        return result.Value with
+        {
+          Usage = result.Usage
+        };
       }
       catch (CloudProviderException exception)
       {
@@ -871,7 +879,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     JsonElement? schema,
     string stage,
     ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Action<ProviderTokenUsage?>? usageObserver = null
   )
   {
     var operationStopwatch = Stopwatch.StartNew();
@@ -920,6 +929,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
           result.RateLimit,
           session.Adapter.ProtocolVersion,
           "provider-request"
+        );
+        usageObserver?.Invoke(
+          result.Usage
         );
         return result.Value;
       }

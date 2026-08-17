@@ -73,11 +73,13 @@ public sealed class ExecutionEffectTests
     var fit = planner.FitToBudget(
       messages,
       toolingProfile,
+      ["read_file"],
       "plan=pending; latest-action=read_file",
       100_000,
       false,
       1,
-      false
+      false,
+      true
     );
 
     Assert.IsTrue(fit.Compacted);
@@ -140,11 +142,13 @@ public sealed class ExecutionEffectTests
     var fit = planner.FitToBudget(
       messages,
       toolingProfile,
+      ["read_file"],
       "latest-action=read_file",
       100_000,
       false,
       1,
-      false
+      false,
+      true
     );
 
     Assert.IsTrue(fit.Compacted);
@@ -209,7 +213,7 @@ public sealed class ExecutionEffectTests
   }
 
   [TestMethod]
-  public void UnboundInspectionsStayOnNextPlanTargetAndDoNotRepeat()
+  public void PlanActionsRequireExplicitSpecialistStepIdWithoutSemanticInference()
   {
     var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(workspace);
@@ -238,32 +242,14 @@ public sealed class ExecutionEffectTests
           0
         )
       );
-      var firstRead = Action("read-style", "read_file") with
-      {
-        TargetPath = stylePath,
-        Summary = "read_file: style.css"
-      };
-
-      Assert.IsNull(session.ValidateUnboundPlanSupport(firstRead));
-      session.RecordAction(firstRead, "completed", "observed");
-
-      var repeatedRead = firstRead with
-      {
-        ActionId = "read-style-again"
-      };
       StringAssert.Contains(
-        session.ValidateUnboundPlanSupport(repeatedRead),
-        "already inspected"
+        session.ValidatePlanStepBinding(null),
+        "must bind every action"
       );
-
-      var unrelatedRead = Action("read-other", "read_file") with
-      {
-        TargetPath = Path.Combine(workspace, "index.html"),
-        Summary = "read_file: index.html"
-      };
+      Assert.IsNull(session.ValidatePlanStepBinding("style"));
       StringAssert.Contains(
-        session.ValidateUnboundPlanSupport(unrelatedRead),
-        "next pending plan step"
+        session.ValidatePlanStepBinding("missing"),
+        "does not exist"
       );
     }
     finally
@@ -273,16 +259,16 @@ public sealed class ExecutionEffectTests
   }
 
   [TestMethod]
-  public void PlanPreservesModelChosenArtifactNamesAndRebasesTraversal()
+  public void PlanPreservesSpecialistTitlesLiterally()
   {
     using var document = JsonDocument.Parse(
       """
       {
         "objective": "Create several artifacts",
         "steps": [
-          { "title": "Create worker source", "target": "../../src/worker.py" },
-          { "title": "Create binary data", "target": "assets/content.dat" },
-          { "title": "Create workbook", "target": "reports/results.xlsx" }
+          { "title": "Create worker source at src/worker.py" },
+          { "title": "Create binary data at assets/content.dat" },
+          { "title": "Create workbook at reports/results.xlsx" }
         ]
       }
       """
@@ -291,86 +277,49 @@ public sealed class ExecutionEffectTests
 
     var plan = service.ValidateCreate(document.RootElement, 8);
 
-    Assert.AreEqual(
-      "src/worker.py",
-      ToolEffectRegistry.TryGetHostTarget(plan.Steps[0].Title)
-    );
-    Assert.AreEqual(
-      "assets/content.dat",
-      ToolEffectRegistry.TryGetHostTarget(plan.Steps[1].Title)
-    );
-    Assert.AreEqual(
-      "reports/results.xlsx",
-      ToolEffectRegistry.TryGetHostTarget(plan.Steps[2].Title)
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "Create worker source at src/worker.py",
+        "Create binary data at assets/content.dat",
+        "Create workbook at reports/results.xlsx"
+      },
+      plan.Steps.Select(step => step.Title).ToArray()
     );
   }
 
   [TestMethod]
-  public void ExistingReferencedDependencyIsInspectedUnlessMutationIsExplicit()
+  public void SpecialistDependenciesMapToHostIdsWithoutSemanticStepRewrite()
   {
-    var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-    var assets = Path.Combine(workspace, "assets");
-    Directory.CreateDirectory(assets);
-    File.WriteAllText(
-      Path.Combine(assets, "library.wathever"),
-      "existing dependency"
+    using var document = JsonDocument.Parse(
+      """
+      {
+        "objective": "Use the existing dependency, then create output",
+        "steps": [
+          { "title": "Inspect existing dependency" },
+          { "title": "Create requested output", "dependsOn": [1] }
+        ]
+      }
+      """
     );
-    try
-    {
-      using var document = JsonDocument.Parse(
-        """
-        {
-          "objective": "Use an existing dependency",
-          "steps": [
-            {
-              "title": "Create referenced dependency",
-              "target": "assets/library.wathever"
-            }
-          ]
-        }
-        """
-      );
-      var service = new ExecutionPlanService();
-      var proposed = service.ValidateCreate(document.RootElement, 8);
+    var service = new ExecutionPlanService();
 
-      var reusePlan = service.NormalizeExistingReferencedDependencies(
-        proposed,
-        "Use the library.wathever inside assets to generate output",
-        workspace
-      );
-      var mutationPlan = service.NormalizeExistingReferencedDependencies(
-        proposed,
-        "Update library.wathever inside assets",
-        workspace
-      );
+    var plan = service.ValidateCreate(document.RootElement, 8);
 
-      Assert.AreEqual(
-        ToolEffects.Inspected,
-        ToolEffectRegistry.InferExpectedEffect(reusePlan.Steps[0].Title)
-      );
-      Assert.AreEqual(
-        "assets/library.wathever",
-        ToolEffectRegistry.TryGetHostTarget(reusePlan.Steps[0].Title)
-      );
-      Assert.AreEqual(
-        ToolEffects.FileCreated,
-        ToolEffectRegistry.InferExpectedEffect(mutationPlan.Steps[0].Title)
-      );
-    }
-    finally
-    {
-      Directory.Delete(workspace, true);
-    }
+    Assert.AreEqual("Inspect existing dependency", plan.Steps[0].Title);
+    Assert.AreEqual("Create requested output", plan.Steps[1].Title);
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "step-1"
+      },
+      plan.Steps[1].Dependencies!.ToArray()
+    );
   }
 
   [TestMethod]
-  public void HostNormalizesAmbiguousAndGenericTitlesWithoutArbitraryFallback()
+  public void GenericSpecialistTitleDoesNotControlActionBinding()
   {
-    Assert.AreEqual(
-      ToolEffects.Inspected,
-      ToolEffectRegistry.InferExpectedEffect("Inspect files selected for deletion")
-    );
-
     var session = CreateSession("Create requested file");
     session.CreatePlan(
       new ExecutionPlanView(
@@ -383,7 +332,13 @@ public sealed class ExecutionEffectTests
     );
     var creation = Action("create-1", "create_file");
 
-    Assert.IsTrue(session.RecordPlanActionStarted(creation.ActionId, creation.Tool));
+    Assert.IsTrue(
+      session.RecordPlanActionStarted(
+        creation.ActionId,
+        creation.Tool,
+        stepId: "generic"
+      )
+    );
     session.RecordFileChange(
       new ExecutionFileChange(
         "created.txt",
@@ -497,7 +452,7 @@ public sealed class ExecutionEffectTests
   }
 
   [TestMethod]
-  public void IncompatibleToolDoesNotAdvanceAnotherPlanStep()
+  public void SpecialistBindingAndDependenciesSelectTheStepWithoutTitleInference()
   {
     var session = CreateSession("Delete obsolete.txt");
     session.CreatePlan(
@@ -505,7 +460,12 @@ public sealed class ExecutionEffectTests
         "Delete obsolete.txt",
         [
           new ExecutionPlanStep("inspect", "Inspect selected file", "pending"),
-          new ExecutionPlanStep("delete", "Delete inspected file", "pending")
+          new ExecutionPlanStep(
+            "delete",
+            "Delete inspected file",
+            "pending",
+            ["inspect"]
+          )
         ],
         null,
         0,
@@ -514,23 +474,39 @@ public sealed class ExecutionEffectTests
     );
 
     var firstInspection = Action("inspect-1", "read_file");
-    Assert.IsTrue(session.RecordPlanActionStarted(firstInspection.ActionId, firstInspection.Tool));
+    StringAssert.Contains(
+      session.ValidatePlanStepBinding("delete"),
+      "waiting for completed dependencies"
+    );
+    Assert.IsTrue(
+      session.RecordPlanActionStarted(
+        firstInspection.ActionId,
+        firstInspection.Tool,
+        stepId: "inspect"
+      )
+    );
     session.RecordAction(firstInspection, "completed", "observed");
     Assert.IsTrue(session.RecordPlanActionResult(firstInspection.ActionId, firstInspection.Tool, "completed"));
 
     var unrelatedInspection = Action("inspect-2", "list_files");
-    Assert.IsFalse(session.RecordPlanActionStarted(unrelatedInspection.ActionId, unrelatedInspection.Tool));
+    Assert.IsTrue(
+      session.RecordPlanActionStarted(
+        unrelatedInspection.ActionId,
+        unrelatedInspection.Tool,
+        stepId: "delete"
+      )
+    );
     session.RecordAction(unrelatedInspection, "completed", "listed");
-    Assert.IsFalse(session.RecordPlanActionResult(unrelatedInspection.ActionId, unrelatedInspection.Tool, "completed"));
+    Assert.IsTrue(session.RecordPlanActionResult(unrelatedInspection.ActionId, unrelatedInspection.Tool, "completed"));
 
     var plan = session.CreateReview().Summary.Plan;
     Assert.IsNotNull(plan);
     Assert.AreEqual("completed", plan.Steps.Single(step => step.Id == "inspect").Status);
-    Assert.AreEqual("pending", plan.Steps.Single(step => step.Id == "delete").Status);
+    Assert.AreEqual("completed", plan.Steps.Single(step => step.Id == "delete").Status);
   }
 
   [TestMethod]
-  public void StaticReviewRequiresEarlierMutationsAndTheExactHostTarget()
+  public void PlanDependenciesBlockLaterStepUntilEarlierEffectIsProven()
   {
     var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
     var session = CreateSession(
@@ -549,7 +525,8 @@ public sealed class ExecutionEffectTests
           new ExecutionPlanStep(
             "review",
             "Review HTML entrypoint [target: index.html]",
-            "pending"
+            "pending",
+            ["create"]
           )
         ],
         null,
@@ -562,12 +539,9 @@ public sealed class ExecutionEffectTests
     {
       TargetPath = Path.Combine(workspace, "index.html")
     };
-    Assert.IsFalse(
-      session.RecordPlanActionStarted(
-        prematureReview.ActionId,
-        prematureReview.Tool,
-        prematureReview.TargetPath
-      )
+    StringAssert.Contains(
+      session.ValidatePlanStepBinding("review"),
+      "waiting for completed dependencies"
     );
 
     var creation = Action("create", "create_file") with
@@ -578,7 +552,8 @@ public sealed class ExecutionEffectTests
       session.RecordPlanActionStarted(
         creation.ActionId,
         creation.Tool,
-        creation.TargetPath
+        creation.TargetPath,
+        "create"
       )
     );
     session.RecordFileChange(
@@ -607,18 +582,6 @@ public sealed class ExecutionEffectTests
       )
     );
 
-    var wrongReview = Action("read-wrong", "read_file") with
-    {
-      TargetPath = Path.Combine(workspace, "words.js")
-    };
-    Assert.IsFalse(
-      session.RecordPlanActionStarted(
-        wrongReview.ActionId,
-        wrongReview.Tool,
-        wrongReview.TargetPath
-      )
-    );
-
     var correctReview = Action("read-correct", "read_file") with
     {
       TargetPath = Path.Combine(workspace, "index.html")
@@ -627,13 +590,14 @@ public sealed class ExecutionEffectTests
       session.RecordPlanActionStarted(
         correctReview.ActionId,
         correctReview.Tool,
-        correctReview.TargetPath
+        correctReview.TargetPath,
+        "review"
       )
     );
   }
 
   [TestMethod]
-  public void StaticCollectionReviewRejectsWrongTopLevelItemCount()
+  public void HostDoesNotParseSpecialistPlanTitleAsAValidationRule()
   {
     var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
     var session = CreateSession(
@@ -663,20 +627,24 @@ public sealed class ExecutionEffectTests
       session.RecordPlanActionStarted(
         review.ActionId,
         review.Tool,
-        review.TargetPath
+        review.TargetPath,
+        "review"
       )
     );
-
-    var diagnostic = session.ValidatePlanActionEvidence(
-      review.ActionId,
-      review.Tool,
+    session.RecordAction(
+      review,
+      "completed",
       "const items = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];"
     );
-    Assert.IsNotNull(diagnostic);
-    StringAssert.Contains(diagnostic, "4 top-level array items");
-    Assert.IsTrue(session.RejectPlanActionEvidence(review.ActionId));
+    Assert.IsTrue(
+      session.RecordPlanActionResult(
+        review.ActionId,
+        review.Tool,
+        "completed"
+      )
+    );
     Assert.AreEqual(
-      "pending",
+      "completed",
       session.CreateReview().Summary.Plan?.Steps.Single().Status
     );
   }
@@ -696,7 +664,13 @@ public sealed class ExecutionEffectTests
     );
     var deletion = Action("delete-1", "delete_files");
 
-    Assert.IsTrue(session.RecordPlanActionStarted(deletion.ActionId, deletion.Tool));
+    Assert.IsTrue(
+      session.RecordPlanActionStarted(
+        deletion.ActionId,
+        deletion.Tool,
+        stepId: "delete"
+      )
+    );
     session.RecordAction(deletion, "completed", "claimed deletion");
     Assert.IsFalse(session.RecordPlanActionResult(deletion.ActionId, deletion.Tool, "completed"));
 
@@ -758,7 +732,13 @@ public sealed class ExecutionEffectTests
     );
     var action = Action("directory-1", "create_directory");
 
-    Assert.IsTrue(session.RecordPlanActionStarted(action.ActionId, action.Tool));
+    Assert.IsTrue(
+      session.RecordPlanActionStarted(
+        action.ActionId,
+        action.Tool,
+        stepId: "directory"
+      )
+    );
     session.RecordCreatedDirectory("generated");
     session.RecordAction(action, "completed", "created");
     Assert.IsTrue(session.RecordPlanActionResult(action.ActionId, action.Tool, "completed"));

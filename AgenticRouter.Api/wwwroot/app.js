@@ -43,6 +43,7 @@ const state = {
   providerHealth: null,
   modelOrganization: null,
   modelCapability: null,
+  compactContextNextRequest: false,
   capabilityRequestId: 0,
   webEnabled: false,
   webControlState: "unavailable",
@@ -112,6 +113,7 @@ function bindElements() {
     "context-usage-summary",
     "context-usage-warning",
     "context-usage-details",
+    "compact-context",
     "web-toggle",
     "web-toggle-label",
     "attach-image",
@@ -425,13 +427,15 @@ function bindEvents() {
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
   elements.messageInput.addEventListener("input", resizeComposer);
-  elements.messageInput.addEventListener("input", renderEstimatedContextUsage);
+  elements.messageInput.addEventListener("input", renderPendingContextUsage);
+  elements.compactContext.addEventListener("click", requestManualContextCompaction);
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
   elements.newConversation.addEventListener("click", requestNewConversation);
   elements.historyNewConversation.addEventListener("click", requestNewConversation);
   elements.modelSelector.addEventListener("change", handleModelSelectionChange);
+  elements.capabilityTags.addEventListener("click", handleCapabilityTagClick);
   elements.webToggle.addEventListener("click", toggleWebSearch);
   elements.attachImage.addEventListener(
     "click",
@@ -721,6 +725,8 @@ function bindEvents() {
     button => button.addEventListener("click", handleModeChange)
   );
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  document.addEventListener("click", handleCapabilityDocumentClick);
+  document.addEventListener("keydown", handleCapabilityKeyDown);
   document.querySelector("#open-settings").addEventListener(
     "click",
     () => openSettings()
@@ -1002,7 +1008,7 @@ async function loadApplicationState() {
   renderValidationProfile();
   updateInteractionControls();
   await refreshSelectedModelCapabilities();
-  renderEstimatedContextUsage();
+  renderPendingContextUsage();
   if (!state.recovery?.historyAutoLoadDisabled) {
     await refreshSessions();
   }
@@ -2581,6 +2587,7 @@ function renderRestoredConversation(session) {
       } else if (message.role === "assistant") {
         const assistant = appendAssistantMessage();
         cancelAnimationFrame(assistant.clockFrame);
+        assistant.progress.hidden = true;
         assistant.details.open = false;
         assistant.summary.textContent = "Histórico restaurado";
         assistant.answer.classList.remove("pending");
@@ -4357,6 +4364,7 @@ function renderComposerModels() {
     ],
     selected
   );
+  updateComposerModelTitle();
   updateModelLockControls();
 }
 
@@ -6309,6 +6317,7 @@ async function handleModelSelectionChange() {
 
   updateModelLockControls();
   updateInteractionControls();
+  updateComposerModelTitle();
   updateComposerStatus();
   state.activeAgentModel = null;
   state.activeAgentRole = null;
@@ -6377,7 +6386,7 @@ async function refreshSelectedModelCapabilities(
   }
 
   renderCapabilityContext();
-  renderEstimatedContextUsage();
+  renderPendingContextUsage();
 }
 
 function renderCapabilityContext() {
@@ -6393,68 +6402,192 @@ function renderCapabilityContext() {
   }
 
   const capabilities = view.capabilities;
+  const routerConfigurationDocumentation =
+    "https://github.com/Shakansis/agentic-router#configuration";
+  const routerCapabilityDocumentation =
+    "https://github.com/Shakansis/agentic-router#web-search-citations-and-image-input";
+  const isLocal = view.provider === "ollama-local";
   elements.activeProviderModel.textContent =
     `${view.providerDisplayName} · ${view.model}`;
   const tags = [
     {
-      label: view.provider === "ollama-local" ? "Local" : "Cloud",
-      kind: view.provider === "ollama-local" ? "local" : "cloud",
-      title: `Provedor: ${view.providerDisplayName}`
+      label: isLocal ? "Local" : "Cloud",
+      kind: isLocal ? "local" : "cloud",
+      status: "Ativo nesta conversa",
+      enabled: true,
+      description: isLocal
+        ? `O modelo ${view.model} está sendo executado pelo provedor Ollama Local.`
+        : `O modelo ${view.model} está sendo executado pelo provedor ${view.providerDisplayName}.`,
+      documentationUrl: isLocal
+        ? "https://docs.ollama.com/api/introduction"
+        : routerConfigurationDocumentation
     },
     capabilities.nativeTools
       ? {
         label: "Tools",
         kind: "tools",
-        title: capabilities.toolProtocolConfirmed
-          ? "Tool protocol confirmed behaviorally."
-          : `Tools advertised by ${capabilities.source}; behavioral conformance is tracked separately.`
+        status: capabilities.toolProtocolConfirmed
+          ? "Habilitado e confirmado"
+          : "Habilitado; confirmação comportamental pendente",
+        enabled: true,
+        description: capabilities.toolProtocolConfirmed
+          ? "O modelo pode chamar ferramentas estruturadas e esse protocolo já foi confirmado pelo Router."
+          : `O modelo anuncia chamadas de ferramentas em ${capabilities.source}; a conformidade comportamental é verificada separadamente.`,
+        documentationUrl: isLocal
+          ? "https://docs.ollama.com/capabilities/tool-calling"
+          : routerCapabilityDocumentation
       }
       : null,
     capabilities.webSearch
       ? {
         label: "Web",
         kind: "web",
-        title: capabilities.providerNativeWebSearch
-          ? "Provider-native web search; explicit enablement required."
-          : "Application-mediated read-only Ollama Web Search; explicit enablement required."
+        status: state.webEnabled
+          ? "Habilitado nesta conversa"
+          : "Disponível, mas desabilitado nesta conversa",
+        enabled: state.webEnabled,
+        description: capabilities.providerNativeWebSearch
+          ? "Pesquisa web nativa do provedor. O usuário precisa habilitá-la explicitamente para a conversa."
+          : "Pesquisa Ollama separada e somente leitura. O usuário precisa habilitá-la explicitamente para a conversa.",
+        documentationUrl: isLocal
+          ? "https://docs.ollama.com/capabilities/web-search"
+          : routerCapabilityDocumentation
       }
       : null,
     capabilities.vision
       ? {
         label: "Vision",
         kind: "vision",
-        title: `Up to ${capabilities.maximumImageCount} images; ${formatBytes(capabilities.maximumImageBytes)} each.`
+        status: "Habilitado para este modelo",
+        enabled: true,
+        description: `Aceita até ${capabilities.maximumImageCount} imagens, com ${formatBytes(capabilities.maximumImageBytes)} por imagem.`,
+        documentationUrl: isLocal
+          ? "https://docs.ollama.com/capabilities/vision"
+          : routerCapabilityDocumentation
       }
       : null,
     capabilities.structuredOutput
       ? {
         label: "Structured",
         kind: "structured",
-        title: `Structured-output capability from ${capabilities.source}.`
+        status: "Habilitado para este modelo",
+        enabled: true,
+        description: `O modelo pode responder conforme um schema estruturado; evidência obtida de ${capabilities.source}.`,
+        documentationUrl: isLocal
+          ? "https://docs.ollama.com/capabilities/structured-outputs"
+          : routerCapabilityDocumentation
       }
       : null,
     {
       label: view.role === "fallback" ? "Fallback" : "Primary",
       kind: view.role === "fallback" ? "fallback" : "primary",
-      title: view.role === "fallback"
-        ? "This model is serving as the configured fallback."
-        : "This model is serving as the primary target."
+      status: "Papel ativo nesta conversa",
+      enabled: true,
+      description: view.role === "fallback"
+        ? "Este modelo está atendendo como fallback configurado após a indisponibilidade elegível do modelo principal."
+        : "Este modelo é o destino principal selecionado para esta conversa.",
+      documentationUrl: routerConfigurationDocumentation
     }
   ].filter(Boolean);
 
-  for (const tag of tags) {
-    const element = document.createElement("span");
-    element.className = "capability-tag";
-    element.dataset.kind = tag.kind;
-    element.textContent = tag.label;
-    element.title = tag.title;
-    elements.capabilityTags.append(element);
+  for (const [index, tag] of tags.entries()) {
+    const container = document.createElement("span");
+    const trigger = document.createElement("button");
+    const popover = document.createElement("span");
+    const heading = document.createElement("strong");
+    const status = document.createElement("span");
+    const description = document.createElement("span");
+    const documentation = document.createElement("a");
+    const popoverId = `capability-help-${tag.kind}-${index}`;
+
+    container.className = "capability-info";
+    trigger.type = "button";
+    trigger.className = "capability-tag";
+    trigger.dataset.kind = tag.kind;
+    trigger.textContent = tag.label;
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-controls", popoverId);
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute(
+      "aria-label",
+      `${tag.label}: ${tag.status}. Abrir detalhes.`
+    );
+
+    popover.id = popoverId;
+    popover.className = "capability-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", `Detalhes de ${tag.label}`);
+    heading.textContent = tag.label;
+    status.className = "capability-popover-status";
+    status.dataset.enabled = String(tag.enabled);
+    status.textContent = tag.status;
+    description.className = "capability-popover-description";
+    description.textContent = tag.description;
+    documentation.className = "capability-popover-link";
+    documentation.href = tag.documentationUrl;
+    documentation.target = "_blank";
+    documentation.rel = "noopener noreferrer";
+    documentation.textContent = "Saiba mais na documentação oficial ↗";
+    popover.append(heading, status, description, documentation);
+    container.append(trigger, popover);
+    elements.capabilityTags.append(container);
   }
 
   elements.fallbackIndicator.hidden =
     view.provider === "ollama-local"
     || !hasConfiguredLocalFallback(view.model);
   renderWebControl();
+}
+
+function handleCapabilityTagClick(event) {
+  const trigger = event.target.closest(".capability-tag");
+  if (!trigger) {
+    return;
+  }
+
+  event.stopPropagation();
+  const container = trigger.closest(".capability-info");
+  const shouldOpen = container.dataset.open !== "true";
+  closeCapabilityPopovers();
+  if (shouldOpen) {
+    container.dataset.open = "true";
+    trigger.setAttribute("aria-expanded", "true");
+  }
+}
+
+function handleCapabilityDocumentClick(event) {
+  if (!event.target.closest(".capability-info")) {
+    closeCapabilityPopovers();
+  }
+}
+
+function handleCapabilityKeyDown(event) {
+  if (event.key !== "Escape") {
+    return;
+  }
+
+  const openTrigger = elements.capabilityTags.querySelector(
+    ".capability-info[data-open=\"true\"] .capability-tag"
+  );
+  if (!openTrigger) {
+    return;
+  }
+
+  event.preventDefault();
+  closeCapabilityPopovers();
+  openTrigger.focus();
+}
+
+function closeCapabilityPopovers() {
+  for (const container of elements.capabilityTags.querySelectorAll(
+    ".capability-info[data-open=\"true\"]"
+  )) {
+    delete container.dataset.open;
+    container.querySelector(".capability-tag")?.setAttribute(
+      "aria-expanded",
+      "false"
+    );
+  }
 }
 
 function renderWebControl() {
@@ -7044,7 +7177,7 @@ function clearConversationUi() {
   updateModelLockControls();
   updateInteractionControls();
   updateComposerStatus();
-  renderEstimatedContextUsage();
+  renderPendingContextUsage();
   updateJumpControl();
   elements.messageInput.focus();
 }
@@ -7286,7 +7419,11 @@ async function handleComposerSubmit(event) {
   );
   const conversationVersion = state.conversationVersion;
   const controller = new AbortController();
-  const assistant = appendAssistantMessage();
+  const assistant = appendAssistantMessage({
+    modelSelectionOrigin: selectedModel === "auto"
+      ? "agent"
+      : "user"
+  });
   state.activeAssistant = assistant;
   elements.messageInput.value = "";
   clearAttachments();
@@ -7296,6 +7433,8 @@ async function handleComposerSubmit(event) {
   requestAnimationFrame(scrollToBottom);
   await refreshRuntimeStatus();
   scheduleRuntimeRefresh();
+  const compactContext = state.compactContextNextRequest;
+  state.compactContextNextRequest = false;
 
   try {
     const response = await fetch(
@@ -7315,7 +7454,8 @@ async function handleComposerSubmit(event) {
           browserSessionId: state.browserSessionId,
           conversationSessionId: state.conversationSessionId,
           webSearchEnabled: state.webEnabled,
-          images: requestAttachments
+          images: requestAttachments,
+          compactContext
         }),
         signal: controller.signal
       }
@@ -7439,16 +7579,24 @@ function appendUserMessage(message, historyIndex, attachments = []) {
   resizeObserver.observe(element);
 }
 
-function appendAssistantMessage() {
+function appendAssistantMessage(options = {}) {
   const container = document.createElement("article");
   container.className = "message assistant";
 
+  const modelNotice = document.createElement("p");
+  modelNotice.className = "model-selection-note";
+  modelNotice.hidden = true;
+  const progress = document.createElement("p");
+  progress.className = "assistant-progress";
+  progress.setAttribute("role", "status");
+  progress.textContent = "Pensando… · 0 ms";
+
   const details = document.createElement("details");
   details.className = "activity";
-  details.open = true;
+  details.open = false;
   const summary = document.createElement("summary");
-  summary.textContent = "Em andamento · 0 ms";
-  summary.setAttribute("aria-label", "Atividade da solicitação");
+  summary.textContent = "Detalhes técnicos";
+  summary.setAttribute("aria-label", "Detalhes técnicos da solicitação");
   const activityList = document.createElement("div");
   activityList.className = "activity-list";
   const sessionHeader = document.createElement("div");
@@ -7466,6 +7614,9 @@ function appendAssistantMessage() {
 
   const answer = document.createElement("div");
   answer.className = "assistant-answer pending";
+  const workActivity = document.createElement("section");
+  workActivity.className = "assistant-work";
+  workActivity.hidden = true;
   const sources = document.createElement("details");
   sources.className = "assistant-sources";
   sources.hidden = true;
@@ -7489,12 +7640,26 @@ function appendAssistantMessage() {
   reviewButton.classList.add("review-changes");
   reviewButton.hidden = true;
   actions.append(reviewButton, copyButton);
-  container.append(details, planPanel, answer, sources, actions);
+  container.append(
+    modelNotice,
+    progress,
+    planPanel,
+    workActivity,
+    answer,
+    sources,
+    details,
+    actions
+  );
   elements.messages.append(container);
 
   const assistant = {
     container,
     answer,
+    modelNotice,
+    progress,
+    activeReasoning: null,
+    hasReasoning: false,
+    reasoningBlockCount: 0,
     details,
     summary,
     activityList,
@@ -7502,6 +7667,12 @@ function appendAssistantMessage() {
     planPanel,
     planSummary,
     planBody,
+    workActivity,
+    workNarrative: null,
+    actionItems: new Map(),
+    modelSelectionOrigin: options.modelSelectionOrigin ?? null,
+    activityGroups: new Map(),
+    technicalEventCount: 0,
     startedAt: performance.now(),
     clockFrame: null,
     lastClockUpdate: 0,
@@ -7512,9 +7683,7 @@ function appendAssistantMessage() {
     sourcesList,
     copyButton,
     reviewButton,
-    executionSession: null,
-    lastActivityGroup: null,
-    lastActivityGroupKey: null
+    executionSession: null
   };
   copyButton.addEventListener(
     "click",
@@ -7571,14 +7740,289 @@ function renderAssistantSources(assistant, citations) {
 function startElapsedClock(assistant) {
   const update = timestamp => {
     if (timestamp - assistant.lastClockUpdate >= 250) {
-      assistant.summary.textContent =
-        `Em andamento · ${formatElapsed(elapsedSince(assistant))}`;
+      assistant.progress.textContent =
+        `${assistant.activeReasoning ? "Thinking" : "Pensando…"} · `
+        + formatElapsed(elapsedSince(assistant));
       assistant.lastClockUpdate = timestamp;
     }
 
     assistant.clockFrame = requestAnimationFrame(update);
   };
   assistant.clockFrame = requestAnimationFrame(update);
+}
+
+function renderModelSelection(assistant, model, origin) {
+  const message = origin === "user"
+    ? `Modelo ${model} selecionado pelo usuário.`
+    : origin === "fallback"
+      ? `Modelo ${model} selecionado como fallback pelo Host.`
+      : `Modelo ${model} roteado pelo agente.`;
+  assistant.modelNotice.textContent = message;
+  assistant.modelNotice.hidden = false;
+}
+
+function appendAssistantReasoning(assistant, delta) {
+  if (!delta) {
+    return;
+  }
+
+  if (!assistant.activeReasoning) {
+    const details = document.createElement("details");
+    details.className = "assistant-reasoning";
+    details.dataset.timelineKind = "thinking";
+    details.dataset.block = String(++assistant.reasoningBlockCount);
+    details.dataset.deltaCount = "0";
+    details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "Thinking";
+    summary.setAttribute("aria-label", "Raciocínio fornecido pelo modelo");
+    const body = document.createElement("div");
+    body.className = "assistant-reasoning-body";
+    details.append(summary, body);
+    assistant.workActivity.hidden = false;
+    assistant.workActivity.append(details);
+    assistant.activeReasoning = {
+      details,
+      body,
+      raw: ""
+    };
+  }
+
+  assistant.activeReasoning.raw += delta;
+  assistant.activeReasoning.body.textContent = assistant.activeReasoning.raw;
+  assistant.activeReasoning.body.scrollTop =
+    assistant.activeReasoning.body.scrollHeight;
+  assistant.activeReasoning.details.dataset.deltaCount = String(
+    Number(assistant.activeReasoning.details.dataset.deltaCount) + 1
+  );
+  assistant.hasReasoning = true;
+  assistant.progress.hidden = false;
+  assistant.progress.textContent =
+    `Thinking · ${formatElapsed(elapsedSince(assistant))}`;
+}
+
+function closeAssistantReasoning(assistant) {
+  if (!assistant.activeReasoning) {
+    return;
+  }
+
+  assistant.activeReasoning.details.open = false;
+  assistant.activeReasoning = null;
+}
+
+function ensureWorkNarrative(assistant, text, replace = false) {
+  if (!assistant.workNarrative) {
+    assistant.workNarrative = document.createElement("p");
+    assistant.workNarrative.className = "assistant-work-narrative";
+    assistant.workActivity.append(assistant.workNarrative);
+  }
+
+  if (replace || !assistant.workNarrative.textContent) {
+    assistant.workNarrative.textContent = text;
+  }
+}
+
+function isVisibleWorkAction(action) {
+  return new Set([
+    "create_file",
+    "write_file",
+    "replace_text",
+    "apply_patch",
+    "delete_files",
+    "create_directory"
+  ]).has(action?.tool);
+}
+
+function actionDisplayLabel(tool) {
+  return {
+    create_file: "Criar",
+    write_file: "Escrever",
+    replace_text: "Editar",
+    apply_patch: "Aplicar patch",
+    delete_files: "Excluir",
+    create_directory: "Criar pasta"
+  }[tool] ?? tool;
+}
+
+function actionTarget(action) {
+  const prefix = `${action.tool}:`;
+  return action.summary?.startsWith(prefix)
+    ? action.summary.slice(prefix.length).trim()
+    : action.summary;
+}
+
+function actionStateLabel(stateValue) {
+  return {
+    proposed: "Preparando",
+    approved: "Aprovada",
+    executing: "Executando…",
+    completed: "Concluída",
+    failed: "Falhou",
+    rejected: "Rejeitada",
+    revised: "Revisada"
+  }[stateValue] ?? stateValue;
+}
+
+function summarizeActionPreview(value) {
+  const lines = (value ?? "").replaceAll("\r\n", "\n").split("\n");
+
+  if (lines.length <= 14) {
+    return lines.join("\n");
+  }
+
+  const omitted = lines.length - 12;
+  return [
+    ...lines.slice(0, 6),
+    `… ${omitted} linhas omitidas …`,
+    ...lines.slice(-6)
+  ].join("\n");
+}
+
+function joinWorkspacePath(workspacePath, relativePath) {
+  if (!workspacePath || !relativePath) {
+    return relativePath || workspacePath || "";
+  }
+
+  if (/^[a-z]:[\\/]/i.test(relativePath) || relativePath.startsWith("\\\\")) {
+    return relativePath;
+  }
+
+  return `${workspacePath.replace(/[\\/]+$/, "")}\\${relativePath.replaceAll("/", "\\")}`;
+}
+
+async function hydrateWorkActionPath(assistant, item, relativePath) {
+  if (item.path.dataset.hydrated === "true") {
+    return;
+  }
+
+  const executionSessionId = assistant.executionSession?.id;
+
+  if (!executionSessionId) {
+    return;
+  }
+
+  try {
+    const review = await fetchJson(
+      `/api/execution-sessions/${encodeURIComponent(executionSessionId)}/review`
+    );
+    item.path.textContent = joinWorkspacePath(
+      review.workspacePath,
+      relativePath
+    );
+    item.path.dataset.hydrated = "true";
+  } catch {
+    item.path.textContent = relativePath;
+  }
+}
+
+function upsertWorkAction(assistant, streamEvent) {
+  const action = streamEvent.localAction;
+
+  if (!isVisibleWorkAction(action)) {
+    return;
+  }
+
+  closeAssistantReasoning(assistant);
+  assistant.workActivity.hidden = false;
+  ensureWorkNarrative(
+    assistant,
+    "Vou executar as alterações solicitadas e mostrar apenas os arquivos afetados."
+  );
+  assistant.progress.hidden = false;
+  assistant.progress.textContent =
+    `Executando… · ${formatElapsed(elapsedSince(assistant))}`;
+  const relativePath = actionTarget(action);
+  let item = assistant.actionItems.get(action.actionId);
+
+  if (!item) {
+    const details = document.createElement("details");
+    details.className = "work-action";
+    details.dataset.timelineKind = "action";
+    details.dataset.actionId = action.actionId;
+    details.dataset.eventType = streamEvent.type;
+    const summary = document.createElement("summary");
+    const icon = document.createElement("span");
+    icon.className = "work-action-icon";
+    icon.textContent = "⌁";
+    icon.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "work-action-label";
+    label.textContent = actionDisplayLabel(action.tool);
+    const link = document.createElement("a");
+    link.className = "work-action-file";
+    link.href = "#";
+    link.textContent = relativePath;
+    link.setAttribute("aria-label", `Abrir revisão de ${relativePath}`);
+    const status = document.createElement("span");
+    status.className = "work-action-status";
+    const body = document.createElement("div");
+    body.className = "work-action-body";
+    const path = document.createElement("code");
+    path.className = "work-action-path";
+    path.textContent = relativePath;
+    const preview = document.createElement("pre");
+    preview.className = "work-action-preview";
+    body.append(path, preview);
+    summary.append(icon, label, link, status);
+    details.append(summary, body);
+    assistant.workActivity.append(details);
+    item = {
+      details,
+      icon,
+      label,
+      link,
+      status,
+      path,
+      preview
+    };
+    assistant.actionItems.set(action.actionId, item);
+    details.addEventListener(
+      "toggle",
+      () => {
+        if (details.open) {
+          void hydrateWorkActionPath(
+            assistant,
+            item,
+            relativePath
+          );
+        }
+      }
+    );
+    link.addEventListener(
+      "click",
+      event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void openChangeReview(
+          assistant.executionSession?.id,
+          relativePath
+        );
+      }
+    );
+  }
+
+  item.details.dataset.eventType = streamEvent.type;
+  item.details.dataset.state = action.state;
+  item.status.textContent = actionStateLabel(action.state);
+  item.icon.textContent = action.state === "completed"
+    ? "✓"
+    : action.state === "failed" || action.state === "rejected"
+      ? "!"
+      : "⌁";
+  item.preview.textContent = summarizeActionPreview(
+    action.preview || action.resultOutput || "Sem conteúdo textual para exibir."
+  );
+  item.details.open = action.state === "failed";
+}
+
+function addToolsetRequest(assistant, streamEvent) {
+  closeAssistantReasoning(assistant);
+  assistant.workActivity.hidden = false;
+  const item = document.createElement("p");
+  item.className = "assistant-toolset-request";
+  item.dataset.timelineKind = "toolset";
+  item.textContent = streamEvent.message;
+  assistant.workActivity.append(item);
 }
 
 async function consumeEventStream(stream, assistant) {
@@ -7630,6 +8074,11 @@ async function consumeEventStream(stream, assistant) {
           streamEvent.selectedModel,
           "primary"
         );
+        renderModelSelection(
+          assistant,
+          streamEvent.selectedModel,
+          assistant.modelSelectionOrigin
+        );
       } else if (
         streamEvent.type.startsWith("cloud.local-fallback")
         && streamEvent.selectedModel
@@ -7638,6 +8087,11 @@ async function consumeEventStream(stream, assistant) {
         state.activeAgentRole = "fallback";
         updateActiveAgentLabel();
         void refreshSelectedModelCapabilities(
+          streamEvent.selectedModel,
+          "fallback"
+        );
+        renderModelSelection(
+          assistant,
           streamEvent.selectedModel,
           "fallback"
         );
@@ -7664,8 +8118,14 @@ async function consumeEventStream(stream, assistant) {
         setPersistenceStatus("Save failed");
       }
 
-      if (streamEvent.type === "response.delta") {
+      if (streamEvent.type === "reasoning.delta") {
+        appendAssistantReasoning(
+          assistant,
+          streamEvent.reasoningDelta ?? ""
+        );
+      } else if (streamEvent.type === "response.delta") {
         answer += streamEvent.delta ?? "";
+        assistant.progress.hidden = true;
         renderAssistantAnswer(
           assistant,
           streamEvent.renderedHtml ?? "",
@@ -7673,6 +8133,7 @@ async function consumeEventStream(stream, assistant) {
         );
       } else if (streamEvent.type === "response.completed") {
         completed = true;
+        closeAssistantReasoning(assistant);
         renderAssistantSources(
           assistant,
           streamEvent.citations
@@ -7693,6 +8154,7 @@ async function consumeEventStream(stream, assistant) {
         assistant.reviewButton.hidden =
           !assistant.executionSession?.reviewAvailable;
       } else if (streamEvent.type === "error") {
+        closeAssistantReasoning(assistant);
         assistant.answer.classList.remove("pending");
         assistant.answer.classList.add("error");
         assistant.answer.textContent ||= `${streamEvent.error.message}\n`
@@ -7715,6 +8177,7 @@ async function consumeEventStream(stream, assistant) {
         );
         addTraceDiagnosticActions(assistant, streamEvent.error);
       } else if (streamEvent.type === "request.cancelled") {
+        closeAssistantReasoning(assistant);
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
         finishActivity(assistant, "Cancelado", false);
@@ -7741,6 +8204,29 @@ async function consumeEventStream(stream, assistant) {
           assistant,
           streamEvent
         );
+      } else if (streamEvent.type === "agent.toolset-requested") {
+        addToolsetRequest(
+          assistant,
+          streamEvent
+        );
+        addActivity(
+          assistant,
+          streamEvent,
+          false
+        );
+      } else if (streamEvent.localAction) {
+        upsertWorkAction(
+          assistant,
+          streamEvent
+        );
+        if (streamEvent.message) {
+          addActivity(
+            assistant,
+            streamEvent,
+            streamEvent.type.includes("failed")
+              || streamEvent.type.includes("warning")
+          );
+        }
       } else if (streamEvent.message) {
         if (streamEvent.type === "target-request-recovered") {
           assistant.recovered = true;
@@ -7887,8 +8373,12 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   row.append(time, icon, message);
   group.body.append(row);
   group.count++;
+  assistant.technicalEventCount++;
   group.countLabel.textContent =
     `${group.count} ${group.count === 1 ? "evento" : "eventos"}`;
+  assistant.summary.textContent =
+    `Detalhes técnicos · ${assistant.technicalEventCount} `
+    + `${assistant.technicalEventCount === 1 ? "evento" : "eventos"}`;
 }
 
 function ensureActivityGroup(assistant, streamEvent, isWarningOrError) {
@@ -7896,15 +8386,14 @@ function ensureActivityGroup(assistant, streamEvent, isWarningOrError) {
     streamEvent
   );
 
-  if (
-    assistant.lastActivityGroup
-    && assistant.lastActivityGroupKey === definition.key
-  ) {
+  const existing = assistant.activityGroups.get(definition.key);
+
+  if (existing) {
     if (isWarningOrError) {
-      assistant.lastActivityGroup.details.classList.add("warning");
+      existing.details.classList.add("warning");
     }
 
-    return assistant.lastActivityGroup;
+    return existing;
   }
 
   const details = document.createElement("details");
@@ -7940,8 +8429,7 @@ function ensureActivityGroup(assistant, streamEvent, isWarningOrError) {
     countLabel,
     count: 0
   };
-  assistant.lastActivityGroup = group;
-  assistant.lastActivityGroupKey = definition.key;
+  assistant.activityGroups.set(definition.key, group);
   return group;
 }
 
@@ -8063,6 +8551,16 @@ function updateExecutionSession(assistant, session) {
 
   assistant.executionSession = session;
   state.latestExecutionSessionId = session.id;
+  if (session.plan?.objective) {
+    assistant.workActivity.hidden = false;
+    ensureWorkNarrative(
+      assistant,
+      session.state === "running"
+        ? `Estou trabalhando em: ${session.plan.objective}`
+        : `Objetivo: ${session.plan.objective}`,
+      true
+    );
+  }
   assistant.sessionHeader.hidden = false;
   assistant.sessionHeader.replaceChildren();
   const stateLabel = document.createElement("strong");
@@ -8094,7 +8592,7 @@ function updateExecutionSession(assistant, session) {
   );
   renderExecutionPlan(
     assistant,
-    session.plan
+    session
   );
 
   if (session.reviewAvailable && session.state !== "running") {
@@ -8102,15 +8600,17 @@ function updateExecutionSession(assistant, session) {
   }
 }
 
-function renderExecutionPlan(assistant, plan) {
+function renderExecutionPlan(assistant, session) {
+  const plan = session?.plan;
   if (!plan) {
     assistant.planPanel.hidden = true;
+    assistant.planBody.replaceChildren();
     return;
   }
 
   assistant.planPanel.hidden = false;
   assistant.planSummary.textContent =
-    `${plan.completedStepCount}/${plan.steps.length} · ${plan.objective}`;
+    `Plano · ${plan.objective}`;
   assistant.planBody.replaceChildren();
   const list = document.createElement("ol");
 
@@ -8131,14 +8631,28 @@ function renderExecutionPlan(assistant, plan) {
     title.textContent = step.title;
     const status = document.createElement("small");
     status.textContent = step.status;
+    if (step.dependencies?.length) {
+      status.title = `Depende de: ${step.dependencies.join(", ")}`;
+    }
     item.append(marker, title, status);
     list.append(item);
   }
 
-  assistant.planBody.append(list);
+  const activeIndex = plan.steps.findIndex(
+    step => step.id === plan.currentStepId
+  );
+  const displayedStep = activeIndex >= 0
+    ? activeIndex + 1
+    : Math.min(plan.completedStepCount + 1, plan.steps.length);
+  const footer = document.createElement("p");
+  footer.className = "execution-plan-progress";
+  footer.textContent = plan.completedStepCount === plan.steps.length
+    ? `Etapas ${plan.steps.length}/${plan.steps.length} · ${session.changedFileCount} arquivos alterados`
+    : `Etapa ${displayedStep}/${plan.steps.length} · ${session.changedFileCount} arquivos alterados`;
+  assistant.planBody.append(list, footer);
 }
 
-async function openChangeReview(executionSessionId) {
+async function openChangeReview(executionSessionId, focusRelativePath = null) {
   if (!executionSessionId) {
     return;
   }
@@ -8155,7 +8669,7 @@ async function openChangeReview(executionSessionId) {
       `/api/execution-sessions/${encodeURIComponent(executionSessionId)}/review`
     );
     state.activeReview = review;
-    renderChangeReview(review);
+    renderChangeReview(review, focusRelativePath);
     await loadGitDelivery(review);
   } catch (error) {
     elements.changeReviewBody.textContent = error.message;
@@ -8203,7 +8717,7 @@ function closeChangeReview() {
   elements.changeReviewDialog.close();
 }
 
-function renderChangeReview(review) {
+function renderChangeReview(review, focusRelativePath = null) {
   elements.changeReviewBody.replaceChildren();
   const summary = document.createElement("section");
   summary.className = "change-review-summary";
@@ -8263,10 +8777,18 @@ function renderChangeReview(review) {
     elements.changeReviewBody.append(plan);
   }
 
+  let focusedFile = null;
+
   for (const file of review.files) {
     const section = document.createElement("details");
     section.className = "change-file-review";
-    section.open = true;
+    section.dataset.relativePath = file.relativePath;
+    section.open = focusRelativePath
+      ? file.relativePath === focusRelativePath
+      : true;
+    if (section.open && focusRelativePath) {
+      focusedFile = section;
+    }
     const title = document.createElement("summary");
     title.textContent =
       `${file.operation === "created" ? "Criado" : "Modificado"} · ${file.relativePath}`;
@@ -8302,6 +8824,14 @@ function renderChangeReview(review) {
     }
 
     elements.changeReviewBody.append(section);
+  }
+
+  if (focusedFile) {
+    requestAnimationFrame(
+      () => focusedFile.scrollIntoView({
+        block: "start"
+      })
+    );
   }
 
   if (review.processes.length > 0) {
@@ -8954,6 +9484,7 @@ async function validateChanges() {
 
 function addApprovalActivity(assistant, streamEvent) {
   const action = streamEvent.localAction;
+  closeAssistantReasoning(assistant);
   const row = document.createElement("details");
   row.className = "activity-row action-approval";
   row.open = true;
@@ -9008,8 +9539,12 @@ function addApprovalActivity(assistant, streamEvent) {
   controls.append(reject, approve);
   content.append(controls);
   row.append(summary, content);
-  assistant.activityList.append(row);
-  assistant.details.open = true;
+  assistant.workActivity.hidden = false;
+  ensureWorkNarrative(
+    assistant,
+    "Preciso da sua decisão para continuar esta alteração."
+  );
+  assistant.workActivity.append(row);
 
   if (command.input) {
     row.dataset.editableText = command.input.value;
@@ -9116,7 +9651,7 @@ function createTerminalCommand(action, title) {
 
 function updateApprovalActivity(assistant, streamEvent) {
   const action = streamEvent.localAction;
-  const approval = assistant.activityList.querySelector(
+  const approval = assistant.container.querySelector(
     `.action-approval[data-action-id="${CSS.escape(action.actionId)}"]`
   );
 
@@ -9279,6 +9814,7 @@ async function decideAction(
 
 function addRecoveryDecisionActivity(assistant, streamEvent) {
   const recovery = streamEvent.recoveryDecision;
+  closeAssistantReasoning(assistant);
   const row = document.createElement("details");
   row.className = "activity-row action-approval recovery-decision";
   row.open = true;
@@ -9354,8 +9890,12 @@ function addRecoveryDecisionActivity(assistant, streamEvent) {
   controls.append(...optionRows);
   content.append(message, reason, controls);
   row.append(summary, content);
-  assistant.activityList.append(row);
-  assistant.details.open = true;
+  assistant.workActivity.hidden = false;
+  ensureWorkNarrative(
+    assistant,
+    "A recuperação automática terminou; escolha como a tarefa deve continuar."
+  );
+  assistant.workActivity.append(row);
 }
 
 async function decideRecovery(
@@ -9402,7 +9942,9 @@ async function decideRecovery(
 
 function finishActivity(assistant, summary, keepOpen) {
   cancelAnimationFrame(assistant.clockFrame);
+  assistant.progress.hidden = true;
   assistant.summary.textContent = summary;
+  assistant.details.dataset.terminal = "true";
   assistant.details.open = keepOpen;
 }
 
@@ -9667,6 +10209,9 @@ function setStreamingState(isStreaming) {
     : state.editingTurn
       ? "Enviar edição"
       : "Enviar";
+  elements.sendButton.querySelector(".send-icon").textContent = isStreaming
+    ? "\u25a0"
+    : "\u2191";
   elements.sendButton.setAttribute(
     "aria-label",
     isStreaming
@@ -9675,9 +10220,11 @@ function setStreamingState(isStreaming) {
         ? "Enviar mensagem editada"
         : "Enviar mensagem"
   );
+  elements.sendButton.title = elements.sendButton.getAttribute("aria-label");
   elements.sendButton.classList.toggle("cancel", isStreaming);
   elements.attachImage.disabled = isStreaming;
   elements.imageInput.disabled = isStreaming;
+  elements.compactContext.disabled = isStreaming;
   elements.cancelMessageEdit.hidden = isStreaming || !state.editingTurn;
   elements.messages.querySelectorAll(".edit-message").forEach(
     button => {
@@ -9689,75 +10236,11 @@ function setStreamingState(isStreaming) {
   renderWebControl();
 }
 
-function renderEstimatedContextUsage() {
+function renderPendingContextUsage() {
   if (!state.settings || state.requestController) {
     return;
   }
-
-  const visible = [
-    ...state.history,
-    ...(elements.messageInput.value.trim()
-      ? [
-        {
-          role: "user",
-          content: elements.messageInput.value
-        }
-      ]
-      : [])
-  ];
-  const currentUser = Math.max(
-    0,
-    Math.ceil(elements.messageInput.value.length / 4) + (
-      elements.messageInput.value ? 4 : 0
-    )
-  );
-  const system = 128;
-  const historyTokens = visible.reduce(
-    (total, message) =>
-      total + Math.max(1, Math.ceil(message.content.length / 4) + 4),
-    0
-  );
-  const applicationLimit = state.settings.context.defaultContextTokens;
-  const configuredProviderLimit =
-    state.settings.context.providerContextTokens;
-  const effective = Math.min(
-    applicationLimit,
-    configuredProviderLimit
-  );
-  const reserved = state.settings.context.reservedResponseTokens;
-  const usable = Math.max(
-    1,
-    effective - reserved
-  );
-  const inputTokens = system + historyTokens;
-  const percentage = inputTokens * 100 / usable;
-  state.contextUsage = {
-    visibleMessages: visible.length,
-    includedMessages: Math.min(
-      visible.length,
-      state.settings.context.maxConversationMessages
-    ),
-    omittedMessages: Math.max(
-      0,
-      visible.length - state.settings.context.maxConversationMessages
-    ),
-    systemInstructionTokens: system,
-    currentUserMessageTokens: currentUser,
-    inputTokens,
-    accuracy: "estimated",
-    providerMaximumTokens: state.modelCapability?.capabilities?.contextTokens ?? null,
-    configuredProviderLimit,
-    applicationLimit,
-    reservedResponseTokens: reserved,
-    trimmed: visible.length > state.settings.context.maxConversationMessages,
-    warningThreshold: percentage >= 95
-      ? 95
-      : percentage >= 85
-        ? 85
-        : percentage >= 70
-          ? 70
-          : 0
-  };
+  state.contextUsage = null;
   renderContextUsage();
 }
 
@@ -9765,17 +10248,20 @@ function renderContextUsage() {
   const usage = state.contextUsage;
 
   if (!usage) {
-    elements.contextUsageSummary.textContent = "Contexto estimado";
+    elements.contextUsageSummary.textContent = "Contexto será calculado ao enviar";
+    elements.contextUsage.dataset.accuracy = "pending";
+    elements.contextUsage.dataset.warning = "";
+    elements.contextUsageWarning.hidden = true;
     elements.contextUsageDetails.replaceChildren();
+    elements.compactContext.hidden = true;
     return;
   }
 
-  const providerLimit = usage.providerMaximumTokens
-    ?? usage.configuredProviderLimit;
-  const effectiveLimit = Math.min(
-    usage.applicationLimit,
-    providerLimit
-  );
+  const effectiveLimit = usage.effectiveLimitTokens
+    || Math.min(
+      usage.applicationLimit,
+      usage.providerMaximumTokens ?? usage.configuredProviderLimit
+    );
   elements.contextUsageSummary.textContent =
     `Contexto ${formatCompactTokens(usage.inputTokens)} / `
     + `${formatCompactTokens(effectiveLimit)} · `
@@ -9790,20 +10276,63 @@ function renderContextUsage() {
       ? `Atenção: contexto acima de ${usage.warningThreshold}% da capacidade útil.`
       : null,
     usage.trimmed
-      ? "Mensagens antigas foram omitidas do contexto enviado."
+      ? "Blocos elegíveis foram omitidos somente do payload enviado."
       : null
   ].filter(Boolean).join(" ");
   elements.contextUsageDetails.replaceChildren(
+    contextDetail("Inferência do especialista", usage.inferenceSequence || 1),
     contextDetail("Mensagens visíveis", usage.visibleMessages),
     contextDetail("Mensagens incluídas", usage.includedMessages),
     contextDetail("Mensagens omitidas", usage.omittedMessages),
+    contextDetail(
+      "Conversa e mensagem atual",
+      `${formatInteger(usage.conversationTokens)} tokens estimados`
+    ),
     contextDetail(
       "Sistema e instruções",
       `${formatInteger(usage.systemInstructionTokens)} tokens estimados`
     ),
     contextDetail(
-      "Mensagem atual",
-      `${formatInteger(usage.currentUserMessageTokens)} tokens estimados`
+      "Contexto do projeto",
+      `${formatInteger(usage.projectContextTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Toolset discovery",
+      `${formatInteger(usage.toolDiscoveryTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Schemas concedidos",
+      `${formatInteger(usage.grantedToolSchemaTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Estado/resultados do Host",
+      `${formatInteger(usage.hostStateTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Overhead estrutural",
+      `${formatInteger(usage.structuralOverheadTokens)} tokens estimados`
+    ),
+    contextDetail(
+      "Entrada total",
+      `${formatInteger(usage.inputTokens)} tokens · ${usage.accuracy === "exact" ? "reportado" : "estimado"}`
+    ),
+    contextDetail(
+      "Reserva de saída",
+      `${formatInteger(usage.reservedResponseTokens)} tokens`
+    ),
+    contextDetail(
+      "Contexto requerido",
+      `${formatInteger(usage.requiredContextTokens)} tokens`
+    ),
+    contextDetail(
+      "Limite efetivo",
+      `${formatInteger(effectiveLimit)} tokens`
+    ),
+    contextDetail(
+      "Origem da contagem",
+      usage.accuracy === "exact"
+        ? "usage reportado pelo provedor"
+        : usage.estimator
     ),
     contextDetail(
       "Máximo do provedor",
@@ -9819,11 +10348,38 @@ function renderContextUsage() {
       "Limite da aplicação",
       `${formatInteger(usage.applicationLimit)} tokens`
     ),
-    contextDetail(
-      "Reserva de resposta",
-      `${formatInteger(usage.reservedResponseTokens)} tokens`
-    )
+    contextDetail("Blocos omitidos", usage.omittedBlocks || 0)
   );
+  elements.compactContext.hidden = !usage.compactionEligible;
+  elements.compactContext.disabled = Boolean(state.requestController);
+  elements.compactContext.textContent = state.compactContextNextRequest
+    ? "Compactação preparada"
+    : "Compactar contexto";
+}
+
+async function requestManualContextCompaction() {
+  const usage = state.contextUsage;
+  if (!usage?.compactionEligible || state.requestController) {
+    return;
+  }
+  const before = usage.beforeCompactionTokens ?? usage.inputTokens;
+  const after = usage.afterCompactionTokens ?? usage.inputTokens;
+  const confirmed = await showAppConfirm(
+    "A compactação não apagará mensagens salvas nem alterará o chat visível. "
+      + "Ela omitirá somente blocos elegíveis dos payloads das próximas inferências.\n\n"
+      + `Estimativa atual: ${formatInteger(before)} tokens\n`
+      + `Estimativa compactada: ${formatInteger(after)} tokens\n`
+      + `Blocos elegíveis/omitidos: ${usage.omittedBlocks || 0}`,
+    {
+      title: "Compactar contexto enviado?",
+      confirmLabel: "Compactar próxima solicitação"
+    }
+  );
+  if (!confirmed) {
+    return;
+  }
+  state.compactContextNextRequest = true;
+  renderContextUsage();
 }
 
 function contextDetail(label, value) {
@@ -9892,7 +10448,14 @@ function updateActiveAgentLabel() {
     selectedModel && selectedModel !== "auto"
       ? selectedModel
       : "Auto (Roteador)";
+  elements.activeAgentLabel.title = elements.activeAgentLabel.textContent;
   renderCloudUsage();
+}
+
+function updateComposerModelTitle() {
+  elements.modelSelector.title =
+    elements.modelSelector.selectedOptions[0]?.textContent?.trim()
+    ?? elements.modelSelector.value;
 }
 
 function elapsedSince(assistant) {
