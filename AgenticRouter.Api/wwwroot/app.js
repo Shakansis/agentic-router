@@ -8139,7 +8139,7 @@ function isVisibleWorkAction(action) {
     "write_file",
     "replace_text",
     "apply_patch",
-    "delete_files",
+    "delete_paths",
     "create_directory"
   ]).has(action?.tool);
 }
@@ -8151,7 +8151,7 @@ function actionDisplayLabel(tool) {
     write_file: "Escrever",
     replace_text: "Editar",
     apply_patch: "Aplicar patch",
-    delete_files: "Excluir",
+    delete_paths: "Excluir",
     create_directory: "Criar pasta"
   }[tool] ?? tool;
 }
@@ -9510,7 +9510,14 @@ async function handleDeliveryPanelClick(event) {
     await showDeliveryDiff();
     return;
   }
-  showDeliveryApproval(operation);
+  if (state.approvalPolicy === "ask") {
+    showDeliveryApproval(operation);
+    return;
+  }
+  state.pendingDeliveryAction = prepareDeliveryAction(operation);
+  if (state.pendingDeliveryAction) {
+    await executePendingDeliveryAction(false);
+  }
 }
 
 async function saveDeliverySelection() {
@@ -9600,7 +9607,7 @@ async function showDeliveryDiff() {
   }
 }
 
-function showDeliveryApproval(operation) {
+function prepareDeliveryAction(operation) {
   const delivery = state.activeDelivery;
   const panel = elements.changeReviewBody.querySelector(".git-delivery-panel");
   const actionId = {
@@ -9613,10 +9620,10 @@ function showDeliveryApproval(operation) {
   }[operation];
 
   if (!actionId) {
-    return;
+    return null;
   }
 
-  state.pendingDeliveryAction = {
+  return {
     operation,
     actionId,
     commitWithoutValidation: panel.querySelector(
@@ -9627,6 +9634,16 @@ function showDeliveryApproval(operation) {
       ".delivery-tag-annotation"
     ).value.trim()
   };
+}
+
+function showDeliveryApproval(operation) {
+  const panel = elements.changeReviewBody.querySelector(".git-delivery-panel");
+  state.pendingDeliveryAction = prepareDeliveryAction(operation);
+  if (!state.pendingDeliveryAction) {
+    return;
+  }
+  const actionId = state.pendingDeliveryAction.actionId;
+  const delivery = state.activeDelivery;
   const host = panel.querySelector(".git-delivery-approval-host");
   host.replaceChildren();
   const card = document.createElement("section");
@@ -9675,6 +9692,10 @@ function showDeliveryApproval(operation) {
 }
 
 async function approveDeliveryAction() {
+  await executePendingDeliveryAction(true);
+}
+
+async function executePendingDeliveryAction(confirmed) {
   const pending = state.pendingDeliveryAction;
   if (!pending) {
     return;
@@ -9690,7 +9711,7 @@ async function approveDeliveryAction() {
   let payload = {
     browserSessionId: state.browserSessionId,
     actionId: pending.actionId,
-    confirmed: true
+    confirmed
   };
   if (pending.operation === "commit") {
     payload.commitWithoutValidation = pending.commitWithoutValidation;

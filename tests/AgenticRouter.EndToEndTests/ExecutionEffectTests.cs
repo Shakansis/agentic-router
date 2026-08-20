@@ -662,7 +662,7 @@ public sealed class ExecutionEffectTests
         0
       )
     );
-    var deletion = Action("delete-1", "delete_files");
+    var deletion = Action("delete-1", "delete_paths");
 
     Assert.IsTrue(
       session.RecordPlanActionStarted(

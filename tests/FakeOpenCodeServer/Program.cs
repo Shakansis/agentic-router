@@ -20,7 +20,7 @@ builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
 var app = builder.Build();
 var subscribers = new ConcurrentDictionary<Guid, Channel<string>>();
 var prompts = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
-var permissions = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+var permissions = new ConcurrentDictionary<string, PendingPermission>(StringComparer.Ordinal);
 var sessionNumber = 0;
 var password = Environment.GetEnvironmentVariable("OPENCODE_SERVER_PASSWORD") ?? string.Empty;
 var runtime = Directory.GetParent(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? string.Empty)?.FullName;
@@ -144,13 +144,27 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
   if (text.Contains("permission opencode", StringComparison.Ordinal))
   {
     const string permissionId = "per_fake_opencode";
-    permissions[permissionId] = sessionId;
+    var deleteRequested = text.Contains(
+      "delete permission opencode",
+      StringComparison.Ordinal
+    );
+    var directory = context.Request.Query["directory"].ToString();
+    permissions[permissionId] = new PendingPermission(
+      sessionId,
+      deleteRequested
+        ? Path.Combine(directory, "codex-created.txt")
+        : null
+    );
     await EmitAsync("permission.asked", new
     {
       id = permissionId,
       sessionID = sessionId,
-      permission = "edit",
-      resources = new[] { "README.md" }
+      permission = deleteRequested ? "delete" : "edit",
+      resources = deleteRequested
+        ? new[] { "codex-created.txt" }
+        : text.Contains("outside permission opencode", StringComparison.Ordinal)
+          ? new[] { "../outside.txt" }
+          : new[] { "README.md" }
     });
     return;
   }
@@ -178,10 +192,14 @@ app.MapGet("/session/{sessionId}/diff", (string sessionId) =>
 app.MapPost("/permission/{requestId}/reply", async (string requestId, HttpContext context) =>
 {
   using var body = await JsonDocument.ParseAsync(context.Request.Body);
-  if (permissions.TryRemove(requestId, out var sessionId)
+  if (permissions.TryRemove(requestId, out var pending)
     && string.Equals(body.RootElement.GetProperty("reply").GetString(), "once", StringComparison.Ordinal))
   {
-    await CompleteAsync(sessionId);
+    if (pending.DeletePath is not null)
+    {
+      File.Delete(pending.DeletePath);
+    }
+    await CompleteAsync(pending.SessionId);
   }
   return Results.Json(true);
 });
@@ -294,3 +312,8 @@ async Task EmitAsync(string type, object properties)
     await subscriber.Writer.WriteAsync(payload);
   }
 }
+
+internal sealed record PendingPermission(
+  string SessionId,
+  string? DeletePath
+);

@@ -1,3 +1,4 @@
+using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Devices;
@@ -192,6 +193,10 @@ builder.Services.AddScoped<IExpertExecutionGuidanceService, ExpertExecutionGuida
 builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
 builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
+builder.Services.AddSingleton<NativeHarnessAdapter>();
+builder.Services.AddSingleton<IAgentHarness>(
+  services => services.GetRequiredService<NativeHarnessAdapter>()
+);
 builder.Services.AddSingleton(
   new CodexHarnessOptions(
     builder.Configuration["AgenticRouter:Codex:ExecutablePath"],
@@ -263,6 +268,26 @@ builder.Services.AddSingleton<IAgentHarness>(
   services => services.GetRequiredService<QwenCodeHarnessAdapter>()
 );
 builder.Services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
+var configuredBenchmarkDirectory = builder.Configuration[
+  "AgenticRouter:Benchmarking:RootDirectory"
+];
+var benchmarkDirectory = string.IsNullOrWhiteSpace(configuredBenchmarkDirectory)
+  ? Path.Combine(
+    Path.GetTempPath(),
+    "agentic-router",
+    "benchmark-runs"
+  )
+  : Path.GetFullPath(configuredBenchmarkDirectory);
+builder.Services.AddSingleton(
+  new BenchmarkWorkspaceOptions(
+    benchmarkDirectory,
+    builder.Environment.ContentRootPath
+  )
+);
+builder.Services.AddSingleton<IBenchmarkWorkspaceFactory, BenchmarkWorkspaceFactory>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemCreateBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestRegistry, BenchmarkTestRegistry>();
+builder.Services.AddScoped<IBenchmarkEngine, BenchmarkEngine>();
 builder.Services.AddScoped<IModelDiagnosticService, ModelDiagnosticService>();
 builder.Services.AddSingleton<IModelOrganizationService>(
   services => new ModelOrganizationService(

@@ -367,7 +367,7 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
           change.RelativePath
         );
 
-        if (change.Operation == "deleted")
+        if (change.Operation is "deleted" or "deleted-directory")
         {
           if (File.Exists(path) || Directory.Exists(path))
           {
@@ -435,6 +435,7 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
     var warnings = new List<string>();
     var stagedCreatedFiles = new List<(string Path, string TemporaryPath)>();
     var restoredModifiedFiles = new List<ExecutionFileChange>();
+    var restoredDeletedDirectories = new List<string>();
 
     try
     {
@@ -460,8 +461,19 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
         );
       }
 
+      foreach (var change in changes
+        .Where(item => item.Operation == "deleted-directory")
+        .OrderBy(item => PathDepth(item.RelativePath)))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = ResolveSessionPath(session, change.RelativePath);
+        Directory.CreateDirectory(path);
+        restoredDeletedDirectories.Add(path);
+        restored.Add(change.RelativePath);
+      }
+
       foreach (var change in changes.Where(
-        item => item.ExistedBefore
+        item => item.ExistedBefore && item.Operation != "deleted-directory"
       ))
       {
         cancellationToken.ThrowIfCancellationRequested();
@@ -638,6 +650,24 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
         }
       }
 
+      foreach (var directory in restoredDeletedDirectories.OrderByDescending(PathDepth))
+      {
+        try
+        {
+          if (Directory.Exists(directory)
+            && !Directory.EnumerateFileSystemEntries(directory).Any())
+          {
+            Directory.Delete(directory);
+          }
+        }
+        catch
+        {
+          warnings.Add(
+            $"{Path.GetFileName(directory)}: recovery after the failed undo could not remove a restored directory."
+          );
+        }
+      }
+
       session.CancelUndo(
         exception.Message
       );
@@ -653,6 +683,11 @@ public sealed class ExecutionSessionStore : IExecutionSessionStore
         warnings
       );
     }
+  }
+
+  private static int PathDepth(string path)
+  {
+    return path.Count(character => character is '/' or '\\');
   }
 
   private static UndoExecutionResponse Failure(
@@ -1101,7 +1136,7 @@ public sealed class ExecutionSession
         var latestChanges = LatestVerifiedChangedFilesUnsafe();
         return latestChanges.Length == 0
           ? _files.Any(
-            file => file.Verified && file.Operation == "deleted"
+            file => file.Verified && file.Operation.StartsWith("deleted", StringComparison.Ordinal)
           )
           : UnreviewedChangedFilesUnsafe(latestChanges).Length == 0;
       }
@@ -2262,7 +2297,9 @@ public sealed class ExecutionSession
     {
       ToolEffects.FileCreated => _files.Any(file => file.Verified && file.Operation == "created"),
       ToolEffects.FileChanged => _files.Any(file => file.Verified && file.Operation == "modified"),
-      ToolEffects.FileDeleted => _files.Any(file => file.Verified && file.Operation == "deleted"),
+      ToolEffects.FileDeleted => _files.Any(
+        file => file.Verified && file.Operation.StartsWith("deleted", StringComparison.Ordinal)
+      ),
       ToolEffects.DirectoryCreated => _createdDirectories.Count > 0,
       ToolEffects.Validated => _validation?.State is "passed" or "passed-with-warnings",
       _ => EffectCount(effect) > 0
@@ -2402,7 +2439,7 @@ public sealed class ExecutionSession
     ).Select(
       group => group.Last()
     ).Where(
-      file => file.Operation != "deleted"
+      file => !file.Operation.StartsWith("deleted", StringComparison.Ordinal)
     ).ToArray();
   }
 

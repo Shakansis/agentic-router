@@ -15,27 +15,6 @@ public interface IHarnessRegistry
 
 public sealed class HarnessRegistry : IHarnessRegistry
 {
-  private static readonly HarnessDefinition NativeDefinition = new(
-    HarnessIds.Native,
-    "Native",
-    false,
-    "Agentic Router's built-in specialist and Host tool loop.",
-    new HarnessCapabilities(
-      SupportsStreaming: true,
-      SupportsThinking: true,
-      SupportsResume: false,
-      SupportsCancel: true,
-      SupportsApprovals: true,
-      SupportsToolEvents: true,
-      SupportsStructuredEdits: true,
-      SupportsStaleProtection: true,
-      SupportsSubagents: false,
-      SupportsSandbox: false,
-      SupportsSessionDiff: true,
-      SupportsNativePermissions: false
-    )
-  );
-
   private readonly IReadOnlyDictionary<string, HarnessDefinition> _definitions;
   private readonly IReadOnlyDictionary<string, IAgentHarness> _adapters;
 
@@ -46,10 +25,7 @@ public sealed class HarnessRegistry : IHarnessRegistry
     );
     var definitions = new Dictionary<string, HarnessDefinition>(
       StringComparer.OrdinalIgnoreCase
-    )
-    {
-      [NativeDefinition.Id] = NativeDefinition
-    };
+    );
 
     foreach (var adapter in adapters)
     {
@@ -100,17 +76,7 @@ public sealed class HarnessRegistry : IHarnessRegistry
     var statuses = new List<HarnessStatus>(Definitions.Count);
     foreach (var definition in Definitions)
     {
-      if (!_adapters.TryGetValue(definition.Id, out var adapter))
-      {
-        statuses.Add(
-          new HarnessStatus(
-            definition,
-            HarnessAvailability.Ready("built-in")
-          )
-        );
-        continue;
-      }
-
+      var adapter = _adapters[definition.Id];
       HarnessAvailability availability;
       try
       {

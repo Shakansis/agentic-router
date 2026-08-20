@@ -1478,7 +1478,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         && message.Content.Contains("Status: completed", StringComparison.Ordinal)
     );
     var completedStructuredDeletion = activeMessages.Any(
-      message => message.Content.Contains("Tool: delete_files", StringComparison.Ordinal)
+      message => message.Content.Contains("Tool: delete_paths", StringComparison.Ordinal)
         && message.Content.Contains("Status: completed", StringComparison.Ordinal)
     );
     var completedStructuredValidation = activeMessages.Any(
@@ -1563,14 +1563,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
       return new
       {
-        tool = "delete_files",
+        tool = "delete_paths",
         arguments = new
         {
           paths = new[]
           {
             "obsolete-a.txt",
             "obsolete-b.txt"
-          }
+          },
+          recursive = false
         },
         explanation = "Delete the exact inspected files after Host validation."
       };
@@ -1709,6 +1710,24 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             explanation = "Use a safe path inside the trusted workspace."
           }
         )
+      : current.Contains("delete directory recursive", StringComparison.OrdinalIgnoreCase)
+      && !completedStructuredDeletion
+      ? CreateStructuredGuidance(
+        current,
+        new
+        {
+          tool = "delete_paths",
+          arguments = new
+          {
+            paths = new[]
+            {
+              "obsolete-tree"
+            },
+            recursive = true
+          },
+          explanation = "Delete the explicit directory recursively through the Host-owned path tool."
+        }
+      )
       : current.Contains("delete files", StringComparison.OrdinalIgnoreCase)
       && !completedStructuredDeletion
       ? CreateStructuredGuidance(current, NextDeleteProposal())
@@ -2502,6 +2521,29 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     else if (
       !hasResult
       && current.Contains(
+        "delete directory recursive",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "delete_paths",
+        arguments = new
+        {
+          paths = new[]
+          {
+            "obsolete-tree"
+          },
+          recursive = true,
+          stepId = "step-1"
+        },
+        explanation = "Delete the explicit directory recursively through the Host-owned path tool."
+      };
+    }
+    else if (
+      !hasResult
+      && current.Contains(
         "delete files direct",
         StringComparison.OrdinalIgnoreCase
       )
@@ -2509,14 +2551,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       plan = new
       {
-        tool = "delete_files",
+        tool = "delete_paths",
         arguments = new
         {
           paths = new[]
           {
             "obsolete-a.txt",
             "obsolete-b.txt"
-          }
+          },
+          recursive = false
         },
         explanation = "Submit the explicit files directly for Host validation and approval."
       };
@@ -2727,14 +2770,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       plan = new
       {
-        tool = "delete_files",
+        tool = "delete_paths",
         arguments = new
         {
           paths = new[]
           {
             "obsolete-a.txt",
             "obsolete-b.txt"
-          }
+          },
+          recursive = false
         },
         explanation = "Delete the exact inspected files after Host validation."
       };

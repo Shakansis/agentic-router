@@ -55,6 +55,7 @@ public sealed class HarnessWorkspaceObserver
 
   public async Task<IReadOnlyList<ExecutionFileChange>> ObserveAsync(
     IReadOnlySet<string> approvedDeletionPaths,
+    bool policyAuthorizesDeletion,
     CancellationToken cancellationToken
   )
   {
@@ -93,13 +94,14 @@ public sealed class HarnessWorkspaceObserver
       if (
         after is null
         && before is not null
+        && !policyAuthorizesDeletion
         && !approvedDeletionPaths.Contains(relativePath)
       )
       {
         await RestoreDeletedFileAsync(relativePath, before, cancellationToken);
         throw new HarnessException(
           "codex-delete-approval-required",
-          "Codex attempted a deletion that requires explicit Host approval.",
+          "The harness attempted a deletion that requires Host approval under the selected policy.",
           $"The unapproved deletion of '{relativePath}' was restored from the bounded Host snapshot.",
           true
         );
@@ -150,7 +152,7 @@ public sealed class HarnessWorkspaceObserver
       var tool = change.Operation switch
       {
         "created" => "create_file",
-        "deleted" => "delete_files",
+        "deleted" => "delete_paths",
         _ => "write_file"
       };
       session.RecordAction(

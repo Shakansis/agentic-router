@@ -174,10 +174,10 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
-    if (proposal.Tool == "delete_files")
+    if (proposal.Tool == "delete_paths")
     {
       return AttachAndValidatePlanBinding(
-        await ValidateDeleteFilesAsync(
+        await ValidateDeletePathsAsync(
           proposal,
           executionSession,
           cancellationToken
@@ -301,7 +301,7 @@ public sealed class LocalActionService : ILocalActionService
           action,
           cancellationToken
         ),
-        "delete_files" => await DeleteFilesAsync(
+        "delete_paths" => await DeletePathsAsync(
           action,
           executionSession,
           cancellationToken
@@ -1119,7 +1119,7 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
-  private async Task<ValidatedLocalAction> ValidateDeleteFilesAsync(
+  private async Task<ValidatedLocalAction> ValidateDeletePathsAsync(
     LocalActionProposal proposal,
     ExecutionSession? executionSession,
     CancellationToken cancellationToken
@@ -1129,7 +1129,7 @@ public sealed class LocalActionService : ILocalActionService
     {
       throw new LocalActionException(
         "action-validation",
-        "File deletion requires an active execution session."
+        "Path deletion requires an active execution session."
       );
     }
 
@@ -1143,11 +1143,13 @@ public sealed class LocalActionService : ILocalActionService
     {
       throw new LocalActionException(
         "action-validation",
-        "delete_files requires between 1 and 50 explicit unique file paths."
+        "delete_paths requires between 1 and 50 explicit unique paths."
       );
     }
 
-    var prepared = new List<PendingFileChange>(requestedPaths.Length);
+    var recursive = GetOptionalBoolean(proposal.Arguments, "recursive");
+    var prepared = new List<PendingFileChange>();
+    var explicitTargets = new List<(string FullPath, string RelativePath, bool Directory)>();
     var totalOriginalBytes = 0L;
 
     foreach (var requestedPath in requestedPaths)
@@ -1155,71 +1157,97 @@ public sealed class LocalActionService : ILocalActionService
       var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
       var relative = await GetRelativePathAsync(target, cancellationToken);
 
-      if (!File.Exists(target))
+      if (relative == ".")
       {
         throw new LocalActionException(
           "action-validation",
-          $"{relative}: delete_files accepts existing files only; directories and missing paths are rejected."
+          "delete_paths cannot delete the trusted workspace root."
         );
       }
 
-      if (IsProtectedInstructionFile(relative)
-        && !executionSession.Objective.Contains(relative, StringComparison.OrdinalIgnoreCase)
-        && !executionSession.Objective.Contains(Path.GetFileName(relative), StringComparison.OrdinalIgnoreCase))
+      var isFile = File.Exists(target);
+      var isDirectory = Directory.Exists(target);
+      if (!isFile && !isDirectory)
       {
         throw new LocalActionException(
           "action-validation",
-          $"{relative}: protected repository instructions can be deleted only when that exact file is named in the user objective."
+          $"{relative}: delete_paths accepts existing files or directories only."
         );
       }
 
-      var info = new FileInfo(target);
-      var maximumRecoverableBytes = Math.Min(
-        FileWriteLimit,
-        executionSession.Limits.MaxRollbackBytesPerFile
-      );
-      if (info.Length > maximumRecoverableBytes)
+      if (explicitTargets.Any(existing => PathsOverlap(existing.FullPath, target)))
       {
         throw new LocalActionException(
           "action-validation",
-          $"{relative}: bounded recoverable deletion supports files up to {maximumRecoverableBytes} bytes."
+          $"{relative}: delete_paths does not accept overlapping parent and child targets."
+        );
+      }
+      explicitTargets.Add((target, relative, isDirectory));
+
+      if (isFile)
+      {
+        var pending = await PrepareDeletedFileAsync(
+          target,
+          relative,
+          executionSession,
+          cancellationToken
+        );
+        prepared.Add(pending);
+        totalOriginalBytes = checked(totalOriginalBytes + pending.OriginalBytes);
+        continue;
+      }
+
+      var entries = EnumerateDeletionTree(target, relative);
+      if (!recursive && entries.Count > 0)
+      {
+        throw new LocalActionException(
+          "action-validation",
+          $"{relative}: recursive must be true to delete a non-empty directory."
         );
       }
 
-      var currentHash = await HashFileAsync(target, cancellationToken);
-      var originalBytes = await File.ReadAllBytesAsync(target, cancellationToken);
-      string? originalContent;
-      string? originalBinaryBase64;
-
-      try
-      {
-        originalContent = new UTF8Encoding(
-          false,
-          true
-        ).GetString(originalBytes);
-        originalBinaryBase64 = null;
-      }
-      catch (DecoderFallbackException)
-      {
-        originalContent = null;
-        originalBinaryBase64 = Convert.ToBase64String(originalBytes);
-      }
-      totalOriginalBytes = checked(totalOriginalBytes + info.Length);
       prepared.Add(
         new PendingFileChange(
           relative,
-          "deleted",
+          "deleted-directory",
           true,
-          currentHash,
-          originalContent,
+          HashText("directory"),
+          null,
           string.Empty,
           HashText(string.Empty),
-          info.Length,
+          0,
           false,
-          null,
-          originalBinaryBase64
+          null
         )
       );
+      foreach (var entry in entries.Where(entry => entry.Directory))
+      {
+        prepared.Add(
+          new PendingFileChange(
+            entry.RelativePath,
+            "deleted-directory",
+            true,
+            HashText("directory"),
+            null,
+            string.Empty,
+            HashText(string.Empty),
+            0,
+            false,
+            null
+          )
+        );
+      }
+      foreach (var entry in entries.Where(entry => !entry.Directory))
+      {
+        var pending = await PrepareDeletedFileAsync(
+          entry.FullPath,
+          entry.RelativePath,
+          executionSession,
+          cancellationToken
+        );
+        prepared.Add(pending);
+        totalOriginalBytes = checked(totalOriginalBytes + pending.OriginalBytes);
+      }
     }
 
     var undoAvailable = executionSession.CanTrackRollbackBatch(
@@ -1231,7 +1259,7 @@ public sealed class LocalActionService : ILocalActionService
     {
       throw new LocalActionException(
         "action-validation",
-        $"delete_files cannot guarantee bounded recovery for this batch: {undoDiagnostic}"
+        $"delete_paths cannot guarantee bounded recovery for this batch: {undoDiagnostic}"
       );
     }
 
@@ -1249,10 +1277,10 @@ public sealed class LocalActionService : ILocalActionService
       proposal.Arguments.Clone(),
       null,
       null,
-      $"delete_files: {prepared.Count} explicit file(s)",
-      string.Join("\n", prepared.Select(item => item.RelativePath)),
+      $"delete_paths: {explicitTargets.Count} explicit path(s)",
+      string.Join("\n", explicitTargets.Select(item => item.RelativePath)),
       false,
-      true,
+      false,
       null,
       PendingFileChanges: prepared
     );
@@ -1417,6 +1445,116 @@ public sealed class LocalActionService : ILocalActionService
       PendingFileChanges: prepared,
       Corrections: corrections.Count == 0 ? null : corrections
     );
+  }
+
+  private async Task<PendingFileChange> PrepareDeletedFileAsync(
+    string target,
+    string relative,
+    ExecutionSession executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (IsProtectedInstructionFile(relative)
+      && !executionSession.Objective.Contains(relative, StringComparison.OrdinalIgnoreCase)
+      && !executionSession.Objective.Contains(Path.GetFileName(relative), StringComparison.OrdinalIgnoreCase))
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"{relative}: protected repository instructions can be deleted only when that exact file is named in the user objective."
+      );
+    }
+
+    var info = new FileInfo(target);
+    var maximumRecoverableBytes = Math.Min(
+      FileWriteLimit,
+      executionSession.Limits.MaxRollbackBytesPerFile
+    );
+    if (info.Length > maximumRecoverableBytes)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"{relative}: bounded recoverable deletion supports files up to {maximumRecoverableBytes} bytes."
+      );
+    }
+
+    var currentHash = await HashFileAsync(target, cancellationToken);
+    var originalBytes = await File.ReadAllBytesAsync(target, cancellationToken);
+    string? originalContent;
+    string? originalBinaryBase64;
+    try
+    {
+      originalContent = new UTF8Encoding(false, true).GetString(originalBytes);
+      originalBinaryBase64 = null;
+    }
+    catch (DecoderFallbackException)
+    {
+      originalContent = null;
+      originalBinaryBase64 = Convert.ToBase64String(originalBytes);
+    }
+
+    return new PendingFileChange(
+      relative,
+      "deleted",
+      true,
+      currentHash,
+      originalContent,
+      string.Empty,
+      HashText(string.Empty),
+      info.Length,
+      false,
+      null,
+      originalBinaryBase64
+    );
+  }
+
+  private static IReadOnlyList<DeletionTreeEntry> EnumerateDeletionTree(
+    string directory,
+    string relativeDirectory
+  )
+  {
+    var result = new List<DeletionTreeEntry>();
+    var pending = new Stack<(string FullPath, string RelativePath)>();
+    pending.Push((directory, relativeDirectory));
+    while (pending.Count > 0)
+    {
+      var current = pending.Pop();
+      foreach (var entry in Directory.EnumerateFileSystemEntries(current.FullPath))
+      {
+        var attributes = File.GetAttributes(entry);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        {
+          throw new LocalActionException(
+            "path-validation",
+            $"{Path.GetRelativePath(directory, entry)}: delete_paths rejects reparse points inside a recursive target."
+          );
+        }
+        var relative = Path.Combine(
+          current.RelativePath,
+          Path.GetFileName(entry)
+        );
+        var isDirectory = (attributes & FileAttributes.Directory) != 0;
+        result.Add(new DeletionTreeEntry(entry, relative, isDirectory));
+        if (isDirectory)
+        {
+          pending.Push((entry, relative));
+        }
+      }
+    }
+    return result;
+  }
+
+  private static bool PathsOverlap(string left, string right)
+  {
+    var normalizedLeft = Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
+    var normalizedRight = Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
+    return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase)
+      || normalizedLeft.StartsWith(normalizedRight + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+      || normalizedRight.StartsWith(normalizedLeft + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+  }
+
+  private static int PathDepth(string path)
+  {
+    return path.Count(character => character is '/' or '\\');
   }
 
   private async Task<ValidatedLocalAction> ValidateProcessAsync(
@@ -2117,7 +2255,7 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
-  private async Task<LocalActionResult> DeleteFilesAsync(
+  private async Task<LocalActionResult> DeletePathsAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
     CancellationToken cancellationToken
@@ -2126,48 +2264,66 @@ public sealed class LocalActionService : ILocalActionService
     var pendingChanges = action.PendingFileChanges
       ?? throw new LocalActionException(
         "action-execution",
-        "delete_files did not contain a validated explicit file set."
+        "delete_paths did not contain a validated path snapshot."
       );
-    var deleted = new List<(string Path, PendingFileChange Change)>();
+    var requestedPaths = GetStringArray(action.Arguments, "paths")
+      .Select(path => path.Trim())
+      .Where(path => path.Length > 0)
+      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+    var recursive = GetOptionalBoolean(action.Arguments, "recursive");
 
     try
     {
-      foreach (var pending in pendingChanges)
+      foreach (var requestedPath in requestedPaths)
       {
         cancellationToken.ThrowIfCancellationRequested();
-        var target = await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
-        File.Delete(target);
-        deleted.Add((target, pending));
+        var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
+        if (Directory.Exists(target))
+        {
+          Directory.Delete(target, recursive);
+        }
+        else
+        {
+          File.Delete(target);
+        }
       }
     }
     catch
     {
-      foreach (var item in deleted.AsEnumerable().Reverse())
+      foreach (var directory in pendingChanges
+        .Where(change => change.Operation == "deleted-directory")
+        .OrderBy(change => PathDepth(change.RelativePath)))
       {
-        if (
-          (
-            item.Change.OriginalContent is null
-            && item.Change.OriginalBinaryBase64 is null
-          )
-          || File.Exists(item.Path)
-        )
+        var path = (await _workspace.ResolveCreationPathAsync(
+          directory.RelativePath,
+          CancellationToken.None
+        )).FullPath;
+        Directory.CreateDirectory(path);
+      }
+      foreach (var change in pendingChanges.Where(change => change.Operation == "deleted"))
+      {
+        var path = (await _workspace.ResolveCreationPathAsync(
+          change.RelativePath,
+          CancellationToken.None
+        )).FullPath;
+        if (File.Exists(path))
         {
           continue;
         }
-
-        if (item.Change.OriginalBinaryBase64 is not null)
+        if (change.OriginalBinaryBase64 is not null)
         {
           await WriteBytesAtomicallyAsync(
-            item.Path,
-            Convert.FromBase64String(item.Change.OriginalBinaryBase64),
+            path,
+            Convert.FromBase64String(change.OriginalBinaryBase64),
             CancellationToken.None
           );
         }
         else
         {
           await WriteAtomicallyAsync(
-            item.Path,
-            item.Change.OriginalContent!,
+            path,
+            change.OriginalContent!,
             CancellationToken.None
           );
         }
@@ -2177,7 +2333,7 @@ public sealed class LocalActionService : ILocalActionService
     }
 
     return new LocalActionResult(
-      $"Deleted {deleted.Count} verified file(s): {string.Join(", ", pendingChanges.Select(item => item.RelativePath))}.",
+      $"Deleted {requestedPaths.Length} verified path(s): {string.Join(", ", requestedPaths)}.",
       "action.edit-applied"
     );
   }
@@ -2581,6 +2737,35 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
+    if (action.Tool == "delete_paths")
+    {
+      var snapshot = action.PendingFileChanges ?? [];
+      foreach (var requestedPath in GetStringArray(action.Arguments, "paths"))
+      {
+        var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
+        if (!Directory.Exists(target))
+        {
+          continue;
+        }
+        var relative = await GetRelativePathAsync(target, cancellationToken);
+        var expected = snapshot
+          .Where(change => !string.Equals(change.RelativePath, relative, StringComparison.OrdinalIgnoreCase)
+            && IsRelativeDescendant(relative, change.RelativePath))
+          .Select(change => change.RelativePath)
+          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var current = EnumerateDeletionTree(target, relative)
+          .Select(entry => entry.RelativePath)
+          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!expected.SetEquals(current))
+        {
+          throw new LocalActionException(
+            "file-conflict",
+            $"{relative}: directory contents changed after delete_paths was proposed."
+          );
+        }
+      }
+    }
+
     foreach (var pending in action.PendingFileChanges ?? [])
     {
       var target = pending.Operation == "created"
@@ -2599,11 +2784,23 @@ public sealed class LocalActionService : ILocalActionService
         continue;
       }
 
+      if (pending.Operation == "deleted-directory")
+      {
+        if (!Directory.Exists(target))
+        {
+          throw new LocalActionException(
+            "file-conflict",
+            $"{pending.RelativePath}: the directory no longer exists after delete_paths was proposed."
+          );
+        }
+        continue;
+      }
+
       if (!File.Exists(target))
       {
         throw new LocalActionException(
           "file-conflict",
-          $"{pending.RelativePath}: the file no longer exists after delete_files was proposed."
+          $"{pending.RelativePath}: the file no longer exists after delete_paths was proposed."
         );
       }
 
@@ -2625,9 +2822,16 @@ public sealed class LocalActionService : ILocalActionService
       );
       throw new LocalActionException(
         "file-conflict",
-        $"{pending.RelativePath}: the file changed after delete_files was proposed."
+        $"{pending.RelativePath}: the file changed after delete_paths was proposed."
       );
     }
+  }
+
+  private static bool IsRelativeDescendant(string parent, string candidate)
+  {
+    var prefix = Path.TrimEndingDirectorySeparator(parent) + Path.DirectorySeparatorChar;
+    var normalizedCandidate = candidate.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+    return normalizedCandidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
   }
 
   private async Task VerifyAndRecordBatchFileChangesAsync(
@@ -2687,14 +2891,14 @@ public sealed class LocalActionService : ILocalActionService
       {
         throw new LocalActionException(
           "post-delete-verification",
-          $"{pending.RelativePath}: the path still exists after delete_files completed."
+          $"{pending.RelativePath}: the path still exists after delete_paths completed."
         );
       }
 
       executionSession?.RecordFileChange(
         new ExecutionFileChange(
           pending.RelativePath,
-          "deleted",
+          pending.Operation,
           true,
           pending.OriginalHash,
           pending.ExpectedFinalHash,
@@ -3547,5 +3751,11 @@ public sealed class LocalActionService : ILocalActionService
   private sealed record PatchReplacement(
     string OldText,
     string NewText
+  );
+
+  private sealed record DeletionTreeEntry(
+    string FullPath,
+    string RelativePath,
+    bool Directory
   );
 }

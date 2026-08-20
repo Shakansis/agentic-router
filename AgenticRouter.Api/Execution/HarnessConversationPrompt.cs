@@ -1,0 +1,89 @@
+using System.Text;
+
+namespace AgenticRouter.Api.Execution;
+
+internal sealed record HarnessConversationPrompt(
+  string Text,
+  long SynchronizedThroughVersion
+);
+
+internal static class HarnessConversationPromptBuilder
+{
+  public static HarnessConversationPrompt Create(
+    HarnessTurnRequest request,
+    long? synchronizedThroughVersion,
+    IReadOnlyList<string>? capabilityNotes = null
+  )
+  {
+    var builder = new StringBuilder(
+      "Agentic Router context for this turn:\n"
+    );
+    builder.Append(
+      "- The current working directory is the trusted workspace; the Host validates exposed capabilities, paths, approvals, and observed effects.\n"
+    );
+    builder.Append(
+      "- Preserve unrelated existing user changes. Files that are part of the user's requested operation may be changed or deleted as necessary.\n"
+    );
+    builder.Append(
+      "- Report only actions and results that actually occurred.\n"
+    );
+
+    if (capabilityNotes is not null)
+    {
+      foreach (var note in capabilityNotes.Where(note => !string.IsNullOrWhiteSpace(note)))
+      {
+        builder.Append("- ").Append(note.Trim()).Append('\n');
+      }
+    }
+
+    var conversation = request.Conversation;
+    var synchronizedThrough = synchronizedThroughVersion ?? 0;
+    if (conversation is not null && conversation.Messages.Count > 0)
+    {
+      var firstAvailableSequence = conversation.Messages[0].Sequence;
+      var requiresCompactedHydration = synchronizedThroughVersion is null
+        || synchronizedThrough < firstAvailableSequence;
+      var messages = requiresCompactedHydration
+        ? conversation.Messages.ToArray()
+        : conversation.Messages
+          .Where(message => message.Sequence >= synchronizedThrough)
+          .ToArray();
+
+      if (messages.Length > 0)
+      {
+        builder.Append('\n');
+        builder.Append(
+          synchronizedThroughVersion is null
+            ? "Canonical Agentic Router conversation hydration:\n"
+            : requiresCompactedHydration
+              ? "Canonical Agentic Router conversation synchronization (compacted window):\n"
+              : "Canonical Agentic Router conversation delta since this harness last ran:\n"
+        );
+        if (requiresCompactedHydration && conversation.OmittedMessages > 0)
+        {
+          builder.Append(
+            "[Host context note] Older complete turns were omitted by deterministic context compaction.\n"
+          );
+        }
+        foreach (var message in messages)
+        {
+          builder.Append('[')
+            .Append(message.Role)
+            .Append("]\n")
+            .Append(message.Content)
+            .Append("\n[/")
+            .Append(message.Role)
+            .Append("]\n");
+        }
+      }
+    }
+
+    builder.Append("\nCurrent user request:\n")
+      .Append(request.Prompt);
+
+    return new HarnessConversationPrompt(
+      builder.ToString(),
+      checked((conversation?.Version ?? 0) + 2)
+    );
+  }
+}

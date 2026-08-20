@@ -85,6 +85,18 @@ public sealed record HarnessStatus(
   HarnessAvailability Availability
 );
 
+public sealed record HarnessConversationMessage(
+  long Sequence,
+  string Role,
+  string Content
+);
+
+public sealed record HarnessConversationContext(
+  long Version,
+  int OmittedMessages,
+  IReadOnlyList<HarnessConversationMessage> Messages
+);
+
 public sealed record HarnessTurnRequest(
   string HarnessId,
   string SessionId,
@@ -94,9 +106,10 @@ public sealed record HarnessTurnRequest(
   string Prompt,
   string ApprovalPolicy,
   Uri? ProviderEndpoint,
-  IReadOnlyList<string> ProtectedPaths,
+  HarnessConversationContext? Conversation = null,
   IReadOnlyDictionary<string, JsonElement>? NativeOptions = null,
-  int? ContextWindowTokens = null
+  int? ContextWindowTokens = null,
+  HostCapabilityProfile? HostCapabilities = null
 );
 
 public sealed record HarnessEvent
@@ -122,7 +135,8 @@ public sealed record HarnessEvent
     DateTimeOffset? timestamp = null,
     HarnessTerminalState? terminalState = null,
     JsonElement? nativePayload = null,
-    long? contextInputTokens = null
+    long? contextInputTokens = null,
+    bool recoveryExhausted = false
   )
   {
     Type = type;
@@ -135,6 +149,7 @@ public sealed record HarnessEvent
     ApprovalId = approvalId;
     ApprovalCanBeMapped = approvalCanBeMapped;
     Destructive = destructive;
+    RecoveryExhausted = recoveryExhausted;
     ErrorCode = errorCode;
     Paths = paths;
     ToolCallId = toolCallId;
@@ -168,6 +183,8 @@ public sealed record HarnessEvent
 
   public bool Destructive { get; init; }
 
+  public bool RecoveryExhausted { get; init; }
+
   public string? ErrorCode { get; init; }
 
   public IReadOnlyList<string>? Paths { get; init; }
@@ -193,6 +210,11 @@ public sealed record HarnessEvent
   public bool IsTerminal => TerminalState.HasValue;
 }
 
+public sealed record AgentHarnessExecution<TEvent>(
+  Func<CancellationToken, IAsyncEnumerable<TEvent>> ExecuteNativeAsync,
+  Func<IAgentHarnessTransport, CancellationToken, IAsyncEnumerable<TEvent>> ExecuteExternalAsync
+);
+
 public interface IAgentHarness : IAsyncDisposable
 {
   HarnessDefinition Definition { get; }
@@ -200,6 +222,16 @@ public interface IAgentHarness : IAsyncDisposable
   ValueTask<HarnessAvailability> GetAvailabilityAsync(
     CancellationToken cancellationToken
   );
+
+  IAsyncEnumerable<TEvent> ExecuteAsync<TEvent>(
+    AgentHarnessExecution<TEvent> execution,
+    CancellationToken cancellationToken
+  );
+}
+
+public interface IAgentHarnessTransport
+{
+  HarnessDefinition Definition { get; }
 
   IAsyncEnumerable<HarnessEvent> StartTurnAsync(
     HarnessTurnRequest request,

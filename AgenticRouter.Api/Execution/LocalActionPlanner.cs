@@ -89,7 +89,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "An execution plan is optional. For a task that benefits from visible multi-step tracking, "
     + "you may request and call create_execution_plan with your own objective, titles, steps, and "
     + "dependencies. For a simple task, continue without a plan. The Host never invents plan steps. "
-    + "Every Git write is separately approved by the user even under automatic approval. "
+    + "The Host owns approval. Under ask, every mutation waits for approval; under auto, requested in-scope mutations execute after Host validation without a duplicate approval. "
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
     + "are intentionally unavailable. "
@@ -99,13 +99,21 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Never prefix a path with the workspace display name or root directory name. Before "
     + "editing, fixing, or updating existing files, inspect their real paths and contents. "
     + "Never use create_file as a substitute for editing an existing file. "
-    + "Deletion is available only through delete_files with an explicit list of existing file paths. "
+    + "Deletion is available only through delete_paths with an explicit list of existing paths and an explicit recursive flag. "
     + "Never request moving, "
     + "a shell interpreter, command chaining, or access outside the workspace. "
     + "Do not return a prose plan and do not claim execution without an authoritative tool result.";
 
   private static readonly IReadOnlyList<CanonicalToolDefinition> ToolDefinitions =
     CreateToolDefinitions();
+
+  public static IReadOnlyList<CanonicalToolDefinition> GetToolDefinitions(
+    IEnumerable<string> names
+  )
+  {
+    var requested = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    return ToolDefinitions.Where(tool => requested.Contains(tool.Name)).ToArray();
+  }
 
   private static readonly CanonicalToolDefinition RequestToolsetDefinition =
     CreateRequestToolsetDefinition();
@@ -763,13 +771,14 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         ["path", "replacements"]
       ),
       Tool(
-        "delete_files",
-        "Delete an explicit bounded list of existing files. The Host validates and snapshots every path; directories are never removed and user approval is always required.",
+        "delete_paths",
+        "Delete an explicit bounded list of existing files or directories. Recursive directory deletion requires recursive=true. The Host validates, snapshots, executes, and verifies every path.",
         new
         {
-          paths = StringArrayProperty()
+          paths = StringArrayProperty(),
+          recursive = BooleanProperty()
         },
-        ["paths"]
+        ["paths", "recursive"]
       ),
       Tool(
         "create_directory",

@@ -723,8 +723,13 @@ public sealed class GitDeliveryService : IGitDeliveryService
       "push-tag" => current.PushTagActionId,
       _ => string.Empty
     };
+    var approvalRequired = string.Equals(
+      session.ApprovalPolicy,
+      "ask",
+      StringComparison.Ordinal
+    );
     if (
-      !confirmed
+      approvalRequired && !confirmed
       || string.IsNullOrWhiteSpace(
         actionId
       )
@@ -733,7 +738,9 @@ public sealed class GitDeliveryService : IGitDeliveryService
       throw new GitDeliveryException(
         "git-approval-required",
         $"git-{operation}",
-        "Every Git write requires explicit action-specific approval."
+        approvalRequired
+          ? "The selected approval policy requires confirmation before this exact Git write."
+          : "The Git action identifier is missing."
       );
     }
     if (!string.Equals(

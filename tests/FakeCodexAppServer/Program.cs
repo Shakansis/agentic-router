@@ -111,14 +111,20 @@ while (await Console.In.ReadLineAsync() is { } line)
         var dynamicToolNames = dynamicTools.EnumerateArray()
           .Select(tool => tool.GetProperty("name").GetString())
           .ToArray();
-        if (
-          !dynamicToolNames.SequenceEqual(
-            new[] { "create_files", "delete_files" },
-            StringComparer.Ordinal
-          )
-        )
+        if (dynamicToolNames.Length > 0
+          && (
+            dynamicToolNames.Distinct(StringComparer.Ordinal).Count() != dynamicToolNames.Length
+            || !new[]
+            {
+              "create_files",
+              "delete_paths",
+              "run_process",
+              "git_status",
+              "git_create_commit"
+            }.All(expected => dynamicToolNames.Contains(expected, StringComparer.Ordinal))
+          ))
         {
-          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected Host batch dynamic tools." } });
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the projected Agentic Router Host capability tools." } });
           break;
         }
         if (
@@ -133,11 +139,7 @@ while (await Console.In.ReadLineAsync() is { } line)
           break;
         }
         if (
-          !string.Equals(
-            parameters.GetProperty("approvalPolicy").GetString(),
-            "on-request",
-            StringComparison.Ordinal
-          )
+          parameters.GetProperty("approvalPolicy").GetString() is not ("on-request" or "never")
           || !string.Equals(
             parameters.GetProperty("sandbox").GetString(),
             "workspace-write",
@@ -235,11 +237,7 @@ while (await Console.In.ReadLineAsync() is { } line)
         var model = parameters.GetProperty("model").GetString()!;
         var sandboxPolicy = parameters.GetProperty("sandboxPolicy");
         if (
-          !string.Equals(
-            parameters.GetProperty("approvalPolicy").GetString(),
-            "on-request",
-            StringComparison.Ordinal
-          )
+          parameters.GetProperty("approvalPolicy").GetString() is not ("on-request" or "never")
           || !string.Equals(
             sandboxPolicy.GetProperty("type").GetString(),
             "workspaceWrite",
@@ -298,22 +296,23 @@ async Task RunTurnAsync(
 {
   try
   {
+    var currentRequest = CurrentUserRequest(input);
     await SendAsync(new { method = "turn/started", @params = new { threadId, turn = new { id = turnId, status = "inProgress" } } });
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "Inspecting — revisão " } });
 
-    if (input.Contains("crash codex child", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("crash codex child", StringComparison.OrdinalIgnoreCase))
     {
       Environment.Exit(23);
     }
 
-    if (input.Contains("malformed codex event", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("malformed codex event", StringComparison.OrdinalIgnoreCase))
     {
       await SendRawAsync("{ this is not valid JSON");
       turns.TryRemove(turnId, out _);
       return;
     }
 
-    if (input.Contains("unexpected codex event", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("unexpected codex event", StringComparison.OrdinalIgnoreCase))
     {
       await SendAsync(new
       {
@@ -328,10 +327,35 @@ async Task RunTurnAsync(
       });
     }
 
+    if (currentRequest.Contains("recovered codex diagnostic", StringComparison.OrdinalIgnoreCase))
+    {
+      await SendAsync(new
+      {
+        method = "warning",
+        @params = new
+        {
+          threadId,
+          turnId,
+          message = "Fake Codex warning retained as activity."
+        }
+      });
+      await SendAsync(new
+      {
+        method = "error",
+        @params = new
+        {
+          threadId,
+          turnId,
+          message = "Fake recoverable Codex diagnostic.",
+          codexErrorInfo = new { type = "fakeRecoverable" }
+        }
+      });
+    }
+
     await Task.Delay(200, cancellationToken);
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "the trusted workspace." } });
 
-    if (input.Contains("chronological codex content", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("chronological codex content", StringComparison.OrdinalIgnoreCase))
     {
       await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-first-{turnId}", delta = "First **response** " } });
       await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-first-{turnId}", delta = "segment." } });
@@ -339,7 +363,7 @@ async Task RunTurnAsync(
       await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-second-{turnId}", delta = "the first response." } });
     }
 
-    if (input.Contains("long codex turn", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("long codex turn", StringComparison.OrdinalIgnoreCase))
     {
       await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
     }
@@ -358,7 +382,7 @@ async Task RunTurnAsync(
     });
     await SendAsync(new { method = "item/commandExecution/outputDelta", @params = new { threadId, turnId, itemId, delta = "fake output\n" } });
 
-    if (input.Contains("recover command deletion with host batch", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("recover command deletion with host batch", StringComparison.OrdinalIgnoreCase))
     {
       var approvalId = 40_000L + int.Parse(turnId["fake-turn-".Length..], System.Globalization.CultureInfo.InvariantCulture);
       var approval = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -382,7 +406,7 @@ async Task RunTurnAsync(
       }
     }
 
-    if (input.Contains("create host batch files", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("create host batch files", StringComparison.OrdinalIgnoreCase))
     {
       var dynamicItemId = $"dynamic-{turnId}";
       var callId = $"call-{turnId}";
@@ -436,14 +460,18 @@ async Task RunTurnAsync(
     }
 
     if (
-      input.Contains("delete host batch files", StringComparison.OrdinalIgnoreCase)
-      || input.Contains("recover command deletion with host batch", StringComparison.OrdinalIgnoreCase)
+      currentRequest.Contains("delete host batch files", StringComparison.OrdinalIgnoreCase)
+      || currentRequest.Contains("recover command deletion with host batch", StringComparison.OrdinalIgnoreCase)
     )
     {
       var dynamicItemId = $"dynamic-{turnId}";
       var callId = $"call-{turnId}";
       var requestId = 30_000L + int.Parse(turnId["fake-turn-".Length..], System.Globalization.CultureInfo.InvariantCulture);
-      var arguments = new { paths = new[] { "batch-delete-a.txt", "batch-delete-b.txt" } };
+      var arguments = new
+      {
+        paths = new[] { "batch-delete-a.txt", "batch-delete-b.txt" },
+        recursive = false
+      };
       await SendAsync(new
       {
         method = "item/started",
@@ -451,7 +479,7 @@ async Task RunTurnAsync(
         {
           threadId,
           turnId,
-          item = new { type = "dynamicToolCall", id = dynamicItemId, status = "inProgress", tool = "delete_files", arguments }
+          item = new { type = "dynamicToolCall", id = dynamicItemId, status = "inProgress", tool = "delete_paths", arguments }
         }
       });
       var response = new TaskCompletionSource<(bool Success, string Text)>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -460,7 +488,7 @@ async Task RunTurnAsync(
       {
         method = "item/tool/call",
         id = requestId,
-        @params = new { threadId, turnId, callId, tool = "delete_files", arguments }
+        @params = new { threadId, turnId, callId, tool = "delete_paths", arguments }
       });
       var result = await response.Task.WaitAsync(cancellationToken);
       await SendAsync(new
@@ -475,7 +503,7 @@ async Task RunTurnAsync(
             type = "dynamicToolCall",
             id = dynamicItemId,
             status = result.Success ? "completed" : "failed",
-            tool = "delete_files",
+            tool = "delete_paths",
             arguments,
             success = result.Success,
             contentItems = new[] { new { type = "inputText", text = result.Text } }
@@ -484,7 +512,7 @@ async Task RunTurnAsync(
       });
     }
 
-    if (input.Contains("delete codex file", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("delete codex file", StringComparison.OrdinalIgnoreCase))
     {
       var fileItemId = $"file-{turnId}";
       var target = Path.Combine(cwd, "codex-delete.txt");
@@ -536,12 +564,21 @@ async Task RunTurnAsync(
       });
     }
 
-    if (input.Contains("create codex file", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))
+    {
+      await PrepareBenchmarkOutcomeAsync(cwd, model, cancellationToken);
+      await SendAsync(new
+      {
+        method = "turn/diff/updated",
+        @params = new { threadId, turnId, diff = "benchmark fixture outcome prepared" }
+      });
+    }
+    else if (currentRequest.Contains("create codex file", StringComparison.OrdinalIgnoreCase))
     {
       await File.WriteAllTextAsync(Path.Combine(cwd, "codex-created.txt"), "created by fake Codex App Server\n", cancellationToken);
       await SendAsync(new { method = "turn/diff/updated", @params = new { threadId, turnId, diff = "+++ codex-created.txt" } });
     }
-    else if (input.Contains("codex second turn", StringComparison.OrdinalIgnoreCase))
+    else if (currentRequest.Contains("codex second turn", StringComparison.OrdinalIgnoreCase))
     {
       await File.WriteAllTextAsync(Path.Combine(cwd, "codex-created.txt"), "edited on the reused Codex thread\n", cancellationToken);
       await SendAsync(new { method = "turn/diff/updated", @params = new { threadId, turnId, diff = "--- codex-created.txt\n+++ codex-created.txt" } });
@@ -566,7 +603,7 @@ async Task RunTurnAsync(
       method = "turn/completed",
       @params = new { threadId, turn = new { id = turnId, status = "completed", error = (object?)null } }
     });
-    if (input.Contains("restart codex after completion", StringComparison.OrdinalIgnoreCase))
+    if (currentRequest.Contains("restart codex after completion", StringComparison.OrdinalIgnoreCase))
     {
       if (!string.IsNullOrWhiteSpace(codexHome))
       {
@@ -580,6 +617,82 @@ async Task RunTurnAsync(
   }
   catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
   {
+  }
+}
+
+string CurrentUserRequest(string input)
+{
+  const string marker = "\nCurrent user request:\n";
+  var markerIndex = input.LastIndexOf(marker, StringComparison.Ordinal);
+  return markerIndex < 0
+    ? input
+    : input[(markerIndex + marker.Length)..];
+}
+
+async Task PrepareBenchmarkOutcomeAsync(
+  string cwd,
+  string model,
+  CancellationToken cancellationToken
+)
+{
+  const string expected = "Agentic Router Benchmark\noperation=create\nresult=success";
+  var expectedDirectory = Path.Combine(cwd, "benchmark-data");
+  var expectedPath = Path.Combine(expectedDirectory, "result.txt");
+
+  switch (model)
+  {
+    case "alpha:latest":
+      Directory.CreateDirectory(expectedDirectory);
+      await File.WriteAllTextAsync(expectedPath, expected, cancellationToken);
+      break;
+    case "beta:code":
+      Directory.CreateDirectory(expectedDirectory);
+      await File.WriteAllTextAsync(expectedPath, expected + "!", cancellationToken);
+      break;
+    case "docs:latest":
+      Directory.CreateDirectory(expectedDirectory);
+      await File.WriteAllTextAsync(
+        Path.Combine(expectedDirectory, "wrong-result.txt"),
+        expected,
+        cancellationToken
+      );
+      break;
+    case "unused:latest":
+      var wrongDirectory = Path.Combine(cwd, "wrong-directory");
+      Directory.CreateDirectory(wrongDirectory);
+      await File.WriteAllTextAsync(
+        Path.Combine(wrongDirectory, "result.txt"),
+        expected,
+        cancellationToken
+      );
+      break;
+    case "command-r:latest":
+      break;
+    case "structured-failure:latest":
+      Directory.CreateDirectory(expectedDirectory);
+      await File.WriteAllTextAsync(expectedPath, expected, cancellationToken);
+      await File.WriteAllTextAsync(
+        Path.Combine(cwd, "unexpected.txt"),
+        "unexpected\n",
+        cancellationToken
+      );
+      break;
+    case "structured:latest":
+      Directory.CreateDirectory(expectedDirectory);
+      await File.WriteAllTextAsync(expectedPath, expected, cancellationToken);
+      await File.WriteAllTextAsync(
+        Path.Combine(cwd, "fixture", "keep.txt"),
+        "fixture-keep-modified\n",
+        cancellationToken
+      );
+      break;
+    case "gpt-oss:20b":
+      Directory.CreateDirectory(expectedDirectory);
+      await File.WriteAllTextAsync(expectedPath, expected, cancellationToken);
+      File.Delete(Path.Combine(cwd, "fixture", "delete.txt"));
+      break;
+    default:
+      break;
   }
 }
 

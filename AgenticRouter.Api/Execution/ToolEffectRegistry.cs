@@ -33,7 +33,7 @@ public static class ToolEffectRegistry
       ["write_file"] = ToolEffects.FileChanged,
       ["replace_text"] = ToolEffects.FileChanged,
       ["apply_patch"] = ToolEffects.FileChanged,
-      ["delete_files"] = ToolEffects.FileDeleted,
+      ["delete_paths"] = ToolEffects.FileDeleted,
       ["create_directory"] = ToolEffects.DirectoryCreated,
       ["run_process"] = ToolEffects.ProcessExecuted,
       ["run_validation_profile"] = ToolEffects.Validated,

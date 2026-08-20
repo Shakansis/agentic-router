@@ -18,7 +18,7 @@ public sealed record OpenCodeHarnessOptions(
   TimeSpan RequestTimeout
 );
 
-public sealed class OpenCodeHarnessAdapter : IAgentHarness
+public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport
 {
   private const string ProviderId = "agentic-router-ollama";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
@@ -50,7 +50,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
   private readonly SemaphoreSlim _availabilityGate = new(1, 1);
   private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
   private readonly SemaphoreSlim _turnGate = new(1, 1);
-  private readonly ConcurrentDictionary<string, string> _sessions = new(StringComparer.Ordinal);
+  private readonly ConcurrentDictionary<string, HarnessSessionState> _sessions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, PendingPermission> _permissions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, ActiveTurn> _activeTurns = new(StringComparer.Ordinal);
   private Process? _process;
@@ -72,6 +72,14 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
   }
 
   public HarnessDefinition Definition => AdapterDefinition;
+
+  public IAsyncEnumerable<TEvent> ExecuteAsync<TEvent>(
+    AgentHarnessExecution<TEvent> execution,
+    CancellationToken cancellationToken
+  )
+  {
+    return execution.ExecuteExternalAsync(this, cancellationToken);
+  }
 
   public async ValueTask<HarnessAvailability> GetAvailabilityAsync(
     CancellationToken cancellationToken
@@ -141,7 +149,20 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
     {
       var endpoint = request.ProviderEndpoint!;
       await EnsureStartedAsync(endpoint, request.Model, cancellationToken);
-      var sessionId = await GetOrCreateSessionAsync(request, cancellationToken);
+      var harnessSession = await GetOrCreateSessionAsync(request, cancellationToken);
+      var sessionId = harnessSession.NativeSessionId;
+      var turnPrompt = HarnessConversationPromptBuilder.Create(
+        request,
+        harnessSession.SynchronizedThroughVersion,
+        request.HostCapabilities is null
+          ? []
+          :
+          [
+            $"Agentic Router common capabilities implemented by OpenCode native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.OpenCode))}.",
+            $"Unavailable adapter capabilities for this installed OpenCode protocol: {string.Join(", ", HarnessCapabilityProjection.MissingAdapterTools(HarnessIds.OpenCode, request.HostCapabilities))}. Do not claim or attempt those operations through an unconfined shell.",
+            $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}."
+          ]
+      );
       active = new ActiveTurn(request.SessionId, sessionId, request.WorkingDirectory, turnId);
       _activeTurns[request.SessionId] = active;
 
@@ -177,7 +198,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
             ["webfetch"] = false,
             ["websearch"] = false
           },
-          parts = new[] { new { type = "text", text = CreatePrompt(request) } }
+          parts = new[] { new { type = "text", text = turnPrompt.Text } }
         },
         cancellationToken,
         expectedStatus: HttpStatusCode.NoContent
@@ -467,14 +488,18 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
                 request.WorkingDirectory
               );
               var resources = Strings(properties, "resources");
+              var permission = String(properties, "action")
+                ?? String(properties, "permission")
+                ?? "workspace permission";
               yield return Event(
                 "approval.requested",
                 sessionId,
                 turnId,
-                message: $"OpenCode requests {String(properties, "action") ?? String(properties, "permission") ?? "workspace permission"}.",
+                message: $"OpenCode requests {permission}.",
                 approvalId: permissionId,
                 approvalCanBeMapped: true,
-                destructive: resources.Any(IsDestructiveResource),
+                destructive: IsDestructiveResource(permission)
+                  || resources.Any(IsDestructiveResource),
                 paths: resources,
                 native: payload
               );
@@ -513,10 +538,12 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
                 terminal: HarnessTerminalState.Completed,
                 native: payload
               );
+              harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
               terminal = true;
               break;
             }
           case "session.status" when StatusType(properties) == "idle":
+            harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
             yield return Event(
               "turn.completed",
               sessionId,
@@ -680,7 +707,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
     }
   }
 
-  private async Task<string> GetOrCreateSessionAsync(
+  private async Task<HarnessSessionState> GetOrCreateSessionAsync(
     HarnessTurnRequest request,
     CancellationToken cancellationToken
   )
@@ -710,8 +737,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
     {
       throw Failure("opencode-workspace-mismatch", "OpenCode returned a different working directory.");
     }
-    _sessions[request.SessionId] = sessionId;
-    return sessionId;
+    var harnessSession = new HarnessSessionState(sessionId);
+    _sessions[request.SessionId] = harnessSession;
+    return harnessSession;
   }
 
   private async Task<JsonElement> GetDiffAsync(
@@ -865,6 +893,11 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
       ["permission"] = new Dictionary<string, string>
       {
         ["*"] = "ask",
+        ["read"] = "allow",
+        ["glob"] = "allow",
+        ["grep"] = "allow",
+        ["list"] = "allow",
+        ["edit"] = "ask",
         ["bash"] = "deny",
         ["task"] = "deny",
         ["webfetch"] = "deny",
@@ -1052,17 +1085,6 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
     );
   }
 
-  private static string CreatePrompt(HarnessTurnRequest request)
-  {
-    return "Agentic Router Host constraints:\n"
-      + "- Work only inside the exact current project directory.\n"
-      + "- Do not use shell commands, Git writes, subagents, network tools, sharing, or external directories.\n"
-      + "- Preserve pre-existing changes and report only actions actually completed.\n"
-      + $"- Protected pre-existing paths: {JsonSerializer.Serialize(request.ProtectedPaths)}\n\n"
-      + "User request (verbatim):\n"
-      + request.Prompt;
-  }
-
   private static void Validate(HarnessTurnRequest request)
   {
     if (!string.Equals(request.HarnessId, HarnessIds.OpenCode, StringComparison.OrdinalIgnoreCase))
@@ -1203,6 +1225,13 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness
     string WorkingDirectory,
     string TurnId
   );
+
+  private sealed class HarnessSessionState(string nativeSessionId)
+  {
+    public string NativeSessionId { get; } = nativeSessionId;
+
+    public long? SynchronizedThroughVersion { get; set; }
+  }
 
   private sealed record OpenCodePart(string Type, string Text);
 }

@@ -18,7 +18,7 @@ public sealed record QwenCodeHarnessOptions(
   TimeSpan RequestTimeout
 );
 
-public sealed class QwenCodeHarnessAdapter : IAgentHarness
+public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport
 {
   private const int MaximumActivityText = 8_192;
   private const int MaximumNativeDiagnosticsPerTurn = 8;
@@ -88,6 +88,14 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
   }
 
   public HarnessDefinition Definition => AdapterDefinition;
+
+  public IAsyncEnumerable<TEvent> ExecuteAsync<TEvent>(
+    AgentHarnessExecution<TEvent> execution,
+    CancellationToken cancellationToken
+  )
+  {
+    return execution.ExecuteExternalAsync(this, cancellationToken);
+  }
 
   public async ValueTask<HarnessAvailability> GetAvailabilityAsync(
     CancellationToken cancellationToken
@@ -166,6 +174,18 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
         cancellationToken
       );
       var session = await GetOrCreateSessionAsync(request, cancellationToken);
+      var turnPrompt = HarnessConversationPromptBuilder.Create(
+        request,
+        session.SynchronizedThroughVersion,
+        request.HostCapabilities is null
+          ? []
+          :
+          [
+            $"Agentic Router common capabilities implemented by Qwen native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode))}.",
+            $"Unavailable adapter capabilities for this installed Qwen protocol: {string.Join(", ", HarnessCapabilityProjection.MissingAdapterTools(HarnessIds.QwenCode, request.HostCapabilities))}. Do not claim or attempt disabled operations.",
+            $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}."
+          ]
+      );
       active = new ActiveTurn(
         request.SessionId,
         session.SessionId,
@@ -201,7 +221,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
         {
           prompt = new[]
           {
-            new { type = "text", text = CreatePrompt(request) }
+            new { type = "text", text = turnPrompt.Text }
           }
         },
         session.ClientId,
@@ -339,6 +359,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
                 }
                 else
                 {
+                  session.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
                   yield return Event(
                     "turn.completed",
                     active,
@@ -360,6 +381,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
               }
               else
               {
+                if (
+                  assistantCharacters > 0
+                  && stopReason is "max_tokens" or "length"
+                )
+                {
+                  session.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
+                }
                 yield return Event(
                   "turn.failed",
                   active,
@@ -1440,17 +1468,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
       : null;
   }
 
-  private static string CreatePrompt(HarnessTurnRequest request)
-  {
-    return "Agentic Router Host constraints:\n"
-      + "- Work only inside the exact current project directory.\n"
-      + "- Do not use shell commands, Git writes, subagents, network tools, MCP, skills, memory, hooks, or external directories.\n"
-      + "- Preserve pre-existing changes and report only actions actually completed.\n"
-      + $"- Protected pre-existing paths: {JsonSerializer.Serialize(request.ProtectedPaths)}\n\n"
-      + "User request (verbatim):\n"
-      + request.Prompt;
-  }
-
   private static void Validate(HarnessTurnRequest request)
   {
     if (!string.Equals(request.HarnessId, HarnessIds.QwenCode, StringComparison.OrdinalIgnoreCase))
@@ -1499,7 +1516,14 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness
 
   private sealed record ResolvedCommand(string FileName, string? ScriptPath);
 
-  private sealed record QwenSession(string SessionId, string ClientId);
+  private sealed class QwenSession(string sessionId, string clientId)
+  {
+    public string SessionId { get; } = sessionId;
+
+    public string ClientId { get; } = clientId;
+
+    public long? SynchronizedThroughVersion { get; set; }
+  }
 
   private sealed record PendingPermission(
     string SessionId,

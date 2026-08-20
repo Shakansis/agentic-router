@@ -101,7 +101,7 @@ public static class ExecutionTurnToolPolicy
     const bool deletionAvailable = true;
 
     var tools = new List<string>(CoreTools);
-    if (deletionAvailable) tools.Add("delete_files");
+    if (deletionAvailable) tools.Add("delete_paths");
     if (directoryCreationAvailable) tools.Add("create_directory");
     if (processAllowed) tools.Add("run_process");
     if (validationProfileAvailable && !manualValidation)
@@ -156,6 +156,7 @@ public static class ExecutionTurnToolPolicy
         : "No Host validation profile is configured; do not invent validation commands or a development server.";
     return $"{process}\n{validation}\n"
       + "Only tools offered by the Host in the current request are valid. "
+      + "The approval selector is authoritative: ask requires approval before every mutation; auto executes a requested in-scope mutation after Host validation without a duplicate prompt. "
       + "create_file and create_files create required parent directories, so do not create a directory solely as a file parent. "
       + "Use create_files for two or more independent new text files so the Host can validate and apply the batch as one action.";
   }

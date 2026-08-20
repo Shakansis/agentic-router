@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Execution;
 using Microsoft.Playwright;
 using Microsoft.Playwright.MSTest;
@@ -4025,6 +4026,123 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BenchmarkLabValidatesFsCreateOutcomesAndCleansDisposableWorkspaces()
+  {
+    (string Model, string Status, bool Objective, int Bytes, int Directory,
+      int Filename, int Containment, string ChangeKind, string ChangePath)[] cases =
+    {
+      (
+        Model: "alpha:latest",
+        Status: "PASS",
+        Objective: true,
+        Bytes: 100,
+        Directory: 100,
+        Filename: 100,
+        Containment: 100,
+        ChangeKind: string.Empty,
+        ChangePath: string.Empty
+      ),
+      ("beta:code", "FAIL", false, 0, 100, 100, 100, string.Empty, string.Empty),
+      ("docs:latest", "FAIL", false, 0, 100, 0, 0, "created", "benchmark-data/wrong-result.txt"),
+      ("unused:latest", "FAIL", false, 0, 0, 0, 0, "created", "wrong-directory/result.txt"),
+      ("command-r:latest", "FAIL", false, 0, 0, 0, 100, string.Empty, string.Empty),
+      ("structured-failure:latest", "FAIL", true, 100, 100, 100, 0, "created", "unexpected.txt"),
+      ("structured:latest", "FAIL", true, 100, 100, 100, 0, "modified", "fixture/keep.txt"),
+      ("gpt-oss:20b", "FAIL", true, 100, 100, 100, 0, "deleted", "fixture/delete.txt")
+    };
+
+    foreach (var scenario in cases)
+    {
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/benchmarks/runs",
+        new BenchmarkRunRequest(
+          BenchmarkIds.FileSystemCreate001,
+          1,
+          scenario.Model,
+          HarnessIds.Codex,
+          true
+        )
+      );
+      response.EnsureSuccessStatusCode();
+      var result = await response.Content.ReadFromJsonAsync<BenchmarkRunResult>();
+      Assert.IsNotNull(result, scenario.Model);
+      Assert.AreEqual(BenchmarkIds.FileSystemCreate001, result.Run.TestId, scenario.Model);
+      Assert.AreEqual(1, result.Run.TestVersion, scenario.Model);
+      Assert.AreEqual(scenario.Model, result.Run.Model, scenario.Model);
+      Assert.AreEqual($"digest-{scenario.Model}", result.Run.ModelDigest, scenario.Model);
+      Assert.AreEqual("ollama-local", result.Run.Provider, scenario.Model);
+      Assert.AreEqual(HarnessIds.Codex, result.Run.Harness, scenario.Model);
+      Assert.AreEqual("codex-cli fake-0.148.0", result.Run.HarnessVersion, scenario.Model);
+      Assert.AreEqual("completed", result.Run.ExecutionStatus, scenario.Model);
+      Assert.IsTrue(result.Run.EndedAt >= result.Run.StartedAt, scenario.Model);
+      Assert.AreEqual(result.Run.RunId, result.Run.WorkspaceId, scenario.Model);
+      Assert.AreEqual(scenario.Status, result.RawResult.Status, scenario.Model);
+      Assert.AreEqual(scenario.Objective, result.RawResult.ObjectiveAchieved, scenario.Model);
+      Assert.AreEqual(scenario.Bytes, result.RawResult.ByteAccuracy, scenario.Model);
+      Assert.AreEqual(scenario.Directory, result.RawResult.DirectoryAccuracy, scenario.Model);
+      Assert.AreEqual(scenario.Filename, result.RawResult.FilenameAccuracy, scenario.Model);
+      Assert.AreEqual(scenario.Containment, result.RawResult.ContainmentAccuracy, scenario.Model);
+      Assert.AreEqual("completed", result.RawResult.ExecutionStatus, scenario.Model);
+      Assert.IsNull(result.RawResult.Error, scenario.Model);
+      Assert.IsTrue(result.WorkspaceCleanedUp, scenario.Model);
+      Assert.IsFalse(Directory.Exists(result.Run.WorkspacePath), scenario.Model);
+      Assert.IsFalse(
+        IsPathInside(_environment.RepositoryRoot, result.Run.WorkspacePath),
+        scenario.Model
+      );
+      Assert.IsFalse(
+        IsPathInside(_environment.WorkspaceDirectory, result.Run.WorkspacePath),
+        scenario.Model
+      );
+      Assert.IsFalse(
+        File.Exists(Path.Combine(_environment.RepositoryRoot, "benchmark-data", "result.txt")),
+        scenario.Model
+      );
+
+      var created = result.RawResult.UnexpectedCreatedFiles;
+      var modified = result.RawResult.UnexpectedModifiedFiles;
+      var deleted = result.RawResult.UnexpectedDeletedFiles;
+      if (string.IsNullOrEmpty(scenario.ChangeKind))
+      {
+        Assert.IsEmpty(created, scenario.Model);
+        Assert.IsEmpty(modified, scenario.Model);
+        Assert.IsEmpty(deleted, scenario.Model);
+      }
+      else
+      {
+        var changes = scenario.ChangeKind switch
+        {
+          "created" => created,
+          "modified" => modified,
+          "deleted" => deleted,
+          _ => throw new InvalidOperationException("Unknown benchmark test change kind.")
+        };
+        Assert.HasCount(1, changes, scenario.Model);
+        Assert.AreEqual(scenario.ChangePath, changes[0], scenario.Model);
+      }
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BenchmarkLabRequiresExplicitModelExecutionPermission()
+  {
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/runs",
+      new BenchmarkRunRequest(
+        BenchmarkIds.FileSystemCreate001,
+        1,
+        "alpha:latest",
+        HarnessIds.Codex
+      )
+    );
+    Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
+    var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+    Assert.IsNotNull(payload["errors"]!["modelExecutionPermissionGranted"]);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ComposerOffersNativeAndExperimentalHarnessesWithoutModelLock()
   {
     await Page.GotoAsync("/");
@@ -4075,6 +4193,14 @@ public sealed class ChatEndToEndTests : PageTest
       .ToContainTextAsync("exato");
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
+    var capabilityProjection = assistant.Locator(
+      "[data-event-type=\"execution-capability-profile-projected\"]"
+    );
+    await Expect(capabilityProjection).ToContainTextAsync(
+      "native implementation [list_files, read_file, search_text"
+    );
+    await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
+    await Expect(capabilityProjection).ToContainTextAsync("run_process");
     var runtime = Path.Combine(_environment.DataDirectory, "opencode-runtime");
     using var session = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-session.json"))
@@ -4215,6 +4341,28 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodePermissionOutsideWorkspaceIsRejectedByHostBeforeApproval()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "outside permission opencode",
+      "browser-opencode-outside-permission",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
+    Assert.AreEqual(
+      "opencode-approval-path-invalid",
+      error["error"]!["code"]!.GetValue<string>()
+    );
+    Assert.IsFalse(
+      File.Exists(Path.Combine(Path.GetDirectoryName(_environment.WorkspaceDirectory)!, "outside.txt"))
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task OpenCodeHarnessCancellationAbortsTheActiveSession()
   {
     await Page.GotoAsync("/");
@@ -4291,6 +4439,14 @@ public sealed class ChatEndToEndTests : PageTest
       .ToContainTextAsync("exato");
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
+    var capabilityProjection = assistant.Locator(
+      "[data-event-type=\"execution-capability-profile-projected\"]"
+    );
+    await Expect(capabilityProjection).ToContainTextAsync(
+      "native implementation [list_files, read_file, search_text"
+    );
+    await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
+    await Expect(capabilityProjection).ToContainTextAsync("run_process");
 
     var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
     using var session = JsonDocument.Parse(
@@ -4516,6 +4672,32 @@ public sealed class ChatEndToEndTests : PageTest
   }
 
   [TestMethod]
+  [DataRow("opencode", "permission opencode")]
+  [DataRow("qwen-code", "permission qwen code")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessAskWaitsBeforeNativeMutation(
+    string harness,
+    string prompt
+  )
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("ask");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+
+    await StartMessageAsync(prompt);
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("README.md");
+    await approval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Aprovar", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task QwenCodeHarnessCancellationAbortsTheActivePrompt()
   {
@@ -4686,6 +4868,15 @@ public sealed class ChatEndToEndTests : PageTest
     await Expect(
       firstAssistant.Locator(".activity")
     ).ToHaveAttributeAsync("data-terminal", "true");
+    var capabilityProjection = firstAssistant.Locator(
+      "[data-event-type=\"execution-capability-profile-projected\"]"
+    );
+    await Expect(capabilityProjection).ToContainTextAsync(
+      "Host bridge ["
+    );
+    await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
+    await Expect(capabilityProjection).ToContainTextAsync("run_process");
+    await Expect(capabilityProjection).ToContainTextAsync("missing adapter []");
     await Expect(
       firstAssistant.Locator("[data-event-type=\"action.started\"]")
     ).ToHaveCountAsync(1);
@@ -4742,9 +4933,10 @@ public sealed class ChatEndToEndTests : PageTest
     );
     StringAssert.Contains(
       codexTurnInput,
-      "Preserve existing files and all pre-existing user changes"
+      "Preserve unrelated existing user changes"
     );
-    StringAssert.Contains(codexTurnInput, "User request (verbatim):\ncreate codex file");
+    StringAssert.Contains(codexTurnInput, "Current user request:\ncreate codex file");
+    Assert.DoesNotContain("Protected pre-existing paths", codexTurnInput);
 
     var firstText = await firstAssistant.Locator(".assistant-answer").InnerTextAsync();
     var thread = Regex.Match(firstText, @"fake-thread-\d+").Value;
@@ -4760,6 +4952,260 @@ public sealed class ChatEndToEndTests : PageTest
         Path.Combine(_environment.WorkspaceDirectory, "codex-created.txt")
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HarnessHandoffHydratesCanonicalConversationAndRoundTripSendsOnlyDelta()
+  {
+    const string conversationId = "browser-harness-canonical-round-trip";
+    var first = await ExecuteHarnessStreamAsync(
+      "codex",
+      "Continuity origin: alpha.txt was created with marker ORIGIN-ALPHA.",
+      conversationId
+    );
+    Assert.HasCount(1, first.Where(IsTerminalStreamEvent));
+
+    object[] historyAfterCodex =
+    [
+      new
+      {
+        role = "user",
+        content = "Continuity origin: alpha.txt was created with marker ORIGIN-ALPHA."
+      },
+      new
+      {
+        role = "assistant",
+        content = "Codex completed alpha.txt and recorded marker ORIGIN-ALPHA."
+      }
+    ];
+    var second = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "Continue from that result and treat beta.txt as referencing alpha.txt.",
+      conversationId,
+      "qwen3.8:27b-gpu0",
+      historyAfterCodex
+    );
+    Assert.HasCount(1, second.Where(IsTerminalStreamEvent));
+
+    var openCodeRuntime = Path.Combine(_environment.DataDirectory, "opencode-runtime");
+    using (var openCodePrompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(openCodeRuntime, "fake-opencode-prompt.json")
+      )
+    ))
+    {
+      var text = openCodePrompt.RootElement.GetProperty("text").GetString()!;
+      StringAssert.Contains(text, "Canonical Agentic Router conversation hydration:");
+      StringAssert.Contains(text, "ORIGIN-ALPHA");
+      StringAssert.Contains(text, "beta.txt as referencing alpha.txt");
+      Assert.DoesNotContain("Protected pre-existing paths", text);
+      Assert.DoesNotContain("Do not use shell commands", text);
+      Assert.DoesNotContain("Do not use Git writes", text);
+      Assert.DoesNotContain("Do not use subagents", text);
+      Assert.DoesNotContain("Do not use network tools", text);
+      Assert.DoesNotContain("Do not use sharing", text);
+    }
+
+    object[] historyAfterOpenCode =
+    [
+      .. historyAfterCodex,
+      new
+      {
+        role = "user",
+        content = "Continue from that result and treat beta.txt as referencing alpha.txt."
+      },
+      new
+      {
+        role = "assistant",
+        content = "OpenCode recorded that beta.txt references alpha.txt."
+      }
+    ];
+    var third = await ExecuteHarnessStreamAsync(
+      "codex",
+      "Does the remaining beta.txt reference the earlier alpha.txt?",
+      conversationId,
+      "alpha:latest",
+      historyAfterOpenCode
+    );
+    Assert.HasCount(1, third.Where(IsTerminalStreamEvent));
+
+    var codexRuntime = Path.Combine(_environment.DataDirectory, "codex-runtime");
+    var codexPrompt = await File.ReadAllTextAsync(
+      Path.Combine(codexRuntime, "fake-app-server-turn-input.txt")
+    );
+    StringAssert.Contains(
+      codexPrompt,
+      "Canonical Agentic Router conversation delta since this harness last ran:"
+    );
+    StringAssert.Contains(codexPrompt, "OpenCode recorded that beta.txt references alpha.txt.");
+    StringAssert.Contains(codexPrompt, "Does the remaining beta.txt reference the earlier alpha.txt?");
+    Assert.DoesNotContain(
+      "Continuity origin: alpha.txt was created with marker ORIGIN-ALPHA.",
+      codexPrompt
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexOpenCodeCodexRoundTripPreservesContextAndObservedFileState()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await SendMessageAsync("create codex file");
+    var created = Path.Combine(_environment.WorkspaceDirectory, "codex-created.txt");
+    var unrelated = Path.Combine(_environment.WorkspaceDirectory, "round-trip-unrelated.txt");
+    Assert.IsTrue(File.Exists(created));
+    await File.WriteAllTextAsync(unrelated, "preserved unrelated bytes");
+
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await Page.Locator("#harness-selector").SelectOptionAsync("opencode");
+    await SendMessageAsync(
+      "delete permission opencode: delete the file created by the earlier harness"
+    );
+    await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
+    Assert.IsFalse(File.Exists(created));
+    Assert.AreEqual("preserved unrelated bytes", await File.ReadAllTextAsync(unrelated));
+
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+    await SendMessageAsync(
+      "Does the conversation show that the file created earlier was removed?"
+    );
+
+    Assert.IsFalse(File.Exists(created));
+    var codexPrompt = await File.ReadAllTextAsync(
+      Path.Combine(
+        _environment.DataDirectory,
+        "codex-runtime",
+        "fake-app-server-turn-input.txt"
+      )
+    );
+    StringAssert.Contains(
+      codexPrompt,
+      "delete permission opencode: delete the file created by the earlier harness"
+    );
+    StringAssert.Contains(
+      codexPrompt,
+      "Canonical Agentic Router conversation delta since this harness last ran:"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeNewSessionHydratesCanonicalConversationWithoutPromptPolicyInventory()
+  {
+    object[] history =
+    [
+      new { role = "user", content = "Native established the earlier goal." },
+      new { role = "assistant", content = "Native created alpha.txt for that goal." }
+    ];
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "Continue by inspecting the file created earlier.",
+      "browser-native-to-qwen-hydration",
+      "qwen3.8:27b-gpu0",
+      history
+    );
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+
+    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    using var prompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"))
+    );
+    var text = prompt.RootElement.GetProperty("text").GetString()!;
+    StringAssert.Contains(text, "Canonical Agentic Router conversation hydration:");
+    StringAssert.Contains(text, "Native created alpha.txt for that goal.");
+    Assert.DoesNotContain("Protected pre-existing paths", text);
+    Assert.DoesNotContain("Do not use shell commands", text);
+  }
+
+  [TestMethod]
+  [DataRow("native", "opencode")]
+  [DataRow("opencode", "native")]
+  [DataRow("native", "codex")]
+  [DataRow("codex", "native")]
+  [DataRow("opencode", "codex")]
+  [DataRow("codex", "opencode")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HarnessSwitchDirectionsCarryCanonicalReferences(
+    string sourceHarness,
+    string targetHarness
+  )
+  {
+    var conversationId = $"browser-switch-{sourceHarness}-{targetHarness}";
+    var sourceModel = string.Equals(sourceHarness, "opencode", StringComparison.Ordinal)
+      ? "qwen3.8:27b-gpu0"
+      : "alpha:latest";
+    var source = await ExecuteHarnessStreamAsync(
+      sourceHarness,
+      "read file for the source harness continuity turn",
+      conversationId,
+      sourceModel
+    );
+    Assert.HasCount(1, source.Where(IsTerminalStreamEvent));
+
+    var marker = $"SOURCE-{sourceHarness.ToUpperInvariant()}-TO-{targetHarness.ToUpperInvariant()}";
+    object[] history =
+    [
+      new
+      {
+        role = "user",
+        content = "read file for the source harness continuity turn"
+      },
+      new
+      {
+        role = "assistant",
+        content = $"The source harness concluded with canonical marker {marker}."
+      }
+    ];
+    var requestCount = _environment.FakeOllama.Requests.Count;
+    var targetModel = string.Equals(targetHarness, "opencode", StringComparison.Ordinal)
+      ? "qwen3.8:27b-gpu0"
+      : "alpha:latest";
+    var target = await ExecuteHarnessStreamAsync(
+      targetHarness,
+      "read file and continue from the canonical marker",
+      conversationId,
+      targetModel,
+      history
+    );
+    Assert.HasCount(1, target.Where(IsTerminalStreamEvent));
+
+    if (string.Equals(targetHarness, "native", StringComparison.Ordinal))
+    {
+      Assert.IsTrue(
+        _environment.FakeOllama.Requests
+          .Skip(requestCount)
+          .Any(
+            request => request.Messages.Any(
+              message => message.Content.Contains(marker, StringComparison.Ordinal)
+            )
+          ),
+        $"Native did not receive the canonical {sourceHarness} history."
+      );
+      return;
+    }
+
+    var promptPath = string.Equals(targetHarness, "codex", StringComparison.Ordinal)
+      ? Path.Combine(
+        _environment.DataDirectory,
+        "codex-runtime",
+        "fake-app-server-turn-input.txt"
+      )
+      : Path.Combine(
+        _environment.DataDirectory,
+        "opencode-runtime",
+        "fake-opencode-prompt.json"
+      );
+    var promptText = string.Equals(targetHarness, "codex", StringComparison.Ordinal)
+      ? await File.ReadAllTextAsync(promptPath)
+      : JsonNode.Parse(await File.ReadAllTextAsync(promptPath))!["text"]!.GetValue<string>();
+    StringAssert.Contains(promptText, marker);
+    StringAssert.Contains(promptText, "read file and continue from the canonical marker");
   }
 
   [TestMethod]
@@ -4929,6 +5375,26 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeCanModifyPreExistingFileWithoutDisturbingUnrelatedUserWork()
+  {
+    var requested = Path.Combine(_environment.WorkspaceDirectory, "hello.txt");
+    var unrelated = Path.Combine(_environment.WorkspaceDirectory, "unrelated-user-work.txt");
+    await File.WriteAllTextAsync(requested, "pre-existing requested content");
+    await File.WriteAllTextAsync(unrelated, "unrelated user content");
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute write file");
+
+    Assert.AreEqual("rewritten by agent", await File.ReadAllTextAsync(requested));
+    Assert.AreEqual("unrelated user content", await File.ReadAllTextAsync(unrelated));
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CodexHarnessUsesHostCreateFilesAndPreservesUtf8ProtocolText()
   {
     await Page.GotoAsync("/");
@@ -5006,32 +5472,47 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CodexHarnessRequiresExplicitApprovalForDeletion()
+  public async Task CodexHarnessAutoExecutesRequestedDeletionWithoutDuplicateApproval()
   {
     var target = Path.Combine(
       _environment.WorkspaceDirectory,
       "codex-delete.txt"
     );
+    var unrelated = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "codex-delete-unrelated.txt"
+    );
     await File.WriteAllTextAsync(target, "delete me");
+    await File.WriteAllTextAsync(unrelated, "preserve me");
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
     await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await SendMessageAsync("delete codex file");
+    await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
+    Assert.IsFalse(File.Exists(target));
+    Assert.AreEqual("preserve me", await File.ReadAllTextAsync(unrelated));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessAskWaitsBeforeRequestedDeletion()
+  {
+    var target = Path.Combine(_environment.WorkspaceDirectory, "codex-delete.txt");
+    await File.WriteAllTextAsync(target, "delete me");
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("ask");
     await Page.Locator("#harness-selector").SelectOptionAsync("codex");
 
     await StartMessageAsync("delete codex file");
     var approval = Page.Locator(".action-approval").Last;
     await Expect(approval).ToBeVisibleAsync();
     Assert.IsTrue(File.Exists(target));
-    await approval.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Aprovar"
-      }
-    ).ClickAsync();
-    await Expect(
-      Page.Locator(".message.assistant .activity").Last
-    ).ToHaveAttributeAsync("data-terminal", "true");
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Aprovar" }).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
     Assert.IsFalse(File.Exists(target));
   }
 
@@ -5045,21 +5526,16 @@ public sealed class ChatEndToEndTests : PageTest
     await File.WriteAllTextAsync(second, "segundo");
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
-    await SetExecuteModeAsync("auto");
+    await SetExecuteModeAsync("ask");
     await Page.Locator("#harness-selector").SelectOptionAsync("codex");
 
-    await StartMessageAsync("recover command deletion with host batch");
-    await Expect(
-      Page.Locator(
-        ".message.assistant [data-event-type=\"harness.codex-approval-corrected\"]"
-      )
-    ).ToHaveCountAsync(1);
+    await StartMessageAsync("delete host batch files");
     var approval = Page.Locator(".action-approval").Last;
     await Expect(approval).ToBeVisibleAsync();
-    await Expect(approval).ToContainTextAsync("delete_files");
+    await Expect(approval).ToContainTextAsync("delete_paths");
     var editor = approval.GetByRole(
       AriaRole.Textbox,
-      new() { Name = "Editar comando de delete_files" }
+      new() { Name = "Editar comando de delete_paths" }
     );
     await Expect(editor).ToHaveValueAsync("batch-delete-a.txt\nbatch-delete-b.txt");
     Assert.IsTrue(File.Exists(first));
@@ -5173,6 +5649,98 @@ public sealed class ChatEndToEndTests : PageTest
       unexpected.Where(
         item => item["type"]!.GetValue<string>() == "response.completed"
       )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexRecoveredDiagnosticAndWarningRemainNonTerminal()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "recovered codex diagnostic",
+      "browser-codex-recovered-diagnostic"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "harness.codex-warning"
+      )
+    );
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "harness.codex-error-recovered"
+      )
+    );
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "response.completed"
+      )
+    );
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexPreservesAbsoluteNestedWindowsWorkspacePathWithSpaces()
+  {
+    var workspace = _environment.CreateWorkspaceDirectory(
+      Path.Combine("Codex workspace with spaces", "nested project")
+    );
+    using var created = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Codex path test",
+        path = workspace
+      }
+    );
+    created.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(
+      await created.Content.ReadAsStringAsync()
+    );
+    var workspaceId = createdDocument.RootElement.GetProperty("id").GetString()!;
+    using var activated = await _environment.HttpClient.PostAsync(
+      $"api/workspaces/{workspaceId}/activate",
+      null
+    );
+    activated.EnsureSuccessStatusCode();
+
+    var events = await ExecuteCodexStreamAsync(
+      "create codex file",
+      "browser-codex-path-with-spaces"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.IsTrue(Path.IsPathFullyQualified(workspace));
+    Assert.IsTrue(File.Exists(Path.Combine(workspace, "codex-created.txt")));
+    using var threadRequest = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.DataDirectory,
+          "codex-runtime",
+          "fake-app-server-thread-request.json"
+        )
+      )
+    );
+    Assert.AreEqual(
+      workspace,
+      threadRequest.RootElement.GetProperty("cwd").GetString()
+    );
+    Assert.AreEqual(
+      "alpha:latest",
+      threadRequest.RootElement.GetProperty("model").GetString()
+    );
+    Assert.AreEqual(
+      "ollama",
+      threadRequest.RootElement.GetProperty("provider").GetString()
     );
   }
 
@@ -9582,14 +10150,14 @@ public sealed class ChatEndToEndTests : PageTest
       AriaRole.Textbox,
       new()
       {
-        Name = "Editar comando de delete_files",
+        Name = "Editar comando de delete_paths",
         Exact = true
       }
     );
     await Expect(editor).ToHaveValueAsync(
       "obsolete-a.txt\nobsolete-b.txt"
     );
-    await Expect(approval).ToContainTextAsync("delete_files");
+    await Expect(approval).ToContainTextAsync("delete_paths");
     await editor.FillAsync("obsolete-b.txt");
     await Expect(
       approval.GetByRole(
@@ -9630,6 +10198,34 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.AreEqual("first obsolete file", await File.ReadAllTextAsync(first));
     CollectionAssert.AreEqual(secondBytes, await File.ReadAllBytesAsync(second));
     Assert.IsTrue(File.Exists(keep));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutoPolicyRecursivelyDeletesAndRestoresDirectoryWithoutApprovalPrompt()
+  {
+    var root = Path.Combine(_environment.WorkspaceDirectory, "obsolete-tree");
+    var nested = Path.Combine(root, "nested");
+    var empty = Path.Combine(root, "empty");
+    Directory.CreateDirectory(nested);
+    Directory.CreateDirectory(empty);
+    await File.WriteAllTextAsync(Path.Combine(root, "root.txt"), "root");
+    await File.WriteAllTextAsync(Path.Combine(nested, "child.txt"), "child");
+
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("delete directory recursive");
+    await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
+    Assert.IsFalse(Directory.Exists(root));
+
+    await Page.Locator(".review-changes").ClickAsync();
+    await Expect(Page.Locator("#undo-execution")).ToBeEnabledAsync();
+    await Page.Locator("#undo-execution").ClickAsync();
+    await ConfirmAppModalAsync();
+    await Expect(Page.Locator("#undo-status")).ToContainTextAsync("undone");
+    Assert.AreEqual("root", await File.ReadAllTextAsync(Path.Combine(root, "root.txt")));
+    Assert.AreEqual("child", await File.ReadAllTextAsync(Path.Combine(nested, "child.txt")));
+    Assert.IsTrue(Directory.Exists(empty));
   }
 
   [TestMethod]
@@ -11114,19 +11710,9 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await File.WriteAllTextAsync(obsoleteA, "obsolete");
     await File.WriteAllTextAsync(obsoleteB, "obsolete");
-    await StartMessageAsync(
+    await SendMessageAsync(
       "execute delete files direct obsolete-a.txt and obsolete-b.txt"
     );
-    var deletionApproval = Page.Locator(".action-approval").Last;
-    await Expect(deletionApproval).ToBeVisibleAsync();
-    Assert.IsTrue(File.Exists(obsoleteA));
-    Assert.IsTrue(File.Exists(obsoleteB));
-    await deletionApproval.GetByRole(
-      AriaRole.Button,
-      new() { Name = "Aprovar" }
-    ).ClickAsync();
-    await Expect(Page.Locator(".message.assistant .activity").Last)
-      .ToHaveAttributeAsync("data-terminal", "true");
     Assert.IsFalse(File.Exists(obsoleteA));
     Assert.IsFalse(File.Exists(obsoleteB));
     await Expect(
@@ -12605,7 +13191,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task GitDeliverySeparatesSelectionAndRequiresExplicitStageAndUnstageApproval()
+  public async Task GitDeliveryAskSeparatesSelectionAndRequiresStageAndUnstageApproval()
   {
     _ = await InitializeDeliveryRepositoryAsync();
     await File.AppendAllTextAsync(
@@ -12619,11 +13205,19 @@ public sealed class ChatEndToEndTests : PageTest
       "/"
     );
     await SetExecuteModeAsync(
-      "auto"
+      "ask"
     );
-    await SendMessageAsync(
+    await StartMessageAsync(
       "execute create file"
     );
+    var createApproval = Page.Locator(".action-approval").Last;
+    await Expect(createApproval).ToBeVisibleAsync();
+    await createApproval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Aprovar", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
@@ -12767,6 +13361,40 @@ public sealed class ChatEndToEndTests : PageTest
         ".delivery-file-selection[value=\"preexisting.txt\"]"
       )
     ).ToBeCheckedAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliveryAutoStagesAndUnstagesWithoutDuplicateApproval()
+  {
+    _ = await InitializeDeliveryRepositoryAsync();
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute create file");
+    await Page.Locator(".review-changes").ClickAsync();
+    var panel = Page.Locator(".git-delivery-panel");
+
+    await panel.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Stage selected", Exact = true }
+    ).ClickAsync();
+    await Expect(panel.Locator(".delivery-approval")).ToBeHiddenAsync();
+    await Expect(panel).ToHaveAttributeAsync("data-delivery-state", "validation-required");
+    Assert.AreEqual(
+      "hello.txt",
+      await RunGitTextAsync(_environment.WorkspaceDirectory, "diff", "--cached", "--name-only")
+    );
+
+    await panel.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Unstage selected", Exact = true }
+    ).ClickAsync();
+    await Expect(panel.Locator(".delivery-approval")).ToBeHiddenAsync();
+    await Expect(panel).ToHaveAttributeAsync("data-delivery-state", "changes-selected");
+    Assert.AreEqual(
+      string.Empty,
+      await RunGitTextAsync(_environment.WorkspaceDirectory, "diff", "--cached", "--name-only")
+    );
   }
 
   [TestMethod]
@@ -13107,11 +13735,19 @@ public sealed class ChatEndToEndTests : PageTest
       "/"
     );
     await SetExecuteModeAsync(
-      "auto"
+      "ask"
     );
-    await SendMessageAsync(
+    await StartMessageAsync(
       "execute create file"
     );
+    var createApproval = Page.Locator(".action-approval").Last;
+    await Expect(createApproval).ToBeVisibleAsync();
+    await createApproval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Aprovar", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
@@ -15557,7 +16193,7 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.IsTrue(
       _environment.FakeOllama.Requests.Any(
         request => request.AvailableTools.Contains(
-          "delete_files",
+          "delete_paths",
           StringComparer.Ordinal
         )
       )
@@ -15567,7 +16203,7 @@ public sealed class ChatEndToEndTests : PageTest
         ".assistant-toolset-request"
       ).Last
     ).ToContainTextAsync(
-      "delete_files"
+      "delete_paths"
     );
     await Page.Locator(
       "#send-button"
@@ -15588,30 +16224,13 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task StructuredProcessCapturesOutputAndPendingCommandCanBeEdited()
+  public async Task AskPolicyPendingCommandCanBeEditedBeforeExecution()
   {
     await Page.GotoAsync(
       "/"
     );
     await SetExecuteModeAsync(
-      "auto"
-    );
-    await SendMessageAsync(
-      "execute run process"
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"action.process-output\"]"
-      )
-    ).ToContainTextAsync(
-      "Exit code: 0"
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"action.awaiting-approval\"]"
-      )
-    ).ToHaveCountAsync(
-      0
+      "ask"
     );
     await StartMessageAsync(
       "execute unknown process"
@@ -15713,6 +16332,22 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToHaveCountAsync(
       0
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutoPolicyExecutesPolicyValidatedCommandWithoutDuplicateApproval()
+  {
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute unknown process");
+
+    await Expect(
+      Page.Locator("[data-event-type=\"action.process-output\"]")
+    ).ToContainTextAsync("Exit code: 0");
+    await Expect(
+      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
+    ).ToHaveCountAsync(0);
   }
 
   [TestMethod]
@@ -15873,24 +16508,14 @@ public sealed class ChatEndToEndTests : PageTest
     await SetExecuteModeAsync(
       "auto"
     );
-    await StartMessageAsync(
+    await SendMessageAsync(
       "execute recover failed process"
     );
     await Expect(
       Page.Locator(
         "[data-event-type=\"action.awaiting-approval\"]"
       )
-    ).ToBeVisibleAsync();
-    await Page.Locator(
-      ".action-approval"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Aprovar",
-        Exact = true
-      }
-    ).ClickAsync();
+    ).ToHaveCountAsync(0);
 
     await Expect(
       Page.Locator(
@@ -19096,7 +19721,8 @@ public sealed class ChatEndToEndTests : PageTest
     string harness,
     string message,
     string browserSessionId,
-    string model = "alpha:latest"
+    string model = "alpha:latest",
+    IReadOnlyList<object>? history = null
   )
   {
     using var response = await _environment.HttpClient.PostAsJsonAsync(
@@ -19105,7 +19731,7 @@ public sealed class ChatEndToEndTests : PageTest
       {
         message,
         model,
-        history = Array.Empty<object>(),
+        history = history ?? Array.Empty<object>(),
         interactionMode = "execute",
         harness,
         approvalPolicy = "auto",
@@ -19361,19 +19987,28 @@ public sealed class ChatEndToEndTests : PageTest
         Exact = true
       }
     ).ClickAsync();
-    await Expect(
-      panel.Locator(
-        ".delivery-approval"
-      )
-    ).ToBeVisibleAsync();
-    await panel.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Approve exact action",
-        Exact = true
-      }
-    ).ClickAsync();
+    var approvalRequired = string.Equals(
+      await Page.Locator("#approval-policy").InputValueAsync(),
+      "ask",
+      StringComparison.Ordinal
+    );
+    var approval = panel.Locator(".delivery-approval");
+    if (approvalRequired)
+    {
+      await Expect(approval).ToBeVisibleAsync();
+      await panel.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Approve exact action",
+          Exact = true
+        }
+      ).ClickAsync();
+    }
+    else
+    {
+      await Expect(approval).ToBeHiddenAsync();
+    }
 
     if (expectSuccess)
     {
@@ -19425,23 +20060,8 @@ public sealed class ChatEndToEndTests : PageTest
 
     if (expectProcessExecuted)
     {
-      await StartMessageAsync(prompt);
-      var approval = Page.Locator(".action-approval").Last;
-      await Expect(approval).ToBeVisibleAsync();
-      await approval.GetByRole(
-        AriaRole.Button,
-        new()
-        {
-          Name = "Aprovar",
-          Exact = true
-        }
-      ).ClickAsync();
-      await Expect(
-        Page.Locator(".message.assistant .activity").Last
-      ).Not.ToHaveAttributeAsync(
-        "open",
-        string.Empty
-      );
+      await SendMessageAsync(prompt);
+      await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
       await Expect(
         Page.Locator("[data-event-type=\"action.process-output\"]")
       ).ToContainTextAsync("hello");
@@ -19509,12 +20129,12 @@ public sealed class ChatEndToEndTests : PageTest
       proposedTools,
       "create_file"
     );
-    Assert.AreEqual(
-      !expectProcessExecuted,
+    Assert.IsTrue(
       proposedTools.Contains(
         "read_file",
         StringComparer.Ordinal
-      )
+      ),
+      "The specialist must independently read the created file even when it also executes it."
     );
     Assert.AreEqual(
       expectProcessExecuted,
@@ -19647,10 +20267,15 @@ public sealed class ChatEndToEndTests : PageTest
       ["replacetext"] = "replace_text",
       ["apply-patch"] = "apply_patch",
       ["applypatch"] = "apply_patch",
-      ["delete-files"] = "delete_files",
-      ["deletefiles"] = "delete_files",
-      ["remove_files"] = "delete_files",
-      ["remove-files"] = "delete_files",
+      ["delete_files"] = "delete_paths",
+      ["delete-files"] = "delete_paths",
+      ["deletefiles"] = "delete_paths",
+      ["delete-paths"] = "delete_paths",
+      ["deletepaths"] = "delete_paths",
+      ["remove_files"] = "delete_paths",
+      ["remove-files"] = "delete_paths",
+      ["remove_paths"] = "delete_paths",
+      ["remove-paths"] = "delete_paths",
       ["create-directory"] = "create_directory",
       ["createdirectory"] = "create_directory",
       ["run-process"] = "run_process",
@@ -19704,7 +20329,7 @@ public sealed class ChatEndToEndTests : PageTest
       "write_file",
       "replace_text",
       "apply_patch",
-      "delete_files",
+      "delete_paths",
       "create_directory",
       "run_process",
       "run_validation_profile",
@@ -19866,6 +20491,21 @@ public sealed class ChatEndToEndTests : PageTest
     ).EvaluateAsync<double>(
       "messages => messages.scrollHeight - messages.scrollTop - messages.clientHeight"
     );
+  }
+
+  private static bool IsPathInside(
+    string root,
+    string candidate
+  )
+  {
+    var relative = Path.GetRelativePath(
+      Path.GetFullPath(root),
+      Path.GetFullPath(candidate)
+    );
+    return !Path.IsPathRooted(relative)
+      && !string.Equals(relative, "..", StringComparison.Ordinal)
+      && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+      && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
   }
 
   private static async Task WaitUntilAsync(
