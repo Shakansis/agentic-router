@@ -10,9 +10,15 @@ internal sealed record TestApplicationSettings
 
   public string RouterModel { get; init; } = "router:latest";
 
+  public string RouterGpu { get; init; } = "default";
+
   public string ActionModel { get; init; } = "router:latest";
 
+  public string ActionGpu { get; init; } = "default";
+
   public string CoordinatorModel { get; init; } = "router:latest";
+
+  public string CoordinatorGpu { get; init; } = "default";
 
   public string DefaultModel { get; init; } = "alpha:latest";
 

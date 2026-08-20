@@ -356,6 +356,10 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       var settings = await _settingsStore.GetAsync(
         cancellationToken
       );
+      var mainGpu = ResolveRoleGpu(
+        settings,
+        role
+      );
       var baseUri = new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
@@ -496,6 +500,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
               ? -1
               : roleProfile.KeepAlive,
             candidate,
+            mainGpu,
             cancellationToken
           );
         }
@@ -551,7 +556,11 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
               ),
               "memory-profile-minimal-request",
               installed.Digest,
-              candidate
+              candidate,
+              Gpu: GpuSelectionForRole(
+                settings,
+                role
+              )
             ),
             cancellationToken
           );
@@ -645,6 +654,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
                 ? -1
                 : roleProfile.KeepAlive,
               priorTarget.ContextLength,
+              mainGpu,
               CancellationToken.None
             );
           }
@@ -679,6 +689,33 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     {
       _measurementGate.Release();
     }
+  }
+
+  private static int? ResolveRoleGpu(
+    ApplicationSettings settings,
+    string role
+  )
+  {
+    return OllamaGpuSelection.Resolve(
+      GpuSelectionForRole(
+        settings,
+        role
+      ),
+      settings.DefaultGpu
+    );
+  }
+
+  private static string GpuSelectionForRole(
+    ApplicationSettings settings,
+    string role
+  )
+  {
+    return role switch
+    {
+      OllamaRuntimeRoleIds.Router => settings.RouterGpu,
+      OllamaRuntimeRoleIds.ResidentCoordinator => settings.ActionGpu,
+      _ => settings.DefaultGpu
+    };
   }
 
   public async Task<IReadOnlyDictionary<string, string[]>> ValidateOverridesAsync(

@@ -8,10 +8,11 @@ const state = {
   runtimeTimer: null,
   activeAssistant: null,
   editingTurn: null,
-  lockedModel: null,
   conversationVersion: 0,
   modelDiagnostics: null,
   interactionMode: "chat",
+  harness: "native",
+  harnesses: [],
   approvalPolicy: "auto",
   workspace: null,
   workspaceProfiles: null,
@@ -30,6 +31,7 @@ const state = {
   latestExecutionSessionId: null,
   settingsDirty: false,
   settingsSection: "general",
+  settingsSubsection: "portable-yaml",
   workspaceSaving: false,
   activeReview: null,
   activeDelivery: null,
@@ -66,6 +68,52 @@ const state = {
 const elements = {};
 let resizeObserver;
 
+const settingsSectionGroups = {
+  general: ["settings-general", "settings-ollama"],
+  "models-routing": ["settings-models", "settings-coordinator"],
+  providers: ["settings-cloud-providers"],
+  harnesses: ["settings-runtime"],
+  execution: ["settings-execution"],
+  workspaces: ["settings-workspaces", "settings-git", "settings-validation"],
+  advanced: ["settings-advanced"]
+};
+
+const settingsSectionAliases = {
+  ollama: "general",
+  cloud: "providers",
+  "cloud-providers": "providers",
+  models: "models-routing",
+  coordinator: "models-routing",
+  actions: "models-routing",
+  runtime: "harnesses",
+  execution: "execution",
+  context: "harnesses",
+  usage: "harnesses",
+  workspaces: "workspaces",
+  workspace: "workspaces",
+  git: "workspaces",
+  validation: "workspaces",
+  advanced: "advanced"
+};
+
+function normalizeSettingsSection(section) {
+  if (!section) {
+    return "general";
+  }
+
+  const normalized = settingsSectionAliases[section] ?? section;
+
+  return settingsSectionGroups[normalized] ? normalized : "general";
+}
+
+function sectionElementById(sectionId) {
+  return document.getElementById(sectionId);
+}
+
+function visibleSettingsSectionIds(section) {
+  return settingsSectionGroups[section] ?? [section];
+}
+
 document.addEventListener("DOMContentLoaded", initialize);
 
 async function initialize() {
@@ -101,7 +149,7 @@ function bindElements() {
     "composer",
     "message-input",
     "model-selector",
-    "model-lock",
+    "harness-selector",
     "send-button",
     "send-button-label",
     "cancel-message-edit",
@@ -137,8 +185,11 @@ function bindElements() {
     "intentions-grid",
     "ollama-url",
     "router-model",
+    "router-gpu",
     "action-model",
+    "action-gpu",
     "coordinator-model",
+    "coordinator-gpu",
     "default-model",
     "default-gpu",
     "jump-latest",
@@ -450,7 +501,7 @@ function bindEvents() {
     "click",
     handleAttachmentPreviewClick
   );
-  elements.modelLock.addEventListener("change", handleModelLockChange);
+  elements.harnessSelector.addEventListener("change", handleHarnessChange);
   elements.testModel.addEventListener("click", testSelectedModel);
   elements.approvalPolicy.addEventListener("change", handleApprovalPolicyChange);
   elements.workspaceForm.addEventListener("submit", saveWorkspace);
@@ -694,6 +745,9 @@ function bindEvents() {
   );
   elements.settingsNavigation.querySelectorAll("[data-settings-target]").forEach(
     button => button.addEventListener("click", selectSettingsSection)
+  );
+  document.querySelectorAll("[data-settings-subtarget]").forEach(
+    button => button.addEventListener("click", selectSettingsSubsection)
   );
   elements.settingsSectionSelect.addEventListener(
     "change",
@@ -949,6 +1003,7 @@ function initializeScrollFollowing() {
 async function loadApplicationState() {
   const [
     settings,
+    harnesses,
     modelsResponse,
     devicesResponse,
     workspace,
@@ -960,11 +1015,11 @@ async function loadApplicationState() {
     cloudProviders,
     cloudUsageDashboard,
     webSearch,
-    providerHealth,
     modelOrganization,
     runtimeProfiles
   ] = await Promise.all([
     fetchJson("/api/settings"),
+    fetchJson("/api/harnesses"),
     fetchJson("/api/models"),
     fetchJson("/api/devices"),
     fetchJson("/api/workspace"),
@@ -976,12 +1031,13 @@ async function loadApplicationState() {
     fetchJson("/api/cloud-providers"),
     fetchJson("/api/usage/cloud-dashboard"),
     fetchJson("/api/web-search"),
-    fetchJson("/api/provider-health"),
     fetchJson("/api/model-organization"),
     fetchJson("/api/runtime/profiles")
   ]);
+  const providerHealth = await fetchJson("/api/provider-health");
 
   state.settings = settings;
+  state.harnesses = harnesses;
   state.models = modelsResponse.models;
   state.devices = devicesResponse.devices;
   state.workspace = workspace;
@@ -998,6 +1054,7 @@ async function loadApplicationState() {
   state.runtimeProfiles = runtimeProfiles;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
+  renderHarnesses();
   renderComposerModels();
   renderSettings();
   renderCloudUsage();
@@ -1780,11 +1837,11 @@ async function resetConversationForWorkspaceChange() {
   state.latestExecutionSessionId = null;
   state.interactionMode = "chat";
   state.approvalPolicy = "auto";
-  state.lockedModel = null;
+  state.harness = "native";
   elements.modelSelector.value = "auto";
-  elements.modelLock.checked = false;
+  elements.harnessSelector.value = "native";
   updateInteractionControls();
-  updateModelLockControls();
+  updateHarnessControls();
   await ensureConversationIdentity();
   await refreshSelectedModelCapabilities();
 }
@@ -2545,7 +2602,7 @@ async function resumeSession(id) {
           : session.state;
         state.interactionMode = "chat";
         state.approvalPolicy = "auto";
-        state.lockedModel = null;
+        state.harness = "native";
         elements.modelSelector.value = session.selectedModel
           && state.models.some(model => model.name === session.selectedModel)
           ? session.selectedModel
@@ -2558,7 +2615,8 @@ async function resumeSession(id) {
             : "Saved locally"
         );
         updateInteractionControls();
-        updateModelLockControls();
+        elements.harnessSelector.value = "native";
+        updateHarnessControls();
         updateComposerStatus();
         elements.workspaceDialog.close();
         await refreshSessions();
@@ -3395,7 +3453,6 @@ function renderCloudUsage() {
   const dashboard = state.cloudUsageDashboard;
   const active = parseModelReference(
     state.activeAgentModel
-      ?? state.lockedModel
       ?? elements.modelSelector.value
   );
   const activeProvider = active.provider === "ollama-local"
@@ -4365,7 +4422,7 @@ function renderComposerModels() {
     selected
   );
   updateComposerModelTitle();
-  updateModelLockControls();
+  updateHarnessControls();
 }
 
 function renderSettings() {
@@ -4376,17 +4433,36 @@ function renderSettings() {
   elements.ollamaUrl.value = state.settings.ollamaUrl;
   replaceOptions(elements.routerModel, modelOptions(), state.settings.routerModel);
   replaceOptions(
+    elements.routerGpu,
+    gpuOptions(true, state.settings.routerGpu),
+    state.settings.routerGpu
+  );
+  replaceOptions(
     elements.actionModel,
     modelOptions(),
     state.settings.actionModel
+  );
+  replaceOptions(
+    elements.actionGpu,
+    gpuOptions(true, state.settings.actionGpu),
+    state.settings.actionGpu
   );
   replaceOptions(
     elements.coordinatorModel,
     modelOptions(),
     state.settings.coordinatorModel
   );
+  replaceOptions(
+    elements.coordinatorGpu,
+    gpuOptions(true, state.settings.coordinatorGpu),
+    state.settings.coordinatorGpu
+  );
   replaceOptions(elements.defaultModel, modelOptions(), state.settings.defaultModel);
-  replaceOptions(elements.defaultGpu, gpuOptions(false), state.settings.defaultGpu);
+  replaceOptions(
+    elements.defaultGpu,
+    gpuOptions(false, state.settings.defaultGpu),
+    state.settings.defaultGpu
+  );
   elements.defaultContextTokens.value = state.settings.context.defaultContextTokens;
   elements.providerContextTokens.value = state.settings.context.providerContextTokens;
   elements.reservedResponseTokens.value = state.settings.context.reservedResponseTokens;
@@ -4924,7 +5000,7 @@ async function applyModelProfile() {
     renderSettings();
     renderProfilePreview(preview);
     elements.modelProfileStatus.textContent =
-      "Perfil aplicado. O lock da conversa atual foi preservado.";
+      "Perfil aplicado. A seleção atual da conversa foi preservada.";
   } catch (error) {
     elements.modelProfileStatus.textContent = error.message;
   } finally {
@@ -5527,9 +5603,10 @@ async function refreshCloudProviderState() {
   renderSettings();
   renderCloudUsage();
   await refreshSelectedModelCapabilities();
+  await refreshProviderHealth();
 }
 
-function gpuOptions(includeDefault) {
+function gpuOptions(includeDefault, selected = null) {
   const options = includeDefault
     ? [
       {
@@ -5540,9 +5617,26 @@ function gpuOptions(includeDefault) {
     : [];
 
   for (const device of state.devices) {
+    if (!device.isAuto && device.ollamaIndex == null) {
+      continue;
+    }
+
     options.push({
-      value: device.id,
-      label: device.isAuto ? "Auto" : device.name
+      value: device.isAuto ? "auto" : `ollama:${device.ollamaIndex}`,
+      label: device.isAuto
+        ? "Auto"
+        : `CUDA ${device.ollamaIndex} · ${device.name}`
+    });
+  }
+
+  if (
+    selected
+    && /^ollama:\d+$/.test(selected)
+    && !options.some(option => option.value === selected)
+  ) {
+    options.push({
+      value: selected,
+      label: `CUDA ${selected.slice("ollama:".length)} · configurada, indisponível`
     });
   }
 
@@ -5589,7 +5683,7 @@ function createIntentionCard(name, intention) {
     createSelectField(
       "GPU",
       "intention-gpu",
-      gpuOptions(true),
+      gpuOptions(true, intention.gpu),
       intention.gpu
     )
   );
@@ -5746,7 +5840,9 @@ async function openSettings(section = "general") {
   state.settingsDirty = false;
   updateSettingsDirtyState();
   setSettingsSection(section, false);
-  document.querySelector(`[data-settings-target="${section}"]`)?.focus();
+  document.querySelector(
+    `[data-settings-target="${normalizeSettingsSection(section)}"]`
+  )?.focus();
 
   try {
     [
@@ -5802,8 +5898,11 @@ async function saveSettings(event) {
     schemaVersion: state.settings.schemaVersion,
     ollamaUrl: elements.ollamaUrl.value.trim(),
     routerModel: elements.routerModel.value,
+    routerGpu: elements.routerGpu.value,
     actionModel: elements.actionModel.value,
+    actionGpu: elements.actionGpu.value,
     coordinatorModel: elements.coordinatorModel.value,
+    coordinatorGpu: elements.coordinatorGpu.value,
     defaultModel: elements.defaultModel.value,
     defaultGpu: elements.defaultGpu.value,
     trustedWorkspacePath: state.settings.trustedWorkspacePath ?? null,
@@ -5867,7 +5966,6 @@ async function saveSettings(event) {
     updateSettingsDirtyState();
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
     renderSettings();
-    elements.settingsDialog.close();
     await refreshRuntimeStatus();
     scheduleRuntimeRefresh();
   } catch (error) {
@@ -5924,12 +6022,22 @@ function markSettingsValidationErrors(errors) {
       const card = elements.intentionsGrid.querySelector(
         `[data-intention="${CSS.escape(intention)}"]`
       );
-      control = field.toLowerCase().includes("fallback")
-        ? card?.querySelector(".intention-fallback-model")
-        : card?.querySelector(".intention-model");
+      control = field.toLowerCase().endsWith("gpu")
+        ? card?.querySelector(".intention-gpu")
+        : field.toLowerCase().includes("fallback")
+          ? card?.querySelector(".intention-fallback-model")
+          : card?.querySelector(".intention-model");
       card?.classList.add("field-invalid-card");
+    } else if (field === "routerGpu") {
+      control = elements.routerGpu;
     } else if (field.startsWith("router")) {
       control = elements.routerModel;
+    } else if (field === "actionGpu") {
+      control = elements.actionGpu;
+    } else if (field.startsWith("action")) {
+      control = elements.actionModel;
+    } else if (field === "coordinatorGpu") {
+      control = elements.coordinatorGpu;
     } else if (field.startsWith("coordinator")) {
       control = elements.coordinatorModel;
     } else if (field.startsWith("defaultModel")) {
@@ -5942,6 +6050,7 @@ function markSettingsValidationErrors(errors) {
         "context.maxConversationMessages": elements.maxConversationMessages,
         "execution.maxToolOutputTokens": elements.maxToolOutputTokens,
         "runtime.generationTimeoutSeconds": elements.generationTimeoutSeconds,
+        defaultGpu: elements.defaultGpu,
         ollamaUrl: elements.ollamaUrl
       };
       control = fieldControls[field] ?? null;
@@ -6217,27 +6326,99 @@ function selectSettingsSection(event) {
   );
 }
 
-function setSettingsSection(section, moveFocus) {
-  const target = document.querySelector(
-    `[data-settings-section="${section}"]`
-  );
-  if (!target) {
+function setSettingsSubsection(subsection, moveFocus) {
+  const advancedSection = sectionElementById("settings-advanced");
+  if (!advancedSection) {
     return;
   }
-  state.settingsSection = section;
-  elements.settingsSectionSelect.value = section;
-  elements.settingsDialog.dataset.section = section;
+
+  const normalizedSubsection = subsection ?? "portable-yaml";
+  const subsectionPanels = advancedSection.querySelectorAll(
+    "[data-settings-subsection]"
+  );
+  let foundPanel = null;
+
+  subsectionPanels.forEach(
+    panel => {
+      const isActive = panel.dataset.settingsSubsection === normalizedSubsection;
+      panel.classList.toggle("active", isActive);
+      if (isActive) {
+        foundPanel = panel;
+      }
+    }
+  );
+
+  advancedSection.querySelectorAll(
+    "[data-settings-subtarget]"
+  ).forEach(
+    button => button.setAttribute(
+      "aria-current",
+      button.dataset.settingsSubtarget === normalizedSubsection
+        ? "page"
+        : "false"
+    )
+  );
+
+  if (!foundPanel) {
+    return;
+  }
+
+  state.settingsSubsection = normalizedSubsection;
+  if (moveFocus) {
+    foundPanel.focus({
+      preventScroll: true
+    });
+  }
+}
+
+function selectSettingsSubsection(event) {
+  setSettingsSubsection(
+    event.currentTarget.dataset.settingsSubtarget,
+    true
+  );
+}
+
+function setSettingsSection(section, moveFocus) {
+  const normalizedSection = normalizeSettingsSection(section);
+  const sectionIds = visibleSettingsSectionIds(normalizedSection);
+  const allSections = document.querySelectorAll(".settings-section");
+  const activeSections = sectionIds
+    .map(
+      sectionId => sectionElementById(sectionId)
+    )
+    .filter(Boolean);
+
+  if (!activeSections.length) {
+    return;
+  }
+
+  allSections.forEach(
+    sectionElement => sectionElement.classList.remove("active")
+  );
+  activeSections.forEach(
+    sectionElement => sectionElement.classList.add("active")
+  );
+
+  state.settingsSection = normalizedSection;
+  elements.settingsSectionSelect.value = normalizedSection;
+  elements.settingsDialog.dataset.section = normalizedSection;
   elements.settingsNavigation.querySelectorAll("[data-settings-target]").forEach(
     button => button.setAttribute(
       "aria-current",
-      button.dataset.settingsTarget === section ? "page" : "false"
+      button.dataset.settingsTarget === normalizedSection
+        ? "page"
+        : "false"
     )
   );
-  target.scrollIntoView({
-    block: "start"
-  });
+
+  if (normalizedSection === "advanced") {
+    setSettingsSubsection(
+      state.settingsSubsection
+    );
+  }
+
   if (moveFocus) {
-    target.focus({
+    activeSections[0].focus({
       preventScroll: true
     });
   }
@@ -6247,22 +6428,24 @@ function navigateToSettingsError(field) {
   const section = !field
     ? "general"
     : field.startsWith("ollama")
-      ? "ollama"
+      ? "general"
       : field.startsWith("router") || field.startsWith("intentions")
-        ? "models"
-        : field.startsWith("coordinator")
-          ? "coordinator"
+        ? "models-routing"
+        : field.startsWith("coordinator") || field.startsWith("action")
+          ? "models-routing"
           : field.startsWith("execution")
             ? "execution"
             : field.startsWith("runtime") || field.startsWith("context")
-              ? "runtime"
+              ? "harnesses"
               : field.startsWith("usage")
-                ? "runtime"
-              : field.startsWith("git")
-                ? "git"
-                : field.startsWith("session")
+                ? "harnesses"
+                : field.startsWith("validation")
                   ? "workspaces"
-                  : "general";
+                  : field.startsWith("git")
+                    ? "workspaces"
+                    : field.startsWith("session")
+                      ? "workspaces"
+                      : "general";
   setSettingsSection(
     section,
     true
@@ -6310,12 +6493,7 @@ function openValidationFromSettings() {
 }
 
 async function handleModelSelectionChange() {
-  if (elements.modelSelector.value === "auto") {
-    state.lockedModel = null;
-    elements.modelLock.checked = false;
-  }
-
-  updateModelLockControls();
+  updateHarnessControls();
   updateInteractionControls();
   updateComposerModelTitle();
   updateComposerStatus();
@@ -6332,7 +6510,6 @@ async function refreshSelectedModelCapabilities(
 ) {
   const selected = model
     ?? state.activeAgentModel
-    ?? state.lockedModel
     ?? elements.modelSelector.value;
   const capabilityModel = selected && selected !== "auto"
     ? selected
@@ -6914,6 +7091,7 @@ function handleModeChange(event) {
 function setInteractionMode(mode) {
   state.interactionMode = mode;
   updateInteractionControls();
+  updateHarnessControls();
   updateComposerStatus();
 }
 
@@ -6942,34 +7120,52 @@ function updateInteractionControls() {
   );
 }
 
-function handleModelLockChange() {
-  if (
-    elements.modelLock.checked
-    && elements.modelSelector.value !== "auto"
-  ) {
-    state.lockedModel = elements.modelSelector.value;
-  } else {
-    state.lockedModel = null;
-    elements.modelLock.checked = false;
-  }
-
-  updateModelLockControls();
+function handleHarnessChange() {
+  state.harness = elements.harnessSelector.value;
   updateComposerStatus();
 }
 
-function updateModelLockControls() {
+function renderHarnesses() {
+  const statuses = Array.isArray(state.harnesses)
+    ? state.harnesses
+    : [];
+  const options = statuses.map(status => {
+    const definition = status.definition;
+    const availability = status.availability;
+    const label = definition.experimental
+      ? `${definition.displayName} (Experimental)`
+      : definition.displayName;
+    return {
+      value: definition.id,
+      label: availability.available
+        ? label
+        : `${label} — Unavailable`,
+      disabled: !availability.available,
+      title: availability.available
+        ? `${definition.description} Version: ${availability.version ?? "unknown"}.`
+        : availability.message ?? `${label} is unavailable.`
+    };
+  });
+  if (!options.some(option => option.value === "native")) {
+    options.unshift({ value: "native", label: "Native" });
+  }
+  const selected = options.some(
+    option => option.value === state.harness && !option.disabled
+  )
+    ? state.harness
+    : "native";
+  state.harness = selected;
+  replaceOptions(elements.harnessSelector, options, selected);
+}
+
+function updateHarnessControls() {
   const disabled = Boolean(
     state.requestController
   ) || state.conversationTransitioning;
-  const isLocked = Boolean(state.lockedModel);
-  elements.modelSelector.disabled = disabled || isLocked;
-  elements.modelLock.disabled = disabled
-    || (!isLocked && elements.modelSelector.value === "auto");
-  elements.modelLock.checked = isLocked;
-  elements.composer.classList.toggle(
-    "model-locked",
-    isLocked
-  );
+  elements.modelSelector.disabled = disabled;
+  elements.harnessSelector.disabled = disabled
+    || state.interactionMode !== "execute";
+  elements.harnessSelector.value = state.harness;
 }
 
 async function ensureConversationIdentity() {
@@ -7086,7 +7282,7 @@ async function saveCurrentConversation() {
           sessionId: state.conversationSessionId,
           messages: state.history,
           interactionMode: state.interactionMode,
-          selectedModel: state.lockedModel ?? elements.modelSelector.value,
+          selectedModel: elements.modelSelector.value,
           state: state.conversationState
         })
       }
@@ -7146,7 +7342,7 @@ function clearConversationUi() {
   state.conversationVersion++;
   state.history = [];
   state.editingTurn = null;
-  state.lockedModel = null;
+  state.harness = "native";
   state.interactionMode = "chat";
   state.approvalPolicy = "auto";
   state.activeAgentModel = null;
@@ -7159,7 +7355,7 @@ function clearConversationUi() {
   clearAttachments();
   state.autoFollow = true;
   elements.modelSelector.value = "auto";
-  elements.modelLock.checked = false;
+  elements.harnessSelector.value = "native";
   elements.messageInput.value = "";
   resizeComposer();
   elements.composer.classList.remove("editing");
@@ -7174,7 +7370,7 @@ function clearConversationUi() {
   elements.messages.replaceChildren(
     emptyState
   );
-  updateModelLockControls();
+  updateHarnessControls();
   updateInteractionControls();
   updateComposerStatus();
   renderPendingContextUsage();
@@ -7266,7 +7462,7 @@ function setConversationTransitioning(isTransitioning) {
   elements.messageInput.disabled = isTransitioning;
   elements.sendButton.disabled = isTransitioning;
   updateInteractionControls();
-  updateModelLockControls();
+  updateHarnessControls();
   if (
     isTransitioning
     || state.persistenceStatus !== "Save failed"
@@ -7365,7 +7561,7 @@ async function handleComposerSubmit(event) {
     return;
   }
 
-  const selectedModel = state.lockedModel ?? elements.modelSelector.value;
+  const selectedModel = elements.modelSelector.value;
 
   if (!await ensureCloudImageApproval(selectedModel)) {
     return;
@@ -7448,8 +7644,8 @@ async function handleComposerSubmit(event) {
           message,
           model: selectedModel,
           history: requestHistory,
-          modelLocked: Boolean(state.lockedModel),
           interactionMode: state.interactionMode,
+          harness: state.harness,
           approvalPolicy: state.approvalPolicy,
           browserSessionId: state.browserSessionId,
           conversationSessionId: state.conversationSessionId,
@@ -7613,7 +7809,7 @@ function appendAssistantMessage(options = {}) {
   details.append(summary, sessionHeader, activityList);
 
   const answer = document.createElement("div");
-  answer.className = "assistant-answer pending";
+  answer.className = "assistant-response assistant-answer pending";
   const workActivity = document.createElement("section");
   workActivity.className = "assistant-work";
   workActivity.hidden = true;
@@ -7658,8 +7854,11 @@ function appendAssistantMessage(options = {}) {
     modelNotice,
     progress,
     activeReasoning: null,
+    activeResponse: null,
     hasReasoning: false,
+    hasResponse: false,
     reasoningBlockCount: 0,
+    responseBlockCount: 0,
     details,
     summary,
     activityList,
@@ -7761,9 +7960,18 @@ function renderModelSelection(assistant, model, origin) {
   assistant.modelNotice.hidden = false;
 }
 
-function appendAssistantReasoning(assistant, delta) {
+function appendAssistantReasoning(assistant, delta, contentBlockId = null) {
   if (!delta) {
     return;
+  }
+
+  closeAssistantResponse(assistant);
+  if (
+    assistant.activeReasoning
+    && contentBlockId
+    && assistant.activeReasoning.contentBlockId !== contentBlockId
+  ) {
+    closeAssistantReasoning(assistant);
   }
 
   if (!assistant.activeReasoning) {
@@ -7772,6 +7980,9 @@ function appendAssistantReasoning(assistant, delta) {
     details.dataset.timelineKind = "thinking";
     details.dataset.block = String(++assistant.reasoningBlockCount);
     details.dataset.deltaCount = "0";
+    if (contentBlockId) {
+      details.dataset.contentBlockId = contentBlockId;
+    }
     details.open = true;
     const summary = document.createElement("summary");
     summary.textContent = "Thinking";
@@ -7784,7 +7995,8 @@ function appendAssistantReasoning(assistant, delta) {
     assistant.activeReasoning = {
       details,
       body,
-      raw: ""
+      raw: "",
+      contentBlockId
     };
   }
 
@@ -7810,6 +8022,104 @@ function closeAssistantReasoning(assistant) {
   assistant.activeReasoning = null;
 }
 
+function ensureAssistantResponse(
+  assistant,
+  contentBlockId = null,
+  promoteLatest = true
+) {
+  if (
+    assistant.activeResponse
+    && (
+      !contentBlockId
+      || assistant.activeResponse.contentBlockId === contentBlockId
+    )
+  ) {
+    return assistant.activeResponse;
+  }
+
+  closeAssistantResponse(assistant);
+  let body = assistant.answer;
+  if (assistant.hasResponse) {
+    body = document.createElement("div");
+    body.className = "assistant-response pending";
+    if (promoteLatest) {
+      assistant.answer.classList.remove("assistant-answer");
+      body.classList.add("assistant-answer");
+      assistant.answer = body;
+    }
+  }
+
+  body.dataset.timelineKind = "response";
+  body.dataset.block = String(++assistant.responseBlockCount);
+  body.dataset.deltaCount = "0";
+  if (contentBlockId) {
+    body.dataset.contentBlockId = contentBlockId;
+  } else {
+    delete body.dataset.contentBlockId;
+  }
+  assistant.workActivity.hidden = false;
+  assistant.workActivity.append(body);
+  assistant.hasResponse = true;
+  assistant.activeResponse = {
+    body,
+    raw: "",
+    contentBlockId
+  };
+  return assistant.activeResponse;
+}
+
+function appendAssistantResponse(
+  assistant,
+  delta,
+  renderedHtml,
+  contentBlockId,
+  aggregateMarkdown,
+  promoteLatest = true
+) {
+  if (!delta) {
+    return;
+  }
+
+  closeAssistantReasoning(assistant);
+  const response = ensureAssistantResponse(
+    assistant,
+    contentBlockId,
+    promoteLatest
+  );
+  response.raw += delta;
+  response.body.dataset.deltaCount = String(
+    Number(response.body.dataset.deltaCount) + 1
+  );
+  renderAssistantResponse(
+    assistant,
+    response,
+    renderedHtml,
+    response.raw,
+    aggregateMarkdown
+  );
+  assistant.progress.hidden = true;
+}
+
+function closeAssistantResponse(assistant) {
+  if (!assistant.activeResponse) {
+    return;
+  }
+
+  assistant.activeResponse.body.classList.remove("pending");
+  assistant.activeResponse = null;
+}
+
+function closeAssistantContent(assistant) {
+  closeAssistantReasoning(assistant);
+  closeAssistantResponse(assistant);
+}
+
+function isAssistantContentBoundary(streamEvent) {
+  return Boolean(streamEvent.localAction)
+    || streamEvent.type === "agent.toolset-requested"
+    || streamEvent.type === "action.recovery-decision-required";
+}
+
 function ensureWorkNarrative(assistant, text, replace = false) {
   if (!assistant.workNarrative) {
     assistant.workNarrative = document.createElement("p");
@@ -7825,6 +8135,7 @@ function ensureWorkNarrative(assistant, text, replace = false) {
 function isVisibleWorkAction(action) {
   return new Set([
     "create_file",
+    "create_files",
     "write_file",
     "replace_text",
     "apply_patch",
@@ -7836,6 +8147,7 @@ function isVisibleWorkAction(action) {
 function actionDisplayLabel(tool) {
   return {
     create_file: "Criar",
+    create_files: "Criar arquivos",
     write_file: "Escrever",
     replace_text: "Editar",
     apply_patch: "Aplicar patch",
@@ -7923,6 +8235,7 @@ function upsertWorkAction(assistant, streamEvent) {
   }
 
   closeAssistantReasoning(assistant);
+  closeAssistantResponse(assistant);
   assistant.workActivity.hidden = false;
   ensureWorkNarrative(
     assistant,
@@ -8017,6 +8330,7 @@ function upsertWorkAction(assistant, streamEvent) {
 
 function addToolsetRequest(assistant, streamEvent) {
   closeAssistantReasoning(assistant);
+  closeAssistantResponse(assistant);
   assistant.workActivity.hidden = false;
   const item = document.createElement("p");
   item.className = "assistant-toolset-request";
@@ -8118,32 +8432,66 @@ async function consumeEventStream(stream, assistant) {
         setPersistenceStatus("Save failed");
       }
 
+      if (isAssistantContentBoundary(streamEvent)) {
+        closeAssistantContent(assistant);
+      }
+
       if (streamEvent.type === "reasoning.delta") {
         appendAssistantReasoning(
           assistant,
-          streamEvent.reasoningDelta ?? ""
+          streamEvent.reasoningDelta ?? "",
+          streamEvent.contentBlockId ?? null
         );
       } else if (streamEvent.type === "response.delta") {
-        answer += streamEvent.delta ?? "";
-        assistant.progress.hidden = true;
-        renderAssistantAnswer(
+        const delta = streamEvent.delta ?? "";
+        answer += delta;
+        appendAssistantResponse(
           assistant,
-          streamEvent.renderedHtml ?? "",
+          delta,
+          streamEvent.responseSegmentHtml
+            ?? streamEvent.renderedHtml
+            ?? "",
+          streamEvent.contentBlockId ?? null,
           answer
         );
       } else if (streamEvent.type === "response.completed") {
         completed = true;
-        closeAssistantReasoning(assistant);
+        closeAssistantContent(assistant);
+        const responseTail = streamEvent.responseTail ?? "";
+        if (responseTail) {
+          const aggregateAnswer = answer
+            ? `${answer}\n\n---\n${responseTail}`
+            : responseTail;
+          appendAssistantResponse(
+            assistant,
+            responseTail,
+            streamEvent.responseTailHtml
+              ?? streamEvent.renderedHtml
+              ?? "",
+            `terminal:${streamEvent.requestId}`,
+            aggregateAnswer,
+            !assistant.hasResponse
+          );
+          answer = aggregateAnswer;
+          closeAssistantResponse(assistant);
+        } else if (!assistant.hasResponse && streamEvent.renderedHtml) {
+          appendAssistantResponse(
+            assistant,
+            answer || " ",
+            streamEvent.renderedHtml,
+            `terminal:${streamEvent.requestId}`,
+            answer
+          );
+          closeAssistantResponse(assistant);
+        } else {
+          assistant.rawAnswer = answer;
+          assistant.copyButton.disabled = !answer;
+        }
         renderAssistantSources(
           assistant,
           streamEvent.citations
         );
         assistant.answer.classList.remove("pending");
-        renderAssistantAnswer(
-          assistant,
-          streamEvent.renderedHtml ?? "",
-          answer
-        );
         addActivity(assistant, streamEvent, false);
         finishActivity(
           assistant,
@@ -8154,11 +8502,20 @@ async function consumeEventStream(stream, assistant) {
         assistant.reviewButton.hidden =
           !assistant.executionSession?.reviewAvailable;
       } else if (streamEvent.type === "error") {
-        closeAssistantReasoning(assistant);
-        assistant.answer.classList.remove("pending");
-        assistant.answer.classList.add("error");
-        assistant.answer.textContent ||= `${streamEvent.error.message}\n`
+        closeAssistantContent(assistant);
+        const errorText = `${streamEvent.error.message}\n`
           + `Referência: ${streamEvent.error.traceId}`;
+        const response = ensureAssistantResponse(
+          assistant,
+          `error:${streamEvent.error.traceId}`
+        );
+        response.raw = errorText;
+        response.body.classList.remove("pending");
+        response.body.classList.add("error");
+        response.body.textContent = errorText;
+        assistant.rawAnswer ||= errorText;
+        assistant.copyButton.disabled = !assistant.rawAnswer;
+        closeAssistantResponse(assistant);
         addActivity(
           assistant,
           {
@@ -8177,7 +8534,7 @@ async function consumeEventStream(stream, assistant) {
         );
         addTraceDiagnosticActions(assistant, streamEvent.error);
       } else if (streamEvent.type === "request.cancelled") {
-        closeAssistantReasoning(assistant);
+        closeAssistantContent(assistant);
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
         finishActivity(assistant, "Cancelado", false);
@@ -9485,6 +9842,7 @@ async function validateChanges() {
 function addApprovalActivity(assistant, streamEvent) {
   const action = streamEvent.localAction;
   closeAssistantReasoning(assistant);
+  closeAssistantResponse(assistant);
   const row = document.createElement("details");
   row.className = "activity-row action-approval";
   row.open = true;
@@ -9815,6 +10173,7 @@ async function decideAction(
 function addRecoveryDecisionActivity(assistant, streamEvent) {
   const recovery = streamEvent.recoveryDecision;
   closeAssistantReasoning(assistant);
+  closeAssistantResponse(assistant);
   const row = document.createElement("details");
   row.className = "activity-row action-approval recovery-decision";
   row.open = true;
@@ -10001,13 +10360,19 @@ function createMessageActionButton(text, accessibleName) {
   return button;
 }
 
-function renderAssistantAnswer(assistant, renderedHtml, markdown) {
-  assistant.rawAnswer = markdown;
-  assistant.copyButton.disabled = !markdown;
-  assistant.answer.innerHTML = renderedHtml;
-  secureRenderedLinks(assistant.answer);
+function renderAssistantResponse(
+  assistant,
+  response,
+  renderedHtml,
+  markdown,
+  aggregateMarkdown
+) {
+  assistant.rawAnswer = aggregateMarkdown;
+  assistant.copyButton.disabled = !aggregateMarkdown;
+  response.body.innerHTML = renderedHtml;
+  secureRenderedLinks(response.body);
   enhanceCodeBlocks(
-    assistant.answer,
+    response.body,
     markdown
   );
 }
@@ -10231,7 +10596,7 @@ function setStreamingState(isStreaming) {
       button.disabled = isStreaming;
     }
   );
-  updateModelLockControls();
+  updateHarnessControls();
   updateComposerStatus();
   renderWebControl();
 }
@@ -10415,11 +10780,17 @@ function updateComposerStatus() {
     elements.composerStatus.textContent = "Switching conversation safely";
   } else if (state.editingTurn) {
     elements.composerStatus.textContent = "Editando mensagem · Esc para cancelar";
-  } else if (state.lockedModel) {
-    elements.composerStatus.textContent = `Modelo fixado: ${state.lockedModel}`;
   } else if (state.interactionMode === "execute") {
+    const status = state.harnesses.find(
+      item => item.definition.id === state.harness
+    );
+    const harness = status
+      ? status.definition.experimental
+        ? `${status.definition.displayName} (Experimental)`
+        : status.definition.displayName
+      : state.harness;
     elements.composerStatus.textContent =
-      `Execute · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
+      `Execute · ${harness} · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
   } else if (state.attachments.length > 0 || state.webEnabled) {
     elements.composerStatus.textContent = [
       state.attachments.length > 0
@@ -10442,7 +10813,6 @@ function updateActiveAgentLabel() {
   }
 
   const selectedModel = state.activeAgentModel
-    ?? state.lockedModel
     ?? elements.modelSelector.value;
   elements.activeAgentLabel.textContent =
     selectedModel && selectedModel !== "auto"

@@ -192,6 +192,77 @@ builder.Services.AddScoped<IExpertExecutionGuidanceService, ExpertExecutionGuida
 builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
 builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
+builder.Services.AddSingleton(
+  new CodexHarnessOptions(
+    builder.Configuration["AgenticRouter:Codex:ExecutablePath"],
+    builder.Configuration["AgenticRouter:Codex:ManagedInstallRoot"]
+      ?? (
+        OperatingSystem.IsWindows()
+          ? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OpenAI",
+            "Codex",
+            "bin"
+          )
+          : null
+      ),
+    Path.Combine(
+      dataDirectory,
+      "codex-runtime"
+    ),
+    TimeSpan.FromSeconds(10),
+    TimeSpan.FromSeconds(3)
+  )
+);
+builder.Services.AddSingleton<CodexHarnessAdapter>();
+builder.Services.AddSingleton<IAgentHarness>(
+  services => services.GetRequiredService<CodexHarnessAdapter>()
+);
+builder.Services.AddSingleton(
+  new OpenCodeHarnessOptions(
+    builder.Configuration["AgenticRouter:OpenCode:ExecutablePath"],
+    OperatingSystem.IsWindows()
+      ? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "npm",
+        "node_modules",
+        "opencode-ai",
+        "bin",
+        "opencode.exe"
+      )
+      : null,
+    Path.Combine(dataDirectory, "opencode-runtime"),
+    TimeSpan.FromSeconds(15),
+    TimeSpan.FromMinutes(5)
+  )
+);
+builder.Services.AddSingleton<OpenCodeHarnessAdapter>();
+builder.Services.AddSingleton<IAgentHarness>(
+  services => services.GetRequiredService<OpenCodeHarnessAdapter>()
+);
+builder.Services.AddSingleton(
+  new QwenCodeHarnessOptions(
+    builder.Configuration["AgenticRouter:QwenCode:ExecutablePath"],
+    OperatingSystem.IsWindows()
+      ? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "npm",
+        "node_modules",
+        "@qwen-code",
+        "qwen-code",
+        "cli.js"
+      )
+      : null,
+    Path.Combine(dataDirectory, "qwen-code-runtime"),
+    TimeSpan.FromSeconds(20),
+    TimeSpan.FromMinutes(5)
+  )
+);
+builder.Services.AddSingleton<QwenCodeHarnessAdapter>();
+builder.Services.AddSingleton<IAgentHarness>(
+  services => services.GetRequiredService<QwenCodeHarnessAdapter>()
+);
+builder.Services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
 builder.Services.AddScoped<IModelDiagnosticService, ModelDiagnosticService>();
 builder.Services.AddSingleton<IModelOrganizationService>(
   services => new ModelOrganizationService(

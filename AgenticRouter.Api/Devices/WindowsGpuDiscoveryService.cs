@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -25,7 +27,9 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
     _logger = logger;
   }
 
-  public DevicesResponse Discover()
+  public async Task<DevicesResponse> DiscoverAsync(
+    CancellationToken cancellationToken
+  )
   {
     var auto = new GraphicsDevice(
       "auto",
@@ -33,7 +37,8 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
       null,
       null,
       true,
-      true
+      true,
+      null
     );
 
     if (!OperatingSystem.IsWindows())
@@ -46,6 +51,31 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
 
     try
     {
+      var nvidiaDevices = await DiscoverNvidiaDevicesAsync(
+        cancellationToken
+      );
+
+      if (nvidiaDevices.Count > 0)
+      {
+        nvidiaDevices.Insert(
+          0,
+          auto
+        );
+        var visibility = Environment.GetEnvironmentVariable(
+          "CUDA_VISIBLE_DEVICES"
+        );
+        var diagnostic = string.IsNullOrWhiteSpace(
+          visibility
+        )
+          ? "CUDA device order and UUIDs were read from nvidia-smi."
+          : "CUDA device order was read from nvidia-smi, but CUDA_VISIBLE_DEVICES is set for this process. The Ollama daemon must expose every selected GPU.";
+
+        return new DevicesResponse(
+          nvidiaDevices,
+          diagnostic
+        );
+      }
+
       var devices = DiscoverWindowsDevices();
       devices.Insert(
         0,
@@ -56,7 +86,7 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
         devices,
         devices.Count == 1
           ? "Windows did not report a graphics device through SetupAPI."
-          : null
+          : "Windows reported graphics adapters, but no authoritative Ollama CUDA index was available. Exact affinity remains on Auto."
       );
     }
     catch (Exception exception)
@@ -71,6 +101,150 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
         $"GPU discovery is unavailable: {exception.Message}"
       );
     }
+  }
+
+  private async Task<List<GraphicsDevice>> DiscoverNvidiaDevicesAsync(
+    CancellationToken cancellationToken
+  )
+  {
+    using var process = new Process
+    {
+      StartInfo = new ProcessStartInfo
+      {
+        FileName = "nvidia-smi",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+      }
+    };
+    process.StartInfo.ArgumentList.Add(
+      "--query-gpu=index,uuid,name,memory.total"
+    );
+    process.StartInfo.ArgumentList.Add(
+      "--format=csv,noheader,nounits"
+    );
+
+    try
+    {
+      if (!process.Start())
+      {
+        return [];
+      }
+
+      var output = process.StandardOutput.ReadToEndAsync(
+        cancellationToken
+      );
+      var error = process.StandardError.ReadToEndAsync(
+        cancellationToken
+      );
+      using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken
+      );
+      timeout.CancelAfter(
+        TimeSpan.FromSeconds(
+          3
+        )
+      );
+      await process.WaitForExitAsync(
+        timeout.Token
+      );
+      var stdout = await output;
+      var stderr = await error;
+
+      if (process.ExitCode != 0)
+      {
+        _logger.LogDebug(
+          "nvidia-smi GPU discovery returned exit code {ExitCode}: {Diagnostic}",
+          process.ExitCode,
+          stderr.Trim()
+        );
+        return [];
+      }
+
+      return ParseNvidiaDevices(
+        stdout
+      );
+    }
+    catch (Exception exception) when (
+      exception is Win32Exception
+      or InvalidOperationException
+      or OperationCanceledException
+    )
+    {
+      if (cancellationToken.IsCancellationRequested)
+      {
+        throw;
+      }
+
+      _logger.LogDebug(
+        exception,
+        "nvidia-smi GPU discovery was unavailable."
+      );
+      return [];
+    }
+  }
+
+  private static List<GraphicsDevice> ParseNvidiaDevices(
+    string output
+  )
+  {
+    var devices = new List<GraphicsDevice>();
+
+    foreach (var line in output.Split(
+      ['\r', '\n'],
+      StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+    ))
+    {
+      var fields = line.Split(
+        ',',
+        4,
+        StringSplitOptions.TrimEntries
+      );
+
+      if (
+        fields.Length != 4
+        || !int.TryParse(
+          fields[0],
+          NumberStyles.None,
+          CultureInfo.InvariantCulture,
+          out var index
+        )
+        || index < 0
+        || string.IsNullOrWhiteSpace(
+          fields[1]
+        )
+      )
+      {
+        continue;
+      }
+
+      long? memoryBytes = long.TryParse(
+        fields[3],
+        NumberStyles.None,
+        CultureInfo.InvariantCulture,
+        out var memoryMib
+      ) && memoryMib > 0
+        ? memoryMib * 1_048_576L
+        : null;
+      devices.Add(
+        new GraphicsDevice(
+          fields[1],
+          fields[2],
+          "NVIDIA",
+          memoryBytes,
+          true,
+          false,
+          index
+        )
+      );
+    }
+
+    return devices
+      .OrderBy(
+        device => device.OllamaIndex
+      )
+      .ToList();
   }
 
   private static List<GraphicsDevice> DiscoverWindowsDevices()

@@ -33,6 +33,7 @@ public static class ExecutionTurnToolPolicy
     "get_file_info",
     "search_text",
     "create_file",
+    "create_files",
     "write_file",
     "replace_text",
     "apply_patch"
@@ -155,7 +156,8 @@ public static class ExecutionTurnToolPolicy
         : "No Host validation profile is configured; do not invent validation commands or a development server.";
     return $"{process}\n{validation}\n"
       + "Only tools offered by the Host in the current request are valid. "
-      + "create_file creates required parent directories, so do not create a directory solely as a file parent.";
+      + "create_file and create_files create required parent directories, so do not create a directory solely as a file parent. "
+      + "Use create_files for two or more independent new text files so the Host can validate and apply the batch as one action.";
   }
 
   private static bool IsControlMessage(string? content)

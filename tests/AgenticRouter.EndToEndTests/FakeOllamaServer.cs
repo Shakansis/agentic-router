@@ -38,6 +38,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       4_200_000_000L
     ),
     new(
+      "qwen3.8:27b-gpu0",
+      17_741_872_167L
+    ),
+    new(
       "docs:latest",
       5_100_000_000L
     ),
@@ -408,7 +412,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       {
         model_info = new Dictionary<string, object>
         {
-          ["general.context_length"] = 65_536
+          ["general.context_length"] = string.Equals(
+            model,
+            "qwen3.8:27b-gpu0",
+            StringComparison.Ordinal
+          )
+            ? 262_144
+            : 65_536
         },
         details = new
         {
@@ -421,7 +431,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           parameter_size = "8B",
           quantization_level = "Q4_K_M"
         },
-        capabilities = model == "alpha:latest"
+        capabilities = model is "alpha:latest" or "qwen3.8:27b-gpu0"
           ? new[]
           {
             "completion",
@@ -540,6 +550,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       )
         ? predictTokensElement.GetInt32()
         : null;
+    int? mainGpu = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty(
+        "main_gpu",
+        out var mainGpuElement
+      )
+        ? mainGpuElement.GetInt32()
+        : null;
     var recorded = new RecordedChatRequest(
       model,
       stream,
@@ -548,7 +565,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       hasTools,
       availableTools,
       contextTokens,
-      predictTokens
+      predictTokens,
+      mainGpu
     );
     _requests.Enqueue(
       recorded
@@ -1446,6 +1464,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       )
         && (
           message.Content.Contains("Tool: write_file", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: create_files", StringComparison.Ordinal)
           || message.Content.Contains("Tool: replace_text", StringComparison.Ordinal)
           || message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
         )
@@ -1489,6 +1508,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         )
         && (
           message.Content.Contains("Tool: create_file", StringComparison.Ordinal)
+          || message.Content.Contains("Tool: create_files", StringComparison.Ordinal)
           || message.Content.Contains("Tool: write_file", StringComparison.Ordinal)
           || message.Content.Contains("Tool: replace_text", StringComparison.Ordinal)
           || message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
@@ -1556,7 +1576,51 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       };
     }
 
-    var guidance = current.Contains("duplicate workspace root edit", StringComparison.OrdinalIgnoreCase)
+    var nativeBatchCreation = current.Contains(
+      "native create host batch files",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var guidance = nativeBatchCreation
+      && !completedStructuredMutation
+      ? CreateStructuredGuidance(
+        current,
+        new
+        {
+          tool = "create_files",
+          arguments = new
+          {
+            files = new[]
+            {
+              new { path = "native-ação.html", content = "<!doctype html><title>Ação nativa</title>\n" },
+              new { path = "native-estilo.css", content = "/* revisão nativa */\nbody { color: #456; }\n" }
+            }
+          },
+          explanation = "Create both independent UTF-8 files through one Host batch action."
+        }
+      )
+      : nativeBatchCreation
+        && !activeContent.Contains("<!doctype html><title>Ação nativa", StringComparison.Ordinal)
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "read_file",
+            arguments = new { path = "native-ação.html" },
+            explanation = "Verify the first file created by the Host batch."
+          }
+        )
+      : nativeBatchCreation
+        && !activeContent.Contains("/* revisão nativa */", StringComparison.Ordinal)
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "read_file",
+            arguments = new { path = "native-estilo.css" },
+            explanation = "Verify the second file created by the Host batch."
+          }
+        )
+      : current.Contains("duplicate workspace root edit", StringComparison.OrdinalIgnoreCase)
       && !completedStructuredMutation
       ? CreateStructuredGuidance(
         current,
@@ -5031,7 +5095,8 @@ internal sealed record RecordedChatRequest(
   bool HasTools,
   IReadOnlyList<string> AvailableTools,
   int? ContextTokens,
-  int? PredictTokens
+  int? PredictTokens,
+  int? MainGpu
 );
 
 internal sealed record RecordedMessage(

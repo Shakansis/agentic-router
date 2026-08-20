@@ -289,6 +289,44 @@ public sealed class ChatController : ControllerBase
         cancellationToken
       );
     }
+    catch (HarnessException exception)
+    {
+      await MarkPersistentTerminalAsync(
+        "failed"
+      );
+      _logger.LogWarning(
+        exception,
+        "Chat request {RequestId} failed in harness {HarnessId} with {Code}. Diagnostic: {Diagnostic}",
+        requestId,
+        exception.HarnessId,
+        exception.Code,
+        exception.TechnicalMessage
+      );
+      await WriteErrorAsync(
+        requestId,
+        new ChatStageException(
+          $"{exception.HarnessId}-harness",
+          exception.Message,
+          $"Harness diagnostic: {exception.Code}.",
+          request.Model,
+          null,
+          exception.Code.EndsWith("-executable-not-found", StringComparison.Ordinal)
+            || exception.Code.EndsWith("-executable-access-denied", StringComparison.Ordinal)
+            || exception.Code.EndsWith("-start-failed", StringComparison.Ordinal)
+            || exception.Code.EndsWith("-app-server-exited", StringComparison.Ordinal)
+              ? 503
+              : 400,
+          exception.Recoverable,
+          exception,
+          new Dictionary<string, string?>
+          {
+            ["code"] = exception.Code,
+            ["harnessId"] = exception.HarnessId
+          }
+        ),
+        cancellationToken
+      );
+    }
     catch (OllamaProviderException exception)
     {
       await MarkPersistentTerminalAsync(

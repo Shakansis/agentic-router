@@ -70,6 +70,7 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - `get_file_info` - Get file metadata
 - `search_text` - Search for text within files
 - `create_file` - Create new files
+- `create_files` - Create 1-50 new UTF-8 text files as one validated batch
 - `write_file` - Write to existing files
 - `replace_text` - Replace text in files
 - `apply_patch` - Apply multiple text replacements
@@ -84,6 +85,8 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - Protected instruction files require explicit mention in the user objective
 - Process execution uses an allowlist policy
 - File writes use observed hashes to detect stale or external changes
+- Batch creation validates every target before the first write, verifies every
+  result, and rolls back files created by a failed batch
 - Deletion requires explicit paths, hash validation, and bounded recovery evidence
 
 **Git Delivery:**

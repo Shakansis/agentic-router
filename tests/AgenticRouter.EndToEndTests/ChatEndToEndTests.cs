@@ -202,7 +202,7 @@ public sealed class ChatEndToEndTests : PageTest
       "#open-settings"
     ).ClickAsync();
     await Page.Locator(
-      "[data-settings-target=\"cloud-providers\"]"
+        "[data-settings-target=\"providers\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -234,10 +234,16 @@ public sealed class ChatEndToEndTests : PageTest
       "openai/gpt-oss-120b"
     );
     await Page.Locator(
+      "[data-settings-target=\"general\"]"
+    ).ClickAsync();
+    await Page.Locator(
       "#default-model"
     ).SelectOptionAsync(
       "cerebras::gpt-oss-120b"
     );
+    await Page.Locator(
+      "[data-settings-target=\"models-routing\"]"
+    ).ClickAsync();
     foreach (var intention in new[]
     {
       "general-chat",
@@ -256,10 +262,15 @@ public sealed class ChatEndToEndTests : PageTest
       "#save-settings"
     ).ClickAsync();
     await Expect(
+      Page.Locator("#save-status")
+    ).ToHaveTextAsync("Salvo");
+    await Expect(
       Page.Locator(
         "#settings-dialog"
       )
-    ).Not.ToBeVisibleAsync();
+    ).ToBeVisibleAsync();
+    await Page.Locator("#cancel-settings").ClickAsync();
+    await Expect(Page.Locator("#settings-dialog")).ToBeHiddenAsync();
     using var qualifiedYamlResponse = await _environment.HttpClient.GetAsync(
       "api/settings/yaml"
     );
@@ -325,7 +336,7 @@ public sealed class ChatEndToEndTests : PageTest
 
     const string rejectedKey = "gsk_rejected_secret_093";
     await Page.Locator(
-      "[data-settings-target=\"cloud-providers\"]"
+      "[data-settings-target=\"providers\"]"
     ).ClickAsync();
     await Page.Locator(
       ".cloud-provider-card[data-provider=\"groq\"] summary"
@@ -481,10 +492,14 @@ public sealed class ChatEndToEndTests : PageTest
       ).SelectOptionAsync(
         provider.Model
       );
-      await Page.Locator(
-        "#model-lock"
-      ).CheckAsync();
-      await StartMessageAsync(
+      await Expect(
+        Page.Locator(
+          "#active-provider-model"
+        )
+      ).ToContainTextAsync(
+        provider.Model
+      );
+      await SendMessageAsync(
         $"Use {provider.Id} for this deterministic fake turn."
       );
       var activity = Page.Locator(
@@ -513,13 +528,48 @@ public sealed class ChatEndToEndTests : PageTest
       ).ToContainTextAsync(
         provider.Answer
       );
-      await Page.Locator(
-        "#model-lock"
-      ).UncheckAsync();
     }
+
+    var usageDirectory = Path.Combine(
+      _environment.DataDirectory,
+      "usage"
+    );
+    var usageEvents = Directory.GetFiles(
+      usageDirectory,
+      "*.jsonl"
+    ).SelectMany(
+      File.ReadAllLines
+    ).Where(
+      line => !string.IsNullOrWhiteSpace(line)
+    ).Select(
+      line => JsonNode.Parse(line)
+    ).OfType<JsonObject>().ToArray();
 
     foreach (var provider in providers)
     {
+      var providerUsage = usageEvents.Where(
+        usage => string.Equals(
+          usage["providerId"]?.GetValue<string>(),
+          provider.Id,
+          StringComparison.Ordinal
+        )
+      ).ToArray();
+      Assert.HasCount(
+        5,
+        providerUsage,
+        $"{provider.Id}: every deterministic provider attempt must be recorded."
+      );
+      Assert.HasCount(
+        1,
+        providerUsage.Where(
+          usage => string.Equals(
+            usage["requestPurpose"]?.GetValue<string>(),
+            "target-response",
+            StringComparison.Ordinal
+          )
+        ).ToArray(),
+        $"{provider.Id}: the streamed target response must have exactly one usage event."
+      );
       using var usageResponse = await _environment.HttpClient.GetAsync(
         $"api/usage/summary?window=rolling-hour&providerId={Uri.EscapeDataString(provider.Id)}"
       );
@@ -541,18 +591,7 @@ public sealed class ChatEndToEndTests : PageTest
       );
     }
 
-    var ledger = string.Join(
-      "\n",
-      Directory.GetFiles(
-        Path.Combine(
-          _environment.DataDirectory,
-          "usage"
-        ),
-        "*.jsonl"
-      ).Select(
-        File.ReadAllText
-      )
-    );
+    var ledger = string.Join("\n", usageEvents.Select(usage => usage.ToJsonString()));
     StringAssert.Contains(
       ledger,
       "\"rateLimit\""
@@ -1846,7 +1885,7 @@ public sealed class ChatEndToEndTests : PageTest
       composer => {
         const composerRect = composer.getBoundingClientRect();
         const controls = composer.querySelectorAll(
-          ".capability-control, .mode-option, .model-field, .model-lock-field, #send-button"
+          ".capability-control, .mode-option, .model-field, #send-button"
         );
         return document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1
           && composer.scrollWidth <= composer.clientWidth + 1
@@ -2015,7 +2054,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await OpenSettingsAsync();
     await Page.Locator(
-      "[data-settings-target=\"models\"]"
+      "[data-settings-target=\"models-routing\"]"
     ).ClickAsync();
     var generalCard = Page.Locator(
       "[data-intention=\"general-chat\"]"
@@ -2627,7 +2666,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await OpenSettingsAsync();
     await Page.Locator(
-      "[data-settings-target=\"runtime\"]"
+      "[data-settings-target=\"harnesses\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -2861,7 +2900,6 @@ public sealed class ChatEndToEndTests : PageTest
                 message = "trigger-cloud-cancel-retry",
                 model = "groq::openai/gpt-oss-120b",
                 history = Array.Empty<object>(),
-                modelLocked = true,
                 interactionMode = "chat",
                 approvalPolicy = "ask",
                 browserSessionId = "browser-health-cancel",
@@ -3073,7 +3111,7 @@ public sealed class ChatEndToEndTests : PageTest
       "#open-settings"
     ).ClickAsync();
     await Page.Locator(
-      "[data-settings-target=\"cloud-providers\"]"
+      "[data-settings-target=\"providers\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -3093,6 +3131,40 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OllamaDiscoveryPublishesHealthyProviderState()
+  {
+    using (var models = await _environment.HttpClient.GetAsync("api/models"))
+    {
+      models.EnsureSuccessStatusCode();
+    }
+    using (var response = await _environment.HttpClient.GetAsync("api/provider-health"))
+    {
+      response.EnsureSuccessStatusCode();
+      using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+      var ollama = document.RootElement.GetProperty("providers")
+        .EnumerateArray()
+        .Single(provider => provider.GetProperty("providerId").GetString() == "ollama-local");
+      Assert.AreEqual("healthy", ollama.GetProperty("connectionState").GetString());
+      Assert.AreEqual(
+        "provider-model-refresh",
+        ollama.GetProperty("healthSource").GetString()
+      );
+      Assert.AreEqual(
+        200,
+        ollama.GetProperty("diagnostic").GetProperty("lastStatusCode").GetInt32()
+      );
+    }
+
+    await Page.GotoAsync("/");
+    await OpenSettingsAsync();
+    await Page.Locator("[data-settings-target=\"providers\"]").ClickAsync();
+    await Expect(
+      Page.Locator("[data-provider=\"ollama-local\"] summary .badge")
+    ).ToHaveTextAsync("Saudável");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LoadsVersionModelsAndCleanGpuNames()
   {
     using var modelsResponse = await _environment.HttpClient.GetAsync(
@@ -3103,7 +3175,7 @@ public sealed class ChatEndToEndTests : PageTest
       await modelsResponse.Content.ReadAsStringAsync()
     );
     Assert.AreEqual(
-      11,
+      12,
       modelsDocument.RootElement.GetProperty(
         "models"
       ).GetArrayLength()
@@ -3135,7 +3207,7 @@ public sealed class ChatEndToEndTests : PageTest
         "#model-selector option"
       )
     ).ToHaveCountAsync(
-      12
+      13
     );
     await Expect(
       Page.Locator(
@@ -3149,7 +3221,7 @@ public sealed class ChatEndToEndTests : PageTest
         "#model-count"
       )
     ).ToHaveTextAsync(
-      "11 instalados"
+      "12 instalados"
     );
 
     using var response = await _environment.HttpClient.GetAsync(
@@ -3189,12 +3261,87 @@ public sealed class ChatEndToEndTests : PageTest
     Assert.IsFalse(
       optionLabels.Any(
         label => label.Contains(
-          '·',
-          StringComparison.Ordinal
-        ) || label.Contains(
           ';',
           StringComparison.Ordinal
         )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AppliesExactGpuAffinityToResidentRouterAndSpecialist()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["defaultGpu"] = "ollama:0";
+    settings["routerGpu"] = "ollama:1";
+    settings["actionGpu"] = "ollama:1";
+    settings["coordinatorGpu"] = "ollama:1";
+    settings["intentions"]!["documentation"]!["gpu"] = "ollama:0";
+
+    using var saved = await PutSettingsJsonAsync(
+      settings
+    );
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      saved.StatusCode,
+      await saved.Content.ReadAsStringAsync()
+    );
+
+    var preload = _environment.FakeOllama.Requests.Last(
+      request => request.KeepAlive == -1
+    );
+    Assert.AreEqual(
+      "router:latest",
+      preload.Model
+    );
+    Assert.AreEqual(
+      1,
+      preload.MainGpu
+    );
+
+    _environment.FakeOllama.Reset();
+    await PostChatStreamAsync(
+      "write a document about exact GPU affinity",
+      "auto",
+      "browser-gpu-affinity"
+    );
+
+    var requests = _environment.FakeOllama.Requests;
+    var router = requests.First(
+      request => request.Model == "router:latest"
+        && request.Messages.Count > 0
+    );
+    var specialist = requests.Last(
+      request => request.Model == "docs:latest"
+        && request.Stream
+    );
+    Assert.AreEqual(
+      1,
+      router.MainGpu
+    );
+    Assert.AreEqual(
+      0,
+      specialist.MainGpu
+    );
+
+    settings["defaultModel"] = "router:latest";
+    using var conflicting = await PutSettingsJsonAsync(
+      settings
+    );
+    Assert.AreEqual(
+      HttpStatusCode.BadRequest,
+      conflicting.StatusCode
+    );
+    var conflict = await conflicting.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.IsTrue(
+      conflict.GetProperty(
+        "errors"
+      ).TryGetProperty(
+        "actionGpu",
+        out _
       )
     );
   }
@@ -3800,9 +3947,1258 @@ public sealed class ChatEndToEndTests : PageTest
     ).ToBeVisibleAsync();
     await Expect(
       Page.Locator(
-        "#model-lock"
+        "#harness-selector"
       )
     ).ToBeAttachedAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HarnessRegistryDiscoversAvailableHarnessCapabilitiesAndVersions()
+  {
+    using var response = await _environment.HttpClient.GetAsync("api/harnesses");
+    response.EnsureSuccessStatusCode();
+    var statuses = JsonNode.Parse(await response.Content.ReadAsStringAsync())!
+      .AsArray();
+    Assert.HasCount(4, statuses);
+
+    var native = statuses.Single(
+      item => item!["definition"]!["id"]!.GetValue<string>() == "native"
+    )!;
+    Assert.IsTrue(native["availability"]!["available"]!.GetValue<bool>());
+    Assert.AreEqual(
+      "built-in",
+      native["availability"]!["version"]!.GetValue<string>()
+    );
+
+    var codex = statuses.Single(
+      item => item!["definition"]!["id"]!.GetValue<string>() == "codex"
+    )!;
+    Assert.IsTrue(codex["definition"]!["experimental"]!.GetValue<bool>());
+    Assert.IsTrue(codex["availability"]!["available"]!.GetValue<bool>());
+    Assert.AreEqual(
+      "codex-cli fake-0.148.0",
+      codex["availability"]!["version"]!.GetValue<string>()
+    );
+    Assert.IsTrue(
+      codex["definition"]!["capabilities"]!["supportsResume"]!.GetValue<bool>()
+    );
+    Assert.IsTrue(
+      codex["definition"]!["capabilities"]!["supportsThinking"]!.GetValue<bool>()
+    );
+    Assert.IsFalse(
+      codex["definition"]!["capabilities"]!["supportsSubagents"]!.GetValue<bool>()
+    );
+
+    var openCode = statuses.Single(
+      item => item!["definition"]!["id"]!.GetValue<string>() == "opencode"
+    )!;
+    Assert.IsTrue(openCode["definition"]!["experimental"]!.GetValue<bool>());
+    Assert.IsTrue(openCode["availability"]!["available"]!.GetValue<bool>());
+    Assert.AreEqual(
+      "1.18.18-fake",
+      openCode["availability"]!["version"]!.GetValue<string>()
+    );
+    Assert.IsTrue(
+      openCode["definition"]!["capabilities"]!["supportsSessionDiff"]!.GetValue<bool>()
+    );
+
+    var qwenCode = statuses.Single(
+      item => item!["definition"]!["id"]!.GetValue<string>() == "qwen-code"
+    )!;
+    Assert.IsTrue(qwenCode["definition"]!["experimental"]!.GetValue<bool>());
+    Assert.IsTrue(qwenCode["availability"]!["available"]!.GetValue<bool>());
+    Assert.AreEqual(
+      "0.21.13-fake",
+      qwenCode["availability"]!["version"]!.GetValue<string>()
+    );
+    Assert.IsTrue(
+      qwenCode["definition"]!["capabilities"]!["supportsStaleProtection"]!.GetValue<bool>()
+    );
+    Assert.IsFalse(
+      qwenCode["definition"]!["capabilities"]!["supportsSessionDiff"]!.GetValue<bool>()
+    );
+    Assert.IsFalse(
+      qwenCode["definition"]!["capabilities"]!["supportsSubagents"]!.GetValue<bool>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ComposerOffersNativeAndExperimentalHarnessesWithoutModelLock()
+  {
+    await Page.GotoAsync("/");
+
+    await Expect(Page.Locator("#model-lock")).ToHaveCountAsync(0);
+    var harness = Page.Locator("#harness-selector");
+    await Expect(harness).ToHaveValueAsync("native");
+    await Expect(harness).ToBeDisabledAsync();
+    await Expect(harness.Locator("option")).ToHaveTextAsync(
+      new[]
+      {
+        "Native",
+        "Codex (Experimental)",
+        "OpenCode (Experimental)",
+        "Qwen Code (Experimental)"
+      }
+    );
+    await Expect(harness.Locator("option[value=\"codex\"]"))
+      .ToHaveAttributeAsync("title", new Regex("codex-cli fake-0.148.0"));
+
+    await Page.Locator("[data-mode=\"execute\"]").ClickAsync();
+    await Expect(harness).ToBeEnabledAsync();
+    await harness.SelectOptionAsync("codex");
+    await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
+      "Codex (Experimental)"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeHarnessUsesIsolatedAuthenticatedServerAndExactWorkspaceModel()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("opencode");
+
+    await SendMessageAsync("opencode deterministic turn");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".assistant-reasoning-body"))
+      .ToContainTextAsync("Inspecting OpenCode workspace");
+    await Expect(assistant.Locator(".assistant-answer"))
+      .ToContainTextAsync("OpenCode streamed with qwen3.8:27b-gpu0");
+    await Expect(assistant.Locator(".assistant-answer"))
+      .Not.ToContainTextAsync("Internal reasoning stays in Thinking");
+    await Expect(Page.Locator("#context-usage-summary"))
+      .ToContainTextAsync("exato");
+    await Expect(assistant.Locator(".activity"))
+      .ToHaveAttributeAsync("data-terminal", "true");
+    var runtime = Path.Combine(_environment.DataDirectory, "opencode-runtime");
+    using var session = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-session.json"))
+    );
+    Assert.AreEqual(
+      Path.GetFullPath(_environment.WorkspaceDirectory),
+      Path.GetFullPath(session.RootElement.GetProperty("directory").GetString()!)
+    );
+    Assert.AreEqual(
+      "qwen3.8:27b-gpu0",
+      session.RootElement.GetProperty("model").GetString()
+    );
+    Assert.AreEqual(
+      "agentic-router-ollama",
+      session.RootElement.GetProperty("provider").GetString()
+    );
+    Assert.IsTrue(session.RootElement.GetProperty("passwordConfigured").GetBoolean());
+    StringAssert.Contains(
+      session.RootElement.GetProperty("stateRoot").GetString(),
+      "opencode-runtime"
+    );
+    var config = await File.ReadAllTextAsync(
+      Path.Combine(runtime, "config", "opencode", "opencode.json")
+    );
+    StringAssert.Contains(config, "http://127.0.0.1:");
+    StringAssert.Contains(config, "qwen3.8:27b-gpu0");
+    StringAssert.Contains(config, "\"bash\": \"deny\"");
+
+    using var firstPrompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-prompt.json"))
+    );
+    var firstSessionId = firstPrompt.RootElement.GetProperty("sessionId").GetString();
+    await SendMessageAsync("opencode second deterministic turn");
+    using var secondPrompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-prompt.json"))
+    );
+    Assert.AreEqual(
+      firstSessionId,
+      secondPrompt.RootElement.GetProperty("sessionId").GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeToolEventsAreNormalized()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "opencode tool events",
+      "browser-opencode-tools",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.started")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.completed")
+    );
+    var contextEvents = events.Where(
+      item => item["type"]!.GetValue<string>() == "context.usage"
+    ).ToArray();
+    Assert.IsGreaterThanOrEqualTo(2, contextEvents.Length);
+    Assert.AreEqual(
+      "estimated",
+      contextEvents.First()["contextUsage"]!["accuracy"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "exact",
+      contextEvents.Last()["contextUsage"]!["accuracy"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      1_234,
+      contextEvents.Last()["contextUsage"]!["inputTokens"]!.GetValue<long>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeSessionDiffAndUnexpectedNativeEventArePreserved()
+  {
+    var diff = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "diff opencode",
+      "browser-opencode-diff",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, diff.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      diff.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.opencode-files-changed"
+      )
+    );
+
+    var unexpected = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "unexpected opencode",
+      "browser-opencode-unexpected",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, unexpected.Where(IsTerminalStreamEvent));
+    Assert.IsGreaterThanOrEqualTo(
+      2,
+      unexpected.Count(
+        item => item["type"]!.GetValue<string>()
+          == "harness.opencode-native-event-preserved"
+      ),
+      "The future event and native diagnostic events must be preserved."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeNativePermissionIsMappedAndAutoApproved()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "permission opencode",
+      "browser-opencode-permission",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.approved")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeHarnessCancellationAbortsTheActiveSession()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("opencode");
+
+    await StartMessageAsync("long opencode");
+    await Expect(
+      Page.Locator(".message.assistant .assistant-reasoning-body").Last
+    ).ToContainTextAsync("Inspecting long OpenCode task");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
+      .Not.ToContainTextAsync("OpenCode streamed");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeMalformedEventAndServerCrashEachFailExactlyOnce()
+  {
+    var malformed = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "malformed opencode",
+      "browser-opencode-malformed",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, malformed.Where(IsTerminalStreamEvent));
+    var malformedError = malformed.SingleOrDefault(
+      item => item["type"]!.GetValue<string>() == "error"
+    );
+    Assert.IsNotNull(
+      malformedError,
+      string.Join(Environment.NewLine, malformed.Select(item => item.ToJsonString()))
+    );
+    Assert.AreEqual(
+      "opencode-protocol-json",
+      malformedError["error"]!["code"]!.GetValue<string>()
+    );
+
+    var crashed = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "crash opencode",
+      "browser-opencode-crash",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, crashed.Where(IsTerminalStreamEvent));
+    StringAssert.Contains(
+      crashed.Single(item => item["type"]!.GetValue<string>() == "error")
+        ["error"]!["code"]!.GetValue<string>(),
+      "opencode"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeHarnessUsesIsolatedAuthenticatedServerAndExactWorkspaceModel()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+
+    await SendMessageAsync("qwen code deterministic turn");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".assistant-reasoning-body"))
+      .ToContainTextAsync("Inspecting Qwen Code workspace");
+    await Expect(assistant.Locator(".assistant-answer"))
+      .ToContainTextAsync("Qwen Code streamed with qwen3.8:27b-gpu0");
+    await Expect(Page.Locator("#context-usage-summary"))
+      .ToContainTextAsync("exato");
+    await Expect(assistant.Locator(".activity"))
+      .ToHaveAttributeAsync("data-terminal", "true");
+
+    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    using var session = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-session.json"))
+    );
+    Assert.AreEqual(
+      Path.GetFullPath(_environment.WorkspaceDirectory),
+      Path.GetFullPath(session.RootElement.GetProperty("cwd").GetString()!)
+    );
+    Assert.AreEqual(
+      "thread",
+      session.RootElement.GetProperty("sessionScope").GetString()
+    );
+    var requestedClientId = session.RootElement.GetProperty("requestedClientId").GetString();
+    var assignedClientId = session.RootElement.GetProperty("assignedClientId").GetString();
+    StringAssert.StartsWith(requestedClientId, "agentic-router-");
+    StringAssert.StartsWith(assignedClientId, "client_");
+    Assert.AreNotEqual(requestedClientId, assignedClientId);
+    Assert.IsTrue(session.RootElement.GetProperty("tokenConfigured").GetBoolean());
+    Assert.AreEqual(
+      "openai",
+      session.RootElement.GetProperty("selectedAuthType").GetString()
+    );
+    Assert.AreEqual(
+      "OLLAMA_API_KEY",
+      session.RootElement.GetProperty("providerEnvKey").GetString()
+    );
+    Assert.IsTrue(
+      session.RootElement.GetProperty("providerCredentialConfigured").GetBoolean()
+    );
+    StringAssert.Contains(
+      session.RootElement.GetProperty("qwenHome").GetString(),
+      "qwen-code-runtime"
+    );
+    var arguments = session.RootElement.GetProperty("args")
+      .EnumerateArray()
+      .Select(item => item.GetString())
+      .ToArray();
+    CollectionAssert.Contains(arguments, "--require-auth");
+    CollectionAssert.Contains(arguments, "--no-web");
+    CollectionAssert.Contains(arguments, "--safe-mode");
+    CollectionAssert.Contains(arguments, "--workspace");
+    CollectionAssert.DoesNotContain(arguments, "--enable-session-shell");
+    CollectionAssert.DoesNotContain(arguments, "--enable-local-control");
+
+    using var model = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-model.json"))
+    );
+    Assert.AreEqual(
+      "qwen3.8:27b-gpu0",
+      model.RootElement.GetProperty("model").GetString()
+    );
+    Assert.AreNotEqual(
+      model.RootElement.GetProperty("model").GetString(),
+      model.RootElement.GetProperty("modelRouteId").GetString(),
+      "The fake must preserve Qwen's distinction between the exact model and its ACP route ID."
+    );
+    Assert.AreEqual(
+      assignedClientId,
+      model.RootElement.GetProperty("clientId").GetString()
+    );
+    Assert.AreEqual(
+      "initial-settings",
+      model.RootElement.GetProperty("source").GetString()
+    );
+    using var settings = JsonDocument.Parse(
+      model.RootElement.GetProperty("settings").GetString()!
+    );
+    Assert.AreEqual(
+      "qwen3.8:27b-gpu0",
+      settings.RootElement.GetProperty("model").GetProperty("name").GetString()
+    );
+    Assert.AreEqual(
+      "openai",
+      settings.RootElement.GetProperty("security").GetProperty("auth")
+        .GetProperty("selectedType").GetString()
+    );
+    StringAssert.Contains(
+      settings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]
+        .GetProperty("baseUrl").GetString(),
+      "/v1"
+    );
+    Assert.AreEqual(
+      32_768,
+      settings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]
+        .GetProperty("generationConfig").GetProperty("contextWindowSize").GetInt32()
+    );
+    var coreTools = settings.RootElement.GetProperty("coreTools")
+      .EnumerateArray()
+      .Select(item => item.GetString())
+      .ToArray();
+    Assert.HasCount(6, coreTools);
+    CollectionAssert.DoesNotContain(coreTools, "run_shell_command");
+    var denied = settings.RootElement.GetProperty("permissions").GetProperty("deny")
+      .EnumerateArray()
+      .Select(item => item.GetString())
+      .ToArray();
+    CollectionAssert.Contains(denied, "run_shell_command");
+    CollectionAssert.Contains(denied, "agent");
+    Assert.IsFalse(
+      settings.RootElement.GetProperty("memory")
+        .GetProperty("enableManagedAutoMemory").GetBoolean()
+    );
+
+    using var firstPrompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"))
+    );
+    Assert.AreEqual(
+      assignedClientId,
+      firstPrompt.RootElement.GetProperty("clientId").GetString()
+    );
+    var firstSessionId = firstPrompt.RootElement.GetProperty("sessionId").GetString();
+    await SendMessageAsync("qwen code second deterministic turn");
+    using var secondPrompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"))
+    );
+    Assert.AreEqual(
+      firstSessionId,
+      secondPrompt.RootElement.GetProperty("sessionId").GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeUsesTheHostResolved128kContextWindow()
+  {
+    using var saved = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        Context = _environment.BaselineSettings.Context with
+        {
+          DefaultContextTokens = 131_072,
+          ProviderContextTokens = 131_072
+        }
+      }
+    );
+    saved.EnsureSuccessStatusCode();
+
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "qwen code 128k context",
+      "browser-qwen-code-128k",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(
+      events.Where(item => item["type"]!.GetValue<string>() == "context.usage")
+        .Any(item => item["contextUsage"]?["effectiveLimitTokens"]?.GetValue<int>() == 131_072)
+    );
+
+    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    using var model = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-model.json"))
+    );
+    using var settings = JsonDocument.Parse(
+      model.RootElement.GetProperty("settings").GetString()!
+    );
+    Assert.AreEqual(
+      131_072,
+      settings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]
+        .GetProperty("generationConfig").GetProperty("contextWindowSize").GetInt32()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeToolEventsAndExactUsageAreNormalized()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "qwen code tool events",
+      "browser-qwen-code-tools",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.started")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.completed")
+    );
+    var contextEvents = events.Where(
+      item => item["type"]!.GetValue<string>() == "context.usage"
+    ).ToArray();
+    Assert.IsGreaterThanOrEqualTo(2, contextEvents.Length);
+    Assert.AreEqual(
+      "estimated",
+      contextEvents.First()["contextUsage"]!["accuracy"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "exact",
+      contextEvents.Last()["contextUsage"]!["accuracy"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      4_321,
+      contextEvents.Last()["contextUsage"]!["inputTokens"]!.GetValue<long>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeNativePermissionIsMappedAndAutoApproved()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "permission qwen code",
+      "browser-qwen-code-permission",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.approved")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeHarnessCancellationAbortsTheActivePrompt()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+
+    await StartMessageAsync("long qwen code");
+    await Expect(
+      Page.Locator(".message.assistant .assistant-reasoning-body").Last
+    ).ToContainTextAsync("Inspecting long Qwen Code task");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
+      .Not.ToContainTextAsync("Qwen Code streamed");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeMalformedEventAndServerCrashEachFailExactlyOnce()
+  {
+    var malformed = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "malformed qwen code",
+      "browser-qwen-code-malformed",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, malformed.Where(IsTerminalStreamEvent));
+    var malformedError = malformed.SingleOrDefault(
+      item => item["type"]!.GetValue<string>() == "error"
+    );
+    Assert.IsNotNull(
+      malformedError,
+      string.Join(Environment.NewLine, malformed.Select(item => item.ToJsonString()))
+    );
+    Assert.AreEqual(
+      "qwen-code-protocol-json",
+      malformedError["error"]!["code"]!.GetValue<string>()
+    );
+
+    var crashed = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "crash qwen code",
+      "browser-qwen-code-crash",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, crashed.Where(IsTerminalStreamEvent));
+    StringAssert.Contains(
+      crashed.Single(item => item["type"]!.GetValue<string>() == "error")
+        ["error"]!["code"]!.GetValue<string>(),
+      "qwen-code"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeUnexpectedNativeEventIsPreserved()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "unexpected qwen code",
+      "browser-qwen-code-unexpected",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.qwen-code-native-event-preserved"
+      ),
+      "Repeated unknown native events must be represented once per event type."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeRealEnvelopeStormIsBoundedAndReturnsTheCompleteAnswer()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "storm qwen code",
+      "browser-qwen-code-storm",
+      "qwen3.8:27b-gpu0"
+    );
+
+    var responseDeltas = events.Where(
+      item => item["type"]!.GetValue<string>() == "response.delta"
+    ).ToArray();
+    var reasoningDeltas = events.Where(
+      item => item["type"]!.GetValue<string>() == "reasoning.delta"
+    ).ToArray();
+    var answer = string.Concat(responseDeltas.Select(
+      item => item["delta"]?.GetValue<string>() ?? string.Empty
+    ));
+    var expectedAnswer = string.Concat(Enumerable.Repeat(
+      "Qwen Code returned a useful bounded response. ",
+      32
+    ));
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.AreEqual(expectedAnswer, answer);
+    Assert.IsLessThanOrEqualTo(8, responseDeltas.Length);
+    Assert.IsLessThanOrEqualTo(4, reasoningDeltas.Length);
+    Assert.HasCount(
+      0,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.qwen-code-native-event-preserved"
+      ),
+      "Known Qwen state updates must not leak into the activity timeline."
+    );
+    Assert.IsLessThan(
+      40,
+      events.Count(),
+      "The Host stream must stay bounded even when Qwen emits thousands of frames."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeEndTurnWithoutAssistantOutputFailsReviewably()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "empty qwen code",
+      "browser-qwen-code-empty",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
+    Assert.AreEqual(
+      "qwen-code-empty-response",
+      error["error"]!["code"]!.GetValue<string>()
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessStreamsThinkingToolsAssistantAndReusesConversationThread()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await StartMessageAsync("create codex file");
+    var firstAssistant = Page.Locator(".message.assistant").Last;
+    await Expect(
+      firstAssistant.Locator(".assistant-reasoning-body")
+    ).ToContainTextAsync("Inspecting");
+    await Expect(
+      firstAssistant.Locator(".assistant-answer")
+    ).ToContainTextAsync("Codex streamed with alpha:latest");
+    await Expect(
+      firstAssistant.Locator(".activity")
+    ).ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(
+      firstAssistant.Locator("[data-event-type=\"action.started\"]")
+    ).ToHaveCountAsync(1);
+    await Expect(
+      firstAssistant.Locator("[data-event-type=\"harness.codex-effects-observed\"]")
+    ).ToHaveCountAsync(1);
+    Assert.IsTrue(
+      File.Exists(Path.Combine(_environment.WorkspaceDirectory, "codex-created.txt"))
+    );
+    var codexRuntime = Path.Combine(_environment.DataDirectory, "codex-runtime");
+    Assert.IsTrue(
+      File.Exists(Path.Combine(codexRuntime, "fake-app-server-started.marker"))
+    );
+    StringAssert.Contains(
+      await File.ReadAllTextAsync(Path.Combine(codexRuntime, "config.toml")),
+      "model_provider = \"ollama\""
+    );
+    using (var environmentDocument = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(codexRuntime, "fake-app-server-environment.json")
+      )
+    ))
+    {
+      Assert.AreEqual(
+        _environment.FakeOllama.BaseUrl,
+        environmentDocument.RootElement.GetProperty("ollamaHost").GetString()
+      );
+      Assert.AreEqual(
+        $"{_environment.FakeOllama.BaseUrl}/v1",
+        environmentDocument.RootElement.GetProperty("codexOssBaseUrl").GetString()
+      );
+    }
+    using (var threadRequest = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(codexRuntime, "fake-app-server-thread-request.json")
+      )
+    ))
+    {
+      Assert.AreEqual(
+        Path.GetFullPath(_environment.WorkspaceDirectory),
+        Path.GetFullPath(threadRequest.RootElement.GetProperty("cwd").GetString()!)
+      );
+      Assert.AreEqual(
+        "alpha:latest",
+        threadRequest.RootElement.GetProperty("model").GetString()
+      );
+      Assert.AreEqual(
+        "ollama",
+        threadRequest.RootElement.GetProperty("provider").GetString()
+      );
+    }
+    var codexTurnInput = await File.ReadAllTextAsync(
+      Path.Combine(codexRuntime, "fake-app-server-turn-input.txt")
+    );
+    StringAssert.Contains(
+      codexTurnInput,
+      "Preserve existing files and all pre-existing user changes"
+    );
+    StringAssert.Contains(codexTurnInput, "User request (verbatim):\ncreate codex file");
+
+    var firstText = await firstAssistant.Locator(".assistant-answer").InnerTextAsync();
+    var thread = Regex.Match(firstText, @"fake-thread-\d+").Value;
+    Assert.IsFalse(string.IsNullOrWhiteSpace(thread), firstText);
+
+    await SendMessageAsync("codex second turn");
+    await Expect(
+      Page.Locator(".message.assistant .assistant-answer").Last
+    ).ToContainTextAsync(thread);
+    Assert.AreEqual(
+      "edited on the reused Codex thread\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "codex-created.txt")
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessResumesItsSessionAfterOwnedProcessRestart()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await SendMessageAsync("restart codex after completion");
+    var firstAnswer = await Page.Locator(
+      ".message.assistant .assistant-answer"
+    ).Last.InnerTextAsync();
+    var threadId = Regex.Match(firstAnswer, @"fake-thread-\d+").Value;
+    Assert.IsFalse(string.IsNullOrWhiteSpace(threadId), firstAnswer);
+    var runtime = Path.Combine(_environment.DataDirectory, "codex-runtime");
+    await WaitUntilAsync(
+      () => File.Exists(
+        Path.Combine(runtime, "fake-app-server-exited-after-terminal.marker")
+      ),
+      TimeSpan.FromSeconds(5)
+    );
+
+    await SendMessageAsync("codex second turn");
+    await Expect(
+      Page.Locator(".message.assistant .assistant-answer").Last
+    ).ToContainTextAsync(threadId);
+    using var resumed = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(runtime, "fake-app-server-thread-resumed.json")
+      )
+    );
+    Assert.AreEqual(
+      threadId,
+      resumed.RootElement.GetProperty("threadId").GetString()
+    );
+    Assert.AreEqual(
+      Path.GetFullPath(_environment.WorkspaceDirectory),
+      Path.GetFullPath(resumed.RootElement.GetProperty("cwd").GetString()!)
+    );
+    Assert.AreEqual(
+      "alpha:latest",
+      resumed.RootElement.GetProperty("model").GetString()
+    );
+    Assert.AreEqual(
+      "ollama",
+      resumed.RootElement.GetProperty("provider").GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexManagedInstallDiscoverySurvivesVersionedPathChanges()
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      Assert.Inconclusive("Managed Codex discovery is a Windows integration.");
+    }
+
+    await _environment.UseManagedCodexInstallAndRestartAsync();
+
+    try
+    {
+      using var response = await _environment.HttpClient.GetAsync("api/harnesses");
+      response.EnsureSuccessStatusCode();
+      var codex = JsonNode.Parse(await response.Content.ReadAsStringAsync())!
+        .AsArray()
+        .Single(
+          item => item!["definition"]!["id"]!.GetValue<string>() == "codex"
+        )!;
+      Assert.IsTrue(codex["availability"]!["available"]!.GetValue<bool>());
+      Assert.AreEqual(
+        "codex-cli fake-0.148.0",
+        codex["availability"]!["version"]!.GetValue<string>()
+      );
+    }
+    finally
+    {
+      await _environment.SetCodexExecutableAndRestartAsync(
+        _environment.FakeCodexExecutablePath
+      );
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessPreservesChronologicalThinkingAndResponseItems()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await SendMessageAsync("chronological codex content");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    var timelineItems = assistant.Locator(
+      ".assistant-work > [data-timeline-kind]"
+    );
+    await Expect(timelineItems).ToHaveCountAsync(5);
+    var timelineKinds = await timelineItems.EvaluateAllAsync<string[]>(
+      "nodes => nodes.map(node => node.dataset.timelineKind)"
+    );
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "thinking",
+        "response",
+        "thinking",
+        "response",
+        "response"
+      },
+      timelineKinds
+    );
+
+    await Expect(
+      assistant.Locator(".assistant-reasoning[data-delta-count=\"2\"]")
+    ).ToHaveCountAsync(2);
+    await Expect(
+      assistant.Locator(".assistant-response[data-delta-count=\"2\"]")
+    ).ToHaveCountAsync(2);
+    await Expect(
+      assistant.Locator(".assistant-response[data-delta-count=\"1\"]")
+    ).ToHaveCountAsync(1);
+    await Expect(
+      assistant.Locator(".assistant-reasoning").Nth(0)
+    ).ToContainTextAsync("Inspecting — revisão the trusted workspace.");
+    await Expect(
+      assistant.Locator(".assistant-response").Nth(0).Locator("strong")
+    ).ToHaveTextAsync("response");
+    await Expect(
+      assistant.Locator(".assistant-reasoning").Nth(1)
+    ).ToContainTextAsync("Thinking again after the first response.");
+    await Expect(
+      assistant.Locator(".assistant-answer")
+    ).ToContainTextAsync("Codex streamed with alpha:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeHarnessCreatesUtf8FilesThroughOneHostBatchTool()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+
+    await SendMessageAsync("native create host batch files");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".activity")).ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(assistant).ToContainTextAsync("create_files");
+    Assert.AreEqual(
+      "<!doctype html><title>Ação nativa</title>\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "native-ação.html")
+      )
+    );
+    Assert.AreEqual(
+      "/* revisão nativa */\nbody { color: #456; }\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "native-estilo.css")
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessUsesHostCreateFilesAndPreservesUtf8ProtocolText()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await SendMessageAsync("create host batch files");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".assistant-reasoning-body")).ToContainTextAsync("revisão");
+    await Expect(assistant.Locator(".assistant-answer")).ToContainTextAsync("Ação concluída");
+    await Expect(assistant).ToContainTextAsync("create_files");
+    await Expect(
+      assistant.Locator("[data-event-type=\"validation-completed\"]")
+    ).ToContainTextAsync("not-configured");
+    var visibleText = await assistant.InnerTextAsync();
+    Assert.DoesNotContain("Ã", visibleText);
+    Assert.DoesNotContain("ÔÇ", visibleText);
+    Assert.AreEqual(
+      "<!doctype html><title>Ação</title>\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "batch-ação.html")
+      )
+    );
+    Assert.AreEqual(
+      "/* revisão */\nbody { color: #123; }\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "batch-estilo.css")
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeHarnessRemainsDefaultAndDoesNotStartCodex()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("native");
+
+    await SendMessageAsync("execute create file");
+
+    await Expect(
+      Page.Locator(".message.assistant [data-event-type=\"harness.codex-selected\"]")
+    ).ToHaveCountAsync(0);
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(request => request.Model == "alpha:latest")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessCancellationInterruptsTheActiveTurn()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await StartMessageAsync("long codex turn");
+    await Expect(
+      Page.Locator(".message.assistant .assistant-reasoning-body").Last
+    ).ToContainTextAsync("Inspecting");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(
+      Page.Locator(".message.assistant .activity").Last
+    ).ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(
+      Page.Locator(".message.assistant .assistant-answer").Last
+    ).Not.ToContainTextAsync("Codex streamed");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessRequiresExplicitApprovalForDeletion()
+  {
+    var target = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "codex-delete.txt"
+    );
+    await File.WriteAllTextAsync(target, "delete me");
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await StartMessageAsync("delete codex file");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    Assert.IsTrue(File.Exists(target));
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Aprovar"
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(".message.assistant .activity").Last
+    ).ToHaveAttributeAsync("data-terminal", "true");
+    Assert.IsFalse(File.Exists(target));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessUsesOneEditableHostApprovalForBatchDeletion()
+  {
+    var first = Path.Combine(_environment.WorkspaceDirectory, "batch-delete-a.txt");
+    var second = Path.Combine(_environment.WorkspaceDirectory, "batch-delete-b.txt");
+    await File.WriteAllTextAsync(first, "primeiro");
+    await File.WriteAllTextAsync(second, "segundo");
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+
+    await StartMessageAsync("recover command deletion with host batch");
+    await Expect(
+      Page.Locator(
+        ".message.assistant [data-event-type=\"harness.codex-approval-corrected\"]"
+      )
+    ).ToHaveCountAsync(1);
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("delete_files");
+    var editor = approval.GetByRole(
+      AriaRole.Textbox,
+      new() { Name = "Editar comando de delete_files" }
+    );
+    await Expect(editor).ToHaveValueAsync("batch-delete-a.txt\nbatch-delete-b.txt");
+    Assert.IsTrue(File.Exists(first));
+    Assert.IsTrue(File.Exists(second));
+
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Aprovar" }).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    Assert.IsFalse(File.Exists(first));
+    Assert.IsFalse(File.Exists(second));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task MissingCodexFailsClearlyWhileNativeRemainsAvailable()
+  {
+    var missing = Path.Combine(
+      _environment.DataDirectory,
+      "missing-codex.exe"
+    );
+    await _environment.SetCodexExecutableAndRestartAsync(missing);
+
+    try
+    {
+      await Page.GotoAsync("/");
+      await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+      await SetExecuteModeAsync("auto");
+      var selector = Page.Locator("#harness-selector");
+      var unavailable = selector.Locator("option[value=\"codex\"]");
+      Assert.IsTrue(
+        await unavailable.EvaluateAsync<bool>("option => option.disabled")
+      );
+      await Expect(unavailable).ToContainTextAsync("Unavailable");
+      await Expect(unavailable).ToHaveAttributeAsync(
+        "title",
+        new Regex("Codex executable was not found")
+      );
+      await Expect(selector).ToHaveValueAsync("native");
+
+      var failed = await ExecuteCodexStreamAsync(
+        "create codex file",
+        "browser-missing-codex"
+      );
+      var terminal = failed.Single(item => IsTerminalStreamEvent(item));
+      Assert.AreEqual("error", terminal["type"]!.GetValue<string>());
+      Assert.AreEqual(
+        "codex-executable-not-found",
+        terminal["error"]!["code"]!.GetValue<string>()
+      );
+
+      await SendMessageAsync("execute create file");
+      Assert.IsTrue(
+        File.Exists(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
+      );
+    }
+    finally
+    {
+      await _environment.SetCodexExecutableAndRestartAsync(
+        _environment.FakeCodexExecutablePath
+      );
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessChildFailureProducesExactlyOneTerminalEvent()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "crash codex child",
+      "browser-codex-child-crash"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
+    Assert.AreEqual(
+      "codex-app-server-exited",
+      error["error"]!["code"]!.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessMalformedEventFailsOnceAndUnexpectedPayloadIsPreserved()
+  {
+    var malformed = await ExecuteCodexStreamAsync(
+      "malformed codex event",
+      "browser-codex-malformed"
+    );
+    Assert.HasCount(1, malformed.Where(IsTerminalStreamEvent));
+    Assert.AreEqual(
+      "codex-protocol-json",
+      malformed.Single(item => item["type"]!.GetValue<string>() == "error")
+        ["error"]!["code"]!.GetValue<string>()
+    );
+
+    var unexpected = await ExecuteCodexStreamAsync(
+      "unexpected codex event",
+      "browser-codex-unexpected"
+    );
+    Assert.HasCount(1, unexpected.Where(IsTerminalStreamEvent));
+    Assert.IsGreaterThanOrEqualTo(
+      1,
+      unexpected.Count(
+        item => item["type"]!.GetValue<string>()
+          == "harness.codex-native-event-preserved"
+      ),
+      "The future Codex event must be preserved even when other native diagnostics are present."
+    );
+    Assert.HasCount(
+      1,
+      unexpected.Where(
+        item => item["type"]!.GetValue<string>() == "response.completed"
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessRejectsUnsupportedProviderWithoutFallback()
+  {
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "do not run this cloud request",
+        model = "groq::openai/gpt-oss-120b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "codex",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-codex-cloud-rejected"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var stream = await response.Content.ReadAsStringAsync();
+    StringAssert.Contains(stream, "codex-provider-unsupported");
+    StringAssert.Contains(stream, "supports Ollama Local models only");
+    Assert.DoesNotContain("harness.codex-selected", stream);
+    Assert.DoesNotContain("cloud.local-fallback", stream);
   }
 
   [TestMethod]
@@ -3813,6 +5209,9 @@ public sealed class ChatEndToEndTests : PageTest
       "/"
     );
     await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"models-routing\"]"
+    ).ClickAsync();
     await Page.Locator(
       "#router-model"
     ).SelectOptionAsync(
@@ -3829,6 +5228,9 @@ public sealed class ChatEndToEndTests : PageTest
       "Persisted documentation prompt."
     );
     await Page.Locator(
+      "[data-settings-target=\"harnesses\"]"
+    ).ClickAsync();
+    await Page.Locator(
       "#provider-context-tokens"
     ).FillAsync(
       "49152"
@@ -3839,6 +5241,9 @@ public sealed class ChatEndToEndTests : PageTest
       "240"
     );
     await Page.Locator(
+      "[data-settings-target=\"execution\"]"
+    ).ClickAsync();
+    await Page.Locator(
       "#max-tool-output-tokens"
     ).FillAsync(
       "1536"
@@ -3848,9 +5253,16 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
     await Expect(
       Page.Locator(
+        "#save-status"
+      )
+    ).ToHaveTextAsync("Salvo");
+    await Expect(
+      Page.Locator(
         "#settings-dialog"
       )
-    ).ToBeHiddenAsync();
+    ).ToBeVisibleAsync();
+    await Page.Locator("#cancel-settings").ClickAsync();
+    await Expect(Page.Locator("#settings-dialog")).ToBeHiddenAsync();
 
     using var savedDocument = JsonDocument.Parse(
       await File.ReadAllTextAsync(
@@ -4056,11 +5468,11 @@ public sealed class ChatEndToEndTests : PageTest
       1
     );
     await Page.Locator(
-      "[data-settings-target=\"git\"]"
+      "[data-settings-target=\"workspaces\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "[data-settings-target=\"git\"]"
+        "[data-settings-target=\"workspaces\"]"
       )
     ).ToHaveAttributeAsync(
       "aria-current",
@@ -4075,7 +5487,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
 
     await Page.Locator(
-      "[data-settings-target=\"runtime\"]"
+      "[data-settings-target=\"harnesses\"]"
     ).ClickAsync();
     await Page.Locator(
       "#provider-context-tokens"
@@ -4116,7 +5528,7 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToHaveAttributeAsync(
       "data-section",
-      "runtime"
+      "harnesses"
     );
 
     await Page.Keyboard.PressAsync(
@@ -4181,6 +5593,150 @@ public sealed class ChatEndToEndTests : PageTest
       await Page.EvaluateAsync<bool>(
         "document.querySelector('#settings-dialog').contains(document.activeElement)"
       )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SettingsSectionsAndAdvancedSubsectionsRemainExclusiveAndScrollIndependent()
+  {
+    await Page.GotoAsync("/");
+    await OpenSettingsAsync();
+
+    var sectionTargets = new[]
+    {
+      ("general", new[] {"settings-general", "settings-ollama"}),
+      ("models-routing", new[] {"settings-models", "settings-coordinator"}),
+      ("providers", new[] {"settings-cloud-providers"}),
+      ("harnesses", new[] {"settings-runtime"}),
+      ("execution", new[] {"settings-execution"}),
+      ("workspaces", new[] {"settings-workspaces", "settings-git", "settings-validation"}),
+      ("advanced", new[] {"settings-advanced"})
+    };
+
+    async Task<string[]> GetActiveSectionIds()
+    {
+      return await Page.EvaluateAsync<string[]>(
+        "() => Array.from(document.querySelectorAll('.settings-section.active')).map((section) => section.id)"
+      );
+    }
+
+    async Task ClickSectionWithoutPageJumpAsync(string target)
+    {
+      await Page.EvaluateAsync(
+        "() => window.scrollTo(0, 180)"
+      );
+      var scrollBefore = await Page.EvaluateAsync<double>(
+        "() => window.scrollY"
+      );
+      await Page.Locator(
+        $"[data-settings-target=\"{target}\"]"
+      ).ClickAsync();
+      var scrollAfter = await Page.EvaluateAsync<double>(
+        "() => window.scrollY"
+      );
+      Assert.AreEqual(
+        scrollBefore,
+        scrollAfter
+      );
+    }
+
+    foreach (var (target, expectedSections) in sectionTargets)
+    {
+      await ClickSectionWithoutPageJumpAsync(target);
+      await Expect(
+        Page.Locator(
+          "#settings-dialog"
+        )
+      ).ToHaveAttributeAsync(
+        "data-section",
+        target
+      );
+
+      var activeSections = await GetActiveSectionIds();
+      Array.Sort(activeSections);
+      Array.Sort(expectedSections);
+      CollectionAssert.AreEqual(
+        expectedSections,
+        activeSections
+      );
+      await Expect(
+        Page.Locator(
+          $"[data-settings-target=\"{target}\"]"
+        )
+      ).ToHaveAttributeAsync(
+        "aria-current",
+        "page"
+      );
+    }
+
+    await Page.Locator(
+      "[data-settings-target=\"advanced\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-settings-subtarget=\"portable-yaml\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-current",
+      "page"
+    );
+    Assert.IsTrue(
+      await Page.EvaluateAsync<bool>(
+        "() => document.querySelector('#settings-advanced-yaml').classList.contains('active')"
+      )
+    );
+    await Expect(Page.Locator("#settings-advanced-backup")).ToBeHiddenAsync();
+
+    await Page.Locator(
+      "[data-settings-subtarget=\"backup\"]"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "[data-settings-subtarget=\"backup\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-current",
+      "page"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-settings-subtarget=\"portable-yaml\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-current",
+      "false"
+    );
+    Assert.IsTrue(
+      await Page.EvaluateAsync<bool>(
+        "() => document.querySelector('#settings-advanced-backup').classList.contains('active')"
+      )
+    );
+    Assert.IsFalse(
+      await Page.EvaluateAsync<bool>(
+        "() => document.querySelector('#settings-advanced-yaml').classList.contains('active')"
+      )
+    );
+
+    await Page.Locator(
+      "[data-settings-target=\"providers\"]"
+    ).ClickAsync();
+    await Expect(Page.Locator("#settings-advanced-backup")).ToBeHiddenAsync();
+    await Expect(
+      Page.Locator(
+        "#settings-dialog"
+      )
+    ).ToHaveAttributeAsync(
+      "data-section",
+      "providers"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-settings-target=\"providers\"]"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-current",
+      "page"
     );
   }
 
@@ -4755,19 +6311,42 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       reasoning
-    ).ToBeVisibleAsync();
+    ).ToHaveCountAsync(3);
     await Expect(
-      reasoning.Locator(
+      reasoning.First.Locator(
         ".assistant-reasoning-body"
       )
     ).ToContainTextAsync(
       "inspect the request"
     );
     await Expect(
-      reasoning
+      reasoning.Locator(
+        ".assistant-reasoning-body",
+        new() { HasText = "The response should remain concise and grounded." }
+      )
+    ).ToHaveCountAsync(2);
+    await Expect(
+      reasoning.Last
     ).Not.ToHaveAttributeAsync(
       "open",
       string.Empty
+    );
+    var timelineKinds = await Page.Locator(
+      ".message.assistant .assistant-work > [data-timeline-kind]"
+    ).EvaluateAllAsync<string[]>(
+      "nodes => nodes.map(node => node.dataset.timelineKind)"
+    );
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "thinking",
+        "response",
+        "thinking",
+        "response",
+        "thinking",
+        "response"
+      },
+      timelineKinds
     );
     await Expect(
       Page.Locator(
@@ -5043,72 +6622,6 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ConversationModelLockBypassesRouterUntilUnlocked()
-  {
-    await Page.GotoAsync(
-      "/"
-    );
-    var selector = Page.Locator(
-      "#model-selector"
-    );
-    var modelLock = Page.Locator(
-      "#model-lock"
-    );
-    await Expect(
-      modelLock
-    ).ToBeDisabledAsync();
-    await selector.SelectOptionAsync(
-      "beta:code"
-    );
-    await modelLock.CheckAsync();
-    await Expect(
-      selector
-    ).ToBeDisabledAsync();
-
-    await SendMessageAsync(
-      "First locked request"
-    );
-    await SendMessageAsync(
-      "Second locked request"
-    );
-    var lockedRequests = _environment.FakeOllama.Requests;
-    Assert.HasCount(
-      2,
-      lockedRequests
-    );
-    Assert.IsTrue(
-      lockedRequests.All(
-        request => request.Stream && request.Model == "beta:code"
-      )
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"model.lock-active\"]"
-      )
-    ).ToHaveCountAsync(
-      2
-    );
-
-    await modelLock.UncheckAsync();
-    await selector.SelectOptionAsync(
-      "auto"
-    );
-    await SendMessageAsync(
-      "Write documentation after unlocking"
-    );
-    Assert.IsTrue(
-      _environment.FakeOllama.Requests
-        .Skip(
-          2
-        )
-        .Any(
-          request => !request.Stream && request.Model == "router:latest"
-        )
-    );
-  }
-
-  [TestMethod]
-  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task HistoryDisabledNewConversationRequiresExplicitDiscardAndPreservesSettings()
   {
     await Page.GotoAsync(
@@ -5119,9 +6632,6 @@ public sealed class ChatEndToEndTests : PageTest
     ).SelectOptionAsync(
       "beta:code"
     );
-    await Page.Locator(
-      "#model-lock"
-    ).CheckAsync();
     await SendMessageAsync(
       "Message in the old conversation"
     );
@@ -5171,9 +6681,9 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "#model-lock"
+        "#harness-selector"
       )
-    ).Not.ToBeCheckedAsync();
+    ).ToHaveValueAsync("native");
     await OpenSettingsAsync();
     await Expect(
       Page.Locator(
@@ -5515,9 +7025,9 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "#model-lock"
+        "#harness-selector"
       )
-    ).Not.ToBeCheckedAsync();
+    ).ToHaveValueAsync("native");
   }
 
   [TestMethod]
@@ -7184,7 +8694,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await OpenSettingsAsync();
     await Page.Locator(
-      "[data-settings-target=\"runtime\"]"
+      "[data-settings-target=\"harnesses\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -7285,7 +8795,6 @@ public sealed class ChatEndToEndTests : PageTest
         ),
         model = "alpha:latest",
         history = Array.Empty<object>(),
-        modelLocked = true,
         interactionMode = "chat",
         approvalPolicy = "ask"
       }
@@ -7315,7 +8824,6 @@ public sealed class ChatEndToEndTests : PageTest
         ),
         model = "alpha:latest",
         history = Array.Empty<object>(),
-        modelLocked = true,
         interactionMode = "chat",
         approvalPolicy = "ask"
       }
@@ -9606,9 +11114,19 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await File.WriteAllTextAsync(obsoleteA, "obsolete");
     await File.WriteAllTextAsync(obsoleteB, "obsolete");
-    await SendMessageAsync(
+    await StartMessageAsync(
       "execute delete files direct obsolete-a.txt and obsolete-b.txt"
     );
+    var deletionApproval = Page.Locator(".action-approval").Last;
+    await Expect(deletionApproval).ToBeVisibleAsync();
+    Assert.IsTrue(File.Exists(obsoleteA));
+    Assert.IsTrue(File.Exists(obsoleteB));
+    await deletionApproval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Aprovar" }
+    ).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
     Assert.IsFalse(File.Exists(obsoleteA));
     Assert.IsFalse(File.Exists(obsoleteB));
     await Expect(
@@ -9951,6 +11469,9 @@ public sealed class ChatEndToEndTests : PageTest
     ).EvaluateAsync(
       "element => element.open = true"
     );
+    await Expect(
+      Page.Locator("#detected-validation-profile")
+    ).ToContainTextAsync("Sugestão detectada:");
     await Page.Locator(
       "#reset-validation-profile"
     ).ClickAsync();
@@ -10256,7 +11777,7 @@ public sealed class ChatEndToEndTests : PageTest
       )
     ).ToBeVisibleAsync();
     await Page.Locator(
-      "[data-settings-target=\"git\"]"
+      "[data-settings-target=\"workspaces\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -12789,7 +14310,6 @@ public sealed class ChatEndToEndTests : PageTest
         message = "execute create file",
         model = "auto",
         history = Array.Empty<object>(),
-        modelLocked = false,
         interactionMode = "execute",
         approvalPolicy = "auto",
         browserSessionId
@@ -14518,9 +16038,6 @@ public sealed class ChatEndToEndTests : PageTest
     ).SelectOptionAsync(
       "alpha:latest"
     );
-    await Page.Locator(
-      "#model-lock"
-    ).CheckAsync();
     await SetExecuteModeAsync(
       "auto"
     );
@@ -14572,9 +16089,9 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "#model-lock"
+        "#harness-selector"
       )
-    ).Not.ToBeCheckedAsync();
+    ).ToHaveValueAsync("native");
 
     await Page.Locator(
       ".workspace-profile-entry.active"
@@ -15961,7 +17478,6 @@ public sealed class ChatEndToEndTests : PageTest
             content = "Recent visible assistant message."
           }
         },
-        modelLocked = true,
         interactionMode = "chat",
         approvalPolicy = "ask",
         browserSessionId = "browser-context-v098",
@@ -16982,12 +18498,9 @@ public sealed class ChatEndToEndTests : PageTest
     ).SelectOptionAsync(
       "alpha:latest"
     );
-    await Page.Locator(
-      "#model-lock"
-    ).CheckAsync();
     await OpenSettingsAsync();
     await Page.Locator(
-      "[data-settings-target=\"models\"]"
+      "[data-settings-target=\"models-routing\"]"
     ).ClickAsync();
     await Page.Locator(
       ".model-organization-panel"
@@ -17131,13 +18644,13 @@ public sealed class ChatEndToEndTests : PageTest
         "#model-profile-status"
       )
     ).ToContainTextAsync(
-      "lock da conversa atual foi preservado"
+      "seleção atual da conversa foi preservada"
     );
     await Expect(
       Page.Locator(
-        "#model-lock"
+        "#harness-selector"
       )
-    ).ToBeCheckedAsync();
+    ).ToHaveValueAsync("native");
     await Expect(
       Page.Locator(
         "#model-selector"
@@ -17199,7 +18712,6 @@ public sealed class ChatEndToEndTests : PageTest
         message = secretMarker + new string('x', 132_000),
         model = "alpha:latest",
         history = Array.Empty<object>(),
-        modelLocked = true,
         interactionMode = "chat",
         approvalPolicy = "ask",
         browserSessionId = "browser-trace-v0913"
@@ -17311,7 +18823,6 @@ public sealed class ChatEndToEndTests : PageTest
   {
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
-    await Page.Locator("#model-lock").CheckAsync();
     await Page.Locator("#message-input").FillAsync(new string('z', 132_000));
     await Page.Locator("#message-input").PressAsync("Enter");
     await Expect(Page.Locator(".trace-diagnostic-actions")).ToBeVisibleAsync();
@@ -17357,7 +18868,6 @@ public sealed class ChatEndToEndTests : PageTest
         message = "execute read file",
         model = "command-r:latest",
         history,
-        modelLocked = true,
         interactionMode = "execute",
         approvalPolicy = "auto",
         browserSessionId = "browser-context-compaction-v0913"
@@ -17401,7 +18911,6 @@ public sealed class ChatEndToEndTests : PageTest
         message = "execute " + new string('q', 30_000),
         model = "command-r:latest",
         history = Array.Empty<object>(),
-        modelLocked = true,
         interactionMode = "execute",
         approvalPolicy = "auto",
         browserSessionId = "browser-context-item-v0913"
@@ -17444,7 +18953,6 @@ public sealed class ChatEndToEndTests : PageTest
           message = $"Concurrent trace request {index}.",
           model = "alpha:latest",
           history = Array.Empty<object>(),
-          modelLocked = true,
           interactionMode = "chat",
           approvalPolicy = "ask",
           browserSessionId = $"browser-concurrent-v0913-{index}"
@@ -17499,7 +19007,6 @@ public sealed class ChatEndToEndTests : PageTest
         message = "execute create file",
         model = "alpha:latest",
         history,
-        modelLocked = true,
         interactionMode = "execute",
         approvalPolicy = "auto",
         browserSessionId = "browser-structured-context-v0913"
@@ -17542,7 +19049,6 @@ public sealed class ChatEndToEndTests : PageTest
           message = "",
           model = "alpha:latest",
           history = Array.Empty<object>(),
-          modelLocked = true,
           interactionMode = "chat",
           approvalPolicy = "ask"
         }
@@ -17562,6 +19068,58 @@ public sealed class ChatEndToEndTests : PageTest
         Directory.Move(retainedDirectory, incidentDirectory);
       }
     }
+  }
+
+  private static async Task<JsonObject[]> ExecuteCodexStreamAsync(
+    string message,
+    string browserSessionId
+  )
+  {
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message,
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "codex",
+        approvalPolicy = "auto",
+        browserSessionId
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    return ParseSseEvents(await response.Content.ReadAsStringAsync());
+  }
+
+  private static async Task<JsonObject[]> ExecuteHarnessStreamAsync(
+    string harness,
+    string message,
+    string browserSessionId,
+    string model = "alpha:latest"
+  )
+  {
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message,
+        model,
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness,
+        approvalPolicy = "auto",
+        browserSessionId
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    return ParseSseEvents(await response.Content.ReadAsStringAsync());
+  }
+
+  private static bool IsTerminalStreamEvent(JsonObject item)
+  {
+    return item["type"]!.GetValue<string>() is
+      "error" or "response.completed" or "request.cancelled";
   }
 
   private static JsonObject[] ParseSseEvents(string stream)
@@ -18081,6 +19639,8 @@ public sealed class ChatEndToEndTests : PageTest
       ["search-in-files"] = "search_text",
       ["create-file"] = "create_file",
       ["createfile"] = "create_file",
+      ["create-files"] = "create_files",
+      ["createfiles"] = "create_files",
       ["write-file"] = "write_file",
       ["writefile"] = "write_file",
       ["replace-text"] = "replace_text",
@@ -18140,6 +19700,7 @@ public sealed class ChatEndToEndTests : PageTest
       "get_file_info",
       "search_text",
       "create_file",
+      "create_files",
       "write_file",
       "replace_text",
       "apply_patch",
@@ -18257,7 +19818,6 @@ public sealed class ChatEndToEndTests : PageTest
         message,
         model,
         history = Array.Empty<object>(),
-        modelLocked = true,
         interactionMode = "chat",
         approvalPolicy = "ask",
         browserSessionId,

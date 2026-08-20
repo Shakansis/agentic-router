@@ -25,6 +25,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
     TestApplicationSettings baselineSettings,
     FakeOllamaServer fakeOllama,
     FakeCloudProviderServer fakeCloud,
+    string fakeCodexExecutablePath,
+    string fakeOpenCodeExecutablePath,
+    string fakeQwenCodeExecutablePath,
     Process apiProcess,
     StringBuilder apiOutput
   )
@@ -38,6 +41,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
     BaselineSettings = baselineSettings;
     _fakeOllama = fakeOllama;
     _fakeCloud = fakeCloud;
+    FakeCodexExecutablePath = fakeCodexExecutablePath;
+    FakeOpenCodeExecutablePath = fakeOpenCodeExecutablePath;
+    FakeQwenCodeExecutablePath = fakeQwenCodeExecutablePath;
     _apiProcess = apiProcess;
     _apiOutput = apiOutput;
     HttpClient = new HttpClient
@@ -66,6 +72,12 @@ internal sealed class TestEnvironment : IAsyncDisposable
   public FakeOllamaServer FakeOllama => _fakeOllama;
 
   public FakeCloudProviderServer FakeCloud => _fakeCloud;
+
+  public string FakeCodexExecutablePath { get; }
+
+  public string FakeOpenCodeExecutablePath { get; }
+
+  public string FakeQwenCodeExecutablePath { get; }
 
   public string ApiOutput => _apiOutput.ToString();
 
@@ -170,6 +182,78 @@ internal sealed class TestEnvironment : IAsyncDisposable
     processStartInfo.Environment[
       "AgenticRouter__Providers__OllamaWebSearchBaseUrl"
     ] = $"{fakeCloud.BaseUrl}/ollama/";
+    var fakeCodexExecutablePath = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_FAKE_CODEX_PATH"
+    );
+    if (string.IsNullOrWhiteSpace(fakeCodexExecutablePath))
+    {
+      fakeCodexExecutablePath = Path.Combine(
+        repositoryRoot,
+        "tests",
+        "FakeCodexAppServer",
+        "bin",
+        configuration,
+        "net10.0",
+        OperatingSystem.IsWindows()
+          ? "FakeCodexAppServer.exe"
+          : "FakeCodexAppServer"
+      );
+    }
+    else
+    {
+      fakeCodexExecutablePath = Path.GetFullPath(fakeCodexExecutablePath);
+    }
+    processStartInfo.Environment[
+      "AgenticRouter__Codex__ExecutablePath"
+    ] = fakeCodexExecutablePath;
+    var fakeOpenCodeExecutablePath = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_FAKE_OPENCODE_PATH"
+    );
+    if (string.IsNullOrWhiteSpace(fakeOpenCodeExecutablePath))
+    {
+      fakeOpenCodeExecutablePath = Path.Combine(
+        repositoryRoot,
+        "tests",
+        "FakeOpenCodeServer",
+        "bin",
+        configuration,
+        "net10.0",
+        OperatingSystem.IsWindows()
+          ? "FakeOpenCodeServer.exe"
+          : "FakeOpenCodeServer"
+      );
+    }
+    else
+    {
+      fakeOpenCodeExecutablePath = Path.GetFullPath(fakeOpenCodeExecutablePath);
+    }
+    processStartInfo.Environment[
+      "AgenticRouter__OpenCode__ExecutablePath"
+    ] = fakeOpenCodeExecutablePath;
+    var fakeQwenCodeExecutablePath = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_FAKE_QWEN_CODE_PATH"
+    );
+    if (string.IsNullOrWhiteSpace(fakeQwenCodeExecutablePath))
+    {
+      fakeQwenCodeExecutablePath = Path.Combine(
+        repositoryRoot,
+        "tests",
+        "FakeQwenCodeServer",
+        "bin",
+        configuration,
+        "net10.0",
+        OperatingSystem.IsWindows()
+          ? "FakeQwenCodeServer.exe"
+          : "FakeQwenCodeServer"
+      );
+    }
+    else
+    {
+      fakeQwenCodeExecutablePath = Path.GetFullPath(fakeQwenCodeExecutablePath);
+    }
+    processStartInfo.Environment[
+      "AgenticRouter__QwenCode__ExecutablePath"
+    ] = fakeQwenCodeExecutablePath;
     var apiProcess = new Process
     {
       StartInfo = processStartInfo,
@@ -222,6 +306,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
       baselineSettings,
       fakeOllama,
       fakeCloud,
+      fakeCodexExecutablePath,
+      fakeOpenCodeExecutablePath,
+      fakeQwenCodeExecutablePath,
       apiProcess,
       apiOutput
     );
@@ -397,7 +484,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
     if (!_apiProcess.HasExited)
     {
-      _apiProcess.Kill();
+      _apiProcess.Kill(true);
       await _apiProcess.WaitForExitAsync();
     }
 
@@ -443,6 +530,58 @@ internal sealed class TestEnvironment : IAsyncDisposable
     _apiProcess.BeginOutputReadLine();
     _apiProcess.BeginErrorReadLine();
     await WaitUntilReadyAsync();
+  }
+
+  public async Task SetCodexExecutableAndRestartAsync(
+    string executablePath
+  )
+  {
+    _apiProcess.StartInfo.Environment[
+      "AgenticRouter__Codex__ExecutablePath"
+    ] = executablePath;
+    await RestartApplicationAsync();
+  }
+
+  public async Task UseManagedCodexInstallAndRestartAsync()
+  {
+    var managedRoot = Path.Combine(
+      _temporaryRoot,
+      "managed-codex"
+    );
+    var managedVersion = Path.Combine(
+      managedRoot,
+      "current-test-version"
+    );
+    Directory.CreateDirectory(managedVersion);
+    var sourceDirectory = Path.GetDirectoryName(FakeCodexExecutablePath)
+      ?? throw new InvalidOperationException(
+        "The fake Codex executable has no parent directory."
+      );
+
+    foreach (var source in Directory.EnumerateFiles(sourceDirectory))
+    {
+      File.Copy(
+        source,
+        Path.Combine(managedVersion, Path.GetFileName(source)),
+        true
+      );
+    }
+
+    File.Copy(
+      FakeCodexExecutablePath,
+      Path.Combine(
+        managedVersion,
+        OperatingSystem.IsWindows() ? "codex.exe" : "codex"
+      ),
+      true
+    );
+    _apiProcess.StartInfo.Environment.Remove(
+      "AgenticRouter__Codex__ExecutablePath"
+    );
+    _apiProcess.StartInfo.Environment[
+      "AgenticRouter__Codex__ManagedInstallRoot"
+    ] = managedRoot;
+    await RestartApplicationAsync();
   }
 
   public async Task<HttpResponseMessage> PutSettingsAsync(

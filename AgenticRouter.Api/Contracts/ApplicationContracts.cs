@@ -54,7 +54,8 @@ public sealed record GraphicsDevice(
   string? Manufacturer,
   long? MemoryBytes,
   bool Available,
-  bool IsAuto
+  bool IsAuto,
+  int? OllamaIndex = null
 );
 
 public sealed record DevicesResponse(
@@ -79,8 +80,8 @@ public sealed record ChatRequest(
   string Message,
   string Model,
   IReadOnlyList<ChatMessage>? History,
-  bool ModelLocked = false,
   string InteractionMode = "chat",
+  string Harness = "native",
   string ApprovalPolicy = "auto",
   string? BrowserSessionId = null,
   string? ConversationSessionId = null,
@@ -736,7 +737,11 @@ public sealed record ChatStreamEvent(
   IReadOnlyList<ProviderCitation>? Citations = null,
   ContextUsageView? ContextUsage = null,
   IncidentContextFitView? IncidentContextFit = null,
-  string? ReasoningDelta = null
+  string? ReasoningDelta = null,
+  string? ContentBlockId = null,
+  string? ResponseSegmentHtml = null,
+  string? ResponseTail = null,
+  string? ResponseTailHtml = null
 );
 
 public sealed record ValidationErrorsResponse(

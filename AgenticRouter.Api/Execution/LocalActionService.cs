@@ -82,6 +82,7 @@ public sealed class LocalActionService : ILocalActionService
 {
   private const int FileReadLimit = 128 * 1_024;
   private const int FileWriteLimit = 1024 * 1_024;
+  private const int BatchWriteLimit = 5 * 1024 * 1_024;
   private readonly ITrustedWorkspaceService _workspace;
   private readonly IProcessExecutionService _processExecution;
   private readonly IProcessPolicyService _processPolicy;
@@ -186,6 +187,19 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    if (proposal.Tool == "create_files")
+    {
+      return AttachAndValidatePlanBinding(
+        await ValidateCreateFilesAsync(
+          proposal,
+          executionSession,
+          cancellationToken
+        ),
+        proposal,
+        executionSession
+      );
+    }
+
     var validated = proposal.Tool == "run_process"
       ? await ValidateProcessAsync(
         proposal,
@@ -241,7 +255,7 @@ public sealed class LocalActionService : ILocalActionService
         executionSession,
         cancellationToken
       );
-      await ValidatePendingDeleteStatesAsync(
+      await ValidatePendingBatchStatesAsync(
         action,
         executionSession,
         cancellationToken
@@ -268,6 +282,10 @@ public sealed class LocalActionService : ILocalActionService
           cancellationToken
         ),
         "create_file" => await CreateFileAsync(
+          action,
+          cancellationToken
+        ),
+        "create_files" => await CreateFilesAsync(
           action,
           cancellationToken
         ),
@@ -323,7 +341,7 @@ public sealed class LocalActionService : ILocalActionService
 
       if (action.PendingFileChanges?.Count > 0)
       {
-        await VerifyAndRecordDeletedFilesAsync(
+        await VerifyAndRecordBatchFileChangesAsync(
           action,
           executionSession,
           cancellationToken
@@ -1234,9 +1252,170 @@ public sealed class LocalActionService : ILocalActionService
       $"delete_files: {prepared.Count} explicit file(s)",
       string.Join("\n", prepared.Select(item => item.RelativePath)),
       false,
-      false,
+      true,
       null,
       PendingFileChanges: prepared
+    );
+  }
+
+  private async Task<ValidatedLocalAction> ValidateCreateFilesAsync(
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "Batch file creation requires an active execution session."
+      );
+    }
+
+    var requestedFiles = GetFileCreations(proposal.Arguments);
+    if (requestedFiles.Count is < 1 or > 50)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "create_files requires between 1 and 50 explicit file entries."
+      );
+    }
+
+    var prepared = new List<PendingFileChange>(requestedFiles.Count);
+    var normalized = new List<object>(requestedFiles.Count);
+    var corrections = new List<LocalActionCorrection>();
+    var canonicalTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var totalBytes = 0;
+    var requiresExplicitApproval = false;
+
+    foreach (var requested in requestedFiles)
+    {
+      var path = requested.Path.Trim();
+      if (path.Length == 0)
+      {
+        throw new LocalActionException(
+          "action-validation",
+          "create_files entries require a non-empty path."
+        );
+      }
+
+      ValidateContent(requested.Content);
+      totalBytes = checked(totalBytes + Encoding.UTF8.GetByteCount(requested.Content));
+      if (totalBytes > BatchWriteLimit)
+      {
+        throw new LocalActionException(
+          "action-validation",
+          "create_files exceeds the 5 MiB total batch write limit."
+        );
+      }
+
+      var resolution = await _workspace.ResolveCreationPathAsync(path, cancellationToken);
+      var target = resolution.FullPath;
+      var relative = resolution.RelativePath;
+      if (relative == ".")
+      {
+        throw new LocalActionException(
+          "action-validation",
+          "create_files entries must name files inside the trusted workspace."
+        );
+      }
+      if (!canonicalTargets.Add(target))
+      {
+        throw new LocalActionException(
+          "action-validation",
+          $"{relative}: create_files contains the same effective target more than once."
+        );
+      }
+      if (File.Exists(target) || Directory.Exists(target))
+      {
+        throw new LocalActionException(
+          "action-validation",
+          $"{relative}: create_files accepts new file targets only."
+        );
+      }
+
+      var parent = Path.GetDirectoryName(target);
+      while (
+        !string.IsNullOrWhiteSpace(parent)
+        && !Directory.Exists(parent)
+      )
+      {
+        if (File.Exists(parent))
+        {
+          throw new LocalActionException(
+            "action-validation",
+            $"{relative}: a parent path is an existing file."
+          );
+        }
+        parent = Path.GetDirectoryName(parent);
+      }
+
+      var effectivePath = relative.Replace(Path.DirectorySeparatorChar, '/');
+      if (resolution.RebasedToWorkspace)
+      {
+        corrections.Add(
+          new LocalActionCorrection(
+            $"files[{normalized.Count}].path",
+            resolution.OriginalPath ?? path,
+            effectivePath,
+            "The relative traversal would leave the trusted workspace, so the Host rebased the creation inside its root."
+          )
+        );
+      }
+
+      var protectedInstructionFile = IsProtectedInstructionFile(relative);
+      if (
+        protectedInstructionFile
+        && !executionSession.Objective.Contains(relative, StringComparison.OrdinalIgnoreCase)
+        && !executionSession.Objective.Contains(Path.GetFileName(relative), StringComparison.OrdinalIgnoreCase)
+      )
+      {
+        requiresExplicitApproval = true;
+      }
+
+      normalized.Add(new { path = effectivePath, content = requested.Content });
+      prepared.Add(
+        new PendingFileChange(
+          relative,
+          "created",
+          false,
+          HashText(string.Empty),
+          null,
+          requested.Content,
+          HashText(requested.Content),
+          0,
+          false,
+          null
+        )
+      );
+    }
+
+    var undoAvailable = executionSession.CanTrackRollbackBatch(
+      prepared.Count,
+      0,
+      out var undoDiagnostic
+    );
+    prepared = prepared.Select(
+      pending => pending with
+      {
+        UndoAvailable = undoAvailable,
+        UndoDiagnostic = undoAvailable ? null : undoDiagnostic
+      }
+    ).ToList();
+
+    return new ValidatedLocalAction(
+      Guid.NewGuid().ToString("N"),
+      proposal.Tool,
+      JsonSerializer.SerializeToElement(new { files = normalized }),
+      null,
+      executionSession.WorkspacePath,
+      $"create_files: {prepared.Count} new file(s)",
+      string.Join("\n", prepared.Select(item => item.RelativePath)),
+      false,
+      requiresExplicitApproval,
+      null,
+      PendingFileChanges: prepared,
+      Corrections: corrections.Count == 0 ? null : corrections
     );
   }
 
@@ -1675,6 +1854,73 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       $"Created {Path.GetFileName(target)} ({content.Length} characters).",
+      "action.edit-applied"
+    );
+  }
+
+  private static async Task<LocalActionResult> CreateFilesAsync(
+    ValidatedLocalAction action,
+    CancellationToken cancellationToken
+  )
+  {
+    var pendingChanges = action.PendingFileChanges
+      ?? throw new LocalActionException(
+        "action-execution",
+        "create_files did not contain a validated explicit file set."
+      );
+    var createdFiles = new List<string>(pendingChanges.Count);
+    var createdDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    try
+    {
+      foreach (var pending in pendingChanges)
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        var target = Path.GetFullPath(
+          Path.Combine(
+            action.WorkingDirectory
+              ?? throw new LocalActionException(
+                "action-execution",
+                "create_files is missing its validated workspace root."
+              ),
+            pending.RelativePath
+          )
+        );
+        TrackAndCreateParents(target, createdDirectories);
+        await using var stream = new FileStream(
+          target,
+          FileMode.CreateNew,
+          FileAccess.Write,
+          FileShare.None,
+          65_536,
+          FileOptions.Asynchronous
+        );
+        createdFiles.Add(target);
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+        await writer.WriteAsync(pending.FinalContent.AsMemory(), cancellationToken);
+      }
+    }
+    catch
+    {
+      foreach (var path in createdFiles.AsEnumerable().Reverse())
+      {
+        if (File.Exists(path))
+        {
+          File.Delete(path);
+        }
+      }
+      foreach (var directory in createdDirectories.OrderByDescending(path => path.Length))
+      {
+        if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
+        {
+          Directory.Delete(directory);
+        }
+      }
+      throw;
+    }
+
+    return new LocalActionResult(
+      $"Created {createdFiles.Count} verified file(s): {string.Join(", ", pendingChanges.Select(item => item.RelativePath))}.",
       "action.edit-applied"
     );
   }
@@ -2329,7 +2575,7 @@ public sealed class LocalActionService : ILocalActionService
     }
   }
 
-  private async Task ValidatePendingDeleteStatesAsync(
+  private async Task ValidatePendingBatchStatesAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
     CancellationToken cancellationToken
@@ -2337,7 +2583,21 @@ public sealed class LocalActionService : ILocalActionService
   {
     foreach (var pending in action.PendingFileChanges ?? [])
     {
-      var target = await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+      var target = pending.Operation == "created"
+        ? (await _workspace.ResolveCreationPathAsync(pending.RelativePath, cancellationToken)).FullPath
+        : await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+
+      if (pending.Operation == "created")
+      {
+        if (File.Exists(target) || Directory.Exists(target))
+        {
+          throw new LocalActionException(
+            "file-conflict",
+            $"{pending.RelativePath}: the target appeared after create_files was proposed."
+          );
+        }
+        continue;
+      }
 
       if (!File.Exists(target))
       {
@@ -2370,7 +2630,7 @@ public sealed class LocalActionService : ILocalActionService
     }
   }
 
-  private async Task VerifyAndRecordDeletedFilesAsync(
+  private async Task VerifyAndRecordBatchFileChangesAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
     CancellationToken cancellationToken
@@ -2378,7 +2638,50 @@ public sealed class LocalActionService : ILocalActionService
   {
     foreach (var pending in action.PendingFileChanges ?? [])
     {
-      var target = await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+      var target = pending.Operation == "created"
+        ? (await _workspace.ResolveCreationPathAsync(pending.RelativePath, cancellationToken)).FullPath
+        : await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+
+      if (pending.Operation == "created")
+      {
+        if (!File.Exists(target))
+        {
+          throw new LocalActionException(
+            "post-write-verification",
+            $"{pending.RelativePath}: the created file could not be found during verification."
+          );
+        }
+        var content = await File.ReadAllTextAsync(target, cancellationToken);
+        var hash = HashText(content);
+        if (
+          !string.Equals(content, pending.FinalContent, StringComparison.Ordinal)
+          || !string.Equals(hash, pending.ExpectedFinalHash, StringComparison.Ordinal)
+        )
+        {
+          throw new LocalActionException(
+            "post-write-verification",
+            $"{pending.RelativePath}: the created file did not match the intended UTF-8 content."
+          );
+        }
+        executionSession?.RecordFileChange(
+          new ExecutionFileChange(
+            pending.RelativePath,
+            "created",
+            false,
+            pending.OriginalHash,
+            pending.ExpectedFinalHash,
+            null,
+            pending.FinalContent,
+            new FileInfo(target).Length,
+            DateTimeOffset.UtcNow,
+            true,
+            pending.UndoAvailable,
+            pending.UndoDiagnostic,
+            0
+          )
+        );
+        continue;
+      }
 
       if (File.Exists(target) || Directory.Exists(target))
       {
@@ -2928,6 +3231,25 @@ public sealed class LocalActionService : ILocalActionService
     }
   }
 
+  private static void TrackAndCreateParents(
+    string path,
+    ISet<string> createdDirectories
+  )
+  {
+    var missing = new Stack<string>();
+    var parent = Path.GetDirectoryName(path);
+    while (!string.IsNullOrWhiteSpace(parent) && !Directory.Exists(parent))
+    {
+      missing.Push(parent);
+      parent = Path.GetDirectoryName(parent);
+    }
+    while (missing.TryPop(out var directory))
+    {
+      Directory.CreateDirectory(directory);
+      createdDirectories.Add(directory);
+    }
+  }
+
   private static IEnumerable<string> EnumerateEntries(
     string root,
     bool recursive
@@ -3061,6 +3383,44 @@ public sealed class LocalActionService : ILocalActionService
 
     return result;
   }
+
+  private static IReadOnlyList<FileCreationInput> GetFileCreations(
+    JsonElement arguments
+  )
+  {
+    if (
+      arguments.ValueKind != JsonValueKind.Object
+      || !arguments.TryGetProperty("files", out var value)
+      || value.ValueKind != JsonValueKind.Array
+    )
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "Action argument 'files' must be an array of { path, content } objects."
+      );
+    }
+
+    var result = new List<FileCreationInput>();
+    foreach (var item in value.EnumerateArray())
+    {
+      if (item.ValueKind != JsonValueKind.Object)
+      {
+        throw new LocalActionException(
+          "action-validation",
+          "Action argument 'files' must contain only objects."
+        );
+      }
+      result.Add(
+        new FileCreationInput(
+          GetRequiredString(item, "path"),
+          GetRequiredString(item, "content")
+        )
+      );
+    }
+    return result;
+  }
+
+  private sealed record FileCreationInput(string Path, string Content);
 
   private static bool GetOptionalBoolean(
     JsonElement arguments,

@@ -1,6 +1,9 @@
 <Solution>
   <Folder Name="/tests/">
     <Project Path="tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj" />
+    <Project Path="tests/FakeCodexAppServer/FakeCodexAppServer.csproj" />
+    <Project Path="tests/FakeOpenCodeServer/FakeOpenCodeServer.csproj" />
+    <Project Path="tests/FakeQwenCodeServer/FakeQwenCodeServer.csproj" />
   </Folder>
   <Project Path="AgenticRouter.Api/AgenticRouter.Api.csproj" />
 </Solution>

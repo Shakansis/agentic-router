@@ -4,5 +4,7 @@ namespace AgenticRouter.Api.Devices;
 
 public interface IGpuDiscoveryService
 {
-  DevicesResponse Discover();
+  Task<DevicesResponse> DiscoverAsync(
+    CancellationToken cancellationToken
+  );
 }

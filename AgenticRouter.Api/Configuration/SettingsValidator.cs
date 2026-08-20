@@ -172,16 +172,30 @@ public sealed class SettingsValidator : ISettingsValidator
       settings.Context.ProviderContextTokens
     );
 
-    if (string.IsNullOrWhiteSpace(
-      settings.DefaultGpu
-    ))
-    {
-      AddError(
-        errors,
-        "defaultGpu",
-        "Default GPU is required."
-      );
-    }
+    ValidateGpuSelection(
+      errors,
+      "defaultGpu",
+      settings.DefaultGpu,
+      false
+    );
+    ValidateGpuSelection(
+      errors,
+      "routerGpu",
+      settings.RouterGpu,
+      true
+    );
+    ValidateGpuSelection(
+      errors,
+      "actionGpu",
+      settings.ActionGpu,
+      true
+    );
+    ValidateGpuSelection(
+      errors,
+      "coordinatorGpu",
+      settings.CoordinatorGpu,
+      true
+    );
 
     foreach (var intentionName in SettingsDefaults.IntentionNames)
     {
@@ -243,16 +257,12 @@ public sealed class SettingsValidator : ISettingsValidator
         settings.DefaultModel
       );
 
-      if (string.IsNullOrWhiteSpace(
-        intention.Gpu
-      ))
-      {
-        AddError(
-          errors,
-          $"intentions.{intentionName}.gpu",
-          "GPU selection is required."
-        );
-      }
+      ValidateGpuSelection(
+        errors,
+        $"intentions.{intentionName}.gpu",
+        intention.Gpu,
+        true
+      );
 
       if (string.IsNullOrWhiteSpace(
         intention.SystemPrompt
@@ -289,10 +299,191 @@ public sealed class SettingsValidator : ISettingsValidator
       );
     }
 
+    ValidateModelGpuConflicts(
+      errors,
+      settings
+    );
+
     return errors.ToDictionary(
       pair => pair.Key,
       pair => pair.Value.ToArray(),
       StringComparer.Ordinal
+    );
+  }
+
+  private static void ValidateModelGpuConflicts(
+    IDictionary<string, List<string>> errors,
+    ApplicationSettings settings
+  )
+  {
+    var assignments = new Dictionary<
+      string,
+      List<(string Gpu, string Field)>
+    >(
+      StringComparer.OrdinalIgnoreCase
+    );
+    AddGpuAssignment(
+      assignments,
+      settings.RouterModel,
+      settings.RouterGpu,
+      "routerGpu",
+      settings.DefaultGpu
+    );
+    AddGpuAssignment(
+      assignments,
+      settings.ActionModel,
+      settings.ActionGpu,
+      "actionGpu",
+      settings.DefaultGpu
+    );
+    AddGpuAssignment(
+      assignments,
+      settings.CoordinatorModel,
+      settings.CoordinatorGpu,
+      "coordinatorGpu",
+      settings.DefaultGpu
+    );
+    AddGpuAssignment(
+      assignments,
+      settings.DefaultModel,
+      settings.DefaultGpu,
+      "defaultGpu",
+      settings.DefaultGpu
+    );
+
+    foreach (var intention in settings.Intentions)
+    {
+      var model = string.Equals(
+        intention.Value.Model,
+        "default",
+        StringComparison.OrdinalIgnoreCase
+      )
+        ? settings.DefaultModel
+        : intention.Value.Model;
+      AddGpuAssignment(
+        assignments,
+        model,
+        intention.Value.Gpu,
+        $"intentions.{intention.Key}.gpu",
+        settings.DefaultGpu
+      );
+      var fallback = string.Equals(
+        intention.Value.FallbackModel,
+        "default",
+        StringComparison.OrdinalIgnoreCase
+      )
+        ? settings.DefaultModel
+        : intention.Value.FallbackModel;
+      AddGpuAssignment(
+        assignments,
+        fallback,
+        intention.Value.Gpu,
+        $"intentions.{intention.Key}.gpu",
+        settings.DefaultGpu
+      );
+    }
+
+    foreach (var assignment in assignments)
+    {
+      var distinct = assignment.Value.Select(
+        item => item.Gpu
+      ).Distinct(
+        StringComparer.Ordinal
+      ).ToArray();
+
+      if (distinct.Length <= 1)
+      {
+        continue;
+      }
+
+      foreach (var field in assignment.Value.Select(
+        item => item.Field
+      ).Distinct(
+        StringComparer.Ordinal
+      ))
+      {
+        AddError(
+          errors,
+          field,
+          $"Model '{assignment.Key}' cannot use conflicting GPU affinities in one Ollama daemon."
+        );
+      }
+    }
+  }
+
+  private static void AddGpuAssignment(
+    IDictionary<string, List<(string Gpu, string Field)>> assignments,
+    string model,
+    string selection,
+    string field,
+    string defaultGpu
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(
+        model
+      )
+      || string.Equals(
+        model,
+        "none",
+        StringComparison.OrdinalIgnoreCase
+      )
+      || string.Equals(
+        model,
+        "configure-model",
+        StringComparison.OrdinalIgnoreCase
+      )
+      || !ProviderModelReference.Parse(
+        model
+      ).IsLocal
+    )
+    {
+      return;
+    }
+
+    var effectiveGpu = string.Equals(
+      selection,
+      OllamaGpuSelection.Default,
+      StringComparison.Ordinal
+    )
+      ? defaultGpu
+      : selection;
+
+    if (!assignments.TryGetValue(
+      model,
+      out var modelAssignments
+    ))
+    {
+      modelAssignments = [];
+      assignments[model] = modelAssignments;
+    }
+
+    modelAssignments.Add(
+      (effectiveGpu, field)
+    );
+  }
+
+  private static void ValidateGpuSelection(
+    IDictionary<string, List<string>> errors,
+    string field,
+    string? selection,
+    bool allowDefault
+  )
+  {
+    if (OllamaGpuSelection.IsValid(
+      selection,
+      allowDefault
+    ))
+    {
+      return;
+    }
+
+    AddError(
+      errors,
+      field,
+      allowDefault
+        ? "GPU selection must be default, auto, or an exact Ollama GPU index."
+        : "GPU selection must be auto or an exact Ollama GPU index."
     );
   }
 

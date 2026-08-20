@@ -295,9 +295,11 @@
               <option value="auto">Auto</option>
             </select>
           </label>
-          <label class="model-lock-field">
-            <input id="model-lock" type="checkbox" disabled>
-            <span>Fixar nesta conversa</span>
+          <label class="model-field harness-field">
+            <span>Harness</span>
+            <select id="harness-selector" aria-label="Harness de execução" disabled>
+              <option value="native" selected>Native</option>
+            </select>
           </label>
           <span id="composer-status" class="composer-status">Enter para enviar</span>
           <div class="composer-submit-actions">
@@ -326,7 +328,7 @@
   </main>
 
   <dialog id="settings-dialog" class="settings-dialog">
-    <form id="settings-form" method="dialog" class="settings-shell">
+    <form id="settings-form" method="post" class="settings-shell">
       <header class="dialog-header">
         <div>
           <span class="eyebrow">Configuração local</span>
@@ -341,15 +343,11 @@
         <label for="settings-section-select">Seção</label>
         <select id="settings-section-select">
           <option value="general">Geral</option>
-          <option value="ollama">Ollama</option>
-          <option value="cloud-providers">Provedores cloud</option>
-          <option value="models">Modelos e roteamento</option>
-          <option value="coordinator">Coordenador e recuperação</option>
+          <option value="models-routing">Modelos e roteamento</option>
+          <option value="providers">Provedores</option>
+          <option value="harnesses">Harnesses</option>
           <option value="execution">Execução e aprovações</option>
           <option value="workspaces">Workspaces e histórico</option>
-          <option value="git">Git</option>
-          <option value="validation">Validação</option>
-          <option value="runtime">Runtime e memória</option>
           <option value="advanced">Avançado</option>
         </select>
       </div>
@@ -357,15 +355,11 @@
       <div class="settings-layout">
         <nav id="settings-navigation" class="settings-navigation" aria-label="Seções de configuração">
           <button type="button" data-settings-target="general" aria-current="page">Geral</button>
-          <button type="button" data-settings-target="ollama">Ollama</button>
-          <button type="button" data-settings-target="cloud-providers">Provedores cloud</button>
-          <button type="button" data-settings-target="models">Modelos e roteamento</button>
-          <button type="button" data-settings-target="coordinator">Coordenador e recuperação</button>
+          <button type="button" data-settings-target="models-routing">Modelos e roteamento</button>
+          <button type="button" data-settings-target="providers">Provedores</button>
+          <button type="button" data-settings-target="harnesses">Harnesses</button>
           <button type="button" data-settings-target="execution">Execução e aprovações</button>
           <button type="button" data-settings-target="workspaces">Workspaces e histórico</button>
-          <button type="button" data-settings-target="git">Git</button>
-          <button type="button" data-settings-target="validation">Validação</button>
-          <button type="button" data-settings-target="runtime">Runtime e memória</button>
           <button type="button" data-settings-target="advanced">Avançado</button>
         </nav>
 
@@ -450,6 +444,10 @@
             <label>
               <span>Modelo roteador residente</span>
               <select id="router-model" name="routerModel" required></select>
+            </label>
+            <label>
+              <span>GPU do roteador</span>
+              <select id="router-gpu" name="routerGpu"></select>
             </label>
             </div>
             <div id="intentions-grid" class="intentions-grid"></div>
@@ -572,8 +570,17 @@
               <small>Seleciona apenas a prÃ³xima ferramenta; padrÃ£o leve: FunctionGemma 270M.</small>
             </label>
             <label>
+              <span>GPU do residente</span>
+              <select id="action-gpu" name="actionGpu"></select>
+              <small>A afinidade é enviada ao preload e a todas as chamadas do residente.</small>
+            </label>
+            <label>
               <span>Fallback coordenador sob demanda</span>
               <select id="coordinator-model" name="coordinatorModel" required></select>
+            </label>
+            <label>
+              <span>GPU do fallback coordenador</span>
+              <select id="coordinator-gpu" name="coordinatorGpu"></select>
             </label>
             </div>
           </section>
@@ -854,8 +861,12 @@
               <h3>Avançado</h3>
               <p>Limites persistidos e diagnósticos que normalmente não precisam ser alterados.</p>
             </div>
-            <div id="settings-advanced-summary" class="settings-summary-card"></div>
-            <div class="portable-yaml-panel">
+            <div id="settings-advanced-subnavigation" class="settings-subnavigation" role="tablist" aria-label="Subseções avançadas">
+              <button type="button" data-settings-subtarget="portable-yaml" aria-current="page">YAML</button>
+              <button type="button" data-settings-subtarget="backup">Backup</button>
+            </div>
+            <div id="settings-advanced-yaml" class="settings-subsection active" data-settings-subsection="portable-yaml">
+              <div id="settings-advanced-summary" class="settings-summary-card"></div>
               <div class="heading-title-row">
                 <h4>Configuração portátil YAML</h4>
                 <button
@@ -894,10 +905,10 @@
                 >Copiar</button>
                 <button id="download-settings-yaml" class="secondary-button" type="button">Baixar .yaml</button>
                 <button id="import-settings-yaml" class="primary-button" type="button">Importar e aplicar</button>
+                </div>
+                <output id="settings-yaml-status" class="portable-yaml-status" role="status"></output>
               </div>
-              <output id="settings-yaml-status" class="portable-yaml-status" role="status"></output>
-            </div>
-            <div class="portable-yaml-panel">
+            <div id="settings-advanced-backup" class="settings-subsection" data-settings-subsection="backup">
               <div class="heading-title-row">
                 <h4>Backup local completo</h4>
                 <button

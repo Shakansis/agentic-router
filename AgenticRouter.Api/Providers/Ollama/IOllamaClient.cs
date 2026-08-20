@@ -109,6 +109,15 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    int? mainGpu,
+    CancellationToken cancellationToken
+  );
+
   IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(
     Uri baseUri,
     string model,

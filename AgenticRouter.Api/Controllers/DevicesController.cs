@@ -18,10 +18,14 @@ public sealed class DevicesController : ControllerBase
   }
 
   [HttpGet]
-  public ActionResult<DevicesResponse> Get()
+  public async Task<ActionResult<DevicesResponse>> Get(
+    CancellationToken cancellationToken
+  )
   {
     return Ok(
-      _gpuDiscoveryService.Discover()
+      await _gpuDiscoveryService.DiscoverAsync(
+        cancellationToken
+      )
     );
   }
 }

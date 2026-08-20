@@ -704,6 +704,15 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         ["path", "content"]
       ),
       Tool(
+        "create_files",
+        "Create between 1 and 50 new UTF-8 text files as one Host-validated batch. Every target must be new; the Host verifies every result and rolls back files created by a failed batch.",
+        new
+        {
+          files = FileCreationArrayProperty()
+        },
+        ["files"]
+      ),
+      Tool(
         "write_file",
         "Replace an existing UTF-8 text file.",
         new
@@ -1034,6 +1043,31 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       minItems = 1,
       maxItems = 100,
       items = StringProperty()
+    };
+  }
+
+  private static object FileCreationArrayProperty()
+  {
+    return new
+    {
+      type = "array",
+      minItems = 1,
+      maxItems = 50,
+      items = new
+      {
+        type = "object",
+        properties = new
+        {
+          path = StringProperty(),
+          content = StringProperty()
+        },
+        required = new[]
+        {
+          "path",
+          "content"
+        },
+        additionalProperties = false
+      }
     };
   }
 

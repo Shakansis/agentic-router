@@ -121,6 +121,24 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "default_gpu",
       settings.DefaultGpu
     );
+    Scalar(
+      yaml,
+      1,
+      "router_gpu",
+      settings.RouterGpu
+    );
+    Scalar(
+      yaml,
+      1,
+      "action_gpu",
+      settings.ActionGpu
+    );
+    Scalar(
+      yaml,
+      1,
+      "coordinator_gpu",
+      settings.CoordinatorGpu
+    );
     yaml.AppendLine(
       "  gpus:"
     );
@@ -751,6 +769,9 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       routing,
       [
         "default_gpu",
+        "router_gpu",
+        "action_gpu",
+        "coordinator_gpu",
         "gpus",
         "system_prompts"
       ],
@@ -828,6 +849,27 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         "default_gpu",
         settings.DefaultGpu,
         "routing.default_gpu",
+        errors
+      ),
+      RouterGpu = ReadString(
+        routing,
+        "router_gpu",
+        settings.RouterGpu,
+        "routing.router_gpu",
+        errors
+      ),
+      ActionGpu = ReadString(
+        routing,
+        "action_gpu",
+        settings.ActionGpu,
+        "routing.action_gpu",
+        errors
+      ),
+      CoordinatorGpu = ReadString(
+        routing,
+        "coordinator_gpu",
+        settings.CoordinatorGpu,
+        "routing.coordinator_gpu",
         errors
       ),
       Intentions = intentions

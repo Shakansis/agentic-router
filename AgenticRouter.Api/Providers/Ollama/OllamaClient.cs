@@ -215,7 +215,8 @@ public sealed class OllamaClient : IOllamaClient
         new OllamaOptions(
           0,
           policy.Resolution.EffectiveContextTokens,
-          policy.OutputTokens
+          policy.OutputTokens,
+          policy.MainGpu
         ),
         null,
         tools.Select(
@@ -512,7 +513,8 @@ public sealed class OllamaClient : IOllamaClient
         new OllamaOptions(
           0,
           policy.Resolution.EffectiveContextTokens,
-          policy.OutputTokens
+          policy.OutputTokens,
+          policy.MainGpu
         ),
         null
       );
@@ -944,6 +946,7 @@ public sealed class OllamaClient : IOllamaClient
       model,
       keepAlive,
       null,
+      null,
       cancellationToken
     );
   }
@@ -953,6 +956,25 @@ public sealed class OllamaClient : IOllamaClient
     string model,
     int keepAlive,
     int? contextTokens,
+    CancellationToken cancellationToken
+  )
+  {
+    await SetModelResidencyAsync(
+      baseUri,
+      model,
+      keepAlive,
+      contextTokens,
+      null,
+      cancellationToken
+    );
+  }
+
+  public async Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    int? mainGpu,
     CancellationToken cancellationToken
   )
   {
@@ -969,7 +991,8 @@ public sealed class OllamaClient : IOllamaClient
         : new OllamaOptions(
           0,
           contextTokens,
-          null
+          null,
+          mainGpu
         ),
       keepAlive
     );
@@ -1146,7 +1169,8 @@ public sealed class OllamaClient : IOllamaClient
       new OllamaOptions(
         0,
         policy.Resolution.EffectiveContextTokens,
-        policy.OutputTokens
+        policy.OutputTokens,
+        policy.MainGpu
       ),
       null,
       images: options.Images
@@ -1483,7 +1507,30 @@ public sealed class OllamaClient : IOllamaClient
       resolution.OutputTokenLimit,
       TimeSpan.FromSeconds(
         settings.Runtime.GenerationTimeoutSeconds
+      ),
+      ResolveMainGpu(
+        settings,
+        usageContext
       )
+    );
+  }
+
+  private static int? ResolveMainGpu(
+    ApplicationSettings settings,
+    ProviderCallContext usageContext
+  )
+  {
+    var selection = usageContext.ModelRole switch
+    {
+      UsageModelRoles.Router => settings.RouterGpu,
+      UsageModelRoles.Action => settings.ActionGpu,
+      UsageModelRoles.Coordinator => settings.CoordinatorGpu,
+      _ => usageContext.Gpu ?? settings.DefaultGpu
+    };
+
+    return OllamaGpuSelection.Resolve(
+      selection,
+      settings.DefaultGpu
     );
   }
 
@@ -1881,13 +1928,15 @@ public sealed class OllamaClient : IOllamaClient
   private sealed record OllamaOptions(
     double? Temperature,
     int? NumCtx,
-    int? NumPredict
+    int? NumPredict,
+    int? MainGpu
   );
 
   private sealed record GenerationPolicy(
     OllamaContextResolution Resolution,
     int OutputTokens,
-    TimeSpan Timeout
+    TimeSpan Timeout,
+    int? MainGpu
   );
 
   private sealed record StreamingToolResponse(

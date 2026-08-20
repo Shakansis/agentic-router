@@ -54,9 +54,27 @@ public sealed class ProviderDispatchClient : IOllamaClient
         baseUri,
         cancellationToken
       );
+      _health.ObserveModelRefresh(
+        ModelProviderIds.OllamaLocal,
+        true,
+        "ollama-api",
+        200,
+        null
+      );
     }
-    catch (OllamaProviderException) when (cloud.Count > 0)
+    catch (OllamaProviderException exception)
     {
+      _health.ObserveModelRefresh(
+        ModelProviderIds.OllamaLocal,
+        false,
+        "ollama-api",
+        exception.HttpStatus,
+        exception.Stage
+      );
+      if (cloud.Count == 0)
+      {
+        throw;
+      }
       local = [];
     }
 
@@ -604,6 +622,31 @@ public sealed class ProviderDispatchClient : IOllamaClient
         reference.ModelId,
         keepAlive,
         contextTokens,
+        cancellationToken
+      )
+      : Task.CompletedTask;
+  }
+
+  public Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    int? mainGpu,
+    CancellationToken cancellationToken
+  )
+  {
+    var reference = ProviderModelReference.Parse(
+      model
+    );
+
+    return reference.IsLocal
+      ? _ollama.SetModelResidencyAsync(
+        baseUri,
+        reference.ModelId,
+        keepAlive,
+        contextTokens,
+        mainGpu,
         cancellationToken
       )
       : Task.CompletedTask;

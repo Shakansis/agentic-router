@@ -77,12 +77,17 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       nextSettings.OllamaUrl,
       StringComparison.OrdinalIgnoreCase
     );
+    var deviceChanged = ResolveResidentGpu(
+      previousSettings
+    ) != ResolveResidentGpu(
+      nextSettings
+    );
     var profileChanged = ResidentProfileChanged(
       previousSettings,
       nextSettings
     );
 
-    if (!modelChanged && !endpointChanged && !profileChanged)
+    if (!modelChanged && !endpointChanged && !deviceChanged && !profileChanged)
     {
       return;
     }
@@ -107,7 +112,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       );
 
       if (
-        modelChanged
+        (modelChanged || deviceChanged)
         && !string.IsNullOrWhiteSpace(
           previousSettings.ActionModel
         )
@@ -156,6 +161,9 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         installed,
         resolution,
         "preloading",
+        ResolveResidentGpu(
+          nextSettings
+        ),
         cancellationToken
       );
     }
@@ -304,6 +312,9 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         installed,
         resolution,
         "reloading",
+        ResolveResidentGpu(
+          settings
+        ),
         cancellationToken
       );
       return true;
@@ -430,6 +441,9 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         installed,
         resolution,
         "reasserting",
+        ResolveResidentGpu(
+          settings
+        ),
         cancellationToken
       );
       running = await _ollamaClient.GetRunningModelsAsync(
@@ -696,6 +710,9 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         current is null
           ? "preloading"
           : "reloading",
+        ResolveResidentGpu(
+          settings
+        ),
         cancellationToken
       );
     }
@@ -710,6 +727,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
     InstalledModel installed,
     OllamaContextResolution resolution,
     string state,
+    int? mainGpu,
     CancellationToken cancellationToken
   )
   {
@@ -732,6 +750,7 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       installed.Name,
       -1,
       resolution.EffectiveContextTokens,
+      mainGpu,
       cancellationToken
     );
     var running = await _ollamaClient.GetRunningModelsAsync(
@@ -779,6 +798,16 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
       installed,
       verified,
       resolution
+    );
+  }
+
+  private static int? ResolveResidentGpu(
+    ApplicationSettings settings
+  )
+  {
+    return OllamaGpuSelection.Resolve(
+      settings.ActionGpu,
+      settings.DefaultGpu
     );
   }
 
@@ -1079,6 +1108,23 @@ public sealed class ResidentModelManager : BackgroundService, IResidentModelMana
         )
       )
     )
+    {
+      return true;
+    }
+
+    var previousRoles = OllamaRuntimeProfileResolver.ConfiguredRoles(
+      previous,
+      previous.ActionModel
+    );
+    var nextRoles = OllamaRuntimeProfileResolver.ConfiguredRoles(
+      next,
+      next.ActionModel
+    );
+
+    if (!previousRoles.SequenceEqual(
+      nextRoles,
+      StringComparer.Ordinal
+    ))
     {
       return true;
     }

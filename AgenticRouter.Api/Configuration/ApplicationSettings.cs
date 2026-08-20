@@ -8,9 +8,15 @@ public sealed record ApplicationSettings
 
   public string RouterModel { get; init; } = "configure-model";
 
+  public string RouterGpu { get; init; } = "default";
+
   public string ActionModel { get; init; } = "functiongemma:270m";
 
+  public string ActionGpu { get; init; } = "default";
+
   public string CoordinatorModel { get; init; } = "configure-model";
+
+  public string CoordinatorGpu { get; init; } = "default";
 
   public string DefaultModel { get; init; } = "configure-model";
 
@@ -186,6 +192,90 @@ public sealed record IntentionSettings
   public string Gpu { get; init; } = "default";
 
   public string SystemPrompt { get; init; } = string.Empty;
+}
+
+public static class OllamaGpuSelection
+{
+  public const string Auto = "auto";
+  public const string Default = "default";
+  public const string RuntimePrefix = "ollama:";
+
+  public static int? Resolve(
+    string? selection,
+    string defaultSelection
+  )
+  {
+    var effective = string.IsNullOrWhiteSpace(
+      selection
+    ) || string.Equals(
+      selection,
+      Default,
+      StringComparison.Ordinal
+    )
+      ? defaultSelection
+      : selection;
+
+    if (string.Equals(
+      effective,
+      Auto,
+      StringComparison.Ordinal
+    ))
+    {
+      return null;
+    }
+
+    return effective.StartsWith(
+      RuntimePrefix,
+      StringComparison.Ordinal
+    ) && int.TryParse(
+      effective.AsSpan(
+        RuntimePrefix.Length
+      ),
+      out var index
+    ) && index >= 0
+      ? index
+      : null;
+  }
+
+  public static bool IsValid(
+    string? selection,
+    bool allowDefault
+  )
+  {
+    if (string.Equals(
+      selection,
+      Auto,
+      StringComparison.Ordinal
+    ))
+    {
+      return true;
+    }
+
+    if (
+      allowDefault
+      && string.Equals(
+        selection,
+        Default,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      return true;
+    }
+
+    return selection is not null
+      && selection.StartsWith(
+        RuntimePrefix,
+        StringComparison.Ordinal
+      )
+      && int.TryParse(
+        selection.AsSpan(
+          RuntimePrefix.Length
+        ),
+        out var index
+      )
+      && index >= 0;
+  }
 }
 
 public sealed record ContextSettings

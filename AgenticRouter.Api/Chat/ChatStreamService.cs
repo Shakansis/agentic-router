@@ -53,12 +53,14 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly IImageAttachmentValidator _imageValidator;
   private readonly ICloudImageApprovalStore _cloudImageApprovals;
+  private readonly IHarnessRegistry _harnesses;
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
   private ExecutionSession? _executionSession;
   private string? _usageWorkspaceId;
   private string? _usageConversationId;
   private string? _usageTurnId;
+  private string? _usageGpu;
   private IReadOnlyDictionary<string, string?> _usageModelRevisions =
     new Dictionary<string, string?>(
       StringComparer.OrdinalIgnoreCase
@@ -93,6 +95,7 @@ public sealed class ChatStreamService : IChatStreamService
     IWorkspaceProfileService workspaceProfiles,
     IImageAttachmentValidator imageValidator,
     ICloudImageApprovalStore cloudImageApprovals,
+    IHarnessRegistry harnesses,
     ITraceContext trace,
     ILogger<ChatStreamService> logger
   )
@@ -125,6 +128,7 @@ public sealed class ChatStreamService : IChatStreamService
     _workspaceProfiles = workspaceProfiles;
     _imageValidator = imageValidator;
     _cloudImageApprovals = cloudImageApprovals;
+    _harnesses = harnesses;
     _trace = trace;
     _logger = logger;
   }
@@ -222,14 +226,33 @@ public sealed class ChatStreamService : IChatStreamService
 
       if (!isAuto)
       {
+        var explicitReference = ProviderModelReference.Parse(selectedModel);
+        var explicitHarness = GetHarnessDefinition(request.Harness);
+        if (
+          string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal)
+          && explicitHarness.SupportedProviders is { Count: > 0 }
+          && !explicitHarness.SupportedProviders.Contains(
+            explicitReference.ProviderId,
+            StringComparer.OrdinalIgnoreCase
+          )
+        )
+        {
+          throw new ChatStageException(
+            $"{explicitHarness.Id}-provider-unsupported",
+            HarnessProviderUnsupportedMessage(explicitHarness),
+            $"Selected provider '{explicitReference.ProviderId}' is outside the {explicitHarness.Id} harness scope.",
+            selectedModel,
+            null,
+            400,
+            false,
+            provider: explicitReference.ProviderId
+          );
+        }
+
         yield return Event(
           requestId,
-          request.ModelLocked
-            ? "model.lock-active"
-            : "model.explicit-selected",
-          request.ModelLocked
-            ? "Conversation model lock active."
-            : "Manual model override.",
+          "model.explicit-selected",
+          "Manual model override.",
           stopwatch,
           selectedModel
         );
@@ -256,9 +279,7 @@ public sealed class ChatStreamService : IChatStreamService
             true,
             details: new Dictionary<string, string?>
             {
-              ["selectionMode"] = request.ModelLocked
-                ? "conversation-lock"
-                : "manual",
+              ["selectionMode"] = "manual",
               ["installedModelAvailability"] = "unavailable"
             }
           );
@@ -448,6 +469,10 @@ public sealed class ChatStreamService : IChatStreamService
           : UsageModelRoles.Primary;
       }
 
+      _usageGpu = isAuto
+        ? settings.Intentions[intention].Gpu
+        : settings.DefaultGpu;
+
       if (functionGemmaProtocolActive)
       {
         if (ContainsModel(
@@ -579,6 +604,7 @@ public sealed class ChatStreamService : IChatStreamService
               selectedModel = residentRoute.TeacherModel;
               intention = residentRoute.Intent;
               selectedModelRole = UsageModelRoles.Specialist;
+              _usageGpu = settings.Intentions[intention].Gpu;
             }
           }
           else
@@ -991,6 +1017,131 @@ public sealed class ChatStreamService : IChatStreamService
           );
         }
 
+        if (!string.Equals(request.Harness, HarnessIds.Native, StringComparison.OrdinalIgnoreCase))
+        {
+          var harnessDefinition = GetHarnessDefinition(request.Harness);
+          if (!_harnesses.TryGetAdapter(harnessDefinition.Id, out var harness))
+          {
+            throw new ChatStageException(
+              "harness-adapter-missing",
+              $"{HarnessLabel(harnessDefinition)} is not executable.",
+              $"No adapter is registered for harness '{harnessDefinition.Id}'.",
+              selectedModel,
+              intention,
+              503,
+              true
+            );
+          }
+          var harnessSelectedReference = ProviderModelReference.Parse(selectedModel);
+          if (
+            harnessDefinition.SupportedProviders is { Count: > 0 }
+            && !harnessDefinition.SupportedProviders.Contains(
+              harnessSelectedReference.ProviderId,
+              StringComparer.OrdinalIgnoreCase
+            )
+          )
+          {
+            throw new ChatStageException(
+              $"{harnessDefinition.Id}-provider-unsupported",
+              HarnessProviderUnsupportedMessage(harnessDefinition),
+              $"Selected provider '{harnessSelectedReference.ProviderId}' is outside the {harnessDefinition.Id} harness scope.",
+              selectedModel,
+              intention,
+              400,
+              false,
+              provider: harnessSelectedReference.ProviderId
+            );
+          }
+
+          var harnessSelectedIdentity = models.First(
+            installed => string.Equals(
+              installed.Name,
+              selectedModel,
+              StringComparison.OrdinalIgnoreCase
+            )
+          );
+          var harnessResidentEligibility = _residentEligibility.Evaluate(
+            settings,
+            harnessSelectedIdentity,
+            _residentModel.GetStatus(),
+            false
+          );
+          yield return Event(
+            requestId,
+            "agent.memory-eligibility-evaluated",
+            $"Resident {settings.CoordinatorModel}; {harnessDefinition.DisplayName} target {selectedModel}. Evidence: "
+              + $"{harnessResidentEligibility.Evidence}. Consequence: {harnessResidentEligibility.MemoryConsequence}.",
+            stopwatch,
+            settings.CoordinatorModel,
+            intention
+          );
+
+          if (harnessResidentEligibility.RequiresResidentEviction)
+          {
+            yield return Event(
+              requestId,
+              "resident-model-eviction-started",
+              $"Evicting resident {settings.CoordinatorModel} before {harnessDefinition.DisplayName} starts {selectedModel}.",
+              stopwatch,
+              settings.CoordinatorModel,
+              intention
+            );
+            recoveryActive = await _residentModel.EvictForRecoveryAsync(selectedModel, cancellationToken);
+            recoveryTarget = selectedModel;
+            if (!recoveryActive)
+            {
+              throw new ChatStageException(
+                "resident-model-eviction",
+                "The resident could not be evicted for the selected local target.",
+                harnessResidentEligibility.MemoryConsequence,
+                settings.CoordinatorModel,
+                intention,
+                null,
+                true
+              );
+            }
+          }
+
+          contextUsage = CreateExternalHarnessContextUsage(
+            context,
+            capabilities,
+            settings
+          );
+          yield return new ChatStreamEvent(
+            requestId,
+            "context.usage",
+            DateTimeOffset.UtcNow,
+            null,
+            null,
+            selectedModel,
+            intention,
+            stopwatch.ElapsedMilliseconds,
+            null,
+            null,
+            ContextUsage: contextUsage
+          );
+
+          await foreach (var streamEvent in ExecuteExternalHarnessAsync(
+            harness,
+            harnessDefinition,
+            request,
+            requestId,
+            selectedModel,
+            intention,
+            baseUri,
+            workspace.Path,
+            project.Repository.DirtyPaths,
+            settings.Execution,
+            contextUsage,
+            stopwatch,
+            cancellationToken
+          ))
+          {
+            yield return streamEvent;
+          }
+          yield break;
+        }
+
         messages = messages.Prepend(
           new ChatMessage(
             "system",
@@ -1165,6 +1316,9 @@ public sealed class ChatStreamService : IChatStreamService
           var partialSummary = _executionSession.CreateSummary();
           var partialText = "Execution reached the configured coordinator context limit after one bounded deterministic compaction. "
             + "Completed actions and artifacts were preserved; open the execution review before continuing.";
+          var partialResponse = partialText
+            + "\n\n"
+            + CreateAuthoritativeStatus(partialSummary.CompletionStatus);
           yield return new ChatStreamEvent(
             requestId,
             "response.completed",
@@ -1174,11 +1328,13 @@ public sealed class ChatStreamService : IChatStreamService
             selectedModel,
             isAuto ? intention : null,
             stopwatch.ElapsedMilliseconds,
-            _markdownRenderer.Render(partialText + "\n\n" + CreateAuthoritativeStatus(partialSummary.CompletionStatus)),
+            _markdownRenderer.Render(partialResponse),
             null,
             null,
             partialSummary,
-            ContextUsage: execution.LatestContextUsage
+            ContextUsage: execution.LatestContextUsage,
+            ResponseTail: partialResponse,
+            ResponseTailHtml: _markdownRenderer.Render(partialResponse)
           );
           yield break;
         }
@@ -1212,7 +1368,9 @@ public sealed class ChatStreamService : IChatStreamService
           null,
           null,
           hostReview.Summary,
-          ContextUsage: execution.LatestContextUsage ?? contextUsage
+          ContextUsage: execution.LatestContextUsage ?? contextUsage,
+          ResponseTail: hostResponse,
+          ResponseTailHtml: _markdownRenderer.Render(hostResponse)
         );
         yield break;
       }
@@ -1561,6 +1719,11 @@ public sealed class ChatStreamService : IChatStreamService
             _executionSession.CreateSummary().CompletionStatus
           )
         );
+      var responseTail = _executionSession is null
+        ? null
+        : CreateAuthoritativeStatus(
+          _executionSession.CreateSummary().CompletionStatus
+        );
       contextUsage = CreateContextUsage(
         context,
         capabilities,
@@ -1585,7 +1748,11 @@ public sealed class ChatStreamService : IChatStreamService
         null,
         _executionSession?.CreateSummary(),
         Citations: progress.Citations,
-        ContextUsage: contextUsage
+        ContextUsage: contextUsage,
+        ResponseTail: responseTail,
+        ResponseTailHtml: responseTail is null
+          ? null
+          : _markdownRenderer.Render(responseTail)
       );
     }
     finally
@@ -1607,6 +1774,886 @@ public sealed class ChatStreamService : IChatStreamService
         );
       }
     }
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> ExecuteExternalHarnessAsync(
+    IAgentHarness harness,
+    HarnessDefinition harnessDefinition,
+    ChatRequest request,
+    string requestId,
+    string model,
+    string intention,
+    Uri ollamaUrl,
+    string workspacePath,
+    IReadOnlyList<string> preExistingDirtyPaths,
+    ExecutionSettings executionSettings,
+    ContextUsageView initialContextUsage,
+    Stopwatch stopwatch,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    var session = _executionSession ?? throw new InvalidOperationException(
+      "The selected harness requires an active execution session."
+    );
+    var conversationId = request.BrowserSessionId
+      ?? request.ConversationSessionId
+      ?? throw new ChatStageException(
+        $"{harnessDefinition.Id}-conversation-id",
+        $"{HarnessLabel(harnessDefinition)} requires an Agentic Router conversation identifier.",
+        "Both conversationSessionId and browserSessionId were missing.",
+        model,
+        intention,
+        400,
+        true
+      );
+    var observer = await HarnessWorkspaceObserver.CaptureAsync(
+      workspacePath,
+      executionSettings,
+      cancellationToken
+    );
+    var answer = new StringBuilder();
+    var responseSegment = new StringBuilder();
+    string? activeResponseItemId = null;
+    var approvedDeletionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    HarnessEvent? terminalFailure = null;
+    var latestContextUsage = initialContextUsage;
+    session.ResolveCoordinator(
+      model,
+      harnessDefinition.Experimental
+        ? $"{harnessDefinition.Id}-experimental"
+        : harnessDefinition.Id
+    );
+    session.RecordCoordinationMetadata("none", null, null);
+
+    yield return Event(
+      requestId,
+      $"harness.{harnessDefinition.Id}-selected",
+      $"{HarnessLabel(harnessDefinition)} selected for Execute with exact model {model}.",
+      stopwatch,
+      model,
+      intention
+    );
+    yield return Event(
+      requestId,
+      $"harness.{harnessDefinition.Id}-starting",
+      $"Starting or reusing the Agentic Router-owned {harnessDefinition.DisplayName} runtime.",
+      stopwatch,
+      model,
+      intention
+    );
+    await foreach (var harnessEvent in harness.StartTurnAsync(
+      new HarnessTurnRequest(
+        harnessDefinition.Id,
+        conversationId,
+        model,
+        ModelProviderIds.OllamaLocal,
+        workspacePath,
+        request.Message,
+        request.ApprovalPolicy,
+        ollamaUrl,
+        preExistingDirtyPaths,
+        ContextWindowTokens: initialContextUsage.EffectiveLimitTokens
+      ),
+      cancellationToken
+    ))
+    {
+      if (!string.Equals(
+        harnessEvent.HarnessId,
+        harnessDefinition.Id,
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        throw new HarnessException(
+          "harness-event-identity-mismatch",
+          "The harness returned an event with an invalid identity.",
+          $"Expected '{harnessDefinition.Id}', received '{harnessEvent.HarnessId}'.",
+          false,
+          harnessId: harnessDefinition.Id
+        );
+      }
+      switch (harnessEvent.Type)
+      {
+        case "reasoning.delta":
+          responseSegment.Clear();
+          activeResponseItemId = null;
+          if (!string.IsNullOrEmpty(harnessEvent.Delta))
+          {
+            yield return new ChatStreamEvent(
+              requestId,
+              "reasoning.delta",
+              DateTimeOffset.UtcNow,
+              null,
+              null,
+              model,
+              intention,
+              stopwatch.ElapsedMilliseconds,
+              null,
+              null,
+              ReasoningDelta: harnessEvent.Delta,
+              ContentBlockId: harnessEvent.ItemId
+            );
+          }
+          break;
+        case "assistant.delta":
+          if (!string.IsNullOrEmpty(harnessEvent.Delta))
+          {
+            if (!string.Equals(
+              activeResponseItemId,
+              harnessEvent.ItemId,
+              StringComparison.Ordinal
+            ))
+            {
+              responseSegment.Clear();
+              activeResponseItemId = harnessEvent.ItemId;
+            }
+            answer.Append(harnessEvent.Delta);
+            responseSegment.Append(harnessEvent.Delta);
+            yield return new ChatStreamEvent(
+              requestId,
+              "response.delta",
+              DateTimeOffset.UtcNow,
+              null,
+              harnessEvent.Delta,
+              model,
+              intention,
+              stopwatch.ElapsedMilliseconds,
+              _markdownRenderer.Render(answer.ToString()),
+              null,
+              ExecutionSession: session.CreateSummary(),
+              ContentBlockId: harnessEvent.ItemId,
+              ResponseSegmentHtml: _markdownRenderer.Render(responseSegment.ToString())
+            );
+          }
+          break;
+        case "tool.started":
+        case "tool.output":
+        case "tool.completed":
+        case "tool.failed":
+          responseSegment.Clear();
+          activeResponseItemId = null;
+          yield return HarnessActionEvent(
+            requestId,
+            harnessEvent,
+            harnessDefinition,
+            model,
+            intention,
+            stopwatch,
+            session.Id
+          );
+          break;
+        case "usage.updated" when harnessEvent.ContextInputTokens is > 0:
+          latestContextUsage = WithExactContextUsage(
+            latestContextUsage,
+            harnessEvent.ContextInputTokens.Value
+          );
+          yield return new ChatStreamEvent(
+            requestId,
+            "context.usage",
+            DateTimeOffset.UtcNow,
+            null,
+            null,
+            model,
+            intention,
+            stopwatch.ElapsedMilliseconds,
+            null,
+            null,
+            ContextUsage: latestContextUsage
+          );
+          break;
+        case "host-tool.requested":
+          responseSegment.Clear();
+          activeResponseItemId = null;
+          await foreach (var hostToolEvent in ExecuteHarnessHostToolAsync(
+            harness,
+            harnessDefinition,
+            request,
+            requestId,
+            model,
+            intention,
+            stopwatch,
+            session,
+            harnessEvent,
+            approvedDeletionPaths,
+            cancellationToken
+          ))
+          {
+            yield return hostToolEvent;
+          }
+          break;
+        case "approval.requested":
+          {
+            responseSegment.Clear();
+            activeResponseItemId = null;
+            if (harnessEvent.ApprovalId is null)
+            {
+              throw new HarnessException(
+                $"{harnessDefinition.Id}-approval-invalid",
+                $"{harnessDefinition.DisplayName} sent an invalid approval request.",
+                "The server request did not include an approval identifier.",
+                false
+              );
+            }
+            if (!harnessEvent.ApprovalCanBeMapped)
+            {
+              await harness.ResolveApprovalAsync(
+                harnessEvent.ApprovalId,
+                false,
+                cancellationToken
+              );
+              var repeated = string.Equals(
+                harnessEvent.ErrorCode,
+                "codex-approval-unsupported-repeated",
+                StringComparison.Ordinal
+              );
+              if (repeated)
+              {
+                throw new HarnessException(
+                  harnessEvent.ErrorCode ?? "codex-approval-unsupported-repeated",
+                  $"{harnessDefinition.DisplayName} repeated an unsupported approval request after Host correction.",
+                  harnessEvent.Message ?? $"Repeated unsupported {harnessDefinition.DisplayName} server request.",
+                  false
+                );
+              }
+              var correction = "Agentic Router declined an unmappable command approval. "
+                + $"{harnessDefinition.DisplayName} may continue once with the structured Host create_files or delete_files tool.";
+              session.AddWarning(correction);
+              yield return Event(
+                requestId,
+                $"harness.{harnessDefinition.Id}-approval-corrected",
+                correction,
+                stopwatch,
+                model,
+                intention
+              );
+              break;
+            }
+
+            using var arguments = JsonDocument.Parse("{}");
+            var action = new ValidatedLocalAction(
+              $"{harnessDefinition.Id}-{harnessEvent.ApprovalId}",
+              harnessEvent.Tool ?? $"{harnessDefinition.Id}_file_change",
+              arguments.RootElement.Clone(),
+              null,
+              workspacePath,
+              harnessEvent.Message ?? $"{harnessDefinition.DisplayName} file change",
+              harnessEvent.Output,
+              false,
+              true
+            );
+
+            if (
+              string.Equals(request.ApprovalPolicy, "auto", StringComparison.Ordinal)
+              && !harnessEvent.Destructive
+            )
+            {
+              await harness.ResolveApprovalAsync(
+                harnessEvent.ApprovalId,
+                true,
+                cancellationToken
+              );
+              yield return HarnessApprovalEvent(
+                requestId,
+                "action.approved",
+                $"Agentic Router approved the workspace-confined {harnessDefinition.DisplayName} file change.",
+                action,
+                model,
+                intention,
+                stopwatch,
+                session.Id,
+                "approved"
+              );
+              break;
+            }
+
+            var decisionTask = _approvalCoordinator.WaitAsync(
+              action,
+              session.BrowserSessionId,
+              session.Id,
+              (_, _, _) => Task.FromResult(
+                new ApprovalRevisionValidation(
+                  false,
+                  null,
+                  $"{harnessDefinition.DisplayName} native approvals do not support inline argument editing."
+                )
+              ),
+              cancellationToken
+            );
+            yield return HarnessApprovalEvent(
+              requestId,
+              "action.awaiting-approval",
+              $"Waiting for approval: {action.Summary}.",
+              action,
+              model,
+              intention,
+              stopwatch,
+              session.Id,
+              "awaiting-approval"
+            );
+            var decision = await decisionTask;
+            await harness.ResolveApprovalAsync(
+              harnessEvent.ApprovalId,
+              decision.Approved,
+              cancellationToken
+            );
+            if (decision.Approved && harnessEvent.Destructive)
+            {
+              foreach (var approvedPath in harnessEvent.Paths ?? [])
+              {
+                var fullPath = Path.GetFullPath(
+                  Path.IsPathRooted(approvedPath)
+                    ? approvedPath
+                    : Path.Combine(workspacePath, approvedPath)
+                );
+                approvedDeletionPaths.Add(
+                  Path.GetRelativePath(workspacePath, fullPath).Replace('\\', '/')
+                );
+              }
+            }
+            yield return HarnessApprovalEvent(
+              requestId,
+              decision.Approved ? "action.approved" : "action.rejected",
+              decision.Approved
+                ? $"{harnessDefinition.DisplayName} action approved."
+                : $"{harnessDefinition.DisplayName} action rejected.",
+              action,
+              model,
+              intention,
+              stopwatch,
+              session.Id,
+              decision.Approved ? "approved" : "rejected"
+            );
+            break;
+          }
+        case "warning":
+          session.AddWarning(harnessEvent.Message ?? $"{harnessDefinition.DisplayName} reported a warning.");
+          yield return Event(
+            requestId,
+            $"harness.{harnessDefinition.Id}-warning",
+            harnessEvent.Message ?? $"{harnessDefinition.DisplayName} reported a warning.",
+            stopwatch,
+            model,
+            intention
+          );
+          break;
+        case "files.changed":
+          yield return Event(
+            requestId,
+            $"harness.{harnessDefinition.Id}-files-changed",
+            harnessEvent.Message ?? $"{harnessDefinition.DisplayName} reported workspace changes.",
+            stopwatch,
+            model,
+            intention
+          );
+          break;
+        case "turn.failed":
+        case "error":
+          terminalFailure = harnessEvent;
+          break;
+        case "turn.cancelled":
+          session.Complete("cancelled");
+          yield return new ChatStreamEvent(
+            requestId,
+            "request.cancelled",
+            DateTimeOffset.UtcNow,
+            $"{harnessDefinition.DisplayName} turn cancelled.",
+            null,
+            model,
+            intention,
+            stopwatch.ElapsedMilliseconds,
+            null,
+            null,
+            ExecutionSession: session.CreateSummary(),
+            ContextUsage: latestContextUsage
+          );
+          yield break;
+        case "native.event":
+          if (harnessEvent.NativePayload is null)
+          {
+            throw new HarnessException(
+              $"{harnessDefinition.Id}-native-payload-missing",
+              $"{harnessDefinition.DisplayName} returned an incomplete native event.",
+              harnessEvent.Message ?? "The normalized event omitted its native payload.",
+              true,
+              harnessId: harnessDefinition.Id
+            );
+          }
+          yield return Event(
+            requestId,
+            $"harness.{harnessDefinition.Id}-native-event-preserved",
+            $"{harnessDefinition.DisplayName} native event retained for diagnostics.",
+            stopwatch,
+            model,
+            intention
+          );
+          break;
+      }
+    }
+
+    var observed = await observer.ObserveAsync(
+      approvedDeletionPaths,
+      cancellationToken
+    );
+    HarnessWorkspaceObserver.Record(session, observed);
+    yield return Event(
+      requestId,
+      $"harness.{harnessDefinition.Id}-effects-observed",
+      observed.Count == 0
+        ? $"Agentic Router observed no workspace file changes from the {harnessDefinition.DisplayName} turn."
+        : $"Agentic Router independently hashed and recorded {observed.Count} changed file(s).",
+      stopwatch,
+      model,
+      intention
+    );
+
+    if (terminalFailure is null && observed.Count > 0)
+    {
+      using var validationArguments = JsonDocument.Parse("{}");
+      var validationAction = await _actionService.ValidateAsync(
+        new LocalActionProposal(
+          "run_validation_profile",
+          validationArguments.RootElement.Clone(),
+          "Automatically run the Host validation profile after Codex workspace changes."
+        ),
+        session,
+        cancellationToken
+      );
+      session.RecordAction(validationAction, "proposed");
+      yield return Event(
+        requestId,
+        "validation-started",
+        "Running the Host validation profile after Codex workspace changes.",
+        stopwatch,
+        model,
+        intention
+      );
+      var validationResult = await _actionService.ExecuteAsync(
+        validationAction,
+        session,
+        cancellationToken
+      );
+      var validation = validationResult.Validation
+        ?? throw new LocalActionException(
+          "validation-profile",
+          "The Host validation action did not return validation facts."
+        );
+      foreach (var step in validation.Steps)
+      {
+        yield return Event(
+          requestId,
+          "validation-step-started",
+          $"Validation step started: {step.Label}.",
+          stopwatch,
+          model,
+          intention
+        );
+        yield return Event(
+          requestId,
+          step.Status == "passed"
+            ? "validation-step-passed"
+            : "validation-step-failed",
+          $"{step.Label}: {step.Status} · exit {step.ExitCode?.ToString() ?? "n/a"} · "
+            + $"{step.DurationMilliseconds} ms.",
+          stopwatch,
+          model,
+          intention
+        );
+      }
+      session.RecordAction(
+        validationAction,
+        validationResult.Succeeded ? "completed" : "failed",
+        validationResult.Output
+      );
+      if (!validationResult.Succeeded)
+      {
+        session.AddWarning(
+          validation.State == "not-configured"
+            ? "Host validation was requested automatically, but no validation profile is configured."
+            : $"Host validation completed with state {validation.State}."
+        );
+      }
+      yield return Event(
+        requestId,
+        "validation-completed",
+        $"Validation {validation.State}: {validation.ProfileName ?? "not configured"}.",
+        stopwatch,
+        model,
+        intention
+      );
+    }
+
+    if (terminalFailure is not null)
+    {
+      throw new HarnessException(
+        terminalFailure.ErrorCode ?? $"{harnessDefinition.Id}-turn-failed",
+        terminalFailure.Message ?? $"{harnessDefinition.DisplayName} turn failed.",
+        terminalFailure.Message ?? $"{harnessDefinition.DisplayName} reported a failed turn.",
+        true
+      );
+    }
+
+    session.AddWarning(
+      $"{harnessDefinition.DisplayName} lifecycle completion was recorded separately from Host-observed effects and validation facts."
+    );
+    session.RefreshCompletionGate();
+    session.Complete("completed-with-warnings");
+    var summary = session.CreateSummary();
+    var responseTail = CreateAuthoritativeStatus(summary.CompletionStatus);
+    var visibleAnswer = string.IsNullOrWhiteSpace(answer.ToString())
+      ? responseTail
+      : answer + "\n\n---\n" + responseTail;
+    yield return new ChatStreamEvent(
+      requestId,
+      "response.completed",
+      DateTimeOffset.UtcNow,
+      $"{harnessDefinition.DisplayName} turn completed; Agentic Router recorded only Host-observed facts.",
+      null,
+      model,
+      intention,
+      stopwatch.ElapsedMilliseconds,
+      _markdownRenderer.Render(visibleAnswer),
+      null,
+      ExecutionSession: summary,
+      ContextUsage: latestContextUsage,
+      ResponseTail: responseTail,
+      ResponseTailHtml: _markdownRenderer.Render(responseTail)
+    );
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> ExecuteHarnessHostToolAsync(
+    IAgentHarness harness,
+    HarnessDefinition harnessDefinition,
+    ChatRequest request,
+    string requestId,
+    string model,
+    string intention,
+    Stopwatch stopwatch,
+    ExecutionSession session,
+    HarnessEvent harnessEvent,
+    ISet<string> approvedDeletionPaths,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(harnessEvent.ToolCallId)
+      || string.IsNullOrWhiteSpace(harnessEvent.Tool)
+      || harnessEvent.Arguments is not JsonElement arguments
+    )
+    {
+      throw new HarnessException(
+        $"{harnessDefinition.Id}-tool-call-invalid",
+        $"{harnessDefinition.DisplayName} sent an incomplete Host tool call.",
+        harnessEvent.Message ?? "Dynamic tool request omitted its call id, tool, or arguments.",
+        false
+      );
+    }
+
+    var proposal = new LocalActionProposal(
+      harnessEvent.Tool,
+      arguments,
+      $"Requested through {harnessDefinition.DisplayName} native tools."
+    );
+    var instructionFailure = await ApplyInstructionsForProposalAsync(
+      proposal,
+      cancellationToken
+    );
+    var validation = instructionFailure is null
+      ? await TryValidateAsync(
+        () => _actionService.ValidateAsync(
+        proposal,
+        session,
+        cancellationToken
+      )
+      )
+      : new ValidationAttempt(null, instructionFailure);
+    if (validation.Action is null)
+    {
+      var failure = validation.Failure ?? new LocalActionException(
+        "action-validation",
+        $"The Host rejected the {harnessDefinition.DisplayName} tool arguments."
+      );
+      var output = FormatExecutionFailure(failure);
+      await harness.ResolveToolCallAsync(
+        harnessEvent.ToolCallId,
+        false,
+        output,
+        cancellationToken
+      );
+      session.RecordToolFailure();
+      session.AddWarning($"{harnessEvent.Tool} rejected: {output}");
+      yield return Event(
+        requestId,
+        "action.input-rejected",
+        $"Host rejected {harnessEvent.Tool}: {output}",
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
+
+    var action = validation.Action;
+    session.RecordAction(action, "proposed");
+    yield return ActionEvent(
+      requestId,
+      "action.proposed",
+      $"Proposed action: {action.Summary}.",
+      stopwatch,
+      model,
+      intention,
+      action,
+      "proposed",
+      false
+    );
+
+    var requiresApproval = _approvalPolicy.RequiresApproval(
+      action,
+      request.ApprovalPolicy
+    );
+    if (requiresApproval)
+    {
+      var decisionTask = _approvalCoordinator.WaitAsync(
+        action,
+        session.BrowserSessionId,
+        session.Id,
+        (
+          pendingAction,
+          editedText,
+          revisionCancellationToken
+        ) => ValidateApprovalRevisionAsync(
+          pendingAction,
+          editedText,
+          session,
+          revisionCancellationToken
+        ),
+        cancellationToken
+      );
+      yield return ActionEvent(
+        requestId,
+        "action.awaiting-approval",
+        $"Waiting for approval: {action.Summary}.",
+        stopwatch,
+        model,
+        intention,
+        action,
+        "awaiting-approval",
+        true
+      );
+      var decision = await decisionTask;
+      action = decision.Action;
+      if (decision.Revised)
+      {
+        session.RecordAction(action, "revised", "The pending batch was edited and revalidated by the Host.");
+        yield return ActionEvent(
+          requestId,
+          "action.revised",
+          $"Edited batch validated: {action.Summary}.",
+          stopwatch,
+          model,
+          intention,
+          action,
+          "revised",
+          true
+        );
+      }
+      if (!decision.Approved)
+      {
+        const string rejection = "The user rejected this Host batch action. It was not executed.";
+        await harness.ResolveToolCallAsync(
+          harnessEvent.ToolCallId,
+          false,
+          rejection,
+          cancellationToken
+        );
+        session.RecordAction(action, "rejected", rejection);
+        yield return ActionEvent(
+          requestId,
+          "action.rejected",
+          $"Action rejected: {action.Summary}.",
+          stopwatch,
+          model,
+          intention,
+          action,
+          "rejected",
+          true
+        );
+        yield break;
+      }
+      yield return ActionEvent(
+        requestId,
+        "action.approved",
+        $"Action approved: {action.Summary}.",
+        stopwatch,
+        model,
+        intention,
+        action,
+        "approved",
+        true
+      );
+    }
+    else
+    {
+      yield return ActionEvent(
+        requestId,
+        "action.approved",
+        $"Action approved by policy: {action.Summary}.",
+        stopwatch,
+        model,
+        intention,
+        action,
+        "approved",
+        false
+      );
+    }
+
+    yield return ActionEvent(
+      requestId,
+      "action.execution-started",
+      $"Executing: {action.Summary}.",
+      stopwatch,
+      model,
+      intention,
+      action,
+      "executing",
+      requiresApproval
+    );
+    var execution = await TryExecuteAsync(
+      () => _actionService.ExecuteAsync(action, session, cancellationToken)
+    );
+    if (execution.Result?.Succeeded == true)
+    {
+      var result = execution.Result;
+      session.RecordAction(action, "completed", result.Output);
+      session.RecordToolSuccess();
+      if (action.Tool == "delete_files")
+      {
+        foreach (var change in action.PendingFileChanges ?? [])
+        {
+          approvedDeletionPaths.Add(change.RelativePath.Replace('\\', '/'));
+        }
+      }
+      await harness.ResolveToolCallAsync(
+        harnessEvent.ToolCallId,
+        true,
+        result.Output,
+        cancellationToken
+      );
+      yield return ActionEvent(
+        requestId,
+        result.EventType,
+        FormatActivityOutput(action, result.Output),
+        stopwatch,
+        model,
+        intention,
+        action,
+        "completed",
+        requiresApproval,
+        result.Output
+      );
+      yield break;
+    }
+
+    var exception = execution.Failure ?? new LocalActionException(
+      "action-execution",
+      "The Host batch action did not complete."
+    );
+    var failureOutput = execution.Result?.Output ?? FormatExecutionFailure(exception);
+    session.RecordAction(action, "failed", failureOutput);
+    session.RecordToolFailure();
+    session.AddWarning($"{action.Tool} failed: {failureOutput}");
+    await harness.ResolveToolCallAsync(
+      harnessEvent.ToolCallId,
+      false,
+      failureOutput,
+      cancellationToken
+    );
+    yield return ActionEvent(
+      requestId,
+      "action.execution-error",
+      $"{action.Summary}: {failureOutput}",
+      stopwatch,
+      model,
+      intention,
+      action,
+      "failed",
+      requiresApproval,
+      failureOutput
+    );
+  }
+
+  private static ChatStreamEvent HarnessActionEvent(
+    string requestId,
+    HarnessEvent harnessEvent,
+    HarnessDefinition harnessDefinition,
+    string model,
+    string intention,
+    Stopwatch stopwatch,
+    string executionSessionId
+  )
+  {
+    var type = harnessEvent.Type switch
+    {
+      "tool.started" => "action.started",
+      "tool.output" => "action.output",
+      "tool.completed" => "action.completed",
+      _ => "action.failed"
+    };
+    return new ChatStreamEvent(
+      requestId,
+      type,
+      DateTimeOffset.UtcNow,
+      harnessEvent.Message,
+      null,
+      model,
+      intention,
+      stopwatch.ElapsedMilliseconds,
+      null,
+      null,
+      new LocalActionEvent(
+        $"{harnessDefinition.Id}-{harnessEvent.ItemId ?? Guid.NewGuid().ToString("N")}",
+        harnessEvent.Tool ?? $"{harnessDefinition.Id}_tool",
+        harnessEvent.Message ?? $"{harnessDefinition.DisplayName} tool activity",
+        null,
+        harnessEvent.State ?? "running",
+        false,
+        executionSessionId,
+        ResultOutput: harnessEvent.Output ?? harnessEvent.Delta
+      )
+    );
+  }
+
+  private static ChatStreamEvent HarnessApprovalEvent(
+    string requestId,
+    string type,
+    string message,
+    ValidatedLocalAction action,
+    string model,
+    string intention,
+    Stopwatch stopwatch,
+    string executionSessionId,
+    string state
+  )
+  {
+    return new ChatStreamEvent(
+      requestId,
+      type,
+      DateTimeOffset.UtcNow,
+      message,
+      null,
+      model,
+      intention,
+      stopwatch.ElapsedMilliseconds,
+      null,
+      null,
+      new LocalActionEvent(
+        action.ActionId,
+        action.Tool,
+        action.Summary,
+        action.Preview,
+        state,
+        true,
+        executionSessionId
+      )
+    );
   }
 
   private async IAsyncEnumerable<ChatStreamEvent> ExecuteActionsAsync(
@@ -4323,6 +5370,8 @@ public sealed class ChatStreamService : IChatStreamService
         update.ThinkingDelta
       ))
       {
+        progress.ResponseSegment.Clear();
+        progress.ResponseSegmentActive = false;
         yield return Event(
           requestId,
           "reasoning.delta",
@@ -4386,6 +5435,12 @@ public sealed class ChatStreamService : IChatStreamService
       progress.Answer.Append(
         safeDelta
       );
+      if (!progress.ResponseSegmentActive)
+      {
+        progress.ResponseSegment.Clear();
+        progress.ResponseSegmentActive = true;
+      }
+      progress.ResponseSegment.Append(safeDelta);
       yield return new ChatStreamEvent(
         requestId,
         "response.delta",
@@ -4400,7 +5455,10 @@ public sealed class ChatStreamService : IChatStreamService
         ),
         null,
         null,
-        _executionSession?.CreateSummary()
+        _executionSession?.CreateSummary(),
+        ResponseSegmentHtml: _markdownRenderer.Render(
+          progress.ResponseSegment.ToString()
+        )
       );
     }
 
@@ -4411,6 +5469,12 @@ public sealed class ChatStreamService : IChatStreamService
       progress.PrefixResolved = true;
       progress.ReceivedFirstChunk = true;
       progress.Answer.Append(finalPrefix);
+      if (!progress.ResponseSegmentActive)
+      {
+        progress.ResponseSegment.Clear();
+        progress.ResponseSegmentActive = true;
+      }
+      progress.ResponseSegment.Append(finalPrefix);
       yield return new ChatStreamEvent(
         requestId,
         "response.delta",
@@ -4423,7 +5487,10 @@ public sealed class ChatStreamService : IChatStreamService
         _markdownRenderer.Render(progress.Answer.ToString()),
         null,
         null,
-        _executionSession?.CreateSummary()
+        _executionSession?.CreateSummary(),
+        ResponseSegmentHtml: _markdownRenderer.Render(
+          progress.ResponseSegment.ToString()
+        )
       );
     }
   }
@@ -4748,6 +5815,56 @@ public sealed class ChatStreamService : IChatStreamService
       context.OmittedMessages > 0,
       warning
     );
+  }
+
+  private static ContextUsageView CreateExternalHarnessContextUsage(
+    ConversationContextResult context,
+    ProviderModelCapabilities capabilities,
+    ApplicationSettings settings
+  )
+  {
+    var usage = CreateContextUsage(context, capabilities, settings, null);
+    var effectiveLimit = Math.Min(
+      usage.ApplicationLimit,
+      usage.ProviderMaximumTokens ?? usage.ConfiguredProviderLimit
+    );
+    return usage with
+    {
+      ConversationTokens = context.EstimatedInputTokens,
+      RequiredContextTokens = context.EstimatedInputTokens + usage.ReservedResponseTokens,
+      EffectiveLimitTokens = effectiveLimit,
+      InferenceSequence = 1
+    };
+  }
+
+  private static ContextUsageView WithExactContextUsage(
+    ContextUsageView usage,
+    long inputTokens
+  )
+  {
+    var effectiveLimit = usage.EffectiveLimitTokens > 0
+      ? usage.EffectiveLimitTokens
+      : Math.Min(
+        usage.ApplicationLimit,
+        usage.ProviderMaximumTokens ?? usage.ConfiguredProviderLimit
+      );
+    var usable = Math.Max(1, effectiveLimit - usage.ReservedResponseTokens);
+    var percentage = inputTokens * 100d / usable;
+    var warning = percentage >= 95
+      ? 95
+      : percentage >= 85
+        ? 85
+        : percentage >= 70
+          ? 70
+          : 0;
+    return usage with
+    {
+      InputTokens = inputTokens,
+      Accuracy = "exact",
+      RequiredContextTokens = inputTokens + usage.ReservedResponseTokens,
+      EffectiveLimitTokens = effectiveLimit,
+      WarningThreshold = warning
+    };
   }
 
   private static ContextUsageView CreateSpecialistContextUsage(
@@ -5708,7 +6825,7 @@ public sealed class ChatStreamService : IChatStreamService
     return tokens;
   }
 
-  private static void ValidateInteractionMode(
+  private void ValidateInteractionMode(
     ChatRequest request
   )
   {
@@ -5729,6 +6846,22 @@ public sealed class ChatStreamService : IChatStreamService
         "request-validation",
         "Interaction mode must be chat or execute.",
         $"Unsupported interaction mode: {request.InteractionMode}.",
+        request.Model,
+        null,
+        400,
+        true
+      );
+    }
+
+    if (
+      string.IsNullOrWhiteSpace(request.Harness)
+      || !_harnesses.TryGetDefinition(request.Harness, out _)
+    )
+    {
+      throw new ChatStageException(
+        "request-validation",
+        "The selected harness is not registered.",
+        $"Unsupported harness: {request.Harness}.",
         request.Model,
         null,
         400,
@@ -5759,6 +6892,45 @@ public sealed class ChatStreamService : IChatStreamService
         true
       );
     }
+  }
+
+  private HarnessDefinition GetHarnessDefinition(string harnessId)
+  {
+    if (_harnesses.TryGetDefinition(harnessId, out var definition))
+    {
+      return definition;
+    }
+
+    throw new ChatStageException(
+      "request-validation",
+      "The selected harness is not registered.",
+      $"Unsupported harness: {harnessId}.",
+      null,
+      null,
+      400,
+      true
+    );
+  }
+
+  private static string HarnessLabel(HarnessDefinition definition)
+  {
+    return definition.Experimental
+      ? $"{definition.DisplayName} (Experimental)"
+      : definition.DisplayName;
+  }
+
+  private static string HarnessProviderUnsupportedMessage(
+    HarnessDefinition definition
+  )
+  {
+    if (
+      definition.SupportedProviders is [ModelProviderIds.OllamaLocal]
+    )
+    {
+      return $"{HarnessLabel(definition)} supports Ollama Local models only.";
+    }
+
+    return $"{HarnessLabel(definition)} does not support the selected provider.";
   }
 
   private ChatStreamEvent ActionEvent(
@@ -5823,6 +6995,7 @@ public sealed class ChatStreamService : IChatStreamService
   {
     return action.Tool is
       "create_file"
+      or "create_files"
       or "write_file"
       or "replace_text"
       or "apply_patch"
@@ -7272,7 +8445,8 @@ public sealed class ChatStreamService : IChatStreamService
       TraceId: _trace.TraceId,
       ProviderAttemptId: Guid.NewGuid().ToString("N"),
       IncidentEventId: Guid.NewGuid().ToString("N"),
-      IncidentSequence: _trace.NextSequence()
+      IncidentSequence: _trace.NextSequence(),
+      Gpu: _usageGpu
     );
   }
 
@@ -7358,6 +8532,50 @@ public sealed class ChatStreamService : IChatStreamService
     CancellationToken cancellationToken
   )
   {
+    if (
+      proposal.Tool == "create_files"
+      && proposal.Arguments.TryGetProperty("files", out var files)
+      && files.ValueKind == JsonValueKind.Array
+    )
+    {
+      try
+      {
+        foreach (var file in files.EnumerateArray())
+        {
+          if (
+            file.ValueKind != JsonValueKind.Object
+            || !file.TryGetProperty("path", out var path)
+            || path.ValueKind != JsonValueKind.String
+          )
+          {
+            continue;
+          }
+          var relativePath = (await _workspace.ResolveCreationPathAsync(
+            path.GetString(),
+            cancellationToken
+          )).RelativePath;
+          _executionSession?.ApplyInstructions(
+            await _repositoryInstructions.ResolveAsync(relativePath, cancellationToken)
+          );
+        }
+        return null;
+      }
+      catch (LocalActionException exception)
+      {
+        return exception;
+      }
+      catch (Exception exception) when (
+        exception is IOException or UnauthorizedAccessException
+      )
+      {
+        return new LocalActionException(
+          "repository-instructions",
+          $"Repository instructions could not be resolved for the proposed batch: {exception.Message}",
+          exception
+        );
+      }
+    }
+
     if (
       !proposal.Arguments.TryGetProperty(
         "path",
@@ -7628,6 +8846,10 @@ public sealed class ChatStreamService : IChatStreamService
   private sealed class GenerationProgress
   {
     public StringBuilder Answer { get; } = new();
+
+    public StringBuilder ResponseSegment { get; } = new();
+
+    public bool ResponseSegmentActive { get; set; }
 
     public StringBuilder PrefixBuffer { get; } = new();
 

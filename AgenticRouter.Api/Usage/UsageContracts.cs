@@ -133,7 +133,8 @@ public sealed record ProviderCallContext(
   string? TraceId = null,
   string? ProviderAttemptId = null,
   string? IncidentEventId = null,
-  long? IncidentSequence = null
+  long? IncidentSequence = null,
+  string? Gpu = null
 );
 
 public sealed record ProviderTokenUsage(

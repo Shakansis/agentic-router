@@ -433,6 +433,9 @@ AgenticRouter.Api/data/incidents/
 AgenticRouter.Api/data/usage-aggregates/
 AgenticRouter.Api/data/secrets/
 AgenticRouter.Api/data/providers/
+AgenticRouter.Api/data/codex-runtime/
+AgenticRouter.Api/data/opencode-runtime/
+AgenticRouter.Api/data/qwen-code-runtime/
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 # General
