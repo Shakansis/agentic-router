@@ -257,11 +257,27 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
           steps = new[] { new { title = "Confirm the Host accepted the plan", dependsOn = Array.Empty<int>() } }
         }
       );
+      var action = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "--version" },
+          workingDirectory = ".",
+          timeoutSeconds = 30,
+          stepId = AcceptedPlanStepId(plan)
+        }
+      );
       if (runtime is not null)
       {
         await File.WriteAllTextAsync(
           Path.Combine(runtime, "fake-opencode-host-plan.json"),
-          JsonSerializer.Serialize(new { succeeded = plan.Succeeded, output = plan.Output })
+          JsonSerializer.Serialize(new
+          {
+            succeeded = plan.Succeeded && action.Succeeded,
+            plan = new { succeeded = plan.Succeeded, output = plan.Output },
+            action = new { succeeded = action.Succeeded, output = action.Output }
+          })
         );
       }
       await CompleteAsync(sessionId);
@@ -629,6 +645,26 @@ async Task EmitAsync(string type, object properties)
   }
 }
 
+string AcceptedPlanStepId(McpToolResult plan)
+{
+  if (!plan.Succeeded)
+  {
+    throw new InvalidOperationException(plan.Output);
+  }
+  var jsonStart = plan.Output.IndexOf('{');
+  if (jsonStart < 0)
+  {
+    throw new InvalidOperationException("The accepted Host plan omitted its JSON payload.");
+  }
+  using var document = JsonDocument.Parse(plan.Output[jsonStart..]);
+  var steps = document.RootElement.TryGetProperty("steps", out var camelSteps)
+    ? camelSteps
+    : document.RootElement.GetProperty("Steps");
+  var first = steps[0];
+  return (first.TryGetProperty("id", out var camelId) ? camelId : first.GetProperty("Id")).GetString()
+    ?? throw new InvalidOperationException("The accepted Host plan omitted its first step ID.");
+}
+
 async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
 {
   var configRoot = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
@@ -651,7 +687,24 @@ async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
     clientInfo = new { name = "fake-opencode", version = "1" }
   });
   await SendMcpNotificationAsync(client, endpoint, "notifications/initialized");
-  var response = await SendMcpAsync(client, endpoint, 2, "tools/call", new
+  using var tools = await SendMcpAsync(client, endpoint, 2, "tools/list", new { });
+  var advertised = tools.RootElement.GetProperty("result").GetProperty("tools")
+    .EnumerateArray().FirstOrDefault(
+      candidate => string.Equals(candidate.GetProperty("name").GetString(), tool, StringComparison.Ordinal)
+    );
+  if (advertised.ValueKind == JsonValueKind.Undefined)
+  {
+    throw new InvalidOperationException($"Agentic Router MCP tool '{tool}' was not advertised.");
+  }
+  var serializedArguments = JsonSerializer.SerializeToElement(arguments);
+  if (
+    serializedArguments.TryGetProperty("stepId", out _)
+    && !advertised.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("stepId", out _)
+  )
+  {
+    throw new InvalidOperationException($"Agentic Router MCP tool '{tool}' omitted its plan step binding schema.");
+  }
+  var response = await SendMcpAsync(client, endpoint, 3, "tools/call", new
   {
     name = tool,
     arguments

@@ -373,6 +373,41 @@
             <legend>Harnesses disponíveis</legend>
             <div id="benchmark-harness-list"></div>
           </fieldset>
+          <section class="benchmark-scoring" aria-labelledby="benchmark-scoring-title">
+            <div class="benchmark-scoring-heading">
+              <div>
+                <span class="eyebrow">Calculated score</span>
+                <h3 id="benchmark-scoring-title">Pesos do ranking</h3>
+              </div>
+              <span id="benchmark-score-profile" class="badge">Default v1</span>
+            </div>
+            <div class="benchmark-weight-grid">
+              <label>
+                <span>Objective success</span>
+                <input id="benchmark-weight-objective" type="number" min="0" max="100" step="1">
+              </label>
+              <label>
+                <span>Correctness / exactness</span>
+                <input id="benchmark-weight-correctness" type="number" min="0" max="100" step="1">
+              </label>
+              <label>
+                <span>Terminality</span>
+                <input id="benchmark-weight-terminality" type="number" min="0" max="100" step="1">
+              </label>
+              <label>
+                <span>Workspace accuracy</span>
+                <input id="benchmark-weight-workspace" type="number" min="0" max="100" step="1">
+              </label>
+              <label>
+                <span>Efficiency</span>
+                <input id="benchmark-weight-efficiency" type="number" min="0" max="100" step="1">
+              </label>
+            </div>
+            <div class="benchmark-scoring-footer">
+              <output id="benchmark-weight-total" role="status">Total 100 · sem normalização</output>
+              <button id="reset-benchmark-weights" class="secondary-button" type="button">Restaurar padrão</button>
+            </div>
+          </section>
           <label class="benchmark-permission">
             <input id="benchmark-permission" type="checkbox">
             <span>Autorizo agora a execução do modelo selecionado para este benchmark.</span>
@@ -388,6 +423,9 @@
           <div class="section-heading">
             <h3 id="benchmark-results-title">Resultados</h3>
             <p id="benchmark-run-summary">Execute ou abra um resultado persistido.</p>
+            <p id="benchmark-score-context" class="benchmark-score-context">
+              Measured evidence e Calculated score são apresentados separadamente.
+            </p>
           </div>
           <p id="benchmark-ranking-note" class="benchmark-ranking-note" hidden>
             Ranking provisório: harnesses ainda em execução são identificados abaixo.

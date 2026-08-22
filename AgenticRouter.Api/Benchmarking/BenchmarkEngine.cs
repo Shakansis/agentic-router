@@ -32,7 +32,7 @@ public interface IBenchmarkEngine
 public sealed class BenchmarkEngine : IBenchmarkEngine
 {
   private static readonly IReadOnlySet<string> SupportedHarnesses = new HashSet<string>(
-    [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode],
+    [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode, HarnessIds.QwenCode],
     StringComparer.OrdinalIgnoreCase
   );
   private static readonly HostCapabilityProfile BenchmarkHostCapabilities =

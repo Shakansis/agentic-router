@@ -11,7 +11,7 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class BenchmarksController : ControllerBase
 {
   private static readonly IReadOnlySet<string> SupportedHarnesses = new HashSet<string>(
-    [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode],
+    [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode, HarnessIds.QwenCode],
     StringComparer.OrdinalIgnoreCase
   );
   private readonly IBenchmarkEngine _engine;
@@ -20,6 +20,8 @@ public sealed class BenchmarksController : ControllerBase
   private readonly IBenchmarkResultStore _results;
   private readonly IBenchmarkRunCancellationRegistry _cancellations;
   private readonly IBenchmarkLiveRunCoordinator _liveRuns;
+  private readonly IBenchmarkScorer _scorer;
+  private readonly IBenchmarkScoringProfileStore _scoringProfiles;
 
   public BenchmarksController(
     IBenchmarkEngine engine,
@@ -27,7 +29,9 @@ public sealed class BenchmarksController : ControllerBase
     IHarnessRegistry harnesses,
     IBenchmarkResultStore results,
     IBenchmarkRunCancellationRegistry cancellations,
-    IBenchmarkLiveRunCoordinator liveRuns
+    IBenchmarkLiveRunCoordinator liveRuns,
+    IBenchmarkScorer scorer,
+    IBenchmarkScoringProfileStore scoringProfiles
   )
   {
     _engine = engine;
@@ -36,6 +40,62 @@ public sealed class BenchmarksController : ControllerBase
     _results = results;
     _cancellations = cancellations;
     _liveRuns = liveRuns;
+    _scorer = scorer;
+    _scoringProfiles = scoringProfiles;
+  }
+
+  [HttpGet("scoring-profile")]
+  public async Task<IActionResult> GetScoringProfile(
+    CancellationToken cancellationToken
+  )
+  {
+    return Ok(await _scoringProfiles.GetAsync(cancellationToken));
+  }
+
+  [HttpPut("scoring-profile")]
+  public async Task<IActionResult> SaveScoringProfile(
+    [FromBody] BenchmarkScoreWeights weights,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return Ok(await _scoringProfiles.SaveCustomAsync(weights, cancellationToken));
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpPost("scoring-profile/reset")]
+  public async Task<IActionResult> ResetScoringProfile(
+    CancellationToken cancellationToken
+  )
+  {
+    return Ok(await _scoringProfiles.ResetAsync(cancellationToken));
+  }
+
+  [HttpPost("suite-runs/{runId}/rescore")]
+  public async Task<IActionResult> Rescore(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null)
+      {
+        return NotFound();
+      }
+      var profile = await _scoringProfiles.GetAsync(cancellationToken);
+      return Ok(_scorer.Rescore(result, profile));
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
   }
 
   [HttpPost("suite-runs/live")]

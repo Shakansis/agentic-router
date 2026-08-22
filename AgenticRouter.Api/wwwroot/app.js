@@ -185,11 +185,20 @@ function bindElements() {
     "benchmark-timeout",
     "benchmark-history",
     "benchmark-harness-list",
+    "benchmark-score-profile",
+    "benchmark-weight-objective",
+    "benchmark-weight-correctness",
+    "benchmark-weight-terminality",
+    "benchmark-weight-workspace",
+    "benchmark-weight-efficiency",
+    "benchmark-weight-total",
+    "reset-benchmark-weights",
     "benchmark-permission",
     "run-benchmark",
     "cancel-benchmark",
     "benchmark-status",
     "benchmark-run-summary",
+    "benchmark-score-context",
     "benchmark-ranking-note",
     "benchmark-live-dashboard",
     "benchmark-results-body",
@@ -503,6 +512,10 @@ function bindEvents() {
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.dismissBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
+  for (const input of benchmarkWeightInputs()) {
+    input.addEventListener("input", scheduleBenchmarkScoringUpdate);
+  }
+  elements.resetBenchmarkWeights.addEventListener("click", resetBenchmarkScoringProfile);
   elements.benchmarkResultsBody.addEventListener("click", openBenchmarkHarnessResult);
   elements.benchmarkDialog.addEventListener("cancel", event => {
     event.preventDefault();
@@ -1111,10 +1124,11 @@ async function openBenchmarks() {
   elements.benchmarkStatus.textContent = "Carregando catálogo e histórico…";
 
   try {
-    const [catalog, history, modelsResponse] = await Promise.all([
+    const [catalog, history, modelsResponse, scoringProfile] = await Promise.all([
       fetchJson("/api/benchmarks/catalog"),
       fetchJson("/api/benchmarks/suite-runs?limit=25"),
-      fetchJson("/api/models")
+      fetchJson("/api/models"),
+      fetchJson("/api/benchmarks/scoring-profile")
     ]);
     state.models = modelsResponse.models;
     const retainedLive = state.benchmark?.live ?? null;
@@ -1122,6 +1136,9 @@ async function openBenchmarks() {
       catalog,
       history,
       result: retainedLive ? state.benchmark?.result ?? null : history[0] ?? null,
+      scoringProfile,
+      scoringProjection: null,
+      scoringUpdateTimer: null,
       live: retainedLive
     };
     renderBenchmarkControls();
@@ -1134,7 +1151,7 @@ async function openBenchmarks() {
     } else if (storedRunId) {
       await resumeLiveBenchmark(storedRunId);
     } else {
-      renderBenchmarkResult(state.benchmark.result);
+      await rescoreBenchmarkResult();
       elements.benchmarkStatus.textContent = "Pronto.";
     }
   } catch (error) {
@@ -1171,15 +1188,125 @@ function renderBenchmarkControls() {
     input.dataset.available = String(status.availability.available);
     input.checked = status.availability.available;
     const text = document.createElement("span");
+    const harnessLabel = harnessDisplayLabel(status.definition);
     text.textContent = status.availability.available
-      ? `${status.definition.displayName} · ${status.availability.version ?? "disponível"}`
-      : `${status.definition.displayName} · indisponível`;
+      ? `${harnessLabel} · ${status.availability.version ?? "disponível"}`
+      : `${harnessLabel} · indisponível`;
     if (!status.availability.available && status.availability.message) {
       label.title = status.availability.message;
     }
     label.append(input, text);
     elements.benchmarkHarnessList.append(label);
   }
+  renderBenchmarkScoringProfile();
+}
+
+function benchmarkWeightInputs() {
+  return [
+    elements.benchmarkWeightObjective,
+    elements.benchmarkWeightCorrectness,
+    elements.benchmarkWeightTerminality,
+    elements.benchmarkWeightWorkspace,
+    elements.benchmarkWeightEfficiency
+  ];
+}
+
+function benchmarkWeightsFromInputs() {
+  return {
+    objectiveSuccess: Number(elements.benchmarkWeightObjective.value),
+    correctness: Number(elements.benchmarkWeightCorrectness.value),
+    terminality: Number(elements.benchmarkWeightTerminality.value),
+    workspaceAccuracy: Number(elements.benchmarkWeightWorkspace.value),
+    efficiency: Number(elements.benchmarkWeightEfficiency.value)
+  };
+}
+
+function renderBenchmarkScoringProfile() {
+  const profile = state.benchmark?.scoringProfile;
+  if (!profile) {
+    return;
+  }
+  const weights = profile.weights;
+  elements.benchmarkScoreProfile.textContent = `${profile.displayName} v${profile.version}`;
+  elements.benchmarkWeightObjective.value = String(weights.objectiveSuccess);
+  elements.benchmarkWeightCorrectness.value = String(weights.correctness);
+  elements.benchmarkWeightTerminality.value = String(weights.terminality);
+  elements.benchmarkWeightWorkspace.value = String(weights.workspaceAccuracy);
+  elements.benchmarkWeightEfficiency.value = String(weights.efficiency);
+  renderBenchmarkWeightTotal(weights);
+}
+
+function renderBenchmarkWeightTotal(weights) {
+  const total = Number(weights.objectiveSuccess)
+    + Number(weights.correctness)
+    + Number(weights.terminality)
+    + Number(weights.workspaceAccuracy)
+    + Number(weights.efficiency);
+  elements.benchmarkWeightTotal.textContent = total <= 0
+    ? "Total 0 · configuração inválida"
+    : total === 100
+      ? "Total 100 · sem normalização"
+      : `Total ${total} · normalizado para 100%`;
+  elements.benchmarkWeightTotal.classList.toggle("error", total <= 0);
+}
+
+function scheduleBenchmarkScoringUpdate() {
+  const weights = benchmarkWeightsFromInputs();
+  renderBenchmarkWeightTotal(weights);
+  clearTimeout(state.benchmark?.scoringUpdateTimer);
+  if (!state.benchmark) {
+    return;
+  }
+  state.benchmark.scoringUpdateTimer = setTimeout(saveBenchmarkScoringProfile, 150);
+}
+
+async function saveBenchmarkScoringProfile() {
+  const weights = benchmarkWeightsFromInputs();
+  try {
+    const profile = await fetchJson("/api/benchmarks/scoring-profile", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(weights)
+    });
+    state.benchmark.scoringProfile = profile;
+    state.benchmark.scoringUpdateTimer = null;
+    renderBenchmarkScoringProfile();
+    await rescoreBenchmarkResult();
+    elements.benchmarkStatus.textContent = "Perfil Custom salvo; ranking recalculado sem executar o benchmark.";
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+async function resetBenchmarkScoringProfile() {
+  clearTimeout(state.benchmark?.scoringUpdateTimer);
+  try {
+    const profile = await fetchJson("/api/benchmarks/scoring-profile/reset", {
+      method: "POST"
+    });
+    state.benchmark.scoringProfile = profile;
+    renderBenchmarkScoringProfile();
+    await rescoreBenchmarkResult();
+    elements.benchmarkStatus.textContent = "Perfil Default restaurado; ranking original recalculado.";
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+async function rescoreBenchmarkResult() {
+  const result = state.benchmark?.result;
+  if (!result) {
+    if (state.benchmark) {
+      state.benchmark.scoringProjection = null;
+    }
+    renderBenchmarkResult(null);
+    return;
+  }
+  state.benchmark.scoringProjection = await fetchJson(
+    `/api/benchmarks/suite-runs/${encodeURIComponent(result.runId)}/rescore`,
+    { method: "POST" }
+  );
+  renderBenchmarkResult(result);
 }
 
 function renderBenchmarkHistory() {
@@ -1566,6 +1693,9 @@ function finishBenchmarkLive(result) {
   ];
   renderBenchmarkHistory();
   renderBenchmarkResult(result);
+  rescoreBenchmarkResult().catch(error => {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  });
   elements.benchmarkStatus.textContent = result.terminalState === "cancelled"
     ? "Execução cancelada com resultado final persistido."
     : "Benchmark concluído e persistido.";
@@ -1626,12 +1756,18 @@ function setBenchmarkRunning(running) {
   }
 }
 
-function openPersistedBenchmark() {
+async function openPersistedBenchmark() {
   const selected = state.benchmark?.history?.find(
     result => result.runId === elements.benchmarkHistory.value
   ) ?? null;
   state.benchmark.result = selected;
-  renderBenchmarkResult(selected);
+  state.benchmark.scoringProjection = null;
+  try {
+    await rescoreBenchmarkResult();
+  } catch (error) {
+    renderBenchmarkResult(selected);
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
 }
 
 function renderBenchmarkResult(result) {
@@ -1645,11 +1781,22 @@ function renderBenchmarkResult(result) {
     return;
   }
 
+  const projection = state.benchmark?.scoringProjection?.runId === result.runId
+    ? state.benchmark.scoringProjection
+    : null;
+  const profile = projection?.activeProfile ?? state.benchmark?.scoringProfile;
   elements.benchmarkRunSummary.textContent =
     `${result.model} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)} · `
     + `${result.fixtureId} v${result.fixtureVersion}`;
+  elements.benchmarkScoreContext.textContent = profile
+    ? `Measured evidence inalterada · Calculated score com ${profile.displayName} v${profile.version}`
+    : "Measured evidence e Calculated score são apresentados separadamente.";
   const byHarness = new Map(result.harnessResults.map(item => [item.harness, item]));
-  for (const ranked of result.ranking) {
+  const scoreByHarness = new Map(
+    (projection?.harnessScores ?? []).map(item => [item.harness, item])
+  );
+  const ranking = projection?.ranking ?? result.ranking;
+  for (const ranked of ranking) {
     const harness = byHarness.get(ranked.harness);
     if (!harness) {
       continue;
@@ -1665,7 +1812,7 @@ function renderBenchmarkResult(result) {
     for (const value of [
       harness.terminalState,
       `${harness.passed}/${harness.total}`,
-      Number(harness.score).toFixed(2),
+      Number(scoreByHarness.get(harness.harness)?.score ?? harness.score).toFixed(2),
       formatBenchmarkDuration(harness.durationMilliseconds),
       `${harness.terminality}%`
     ]) {
@@ -1676,9 +1823,9 @@ function renderBenchmarkResult(result) {
     row.prepend(harnessCell);
     elements.benchmarkResultsBody.append(row);
   }
-  const firstHarness = result.ranking[0]?.harness;
+  const firstHarness = ranking[0]?.harness;
   if (firstHarness) {
-    renderBenchmarkHarnessDetail(byHarness.get(firstHarness));
+    renderBenchmarkHarnessDetail(byHarness.get(firstHarness), scoreByHarness.get(firstHarness));
   }
 }
 
@@ -1690,10 +1837,13 @@ function openBenchmarkHarnessResult(event) {
   const harness = state.benchmark?.result?.harnessResults?.find(
     item => item.harness === button.dataset.harness
   );
-  renderBenchmarkHarnessDetail(harness);
+  const score = state.benchmark?.scoringProjection?.harnessScores?.find(
+    item => item.harness === button.dataset.harness
+  );
+  renderBenchmarkHarnessDetail(harness, score);
 }
 
-function renderBenchmarkHarnessDetail(harness) {
+function renderBenchmarkHarnessDetail(harness, calculated) {
   elements.benchmarkResultDetail.replaceChildren();
   if (!harness) {
     elements.benchmarkResultDetail.textContent = "Resultado do harness indisponível.";
@@ -1702,6 +1852,26 @@ function renderBenchmarkHarnessDetail(harness) {
   const heading = document.createElement("h4");
   heading.textContent = `${benchmarkHarnessLabel(harness.harness)} · ${harness.passed}/${harness.total} passed`;
   elements.benchmarkResultDetail.append(heading);
+  if (calculated) {
+    const scoreHeading = document.createElement("strong");
+    scoreHeading.textContent = `Calculated score · ${Number(calculated.score).toFixed(2)}`;
+    const breakdown = document.createElement("dl");
+    breakdown.className = "benchmark-score-breakdown";
+    for (const [label, value] of [
+      ["Objective success", calculated.breakdown.objectiveSuccess],
+      ["Correctness / exactness", calculated.breakdown.correctness],
+      ["Terminality", calculated.breakdown.terminality],
+      ["Workspace accuracy", calculated.breakdown.workspaceAccuracy],
+      ["Efficiency", calculated.breakdown.efficiency]
+    ]) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const definition = document.createElement("dd");
+      definition.textContent = Number(value).toFixed(2);
+      breakdown.append(term, definition);
+    }
+    elements.benchmarkResultDetail.append(scoreHeading, breakdown);
+  }
   if (harness.tests.length === 0) {
     const empty = document.createElement("p");
     empty.textContent = "Nenhum teste iniciou antes do cancelamento.";
@@ -1712,10 +1882,13 @@ function renderBenchmarkHarnessDetail(harness) {
     const details = document.createElement("details");
     details.className = "benchmark-test-detail";
     const summary = document.createElement("summary");
-    summary.textContent = `${test.run.testId} · ${test.rawResult.status} · score ${Number(test.score?.total ?? 0).toFixed(2)}`;
+    const calculatedTest = calculated?.tests?.find(item => item.runId === test.run.runId);
+    summary.textContent = `${test.run.testId} · ${test.rawResult.status} · calculated score ${Number(calculatedTest?.score?.total ?? test.score?.total ?? 0).toFixed(2)}`;
     details.append(summary);
     const facts = document.createElement("dl");
     facts.className = "benchmark-evidence-grid";
+    const evidenceHeading = document.createElement("strong");
+    evidenceHeading.textContent = "Measured evidence";
     const evidence = [
       ["Terminal", test.rawResult.executionStatus],
       ["Exactness", `${test.rawResult.exactness}%`],
@@ -1740,7 +1913,7 @@ function renderBenchmarkHarnessDetail(harness) {
       definition.textContent = String(value);
       facts.append(term, definition);
     }
-    details.append(facts);
+    details.append(evidenceHeading, facts);
     if (test.rawResult.error) {
       const error = document.createElement("p");
       error.className = "benchmark-validation-error";
@@ -7838,7 +8011,7 @@ function harnessDisplayLabel(definition) {
   if (!definition.experimental) {
     return definition.displayName;
   }
-  return definition.id === "opencode"
+  return definition.id === "opencode" || definition.id === "qwen-code"
     ? `${definition.displayName} [Experimental]`
     : `${definition.displayName} (Experimental)`;
 }

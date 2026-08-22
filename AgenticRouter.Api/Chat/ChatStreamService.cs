@@ -2614,10 +2614,17 @@ public sealed class ChatStreamService : IChatStreamService
       );
     }
 
+    var planStepId = arguments.TryGetProperty(
+      "stepId",
+      out var stepIdElement
+    ) && stepIdElement.ValueKind == JsonValueKind.String
+      ? stepIdElement.GetString()
+      : null;
     var proposal = new LocalActionProposal(
       harnessEvent.Tool,
-      arguments,
-      $"Requested through {harnessDefinition.DisplayName} native tools."
+      RemoveJsonProperty(arguments, "stepId"),
+      $"Requested through {harnessDefinition.DisplayName} native tools.",
+      PlanStepId: planStepId
     );
     if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
     {
@@ -2705,6 +2712,23 @@ public sealed class ChatStreamService : IChatStreamService
     }
 
     var action = validation.Action;
+    var planStepStarted = session.RecordPlanActionStarted(
+      action.ActionId,
+      action.Tool,
+      action.TargetPath,
+      action.PlanStepId
+    );
+    if (planStepStarted)
+    {
+      yield return Event(
+        requestId,
+        "execution-step-started",
+        $"{harnessDefinition.DisplayName} Host action bound to plan step '{action.PlanStepId}': {action.Summary}.",
+        stopwatch,
+        model,
+        intention
+      );
+    }
     session.RecordAction(action, "proposed");
     yield return ActionEvent(
       requestId,
@@ -2771,13 +2795,29 @@ public sealed class ChatStreamService : IChatStreamService
       if (!decision.Approved)
       {
         const string rejection = "The user rejected this Host batch action. It was not executed.";
+        session.RecordAction(action, "rejected", rejection);
+        var planStepBlocked = session.RecordPlanActionResult(
+          action.ActionId,
+          action.Tool,
+          "blocked"
+        );
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
           rejection,
           cancellationToken
         );
-        session.RecordAction(action, "rejected", rejection);
+        if (planStepBlocked)
+        {
+          yield return Event(
+            requestId,
+            "execution-step-blocked",
+            $"Plan step blocked because the {harnessDefinition.DisplayName} Host action was rejected: {action.Summary}.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
         yield return ActionEvent(
           requestId,
           "action.rejected",
@@ -2844,12 +2884,36 @@ public sealed class ChatStreamService : IChatStreamService
           approvedDeletionPaths.Add(change.RelativePath.Replace('\\', '/'));
         }
       }
+      bool? planStepCompleted = null;
+      if (session.Plan is not null)
+      {
+        planStepCompleted = session.RecordPlanActionResult(
+          action.ActionId,
+          action.Tool,
+          "completed"
+        );
+      }
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         true,
         result.Output,
         cancellationToken
       );
+      if (planStepCompleted is bool completed)
+      {
+        yield return Event(
+          requestId,
+          completed
+            ? "execution-step-completed"
+            : "execution-step-effect-unproven",
+          completed
+            ? $"Bound plan step completed from the {harnessDefinition.DisplayName} Host action's proven effect: {action.Summary}."
+            : $"Bound plan step remains in progress because the {harnessDefinition.DisplayName} Host action's required effect was not proven: {action.Summary}.",
+          stopwatch,
+          model,
+          intention
+        );
+      }
       yield return ActionEvent(
         requestId,
         result.EventType,
@@ -6998,7 +7062,8 @@ public sealed class ChatStreamService : IChatStreamService
         ),
         "Edited by the user before approval.",
         currentAction.OriginalTool,
-        currentAction.ToolResolutionSource
+        currentAction.ToolResolutionSource,
+        currentAction.PlanStepId
       );
       var revised = await _actionService.ValidateAsync(
         proposal,

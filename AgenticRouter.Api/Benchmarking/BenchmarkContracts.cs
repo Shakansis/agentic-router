@@ -206,6 +206,28 @@ public sealed record BenchmarkScoreWeights(
     + Efficiency;
 }
 
+public static class BenchmarkScoringProfileIds
+{
+  public const string Default = "default";
+  public const string Custom = "custom";
+  public const int DefaultVersion = 1;
+}
+
+public sealed record BenchmarkScoringProfile(
+  string Id,
+  int Version,
+  string DisplayName,
+  BenchmarkScoreWeights Weights
+)
+{
+  public static BenchmarkScoringProfile Default { get; } = new(
+    BenchmarkScoringProfileIds.Default,
+    BenchmarkScoringProfileIds.DefaultVersion,
+    "Default",
+    BenchmarkScoreWeights.Default
+  );
+}
+
 public sealed record BenchmarkScore(
   decimal Total,
   int ObjectiveSuccess,
@@ -242,6 +264,35 @@ public sealed record BenchmarkRankingEntry(
   decimal Score,
   long DurationMilliseconds,
   int Terminality
+);
+
+public sealed record BenchmarkScoreBreakdown(
+  decimal ObjectiveSuccess,
+  decimal Correctness,
+  decimal Terminality,
+  decimal WorkspaceAccuracy,
+  decimal Efficiency
+);
+
+public sealed record BenchmarkTestScoreProjection(
+  string RunId,
+  string TestId,
+  BenchmarkScore Score
+);
+
+public sealed record BenchmarkHarnessScoreProjection(
+  string Harness,
+  decimal Score,
+  BenchmarkScoreBreakdown Breakdown,
+  IReadOnlyList<BenchmarkTestScoreProjection> Tests
+);
+
+public sealed record BenchmarkScoringProjection(
+  string RunId,
+  BenchmarkScoreWeights OriginalScoreWeights,
+  BenchmarkScoringProfile ActiveProfile,
+  IReadOnlyList<BenchmarkHarnessScoreProjection> HarnessScores,
+  IReadOnlyList<BenchmarkRankingEntry> Ranking
 );
 
 public sealed record BenchmarkSuiteRunResult(

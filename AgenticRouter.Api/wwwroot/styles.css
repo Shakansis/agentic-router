@@ -4985,6 +4985,56 @@ textarea[readonly] {
   gap: 0.55rem;
 }
 
+.benchmark-scoring {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+}
+
+.benchmark-scoring-heading,
+.benchmark-scoring-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.benchmark-scoring-heading h3 {
+  margin: 0.15rem 0 0;
+}
+
+.benchmark-weight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.benchmark-weight-grid label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 4.5rem;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.benchmark-scoring-footer output,
+.benchmark-score-context {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.benchmark-scoring-footer output.error {
+  color: var(--danger);
+}
+
+.benchmark-score-context {
+  margin: 0.25rem 0 0;
+}
+
 .benchmark-harness-option:has(input:disabled) {
   color: var(--muted);
   opacity: 0.7;
@@ -5158,6 +5208,26 @@ textarea[readonly] {
   font-size: 0.8rem;
 }
 
+.benchmark-score-breakdown {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) max-content;
+  gap: 0.3rem 0.7rem;
+  margin: 0;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  font-size: 0.8rem;
+}
+
+.benchmark-score-breakdown dt {
+  color: var(--muted);
+}
+
+.benchmark-score-breakdown dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
 .benchmark-evidence-grid dt {
   color: var(--muted);
 }
@@ -5196,6 +5266,10 @@ textarea[readonly] {
 
 @media (max-width: 560px) {
   .benchmark-selection-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .benchmark-weight-grid {
     grid-template-columns: 1fr;
   }
 

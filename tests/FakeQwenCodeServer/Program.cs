@@ -405,9 +405,25 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
           steps = new[] { new { title = "Confirm the Host accepted the plan", dependsOn = Array.Empty<int>() } }
         }
       );
+      var action = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "--version" },
+          workingDirectory = ".",
+          timeoutSeconds = 30,
+          stepId = AcceptedPlanStepId(plan)
+        }
+      );
       await WriteMarkerAsync(
         "fake-qwen-host-plan.json",
-        new { succeeded = plan.Succeeded, output = plan.Output }
+        new
+        {
+          succeeded = plan.Succeeded && action.Succeeded,
+          plan = new { succeeded = plan.Succeeded, output = plan.Output },
+          action = new { succeeded = action.Succeeded, output = action.Output }
+        }
       );
       await CompleteAsync(session, promptId);
       return Results.Empty;
@@ -529,6 +545,23 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
       promptId,
       stopReason = "end_turn"
     });
+    return Results.Empty;
+  }
+  if (
+    string.Equals(session.Model, "unused:latest", StringComparison.Ordinal)
+    && text.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+  )
+  {
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "agent_thought_chunk",
+      content = new { type = "text", text = "Qwen benchmark read remains in progress." }
+    });
+    return Results.Empty;
+  }
+  if (text.Contains("Benchmark test: FS-", StringComparison.Ordinal))
+  {
+    await CompleteBenchmarkAsync(session, promptId, text);
     return Results.Empty;
   }
   await CompleteAsync(session, promptId);
@@ -661,6 +694,144 @@ async Task CompleteAsync(FakeSession session, string promptId)
   });
 }
 
+async Task CompleteBenchmarkAsync(FakeSession session, string promptId, string request)
+{
+  var report = "Benchmark completed.";
+  if (request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal))
+  {
+    await RunBenchmarkToolAsync(
+      session,
+      "qwen-benchmark-read-primary",
+      "read_file",
+      new { path = "fixture/read-primary.txt" },
+      "fixture/read-primary.txt"
+    );
+    await RunBenchmarkToolAsync(
+      session,
+      "qwen-benchmark-read-secondary",
+      "read_file",
+      new { path = "fixture/read-secondary.txt" },
+      "fixture/read-secondary.txt"
+    );
+    report = "codename=ORBIT-41\nverification-word=marigold";
+  }
+  else if (request.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal))
+  {
+    await RunBenchmarkToolAsync(
+      session,
+      "qwen-benchmark-update",
+      "replace_text",
+      new
+      {
+        path = "fixture/update.txt",
+        oldText = "retries=2",
+        newText = "retries=3",
+        replaceAll = false
+      },
+      "fixture/update.txt"
+    );
+  }
+  else if (request.Contains("Benchmark test: FS-DELETE-001", StringComparison.Ordinal))
+  {
+    await RunBenchmarkToolAsync(
+      session,
+      "qwen-benchmark-delete",
+      "delete_paths",
+      new { paths = new[] { "fixture/delete.txt" }, recursive = false },
+      "fixture/delete.txt"
+    );
+  }
+  else
+  {
+    await RunBenchmarkToolAsync(
+      session,
+      "qwen-benchmark-create",
+      "create_files",
+      new
+      {
+        files = new[]
+        {
+          new
+          {
+            path = "benchmark-data/result.txt",
+            content = "Agentic Router Benchmark\noperation=create\nresult=success"
+          }
+        }
+      },
+      "benchmark-data/result.txt"
+    );
+  }
+
+  await EmitSessionUpdateAsync(session, new
+  {
+    sessionUpdate = "agent_message_chunk",
+    content = new { type = "text", text = report }
+  });
+  await EmitAsync(session, "turn_complete", new
+  {
+    sessionId = session.Id,
+    promptId,
+    stopReason = "end_turn"
+  });
+}
+
+async Task RunBenchmarkToolAsync(
+  FakeSession session,
+  string toolCallId,
+  string tool,
+  object arguments,
+  string path
+)
+{
+  await EmitSessionUpdateAsync(session, new
+  {
+    sessionUpdate = "tool_call",
+    toolCallId,
+    title = $"Benchmark {tool}",
+    kind = tool == "read_file" ? "read" : "edit",
+    status = "in_progress",
+    rawInput = arguments,
+    locations = new[] { new { path, line = 1 } },
+    _meta = new { toolName = tool }
+  });
+  McpToolResult result;
+  if (tool == "read_file")
+  {
+    result = new McpToolResult(
+      true,
+      await File.ReadAllTextAsync(Path.Combine(session.Cwd, path))
+    );
+  }
+  else if (tool == "replace_text")
+  {
+    var fullPath = Path.Combine(session.Cwd, path);
+    var content = await File.ReadAllTextAsync(fullPath);
+    await File.WriteAllTextAsync(
+      fullPath,
+      content.Replace("retries=2", "retries=3", StringComparison.Ordinal)
+    );
+    result = new McpToolResult(true, "Replaced benchmark text.");
+  }
+  else
+  {
+    result = await InvokeHostToolAsync(tool, arguments);
+  }
+  await EmitSessionUpdateAsync(session, new
+  {
+    sessionUpdate = "tool_call_update",
+    toolCallId,
+    title = $"Benchmark {tool}",
+    kind = tool == "read_file" ? "read" : "edit",
+    status = result.Succeeded ? "completed" : "failed",
+    rawOutput = result.Output,
+    _meta = new { toolName = tool }
+  });
+  if (!result.Succeeded)
+  {
+    throw new InvalidOperationException(result.Output);
+  }
+}
+
 async Task CompleteStormAsync(FakeSession session, string promptId)
 {
   for (var index = 0; index < 600; index++)
@@ -744,6 +915,26 @@ async Task WriteMarkerAsync(string name, object value)
   );
 }
 
+string AcceptedPlanStepId(McpToolResult plan)
+{
+  if (!plan.Succeeded)
+  {
+    throw new InvalidOperationException(plan.Output);
+  }
+  var jsonStart = plan.Output.IndexOf('{');
+  if (jsonStart < 0)
+  {
+    throw new InvalidOperationException("The accepted Host plan omitted its JSON payload.");
+  }
+  using var document = JsonDocument.Parse(plan.Output[jsonStart..]);
+  var steps = document.RootElement.TryGetProperty("steps", out var camelSteps)
+    ? camelSteps
+    : document.RootElement.GetProperty("Steps");
+  var first = steps[0];
+  return (first.TryGetProperty("id", out var camelId) ? camelId : first.GetProperty("Id")).GetString()
+    ?? throw new InvalidOperationException("The accepted Host plan omitted its first step ID.");
+}
+
 async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
 {
   var qwenHome = Environment.GetEnvironmentVariable("QWEN_HOME")
@@ -777,11 +968,21 @@ async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
     throw new InvalidOperationException("Agentic Router MCP resources/list was not compatible.");
   }
   using var tools = await SendMcpAsync(client, endpoint, 4, "tools/list", new { });
-  if (!tools.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray().Any(
-    candidate => string.Equals(candidate.GetProperty("name").GetString(), tool, StringComparison.Ordinal)
-  ))
+  var advertised = tools.RootElement.GetProperty("result").GetProperty("tools")
+    .EnumerateArray().FirstOrDefault(
+      candidate => string.Equals(candidate.GetProperty("name").GetString(), tool, StringComparison.Ordinal)
+    );
+  if (advertised.ValueKind == JsonValueKind.Undefined)
   {
     throw new InvalidOperationException($"Agentic Router MCP tool '{tool}' was not advertised.");
+  }
+  var serializedArguments = JsonSerializer.SerializeToElement(arguments);
+  if (
+    serializedArguments.TryGetProperty("stepId", out _)
+    && !advertised.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("stepId", out _)
+  )
+  {
+    throw new InvalidOperationException($"Agentic Router MCP tool '{tool}' omitted its plan step binding schema.");
   }
   using var response = await SendMcpAsync(client, endpoint, 5, "tools/call", new
   {

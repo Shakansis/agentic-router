@@ -112,7 +112,11 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   )
   {
     var requested = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
-    return ToolDefinitions.Where(tool => requested.Contains(tool.Name)).ToArray();
+    return ToolDefinitions.Where(tool => requested.Contains(tool.Name))
+      .Select(tool => tool.Name is "create_execution_plan" or "revise_execution_plan"
+        ? tool
+        : AddPlanStepBinding(tool, required: false))
+      .ToArray();
   }
 
   private static readonly CanonicalToolDefinition RequestToolsetDefinition =
@@ -957,7 +961,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   }
 
   private static CanonicalToolDefinition AddPlanStepBinding(
-    CanonicalToolDefinition definition
+    CanonicalToolDefinition definition,
+    bool required = true
   )
   {
     var parameters = JsonNode.Parse(
@@ -966,12 +971,16 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     parameters["properties"]!.AsObject()["stepId"] = new JsonObject
     {
       ["type"] = "string",
-      ["description"] = "Exact Host-owned ID of the accepted plan step this action advances."
+      ["description"] = required
+        ? "Exact Host-owned ID of the accepted plan step this action advances."
+        : "When the Host has returned an accepted plan, the exact Host-owned ID of the pending plan step this action advances. Omit only while no accepted plan exists."
     };
-    var required = parameters["required"]!.AsArray();
-    required.Add(
-      "stepId"
-    );
+    if (required)
+    {
+      parameters["required"]!.AsArray().Add(
+        "stepId"
+      );
+    }
     return definition with
     {
       Parameters = JsonSerializer.SerializeToElement(

@@ -293,6 +293,12 @@ builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemDeleteBenchmar
 builder.Services.AddSingleton<IBenchmarkTestRegistry, BenchmarkTestRegistry>();
 builder.Services.AddScoped<IBenchmarkNativeExecutor, BenchmarkNativeExecutor>();
 builder.Services.AddSingleton<IBenchmarkScorer, BenchmarkScorer>();
+builder.Services.AddSingleton<IBenchmarkScoringProfileStore>(services =>
+  new JsonBenchmarkScoringProfileStore(
+    dataDirectory,
+    services.GetRequiredService<IBenchmarkScorer>()
+  )
+);
 builder.Services.AddSingleton<IBenchmarkResultStore>(
   new JsonBenchmarkResultStore(dataDirectory)
 );

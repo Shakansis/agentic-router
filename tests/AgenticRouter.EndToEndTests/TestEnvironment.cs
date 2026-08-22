@@ -552,6 +552,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
     await RestartApplicationAsync();
   }
 
+  public async Task SetQwenCodeExecutableAndRestartAsync(
+    string executablePath
+  )
+  {
+    _apiProcess.StartInfo.Environment[
+      "AgenticRouter__QwenCode__ExecutablePath"
+    ] = executablePath;
+    await RestartApplicationAsync();
+  }
+
   public async Task UseManagedCodexInstallAndRestartAsync()
   {
     var managedRoot = Path.Combine(
