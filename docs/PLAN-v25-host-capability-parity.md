@@ -40,6 +40,7 @@ Make every supported ACT harness consume one Host-authoritative capability profi
 - The same mutations remain pending until approval under ask policy.
 - No adapter can bypass Host path/process/Git policy through a native permission shortcut.
 - Capability discovery never claims an operation that the active adapter cannot safely execute.
+- A denied native action produces a visible Host correction and leaves the harness turn alive for a materially different safe proposal; only exhausted or irrecoverable conditions terminate the objective.
 - Deterministic parity tests pass through the real browser/API path.
 
 ## Implemented classification
@@ -62,5 +63,5 @@ OpenCode and Qwen therefore receive the same Host-derived profile and a truthful
 
 - `dotnet format AgenticRouter.slnx --verify-no-changes --no-restore`: passed outside the filesystem sandbox because the Roslyn build host requires a named pipe.
 - `dotnet build AgenticRouter.slnx -c Release`: passed with zero warnings and zero errors.
-- Full deterministic Playwright E2E: 246 passed, zero failed, zero skipped; providers and harness executables were fake.
+- Full deterministic Playwright E2E: 248 passed, zero failed, zero skipped; providers and harness executables were fake.
 - Real Ollama/manual real-UI smoke: not run because explicit permission is required.

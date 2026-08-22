@@ -111,17 +111,23 @@ while (await Console.In.ReadLineAsync() is { } line)
         var dynamicToolNames = dynamicTools.EnumerateArray()
           .Select(tool => tool.GetProperty("name").GetString())
           .ToArray();
+        var uniqueDynamicTools = dynamicToolNames.Distinct(StringComparer.Ordinal).ToArray();
+        var fullProjection = new[]
+        {
+          "create_files",
+          "delete_paths",
+          "run_process",
+          "git_status",
+          "git_create_commit"
+        }.All(expected => dynamicToolNames.Contains(expected, StringComparer.Ordinal));
+        var benchmarkProjection = uniqueDynamicTools.Order(StringComparer.Ordinal).SequenceEqual(
+          new[] { "create_files", "delete_paths" }.Order(StringComparer.Ordinal),
+          StringComparer.Ordinal
+        );
         if (dynamicToolNames.Length > 0
           && (
-            dynamicToolNames.Distinct(StringComparer.Ordinal).Count() != dynamicToolNames.Length
-            || !new[]
-            {
-              "create_files",
-              "delete_paths",
-              "run_process",
-              "git_status",
-              "git_create_commit"
-            }.All(expected => dynamicToolNames.Contains(expected, StringComparer.Ordinal))
+            uniqueDynamicTools.Length != dynamicToolNames.Length
+            || (!fullProjection && !benchmarkProjection)
           ))
         {
           await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the projected Agentic Router Host capability tools." } });
@@ -564,9 +570,38 @@ async Task RunTurnAsync(
       });
     }
 
-    if (currentRequest.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))
+    if (
+      currentRequest.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+      && model is "unused:latest" or "docs:latest"
+    )
     {
-      await PrepareBenchmarkOutcomeAsync(cwd, model, cancellationToken);
+      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+    }
+    if (
+      currentRequest.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal)
+      && string.Equals(model, "structured-failure:latest", StringComparison.Ordinal)
+    )
+    {
+      turns.TryRemove(turnId, out _);
+      await SendAsync(new
+      {
+        method = "turn/completed",
+        @params = new
+        {
+          threadId,
+          turn = new
+          {
+            id = turnId,
+            status = "failed",
+            error = new { codexErrorInfo = new { type = "fake-benchmark-failure" } }
+          }
+        }
+      });
+      return;
+    }
+    if (currentRequest.Contains("Benchmark test: FS-", StringComparison.Ordinal))
+    {
+      await PrepareBenchmarkOutcomeAsync(cwd, model, currentRequest, cancellationToken);
       await SendAsync(new
       {
         method = "turn/diff/updated",
@@ -594,9 +629,14 @@ async Task RunTurnAsync(
         item = new { type = "commandExecution", id = itemId, command, cwd, status = "completed", aggregatedOutput = "fake output\n", exitCode = 0, durationMs = 5 }
       }
     });
-    await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = "Codex streamed " } });
+    var finalReport = currentRequest.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+      ? string.Equals(model, "beta:code", StringComparison.Ordinal)
+        ? "codename=ORBIT-41"
+        : "codename=ORBIT-41\nverification-word=marigold"
+      : $"Codex streamed with {model} on {threadId}. Ação concluída.";
+    await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = finalReport[..Math.Min(finalReport.Length, 20)] } });
     await Task.Delay(200, cancellationToken);
-    await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = $"with {model} on {threadId}. Ação concluída." } });
+    await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = finalReport[Math.Min(finalReport.Length, 20)..] } });
     turns.TryRemove(turnId, out _);
     await SendAsync(new
     {
@@ -632,9 +672,33 @@ string CurrentUserRequest(string input)
 async Task PrepareBenchmarkOutcomeAsync(
   string cwd,
   string model,
+  string request,
   CancellationToken cancellationToken
 )
 {
+  if (request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal))
+  {
+    return;
+  }
+  if (request.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal))
+  {
+    var updatePath = Path.Combine(cwd, "fixture", "update.txt");
+    var content = string.Equals(model, "beta:code", StringComparison.Ordinal)
+      ? "mode=preview\nretries=4\nowner=router\n"
+      : "mode=preview\nretries=3\nowner=router\n";
+    await File.WriteAllTextAsync(updatePath, content, cancellationToken);
+    return;
+  }
+  if (request.Contains("Benchmark test: FS-DELETE-001", StringComparison.Ordinal))
+  {
+    var deletePath = Path.Combine(cwd, "fixture", "delete.txt");
+    if (!string.Equals(model, "beta:code", StringComparison.Ordinal))
+    {
+      File.Delete(deletePath);
+    }
+    return;
+  }
+
   const string expected = "Agentic Router Benchmark\noperation=create\nresult=success";
   var expectedDirectory = Path.Combine(cwd, "benchmark-data");
   var expectedPath = Path.Combine(expectedDirectory, "result.txt");

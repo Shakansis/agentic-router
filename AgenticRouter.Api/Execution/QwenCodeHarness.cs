@@ -62,10 +62,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
   private readonly QwenCodeHarnessOptions _options;
   private readonly IHttpClientFactory _httpClients;
+  private readonly HarnessMcpHostBridge _hostTools;
   private readonly ILogger<QwenCodeHarnessAdapter> _logger;
   private readonly SemaphoreSlim _availabilityGate = new(1, 1);
   private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
   private readonly SemaphoreSlim _turnGate = new(1, 1);
+  private readonly object _processOutputGate = new();
+  private readonly Queue<string> _recentProcessOutput = new();
   private readonly ConcurrentDictionary<string, QwenSession> _sessions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, PendingPermission> _permissions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, ActiveTurn> _activeTurns = new(StringComparer.Ordinal);
@@ -79,11 +82,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   public QwenCodeHarnessAdapter(
     QwenCodeHarnessOptions options,
     IHttpClientFactory httpClients,
+    HarnessMcpHostBridge hostTools,
     ILogger<QwenCodeHarnessAdapter> logger
   )
   {
     _options = options;
     _httpClients = httpClients;
+    _hostTools = hostTools;
     _logger = logger;
   }
 
@@ -162,6 +167,11 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     ActiveTurn? active = null;
     try
     {
+      var bridge = await _hostTools.ConfigureClientAsync(
+        HarnessIds.QwenCode,
+        MaximumHostBridgeTools(HarnessIds.QwenCode),
+        cancellationToken
+      );
       await EnsureStartedAsync(
         request.ProviderEndpoint!,
         request.Model,
@@ -171,6 +181,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             "Qwen Code requires a Host-resolved context window."
           ),
         request.WorkingDirectory,
+        bridge,
         cancellationToken
       );
       var session = await GetOrCreateSessionAsync(request, cancellationToken);
@@ -182,7 +193,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           :
           [
             $"Agentic Router common capabilities implemented by Qwen native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode))}.",
-            $"Unavailable adapter capabilities for this installed Qwen protocol: {string.Join(", ", HarnessCapabilityProjection.MissingAdapterTools(HarnessIds.QwenCode, request.HostCapabilities))}. Do not claim or attempt disabled operations.",
+            $"Agentic Router common capabilities supplied through the Host bridge: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.QwenCode, request.HostCapabilities))}.",
+            "Qwen registers each Host bridge capability as a deferred MCP tool named mcp__agentic_router__<canonical-name>. If a required Host capability is not already declared, resolve its exact fully-qualified name once with tool_search before reporting it unavailable. For example, resolve delete_paths with select:mcp__agentic_router__delete_paths and run_process with select:mcp__agentic_router__run_process.",
             $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}."
           ]
       );
@@ -230,6 +242,15 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
       active.PromptId = RequiredString(prompt, "promptId");
       var baselineEventId = Long(prompt, "lastEventId") ?? 0;
+      using var hostTurn = _hostTools.BeginTurn(
+        HarnessIds.QwenCode,
+        session.SessionId,
+        active.PromptId,
+        request.HostCapabilities ?? throw Failure(
+          "qwen-code-host-profile-missing",
+          "Qwen Code requires the Agentic Router Host capability profile."
+        )
+      );
 
       await using var stream = await eventsResponse.Content.ReadAsStreamAsync(cancellationToken);
       using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
@@ -239,9 +260,22 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       var textDeltas = new TextDeltaCoalescer();
       var assistantCharacters = 0;
       var nativeDiagnostics = 0;
+      Task<string?>? lineRead = null;
+      Task<HarnessEvent>? hostToolRead = null;
       while (true)
       {
-        var line = await ReadEventLineAsync(reader, cancellationToken);
+        lineRead ??= ReadEventLineAsync(reader, cancellationToken);
+        hostToolRead ??= hostTurn.Events.ReadAsync(cancellationToken).AsTask();
+        var next = await Task.WhenAny(lineRead, hostToolRead);
+        if (ReferenceEquals(next, hostToolRead))
+        {
+          var hostToolEvent = await hostToolRead;
+          hostToolRead = null;
+          yield return hostToolEvent;
+          continue;
+        }
+        var line = await lineRead;
+        lineRead = null;
         if (line is null)
         {
           throw Failure(
@@ -518,9 +552,12 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     CancellationToken cancellationToken
   )
   {
-    throw Failure(
-      "qwen-code-host-tools-unsupported",
-      "Qwen Code does not expose Agentic Router dynamic Host tools."
+    return _hostTools.ResolveToolCallAsync(
+      HarnessIds.QwenCode,
+      toolCallId,
+      succeeded,
+      output,
+      cancellationToken
     );
   }
 
@@ -689,15 +726,19 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       rejectOnce
     );
     var paths = Paths(toolCall);
+    var tool = ToolName(toolCall);
+    var readOnlyPermission = allowOnce is not null && IsReadOnlyPermission(tool);
+    var approvalCanBeMapped = !readOnlyPermission && allowOnce is not null && paths.Count > 0;
     return Event(
       "approval.requested",
       active,
       message: String(toolCall, "title") ?? "Qwen Code requests workspace permission.",
-      tool: ToolName(toolCall),
+      tool: tool,
       approvalId: requestId,
-      approvalCanBeMapped: allowOnce is not null,
+      approvalCanBeMapped: approvalCanBeMapped,
       destructive: string.Equals(String(toolCall, "kind"), "delete", StringComparison.Ordinal),
       paths: paths,
+      readOnlyPermission: readOnlyPermission,
       native: payload
     );
   }
@@ -707,6 +748,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     string model,
     int contextWindowTokens,
     string workingDirectory,
+    HarnessMcpClientConfiguration bridge,
     CancellationToken cancellationToken
   )
   {
@@ -724,6 +766,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         ollamaEndpoint,
         model,
         contextWindowTokens,
+        bridge,
         cancellationToken
       );
       var port = ReservePort();
@@ -734,7 +777,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       foreach (var argument in new[]
       {
         "serve",
-        "--safe-mode",
         "--no-chat-recording",
         "--port", port.ToString(System.Globalization.CultureInfo.InvariantCulture),
         "--hostname", "127.0.0.1",
@@ -751,8 +793,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       {
         startInfo.ArgumentList.Add(argument);
       }
-      SetRuntimeEnvironment(startInfo, _token);
+      SetRuntimeEnvironment(startInfo, _token, bridge.AuthorizationToken);
       var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+      ClearProcessOutput();
       if (!process.Start())
       {
         throw new InvalidOperationException("Process.Start returned false.");
@@ -793,7 +836,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     {
       if (_process is null || _process.HasExited)
       {
-        throw Failure("qwen-code-daemon-exited", "Qwen Code exited during startup.");
+        var diagnostic = RecentProcessOutput();
+        throw Failure(
+          "qwen-code-daemon-exited",
+          string.IsNullOrWhiteSpace(diagnostic)
+            ? "Qwen Code exited during startup."
+            : $"Qwen Code exited during startup. {diagnostic}"
+        );
       }
       try
       {
@@ -858,10 +907,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       return existing;
     }
     var requestedClientId = $"agentic-router-{Guid.NewGuid():N}";
-    var created = await SendAsync(
-      HttpMethod.Post,
-      "session",
-      new { cwd = Path.GetFullPath(request.WorkingDirectory), sessionScope = "thread" },
+    var created = await CreateSessionAsync(
+      request.WorkingDirectory,
       requestedClientId,
       cancellationToken
     );
@@ -913,17 +960,88 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     return session;
   }
 
+  private async Task<JsonElement> CreateSessionAsync(
+    string workingDirectory,
+    string requestedClientId,
+    CancellationToken cancellationToken
+  )
+  {
+    var deadline = DateTimeOffset.UtcNow + _options.StartupTimeout;
+    var delay = TimeSpan.FromMilliseconds(100);
+    var attempt = 0;
+    while (true)
+    {
+      attempt++;
+      using var request = CreateRequest(HttpMethod.Post, "session", requestedClientId);
+      request.Content = new StringContent(
+        JsonSerializer.Serialize(new
+        {
+          cwd = Path.GetFullPath(workingDirectory),
+          sessionScope = "thread"
+        }),
+        Encoding.UTF8,
+        "application/json"
+      );
+      using var response = await Client().SendAsync(request, cancellationToken);
+      var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+      if (response.IsSuccessStatusCode)
+      {
+        using var document = JsonDocument.Parse(bytes);
+        return document.RootElement.Clone();
+      }
+      var body = Truncate(Encoding.UTF8.GetString(bytes));
+      var runtimeStarting = response.StatusCode == HttpStatusCode.ServiceUnavailable
+        && body.Contains("\"code\":\"daemon_runtime_starting\"", StringComparison.Ordinal);
+      if (!runtimeStarting)
+      {
+        throw Failure(
+          "qwen-code-http",
+          $"Qwen Code returned HTTP {(int)response.StatusCode} ({response.StatusCode}). {body}"
+        );
+      }
+      if (DateTimeOffset.UtcNow + delay > deadline)
+      {
+        throw Failure(
+          "qwen-code-daemon-runtime-start-timeout",
+          "Qwen Code did not finish starting its workspace runtime before the startup timeout."
+        );
+      }
+      _logger.LogInformation(
+        "Qwen Code workspace runtime is still starting; retrying session creation after {DelayMilliseconds} ms (attempt {Attempt}).",
+        delay.TotalMilliseconds,
+        attempt
+      );
+      await Task.Delay(delay, cancellationToken);
+      delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 500));
+    }
+  }
+
   private async Task WriteConfigurationAsync(
     Uri endpoint,
     string model,
     int contextWindowTokens,
+    HarnessMcpClientConfiguration bridge,
     CancellationToken cancellationToken
   )
   {
     Directory.CreateDirectory(_options.RuntimeDirectory);
     var path = Path.Combine(_options.RuntimeDirectory, "settings.json");
+    var hostMcpServer = new
+    {
+      httpUrl = bridge.Endpoint.AbsoluteUri,
+      headers = new Dictionary<string, string>
+      {
+        ["Authorization"] = $"Bearer ${{{bridge.AuthorizationEnvironmentVariable}}}"
+      },
+      timeout = (long)_options.RequestTimeout.TotalMilliseconds,
+      trust = true,
+      includeTools = MaximumHostBridgeTools(HarnessIds.QwenCode)
+        .Select(tool => tool.Name)
+        .ToArray()
+    };
     var config = new Dictionary<string, object?>
     {
+      ["$version"] = 4,
       ["model"] = new
       {
         name = model,
@@ -957,16 +1075,19 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       },
       ["tools"] = new
       {
-        approvalMode = "default"
-      },
-      ["coreTools"] = new[]
-      {
-        "list_directory",
-        "read_file",
-        "glob",
-        "grep_search",
-        "edit",
-        "write_file"
+        approvalMode = "default",
+        core = new[]
+        {
+          "list_directory",
+          "read_file",
+          "glob",
+          "grep_search",
+          "edit",
+          "write_file",
+          "web_fetch",
+          "web_search",
+          "todo_write"
+        }
       },
       ["permissions"] = new
       {
@@ -975,8 +1096,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           "run_shell_command",
           "agent",
           "skill",
-          "web_fetch",
-          "web_search",
           "image_gen",
           "save_memory",
           "ask_user_question",
@@ -1004,7 +1123,15 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         enableTeamMemorySync = false
       },
       ["disableAllHooks"] = true,
-      ["mcpServers"] = new Dictionary<string, object>()
+      ["mcp"] = new
+      {
+        allowed = new[] { "agentic_router" },
+        excluded = Array.Empty<string>()
+      },
+      ["mcpServers"] = new Dictionary<string, object>
+      {
+        ["agentic_router"] = hostMcpServer
+      }
     };
     var content = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
     var temporary = path + ".tmp";
@@ -1156,20 +1283,45 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     {
       info.ArgumentList.Add(command.ScriptPath);
     }
-    SetRuntimeEnvironment(info, null);
+    SetRuntimeEnvironment(info, null, null);
     return info;
   }
 
-  private void SetRuntimeEnvironment(ProcessStartInfo info, string? token)
+  private void SetRuntimeEnvironment(
+    ProcessStartInfo info,
+    string? token,
+    string? hostBridgeToken
+  )
   {
     info.Environment["QWEN_HOME"] = _options.RuntimeDirectory;
+    info.Environment["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = Path.Combine(
+      _options.RuntimeDirectory,
+      "settings.json"
+    );
     info.Environment["OLLAMA_API_KEY"] = "ollama";
     info.Environment["NO_COLOR"] = "1";
     info.Environment["QWEN_CODE_NO_UPDATE_NOTIFIER"] = "1";
+    if (hostBridgeToken is not null)
+    {
+      info.Environment[HarnessMcpHostBridge.AuthorizationEnvironmentVariable] = hostBridgeToken;
+    }
     if (token is not null)
     {
       info.Environment["QWEN_SERVER_TOKEN"] = token;
     }
+  }
+
+  private static IReadOnlyList<CanonicalToolDefinition> MaximumHostBridgeTools(
+    string harnessId
+  )
+  {
+    var maximum = HostCapabilityProfile.Create(
+      ExecutionTurnToolPolicy.Resolve(string.Empty, validationProfileAvailable: true),
+      "auto"
+    );
+    return LocalActionPlanner.GetToolDefinitions(
+      HarnessCapabilityProjection.HostBridgeTools(harnessId, maximum)
+    );
   }
 
   private async Task StopOwnedProcessAsync()
@@ -1326,14 +1478,39 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   {
     try
     {
-      while (!process.HasExited && await reader.ReadLineAsync() is { } line)
+      while (await reader.ReadLineAsync() is { } line)
       {
-        _logger.LogDebug("Qwen Code {Stream}: {Line}", stream, Truncate(line));
+        var sanitized = Truncate(line);
+        lock (_processOutputGate)
+        {
+          _recentProcessOutput.Enqueue($"{stream}: {sanitized}");
+          while (_recentProcessOutput.Count > 8)
+          {
+            _recentProcessOutput.Dequeue();
+          }
+        }
+        _logger.LogDebug("Qwen Code {Stream}: {Line}", stream, sanitized);
       }
     }
     catch (Exception exception) when (exception is IOException or InvalidOperationException)
     {
       _logger.LogDebug(exception, "Qwen Code {Stream} drain ended.", stream);
+    }
+  }
+
+  private void ClearProcessOutput()
+  {
+    lock (_processOutputGate)
+    {
+      _recentProcessOutput.Clear();
+    }
+  }
+
+  private string RecentProcessOutput()
+  {
+    lock (_processOutputGate)
+    {
+      return Truncate(string.Join(" | ", _recentProcessOutput));
     }
   }
 
@@ -1353,7 +1530,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     IReadOnlyList<string>? paths = null,
     HarnessTerminalState? terminal = null,
     JsonElement? native = null,
-    long? contextInputTokens = null
+    long? contextInputTokens = null,
+    bool readOnlyPermission = false
   )
   {
     return new HarnessEvent(
@@ -1374,7 +1552,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       turnId: active.PromptId,
       terminalState: terminal,
       nativePayload: native?.Clone(),
-      contextInputTokens: contextInputTokens
+      contextInputTokens: contextInputTokens,
+      readOnlyPermission: readOnlyPermission
     );
   }
 
@@ -1407,6 +1586,12 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       ?? String(value, "title")
       ?? String(value, "kind")
       ?? "qwen_code_tool";
+  }
+
+  private static bool IsReadOnlyPermission(string tool)
+  {
+    return tool is "list_directory" or "read_file" or "glob" or "grep_search"
+      or "web_fetch" or "web_search" or "computer_use__list_apps";
   }
 
   private static string? ContentText(JsonElement value)

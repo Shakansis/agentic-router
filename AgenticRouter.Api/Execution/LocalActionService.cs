@@ -898,30 +898,6 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
-    if (creationResolution?.RebasedToWorkspace == true)
-    {
-      var effectivePath = relativePath.Replace(
-        Path.DirectorySeparatorChar,
-        '/'
-      );
-      var originalPath = creationResolution.OriginalPath ?? string.Empty;
-      proposal = proposal with
-      {
-        Arguments = ReplaceStringArgument(
-          proposal.Arguments,
-          "path",
-          effectivePath
-        )
-      };
-      corrections.Add(
-        new LocalActionCorrection(
-          "path",
-          originalPath,
-          effectivePath,
-          "The relative traversal would leave the trusted workspace, so the Host rebased the creation inside its root."
-        )
-      );
-    }
     ValidateWorkspaceRootAlias(
       proposal,
       relativePath,
@@ -1379,18 +1355,6 @@ public sealed class LocalActionService : ILocalActionService
       }
 
       var effectivePath = relative.Replace(Path.DirectorySeparatorChar, '/');
-      if (resolution.RebasedToWorkspace)
-      {
-        corrections.Add(
-          new LocalActionCorrection(
-            $"files[{normalized.Count}].path",
-            resolution.OriginalPath ?? path,
-            effectivePath,
-            "The relative traversal would leave the trusted workspace, so the Host rebased the creation inside its root."
-          )
-        );
-      }
-
       var protectedInstructionFile = IsProtectedInstructionFile(relative);
       if (
         protectedInstructionFile

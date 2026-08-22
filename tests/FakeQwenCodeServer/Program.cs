@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -8,7 +10,9 @@ if (args.Contains("--version", StringComparer.Ordinal))
   return;
 }
 
-if (args.Length == 0 || !string.Equals(args[0], "serve", StringComparison.Ordinal))
+var serveIndex = Array.IndexOf(args, "serve");
+var mcpConfigIndex = Array.IndexOf(args, "--mcp-config");
+if (serveIndex != 0 || mcpConfigIndex >= 0 || args.Contains("--safe-mode", StringComparer.Ordinal))
 {
   Environment.ExitCode = 2;
   return;
@@ -30,6 +34,7 @@ var app = builder.Build();
 var sessions = new ConcurrentDictionary<string, FakeSession>(StringComparer.Ordinal);
 var permissions = new ConcurrentDictionary<string, PendingPermission>(StringComparer.Ordinal);
 var sessionNumber = 0;
+var startupResponsesRemaining = 1;
 
 app.Use(async (context, next) =>
 {
@@ -73,6 +78,13 @@ app.MapGet("/capabilities", () => Results.Json(new
 
 app.MapPost("/session", async (HttpContext context) =>
 {
+  if (Interlocked.Exchange(ref startupResponsesRemaining, 0) == 1)
+  {
+    return Results.Json(
+      new { error = "Daemon runtime is still starting", code = "daemon_runtime_starting" },
+      statusCode: StatusCodes.Status503ServiceUnavailable
+    );
+  }
   var settingsPath = Path.Combine(runtime, "settings.json");
   using var settings = JsonDocument.Parse(await File.ReadAllTextAsync(settingsPath));
   var selectedAuthType = settings.RootElement
@@ -135,7 +147,8 @@ app.MapPost("/session", async (HttpContext context) =>
     providerEnvKey,
     providerCredentialConfigured,
     args,
-    qwenHome = runtime
+    qwenHome = runtime,
+    systemSettingsPath = Environment.GetEnvironmentVariable("QWEN_CODE_SYSTEM_SETTINGS_PATH")
   });
   await WriteMarkerAsync("fake-qwen-model.json", new
   {
@@ -332,25 +345,158 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   if (text.Contains("permission qwen code", StringComparison.Ordinal))
   {
     const string requestId = "qwen-permission-1";
-    permissions[requestId] = new PendingPermission(sessionId, promptId);
+    var unmappableNativeExtra = text.Contains(
+      "unmappable permission qwen code",
+      StringComparison.Ordinal
+    );
+    var outsideWorkspace = text.Contains(
+      "outside permission qwen code",
+      StringComparison.Ordinal
+    );
+    permissions[requestId] = new PendingPermission(
+      sessionId,
+      promptId,
+      unmappableNativeExtra || outsideWorkspace
+    );
     await EmitAsync(session, "permission_request", new
     {
       requestId,
       sessionId,
-      toolCall = new
-      {
-        toolCallId = "qwen-edit-permission",
-        title = "Edit README.md",
-        kind = "edit",
-        locations = new[] { new { path = "README.md", line = 1 } },
-        _meta = new { toolName = "edit" }
-      },
+      toolCall = unmappableNativeExtra
+        ? (object)new
+        {
+          toolCallId = "qwen-computer-use-permission",
+          title = "List Windows applications",
+          kind = "other",
+          _meta = new { toolName = "computer_use__list_apps" }
+        }
+        : new
+        {
+          toolCallId = "qwen-edit-permission",
+          title = "Edit README.md",
+          kind = "edit",
+          locations = new[]
+          {
+            new
+            {
+              path = outsideWorkspace ? "../outside.txt" : "README.md",
+              line = 1
+            }
+          },
+          _meta = new { toolName = "edit" }
+        },
       options = new[]
       {
         new { optionId = "proceed_once", name = "Allow once", kind = "allow_once" },
         new { optionId = "reject_once", name = "Reject", kind = "reject_once" }
       }
     });
+    return Results.Empty;
+  }
+  if (text.Contains("host bridge qwen code", StringComparison.Ordinal))
+  {
+    if (text.Contains("plan host bridge qwen code", StringComparison.Ordinal))
+    {
+      var plan = await InvokeHostToolAsync(
+        "create_execution_plan",
+        new
+        {
+          objective = "Prove Qwen Code plan bridging",
+          steps = new[] { new { title = "Confirm the Host accepted the plan", dependsOn = Array.Empty<int>() } }
+        }
+      );
+      await WriteMarkerAsync(
+        "fake-qwen-host-plan.json",
+        new { succeeded = plan.Succeeded, output = plan.Output }
+      );
+      await CompleteAsync(session, promptId);
+      return Results.Empty;
+    }
+    if (text.Contains("boundary host bridge qwen code", StringComparison.Ordinal))
+    {
+      var rejected = await InvokeHostToolAsync(
+        "create_files",
+        new
+        {
+          files = new[] { new { path = "../qwen-escape.txt", content = "must not escape" } }
+        }
+      );
+      var recovered = await InvokeHostToolAsync(
+        "create_files",
+        new
+        {
+          files = new[] { new { path = "qwen-recovered.txt", content = "recovered safely" } }
+        }
+      );
+      await WriteMarkerAsync("fake-qwen-host-boundary.json", new
+      {
+        rejected = new { rejected.Succeeded, rejected.Output },
+        recovered = new { recovered.Succeeded, recovered.Output }
+      });
+      await CompleteAsync(session, promptId);
+      return Results.Empty;
+    }
+    if (text.Contains("parity host bridge qwen code", StringComparison.Ordinal))
+    {
+      var steps = new List<McpStepResult>();
+      await RunHostStepAsync(steps, "create_directory", new { path = "qwen-parity" });
+      await RunHostStepAsync(steps, "create_files", new
+      {
+        files = new[] { new { path = "qwen-parity/item.txt", content = "parity" } }
+      });
+      await RunHostStepAsync(steps, "get_file_info", new { path = "qwen-parity/item.txt" });
+      await RunHostStepAsync(steps, "run_process", new
+      {
+        executable = "dotnet",
+        arguments = new[] { "--version" },
+        workingDirectory = ".",
+        timeoutSeconds = 30
+      });
+      await RunHostStepAsync(steps, "git_status", new { });
+      await RunHostStepAsync(steps, "delete_paths", new
+      {
+        paths = new[] { "qwen-parity" },
+        recursive = true
+      });
+      await RunHostStepAsync(steps, "create_files", new
+      {
+        files = new[] { new { path = "qwen-parity-complete.txt", content = "complete" } }
+      });
+      await WriteMarkerAsync("fake-qwen-host-parity.json", new
+      {
+        steps,
+        deleted = !Directory.Exists(Path.Combine(session.Cwd, "qwen-parity")),
+        finalObserved = File.Exists(Path.Combine(session.Cwd, "qwen-parity-complete.txt"))
+      });
+      await CompleteAsync(session, promptId);
+      return Results.Empty;
+    }
+    var relativePath = text.Contains("ask host bridge qwen code", StringComparison.Ordinal)
+      ? "qwen-host-ask.txt"
+      : "qwen-host-auto.txt";
+    var result = await InvokeHostToolAsync(
+      "create_files",
+      new
+      {
+        files = new[]
+        {
+          new
+          {
+            path = relativePath,
+            content = $"Qwen Code Host bridge created {relativePath}."
+          }
+        }
+      }
+    );
+    await WriteMarkerAsync("fake-qwen-host-tool.json", new
+    {
+      tool = "create_files",
+      relativePath,
+      succeeded = result.Succeeded,
+      output = result.Output,
+      observed = File.Exists(Path.Combine(session.Cwd, relativePath))
+    });
+    await CompleteAsync(session, promptId);
     return Results.Empty;
   }
   if (text.Contains("unexpected qwen code", StringComparison.Ordinal))
@@ -411,6 +557,10 @@ app.MapPost("/permission/{requestId}", async (string requestId, HttpContext cont
     outcome = selected ? "selected" : "cancelled"
   });
   if (selected)
+  {
+    await CompleteAsync(session, pending.PromptId);
+  }
+  else if (pending.ContinueAfterRejection)
   {
     await CompleteAsync(session, pending.PromptId);
   }
@@ -594,6 +744,92 @@ async Task WriteMarkerAsync(string name, object value)
   );
 }
 
+async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
+{
+  var qwenHome = Environment.GetEnvironmentVariable("QWEN_HOME")
+    ?? throw new InvalidOperationException("QWEN_HOME was not configured.");
+  using var config = JsonDocument.Parse(
+    await File.ReadAllTextAsync(Path.Combine(qwenHome, "settings.json"))
+  );
+  var endpoint = config.RootElement.GetProperty("mcpServers")
+    .GetProperty("agentic_router").GetProperty("httpUrl").GetString()
+    ?? throw new InvalidOperationException("Agentic Router MCP URL was not configured.");
+  var token = Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_TOKEN")
+    ?? throw new InvalidOperationException("Agentic Router MCP token was not configured.");
+  using var client = new HttpClient();
+  client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+  client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+  await SendMcpAsync(client, endpoint, 1, "initialize", new
+  {
+    protocolVersion = "2025-03-26",
+    capabilities = new { },
+    clientInfo = new { name = "fake-qwen-code", version = "1" }
+  });
+  await SendMcpNotificationAsync(client, endpoint, "notifications/initialized");
+  using var prompts = await SendMcpAsync(client, endpoint, 2, "prompts/list", new { });
+  if (prompts.RootElement.GetProperty("result").GetProperty("prompts").ValueKind != JsonValueKind.Array)
+  {
+    throw new InvalidOperationException("Agentic Router MCP prompts/list was not compatible.");
+  }
+  using var resources = await SendMcpAsync(client, endpoint, 3, "resources/list", new { });
+  if (resources.RootElement.GetProperty("result").GetProperty("resources").ValueKind != JsonValueKind.Array)
+  {
+    throw new InvalidOperationException("Agentic Router MCP resources/list was not compatible.");
+  }
+  using var tools = await SendMcpAsync(client, endpoint, 4, "tools/list", new { });
+  if (!tools.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray().Any(
+    candidate => string.Equals(candidate.GetProperty("name").GetString(), tool, StringComparison.Ordinal)
+  ))
+  {
+    throw new InvalidOperationException($"Agentic Router MCP tool '{tool}' was not advertised.");
+  }
+  using var response = await SendMcpAsync(client, endpoint, 5, "tools/call", new
+  {
+    name = tool,
+    arguments
+  });
+  var result = response.RootElement.GetProperty("result");
+  return new McpToolResult(
+    !result.GetProperty("isError").GetBoolean(),
+    result.GetProperty("content")[0].GetProperty("text").GetString() ?? string.Empty
+  );
+}
+
+async Task RunHostStepAsync(List<McpStepResult> steps, string tool, object arguments)
+{
+  var result = await InvokeHostToolAsync(tool, arguments);
+  steps.Add(new McpStepResult(tool, result.Succeeded, result.Output));
+}
+
+async Task<JsonDocument> SendMcpAsync(
+  HttpClient client,
+  string endpoint,
+  int id,
+  string method,
+  object parameters
+)
+{
+  using var response = await client.PostAsJsonAsync(endpoint, new
+  {
+    jsonrpc = "2.0",
+    id,
+    method,
+    @params = parameters
+  });
+  response.EnsureSuccessStatusCode();
+  return JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+}
+
+async Task SendMcpNotificationAsync(HttpClient client, string endpoint, string method)
+{
+  using var response = await client.PostAsJsonAsync(endpoint, new
+  {
+    jsonrpc = "2.0",
+    method
+  });
+  response.EnsureSuccessStatusCode();
+}
+
 bool HasRegisteredClient(HttpContext context, FakeSession session) =>
   string.Equals(
     context.Request.Headers["X-Qwen-Client-Id"].ToString(),
@@ -647,4 +883,12 @@ sealed class FakeSession
   public ConcurrentDictionary<Guid, Channel<string>> Subscribers { get; } = new();
 }
 
-sealed record PendingPermission(string SessionId, string PromptId);
+sealed record PendingPermission(
+  string SessionId,
+  string PromptId,
+  bool ContinueAfterRejection = false
+);
+
+sealed record McpToolResult(bool Succeeded, string Output);
+
+sealed record McpStepResult(string Tool, bool Succeeded, string Output);

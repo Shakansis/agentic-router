@@ -1616,6 +1616,7 @@ public sealed class ChatStreamService : IChatStreamService
       baseUri,
       workspacePath,
       settings.Execution,
+      settings.ProjectAwareness,
       context,
       contextUsage,
       hostCapabilities,
@@ -1915,6 +1916,7 @@ public sealed class ChatStreamService : IChatStreamService
     Uri ollamaUrl,
     string workspacePath,
     ExecutionSettings executionSettings,
+    ProjectAwarenessSettings projectAwareness,
     ConversationContextResult context,
     ContextUsageView initialContextUsage,
     HostCapabilityProfile hostCapabilities,
@@ -2129,6 +2131,7 @@ public sealed class ChatStreamService : IChatStreamService
             session,
             harnessEvent,
             approvedDeletionPaths,
+            projectAwareness,
             cancellationToken
           ))
           {
@@ -2148,6 +2151,23 @@ public sealed class ChatStreamService : IChatStreamService
                 false
               );
             }
+            if (harnessEvent.ReadOnlyPermission)
+            {
+              await harness.ResolveApprovalAsync(
+                harnessEvent.ApprovalId,
+                true,
+                cancellationToken
+              );
+              yield return Event(
+                requestId,
+                $"harness.{harnessDefinition.Id}-readonly-authorized",
+                $"Agentic Router authorized read-only native capability {harnessEvent.Tool ?? "<unknown>"} without a mutation approval prompt.",
+                stopwatch,
+                model,
+                intention
+              );
+              break;
+            }
             if (!harnessEvent.ApprovalCanBeMapped)
             {
               await harness.ResolveApprovalAsync(
@@ -2164,8 +2184,8 @@ public sealed class ChatStreamService : IChatStreamService
                   false
                 );
               }
-              var correction = "Agentic Router declined an unmappable command approval. "
-                + $"{harnessDefinition.DisplayName} may continue once with a structured Host filesystem tool.";
+              var correction = "Agentic Router declined a native approval that did not provide an exact Host-validatable workspace target. "
+                + $"{harnessDefinition.DisplayName} may continue using its available workspace-confined capabilities.";
               session.AddWarning(correction);
               yield return Event(
                 requestId,
@@ -2179,7 +2199,8 @@ public sealed class ChatStreamService : IChatStreamService
             }
 
             using var arguments = JsonDocument.Parse("{}");
-            IReadOnlyList<string> approvedPaths;
+            IReadOnlyList<string> approvedPaths = [];
+            LocalActionException? pathRejection = null;
             try
             {
               approvedPaths = await ResolveHarnessApprovalPathsAsync(
@@ -2195,14 +2216,22 @@ public sealed class ChatStreamService : IChatStreamService
                 false,
                 cancellationToken
               );
-              throw new HarnessException(
-                $"{harnessDefinition.Id}-approval-path-invalid",
-                $"{harnessDefinition.DisplayName} requested a path outside the trusted capability boundary.",
-                exception.Message,
-                false,
-                exception,
-                harnessDefinition.Id
+              pathRejection = exception;
+            }
+            if (pathRejection is not null)
+            {
+              var correction = $"Agentic Router denied only this native action: {pathRejection.Message} "
+                + $"{harnessDefinition.DisplayName} may continue with a materially different workspace-confined action.";
+              session.AddWarning(correction);
+              yield return Event(
+                requestId,
+                $"harness.{harnessDefinition.Id}-approval-corrected",
+                correction,
+                stopwatch,
+                model,
+                intention
               );
+              break;
             }
             var action = new ValidatedLocalAction(
               $"{harnessDefinition.Id}-{harnessEvent.ApprovalId}",
@@ -2567,6 +2596,7 @@ public sealed class ChatStreamService : IChatStreamService
     ExecutionSession session,
     HarnessEvent harnessEvent,
     ISet<string> approvedDeletionPaths,
+    ProjectAwarenessSettings projectAwareness,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -2589,6 +2619,52 @@ public sealed class ChatStreamService : IChatStreamService
       arguments,
       $"Requested through {harnessDefinition.DisplayName} native tools."
     );
+    if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
+    {
+      var failure = TryApplyExecutionPlan(proposal, projectAwareness, out var plan);
+      if (failure is not null)
+      {
+        var output = FormatExecutionFailure(failure);
+        await harness.ResolveToolCallAsync(
+          harnessEvent.ToolCallId,
+          false,
+          output,
+          cancellationToken
+        );
+        session.RecordToolFailure();
+        session.AddWarning($"{proposal.Tool} rejected: {output}");
+        yield return Event(
+          requestId,
+          "action.input-rejected",
+          $"Host rejected {proposal.Tool}: {output}",
+          stopwatch,
+          model,
+          intention
+        );
+        yield break;
+      }
+      var accepted = JsonSerializer.Serialize(plan);
+      await harness.ResolveToolCallAsync(
+        harnessEvent.ToolCallId,
+        true,
+        $"Accepted Host plan:\n{accepted}",
+        cancellationToken
+      );
+      session.RecordToolSuccess();
+      yield return Event(
+        requestId,
+        proposal.Tool == "create_execution_plan"
+          ? "execution-plan-created"
+          : "execution-plan-revised",
+        proposal.Tool == "create_execution_plan"
+          ? $"Execution plan created with {plan!.Steps.Count} steps."
+          : "Execution plan revised; completed and failed steps were preserved.",
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
     var instructionFailure = await ApplyInstructionsForProposalAsync(
       proposal,
       cancellationToken

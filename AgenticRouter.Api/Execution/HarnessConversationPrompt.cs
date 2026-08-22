@@ -27,6 +27,9 @@ internal static class HarnessConversationPromptBuilder
     builder.Append(
       "- Report only actions and results that actually occurred.\n"
     );
+    builder.Append(
+      "- If the Host denies one native action, treat that action as rejected, use the returned tool result and Host constraints to propose a materially different safe action, and continue the objective unless no safe alternative remains.\n"
+    );
 
     if (capabilityNotes is not null)
     {

@@ -4143,6 +4143,570 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutomatedBenchmarkCrudSuiteRunsAllSupportedHarnessesAndPersistsResults()
+  {
+    var clientRunId = Guid.NewGuid().ToString("N");
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "alpha:latest",
+        [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode],
+        TimeoutSeconds: 20,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: clientRunId
+      )
+    );
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(result);
+    Assert.AreEqual(clientRunId, result.RunId);
+    Assert.AreEqual(BenchmarkSuiteIds.BasicCrud, result.SuiteId);
+    Assert.AreEqual(BenchmarkSuiteIds.BasicCrudVersion, result.SuiteVersion);
+    Assert.AreEqual(BenchmarkSuiteIds.FixtureId, result.FixtureId);
+    Assert.AreEqual(BenchmarkSuiteIds.FixtureVersion, result.FixtureVersion);
+    Assert.AreEqual("completed", result.TerminalState);
+    Assert.AreEqual(
+      "passed",
+      result.FinalStatus,
+      JsonSerializer.Serialize(result.HarnessResults.Select(harness => new
+      {
+        harness.Harness,
+        harness.Passed,
+        tests = harness.Tests.Select(test => new
+        {
+          test.Run.TestId,
+          test.RawResult.Status,
+          test.RawResult.ExecutionStatus,
+          test.RawResult.HostValidationResult,
+          test.RawResult.Exactness,
+          test.RawResult.ContainmentAccuracy,
+          test.RawResult.Error
+        })
+      }))
+    );
+    Assert.AreEqual("alpha:latest", result.Model);
+    Assert.AreEqual("digest-alpha:latest", result.ModelDigest);
+    Assert.AreEqual("ollama-local", result.Provider);
+    Assert.HasCount(3, result.HarnessResults);
+    Assert.HasCount(3, result.Ranking);
+    Assert.AreEqual(35, result.ScoreWeights.ObjectiveSuccess);
+    Assert.AreEqual(25, result.ScoreWeights.Correctness);
+    Assert.AreEqual(15, result.ScoreWeights.Terminality);
+    Assert.AreEqual(20, result.ScoreWeights.WorkspaceAccuracy);
+    Assert.AreEqual(5, result.ScoreWeights.Efficiency);
+    CollectionAssert.AreEquivalent(
+      new[] { HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode },
+      result.HarnessResults.Select(item => item.Harness).ToArray()
+    );
+    Assert.IsTrue(result.Ranking.Select(item => item.Rank).SequenceEqual([1, 2, 3]));
+    Assert.AreEqual(HarnessIds.Native, result.Ranking[^1].Harness);
+
+    var allTests = result.HarnessResults.SelectMany(item => item.Tests).ToArray();
+    Assert.HasCount(12, allTests);
+    Assert.HasCount(12, allTests.Select(item => item.Run.WorkspacePath).Distinct().ToArray());
+    Assert.HasCount(1, allTests.Select(item => item.Run.FixtureFingerprint).Distinct().ToArray());
+    Assert.IsFalse(string.IsNullOrWhiteSpace(allTests[0].Run.FixtureFingerprint));
+    foreach (var harness in result.HarnessResults)
+    {
+      Assert.AreEqual(4, harness.Passed, harness.Harness);
+      Assert.AreEqual(4, harness.Total, harness.Harness);
+      Assert.AreEqual(100, harness.Terminality, harness.Harness);
+      Assert.AreEqual("completed", harness.TerminalState, harness.Harness);
+      Assert.IsGreaterThan(0, harness.Score, harness.Harness);
+      CollectionAssert.AreEqual(
+        new[]
+        {
+          BenchmarkIds.FileSystemCreate001,
+          BenchmarkIds.FileSystemRead001,
+          BenchmarkIds.FileSystemUpdate001,
+          BenchmarkIds.FileSystemDelete001
+        },
+        harness.Tests.Select(item => item.Run.TestId).ToArray(),
+        harness.Harness
+      );
+      Assert.IsTrue(harness.Tests.All(item => item.WorkspaceCleanedUp), harness.Harness);
+      Assert.IsTrue(harness.Tests.All(item => !Directory.Exists(item.Run.WorkspacePath)), harness.Harness);
+      Assert.IsTrue(harness.Tests.All(item => item.RawResult.HostValidationResult == "pass"), harness.Harness);
+      Assert.IsTrue(harness.Tests.All(item => item.RawResult.Status == "PASS"), harness.Harness);
+      Assert.IsTrue(harness.Tests.All(item => item.Score is not null), harness.Harness);
+      Assert.IsTrue(harness.Tests.All(item => item.Run.Prompt.Contains(item.Run.TestId, StringComparison.Ordinal)), harness.Harness);
+      Assert.HasCount(
+        0,
+        harness.Tests.Single(item => item.Run.TestId == BenchmarkIds.FileSystemRead001)
+          .RawResult.ChangedFiles ?? []
+      );
+      StringAssert.Contains(
+        harness.Tests.Single(item => item.Run.TestId == BenchmarkIds.FileSystemRead001)
+          .RawResult.FinalHarnessReport,
+        "verification-word=marigold"
+      );
+    }
+    var nativeRead = result.HarnessResults.Single(item => item.Harness == HarnessIds.Native)
+      .Tests.Single(item => item.Run.TestId == BenchmarkIds.FileSystemRead001);
+    Assert.AreEqual(2, nativeRead.RawResult.ToolCallCount);
+    Assert.AreEqual(99.5m, nativeRead.Score?.Total);
+    var codexCreate = result.HarnessResults.Single(item => item.Harness == HarnessIds.Codex)
+      .Tests.Single(item => item.Run.TestId == BenchmarkIds.FileSystemCreate001);
+    Assert.AreEqual(100m, codexCreate.Score?.Total);
+
+    var persistedPath = Path.Combine(
+      _environment.DataDirectory,
+      "benchmark-results",
+      clientRunId + ".json"
+    );
+    Assert.IsTrue(File.Exists(persistedPath));
+    using var detailResponse = await _environment.HttpClient.GetAsync(
+      $"api/benchmarks/suite-runs/{clientRunId}"
+    );
+    detailResponse.EnsureSuccessStatusCode();
+    var detail = await detailResponse.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.AreEqual(clientRunId, detail?.RunId);
+    var history = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult[]>(
+      "api/benchmarks/suite-runs?limit=10"
+    );
+    Assert.IsNotNull(history);
+    Assert.HasCount(1, history.Where(item => item.RunId == clientRunId));
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task LiveBenchmarkPublishesReplayableLifecycleAndOneAuthoritativeFinalResult()
+  {
+    var clientRunId = Guid.NewGuid().ToString("N");
+    using var startResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs/live",
+      new BenchmarkSuiteRunRequest(
+        "alpha:latest",
+        [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode],
+        TimeoutSeconds: 20,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: clientRunId
+      )
+    );
+    Assert.AreEqual(HttpStatusCode.Accepted, startResponse.StatusCode);
+    var started = await startResponse.Content.ReadFromJsonAsync<BenchmarkLiveRunStart>();
+    Assert.IsNotNull(started);
+    Assert.AreEqual(clientRunId, started.RunId);
+
+    BenchmarkLiveRunView? view = null;
+    for (var attempt = 0; attempt < 200; attempt++)
+    {
+      view = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{clientRunId}/live"
+      );
+      if (view?.Terminal == true)
+      {
+        break;
+      }
+      await Task.Delay(100);
+    }
+    Assert.IsNotNull(view);
+    Assert.IsTrue(view.Terminal);
+    Assert.IsGreaterThan(0, view.LastSequence);
+    Assert.AreEqual(
+      view.Events.Count,
+      view.Events.Select(item => item.Sequence).Distinct().Count()
+    );
+    Assert.IsTrue(view.Events.Select(item => item.Sequence).SequenceEqual(
+      view.Events.Select(item => item.Sequence).OrderBy(sequence => sequence)
+    ));
+    Assert.HasCount(
+      1,
+      view.Events.Where(item => item.Type == BenchmarkProgressTypeIds.RunStarted)
+    );
+    Assert.HasCount(
+      1,
+      view.Events.Where(item => item.Type == BenchmarkProgressTypeIds.RunCompleted)
+    );
+    Assert.HasCount(
+      0,
+      view.Events.Where(item => item.Type == BenchmarkProgressTypeIds.RunFailed)
+    );
+    Assert.IsTrue(view.Events.Any(item =>
+      item.Type == BenchmarkProgressTypeIds.Activity
+      && item.ActivityKind is BenchmarkActivityKindIds.FileRead
+        or BenchmarkActivityKindIds.FileCreate
+        or BenchmarkActivityKindIds.FileEdit
+        or BenchmarkActivityKindIds.FileDelete
+    ));
+    Assert.IsTrue(view.Events.Any(item =>
+      item.Type == BenchmarkProgressTypeIds.Validation
+      && item.ValidationChecks?.ContainsKey("Host validation") == true
+    ));
+    Assert.IsTrue(view.Events.Any(item =>
+      item.Type == BenchmarkProgressTypeIds.Ranking
+      && item.Ranking?.Any(entry => entry.Rank is null) == true
+    ));
+
+    var firstHarnessCompletion = view.Events.First(
+      item => item.Type == BenchmarkProgressTypeIds.HarnessCompleted
+    ).Sequence;
+    foreach (var harnessId in new[] { HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode })
+    {
+      Assert.IsTrue(view.Events.Any(item =>
+        item.Type == BenchmarkProgressTypeIds.HarnessStarted
+        && item.Harness == harnessId
+        && item.Sequence < firstHarnessCompletion
+      ), harnessId);
+      foreach (var testId in new[]
+      {
+        BenchmarkIds.FileSystemCreate001,
+        BenchmarkIds.FileSystemRead001,
+        BenchmarkIds.FileSystemUpdate001,
+        BenchmarkIds.FileSystemDelete001
+      })
+      {
+        var states = view.Events.Where(item =>
+          item.Type == BenchmarkProgressTypeIds.TestState
+          && item.Harness == harnessId
+          && item.TestId == testId
+        ).Select(item => item.State).ToArray();
+        CollectionAssert.IsSubsetOf(
+          new[]
+          {
+            BenchmarkLiveStateIds.Pending,
+            BenchmarkLiveStateIds.Running,
+            BenchmarkLiveStateIds.HarnessCompleted,
+            BenchmarkLiveStateIds.Validating,
+            BenchmarkLiveStateIds.Passed
+          },
+          states,
+          $"{harnessId}/{testId}: {string.Join(", ", states)}"
+        );
+      }
+    }
+
+    var finalEvent = view.Events.Single(
+      item => item.Type == BenchmarkProgressTypeIds.RunCompleted
+    );
+    Assert.IsNotNull(finalEvent.FinalResult);
+    using var persistedResponse = await _environment.HttpClient.GetAsync(
+      $"api/benchmarks/suite-runs/{clientRunId}"
+    );
+    persistedResponse.EnsureSuccessStatusCode();
+    var persisted = await persistedResponse.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(persisted);
+    Assert.AreEqual(
+      JsonSerializer.Serialize(persisted.Ranking),
+      JsonSerializer.Serialize(finalEvent.FinalResult.Ranking)
+    );
+
+    var replayAfter = view.Events[view.Events.Count / 2].Sequence;
+    using var replayResponse = await _environment.HttpClient.GetAsync(
+      $"api/benchmarks/suite-runs/{clientRunId}/events?after={replayAfter}"
+    );
+    replayResponse.EnsureSuccessStatusCode();
+    var replay = await replayResponse.Content.ReadAsStringAsync();
+    var replayIds = replay.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+      .Where(line => line.StartsWith("id: ", StringComparison.Ordinal))
+      .Select(line => long.Parse(line[4..]))
+      .ToArray();
+    Assert.IsNotEmpty(replayIds);
+    Assert.IsTrue(replayIds.All(sequence => sequence > replayAfter));
+    Assert.AreEqual(view.LastSequence, replayIds[^1]);
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task LiveBenchmarkReportsRecoveryTimeoutAndContinuesAfterFailure()
+  {
+    async Task<BenchmarkLiveRunView> RunLiveAsync(
+      string model,
+      string harness,
+      int timeoutSeconds
+    )
+    {
+      var runId = Guid.NewGuid().ToString("N");
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/benchmarks/suite-runs/live",
+        new BenchmarkSuiteRunRequest(
+          model,
+          [harness],
+          TimeoutSeconds: timeoutSeconds,
+          ModelExecutionPermissionGranted: true,
+          ClientRunId: runId
+        )
+      );
+      Assert.AreEqual(HttpStatusCode.Accepted, response.StatusCode);
+      for (var attempt = 0; attempt < 250; attempt++)
+      {
+        var current = await _environment.HttpClient
+          .GetFromJsonAsync<BenchmarkLiveRunView>(
+            $"api/benchmarks/suite-runs/{runId}/live"
+          );
+        if (current?.Terminal == true)
+        {
+          return current;
+        }
+        await Task.Delay(100);
+      }
+      Assert.Fail($"Live benchmark {runId} did not reach a terminal state.");
+      throw new InvalidOperationException();
+    }
+
+    var recovered = await RunLiveAsync("structured:latest", HarnessIds.Native, 20);
+    Assert.IsTrue(recovered.Events.Any(item =>
+      item.Type == BenchmarkProgressTypeIds.Activity
+      && item.ActivityKind == BenchmarkActivityKindIds.RecoveredError
+    ));
+    Assert.AreEqual(
+      BenchmarkResultStatusIds.Pass,
+      recovered.Events.Single(item => item.Type == BenchmarkProgressTypeIds.RunCompleted)
+        .FinalResult!.HarnessResults.Single().Tests.Single(
+          item => item.Run.TestId == BenchmarkIds.FileSystemUpdate001
+        ).RawResult.Status
+    );
+
+    var failed = await RunLiveAsync(
+      "structured-failure:latest",
+      HarnessIds.Codex,
+      20
+    );
+    var failedResult = failed.Events.Single(
+      item => item.Type == BenchmarkProgressTypeIds.RunCompleted
+    ).FinalResult!;
+    Assert.AreEqual(
+      BenchmarkResultStatusIds.Error,
+      failedResult.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemUpdate001
+      ).RawResult.Status
+    );
+    Assert.AreEqual(
+      BenchmarkResultStatusIds.Pass,
+      failedResult.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemDelete001
+      ).RawResult.Status
+    );
+
+    var timedOut = await RunLiveAsync("unused:latest", HarnessIds.Native, 5);
+    Assert.IsTrue(timedOut.Events.Any(item =>
+      item.Type == BenchmarkProgressTypeIds.TestState
+      && item.TestId == BenchmarkIds.FileSystemRead001
+      && item.State == BenchmarkLiveStateIds.TimedOut
+    ));
+    var timeoutResult = timedOut.Events.Single(
+      item => item.Type == BenchmarkProgressTypeIds.RunCompleted
+    ).FinalResult!;
+    Assert.AreEqual(
+      BenchmarkResultStatusIds.Pass,
+      timeoutResult.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemDelete001
+      ).RawResult.Status
+    );
+    _environment.FakeOllama.RemoveLoadedModel("structured:latest");
+    _environment.FakeOllama.RemoveLoadedModel("structured-failure:latest");
+    _environment.FakeOllama.RemoveLoadedModel("unused:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutomatedBenchmarkUiSelectsHarnessesRanksAndOpensCrudEvidence()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#benchmark-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-suite")).ToHaveValueAsync("basic-crud");
+    await Expect(Page.Locator("#benchmark-harness-list input")).ToHaveCountAsync(3);
+    await Expect(Page.Locator("#benchmark-harness-list input[value=\"qwen-code\"]"))
+      .ToHaveCountAsync(0);
+
+    await Page.Locator("#benchmark-model").SelectOptionAsync("alpha:latest");
+    await Page.Locator("#benchmark-harness-list input[value=\"native\"]").UncheckAsync();
+    await Page.Locator("#benchmark-permission").CheckAsync();
+    await Page.Locator("#benchmark-timeout").FillAsync("20");
+    await Page.Locator("#run-benchmark").ClickAsync();
+
+    await Expect(Page.Locator("#benchmark-status"))
+      .ToContainTextAsync("Benchmark concluído", new() { Timeout = 30_000 });
+    await Expect(Page.Locator("#benchmark-results-body tr")).ToHaveCountAsync(2);
+    await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("passed");
+    await Expect(Page.Locator("#benchmark-results-body")).ToContainTextAsync("4/4");
+    await Expect(Page.Locator("#benchmark-history")).Not.ToHaveValueAsync("");
+
+    await Page.Locator("#benchmark-results-body [data-harness=\"codex\"]").ClickAsync();
+    await Expect(Page.Locator("#benchmark-result-detail .benchmark-test-detail"))
+      .ToHaveCountAsync(4);
+    var update = Page.Locator("#benchmark-result-detail .benchmark-test-detail")
+      .Filter(new() { HasText = BenchmarkIds.FileSystemUpdate001 });
+    await update.Locator("summary").ClickAsync();
+    await Expect(update).ToContainTextAsync("Host validation");
+    await Expect(update).ToContainTextAsync("fixture/update.txt");
+    await Expect(update).ToContainTextAsync("FS-UPDATE-001");
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task LiveBenchmarkUiRendersProgressReopensAndSettlesCancellation()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Page.Locator("#benchmark-model").SelectOptionAsync("docs:latest");
+    await Page.Locator("#benchmark-harness-list input[value=\"codex\"]").UncheckAsync();
+    await Page.Locator("#benchmark-harness-list input[value=\"opencode\"]").UncheckAsync();
+    await Page.Locator("#benchmark-permission").CheckAsync();
+    await Page.Locator("#benchmark-timeout").FillAsync("60");
+    await Page.Locator("#run-benchmark").ClickAsync();
+
+    await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-ranking-note")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".benchmark-live-harness")).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#benchmark-live-dashboard"))
+      .ToContainTextAsync(BenchmarkIds.FileSystemRead001, new() { Timeout = 15_000 });
+    await Expect(Page.Locator("#benchmark-live-dashboard"))
+      .ToContainTextAsync("file-create", new() { Timeout = 15_000 });
+
+    await Page.Locator("#close-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#benchmark-dialog")).ToBeHiddenAsync();
+    await Page.EvaluateAsync("document.getElementById('open-benchmarks').click()");
+    await Expect(Page.Locator("#benchmark-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#cancel-benchmark")).ToBeEnabledAsync();
+    await Page.Locator("#cancel-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status"))
+      .ToContainTextAsync("cancelada", new() { Timeout = 15_000 });
+    await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#benchmark-ranking-note")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("cancelled");
+    await Expect(Page.Locator("#benchmark-history")).Not.ToHaveValueAsync("");
+    _environment.FakeOllama.RemoveLoadedModel("docs:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutomatedBenchmarkRejectsUnavailableHarnessBeforeExecution()
+  {
+    var missing = Path.Combine(
+      Path.GetTempPath(),
+      "agentic-router-e2e",
+      Guid.NewGuid().ToString("N"),
+      "missing-opencode.exe"
+    );
+    try
+    {
+      await _environment.SetOpenCodeExecutableAndRestartAsync(missing);
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/benchmarks/suite-runs",
+        new BenchmarkSuiteRunRequest(
+          "alpha:latest",
+          [HarnessIds.OpenCode],
+          TimeoutSeconds: 20,
+          ModelExecutionPermissionGranted: true
+        )
+      );
+      Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
+      var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+      Assert.IsNotNull(payload["errors"]!["harnesses"]);
+    }
+    finally
+    {
+      await _environment.SetOpenCodeExecutableAndRestartAsync(
+        _environment.FakeOpenCodeExecutablePath
+      );
+    }
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutomatedBenchmarkContinuesAfterFailureAndTimeoutAndCancelsCleanly()
+  {
+    using var failureResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "structured-failure:latest",
+        [HarnessIds.Codex],
+        TimeoutSeconds: 20,
+        ModelExecutionPermissionGranted: true
+      )
+    );
+    failureResponse.EnsureSuccessStatusCode();
+    var failure = await failureResponse.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(failure);
+    Assert.AreEqual("completed", failure.TerminalState);
+    Assert.AreEqual("completed-with-failures", failure.FinalStatus);
+    Assert.HasCount(4, failure.HarnessResults.Single().Tests);
+    Assert.AreEqual(
+      "ERROR",
+      failure.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemUpdate001
+      ).RawResult.Status
+    );
+    Assert.AreEqual(
+      "PASS",
+      failure.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemDelete001
+      ).RawResult.Status
+    );
+
+    using var timeoutResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "unused:latest",
+        [HarnessIds.Native],
+        TimeoutSeconds: 5,
+        ModelExecutionPermissionGranted: true
+      )
+    );
+    timeoutResponse.EnsureSuccessStatusCode();
+    var timeout = await timeoutResponse.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(timeout);
+    Assert.HasCount(4, timeout.HarnessResults.Single().Tests);
+    Assert.AreEqual(
+      "timed-out",
+      timeout.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemRead001
+      ).RawResult.ExecutionStatus
+    );
+    Assert.AreEqual(
+      "PASS",
+      timeout.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemDelete001
+      ).RawResult.Status
+    );
+
+    var cancelledRunId = Guid.NewGuid().ToString("N");
+    var runTask = _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "docs:latest",
+        [HarnessIds.Native],
+        TimeoutSeconds: 60,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: cancelledRunId
+      )
+    );
+    await Task.Delay(750);
+    using var cancelResponse = await _environment.HttpClient.PostAsync(
+      $"api/benchmarks/suite-runs/{cancelledRunId}/cancel",
+      null
+    );
+    Assert.AreEqual(HttpStatusCode.Accepted, cancelResponse.StatusCode);
+    using var cancelledResponse = await runTask;
+    cancelledResponse.EnsureSuccessStatusCode();
+    var cancelled = await cancelledResponse.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(cancelled);
+    Assert.AreEqual("cancelled", cancelled.TerminalState);
+    Assert.AreEqual("cancelled", cancelled.FinalStatus);
+    Assert.HasCount(
+      1,
+      cancelled.HarnessResults.SelectMany(item => item.Tests).Where(
+        item => item.RawResult.ExecutionStatus == "cancelled"
+      )
+    );
+    Assert.IsTrue(File.Exists(Path.Combine(
+      _environment.DataDirectory,
+      "benchmark-results",
+      cancelledRunId + ".json"
+    )));
+    _environment.FakeOllama.RemoveLoadedModel("structured-failure:latest");
+    _environment.FakeOllama.RemoveLoadedModel("unused:latest");
+    _environment.FakeOllama.RemoveLoadedModel("docs:latest");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ComposerOffersNativeAndExperimentalHarnessesWithoutModelLock()
   {
     await Page.GotoAsync("/");
@@ -4156,7 +4720,7 @@ public sealed class ChatEndToEndTests : PageTest
       {
         "Native",
         "Codex (Experimental)",
-        "OpenCode (Experimental)",
+        "OpenCode [Experimental]",
         "Qwen Code (Experimental)"
       }
     );
@@ -4168,6 +4732,10 @@ public sealed class ChatEndToEndTests : PageTest
     await harness.SelectOptionAsync("codex");
     await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
       "Codex (Experimental)"
+    );
+    await harness.SelectOptionAsync("opencode");
+    await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
+      "OpenCode [Experimental]"
     );
   }
 
@@ -4189,6 +4757,8 @@ public sealed class ChatEndToEndTests : PageTest
       .ToContainTextAsync("OpenCode streamed with qwen3.8:27b-gpu0");
     await Expect(assistant.Locator(".assistant-answer"))
       .Not.ToContainTextAsync("Internal reasoning stays in Thinking");
+    await Expect(assistant.Locator(".assistant-answer"))
+      .Not.ToContainTextAsync("Agentic Router context for this turn");
     await Expect(Page.Locator("#context-usage-summary"))
       .ToContainTextAsync("exato");
     await Expect(assistant.Locator(".activity"))
@@ -4201,6 +4771,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
     await Expect(capabilityProjection).ToContainTextAsync("run_process");
+    await Expect(capabilityProjection).ToContainTextAsync("missing adapter []");
     var runtime = Path.Combine(_environment.DataDirectory, "opencode-runtime");
     using var session = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-session.json"))
@@ -4228,6 +4799,10 @@ public sealed class ChatEndToEndTests : PageTest
     StringAssert.Contains(config, "http://127.0.0.1:");
     StringAssert.Contains(config, "qwen3.8:27b-gpu0");
     StringAssert.Contains(config, "\"bash\": \"deny\"");
+    StringAssert.Contains(config, "\"webfetch\": \"allow\"");
+    StringAssert.Contains(config, "\"websearch\": \"allow\"");
+    StringAssert.Contains(config, "\"agentic_router\"");
+    StringAssert.Contains(config, "\"agentic_router_*\": \"allow\"");
 
     using var firstPrompt = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-prompt.json"))
@@ -4241,6 +4816,48 @@ public sealed class ChatEndToEndTests : PageTest
       firstSessionId,
       secondPrompt.RootElement.GetProperty("sessionId").GetString()
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeOwnedProcessIsCleanedUpWhenApplicationRestarts()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "opencode cleanup turn",
+      "browser-opencode-cleanup",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+
+    var processId = int.Parse(
+      await File.ReadAllTextAsync(Path.Combine(
+        _environment.DataDirectory,
+        "opencode-runtime",
+        "fake-opencode-process-id.txt"
+      )),
+      System.Globalization.CultureInfo.InvariantCulture
+    );
+    Assert.IsTrue(ProcessIsAlive(processId));
+
+    await _environment.RestartApplicationAsync();
+    await WaitUntilAsync(
+      () => !ProcessIsAlive(processId),
+      TimeSpan.FromSeconds(5)
+    );
+
+    static bool ProcessIsAlive(int id)
+    {
+      try
+      {
+        using var process = Process.GetProcessById(id);
+        return !process.HasExited;
+      }
+      catch (ArgumentException)
+      {
+        return false;
+      }
+    }
   }
 
   [TestMethod]
@@ -4351,14 +4968,112 @@ public sealed class ChatEndToEndTests : PageTest
     );
 
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
-    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
-    Assert.AreEqual(
-      "opencode-approval-path-invalid",
-      error["error"]!["code"]!.GetValue<string>()
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.opencode-approval-corrected"
+      )
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "error")
     );
     Assert.IsFalse(
       File.Exists(Path.Combine(Path.GetDirectoryName(_environment.WorkspaceDirectory)!, "outside.txt"))
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeLegacyPermissionShapeMapsPatternsToHostApproval()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "legacy permission opencode",
+      "browser-opencode-legacy-permission",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.approved")
+    );
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpenCodeRejectsReportedProviderOrModelSubstitution()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "reroute opencode",
+      "browser-opencode-reroute",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.AreEqual(
+      "opencode-provider-substitution",
+      events.Single(item => item["type"]!.GetValue<string>() == "error")
+        ["error"]!["code"]!.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task MissingOpenCodeFailsClearlyWhileNativeRemainsAvailable()
+  {
+    var missing = Path.Combine(_environment.DataDirectory, "missing-opencode.exe");
+    await _environment.SetOpenCodeExecutableAndRestartAsync(missing);
+
+    try
+    {
+      await Page.GotoAsync("/");
+      await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+      await SetExecuteModeAsync("auto");
+      var selector = Page.Locator("#harness-selector");
+      var unavailable = selector.Locator("option[value=\"opencode\"]");
+      Assert.IsTrue(await unavailable.EvaluateAsync<bool>("option => option.disabled"));
+      await Expect(unavailable).ToContainTextAsync("Unavailable");
+      await Expect(unavailable).ToHaveAttributeAsync(
+        "title",
+        new Regex("OpenCode executable was not found or could not be started")
+      );
+      await Expect(selector).ToHaveValueAsync("native");
+
+      var failed = await ExecuteHarnessStreamAsync(
+        "opencode",
+        "opencode unavailable",
+        "browser-missing-opencode",
+        "qwen3.8:27b-gpu0"
+      );
+      Assert.HasCount(1, failed.Where(IsTerminalStreamEvent));
+      Assert.AreEqual(
+        "opencode-executable-not-found",
+        failed.Single(item => item["type"]!.GetValue<string>() == "error")
+          ["error"]!["code"]!.GetValue<string>()
+      );
+
+      await SendMessageAsync("execute create file");
+      Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, "hello.txt")));
+    }
+    finally
+    {
+      await _environment.SetOpenCodeExecutableAndRestartAsync(
+        _environment.FakeOpenCodeExecutablePath
+      );
+    }
   }
 
   [TestMethod]
@@ -4447,6 +5162,7 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
     await Expect(capabilityProjection).ToContainTextAsync("run_process");
+    await Expect(capabilityProjection).ToContainTextAsync("missing adapter []");
 
     var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
     using var session = JsonDocument.Parse(
@@ -4487,10 +5203,15 @@ public sealed class ChatEndToEndTests : PageTest
       .ToArray();
     CollectionAssert.Contains(arguments, "--require-auth");
     CollectionAssert.Contains(arguments, "--no-web");
-    CollectionAssert.Contains(arguments, "--safe-mode");
     CollectionAssert.Contains(arguments, "--workspace");
+    CollectionAssert.DoesNotContain(arguments, "--safe-mode");
+    CollectionAssert.DoesNotContain(arguments, "--mcp-config");
     CollectionAssert.DoesNotContain(arguments, "--enable-session-shell");
     CollectionAssert.DoesNotContain(arguments, "--enable-local-control");
+    Assert.AreEqual(
+      Path.Combine(runtime, "settings.json"),
+      session.RootElement.GetProperty("systemSettingsPath").GetString()
+    );
 
     using var model = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-model.json"))
@@ -4534,12 +5255,25 @@ public sealed class ChatEndToEndTests : PageTest
       settings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]
         .GetProperty("generationConfig").GetProperty("contextWindowSize").GetInt32()
     );
-    var coreTools = settings.RootElement.GetProperty("coreTools")
+    var coreTools = settings.RootElement.GetProperty("tools").GetProperty("core")
       .EnumerateArray()
       .Select(item => item.GetString())
       .ToArray();
-    Assert.HasCount(6, coreTools);
+    Assert.HasCount(9, coreTools);
     CollectionAssert.DoesNotContain(coreTools, "run_shell_command");
+    CollectionAssert.Contains(coreTools, "web_fetch");
+    CollectionAssert.Contains(coreTools, "web_search");
+    CollectionAssert.Contains(coreTools, "todo_write");
+    Assert.IsTrue(
+      settings.RootElement.GetProperty("mcp").GetProperty("allowed")
+        .EnumerateArray().Any(item => item.GetString() == "agentic_router")
+    );
+    Assert.IsTrue(
+      settings.RootElement.GetProperty("mcpServers").TryGetProperty(
+        "agentic_router",
+        out var qwenHostBridge
+      )
+    );
     var denied = settings.RootElement.GetProperty("permissions").GetProperty("deny")
       .EnumerateArray()
       .Select(item => item.GetString())
@@ -4554,6 +5288,9 @@ public sealed class ChatEndToEndTests : PageTest
     using var firstPrompt = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"))
     );
+    var firstPromptText = firstPrompt.RootElement.GetProperty("text").GetString()!;
+    StringAssert.Contains(firstPromptText, "select:mcp__agentic_router__delete_paths");
+    StringAssert.Contains(firstPromptText, "select:mcp__agentic_router__run_process");
     Assert.AreEqual(
       assignedClientId,
       firstPrompt.RootElement.GetProperty("clientId").GetString()
@@ -4672,6 +5409,90 @@ public sealed class ChatEndToEndTests : PageTest
   }
 
   [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeReadOnlyNativeExtraWithoutWorkspaceTargetsExecutesWithoutMutationApproval()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "unmappable permission qwen code",
+      "browser-qwen-code-unmappable-permission",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.qwen-code-readonly-authorized"
+      )
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "error")
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.awaiting-approval")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeReadOnlyNativeExtraAlsoRunsDirectlyInAskMode()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("ask");
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+
+    await SendMessageAsync("unmappable permission qwen code");
+
+    await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(
+      "[data-event-type=\"harness.qwen-code-readonly-authorized\"]"
+    )).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodePermissionOutsideWorkspaceIsRejectedByHostBeforeApproval()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "qwen-code",
+      "outside permission qwen code",
+      "browser-qwen-code-outside-permission",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.qwen-code-approval-corrected"
+      )
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "error")
+    );
+    Assert.IsFalse(
+      File.Exists(Path.Combine(Path.GetDirectoryName(_environment.WorkspaceDirectory)!, "outside.txt"))
+    );
+  }
+
+  [TestMethod]
   [DataRow("opencode", "permission opencode")]
   [DataRow("qwen-code", "permission qwen code")]
   [Timeout(60_000, CooperativeCancellation = true)]
@@ -4695,6 +5516,154 @@ public sealed class ChatEndToEndTests : PageTest
     ).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
+  }
+
+  [TestMethod]
+  [DataRow("opencode", "host bridge opencode", "opencode-host-auto.txt", "fake-opencode-host-tool.json")]
+  [DataRow("qwen-code", "host bridge qwen code", "qwen-host-auto.txt", "fake-qwen-host-tool.json")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessHostBridgeExecutesCanonicalBatchThroughHost(
+    string harness,
+    string prompt,
+    string relativePath,
+    string markerName
+  )
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      harness,
+      prompt,
+      $"browser-{harness}-host-bridge-auto",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.IsTrue(
+      events.Any(item => item["type"]!.GetValue<string>() == "action.proposed")
+    );
+    Assert.IsTrue(
+      events.Any(item => item["type"]!.GetValue<string>() == "action.completed")
+    );
+    Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, relativePath)));
+    var runtime = Path.Combine(
+      _environment.DataDirectory,
+      harness == "opencode" ? "opencode-runtime" : "qwen-code-runtime"
+    );
+    using var marker = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, markerName))
+    );
+    Assert.AreEqual("create_files", marker.RootElement.GetProperty("tool").GetString());
+    Assert.IsTrue(marker.RootElement.GetProperty("succeeded").GetBoolean());
+    Assert.IsTrue(marker.RootElement.GetProperty("observed").GetBoolean());
+  }
+
+  [TestMethod]
+  [DataRow("opencode", "ask host bridge opencode", "opencode-host-ask.txt")]
+  [DataRow("qwen-code", "ask host bridge qwen code", "qwen-host-ask.txt")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessHostBridgeAskWaitsBeforeCanonicalMutation(
+    string harness,
+    string prompt,
+    string relativePath
+  )
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("ask");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+
+    await StartMessageAsync(prompt);
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("create_files");
+    Assert.IsFalse(File.Exists(Path.Combine(_environment.WorkspaceDirectory, relativePath)));
+    await approval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Aprovar", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, relativePath)));
+  }
+
+  [TestMethod]
+  [DataRow("opencode", "parity host bridge opencode", "opencode", "opencode-parity-complete.txt")]
+  [DataRow("qwen-code", "parity host bridge qwen code", "qwen-code", "qwen-parity-complete.txt")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessHostBridgeProvidesDirectoryDeleteProcessAndGit(
+    string harness,
+    string prompt,
+    string runtimeName,
+    string finalPath
+  )
+  {
+    await RunGitAsync("init");
+    var events = await ExecuteHarnessStreamAsync(
+      harness,
+      prompt,
+      $"browser-{harness}-host-bridge-parity",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    var runtime = Path.Combine(_environment.DataDirectory, $"{runtimeName}-runtime");
+    var markerName = harness == "opencode"
+      ? "fake-opencode-host-parity.json"
+      : "fake-qwen-host-parity.json";
+    using var marker = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, markerName))
+    );
+    var steps = marker.RootElement.GetProperty("steps").EnumerateArray().ToArray();
+    Assert.HasCount(7, steps);
+    Assert.IsTrue(steps.All(step => step.GetProperty("Succeeded").GetBoolean()));
+    CollectionAssert.AreEquivalent(
+      new[]
+      {
+        "create_directory",
+        "create_files",
+        "get_file_info",
+        "run_process",
+        "git_status",
+        "delete_paths",
+        "create_files"
+      },
+      steps.Select(step => step.GetProperty("Tool").GetString()).ToArray()
+    );
+    Assert.IsTrue(marker.RootElement.GetProperty("deleted").GetBoolean());
+    Assert.IsTrue(marker.RootElement.GetProperty("finalObserved").GetBoolean());
+    Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, finalPath)));
+  }
+
+  [TestMethod]
+  [DataRow("opencode", "boundary host bridge opencode", "opencode-recovered.txt", "opencode-escape.txt")]
+  [DataRow("qwen-code", "boundary host bridge qwen code", "qwen-recovered.txt", "qwen-escape.txt")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessHostBridgeRejectsBoundaryAndLetsAgentRecover(
+    string harness,
+    string prompt,
+    string recoveredPath,
+    string escapedPath
+  )
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      harness,
+      prompt,
+      $"browser-{harness}-host-bridge-boundary",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.IsTrue(
+      events.Any(item => item["type"]!.GetValue<string>() == "action.input-rejected"),
+      $"Observed event types: {string.Join(", ", events.Select(item => item["type"]!.GetValue<string>()))}"
+    );
+    Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, recoveredPath)));
+    Assert.IsFalse(File.Exists(Path.Combine(
+      Path.GetDirectoryName(_environment.WorkspaceDirectory)!,
+      escapedPath
+    )));
   }
 
   [TestMethod]
@@ -5130,6 +6099,12 @@ public sealed class ChatEndToEndTests : PageTest
   [DataRow("codex", "native")]
   [DataRow("opencode", "codex")]
   [DataRow("codex", "opencode")]
+  [DataRow("native", "qwen-code")]
+  [DataRow("qwen-code", "native")]
+  [DataRow("opencode", "qwen-code")]
+  [DataRow("qwen-code", "opencode")]
+  [DataRow("codex", "qwen-code")]
+  [DataRow("qwen-code", "codex")]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task HarnessSwitchDirectionsCarryCanonicalReferences(
     string sourceHarness,
@@ -5137,7 +6112,7 @@ public sealed class ChatEndToEndTests : PageTest
   )
   {
     var conversationId = $"browser-switch-{sourceHarness}-{targetHarness}";
-    var sourceModel = string.Equals(sourceHarness, "opencode", StringComparison.Ordinal)
+    var sourceModel = sourceHarness is "opencode" or "qwen-code"
       ? "qwen3.8:27b-gpu0"
       : "alpha:latest";
     var source = await ExecuteHarnessStreamAsync(
@@ -5163,7 +6138,7 @@ public sealed class ChatEndToEndTests : PageTest
       }
     ];
     var requestCount = _environment.FakeOllama.Requests.Count;
-    var targetModel = string.Equals(targetHarness, "opencode", StringComparison.Ordinal)
+    var targetModel = targetHarness is "opencode" or "qwen-code"
       ? "qwen3.8:27b-gpu0"
       : "alpha:latest";
     var target = await ExecuteHarnessStreamAsync(
@@ -5190,17 +6165,24 @@ public sealed class ChatEndToEndTests : PageTest
       return;
     }
 
-    var promptPath = string.Equals(targetHarness, "codex", StringComparison.Ordinal)
-      ? Path.Combine(
+    var promptPath = targetHarness switch
+    {
+      "codex" => Path.Combine(
         _environment.DataDirectory,
         "codex-runtime",
         "fake-app-server-turn-input.txt"
-      )
-      : Path.Combine(
+      ),
+      "qwen-code" => Path.Combine(
+        _environment.DataDirectory,
+        "qwen-code-runtime",
+        "fake-qwen-prompt.json"
+      ),
+      _ => Path.Combine(
         _environment.DataDirectory,
         "opencode-runtime",
         "fake-opencode-prompt.json"
-      );
+      )
+    };
     var promptText = string.Equals(targetHarness, "codex", StringComparison.Ordinal)
       ? await File.ReadAllTextAsync(promptPath)
       : JsonNode.Parse(await File.ReadAllTextAsync(promptPath))!["text"]!.GetValue<string>();
@@ -15291,7 +16273,7 @@ public sealed class ChatEndToEndTests : PageTest
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task RelativeTraversalCreationIsRebasedInsideTrustedWorkspace()
+  public async Task RelativeTraversalCreationIsDeniedThenRecoveredInsideTrustedWorkspace()
   {
     var outsideCandidate = Path.GetFullPath(
       Path.Combine(
@@ -15327,24 +16309,10 @@ public sealed class ChatEndToEndTests : PageTest
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.input-corrected\"]"
-      )
-    ).ToContainTextAsync(
-      "../../rebased-create.txt"
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"action.input-corrected\"]"
-      )
-    ).ToContainTextAsync(
-      "rebased-create.txt"
-    );
-    await Expect(
-      Page.Locator(
         "[data-event-type=\"action.security-denied\"]"
       )
-    ).ToHaveCountAsync(
-      0
+    ).ToContainTextAsync(
+      "outside the trusted workspace"
     );
 
     var executionId = await Page.EvaluateAsync<string>(
@@ -15357,15 +16325,14 @@ public sealed class ChatEndToEndTests : PageTest
     using var reviewDocument = JsonDocument.Parse(
       await review.Content.ReadAsStringAsync()
     );
-    Assert.IsTrue(
-      reviewDocument.RootElement.GetProperty(
-        "warnings"
-      ).EnumerateArray().Any(
-        warning => warning.GetString()?.Contains(
-          "rebased the creation inside its root",
-          StringComparison.Ordinal
-        ) == true
-      )
+    Assert.IsFalse(
+      reviewDocument.RootElement.GetProperty("warnings")
+        .EnumerateArray().Any(
+          warning => warning.GetString()?.Contains(
+            "rebased the creation inside its root",
+            StringComparison.Ordinal
+          ) == true
+        )
     );
   }
 
@@ -19549,6 +20516,38 @@ public sealed class ChatEndToEndTests : PageTest
       request => request.HasTools
         && request.Messages.Any(message => message.Content.Contains("SPECIALIST_TOOL_LOOP_V2", StringComparison.Ordinal))
     ));
+  }
+
+  [TestMethod]
+  [DataRow("opencode", "plan host bridge opencode", "opencode-runtime", "fake-opencode-host-plan.json")]
+  [DataRow("qwen-code", "plan host bridge qwen code", "qwen-code-runtime", "fake-qwen-host-plan.json")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessHostBridgeSupportsOptionalVisiblePlan(
+    string harness,
+    string prompt,
+    string runtimeName,
+    string markerName
+  )
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      harness,
+      prompt,
+      $"browser-{harness}-host-bridge-plan",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "execution-plan-created")
+    );
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      runtimeName,
+      markerName
+    )));
+    Assert.IsTrue(marker.RootElement.GetProperty("succeeded").GetBoolean());
   }
 
   [TestMethod]

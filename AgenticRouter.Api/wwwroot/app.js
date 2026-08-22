@@ -62,7 +62,11 @@ const state = {
   inspectedBackupBase64: null,
   runtimeProfiles: null,
   openCloudProviders: new Set(),
-  gitConfigurationEditing: false
+  gitConfigurationEditing: false,
+  benchmark: null,
+  activeBenchmarkRunId: null,
+  benchmarkEventSource: null,
+  benchmarkElapsedTimer: null
 };
 
 const elements = {};
@@ -173,6 +177,25 @@ function bindElements() {
     "model-count",
     "device-count",
     "device-diagnostic",
+    "open-benchmarks",
+    "benchmark-dialog",
+    "benchmark-form",
+    "benchmark-model",
+    "benchmark-suite",
+    "benchmark-timeout",
+    "benchmark-history",
+    "benchmark-harness-list",
+    "benchmark-permission",
+    "run-benchmark",
+    "cancel-benchmark",
+    "benchmark-status",
+    "benchmark-run-summary",
+    "benchmark-ranking-note",
+    "benchmark-live-dashboard",
+    "benchmark-results-body",
+    "benchmark-result-detail",
+    "close-benchmarks",
+    "dismiss-benchmarks",
     "settings-dialog",
     "settings-form",
     "settings-errors",
@@ -474,6 +497,17 @@ function bindElements() {
 
 function bindEvents() {
   elements.composer.addEventListener("submit", handleComposerSubmit);
+  elements.openBenchmarks.addEventListener("click", openBenchmarks);
+  elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
+  elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
+  elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
+  elements.dismissBenchmarks.addEventListener("click", closeBenchmarks);
+  elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
+  elements.benchmarkResultsBody.addEventListener("click", openBenchmarkHarnessResult);
+  elements.benchmarkDialog.addEventListener("cancel", event => {
+    event.preventDefault();
+    closeBenchmarks();
+  });
   elements.composer.addEventListener("click", handleComposerClick);
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
@@ -1070,6 +1104,681 @@ async function loadApplicationState() {
     await refreshSessions();
   }
   await refreshGit();
+}
+
+async function openBenchmarks() {
+  elements.benchmarkDialog.showModal();
+  elements.benchmarkStatus.textContent = "Carregando catálogo e histórico…";
+
+  try {
+    const [catalog, history, modelsResponse] = await Promise.all([
+      fetchJson("/api/benchmarks/catalog"),
+      fetchJson("/api/benchmarks/suite-runs?limit=25"),
+      fetchJson("/api/models")
+    ]);
+    state.models = modelsResponse.models;
+    const retainedLive = state.benchmark?.live ?? null;
+    state.benchmark = {
+      catalog,
+      history,
+      result: retainedLive ? state.benchmark?.result ?? null : history[0] ?? null,
+      live: retainedLive
+    };
+    renderBenchmarkControls();
+    renderBenchmarkHistory();
+    const storedRunId = sessionStorage.getItem("agentic-router-benchmark-live-run");
+    if (retainedLive && state.activeBenchmarkRunId) {
+      renderBenchmarkLive();
+      setBenchmarkRunning(true);
+      connectBenchmarkEvents(state.activeBenchmarkRunId, retainedLive.lastSequence);
+    } else if (storedRunId) {
+      await resumeLiveBenchmark(storedRunId);
+    } else {
+      renderBenchmarkResult(state.benchmark.result);
+      elements.benchmarkStatus.textContent = "Pronto.";
+    }
+  } catch (error) {
+    elements.benchmarkStatus.textContent = error.message;
+  }
+}
+
+function closeBenchmarks() {
+  elements.benchmarkDialog.close();
+}
+
+function renderBenchmarkControls() {
+  const localModels = modelOptions().filter(option =>
+    option.provider === "ollama-local" && !option.disabled
+  );
+  const selectedModel = localModels.some(option => option.value === state.settings?.defaultModel)
+    ? state.settings.defaultModel
+    : localModels[0]?.value;
+  replaceOptions(elements.benchmarkModel, localModels, selectedModel);
+
+  const catalog = state.benchmark?.catalog;
+  elements.benchmarkTimeout.value = String(catalog?.defaultTimeoutSeconds ?? 120);
+  elements.benchmarkTimeout.min = String(catalog?.minimumTimeoutSeconds ?? 5);
+  elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 600);
+  elements.benchmarkHarnessList.replaceChildren();
+  for (const status of catalog?.harnesses ?? []) {
+    const label = document.createElement("label");
+    label.className = "benchmark-harness-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "benchmark-harness";
+    input.value = status.definition.id;
+    input.disabled = !status.availability.available;
+    input.dataset.available = String(status.availability.available);
+    input.checked = status.availability.available;
+    const text = document.createElement("span");
+    text.textContent = status.availability.available
+      ? `${status.definition.displayName} · ${status.availability.version ?? "disponível"}`
+      : `${status.definition.displayName} · indisponível`;
+    if (!status.availability.available && status.availability.message) {
+      label.title = status.availability.message;
+    }
+    label.append(input, text);
+    elements.benchmarkHarnessList.append(label);
+  }
+}
+
+function renderBenchmarkHistory() {
+  const options = [
+    { value: "", label: "Selecione um resultado persistido" },
+    ...(state.benchmark?.history ?? []).map(result => ({
+      value: result.runId,
+      label: `${new Date(result.startedAt).toLocaleString()} · ${result.model} · ${result.finalStatus}`
+    }))
+  ];
+  replaceOptions(
+    elements.benchmarkHistory,
+    options,
+    state.benchmark?.result?.runId ?? ""
+  );
+}
+
+async function runBenchmarkSuite(event) {
+  event.preventDefault();
+  if (state.activeBenchmarkRunId) {
+    return;
+  }
+  const harnesses = [...elements.benchmarkHarnessList.querySelectorAll(
+    'input[name="benchmark-harness"]:checked:not(:disabled)'
+  )].map(input => input.value);
+  if (harnesses.length === 0) {
+    elements.benchmarkStatus.textContent = "Selecione ao menos um harness disponível.";
+    return;
+  }
+  if (!elements.benchmarkPermission.checked) {
+    elements.benchmarkStatus.textContent = "Confirme a autorização imediata para executar o modelo.";
+    return;
+  }
+
+  const clientRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
+  state.activeBenchmarkRunId = clientRunId;
+  sessionStorage.setItem("agentic-router-benchmark-live-run", clientRunId);
+  setBenchmarkRunning(true);
+  initializeBenchmarkLive(clientRunId, harnesses);
+  elements.benchmarkStatus.textContent = "Iniciando dashboard ao vivo…";
+  elements.benchmarkResultsBody.replaceChildren();
+  renderBenchmarkLive();
+
+  try {
+    const started = await fetchJson("/api/benchmarks/suite-runs/live", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: elements.benchmarkModel.value,
+        harnesses,
+        suiteId: "basic-crud",
+        suiteVersion: 1,
+        timeoutSeconds: Number(elements.benchmarkTimeout.value),
+        modelExecutionPermissionGranted: true,
+        clientRunId
+      })
+    });
+    state.activeBenchmarkRunId = started.runId;
+    sessionStorage.setItem("agentic-router-benchmark-live-run", started.runId);
+    state.benchmark.live.runId = started.runId;
+    elements.benchmarkStatus.textContent = "Benchmark em execução; eventos conectados.";
+    connectBenchmarkEvents(started.runId, 0, started.eventsUrl);
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+    clearBenchmarkLiveConnection();
+    state.activeBenchmarkRunId = null;
+    state.benchmark.live = null;
+    sessionStorage.removeItem("agentic-router-benchmark-live-run");
+    elements.benchmarkPermission.checked = false;
+    setBenchmarkRunning(false);
+  }
+}
+
+function initializeBenchmarkLive(runId, harnessIds = []) {
+  const tests = state.benchmark?.catalog?.suite?.tests ?? [];
+  state.benchmark.live = {
+    runId,
+    startedAt: new Date().toISOString(),
+    lastSequence: 0,
+    terminal: false,
+    ranking: [],
+    harnesses: Object.fromEntries(harnessIds.map(harness => [harness, {
+      id: harness,
+      state: "pending",
+      completed: 0,
+      total: tests.length,
+      passed: 0,
+      score: null,
+      terminality: 0,
+      elapsedMilliseconds: 0,
+      startedAt: null,
+      currentTest: null,
+      tests: Object.fromEntries(tests.map(test => [test.id, {
+        id: test.id,
+        state: "pending",
+        activities: [],
+        checks: {},
+        result: null
+      }]))
+    }]))
+  };
+}
+
+async function resumeLiveBenchmark(runId) {
+  try {
+    const view = await fetchJson(
+      `/api/benchmarks/suite-runs/${encodeURIComponent(runId)}/live`
+    );
+    initializeBenchmarkLive(runId);
+    state.activeBenchmarkRunId = runId;
+    setBenchmarkRunning(!view.terminal);
+    for (const progressEvent of view.events ?? []) {
+      applyBenchmarkProgress(progressEvent, false);
+    }
+    if (!view.terminal) {
+      elements.benchmarkStatus.textContent = view.cancellationRequested
+        ? "Cancelamento em andamento…"
+        : "Dashboard reconectado ao benchmark em execução.";
+      connectBenchmarkEvents(runId, view.lastSequence);
+      renderBenchmarkLive();
+    }
+  } catch (error) {
+    sessionStorage.removeItem("agentic-router-benchmark-live-run");
+    state.activeBenchmarkRunId = null;
+    state.benchmark.live = null;
+    setBenchmarkRunning(false);
+    renderBenchmarkResult(state.benchmark.result);
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+function connectBenchmarkEvents(runId, afterSequence = 0, eventsUrl = null) {
+  if (state.benchmarkEventSource) {
+    state.benchmarkEventSource.close();
+  }
+  const separator = (eventsUrl ?? "").includes("?") ? "&" : "?";
+  const url = `${eventsUrl ?? `/api/benchmarks/suite-runs/${encodeURIComponent(runId)}/events`}`
+    + `${separator}after=${Math.max(0, afterSequence)}`;
+  const source = new EventSource(url);
+  state.benchmarkEventSource = source;
+  source.addEventListener("benchmark", event => {
+    try {
+      applyBenchmarkProgress(JSON.parse(event.data));
+    } catch {
+      elements.benchmarkStatus.textContent = "Evento ao vivo inválido; aguardando reconexão.";
+    }
+  });
+  source.onopen = () => {
+    if (state.activeBenchmarkRunId) {
+      elements.benchmarkStatus.textContent = "Benchmark em execução; eventos conectados.";
+    }
+  };
+  source.onerror = () => {
+    if (state.activeBenchmarkRunId) {
+      elements.benchmarkStatus.textContent = "Conexão interrompida; reconectando sem cancelar a execução…";
+    }
+  };
+  if (!state.benchmarkElapsedTimer) {
+    state.benchmarkElapsedTimer = setInterval(() => {
+      if (state.benchmark?.live && !state.benchmark.live.terminal) {
+        renderBenchmarkLive();
+      }
+    }, 1000);
+  }
+}
+
+function ensureLiveHarness(harnessId, total = 0) {
+  const live = state.benchmark.live;
+  if (!live.harnesses[harnessId]) {
+    live.harnesses[harnessId] = {
+      id: harnessId,
+      state: "pending",
+      completed: 0,
+      total,
+      passed: 0,
+      score: null,
+      terminality: 0,
+      elapsedMilliseconds: 0,
+      startedAt: null,
+      currentTest: null,
+      tests: {}
+    };
+  }
+  return live.harnesses[harnessId];
+}
+
+function ensureLiveTest(harness, testId) {
+  if (!harness.tests[testId]) {
+    harness.tests[testId] = {
+      id: testId,
+      state: "pending",
+      activities: [],
+      checks: {},
+      result: null
+    };
+  }
+  return harness.tests[testId];
+}
+
+function applyBenchmarkProgress(progressEvent, render = true) {
+  if (!state.benchmark?.live || progressEvent.runId !== state.benchmark.live.runId) {
+    initializeBenchmarkLive(progressEvent.runId, progressEvent.selectedHarnesses ?? []);
+  }
+  const live = state.benchmark.live;
+  if (progressEvent.sequence <= live.lastSequence) {
+    return;
+  }
+  live.lastSequence = progressEvent.sequence;
+  if (progressEvent.type === "run.started") {
+    live.startedAt = progressEvent.startedAt ?? progressEvent.timestamp;
+    for (const harnessId of progressEvent.selectedHarnesses ?? []) {
+      const harness = ensureLiveHarness(harnessId, progressEvent.totalTests);
+      for (const test of progressEvent.tests ?? []) {
+        ensureLiveTest(harness, test.id);
+      }
+    }
+  }
+  const harness = progressEvent.harness
+    ? ensureLiveHarness(progressEvent.harness, progressEvent.totalTests)
+    : null;
+  const test = harness && progressEvent.testId
+    ? ensureLiveTest(harness, progressEvent.testId)
+    : null;
+  if (progressEvent.type === "harness.started" && harness) {
+    harness.state = "running";
+    harness.startedAt = progressEvent.startedAt ?? progressEvent.timestamp;
+  } else if (progressEvent.type === "harness.progress" && harness) {
+    Object.assign(harness, {
+      state: progressEvent.state,
+      completed: progressEvent.completedTests,
+      total: progressEvent.totalTests,
+      passed: progressEvent.passedTests,
+      score: progressEvent.provisionalScore,
+      terminality: progressEvent.terminality,
+      elapsedMilliseconds: progressEvent.elapsedMilliseconds
+    });
+  } else if (progressEvent.type === "harness.completed" && harness) {
+    Object.assign(harness, {
+      state: progressEvent.state,
+      completed: progressEvent.completedTests,
+      total: progressEvent.totalTests,
+      passed: progressEvent.passedTests,
+      score: progressEvent.provisionalScore,
+      terminality: progressEvent.terminality,
+      elapsedMilliseconds: progressEvent.elapsedMilliseconds,
+      currentTest: null
+    });
+  } else if (progressEvent.type === "test.state" && test) {
+    test.state = progressEvent.state;
+    test.result = progressEvent.testResult ?? test.result;
+    if (["running", "harness-completed", "validating"].includes(progressEvent.state)) {
+      harness.currentTest = progressEvent.testId;
+    }
+  } else if (progressEvent.type === "activity" && test) {
+    test.activities.push({
+      kind: progressEvent.activityKind ?? "activity",
+      message: progressEvent.message ?? "Activity recorded.",
+      timestamp: progressEvent.timestamp
+    });
+    test.activities = test.activities.slice(-8);
+  } else if (progressEvent.type === "validation" && test) {
+    test.checks = progressEvent.validationChecks ?? {};
+  } else if (progressEvent.type === "ranking.provisional") {
+    live.ranking = progressEvent.ranking ?? [];
+  } else if (progressEvent.type === "run.cancelling") {
+    for (const item of Object.values(live.harnesses)) {
+      if (!["completed", "cancelled"].includes(item.state)) {
+        item.state = "cancelling";
+      }
+    }
+    elements.benchmarkStatus.textContent = "Cancelamento em andamento…";
+  } else if (progressEvent.type === "run.completed" && progressEvent.finalResult) {
+    finishBenchmarkLive(progressEvent.finalResult);
+    return;
+  } else if (progressEvent.type === "run.failed") {
+    failBenchmarkLive(progressEvent.error?.message ?? progressEvent.message);
+    return;
+  }
+  if (render) {
+    renderBenchmarkLive();
+  }
+}
+
+function renderBenchmarkLive() {
+  const live = state.benchmark?.live;
+  if (!live) {
+    return;
+  }
+  elements.benchmarkLiveDashboard.hidden = false;
+  elements.benchmarkRankingNote.hidden = false;
+  elements.benchmarkRunSummary.textContent =
+    `Execução ao vivo · ${Object.keys(live.harnesses).length} harness(es) · estado transitório`;
+  elements.benchmarkLiveDashboard.replaceChildren();
+  for (const harness of Object.values(live.harnesses)) {
+    const card = document.createElement("article");
+    card.className = "benchmark-live-harness";
+    card.dataset.state = harness.state;
+    const elapsed = harness.startedAt && !["completed", "cancelled"].includes(harness.state)
+      ? Date.now() - new Date(harness.startedAt).getTime()
+      : harness.elapsedMilliseconds;
+    const heading = document.createElement("h4");
+    heading.textContent = benchmarkHarnessLabel(harness.id);
+    const summary = document.createElement("p");
+    summary.className = "benchmark-live-summary";
+    summary.textContent = `${harness.state} · ${harness.completed}/${harness.total} · `
+      + `${harness.passed} passed · score* ${harness.score === null ? "—" : Number(harness.score).toFixed(2)} · `
+      + `terminality ${harness.terminality}% · ${formatBenchmarkDuration(Math.max(0, elapsed || 0))}`;
+    const current = document.createElement("p");
+    current.className = "benchmark-live-current";
+    current.textContent = harness.currentTest
+      ? `Atual: ${harness.currentTest} · ${harness.tests[harness.currentTest]?.state ?? harness.state}`
+      : "Sem teste ativo.";
+    card.append(heading, summary, current);
+    for (const test of Object.values(harness.tests)) {
+      const details = document.createElement("details");
+      details.className = "benchmark-live-test";
+      const testSummary = document.createElement("summary");
+      testSummary.textContent = `${test.id} · ${test.state}`;
+      details.append(testSummary);
+      if (test.activities.length) {
+        const list = document.createElement("ul");
+        for (const activity of test.activities) {
+          const item = document.createElement("li");
+          item.textContent = `${activity.kind}: ${activity.message}`;
+          list.append(item);
+        }
+        details.append(list);
+      }
+      if (Object.keys(test.checks).length) {
+        const checks = document.createElement("dl");
+        checks.className = "benchmark-live-checks";
+        for (const [name, value] of Object.entries(test.checks)) {
+          const term = document.createElement("dt");
+          term.textContent = name;
+          const definition = document.createElement("dd");
+          definition.textContent = String(value);
+          checks.append(term, definition);
+        }
+        details.append(checks);
+      }
+      card.append(details);
+    }
+    elements.benchmarkLiveDashboard.append(card);
+  }
+  renderProvisionalBenchmarkRanking(live.ranking);
+  elements.benchmarkResultDetail.textContent =
+    "Expanda um teste no card para ver atividade útil e fatos de validação. O resultado final substituirá este estado.";
+}
+
+function renderProvisionalBenchmarkRanking(ranking) {
+  elements.benchmarkResultsBody.replaceChildren();
+  for (const entry of ranking) {
+    const row = document.createElement("tr");
+    for (const value of [
+      entry.rank ? `#${entry.rank} ${benchmarkHarnessLabel(entry.harness)}` : `— ${benchmarkHarnessLabel(entry.harness)}`,
+      entry.state,
+      `${entry.passed}/${entry.total}`,
+      entry.score === null ? "—" : `${Number(entry.score).toFixed(2)}*`,
+      formatBenchmarkDuration(entry.durationMilliseconds),
+      `${entry.terminality}%`
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    elements.benchmarkResultsBody.append(row);
+  }
+}
+
+function finishBenchmarkLive(result) {
+  if (state.benchmark?.live?.terminal) {
+    return;
+  }
+  state.benchmark.live.terminal = true;
+  clearBenchmarkLiveConnection();
+  state.activeBenchmarkRunId = null;
+  sessionStorage.removeItem("agentic-router-benchmark-live-run");
+  elements.benchmarkPermission.checked = false;
+  setBenchmarkRunning(false);
+  state.benchmark.result = result;
+  state.benchmark.history = [
+    result,
+    ...(state.benchmark.history ?? []).filter(item => item.runId !== result.runId)
+  ];
+  renderBenchmarkHistory();
+  renderBenchmarkResult(result);
+  elements.benchmarkStatus.textContent = result.terminalState === "cancelled"
+    ? "Execução cancelada com resultado final persistido."
+    : "Benchmark concluído e persistido.";
+}
+
+function failBenchmarkLive(message) {
+  if (state.benchmark?.live) {
+    state.benchmark.live.terminal = true;
+  }
+  clearBenchmarkLiveConnection();
+  state.activeBenchmarkRunId = null;
+  sessionStorage.removeItem("agentic-router-benchmark-live-run");
+  elements.benchmarkPermission.checked = false;
+  setBenchmarkRunning(false);
+  elements.benchmarkStatus.textContent = message ?? "O benchmark ao vivo falhou antes do resultado final.";
+}
+
+function clearBenchmarkLiveConnection() {
+  if (state.benchmarkEventSource) {
+    state.benchmarkEventSource.close();
+    state.benchmarkEventSource = null;
+  }
+  if (state.benchmarkElapsedTimer) {
+    clearInterval(state.benchmarkElapsedTimer);
+    state.benchmarkElapsedTimer = null;
+  }
+}
+
+async function cancelBenchmarkSuite() {
+  if (!state.activeBenchmarkRunId) {
+    return;
+  }
+  elements.benchmarkStatus.textContent = "Solicitando cancelamento limpo…";
+  for (const harness of Object.values(state.benchmark?.live?.harnesses ?? {})) {
+    if (!["completed", "cancelled"].includes(harness.state)) {
+      harness.state = "cancelling";
+    }
+  }
+  renderBenchmarkLive();
+  try {
+    await fetchJson(
+      `/api/benchmarks/suite-runs/${encodeURIComponent(state.activeBenchmarkRunId)}/cancel`,
+      { method: "POST" }
+    );
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+function setBenchmarkRunning(running) {
+  elements.runBenchmark.disabled = running;
+  elements.cancelBenchmark.disabled = !running;
+  elements.benchmarkModel.disabled = running;
+  elements.benchmarkTimeout.disabled = running;
+  elements.benchmarkHistory.disabled = running;
+  for (const input of elements.benchmarkHarnessList.querySelectorAll("input")) {
+    input.disabled = running || input.dataset.available === "false";
+  }
+}
+
+function openPersistedBenchmark() {
+  const selected = state.benchmark?.history?.find(
+    result => result.runId === elements.benchmarkHistory.value
+  ) ?? null;
+  state.benchmark.result = selected;
+  renderBenchmarkResult(selected);
+}
+
+function renderBenchmarkResult(result) {
+  elements.benchmarkLiveDashboard.hidden = true;
+  elements.benchmarkRankingNote.hidden = true;
+  elements.benchmarkResultsBody.replaceChildren();
+  elements.benchmarkResultDetail.replaceChildren();
+  if (!result) {
+    elements.benchmarkRunSummary.textContent = "Execute ou abra um resultado persistido.";
+    elements.benchmarkResultDetail.textContent = "Selecione um harness na tabela para inspecionar os quatro testes.";
+    return;
+  }
+
+  elements.benchmarkRunSummary.textContent =
+    `${result.model} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)} · `
+    + `${result.fixtureId} v${result.fixtureVersion}`;
+  const byHarness = new Map(result.harnessResults.map(item => [item.harness, item]));
+  for (const ranked of result.ranking) {
+    const harness = byHarness.get(ranked.harness);
+    if (!harness) {
+      continue;
+    }
+    const row = document.createElement("tr");
+    const harnessCell = document.createElement("td");
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "benchmark-result-link";
+    open.dataset.harness = harness.harness;
+    open.textContent = `#${ranked.rank} ${benchmarkHarnessLabel(harness.harness)}`;
+    harnessCell.append(open);
+    for (const value of [
+      harness.terminalState,
+      `${harness.passed}/${harness.total}`,
+      Number(harness.score).toFixed(2),
+      formatBenchmarkDuration(harness.durationMilliseconds),
+      `${harness.terminality}%`
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    row.prepend(harnessCell);
+    elements.benchmarkResultsBody.append(row);
+  }
+  const firstHarness = result.ranking[0]?.harness;
+  if (firstHarness) {
+    renderBenchmarkHarnessDetail(byHarness.get(firstHarness));
+  }
+}
+
+function openBenchmarkHarnessResult(event) {
+  const button = event.target.closest("[data-harness]");
+  if (!button) {
+    return;
+  }
+  const harness = state.benchmark?.result?.harnessResults?.find(
+    item => item.harness === button.dataset.harness
+  );
+  renderBenchmarkHarnessDetail(harness);
+}
+
+function renderBenchmarkHarnessDetail(harness) {
+  elements.benchmarkResultDetail.replaceChildren();
+  if (!harness) {
+    elements.benchmarkResultDetail.textContent = "Resultado do harness indisponível.";
+    return;
+  }
+  const heading = document.createElement("h4");
+  heading.textContent = `${benchmarkHarnessLabel(harness.harness)} · ${harness.passed}/${harness.total} passed`;
+  elements.benchmarkResultDetail.append(heading);
+  if (harness.tests.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "Nenhum teste iniciou antes do cancelamento.";
+    elements.benchmarkResultDetail.append(empty);
+    return;
+  }
+  for (const test of harness.tests) {
+    const details = document.createElement("details");
+    details.className = "benchmark-test-detail";
+    const summary = document.createElement("summary");
+    summary.textContent = `${test.run.testId} · ${test.rawResult.status} · score ${Number(test.score?.total ?? 0).toFixed(2)}`;
+    details.append(summary);
+    const facts = document.createElement("dl");
+    facts.className = "benchmark-evidence-grid";
+    const evidence = [
+      ["Terminal", test.rawResult.executionStatus],
+      ["Exactness", `${test.rawResult.exactness}%`],
+      ["Workspace", `${test.rawResult.containmentAccuracy}%`],
+      ["Host validation", test.rawResult.hostValidationResult],
+      ["Duration", formatBenchmarkDuration(test.durationMilliseconds)],
+      ["Workspace id", test.run.workspaceId],
+      ["Fixture fingerprint", test.run.fixtureFingerprint],
+      ["Workspace cleaned", test.workspaceCleanedUp],
+      ["Tool calls", test.rawResult.toolCallCount ?? "n/d"],
+      ["Errors / recovered", `${test.rawResult.surfacedErrorCount ?? "n/d"} / ${test.rawResult.recoveredErrorCount ?? "n/d"}`],
+      ["Changed files", (test.rawResult.changedFiles ?? []).join(", ") || "none"],
+      ["Unexpected", (test.rawResult.unexpectedFiles ?? []).join(", ") || "none"],
+      ...Object.entries(test.rawResult.validationFacts ?? {}).map(
+        ([key, value]) => [`Validation · ${key}`, value]
+      )
+    ];
+    for (const [label, value] of evidence) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const definition = document.createElement("dd");
+      definition.textContent = String(value);
+      facts.append(term, definition);
+    }
+    details.append(facts);
+    if (test.rawResult.error) {
+      const error = document.createElement("p");
+      error.className = "benchmark-validation-error";
+      error.textContent = `${test.rawResult.error.code}: ${test.rawResult.error.message}`;
+      details.append(error);
+    }
+    const promptLabel = document.createElement("strong");
+    promptLabel.textContent = "Prompt canônico";
+    const prompt = document.createElement("pre");
+    prompt.textContent = test.run.prompt;
+    const reportLabel = document.createElement("strong");
+    reportLabel.textContent = "Relatório final do harness";
+    const report = document.createElement("pre");
+    report.textContent = test.rawResult.finalHarnessReport || "(sem relatório)";
+    details.append(promptLabel, prompt, reportLabel, report);
+    elements.benchmarkResultDetail.append(details);
+  }
+}
+
+function benchmarkHarnessLabel(harnessId) {
+  return state.benchmark?.catalog?.harnesses?.find(
+    item => item.definition.id === harnessId
+  )?.definition.displayName ?? harnessId;
+}
+
+function formatBenchmarkDuration(milliseconds) {
+  if (milliseconds < 1000) {
+    return `${milliseconds} ms`;
+  }
+  return `${(milliseconds / 1000).toFixed(2)} s`;
+}
+
+function benchmarkErrorMessage(error) {
+  const errors = error.payload?.errors;
+  const first = errors
+    ? Object.values(errors).flat()[0]
+    : null;
+  return first ?? error.message;
 }
 
 function renderRecoveryState() {
@@ -7125,6 +7834,15 @@ function handleHarnessChange() {
   updateComposerStatus();
 }
 
+function harnessDisplayLabel(definition) {
+  if (!definition.experimental) {
+    return definition.displayName;
+  }
+  return definition.id === "opencode"
+    ? `${definition.displayName} [Experimental]`
+    : `${definition.displayName} (Experimental)`;
+}
+
 function renderHarnesses() {
   const statuses = Array.isArray(state.harnesses)
     ? state.harnesses
@@ -7132,9 +7850,7 @@ function renderHarnesses() {
   const options = statuses.map(status => {
     const definition = status.definition;
     const availability = status.availability;
-    const label = definition.experimental
-      ? `${definition.displayName} (Experimental)`
-      : definition.displayName;
+    const label = harnessDisplayLabel(definition);
     return {
       value: definition.id,
       label: availability.available
@@ -10806,9 +11522,7 @@ function updateComposerStatus() {
       item => item.definition.id === state.harness
     );
     const harness = status
-      ? status.definition.experimental
-        ? `${status.definition.displayName} (Experimental)`
-        : status.definition.displayName
+      ? harnessDisplayLabel(status.definition)
       : state.harness;
     elements.composerStatus.textContent =
       `Execute · ${harness} · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;

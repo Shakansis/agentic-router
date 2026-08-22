@@ -2,16 +2,18 @@
 
 ## 1. Product Mission
 
-Agentic Router is a local-first application that routes conversations and supervised software-development tasks to local Ollama models or explicitly configured cloud providers.
+Agentic Router is a local-first application that routes conversations and supervised software-development work to a selected **model + harness** combination using local Ollama models or explicitly configured cloud providers.
 
 The product has two user-visible modes:
 
-- **Chat** routes a turn to a configured expert and streams one continuous answer.
-- **Execute** lets a coordinator inspect a trusted workspace, propose a host-owned plan, use a constrained set of local tools, request approvals when required, validate changes, and present a reviewable result.
+- **Chat** routes a turn to the selected specialist and streams one continuous answer.
+- **Execute** lets the selected model + harness work toward the user's goal inside a trusted workspace while Agentic Router enforces product policy, approvals, security boundaries, validation, recovery, and reviewable evidence.
 
-The host, not the model, owns security boundaries, plan identity, approval decisions, retries, recovery budgets, persistence, and tool execution.
+The objective is to deliver the requested outcome whenever a permitted recovery path exists.
 
-## 2. Instruction Priority
+The Host owns product policy, security boundaries, approval semantics, trusted-workspace authority, session state, validation, and execution evidence. Actions may be performed through Host-provided tools or harness-native capabilities. Using a different harness must not silently change Agentic Router policy.
+
+## 2. Instruction and Decision Authority
 
 When instructions conflict, follow this order:
 
@@ -22,413 +24,256 @@ When instructions conflict, follow this order:
 
 Do not expand scope to solve hypothetical future needs.
 
-## 3. Current Technology and Scope
+Do not invent or change product policy. Choose implementation details autonomously only when they preserve existing behavior. Ask the user before changing:
 
-The implementation uses:
+- security or approval semantics;
+- capability availability;
+- Host/harness authority;
+- trusted-workspace boundaries;
+- failure or recovery behavior;
+- user-visible product behavior;
+- roadmap scope or architectural invariants.
+
+Never resolve an unspecified case by silently choosing a stricter, safer, broader, or more restrictive product behavior.
+
+When several implementation choices are behaviorally equivalent, choose the smallest coherent solution without asking.
+
+### AGENTS.md scope
+
+`AGENTS.md` contains only stable, project-wide invariants that should influence most development tasks.
+
+Do not add feature-specific behavior, exact prompts, UI details, provider quirks, storage formats, endpoint-specific rules, test cases, temporary migrations, or milestone decisions to `AGENTS.md`. Put them in the relevant feature specification, design document, tests, or implementation documentation.
+
+Do not update `AGENTS.md` merely because a feature was added or changed. Update it only when a project-wide invariant or architectural authority changes.
+
+## 3. Technology and Scope
+
+The application uses:
 
 - .NET 10 and ASP.NET Core Web API;
-- controllers for HTTP endpoints;
-- Ollama Local plus optional Groq, Google AI Studio, and Cerebras providers;
+- built-in dependency injection, options, logging, and `HttpClientFactory`;
+- Ollama Local plus explicitly configured cloud providers;
 - vanilla HTML, CSS, and JavaScript;
 - Playwright for .NET with MSTest for browser-driven end-to-end tests;
-- one local application instance;
-- one local JSON settings store;
-- one bounded local JSONL usage ledger;
-- optional local conversation persistence;
+- validated local settings and persistence;
 - trusted workspace profiles and supervised local execution.
 
-The application must work with one GPU, multiple GPUs, or provider-managed automatic device selection. Multi-GPU hardware is optional and must never be a runtime requirement.
+The application must work with one GPU, multiple GPUs, or provider-managed device selection. Multi-GPU hardware is optional and must never be required.
+
+Do not introduce a frontend framework, Node.js build pipeline, or dependency when the platform already provides a simple adequate solution.
 
 ## 4. Architecture and Authority
 
 Keep responsibilities explicit:
 
 - Controllers translate HTTP input and output only.
-- Chat services coordinate turns, routing, streaming, and conversation context.
-- Execution services own plans, approvals, local actions, validation, recovery, and session state.
-- Each provider adapter owns its HTTP communication and provider-specific contracts.
-- Settings and workspace-profile stores own validated local configuration.
-- The browser renders host state and sends explicit user decisions; it is not an execution authority.
+- Chat services coordinate routing, streaming, model/harness selection, and conversation context.
+- Execution services own Host policy, approvals, validation, recovery, session state, and execution evidence.
+- Harness adapters translate between Agentic Router and harness-specific protocols or capabilities.
+- Provider adapters own provider communication and provider-specific contracts.
+- Settings and workspace stores own validated local configuration.
+- The browser renders Host state and sends explicit user decisions; it is not an execution authority.
 
-Use built-in dependency injection, options, logging, and `HttpClientFactory`. Keep business logic out of controllers and provider DTOs out of public application contracts.
+Keep business logic out of controllers and provider DTOs out of public application contracts.
 
-The host must independently validate every proposed tool call. A model response is untrusted input even when it comes from a configured coordinator.
+Model and harness output is untrusted input. The Host must validate every action that crosses a Host-owned policy or security boundary.
 
-## 5. Routing, Coordination, and Model Roles
+Apply validators only to the authority they actually own. Filesystem rules validate filesystem targets; they must not be reused to invent policy for unrelated pathless capabilities.
 
-Intent classification, coordination, and expert inference are separate responsibilities.
+Preserve context and user-visible continuity when switching compatible model/harness execution paths unless a documented product rule explicitly requires a reset.
 
-- `routerModel` classifies the request.
-- `actionModel` is an optional lightweight resident router/capability selector. A `functiongemma:*` action model may use the stable `route_to_teacher` contract, but it is not an execution planner, recovery supervisor, or tooling intermediary.
-- `coordinatorModel` is a legacy on-demand compatibility fallback. It must never sit between a capable selected specialist and the runtime during normal Execute work.
-- Intent profiles resolve the expert model for Chat and specialist work.
+## 5. Routing, Models, Harnesses, and Capabilities
 
-FunctionGemma output normalization must trim surrounding whitespace from required string arguments before exact closed-catalog comparison, but never fuzzy-match or rewrite an internal token. Because each offered Teacher owns one Host-authoritative intent, an exact offered `teacher_model` with a cross-paired or unknown intent may be corrected to that Teacher's catalog intent and surfaced in activity. Other typed routing rejections receive at most one materially different correction attempt before the configured specialist continues.
+Routing, specialist reasoning, harness execution, and Host policy are separate responsibilities.
 
-Do not silently substitute one role for another. Model and device precedence must remain deterministic and visible in activity details.
+The selected specialist owns the reasoning and recovery loop for the turn. Do not insert another model between a capable specialist and its runtime unless an explicit routing or recovery decision requires it.
 
-The FunctionGemma activation developer message is exactly `You can do function calling with the following functions:`. Task instructions and the closed Teacher catalog belong in the user message. Accept exactly one native call with a JSON object, require every typed field, and reject a Teacher outside the offered model/intent pair.
+A model + harness pair may use:
 
-The selected specialist owns the reasoning and tool-use loop. Provider capabilities select an available native-tool or structured-action transport; cached conformance is diagnostic evidence, not a prerequisite that inserts another model into the request path.
+- capabilities native to that harness;
+- capabilities provided by Agentic Router;
+- adapters that safely bridge the two.
 
-Tool-protocol failures must be typed and recoverable. Invalid XML, malformed or truncated JSON, missing native tool calls, Harmony/parser failures, and equivalent syntax failures must not be treated as generic provider failures. After a deterministic protocol failure, change strategy for the current turn instead of repeating an identical request.
+Do not remove useful native capabilities merely to make harness capability lists identical.
 
-Execute coordination is specialist-first. The selected specialist proposes one action at a time and receives an authoritative Host result before continuing. Semantic repair is limited to one materially different attempt; repeated invalid proposals stop with a reviewable typed result. Another model may take over only after a demonstrated transport incompatibility and an explicit recovery decision.
+Do not use an unrestricted Host shell, filesystem escape, or equivalent bypass to compensate for a missing adapter. Missing capability bridges must remain explicit.
 
-Tool identifiers use one Host-owned closed alias registry with
-`StringComparer.OrdinalIgnoreCase`. Resolve only exact canonical names or
-explicitly reviewed aliases, preserve original and canonical names in activity
-and audit evidence, and verify that the canonical tool is offered in the
-current phase before ordinary validation. Never use fuzzy, cultural,
-model-inferred, or argument-name normalization.
+Capability availability, routing decisions, fallbacks, retries, and takeovers must be deterministic and visible in activity evidence.
+
+Tool and capability identifiers must use exact canonical names or explicitly reviewed aliases. Never use fuzzy or model-inferred tool-name normalization.
+
+Protocol or transport failures must be typed. After a deterministic failure, change strategy instead of repeating an identical request.
 
 ## 6. Execute Mode
 
-Execute mode is constrained to a user-approved trusted workspace.
+Execute is goal-driven and constrained to a user-approved trusted workspace.
 
-Required behavior:
+A visible plan is optional and must never gate ordinary requested actions.
 
-1. Resolve and validate the active workspace profile.
-2. Inspect repository instructions and project metadata.
-3. Create bounded session state; a visible plan is optional and must never gate ordinary actions.
-4. Let the selected specialist propose only registered structured tools.
-5. Revalidate paths, arguments, policy, approvals, and limits in the host.
-6. Independently prove each action's required effect before recording it as completed.
-7. Record tool calls, results, file changes, validation, recovery, and terminal state.
-8. Generate the terminal Execute answer from Host facts; model prose may not override execution state.
-9. Present changes for review and allow supported undo operations.
+The normal execution loop is:
 
-Supported file actions are structured operations such as listing, reading, searching, creating, writing, replacing, applying patches, and deleting an explicit file list validated by the Host. `delete_files` always requires explicit approval, workspace confinement, protected-path checks, per-file postcondition evidence, and bounded recovery data before execution. Its path list may be edited inline until approval; approval atomically revalidates and binds the final list. Process execution uses a separate structured contract and an allowlist policy. Never add a generic shell tool, free-form command arguments, or an unrestricted filesystem escape.
+1. resolve and validate the active workspace;
+2. inspect applicable repository instructions and project metadata;
+3. let the selected model + harness work toward the user's objective;
+4. validate each Host-governed action against its actual policy and boundary;
+5. execute through the appropriate Host or native-harness capability;
+6. independently verify required effects when Agentic Router claims an action succeeded;
+7. return actionable failures to the active agent for recovery;
+8. record bounded activity, changes, validation, recovery, and terminal state;
+9. present a reviewable result based on Host facts.
 
-The closed tool-name registry remains the naming authority. Effect typing is a post-resolution layer: `alias -> canonical tool -> execution -> proven effect`. A successful tool response without its required observed effect must not be recorded as completed. Mutation objectives with no verified file, directory, or Git mutation end as blocked, never completed. Assistant output beginning with Host-reserved protocol markers is invalid model output and must not become the visible answer.
+All effective filesystem actions governed by the trusted workspace must remain confined to the canonical trusted root. Reject genuine external escapes, protected paths, ambiguous targets, unsafe reparse-point traversal, stale conflicting writes, and other violations defined by the relevant feature specification.
 
-All workspace paths must be canonicalized and confined to the trusted root. No effective action may escape that root. For `create_file` and `create_directory` only, the Host may recover an otherwise valid relative path whose excess `..` segments would cross the root by clamping those segments at the trusted root, replacing the action argument with the effective internal path, and recording the original and effective values as a visible correction. Never apply that correction to absolute external paths, reads, edits, deletion, processes, or Git. Reject reparse-point escapes, protected paths, invalid encodings, oversized inputs, stale file writes, and every path that cannot be reinterpreted unambiguously inside the trusted root. Preserve external user changes and surface conflicts for review.
+Absence of a filesystem path is not evidence of an external filesystem path. Do not manufacture boundary failures for capabilities that are not filesystem operations.
 
-A rejected proposal is not automatically a failed objective. For recoverable tool names, JSON shape, required fields, protocol syntax, relative creation paths, stale state, or equivalent proposal defects, return bounded authoritative correction facts to the active model and continue with a materially different proposal or execution path. Keep the correction visible in activity and review evidence without presenting it as a terminal user error. Stop the objective only when the safe alternatives and recovery budget are exhausted, explicit approval is required or denied, or no interpretation can preserve the trusted-workspace and policy boundaries.
+Preserve external user changes and surface conflicts instead of overwriting them silently.
 
-Trusted-workspace actions use deterministic validation and are automatically approved by default. Ask only for operations whose effects cross a real boundary, such as guarded Git writes, external publication, protected policy files, or processes outside the reviewed safe set. Cancellation must stop active provider and process work.
+A successful tool or capability response is not sufficient evidence of success when Agentic Router can independently verify the required effect. Do not report an operation as completed when its required effect was not observed.
 
-An editable pending approval may revise only the structured argument surface
-explicitly exposed by the Host. Keep the canonical tool and Host action ID
-fixed, parse without a shell, rerun the ordinary path, argument, and policy
-validation, and serialize revision against the final decision. A rejected
-revision must leave the previously validated pending action unexecuted and
-must not broaden its authority.
+## 7. Approval and Recovery
 
-### Safe Git delivery
+The user's selected approval mode is authoritative.
 
-Review changes may prepare an explicitly selected delivery for a valid Git repository inside the trusted workspace. The host may inspect bounded status, diff, log, and commit data, and may perform only structured staging, unstaging, commit, annotated-tag, current-upstream branch push, and exact-tag push operations.
+- In automatic approval mode, requested, validated, permitted mutations may execute without duplicate confirmation.
+- In ask mode, mutations covered by that policy wait for user approval.
+- Approval never authorizes crossing hard security or trusted-workspace boundaries.
+- Do not invent new approval requirements for an unspecified capability.
 
-The main interface exposes host-authoritative Git status and bounded Current session, Working tree, Staged, and Last commit diffs. A non-repository workspace may be initialized at the trusted root on `main`, but only in Execute mode after immutable explicit approval. Initialization must not create a commit, stage files, or add a remote. Repository configuration edits are limited to explicitly approved, repository-local `user.name`, `user.email`, and the exact `origin` address. The Host must accept only validated HTTPS or SSH origin addresses, reject embedded credentials, and use structured `remote add` or `remote set-url` arguments.
+A rejected, unavailable, malformed, or forbidden intermediate action is not automatically a failed objective.
 
-Every Git write always requires immutable, action-specific user approval, including under the automatic approval policy. Pre-existing user changes remain separate and unselected by default. A commit requires an exact staged-set match and a passing validation bound to current file hashes, unless a permitted explicit override is approved. Commit, tag, branch-push, and tag-push facts remain distinct in session state.
+Return a typed, actionable reason to the active agent that explains what failed and why. Keep the turn alive while a permitted materially different recovery path remains.
 
-Never expose arbitrary Git arguments, force push, amend, reset, checkout, switch, clean, stash, pull, merge, rebase, cherry-pick, revert, remote mutation other than the exact guarded `origin` address flow, branch mutation, tag deletion, or history rewriting. Once a session delivery is committed, internal undo must not contradict or rewrite repository history.
+Stop the objective only when:
 
-## 7. Plans, Recovery, and Limits
+- the requested goal is genuinely impossible within current capabilities and policy;
+- no permitted recovery path remains;
+- the user denies required approval;
+- the user cancels;
+- a non-recoverable infrastructure failure prevents continuation;
+- or the configured execution/recovery budget is exhausted.
 
-Plans are host state, not opaque model documents. The model may propose objectives and normalizable titles; the host assigns stable plan and step IDs, validates dependencies, and records state transitions.
+Recovery must remain bounded and observable. Do not retry indefinitely, repeat a deterministic failure unchanged, hide fallbacks, or silently weaken policy to obtain success.
 
-Recovery must be bounded and observable:
+Security constraints limit execution; they do not authorize the implementation to redefine product behavior.
 
-- classify failures by typed stage and reason;
-- checkpoint enough state to continue safely;
-- choose a materially different strategy after deterministic failures;
-- allow one bounded Host-corrected native protocol retry for the active resident before requiring a user recovery decision, while target-path protocol failures may hand off immediately to a different eligible coordinator;
-- respect retry, tool-call, iteration, elapsed-time, and recovery budgets;
-- terminate with a useful blocked or failed result when safe progress is impossible.
+## 8. Configuration, Persistence, and Privacy
 
-Never hide retries, takeovers, fallbacks, or partial results from activity and audit state.
+Configuration must be typed, validated, versionable, and atomically saved where practical. Invalid settings must not be partially applied.
 
-## 8. Configuration and Persistence
+Persist only data the user has enabled and only at the minimum fidelity required by the feature.
 
-Keep configuration typed, validated, versionable, and backward-compatible when practical. Invalid settings must be rejected with field-level errors and must never be partially saved.
+Never expose or persist secrets, hidden instructions, unrestricted local paths, raw provider payloads, full stack traces, or sensitive tool/process content unless an explicitly approved feature specification requires a safe bounded representation.
 
-Configuration includes provider URL, router and coordinator models, intent profiles, model/device defaults, context sizes, timeouts, execution limits, approval policy, trusted workspaces, and persistence preferences.
+Cloud credentials must remain protected and browser-visible state must expose only sanitized or masked information.
 
-Ollama Local context is Host-owned and role-specific. Resolve it from typed
-router, resident-coordinator, specialist, primary, fallback, benchmark,
-model-test, web-search-synthesis, and vision-request defaults plus an optional
-exact provider/model/digest override. The global provider context remains a
-ceiling, and the model-declared maximum is another ceiling. Send the effective
-value only through native `/api/chat` `options.num_ctx`.
+Local Ollama inference has no provider token charge. Provider usage, estimates, measurements, diagnostics, and cost projections must distinguish exact, estimated, measured, configured, stale, and unavailable evidence when those distinctions matter.
 
-Request fit includes bounded message input, tool definitions and results,
-image overhead, and reserved output. Grow context only through the configured
-discrete ladder; reject an unfit request with a typed error rather than
-silently truncating required execution state. Resident coordination receives
-only the current objective, project context, specialist guidance, and bounded
-current tool state.
+Do not make hidden background provider calls or silently change providers, models, harnesses, device policy, persistence state, or user configuration.
 
-The configured coordinator is the resident model. Preload it at 8,192 context
-tokens by default, verify exact model, digest, and `context_length` through
-`/api/ps`, and mark it ready only after verification. A mismatched resident is
-unloaded, verified absent, and reloaded only while no request is active.
-Settings changes, recovery eviction, and measurement must restore or explicitly
-report the prior resident state.
-
-Metadata analysis may use `/api/tags`, `/api/show`, `/api/ps`, and Ollama
-version without loading a model. Real memory measurement always requires
-explicit permission, bounded context candidates, active-request exclusion,
-and restoration. Store measured evidence atomically under
-`data/runtime-profiles/ollama-model-memory.json`, keyed by exact model digest,
-Ollama version, hardware signature, role, context, and runtime signature.
-Never export measured hardware records in portable YAML.
-
-Memory recommendations distinguish configured, inherited, overridden,
-metadata-derived, measured, and stale evidence. Surface shared-model and CPU
-offload consequences. Do not infer or mutate Ollama parallelism, flash
-attention, or KV-cache type when those values are unavailable.
-
-When an intent primary resolves to a cloud provider, its configured fallback
-must resolve unambiguously to an installed Ollama Local model. The Host may
-switch once for an eligible timeout, provider outage, rate limit, quota
-exhaustion, or supported transient failure. It must not fallback for user
-cancellation, invalid requests, policy or security denials, unsupported
-capabilities, or malformed configuration.
-
-Cloud API keys are protected for the current Windows user with DPAPI. Ordinary settings and portable YAML contain no keys, and browser contracts expose only masked state and opaque secret references.
-
-Persist only the data the user has enabled. Do not expose secrets, raw provider payloads, full stack traces, or unrestricted local paths in browser-visible errors.
-
-Provider calls record bounded metadata-only usage events under `data/usage/`.
-Use provider token counts when available and one centralized conservative
-estimator otherwise; exact and estimated values must remain visibly distinct.
-Never write prompts, responses, images, tool arguments, file contents, hidden
-guidance, or secrets to the usage ledger. Local Ollama inference has zero
-provider token charge. Any paid-cloud comparison is an explicitly selected
-equivalent-cost estimate using a versioned official-source price snapshot, not
-an Ollama Cloud token quota or exact savings claim.
-
-Provider health is application-owned and based on observed requests or explicit
-connection tests, never merely on key presence. Diagnostics expose only
-sanitized status, category, retry, quota, model identity, adapter, freshness,
-latency, and accuracy facts. Cloud retries are provider-aware, jittered,
-duration- and attempt-bounded, and respect valid `Retry-After` values. Never
-retry authentication, invalid requests, unsupported capabilities, security
-denials, user cancellation, or deterministic protocol/parser failures. Every
-real provider attempt records its own usage event before the existing
-cloud-to-local fallback policy is considered.
-
-Usage events are validated before storage and aggregation. Rejected or
-duplicate events must not affect derived totals, and exact provider counts are
-never silently repaired. Reconciliation reads immutable JSONL events with
-bounded memory, reports accepted, warned, estimated, rejected, and duplicate
-counts, and atomically replaces only files under `data/usage-aggregates/`.
-Automatic reconciliation is limited to a missing, invalid, or version-mismatched
-aggregate; ordinary startup must not rebuild valid aggregates.
-
-Web search is off by default and requires explicit enablement. Provider-native
-search is used only where official metadata or an explicit adapter contract
-authorizes it. Ollama Web Search is a separate, read-only integration with its
-own DPAPI-protected key; it does not add Ollama Cloud models. Search results are
-bounded untrusted data, citations must use absolute HTTPS URLs, and result
-content must never trigger local tools.
-
-Image input requires verified vision capability, MIME/signature validation,
-bounded count, bytes, and decoded dimensions. Cloud image bytes require an
-independent per-browser-session and per-provider confirmation that is never
-persisted. Conversation history stores attachment metadata and a
-`missing-attachment` marker only; the usage ledger stores counts and byte totals
-but never image or search content. Images must not be stripped to make a
-text-only primary or fallback succeed.
-
-Cloud quota and cost dashboards are local projections over provider-reported
-headers, explicitly configured quotas, cached provider metadata, and the usage
-ledger. Accuracy must remain labelled exact, estimated, or unavailable.
-Expected billing mode is a user label, never a billing guarantee. Do not make
-background provider calls, send alerts externally, or switch providers
-proactively.
-
-Model presentation preferences are local metadata keyed by provider plus exact
-model ID. Aliases, favorites, hidden state, and notes must never replace the
-technical identity used in API calls. Hidden or unavailable saved references
-remain visible in repair flows, while ordinary selectors omit hidden models.
-Capability filters use provider metadata and exact cached conformance identity,
-never model-name inference when authoritative data exists.
-
-Named model profiles store references to existing primary, fallback, router,
-coordinator, web, comparison, and usage-window settings. Applying a profile
-requires confirmation, validates every required reference and the mandatory
-cloud-to-local fallback, and atomically replaces settings without starting a
-model request or changing the active conversation lock. Workspaces store only a
-preferred global profile ID. Portable YAML excludes local presentation metadata
-and model profiles.
-
-Conversation identity is host-generated and stable for the lifetime of a conversation. When history is enabled, persist the current snapshot successfully before creating or resuming another session; a failed save must leave the visible conversation intact. When history is disabled, meaningful content requires an explicit choice to enable and save, discard, or cancel. Never auto-resume conversations, pending approvals, or processes.
-
-Conversation search is literal, local, bounded, and cancellable. It may inspect
-titles, persisted visible user and assistant messages, workspace, exact
-provider/model identity, changed-file metadata, validation results, dates,
-archive state, and pin state. It must not use a model, embeddings, a cloud
-service, hidden instructions, raw tool results, or unrestricted process output.
-Pinned sessions remain explicitly deletable but are protected from ordinary
-retention cleanup.
-
-Session summaries are separate structured records created only after the user
-requests generation, reviews the bounded token estimate, and grants permission
-for the selected real provider or GPU. Summary input includes only bounded
-complete visible turns and authoritative bounded execution facts; exclude
-hidden prompts, raw process output, incomplete responses, credentials, and
-approval state. Summaries may be regenerated, edited, or deleted without
-rewriting conversation messages.
-
-Conversation duplication copies only safe visible messages, a valid preferred
-global profile reference, and the optional summary into a new host-generated
-identity. It must reset model lock, Execute state, approvals, processes,
-rollbacks, validation runtime, pin/archive state, and changed-file authority.
-Markdown export is readable and bounded, redacts likely secrets and absolute
-local paths, and never exports internal runtime authority.
-
-Full local backup is distinct from portable YAML. Archives use a versioned
-manifest, per-entry SHA-256 hashes, creation time, application version, and
-explicit category options. Secrets, encrypted secret blobs, approvals, active
-processes, pending tools, image permissions, handles, temporary files, and user
-workspace file contents are never included. Restore always inspects and
-validates first, permits only selected categories, creates a current-data
-backup, writes atomically, and rolls back applied files on failure.
-
-Persisted stores declare explicit schema versions. Small sequential migrations
-inspect before mutation, preserve an original backup, validate staged output,
-and switch atomically. A recorded migration failure prevents automatic retry
-and activates safe mode without modifying the failed original.
-
-Safe mode may be requested with `--safe-mode`, the
-`AgenticRouter__SafeMode=true` environment setting, or migration failure. It
-disables Execute, provider calls, cloud mutations, automatic history loading,
-resident-model startup, and settings writes. The browser shows a persistent
-indicator and permits only read-only inspection and sanitized backup/export
-until a normal restart.
+Feature-specific persistence schemas, context ladders, backup formats, migration rules, provider metadata behavior, web search rules, image rules, and model-profile behavior belong in their respective specifications rather than this file.
 
 ## 9. Streaming and UI Contracts
 
-The frontend communicates only with the local API and must never call Ollama directly.
+The browser communicates only with the local Agentic Router API and must never call local or cloud model providers directly.
 
-Stream typed events in order and end every turn with exactly one terminal event. Only response-delta events contribute text to the visible assistant answer. Routing, model, tool, validation, retry, recovery, heartbeat, and timing events belong in collapsible activity details.
+Stream typed events in order and terminate each turn exactly once.
 
-The composer exposes a compact context-usage indicator. Before provider
-completion it is a conservative estimate; when the terminal provider response
-contains usage, input tokens are exact. Details distinguish visible, included,
-omitted, system, current-user, configured, provider-reported, reserved-response,
-and application limits. Warnings use the 70%, 85%, and 95% thresholds and must
-make trimming explicit.
+Only response content intended for the visible assistant answer contributes to that answer. Routing, model/harness selection, tool activity, approvals, validation, retries, recovery, diagnostics, and timing belong in activity or review surfaces.
 
-The chat remains the primary surface. Execute mode must additionally expose:
+Chat remains the primary interaction surface. Execute must expose enough Host-owned state for the user to understand:
 
-- active workspace and execution state;
-- plan and step progress;
-- explicit approval prompts;
-- changed-file and diff review;
+- the active workspace;
+- the active model + harness;
+- pending approvals;
+- meaningful execution progress;
+- changed files and review evidence;
 - validation results;
-- conflicts, recovery decisions, and undo availability.
+- failures, recoveries, conflicts, and terminal state.
 
-The composer shows the active provider/model, capability and role tags, an
-explicit Web control, and bounded image attachment controls. These controls
-must remain compact, accessible, and usable without horizontal overflow at
-narrow viewport widths.
+Keep keyboard navigation and accessibility intact.
 
-Keep keyboard and accessibility behavior intact: Enter sends, Shift+Enter inserts a line break, Escape closes dialogs, focus remains visible, and collapsible controls expose `aria-expanded`.
+Never use browser-native `alert`, `confirm`, or `prompt` for application workflows.
 
-Never use browser-native `alert`, `confirm`, or `prompt` UI. Use the application-styled modal for confirmations and text input. Validation and action failures use dismissible top-center toasts with a 30-second timeout, while the exact invalid field or containing card receives a visible error border and `aria-invalid` where applicable.
-
-Settings uses a near-full-viewport dialog with one dirty-state model, persistent save controls, desktop section navigation, and a compact responsive selector. Validation errors must focus the relevant section, and closing dirty settings requires explicit discard confirmation.
-
-Use plain HTML, CSS, and JavaScript. Do not add Node.js, npm, a bundler, or a frontend framework.
+Exact UI layouts, labels, thresholds, dialog sizes, toast durations, and feature-specific controls belong in their UI specifications and tests.
 
 ## 10. Error Handling
 
-Use stable typed errors with fields equivalent to code, message, stage, provider, model, intent, retryability, trace ID, and sanitized details.
+Use stable typed errors with enough sanitized context to identify:
 
-`HttpContext.TraceIdentifier` is the canonical request trace and exact incident
-lookup key. Request, conversation, turn, execution-session, provider-attempt,
-plan-step, and action IDs remain separate linked authorities. Persist only
-bounded typed milestones and Host-authored metadata summaries in the local
-incident journal. Never persist prompts, responses, source/file contents,
-diffs, raw tool arguments or output, process output, provider bodies, secrets,
-stack traces, or unrestricted paths there. Terminal and failure evidence must
-flush before diagnostics are reported as persisted; diagnostic failure must
-never replace the primary request outcome.
+- what failed;
+- where it failed;
+- whether retry or recovery is possible;
+- the relevant provider, model, harness, intent, action, or trace identity when applicable.
 
-Coordinator requests must use the same centralized conservative estimator as
-the provider adapter and fit within resolved maximum context minus reserved
-output. Compact deterministically by preserving objective, project context,
-current guidance, Host-owned plan/action/file metadata, current correction,
-and the latest complete assistant/tool pair. After a context-fit rejection,
-allow at most one materially smaller retry, then change execution path or
-return a reviewable partial terminal state. Do not increase resident context or
-memory as automatic recovery.
+Preserve the original exception as the logged cause.
 
-Distinguish at least:
+Distinguish policy/security rejection, approval rejection, protocol incompatibility, provider failure, cancellation, timeout, stale/conflicting state, validation failure, and exhausted recovery where applicable.
 
-- invalid configuration or request;
-- unavailable model or provider;
-- timeout and cancellation;
-- invalid router output;
-- tool-protocol incompatibility;
-- policy or approval rejection;
-- workspace/path security rejection;
-- stale or conflicting file changes;
-- process and validation failure;
-- exhausted execution or recovery budget.
+Do not convert a recoverable intermediate action failure into a generic terminal user error.
 
-Preserve the original exception as the logged cause. Any fallback must be explicit. Never retry indefinitely or replace every failure with a generic message.
+Any fallback or takeover must be explicit and observable.
 
 ## 11. Testing and Validation
 
 The automated suite contains end-to-end tests only.
 
-Use Playwright for .NET with MSTest to exercise the browser and running API together. The default suite may replace Ollama only at its external HTTP boundary with a deterministic fake. Do not mock internal controllers, routing, execution, persistence, or browser code.
+Use Playwright for .NET with MSTest to exercise the browser and running API together. Tests may fake a provider only at its external boundary; do not mock internal controllers, routing, execution, persistence, harness policy, or browser code.
 
-Before running any benchmark, smoke test, or other validation that invokes a real Ollama model, obtain explicit permission from the user for that run. Before using a real cloud provider for conformance or validation, obtain explicit permission because the call may consume quota. Fake-provider E2E tests and read-only local model discovery do not require this permission.
+Before invoking a real local model, GPU workload, or cloud provider for validation, obtain the user's explicit permission when required by the current testing policy. Deterministic fake-provider E2E tests and read-only discovery do not require such permission.
 
-Every E2E test has a maximum timeout of 60 seconds. Do not solve slow tests by raising that limit. Use Playwright assertions and event-based waiting, avoid arbitrary sleeps, and keep tests independent.
+Do not solve slow or unstable tests by weakening assertions, hiding failures, or arbitrarily increasing limits.
 
-Before completing a change:
+Before completing a change, run the applicable repository validation, including formatting, Release build, relevant E2E coverage, and intended-diff inspection. Run real-model or real-provider validation only when authorized and applicable.
 
-1. run `dotnet format AgenticRouter.slnx --verify-no-changes`;
-2. run `dotnet build AgenticRouter.slnx -c Release`;
-3. run the full Playwright E2E suite;
-4. run a relevant real-Ollama smoke when the required local runtime/model is available;
-5. inspect `git diff --check` and the complete intended diff.
-
-Maintainer diagnostics live only under `tools/diagnostics/`. Default execution
-is read-only and sanitized and must not invoke models, GPUs, cloud providers,
-arbitrary command text, workspace changes, or Git-history changes. Generated
-reports remain ignored. Published application artifacts must exclude
-diagnostic scripts and reports, tests, fake-provider assets, benchmarks,
-secrets, settings, workspace/session data, and usage ledgers.
-
-Never claim validation that was not executed. Report unavailable or incompatible real models as limitations, not as passing evidence.
+Never claim validation that was not executed. Report unavailable validation as a limitation, not as passing evidence.
 
 ## 12. Code Quality and Change Discipline
 
 - Keep nullable reference types enabled and the build at zero warnings.
-- Use asynchronous APIs and pass `CancellationToken` through I/O paths.
-- Never block async work with `.Result`, `.Wait()`, or thread sleeps.
-- Prefer cohesive classes, immutable records, and explicit result types.
-- Keep I/O at the edges and avoid static mutable application state.
-- Do not add dependencies when the platform provides a simple solution.
-- Avoid speculative abstractions, dead scaffolding, section-divider comments, and `#region`.
+- Use asynchronous APIs and propagate `CancellationToken` through I/O.
+- Never block asynchronous work with `.Result`, `.Wait()`, or thread sleeps.
+- Prefer cohesive classes, immutable records, explicit result types, and I/O at the edges.
+- Avoid static mutable application state.
+- Do not add speculative abstractions, dead scaffolding, or unnecessary dependencies.
 - Preserve public contracts unless the requested change explicitly versions them.
 - Preserve unrelated work and external file changes.
-- Do not report success for an operation the host did not perform.
+- Do not report success for an operation the Host did not perform or verify.
 
-Before editing, inspect the relevant implementation, repository instructions, and tests. Make the smallest coherent vertical change. After editing, report the files changed, commands run, results, and real limitations.
+Before editing, inspect the relevant implementation, repository instructions, specifications, and tests.
 
-## 13. Current Non-Goals
+Make the smallest coherent vertical change that satisfies the request.
 
-Do not implement these without an explicit later request:
+After editing, report the files changed, commands run, validation results, and real limitations.
 
-- model providers other than Ollama Local, Groq, Google AI Studio, and Cerebras;
-- MCP, plugin, remote-agent, or recursive delegation systems;
-- unrestricted shell or operating-system control;
-- destructive filesystem operations or history rewriting;
-- background queues, schedulers, distributed execution, or multi-node inference;
-- RAG, embeddings, vector databases, fine-tuning, or training pipelines;
-- authentication, accounts, billing, telemetry platforms, installers, or auto-update;
+If implementation uncovers a product-policy ambiguity, stop before choosing the policy and ask the user. Continue autonomous work on behaviorally equivalent implementation details that do not depend on that decision.
+
+## 13. Non-Goals
+
+Do not implement these without an explicit request or approved specification:
+
+- new provider families;
+- unrestricted filesystem or operating-system control;
+- security-boundary bypasses;
+- recursive autonomous delegation systems;
+- background schedulers or distributed execution;
+- authentication, billing, telemetry platforms, installers, or auto-update;
 - automatic model downloads;
-- frontend frameworks or a JavaScript build pipeline.
+- frontend frameworks or JavaScript build pipelines;
+- destructive Git history rewriting.
+
+A capability is not a non-goal merely because one harness does not yet expose an adapter for it.
 
 ## 14. Definition of Done
 
-A change is complete only when all applicable behavior works through the real browser/API path, host authority and workspace confinement remain intact, failures are reviewable, the Release build has zero errors and warnings, the full E2E suite passes within its timeout, and any required real-provider limitation is explicitly reported.
+A change is complete only when:
+
+- the requested behavior works through the applicable real browser/API path;
+- Host policy and trusted-workspace boundaries remain intact;
+- model + harness behavior remains consistent with documented Agentic Router semantics;
+- recoverable failures remain recoverable;
+- user-visible behavior was not silently redefined;
+- applicable validation passes;
+- the intended diff was reviewed;
+- and any unexecuted validation or real limitation is explicitly reported.
+
+Passing tests does not authorize an undocumented product-policy change.

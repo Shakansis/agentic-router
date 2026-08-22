@@ -73,13 +73,17 @@ public static class HarnessCapabilityProjection
     {
       return profile.ToolScope.AvailableTools;
     }
-    if (!string.Equals(harnessId, HarnessIds.Codex, StringComparison.OrdinalIgnoreCase))
+    if (
+      harnessId is not HarnessIds.Codex
+        and not HarnessIds.OpenCode
+        and not HarnessIds.QwenCode
+    )
     {
       return [];
     }
+    var nativeCommon = NativeCommonTools(harnessId);
     return profile.ToolScope.AvailableTools
-      .Except(CodexNativeCommon, StringComparer.OrdinalIgnoreCase)
-      .Where(tool => tool is not "create_execution_plan" and not "revise_execution_plan")
+      .Except(nativeCommon, StringComparer.OrdinalIgnoreCase)
       .ToArray();
   }
 
@@ -97,7 +101,12 @@ public static class HarnessCapabilityProjection
     HostCapabilityProfile profile
   )
   {
-    if (harnessId is HarnessIds.Native or HarnessIds.Codex)
+    if (
+      harnessId is HarnessIds.Native
+        or HarnessIds.Codex
+        or HarnessIds.OpenCode
+        or HarnessIds.QwenCode
+    )
     {
       return [];
     }

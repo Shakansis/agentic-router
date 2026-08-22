@@ -193,6 +193,7 @@ builder.Services.AddScoped<IExpertExecutionGuidanceService, ExpertExecutionGuida
 builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
 builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
+builder.Services.AddSingleton<HarnessMcpHostBridge>();
 builder.Services.AddSingleton<NativeHarnessAdapter>();
 builder.Services.AddSingleton<IAgentHarness>(
   services => services.GetRequiredService<NativeHarnessAdapter>()
@@ -286,7 +287,23 @@ builder.Services.AddSingleton(
 );
 builder.Services.AddSingleton<IBenchmarkWorkspaceFactory, BenchmarkWorkspaceFactory>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemCreateBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemReadBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemUpdateBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemDeleteBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestRegistry, BenchmarkTestRegistry>();
+builder.Services.AddScoped<IBenchmarkNativeExecutor, BenchmarkNativeExecutor>();
+builder.Services.AddSingleton<IBenchmarkScorer, BenchmarkScorer>();
+builder.Services.AddSingleton<IBenchmarkResultStore>(
+  new JsonBenchmarkResultStore(dataDirectory)
+);
+builder.Services.AddSingleton<
+  IBenchmarkRunCancellationRegistry,
+  BenchmarkRunCancellationRegistry
+>();
+builder.Services.AddSingleton<
+  IBenchmarkLiveRunCoordinator,
+  BenchmarkLiveRunCoordinator
+>();
 builder.Services.AddScoped<IBenchmarkEngine, BenchmarkEngine>();
 builder.Services.AddScoped<IModelDiagnosticService, ModelDiagnosticService>();
 builder.Services.AddSingleton<IModelOrganizationService>(

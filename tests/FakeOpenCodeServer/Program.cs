@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -20,10 +22,19 @@ builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
 var app = builder.Build();
 var subscribers = new ConcurrentDictionary<Guid, Channel<string>>();
 var prompts = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+var selections = new ConcurrentDictionary<string, ModelSelection>(StringComparer.Ordinal);
 var permissions = new ConcurrentDictionary<string, PendingPermission>(StringComparer.Ordinal);
 var sessionNumber = 0;
 var password = Environment.GetEnvironmentVariable("OPENCODE_SERVER_PASSWORD") ?? string.Empty;
 var runtime = Directory.GetParent(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? string.Empty)?.FullName;
+if (runtime is not null)
+{
+  Directory.CreateDirectory(runtime);
+  await File.WriteAllTextAsync(
+    Path.Combine(runtime, "fake-opencode-process-id.txt"),
+    Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+  );
+}
 
 app.Use(async (context, next) =>
 {
@@ -94,7 +105,12 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
 {
   using var body = await JsonDocument.ParseAsync(context.Request.Body);
   var text = body.RootElement.GetProperty("parts")[0].GetProperty("text").GetString() ?? string.Empty;
+  var model = body.RootElement.GetProperty("model").GetProperty("modelID").GetString()
+    ?? throw new InvalidOperationException("OpenCode prompt omitted modelID.");
+  var provider = body.RootElement.GetProperty("model").GetProperty("providerID").GetString()
+    ?? throw new InvalidOperationException("OpenCode prompt omitted providerID.");
   prompts[sessionId] = text;
+  selections[sessionId] = new ModelSelection(provider, model);
   if (runtime is not null)
   {
     await File.WriteAllTextAsync(
@@ -111,6 +127,50 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
   }
   context.Response.StatusCode = StatusCodes.Status204NoContent;
   await context.Response.CompleteAsync();
+  await EmitAsync("message.part.updated", new
+  {
+    sessionID = sessionId,
+    part = new
+    {
+      id = $"prt_user_{sessionId}",
+      messageID = $"msg_user_{sessionId}",
+      sessionID = sessionId,
+      type = "text",
+      text
+    },
+    time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+  });
+  if (text.Contains("Benchmark test: FS-", StringComparison.Ordinal))
+  {
+    var directory = context.Request.Query["directory"].ToString();
+    if (
+      text.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+      && model is "unused:latest" or "docs:latest"
+    )
+    {
+      return;
+    }
+    if (
+      text.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal)
+      && string.Equals(model, "structured-failure:latest", StringComparison.Ordinal)
+    )
+    {
+      await EmitAsync("session.error", new
+      {
+        sessionID = sessionId,
+        error = "fake benchmark harness failure"
+      });
+      return;
+    }
+    await PrepareBenchmarkOutcomeAsync(directory, model, text);
+    var report = text.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+      ? string.Equals(model, "beta:code", StringComparison.Ordinal)
+        ? "codename=ORBIT-41"
+        : "codename=ORBIT-41\nverification-word=marigold"
+      : $"OpenCode completed {model}.";
+    await CompleteBenchmarkAsync(sessionId, report);
+    return;
+  }
   if (text.Contains("malformed opencode", StringComparison.Ordinal))
   {
     foreach (var subscriber in subscribers.Values)
@@ -155,17 +215,161 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
         ? Path.Combine(directory, "codex-created.txt")
         : null
     );
-    await EmitAsync("permission.asked", new
+    var resources = deleteRequested
+      ? new[] { "codex-created.txt" }
+      : text.Contains("outside permission opencode", StringComparison.Ordinal)
+        ? new[] { "../outside.txt" }
+        : new[] { "README.md" };
+    if (text.Contains("legacy permission opencode", StringComparison.Ordinal))
     {
-      id = permissionId,
-      sessionID = sessionId,
-      permission = deleteRequested ? "delete" : "edit",
-      resources = deleteRequested
-        ? new[] { "codex-created.txt" }
-        : text.Contains("outside permission opencode", StringComparison.Ordinal)
-          ? new[] { "../outside.txt" }
-          : new[] { "README.md" }
-    });
+      await EmitAsync("permission.asked", new
+      {
+        id = permissionId,
+        sessionID = sessionId,
+        permission = deleteRequested ? "delete" : "edit",
+        patterns = resources,
+        metadata = new { },
+        always = Array.Empty<string>()
+      });
+    }
+    else
+    {
+      await EmitAsync("permission.v2.asked", new
+      {
+        id = permissionId,
+        sessionID = sessionId,
+        action = deleteRequested ? "delete" : "edit",
+        resources
+      });
+    }
+    return;
+  }
+  if (text.Contains("host bridge opencode", StringComparison.Ordinal))
+  {
+    var directory = context.Request.Query["directory"].ToString();
+    if (text.Contains("plan host bridge opencode", StringComparison.Ordinal))
+    {
+      var plan = await InvokeHostToolAsync(
+        "create_execution_plan",
+        new
+        {
+          objective = "Prove OpenCode plan bridging",
+          steps = new[] { new { title = "Confirm the Host accepted the plan", dependsOn = Array.Empty<int>() } }
+        }
+      );
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-plan.json"),
+          JsonSerializer.Serialize(new { succeeded = plan.Succeeded, output = plan.Output })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    if (text.Contains("boundary host bridge opencode", StringComparison.Ordinal))
+    {
+      var rejected = await InvokeHostToolAsync(
+        "create_files",
+        new
+        {
+          files = new[] { new { path = "../opencode-escape.txt", content = "must not escape" } }
+        }
+      );
+      var recovered = await InvokeHostToolAsync(
+        "create_files",
+        new
+        {
+          files = new[] { new { path = "opencode-recovered.txt", content = "recovered safely" } }
+        }
+      );
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-boundary.json"),
+          JsonSerializer.Serialize(new
+          {
+            rejected = new { rejected.Succeeded, rejected.Output },
+            recovered = new { recovered.Succeeded, recovered.Output }
+          })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    if (text.Contains("parity host bridge opencode", StringComparison.Ordinal))
+    {
+      var steps = new List<McpStepResult>();
+      await RunHostStepAsync(steps, "create_directory", new { path = "opencode-parity" });
+      await RunHostStepAsync(steps, "create_files", new
+      {
+        files = new[] { new { path = "opencode-parity/item.txt", content = "parity" } }
+      });
+      await RunHostStepAsync(steps, "get_file_info", new { path = "opencode-parity/item.txt" });
+      await RunHostStepAsync(steps, "run_process", new
+      {
+        executable = "dotnet",
+        arguments = new[] { "--version" },
+        workingDirectory = ".",
+        timeoutSeconds = 30
+      });
+      await RunHostStepAsync(steps, "git_status", new { });
+      await RunHostStepAsync(steps, "delete_paths", new
+      {
+        paths = new[] { "opencode-parity" },
+        recursive = true
+      });
+      await RunHostStepAsync(steps, "create_files", new
+      {
+        files = new[] { new { path = "opencode-parity-complete.txt", content = "complete" } }
+      });
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-parity.json"),
+          JsonSerializer.Serialize(new
+          {
+            steps,
+            deleted = !Directory.Exists(Path.Combine(directory, "opencode-parity")),
+            finalObserved = File.Exists(Path.Combine(directory, "opencode-parity-complete.txt"))
+          })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    var relativePath = text.Contains("ask host bridge opencode", StringComparison.Ordinal)
+      ? "opencode-host-ask.txt"
+      : "opencode-host-auto.txt";
+    var result = await InvokeHostToolAsync(
+      "create_files",
+      new
+      {
+        files = new[]
+        {
+          new
+          {
+            path = relativePath,
+            content = $"OpenCode Host bridge created {relativePath}."
+          }
+        }
+      }
+    );
+    if (runtime is not null)
+    {
+      await File.WriteAllTextAsync(
+        Path.Combine(runtime, "fake-opencode-host-tool.json"),
+        JsonSerializer.Serialize(new
+        {
+          tool = "create_files",
+          relativePath,
+          succeeded = result.Succeeded,
+          output = result.Output,
+          observed = File.Exists(Path.Combine(directory, relativePath))
+        })
+      );
+    }
+    await CompleteAsync(sessionId);
     return;
   }
   if (text.Contains("unexpected opencode", StringComparison.Ordinal))
@@ -192,10 +396,13 @@ app.MapGet("/session/{sessionId}/diff", (string sessionId) =>
 app.MapPost("/permission/{requestId}/reply", async (string requestId, HttpContext context) =>
 {
   using var body = await JsonDocument.ParseAsync(context.Request.Body);
-  if (permissions.TryRemove(requestId, out var pending)
-    && string.Equals(body.RootElement.GetProperty("reply").GetString(), "once", StringComparison.Ordinal))
+  if (permissions.TryRemove(requestId, out var pending))
   {
-    if (pending.DeletePath is not null)
+    if (string.Equals(
+      body.RootElement.GetProperty("reply").GetString(),
+      "once",
+      StringComparison.Ordinal
+    ) && pending.DeletePath is not null)
     {
       File.Delete(pending.DeletePath);
     }
@@ -286,6 +493,14 @@ async Task CompleteAsync(string sessionId)
       id = "msg_assistant",
       sessionID = sessionId,
       role = "assistant",
+      providerID = prompts.TryGetValue(sessionId, out var prompt)
+        && prompt.Contains("reroute opencode", StringComparison.Ordinal)
+          ? "unexpected-cloud-provider"
+          : selections[sessionId].Provider,
+      modelID = prompt is not null
+        && prompt.Contains("reroute opencode", StringComparison.Ordinal)
+          ? "unexpected-cloud-model"
+          : selections[sessionId].Model,
       tokens = new
       {
         input = 1_000,
@@ -297,6 +512,107 @@ async Task CompleteAsync(string sessionId)
   });
   await EmitAsync("session.diff", new { sessionID = sessionId, diff = Array.Empty<object>() });
   await EmitAsync("session.idle", new { sessionID = sessionId });
+}
+
+async Task CompleteBenchmarkAsync(string sessionId, string answer)
+{
+  await EmitAsync("message.part.updated", new
+  {
+    sessionID = sessionId,
+    part = new
+    {
+      id = $"prt_benchmark_tool_{sessionId}",
+      sessionID = sessionId,
+      type = "tool",
+      callID = $"call_benchmark_{sessionId}",
+      tool = "structured_filesystem",
+      state = new { status = "running", input = new { } }
+    },
+    time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+  });
+  await EmitAsync("message.part.updated", new
+  {
+    sessionID = sessionId,
+    part = new
+    {
+      id = $"prt_benchmark_tool_{sessionId}",
+      sessionID = sessionId,
+      type = "tool",
+      callID = $"call_benchmark_{sessionId}",
+      tool = "structured_filesystem",
+      state = new { status = "completed", output = "ok", metadata = new { } }
+    },
+    time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+  });
+  await EmitAsync("message.part.updated", new
+  {
+    sessionID = sessionId,
+    part = new { id = $"prt_benchmark_text_{sessionId}", sessionID = sessionId, type = "text", text = "" },
+    time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+  });
+  await EmitAsync("message.part.delta", new
+  {
+    sessionID = sessionId,
+    messageID = $"msg_benchmark_{sessionId}",
+    partID = $"prt_benchmark_text_{sessionId}",
+    field = "text",
+    delta = answer
+  });
+  await EmitAsync("message.updated", new
+  {
+    sessionID = sessionId,
+    info = new
+    {
+      id = $"msg_benchmark_{sessionId}",
+      sessionID = sessionId,
+      role = "assistant",
+      providerID = selections[sessionId].Provider,
+      modelID = selections[sessionId].Model,
+      tokens = new
+      {
+        input = 200,
+        output = 20,
+        reasoning = 0,
+        cache = new { read = 0, write = 0 }
+      }
+    }
+  });
+  await EmitAsync("session.idle", new { sessionID = sessionId });
+}
+
+async Task PrepareBenchmarkOutcomeAsync(string directory, string model, string request)
+{
+  if (request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal))
+  {
+    return;
+  }
+  if (request.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal))
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(directory, "fixture", "update.txt"),
+      string.Equals(model, "beta:code", StringComparison.Ordinal)
+        ? "mode=preview\nretries=4\nowner=router\n"
+        : "mode=preview\nretries=3\nowner=router\n"
+    );
+    return;
+  }
+  if (request.Contains("Benchmark test: FS-DELETE-001", StringComparison.Ordinal))
+  {
+    if (!string.Equals(model, "beta:code", StringComparison.Ordinal))
+    {
+      File.Delete(Path.Combine(directory, "fixture", "delete.txt"));
+    }
+    return;
+  }
+  const string content = "Agentic Router Benchmark\noperation=create\nresult=success";
+  var benchmarkDirectory = Path.Combine(directory, "benchmark-data");
+  Directory.CreateDirectory(benchmarkDirectory);
+  await File.WriteAllTextAsync(
+    Path.Combine(benchmarkDirectory, "result.txt"),
+    string.Equals(model, "beta:code", StringComparison.Ordinal)
+      ? content + "!"
+      : content
+  );
 }
 
 async Task EmitAsync(string type, object properties)
@@ -313,7 +629,82 @@ async Task EmitAsync(string type, object properties)
   }
 }
 
+async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
+{
+  var configRoot = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+    ?? throw new InvalidOperationException("XDG_CONFIG_HOME was not configured.");
+  using var config = JsonDocument.Parse(
+    await File.ReadAllTextAsync(Path.Combine(configRoot, "opencode", "opencode.json"))
+  );
+  var endpoint = config.RootElement.GetProperty("mcp").GetProperty("agentic_router")
+    .GetProperty("url").GetString()
+    ?? throw new InvalidOperationException("Agentic Router MCP URL was not configured.");
+  var token = Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_TOKEN")
+    ?? throw new InvalidOperationException("Agentic Router MCP token was not configured.");
+  using var client = new HttpClient();
+  client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+  client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+  await SendMcpAsync(client, endpoint, 1, "initialize", new
+  {
+    protocolVersion = "2025-03-26",
+    capabilities = new { },
+    clientInfo = new { name = "fake-opencode", version = "1" }
+  });
+  await SendMcpNotificationAsync(client, endpoint, "notifications/initialized");
+  var response = await SendMcpAsync(client, endpoint, 2, "tools/call", new
+  {
+    name = tool,
+    arguments
+  });
+  var result = response.RootElement.GetProperty("result");
+  return new McpToolResult(
+    !result.GetProperty("isError").GetBoolean(),
+    result.GetProperty("content")[0].GetProperty("text").GetString() ?? string.Empty
+  );
+}
+
+async Task RunHostStepAsync(List<McpStepResult> steps, string tool, object arguments)
+{
+  var result = await InvokeHostToolAsync(tool, arguments);
+  steps.Add(new McpStepResult(tool, result.Succeeded, result.Output));
+}
+
+async Task<JsonDocument> SendMcpAsync(
+  HttpClient client,
+  string endpoint,
+  int id,
+  string method,
+  object parameters
+)
+{
+  using var response = await client.PostAsJsonAsync(endpoint, new
+  {
+    jsonrpc = "2.0",
+    id,
+    method,
+    @params = parameters
+  });
+  response.EnsureSuccessStatusCode();
+  return JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
+}
+
+async Task SendMcpNotificationAsync(HttpClient client, string endpoint, string method)
+{
+  using var response = await client.PostAsJsonAsync(endpoint, new
+  {
+    jsonrpc = "2.0",
+    method
+  });
+  response.EnsureSuccessStatusCode();
+}
+
 internal sealed record PendingPermission(
   string SessionId,
   string? DeletePath
 );
+
+internal sealed record ModelSelection(string Provider, string Model);
+
+internal sealed record McpToolResult(bool Succeeded, string Output);
+
+internal sealed record McpStepResult(string Tool, bool Succeeded, string Output);

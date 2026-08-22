@@ -46,6 +46,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
   private readonly OpenCodeHarnessOptions _options;
   private readonly IHttpClientFactory _httpClients;
+  private readonly HarnessMcpHostBridge _hostTools;
   private readonly ILogger<OpenCodeHarnessAdapter> _logger;
   private readonly SemaphoreSlim _availabilityGate = new(1, 1);
   private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
@@ -63,11 +64,13 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   public OpenCodeHarnessAdapter(
     OpenCodeHarnessOptions options,
     IHttpClientFactory httpClients,
+    HarnessMcpHostBridge hostTools,
     ILogger<OpenCodeHarnessAdapter> logger
   )
   {
     _options = options;
     _httpClients = httpClients;
+    _hostTools = hostTools;
     _logger = logger;
   }
 
@@ -108,7 +111,19 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
       using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
       timeout.CancelAfter(_options.StartupTimeout);
-      await process.WaitForExitAsync(timeout.Token);
+      try
+      {
+        await process.WaitForExitAsync(timeout.Token);
+      }
+      catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+      {
+        if (!process.HasExited)
+        {
+          process.Kill(true);
+          await process.WaitForExitAsync(CancellationToken.None);
+        }
+        throw new TimeoutException("OpenCode version detection timed out.");
+      }
       var output = (await outputTask).Trim();
       var error = (await errorTask).Trim();
       if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
@@ -148,7 +163,12 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     try
     {
       var endpoint = request.ProviderEndpoint!;
-      await EnsureStartedAsync(endpoint, request.Model, cancellationToken);
+      var bridge = await _hostTools.ConfigureClientAsync(
+        HarnessIds.OpenCode,
+        MaximumHostBridgeTools(HarnessIds.OpenCode),
+        cancellationToken
+      );
+      await EnsureStartedAsync(endpoint, request.Model, bridge, cancellationToken);
       var harnessSession = await GetOrCreateSessionAsync(request, cancellationToken);
       var sessionId = harnessSession.NativeSessionId;
       var turnPrompt = HarnessConversationPromptBuilder.Create(
@@ -159,12 +179,21 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           :
           [
             $"Agentic Router common capabilities implemented by OpenCode native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.OpenCode))}.",
-            $"Unavailable adapter capabilities for this installed OpenCode protocol: {string.Join(", ", HarnessCapabilityProjection.MissingAdapterTools(HarnessIds.OpenCode, request.HostCapabilities))}. Do not claim or attempt those operations through an unconfined shell.",
+            $"Agentic Router common capabilities supplied through the Host bridge: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.OpenCode, request.HostCapabilities))}.",
             $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}."
           ]
       );
       active = new ActiveTurn(request.SessionId, sessionId, request.WorkingDirectory, turnId);
       _activeTurns[request.SessionId] = active;
+      using var hostTurn = _hostTools.BeginTurn(
+        HarnessIds.OpenCode,
+        sessionId,
+        turnId,
+        request.HostCapabilities ?? throw Failure(
+          "opencode-host-profile-missing",
+          "OpenCode requires the Agentic Router Host capability profile."
+        )
+      );
 
       yield return Event(
         "turn.started",
@@ -194,9 +223,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           tools = new Dictionary<string, bool>(StringComparer.Ordinal)
           {
             ["bash"] = false,
-            ["task"] = false,
-            ["webfetch"] = false,
-            ["websearch"] = false
+            ["task"] = false
           },
           parts = new[] { new { type = "text", text = turnPrompt.Text } }
         },
@@ -209,12 +236,31 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       var parts = new Dictionary<string, OpenCodePart>(StringComparer.Ordinal);
       var toolStates = new Dictionary<string, string>(StringComparer.Ordinal);
       var terminal = false;
+      Task<string?>? lineRead = null;
+      Task<HarnessEvent>? hostToolRead = null;
       while (!terminal)
       {
-        var line = await ReadEventLineAsync(reader, cancellationToken);
+        lineRead ??= ReadEventLineAsync(reader, cancellationToken);
+        hostToolRead ??= hostTurn.Events.ReadAsync(cancellationToken).AsTask();
+        var next = await Task.WhenAny(lineRead, hostToolRead);
+        if (ReferenceEquals(next, hostToolRead))
+        {
+          var hostToolEvent = await hostToolRead;
+          hostToolRead = null;
+          yield return hostToolEvent;
+          continue;
+        }
+        var line = await lineRead;
+        lineRead = null;
         if (line is null)
         {
-          throw Failure("opencode-event-stream-ended", "OpenCode event stream ended before terminal state.");
+          var exited = _process is null || _process.HasExited;
+          throw Failure(
+            exited ? "opencode-server-exited" : "opencode-event-stream-ended",
+            exited
+              ? "OpenCode exited before the active turn completed."
+              : "OpenCode event stream ended before terminal state."
+          );
         }
         if (!line.StartsWith("data:", StringComparison.Ordinal))
         {
@@ -327,6 +373,15 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               if (partType is "text" or "reasoning")
               {
                 var fullText = String(part, "text") ?? string.Empty;
+                if (
+                  partType == "text"
+                  && string.Equals(fullText, turnPrompt.Text, StringComparison.Ordinal)
+                )
+                {
+                  parts[partId] = new OpenCodePart("user", fullText);
+                  yield return Event("native.event", sessionId, turnId, native: payload);
+                  break;
+                }
                 var previous = parts.TryGetValue(partId, out var known)
                   ? known.Text
                   : string.Empty;
@@ -421,9 +476,50 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               if (
                 properties.TryGetProperty("info", out var info)
                 && string.Equals(String(info, "role"), "assistant", StringComparison.Ordinal)
-                && info.TryGetProperty("tokens", out var tokens)
               )
               {
+                var reportedProvider = String(info, "providerID");
+                var reportedModel = String(info, "modelID");
+                var selectionError = reportedProvider is null || reportedModel is null
+                  ? "opencode-selection-unverified"
+                  : !string.Equals(reportedProvider, ProviderId, StringComparison.Ordinal)
+                    ? "opencode-provider-substitution"
+                    : !string.Equals(reportedModel, request.Model, StringComparison.Ordinal)
+                      ? "opencode-model-substitution"
+                      : null;
+                if (selectionError is not null)
+                {
+                  yield return Event(
+                    "turn.failed",
+                    sessionId,
+                    turnId,
+                    message: reportedProvider is null || reportedModel is null
+                      ? "OpenCode did not report the provider and model used for the assistant turn."
+                      : $"OpenCode reported '{reportedProvider}/{reportedModel}' after Agentic Router selected '{ProviderId}/{request.Model}'.",
+                    errorCode: selectionError,
+                    terminal: HarnessTerminalState.Failed,
+                    native: payload
+                  );
+                  terminal = true;
+                  try
+                  {
+                    await CancelTurnAsync(request.SessionId, CancellationToken.None);
+                  }
+                  catch (Exception exception)
+                  {
+                    _logger.LogWarning(
+                      exception,
+                      "OpenCode did not acknowledge abort after selection verification failed."
+                    );
+                  }
+                  break;
+                }
+
+                if (!info.TryGetProperty("tokens", out var tokens))
+                {
+                  yield return Event("native.event", sessionId, turnId, native: payload);
+                  break;
+                }
                 var inputTokens = Number(tokens, "input")
                   + CacheTokens(tokens, "read")
                   + CacheTokens(tokens, "write");
@@ -487,17 +583,21 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 sessionId,
                 request.WorkingDirectory
               );
-              var resources = Strings(properties, "resources");
+              var resources = type == "permission.asked"
+                ? Strings(properties, "patterns")
+                : Strings(properties, "resources");
               var permission = String(properties, "action")
                 ?? String(properties, "permission")
                 ?? "workspace permission";
+              var readOnlyPermission = IsReadOnlyPermission(permission);
               yield return Event(
                 "approval.requested",
                 sessionId,
                 turnId,
                 message: $"OpenCode requests {permission}.",
                 approvalId: permissionId,
-                approvalCanBeMapped: true,
+                approvalCanBeMapped: !readOnlyPermission && resources.Count > 0,
+                readOnlyPermission: readOnlyPermission,
                 destructive: IsDestructiveResource(permission)
                   || resources.Any(IsDestructiveResource),
                 paths: resources,
@@ -615,7 +715,13 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     CancellationToken cancellationToken
   )
   {
-    throw Failure("opencode-host-tools-unsupported", "OpenCode does not expose Agentic Router dynamic Host tools.");
+    return _hostTools.ResolveToolCallAsync(
+      HarnessIds.OpenCode,
+      toolCallId,
+      succeeded,
+      output,
+      cancellationToken
+    );
   }
 
   public async Task CancelTurnAsync(
@@ -651,6 +757,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private async Task EnsureStartedAsync(
     Uri ollamaEndpoint,
     string model,
+    HarnessMcpClientConfiguration bridge,
     CancellationToken cancellationToken
   )
   {
@@ -664,7 +771,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       }
       await StopOwnedProcessAsync();
       Directory.CreateDirectory(_options.RuntimeDirectory);
-      await WriteConfigurationAsync(ollamaEndpoint, model, cancellationToken);
+      await WriteConfigurationAsync(ollamaEndpoint, model, bridge, cancellationToken);
       var port = ReservePort();
       var executable = ResolveExecutable();
       _password = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
@@ -676,7 +783,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       startInfo.ArgumentList.Add("127.0.0.1");
       startInfo.ArgumentList.Add("--port");
       startInfo.ArgumentList.Add(port.ToString(System.Globalization.CultureInfo.InvariantCulture));
-      SetRuntimeEnvironment(startInfo, _password);
+      SetRuntimeEnvironment(startInfo, _password, bridge.AuthorizationToken);
       var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
       if (!process.Start())
       {
@@ -761,13 +868,25 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     CancellationToken cancellationToken
   )
   {
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(_options.RequestTimeout);
     try
     {
-      return await reader.ReadLineAsync(cancellationToken);
+      return await reader.ReadLineAsync(timeout.Token);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
       throw;
+    }
+    catch (OperationCanceledException)
+    {
+      throw new HarnessException(
+        "opencode-event-timeout",
+        "OpenCode produced no event before the configured turn timeout.",
+        $"The SSE stream was idle for {_options.RequestTimeout.TotalSeconds:0} seconds.",
+        true,
+        harnessId: HarnessIds.OpenCode
+      );
     }
     catch (Exception exception) when (exception is IOException or HttpRequestException)
     {
@@ -866,6 +985,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private async Task WriteConfigurationAsync(
     Uri endpoint,
     string model,
+    HarnessMcpClientConfiguration bridge,
     CancellationToken cancellationToken
   )
   {
@@ -890,6 +1010,21 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           models = new Dictionary<string, object> { [model] = new { name = model } }
         }
       },
+      ["mcp"] = new Dictionary<string, object>
+      {
+        ["agentic_router"] = new
+        {
+          type = "remote",
+          url = bridge.Endpoint.AbsoluteUri,
+          enabled = true,
+          oauth = false,
+          headers = new Dictionary<string, string>
+          {
+            ["Authorization"] = $"Bearer {{env:{bridge.AuthorizationEnvironmentVariable}}}"
+          },
+          timeout = (long)_options.RequestTimeout.TotalMilliseconds
+        }
+      },
       ["permission"] = new Dictionary<string, string>
       {
         ["*"] = "ask",
@@ -900,8 +1035,10 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         ["edit"] = "ask",
         ["bash"] = "deny",
         ["task"] = "deny",
-        ["webfetch"] = "deny",
-        ["external_directory"] = "deny"
+        ["webfetch"] = "allow",
+        ["websearch"] = "allow",
+        ["external_directory"] = "deny",
+        ["agentic_router_*"] = "allow"
       }
     };
     var content = JsonSerializer.Serialize(
@@ -927,11 +1064,15 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       StandardOutputEncoding = new UTF8Encoding(false, true),
       StandardErrorEncoding = new UTF8Encoding(false, true)
     };
-    SetRuntimeEnvironment(info, null);
+    SetRuntimeEnvironment(info, null, null);
     return info;
   }
 
-  private void SetRuntimeEnvironment(ProcessStartInfo info, string? password)
+  private void SetRuntimeEnvironment(
+    ProcessStartInfo info,
+    string? password,
+    string? hostBridgeToken
+  )
   {
     info.Environment["XDG_CONFIG_HOME"] = Path.Combine(_options.RuntimeDirectory, "config");
     info.Environment["XDG_DATA_HOME"] = Path.Combine(_options.RuntimeDirectory, "data");
@@ -939,11 +1080,28 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     info.Environment["XDG_STATE_HOME"] = Path.Combine(_options.RuntimeDirectory, "state");
     info.Environment["OPENCODE_DISABLE_AUTOUPDATE"] = "true";
     info.Environment["OPENCODE_DISABLE_SHARE"] = "true";
+    if (hostBridgeToken is not null)
+    {
+      info.Environment[HarnessMcpHostBridge.AuthorizationEnvironmentVariable] = hostBridgeToken;
+    }
     if (password is not null)
     {
       info.Environment["OPENCODE_SERVER_USERNAME"] = "opencode";
       info.Environment["OPENCODE_SERVER_PASSWORD"] = password;
     }
+  }
+
+  private static IReadOnlyList<CanonicalToolDefinition> MaximumHostBridgeTools(
+    string harnessId
+  )
+  {
+    var maximum = HostCapabilityProfile.Create(
+      ExecutionTurnToolPolicy.Resolve(string.Empty, validationProfileAvailable: true),
+      "auto"
+    );
+    return LocalActionPlanner.GetToolDefinitions(
+      HarnessCapabilityProjection.HostBridgeTools(harnessId, maximum)
+    );
   }
 
   private string ResolveExecutable()
@@ -1060,7 +1218,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     IReadOnlyList<string>? paths = null,
     HarnessTerminalState? terminal = null,
     JsonElement? native = null,
-    long? contextInputTokens = null
+    long? contextInputTokens = null,
+    bool readOnlyPermission = false
   )
   {
     return new HarnessEvent(
@@ -1081,7 +1240,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       turnId: turnId,
       terminalState: terminal,
       nativePayload: native,
-      contextInputTokens: contextInputTokens
+      contextInputTokens: contextInputTokens,
+      readOnlyPermission: readOnlyPermission
     );
   }
 
@@ -1197,6 +1357,12 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   {
     return resource.Contains("delete", StringComparison.OrdinalIgnoreCase)
       || resource.Contains("remove", StringComparison.OrdinalIgnoreCase);
+  }
+
+  private static bool IsReadOnlyPermission(string permission)
+  {
+    return permission is "read" or "glob" or "grep" or "list" or "lsp"
+      or "webfetch" or "websearch";
   }
 
   private static string Encode(string value) => Uri.EscapeDataString(value);

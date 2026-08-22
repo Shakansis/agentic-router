@@ -1,0 +1,307 @@
+{
+  "RunId": "cb86554c930f4c71adc437334ae9c141",
+  "Model": "qwen3.8:27b-gpu0",
+  "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+  "Provider": "ollama-local",
+  "SuiteId": "basic-crud",
+  "SuiteVersion": 1,
+  "FixtureId": "basic-crud-fixture",
+  "FixtureVersion": 1,
+  "StartedAt": "2026-08-22T02:47:23.8135926+00:00",
+  "EndedAt": "2026-08-22T02:48:37.76752+00:00",
+  "DurationMilliseconds": 73953,
+  "TerminalState": "completed",
+  "FinalStatus": "passed",
+  "TimeoutSeconds": 120,
+  "ScoreWeights": {
+    "ObjectiveSuccess": 35,
+    "Correctness": 25,
+    "Terminality": 15,
+    "WorkspaceAccuracy": 20,
+    "Efficiency": 5,
+    "Total": 100
+  },
+  "HarnessResults": [
+    {
+      "Harness": "opencode",
+      "HarnessVersion": "1.18.18",
+      "Passed": 4,
+      "Total": 4,
+      "Score": 98.56,
+      "DurationMilliseconds": 73932,
+      "Terminality": 100,
+      "TerminalState": "completed",
+      "Tests": [
+        {
+          "Run": {
+            "RunId": "c966fbe2a8184fbca3b0d2458747f65e",
+            "TestId": "FS-CREATE-001",
+            "TestVersion": 1,
+            "Model": "qwen3.8:27b-gpu0",
+            "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+            "Provider": "ollama-local",
+            "Harness": "opencode",
+            "HarnessVersion": "1.18.18",
+            "WorkspaceId": "c966fbe2a8184fbca3b0d2458747f65e",
+            "WorkspacePath": "C:\\Users\\Rodrigo\\AppData\\Local\\Temp\\agentic-router\\benchmark-runs\\c966fbe2a8184fbca3b0d2458747f65e\\workspace",
+            "StartedAt": "2026-08-22T02:47:23.8178281+00:00",
+            "EndedAt": "2026-08-22T02:47:57.0135934+00:00",
+            "ExecutionStatus": "completed",
+            "SuiteId": "basic-crud",
+            "SuiteVersion": 1,
+            "FixtureId": "basic-crud-fixture",
+            "FixtureVersion": 1,
+            "Prompt": "Benchmark test: FS-CREATE-001 (version 1; acceptance 1).\nInside the provided workspace, create exactly benchmark-data/result.txt with the following UTF-8 text and no byte-order mark:\n\nAgentic Router Benchmark\noperation=create\nresult=success\n\nThe canonical file ends immediately after \u0027success\u0027; do not append a trailing newline. Do not modify or delete any existing file and do not create any other file.",
+            "FixtureFingerprint": "c2b0840ff77c6ff5cc4deca1944482de292a1bd9a43736535f4aae68e3bc4da9"
+          },
+          "RawResult": {
+            "Status": "PASS",
+            "ObjectiveAchieved": true,
+            "ByteAccuracy": 100,
+            "DirectoryAccuracy": 100,
+            "FilenameAccuracy": 100,
+            "ContainmentAccuracy": 100,
+            "UnexpectedCreatedFiles": [],
+            "UnexpectedModifiedFiles": [],
+            "UnexpectedDeletedFiles": [],
+            "ExecutionStatus": "completed",
+            "Error": null,
+            "InputTokens": 7875,
+            "OutputTokens": null,
+            "Exactness": 100,
+            "UsefulPartialOutcome": true,
+            "ToolCallCount": 4,
+            "SurfacedErrorCount": 2,
+            "RecoveredErrorCount": 2,
+            "ChangedFiles": [
+              "benchmark-data/result.txt"
+            ],
+            "UnexpectedFiles": [],
+            "HostValidationResult": "pass",
+            "FinalHarnessReport": "Created \u0060benchmark-data/result.txt\u0060 with the exact UTF-8 content (no BOM, no trailing newline \u2014 file is 51 bytes: 3 lines, 3\u002B1\u002B19\u002B1\u002B21 = wait, let me verify size).Done. \u0060benchmark-data/result.txt\u0060 created with the exact three lines, no BOM, and no trailing newline (last byte is the \u0060s\u0060 of \u0022success\u0022). No other files were created or modified.",
+            "ValidationFacts": {
+              "expectedPath": "benchmark-data/result.txt",
+              "expectedByteLength": "56",
+              "actualByteLength": "56",
+              "expectedSha256": "faca1098e03423bb669753af45e56c3b99ee0bfa53de741aa6e5a20650a3eee9",
+              "actualSha256": "faca1098e03423bb669753af45e56c3b99ee0bfa53de741aa6e5a20650a3eee9"
+            }
+          },
+          "WorkspaceCleanedUp": true,
+          "Score": {
+            "Total": 98,
+            "ObjectiveSuccess": 100,
+            "Correctness": 100,
+            "Terminality": 100,
+            "WorkspaceAccuracy": 100,
+            "Efficiency": 60
+          },
+          "DurationMilliseconds": 33195
+        },
+        {
+          "Run": {
+            "RunId": "f8f718dfc5d84019844621ede4a482fe",
+            "TestId": "FS-READ-001",
+            "TestVersion": 1,
+            "Model": "qwen3.8:27b-gpu0",
+            "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+            "Provider": "ollama-local",
+            "Harness": "opencode",
+            "HarnessVersion": "1.18.18",
+            "WorkspaceId": "f8f718dfc5d84019844621ede4a482fe",
+            "WorkspacePath": "C:\\Users\\Rodrigo\\AppData\\Local\\Temp\\agentic-router\\benchmark-runs\\f8f718dfc5d84019844621ede4a482fe\\workspace",
+            "StartedAt": "2026-08-22T02:47:57.0238688+00:00",
+            "EndedAt": "2026-08-22T02:48:06.0299081+00:00",
+            "ExecutionStatus": "completed",
+            "SuiteId": "basic-crud",
+            "SuiteVersion": 1,
+            "FixtureId": "basic-crud-fixture",
+            "FixtureVersion": 1,
+            "Prompt": "Benchmark test: FS-READ-001 (version 1; acceptance 1).\nRead fixture/read-primary.txt and fixture/read-secondary.txt. In the final answer, report the exact codename and exact verification-word as two separate key=value facts. Do not create, modify, or delete any file.",
+            "FixtureFingerprint": "c2b0840ff77c6ff5cc4deca1944482de292a1bd9a43736535f4aae68e3bc4da9"
+          },
+          "RawResult": {
+            "Status": "PASS",
+            "ObjectiveAchieved": true,
+            "ByteAccuracy": 0,
+            "DirectoryAccuracy": 0,
+            "FilenameAccuracy": 0,
+            "ContainmentAccuracy": 100,
+            "UnexpectedCreatedFiles": [],
+            "UnexpectedModifiedFiles": [],
+            "UnexpectedDeletedFiles": [],
+            "ExecutionStatus": "completed",
+            "Error": null,
+            "InputTokens": 7764,
+            "OutputTokens": null,
+            "Exactness": 100,
+            "UsefulPartialOutcome": true,
+            "ToolCallCount": 2,
+            "SurfacedErrorCount": 0,
+            "RecoveredErrorCount": 0,
+            "ChangedFiles": [],
+            "UnexpectedFiles": [],
+            "HostValidationResult": "pass",
+            "FinalHarnessReport": "codename=ORBIT-41\nverification-word=marigold",
+            "ValidationFacts": {
+              "codenameExpected": "ORBIT-41",
+              "codenameMatched": "True",
+              "verificationWordExpected": "marigold",
+              "verificationWordMatched": "True"
+            }
+          },
+          "WorkspaceCleanedUp": true,
+          "Score": {
+            "Total": 99.5,
+            "ObjectiveSuccess": 100,
+            "Correctness": 100,
+            "Terminality": 100,
+            "WorkspaceAccuracy": 100,
+            "Efficiency": 90
+          },
+          "DurationMilliseconds": 9006
+        },
+        {
+          "Run": {
+            "RunId": "e0b714fa9d7d4163a3d79b9b9fbaaf7e",
+            "TestId": "FS-UPDATE-001",
+            "TestVersion": 1,
+            "Model": "qwen3.8:27b-gpu0",
+            "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+            "Provider": "ollama-local",
+            "Harness": "opencode",
+            "HarnessVersion": "1.18.18",
+            "WorkspaceId": "e0b714fa9d7d4163a3d79b9b9fbaaf7e",
+            "WorkspacePath": "C:\\Users\\Rodrigo\\AppData\\Local\\Temp\\agentic-router\\benchmark-runs\\e0b714fa9d7d4163a3d79b9b9fbaaf7e\\workspace",
+            "StartedAt": "2026-08-22T02:48:06.0320022+00:00",
+            "EndedAt": "2026-08-22T02:48:25.5358131+00:00",
+            "ExecutionStatus": "completed",
+            "SuiteId": "basic-crud",
+            "SuiteVersion": 1,
+            "FixtureId": "basic-crud-fixture",
+            "FixtureVersion": 1,
+            "Prompt": "Benchmark test: FS-UPDATE-001 (version 1; acceptance 1).\nIn fixture/update.txt, replace exactly the single line retries=2 with retries=3. Preserve every other byte, do not recreate or duplicate the file, and do not change any other file.",
+            "FixtureFingerprint": "c2b0840ff77c6ff5cc4deca1944482de292a1bd9a43736535f4aae68e3bc4da9"
+          },
+          "RawResult": {
+            "Status": "PASS",
+            "ObjectiveAchieved": true,
+            "ByteAccuracy": 100,
+            "DirectoryAccuracy": 100,
+            "FilenameAccuracy": 100,
+            "ContainmentAccuracy": 100,
+            "UnexpectedCreatedFiles": [],
+            "UnexpectedModifiedFiles": [],
+            "UnexpectedDeletedFiles": [],
+            "ExecutionStatus": "completed",
+            "Error": null,
+            "InputTokens": 7907,
+            "OutputTokens": null,
+            "Exactness": 100,
+            "UsefulPartialOutcome": true,
+            "ToolCallCount": 3,
+            "SurfacedErrorCount": 0,
+            "RecoveredErrorCount": 0,
+            "ChangedFiles": [
+              "fixture/update.txt"
+            ],
+            "UnexpectedFiles": [],
+            "HostValidationResult": "pass",
+            "FinalHarnessReport": "Done. fixture/update.txt now contains \u0060retries=3\u0060 on line 2; all other bytes and files unchanged.",
+            "ValidationFacts": {
+              "expectedPath": "fixture/update.txt",
+              "expectedSha256": "be31ed43670e85b0cc0e19e19316471fa8f450025d8bfc2087cb0041086099b5",
+              "actualSha256": "be31ed43670e85b0cc0e19e19316471fa8f450025d8bfc2087cb0041086099b5",
+              "expectedChangedFiles": "1",
+              "actualChangedFiles": "1"
+            }
+          },
+          "WorkspaceCleanedUp": true,
+          "Score": {
+            "Total": 98.75,
+            "ObjectiveSuccess": 100,
+            "Correctness": 100,
+            "Terminality": 100,
+            "WorkspaceAccuracy": 100,
+            "Efficiency": 75
+          },
+          "DurationMilliseconds": 19503
+        },
+        {
+          "Run": {
+            "RunId": "442051cb79a04305a8c18212858dd890",
+            "TestId": "FS-DELETE-001",
+            "TestVersion": 1,
+            "Model": "qwen3.8:27b-gpu0",
+            "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+            "Provider": "ollama-local",
+            "Harness": "opencode",
+            "HarnessVersion": "1.18.18",
+            "WorkspaceId": "442051cb79a04305a8c18212858dd890",
+            "WorkspacePath": "C:\\Users\\Rodrigo\\AppData\\Local\\Temp\\agentic-router\\benchmark-runs\\442051cb79a04305a8c18212858dd890\\workspace",
+            "StartedAt": "2026-08-22T02:48:25.5374217+00:00",
+            "EndedAt": "2026-08-22T02:48:37.7655353+00:00",
+            "ExecutionStatus": "completed",
+            "SuiteId": "basic-crud",
+            "SuiteVersion": 1,
+            "FixtureId": "basic-crud-fixture",
+            "FixtureVersion": 1,
+            "Prompt": "Benchmark test: FS-DELETE-001 (version 1; acceptance 1).\nDelete exactly fixture/delete.txt using an available structured filesystem capability. Do not use a shell. Preserve every unrelated file and do not create a placeholder or replacement.",
+            "FixtureFingerprint": "c2b0840ff77c6ff5cc4deca1944482de292a1bd9a43736535f4aae68e3bc4da9"
+          },
+          "RawResult": {
+            "Status": "PASS",
+            "ObjectiveAchieved": true,
+            "ByteAccuracy": 100,
+            "DirectoryAccuracy": 100,
+            "FilenameAccuracy": 100,
+            "ContainmentAccuracy": 100,
+            "UnexpectedCreatedFiles": [],
+            "UnexpectedModifiedFiles": [],
+            "UnexpectedDeletedFiles": [],
+            "ExecutionStatus": "completed",
+            "Error": null,
+            "InputTokens": 8125,
+            "OutputTokens": null,
+            "Exactness": 100,
+            "UsefulPartialOutcome": true,
+            "ToolCallCount": 4,
+            "SurfacedErrorCount": 1,
+            "RecoveredErrorCount": 1,
+            "ChangedFiles": [
+              "fixture/delete.txt"
+            ],
+            "UnexpectedFiles": [],
+            "HostValidationResult": "pass",
+            "FinalHarnessReport": "Deleted \u0060fixture/delete.txt\u0060 via \u0060agentic_router_delete_paths\u0060 (no shell). Verified: all 4 unrelated files remain, \u0060delete.txt\u0060 is gone, no replacement created.",
+            "ValidationFacts": {
+              "expectedAbsentPath": "fixture/delete.txt",
+              "targetAbsent": "True",
+              "actualDeletedFiles": "1"
+            }
+          },
+          "WorkspaceCleanedUp": true,
+          "Score": {
+            "Total": 98,
+            "ObjectiveSuccess": 100,
+            "Correctness": 100,
+            "Terminality": 100,
+            "WorkspaceAccuracy": 100,
+            "Efficiency": 60
+          },
+          "DurationMilliseconds": 12228
+        }
+      ]
+    }
+  ],
+  "Ranking": [
+    {
+      "Rank": 1,
+      "Harness": "opencode",
+      "Passed": 4,
+      "Score": 98.56,
+      "DurationMilliseconds": 73932,
+      "Terminality": 100
+    }
+  ]
+}

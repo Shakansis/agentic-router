@@ -542,6 +542,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
     await RestartApplicationAsync();
   }
 
+  public async Task SetOpenCodeExecutableAndRestartAsync(
+    string executablePath
+  )
+  {
+    _apiProcess.StartInfo.Environment[
+      "AgenticRouter__OpenCode__ExecutablePath"
+    ] = executablePath;
+    await RestartApplicationAsync();
+  }
+
   public async Task UseManagedCodexInstallAndRestartAsync()
   {
     var managedRoot = Path.Combine(

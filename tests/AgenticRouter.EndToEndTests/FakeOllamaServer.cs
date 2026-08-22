@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Execution;
 
 namespace AgenticRouter.EndToEndTests;
@@ -633,6 +634,27 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       hasTools
       && messages.Any(
         message => message.Content.Contains(
+          BenchmarkNativeExecutor.PromptMarker,
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      AddLoadedModel(model, -1, contextTokens);
+      await RespondToNativeBenchmarkAsync(
+        context.Response,
+        model,
+        messages,
+        true,
+        cancellationToken
+      );
+      return;
+    }
+
+    if (
+      hasTools
+      && messages.Any(
+        message => message.Content.Contains(
           "SPECIALIST_TOOL_LOOP_V2",
           StringComparison.Ordinal
         )
@@ -739,6 +761,26 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    if (
+      hasTools
+      && messages.Any(
+        message => message.Content.Contains(
+          BenchmarkNativeExecutor.PromptMarker,
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      await RespondToNativeBenchmarkAsync(
+        response,
+        model,
+        messages,
+        false,
+        cancellationToken
+      );
+      return;
+    }
+
     if (messages.Any(
       message => message.Content.Contains(
         "SESSION_SUMMARY_V1",
@@ -1692,6 +1734,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               content = "recovered after invalid process argument"
             },
             explanation = "Use a structured safe action after the malformed process argument was rejected."
+          }
+        )
+      : (semanticCorrectionRequested || policyCorrectionRequested)
+        && !completedStructuredAction
+        && current.Contains("path traversal create corrected", StringComparison.OrdinalIgnoreCase)
+        ? CreateStructuredGuidance(
+          current,
+          new
+          {
+            tool = "create_file",
+            arguments = new
+            {
+              path = "rebased-create.txt",
+              content = "created inside the trusted workspace"
+            },
+            explanation = "Recover from the rejected traversal with an explicit workspace-relative target."
           }
         )
       : (semanticCorrectionRequested || policyCorrectionRequested)
@@ -2658,6 +2716,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       };
     }
     else if (
+      allContent.Contains(
+        "path traversal create corrected",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && allContent.Contains(
+        "outside the trusted workspace",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "rebased-create.txt",
+          content = "created inside the trusted workspace"
+        },
+        explanation = "Recover from the rejected traversal with an explicit workspace-relative target."
+      };
+    }
+    else if (
       hasResult
       && current.Contains(
         "partial context after completed action",
@@ -3016,10 +3096,6 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       )
       && !current.Contains(
         "path traversal recover",
-        StringComparison.OrdinalIgnoreCase
-      )
-      && !current.Contains(
-        "path traversal create corrected",
         StringComparison.OrdinalIgnoreCase
       )
     )
@@ -4963,6 +5039,178 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       true,
       cancellationToken
     );
+  }
+
+  private static async Task RespondToNativeBenchmarkAsync(
+    HttpListenerResponse response,
+    string model,
+    IReadOnlyList<RecordedMessage> messages,
+    bool stream,
+    CancellationToken cancellationToken
+  )
+  {
+    var request = messages.Last(message => message.Role == "user").Content;
+    var completedTools = messages.Count(message => message.Role == "tool");
+    if (
+      request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+      && model is "unused:latest" or "docs:latest"
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+    }
+    if (
+      request.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal)
+      && string.Equals(model, "structured-failure:latest", StringComparison.Ordinal)
+    )
+    {
+      await WriteToolChunkAsync(
+        response,
+        model,
+        string.Empty,
+        null,
+        null,
+        true,
+        cancellationToken
+      );
+      return;
+    }
+
+    string content = string.Empty;
+    string? tool = null;
+    object? arguments = null;
+    if (request.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "create_file";
+        arguments = new
+        {
+          path = "benchmark-data/result.txt",
+          content = string.Equals(model, "beta:code", StringComparison.Ordinal)
+            ? "Agentic Router Benchmark\noperation=create\nresult=success!"
+            : "Agentic Router Benchmark\noperation=create\nresult=success"
+        };
+      }
+      else
+      {
+        content = "Create benchmark completed.";
+      }
+    }
+    else if (request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/read-primary.txt" };
+      }
+      else if (completedTools == 1)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/read-secondary.txt" };
+      }
+      else
+      {
+        content = string.Equals(model, "beta:code", StringComparison.Ordinal)
+          ? "codename=ORBIT-41"
+          : "codename=ORBIT-41\nverification-word=marigold";
+      }
+    }
+    else if (request.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "replace_text";
+        arguments = new
+        {
+          path = "fixture/update.txt",
+          oldText = string.Equals(model, "structured:latest", StringComparison.Ordinal)
+            ? "retries=missing"
+            : "retries=2",
+          newText = string.Equals(model, "beta:code", StringComparison.Ordinal)
+            ? "retries=4"
+            : "retries=3",
+          replaceAll = false
+        };
+      }
+      else if (
+        completedTools == 1
+        && string.Equals(model, "structured:latest", StringComparison.Ordinal)
+      )
+      {
+        tool = "replace_text";
+        arguments = new
+        {
+          path = "fixture/update.txt",
+          oldText = "retries=2",
+          newText = "retries=3",
+          replaceAll = false
+        };
+      }
+      else
+      {
+        content = "Update benchmark completed.";
+      }
+    }
+    else if (request.Contains("Benchmark test: FS-DELETE-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0 && !string.Equals(model, "beta:code", StringComparison.Ordinal))
+      {
+        tool = "delete_paths";
+        arguments = new { paths = new[] { "fixture/delete.txt" }, recursive = false };
+      }
+      else
+      {
+        content = "Delete benchmark completed.";
+      }
+    }
+
+    object? toolCalls = tool is null
+      ? null
+      : new[]
+      {
+        new
+        {
+          function = new
+          {
+            name = tool,
+            arguments = JsonSerializer.SerializeToElement(arguments, CompactJsonOptions)
+          }
+        }
+      };
+    if (stream)
+    {
+      await WriteStreamingToolResponseAsync(
+        response,
+        model,
+        content,
+        tool is null ? null : $"Using structured benchmark tool {tool}.",
+        toolCalls,
+        0,
+        cancellationToken
+      );
+    }
+    else
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.OK,
+        new
+        {
+          model,
+          message = new
+          {
+            role = "assistant",
+            content,
+            thinking = tool is null ? null : $"Using structured benchmark tool {tool}.",
+            tool_calls = toolCalls
+          },
+          done = true,
+          prompt_eval_count = 120,
+          eval_count = 30
+        },
+        cancellationToken
+      );
+    }
   }
 
   private static async Task WriteToolChunkAsync(

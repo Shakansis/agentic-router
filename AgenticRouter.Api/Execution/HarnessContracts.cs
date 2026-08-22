@@ -136,7 +136,8 @@ public sealed record HarnessEvent
     HarnessTerminalState? terminalState = null,
     JsonElement? nativePayload = null,
     long? contextInputTokens = null,
-    bool recoveryExhausted = false
+    bool recoveryExhausted = false,
+    bool readOnlyPermission = false
   )
   {
     Type = type;
@@ -150,6 +151,7 @@ public sealed record HarnessEvent
     ApprovalCanBeMapped = approvalCanBeMapped;
     Destructive = destructive;
     RecoveryExhausted = recoveryExhausted;
+    ReadOnlyPermission = readOnlyPermission;
     ErrorCode = errorCode;
     Paths = paths;
     ToolCallId = toolCallId;
@@ -184,6 +186,8 @@ public sealed record HarnessEvent
   public bool Destructive { get; init; }
 
   public bool RecoveryExhausted { get; init; }
+
+  public bool ReadOnlyPermission { get; init; }
 
   public string? ErrorCode { get; init; }
 

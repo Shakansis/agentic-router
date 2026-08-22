@@ -143,7 +143,6 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
   {
     return (await ResolvePathCoreAsync(
       path,
-      false,
       cancellationToken
     )).FullPath;
   }
@@ -155,14 +154,12 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
   {
     return ResolvePathCoreAsync(
       path,
-      true,
       cancellationToken
     );
   }
 
   private async Task<TrustedWorkspacePathResolution> ResolvePathCoreAsync(
     string? path,
-    bool rebaseRelativeTraversal,
     CancellationToken cancellationToken
   )
   {
@@ -229,55 +226,6 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     var outsideWorkspace = IsOutsideWorkspace(
       relative
     );
-    var rebased = false;
-
-    if (
-      outsideWorkspace
-      && rebaseRelativeTraversal
-      && !string.IsNullOrWhiteSpace(
-        path
-      )
-      && !Path.IsPathFullyQualified(
-        path
-      )
-    )
-    {
-      var rebasedRelative = ClampRelativePathToWorkspace(
-        path
-      );
-
-      try
-      {
-        candidate = Path.GetFullPath(
-          Path.Combine(
-            root,
-            rebasedRelative
-          )
-        );
-      }
-      catch (Exception exception) when (
-        exception is ArgumentException
-        or NotSupportedException
-        or PathTooLongException
-      )
-      {
-        throw new LocalActionException(
-          "path-validation",
-          "The requested path is invalid.",
-          exception
-        );
-      }
-
-      relative = Path.GetRelativePath(
-        root,
-        candidate
-      );
-      rebased = true;
-      outsideWorkspace = IsOutsideWorkspace(
-        relative
-      );
-    }
-
     if (outsideWorkspace)
     {
       throw new LocalActionException(
@@ -303,7 +251,7 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
       candidate,
       relative,
       path,
-      rebased
+      false
     );
   }
 
@@ -339,49 +287,6 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
       $"..{Path.AltDirectorySeparatorChar}",
       StringComparison.Ordinal
     );
-  }
-
-  private static string ClampRelativePathToWorkspace(
-    string path
-  )
-  {
-    var segments = new List<string>();
-
-    foreach (var segment in path.Split(
-      [
-        Path.DirectorySeparatorChar,
-        Path.AltDirectorySeparatorChar
-      ],
-      StringSplitOptions.RemoveEmptyEntries
-    ))
-    {
-      if (segment == ".")
-      {
-        continue;
-      }
-
-      if (segment == "..")
-      {
-        if (segments.Count > 0)
-        {
-          segments.RemoveAt(
-            segments.Count - 1
-          );
-        }
-
-        continue;
-      }
-
-      segments.Add(
-        segment
-      );
-    }
-
-    return segments.Count == 0
-      ? "."
-      : Path.Combine(
-        segments.ToArray()
-      );
   }
 
   private static void EnsurePathContainsNoControlCharacters(

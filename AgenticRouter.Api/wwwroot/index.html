@@ -166,6 +166,10 @@
       </details>
 
       <div class="header-actions">
+        <button id="open-benchmarks" class="secondary-button" type="button">
+          <span class="button-icon" aria-hidden="true">◫</span>
+          <span>Benchmark</span>
+        </button>
         <button id="new-conversation" class="secondary-button" type="button">
           <span class="button-icon" aria-hidden="true">＋</span>
           <span>Nova conversa</span>
@@ -326,6 +330,95 @@
       </form>
     </footer>
   </main>
+
+  <dialog id="benchmark-dialog" class="settings-dialog benchmark-dialog">
+    <form id="benchmark-form" method="dialog" class="benchmark-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Model × Harness</span>
+          <h2>Benchmark CRUD</h2>
+        </div>
+        <button id="close-benchmarks" class="icon-button" type="button" aria-label="Fechar">×</button>
+      </header>
+
+      <div class="dialog-body benchmark-body">
+        <section class="benchmark-controls" aria-labelledby="benchmark-selection-title">
+          <div class="section-heading">
+            <h3 id="benchmark-selection-title">Seleção</h3>
+            <p>O mesmo modelo será usado em workspaces descartáveis equivalentes.</p>
+          </div>
+          <div class="benchmark-selection-grid">
+            <label>
+              <span>Modelo Ollama Local</span>
+              <select id="benchmark-model" required></select>
+            </label>
+            <label>
+              <span>Suite</span>
+              <select id="benchmark-suite" disabled>
+                <option value="basic-crud">Basic CRUD v1</option>
+              </select>
+            </label>
+            <label>
+              <span>Timeout por teste (segundos)</span>
+              <input id="benchmark-timeout" type="number" min="5" max="600" value="120" required>
+            </label>
+            <label>
+              <span>Resultado persistido</span>
+              <select id="benchmark-history">
+                <option value="">Nenhum resultado carregado</option>
+              </select>
+            </label>
+          </div>
+          <fieldset class="benchmark-harnesses">
+            <legend>Harnesses disponíveis</legend>
+            <div id="benchmark-harness-list"></div>
+          </fieldset>
+          <label class="benchmark-permission">
+            <input id="benchmark-permission" type="checkbox">
+            <span>Autorizo agora a execução do modelo selecionado para este benchmark.</span>
+          </label>
+          <div class="benchmark-actions">
+            <button id="run-benchmark" class="primary-button" type="submit">Executar CRUD</button>
+            <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>Cancelar execução</button>
+            <output id="benchmark-status" role="status">Pronto.</output>
+          </div>
+        </section>
+
+        <section class="benchmark-results" aria-labelledby="benchmark-results-title">
+          <div class="section-heading">
+            <h3 id="benchmark-results-title">Resultados</h3>
+            <p id="benchmark-run-summary">Execute ou abra um resultado persistido.</p>
+          </div>
+          <p id="benchmark-ranking-note" class="benchmark-ranking-note" hidden>
+            Ranking provisório: harnesses ainda em execução são identificados abaixo.
+          </p>
+          <div id="benchmark-live-dashboard" class="benchmark-live-dashboard" hidden></div>
+          <div class="benchmark-table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Harness</th>
+                  <th>State</th>
+                  <th>Passed</th>
+                  <th>Score</th>
+                  <th>Duration</th>
+                  <th>Terminality</th>
+                </tr>
+              </thead>
+              <tbody id="benchmark-results-body"></tbody>
+            </table>
+          </div>
+          <div id="benchmark-result-detail" class="benchmark-result-detail">
+            <p>Selecione um harness na tabela para inspecionar os quatro testes.</p>
+          </div>
+        </section>
+      </div>
+
+      <footer class="dialog-footer">
+        <button id="dismiss-benchmarks" class="secondary-button" type="button">Fechar</button>
+      </footer>
+    </form>
+  </dialog>
 
   <dialog id="settings-dialog" class="settings-dialog">
     <form id="settings-form" method="post" class="settings-shell">
