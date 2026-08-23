@@ -74,6 +74,20 @@ public static class BenchmarkMatrixCellStatusIds
   public const string Completed = "completed";
 }
 
+public static class BenchmarkEvidenceStatusIds
+{
+  public const string Measured = "measured";
+  public const string Detected = "detected";
+  public const string Unavailable = "unavailable";
+}
+
+public static class BenchmarkComparabilityIds
+{
+  public const string Comparable = "comparable";
+  public const string PartiallyComparable = "partially-comparable";
+  public const string NotDirectlyComparable = "not-directly-comparable";
+}
+
 public static class BenchmarkLiveStateIds
 {
   public const string Pending = "pending";
@@ -427,7 +441,14 @@ public sealed record BenchmarkModelIdentity(
   int? ConfiguredContextTokens,
   string? ParameterSize,
   string? Format,
-  string? Family
+  string? Family,
+  int? ObservedContextTokens = null
+);
+
+public sealed record BenchmarkHarnessIdentity(
+  string Harness,
+  string? Version,
+  string VersionStatus
 );
 
 public sealed record BenchmarkMatrixCellResult(
@@ -456,7 +477,34 @@ public sealed record BenchmarkEnvironmentIdentity(
   string Runtime,
   string? RuntimeVersion,
   bool Sequential,
-  int? ConfiguredContextTokens
+  int? ConfiguredContextTokens,
+  DateTimeOffset? CapturedAt = null,
+  BenchmarkEvidenceValue? OperatingSystem = null,
+  BenchmarkEvidenceValue? Cpu = null,
+  IReadOnlyList<BenchmarkGpuIdentity>? Gpus = null,
+  BenchmarkEvidenceValue? Ram = null,
+  BenchmarkEvidenceValue? HostVersion = null,
+  BenchmarkEvidenceValue? HostCommit = null,
+  string RuntimeVersionStatus = BenchmarkEvidenceStatusIds.Unavailable
+);
+
+public sealed record BenchmarkEvidenceValue(
+  string Status,
+  string? Value,
+  string? Unit = null,
+  string? Diagnostic = null
+);
+
+public sealed record BenchmarkGpuIdentity(
+  string Id,
+  BenchmarkEvidenceValue Name,
+  BenchmarkEvidenceValue Vram
+);
+
+public sealed record BenchmarkConfigurationIdentity(
+  int TimeoutSeconds,
+  bool Sequential,
+  string Fingerprint
 );
 
 public sealed record BenchmarkSuiteRunResult(
@@ -487,7 +535,185 @@ public sealed record BenchmarkSuiteRunResult(
   IReadOnlyList<BenchmarkAggregateRankingEntry>? ModelRanking = null,
   IReadOnlyList<BenchmarkAggregateRankingEntry>? HarnessRanking = null,
   IReadOnlyList<string>? ExecutionOrder = null,
-  BenchmarkEnvironmentIdentity? Environment = null
+  BenchmarkEnvironmentIdentity? Environment = null,
+  IReadOnlyList<BenchmarkHarnessIdentity>? HarnessIdentities = null,
+  BenchmarkConfigurationIdentity? Configuration = null,
+  int? ScoringProfileVersion = null,
+  string RawMeasurementsStatus = BenchmarkEvidenceStatusIds.Unavailable,
+  string ValidationEvidenceStatus = BenchmarkEvidenceStatusIds.Unavailable
+);
+
+public sealed record BenchmarkHistorySummary(
+  string RunId,
+  DateTimeOffset StartedAt,
+  string SuiteId,
+  int SuiteVersion,
+  string FixtureId,
+  int FixtureVersion,
+  IReadOnlyList<string> Models,
+  IReadOnlyList<string> Harnesses,
+  string FinalStatus,
+  long DurationMilliseconds,
+  int SchemaVersion,
+  int Passed,
+  int Total,
+  decimal OriginalScore,
+  decimal CurrentProfileScore,
+  string OriginalScoringProfileId,
+  int? OriginalScoringProfileVersion,
+  string CurrentScoringProfileId,
+  int CurrentScoringProfileVersion
+);
+
+public sealed record BenchmarkComparisonRequest(
+  string BaselineRunId,
+  string CandidateRunId
+);
+
+public sealed record BenchmarkMetadataChange(
+  string Field,
+  string Baseline,
+  string Candidate
+);
+
+public sealed record BenchmarkMetricDelta(
+  string Metric,
+  decimal Baseline,
+  decimal Candidate,
+  decimal Delta,
+  string? Unit = null
+);
+
+public sealed record BenchmarkRegressionSignal(
+  string Kind,
+  string Direction,
+  string Message,
+  string? Model = null,
+  string? Harness = null,
+  string? TestId = null
+);
+
+public sealed record BenchmarkHistoricalComparison(
+  BenchmarkHistorySummary Baseline,
+  BenchmarkHistorySummary Candidate,
+  string Comparability,
+  IReadOnlyList<string> Reasons,
+  IReadOnlyList<BenchmarkMetadataChange> ChangedMetadata,
+  IReadOnlyList<BenchmarkMetricDelta> Deltas,
+  IReadOnlyList<BenchmarkRegressionSignal> Signals
+);
+
+public sealed record BenchmarkComparabilityAssessment(
+  string Classification,
+  IReadOnlyList<string> Reasons
+);
+
+public static class BenchmarkRecommendationCategoryIds
+{
+  public const string GeneralCoding = "general-coding";
+  public const string ExactFilesystem = "exact-filesystem";
+  public const string LongContinuity = "long-continuity";
+  public const string RecoveryHeavy = "recovery-heavy";
+  public const string CorrectnessFirst = "correctness-first";
+  public const string TerminalityFirst = "terminality-first";
+  public const string EfficiencyFirst = "efficiency-first";
+}
+
+public static class BenchmarkRecommendationEvidenceSourceIds
+{
+  public const string MeasuredLocally = "measured-locally";
+  public const string HistoricalLocal = "historical-local";
+  public const string ExternalEvidence = "external-evidence";
+  public const string Inferred = "inferred";
+  public const string InsufficientEvidence = "insufficient-evidence";
+}
+
+public static class BenchmarkRecommendationConfidenceIds
+{
+  public const string Strong = "strong";
+  public const string Moderate = "moderate";
+  public const string Limited = "limited";
+  public const string Mixed = "mixed";
+  public const string Insufficient = "insufficient";
+}
+
+public sealed record BenchmarkRecommendationCategory(
+  string Id,
+  string Name,
+  string Description,
+  IReadOnlyList<string> EvidenceDimensions
+);
+
+public sealed record BenchmarkRecommendationRequest(
+  string Category,
+  string ScoringProfile = "active",
+  bool IncludeExternalEvidence = false
+);
+
+public sealed record BenchmarkRecommendationEvidenceLink(
+  string RunId,
+  string SuiteId,
+  int SuiteVersion,
+  DateTimeOffset StartedAt,
+  string Source,
+  string Comparability,
+  decimal CategoryScore,
+  int Passed,
+  int Total
+);
+
+public sealed record BenchmarkExternalRecommendationEvidence(
+  string Title,
+  string Url,
+  string Source,
+  string Status
+);
+
+public sealed record BenchmarkRecommendationCandidate(
+  int Rank,
+  string Model,
+  string Harness,
+  string Recommendation,
+  decimal Score,
+  string Confidence,
+  string EvidenceStrength,
+  IReadOnlyList<string> Strengths,
+  IReadOnlyList<string> Weaknesses,
+  IReadOnlyList<string> EvidenceSources,
+  IReadOnlyList<BenchmarkRecommendationEvidenceLink> Evidence,
+  int CurrentRunCount,
+  int ComparableHistoricalRunCount,
+  int PartialHistoricalRunCount,
+  int IncompatibleHistoricalRunCount
+);
+
+public sealed record BenchmarkMissingRecommendationEvidence(
+  string Model,
+  string Harness,
+  string Reason,
+  string SuggestedSuite,
+  int Priority
+);
+
+public sealed record BenchmarkRecommendationResult(
+  string RecommendationId,
+  string AlgorithmVersion,
+  DateTimeOffset GeneratedAt,
+  string Category,
+  BenchmarkScoringProfile ScoringProfile,
+  string EvidenceSetFingerprint,
+  IReadOnlyList<BenchmarkRecommendationCandidate> Candidates,
+  IReadOnlyList<BenchmarkMissingRecommendationEvidence> MissingEvidence,
+  IReadOnlyList<BenchmarkExternalRecommendationEvidence> ExternalEvidence,
+  string ExternalResearchStatus,
+  string Summary
+);
+
+public sealed record BenchmarkRecommendationCatalog(
+  string AlgorithmVersion,
+  IReadOnlyList<BenchmarkRecommendationCategory> Categories,
+  BenchmarkScoringProfile ActiveScoringProfile,
+  bool ExternalResearchAvailable
 );
 
 public sealed record BenchmarkLiveRankingEntry(

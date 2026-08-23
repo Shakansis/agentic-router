@@ -111,3 +111,5 @@ optimization, or Milestone 11.
   were generated and changed through rescoring without rerun.
 - Evidence: `docs/validation/PRE-M10-REAL-VALIDATION-REPORT-2026-08-23.md`
   and `docs/validation/M10-MODEL-HARNESS-MATRIX-REPORT-2026-08-23.md`.
+- Manual validation: approved by Rodrigo on 2026-08-23. Milestone 11 may
+  proceed.

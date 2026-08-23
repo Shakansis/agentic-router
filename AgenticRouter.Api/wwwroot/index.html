@@ -408,6 +408,83 @@
             </label>
           </div>
 
+          <section class="benchmark-history-tools" aria-labelledby="benchmark-history-title">
+            <div class="benchmark-history-heading">
+              <div>
+                <span class="eyebrow">Historical evidence</span>
+                <h3 id="benchmark-history-title">Histórico e comparação</h3>
+              </div>
+              <span class="badge">Persistido localmente</span>
+            </div>
+            <div class="benchmark-history-filters" aria-label="Filtros do histórico">
+              <label>
+                <span>Modelo</span>
+                <input id="benchmark-history-model-filter" type="search" placeholder="Todos os modelos">
+              </label>
+              <label>
+                <span>Harness</span>
+                <select id="benchmark-history-harness-filter">
+                  <option value="">Todos os harnesses</option>
+                </select>
+              </label>
+              <label>
+                <span>Suite</span>
+                <select id="benchmark-history-suite-filter">
+                  <option value="">Todas as suites</option>
+                </select>
+              </label>
+            </div>
+            <div class="benchmark-compare-controls">
+              <label>
+                <span>Base</span>
+                <select id="benchmark-compare-baseline">
+                  <option value="">Selecione uma execução</option>
+                </select>
+              </label>
+              <label>
+                <span>Candidata</span>
+                <select id="benchmark-compare-candidate">
+                  <option value="">Selecione uma execução</option>
+                </select>
+              </label>
+              <button id="compare-benchmark-runs" class="secondary-button" type="button">Comparar</button>
+            </div>
+            <div id="benchmark-comparison" class="benchmark-comparison" hidden></div>
+          </section>
+
+          <section class="benchmark-recommendations" aria-labelledby="benchmark-recommendation-title">
+            <div class="benchmark-recommendation-heading">
+              <div>
+                <span class="eyebrow">Evidence-based recommendation</span>
+                <h3 id="benchmark-recommendation-title">Recomendar Modelo × Harness</h3>
+              </div>
+              <span id="benchmark-recommendation-version" class="badge">v1</span>
+            </div>
+            <div class="benchmark-recommendation-controls">
+              <label>
+                <span>Categoria</span>
+                <select id="benchmark-recommendation-category"></select>
+              </label>
+              <label>
+                <span>Scoring</span>
+                <select id="benchmark-recommendation-profile">
+                  <option value="active">Perfil ativo</option>
+                  <option value="default">Default v1</option>
+                </select>
+              </label>
+              <button id="generate-benchmark-recommendation" class="secondary-button" type="button">
+                Recomendar com evidência local
+              </button>
+              <button id="research-benchmark-recommendation" class="secondary-button" type="button">
+                Pesquisar evidência externa
+              </button>
+            </div>
+            <output id="benchmark-recommendation-status" role="status">
+              Selecione uma categoria. Nenhum benchmark será iniciado automaticamente.
+            </output>
+            <div id="benchmark-recommendation-results" class="benchmark-recommendation-results" hidden></div>
+          </section>
+
           <section class="benchmark-scoring" aria-labelledby="benchmark-scoring-title">
             <div class="benchmark-scoring-heading">
               <div>
@@ -482,6 +559,10 @@
             <div id="benchmark-result-detail" class="benchmark-result-detail">
               <p>Selecione um harness na tabela para inspecionar os cenários.</p>
             </div>
+            <details id="benchmark-raw-evidence" class="benchmark-raw-evidence" hidden>
+              <summary>Abrir evidência bruta original</summary>
+              <pre id="benchmark-raw-evidence-content"></pre>
+            </details>
           </div>
         </section>
       </div>

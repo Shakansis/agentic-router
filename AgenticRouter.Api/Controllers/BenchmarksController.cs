@@ -18,6 +18,8 @@ public sealed class BenchmarksController : ControllerBase
   private readonly IBenchmarkLiveRunCoordinator _liveRuns;
   private readonly IBenchmarkScorer _scorer;
   private readonly IBenchmarkScoringProfileStore _scoringProfiles;
+  private readonly IBenchmarkHistoryService _history;
+  private readonly IBenchmarkRecommendationService _recommendations;
 
   public BenchmarksController(
     IBenchmarkEngine engine,
@@ -27,7 +29,9 @@ public sealed class BenchmarksController : ControllerBase
     IBenchmarkRunCancellationRegistry cancellations,
     IBenchmarkLiveRunCoordinator liveRuns,
     IBenchmarkScorer scorer,
-    IBenchmarkScoringProfileStore scoringProfiles
+    IBenchmarkScoringProfileStore scoringProfiles,
+    IBenchmarkHistoryService history,
+    IBenchmarkRecommendationService recommendations
   )
   {
     _engine = engine;
@@ -38,6 +42,8 @@ public sealed class BenchmarksController : ControllerBase
     _liveRuns = liveRuns;
     _scorer = scorer;
     _scoringProfiles = scoringProfiles;
+    _history = history;
+    _recommendations = recommendations;
   }
 
   [HttpGet("scoring-profile")]
@@ -46,6 +52,50 @@ public sealed class BenchmarksController : ControllerBase
   )
   {
     return Ok(await _scoringProfiles.GetAsync(cancellationToken));
+  }
+
+  [HttpGet("recommendation-catalog")]
+  public async Task<IActionResult> RecommendationCatalog(
+    CancellationToken cancellationToken
+  )
+  {
+    return Ok(await _recommendations.GetCatalogAsync(cancellationToken));
+  }
+
+  [HttpPost("recommendations")]
+  public async Task<IActionResult> Recommend(
+    [FromBody] BenchmarkRecommendationRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return Ok(await _recommendations.RecommendAsync(request, cancellationToken));
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpGet("recommendations/{recommendationId}")]
+  public async Task<IActionResult> GetRecommendation(
+    string recommendationId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var result = await _recommendations.GetAsync(
+        recommendationId,
+        cancellationToken
+      );
+      return result is null ? NotFound() : Ok(result);
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
   }
 
   [HttpPut("scoring-profile")]
@@ -170,8 +220,64 @@ public sealed class BenchmarksController : ControllerBase
     return Ok(await _results.ListAsync(limit, cancellationToken));
   }
 
+  [HttpGet("history")]
+  public async Task<IActionResult> History(
+    [FromQuery] int limit = 50,
+    [FromQuery] string? model = null,
+    [FromQuery] string? harness = null,
+    [FromQuery] string? suite = null,
+    CancellationToken cancellationToken = default
+  )
+  {
+    return Ok(await _history.ListAsync(
+      limit,
+      model,
+      harness,
+      suite,
+      cancellationToken
+    ));
+  }
+
+  [HttpGet("comparisons")]
+  public async Task<IActionResult> Compare(
+    [FromQuery] string baselineRunId,
+    [FromQuery] string candidateRunId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var comparison = await _history.CompareAsync(
+        new BenchmarkComparisonRequest(baselineRunId, candidateRunId),
+        cancellationToken
+      );
+      return comparison is null ? NotFound() : Ok(comparison);
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
   [HttpGet("suite-runs/{runId}")]
   public async Task<IActionResult> Get(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      return result is null ? NotFound() : Ok(result);
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpGet("suite-runs/{runId}/raw")]
+  public async Task<IActionResult> Raw(
     string runId,
     CancellationToken cancellationToken
   )

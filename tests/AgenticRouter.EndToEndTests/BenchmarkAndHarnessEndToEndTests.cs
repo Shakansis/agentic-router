@@ -541,6 +541,778 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     }
   }
 
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BenchmarkHistoryFiltersComparesAndPreservesVersionedEvidence()
+  {
+    await _environment.HttpClient.PostAsync("api/benchmarks/scoring-profile/reset", null);
+    var resultsDirectory = Path.Combine(_environment.DataDirectory, "benchmark-results");
+    Directory.CreateDirectory(resultsDirectory);
+    var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+    var startedAt = new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.Zero);
+    var baseline = WithHistoricalEvidence(
+      CreateScoringProjectionFixture(),
+      Guid.NewGuid().ToString("N"),
+      startedAt
+    );
+    var candidateHarnesses = baseline.HarnessResults.Select(harness =>
+    {
+      if (!string.Equals(harness.Harness, HarnessIds.Native, StringComparison.Ordinal))
+      {
+        return harness;
+      }
+      var tests = harness.Tests.Select(test => test with
+      {
+        RawResult = test.RawResult with
+        {
+          Status = BenchmarkResultStatusIds.Fail,
+          ObjectiveAchieved = false,
+          ExecutionStatus = BenchmarkExecutionStatusIds.TimedOut,
+          UsefulPartialOutcome = true,
+          UnexpectedModifiedFiles = ["unexpected.txt"]
+        },
+        Score = new BenchmarkScore(10m, 0, 0, 0, 50, 50),
+        DurationMilliseconds = 2_000
+      }).ToArray();
+      return harness with
+      {
+        Passed = 0,
+        Score = 10m,
+        DurationMilliseconds = 2_000,
+        Terminality = 0,
+        Tests = tests
+      };
+    }).ToArray();
+    var candidate = baseline with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddDays(1),
+      EndedAt = startedAt.AddDays(1).AddSeconds(2),
+      DurationMilliseconds = 2_000,
+      HarnessResults = candidateHarnesses
+    };
+    var partial = candidate with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddDays(2),
+      HarnessIdentities = candidate.HarnessIdentities!.Select(identity =>
+        string.Equals(identity.Harness, HarnessIds.Native, StringComparison.Ordinal)
+          ? identity with { Version = "fixture-v2" }
+          : identity
+      ).ToArray()
+    };
+    var incompatible = candidate with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddDays(3),
+      SuiteVersion = 99
+    };
+    var legacy = CreateIncompleteScoringFixture() with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddDays(-1)
+    };
+    var matrixBaseline = AsHistoricalMatrix(
+      baseline,
+      Guid.NewGuid().ToString("N"),
+      startedAt.AddDays(4)
+    );
+    var matrixCandidate = AsHistoricalMatrix(
+      candidate,
+      Guid.NewGuid().ToString("N"),
+      startedAt.AddDays(5)
+    );
+    foreach (var result in new[]
+    {
+      baseline,
+      candidate,
+      partial,
+      incompatible,
+      legacy,
+      matrixBaseline,
+      matrixCandidate
+    })
+    {
+      await File.WriteAllTextAsync(
+        Path.Combine(resultsDirectory, result.RunId + ".json"),
+        JsonSerializer.Serialize(result, jsonOptions)
+      );
+    }
+    var baselinePath = Path.Combine(resultsDirectory, baseline.RunId + ".json");
+    var baselineBytes = await File.ReadAllBytesAsync(baselinePath);
+    var providerRequests = _environment.FakeOllama.AllRequests.Count;
+
+    var history = await _environment.HttpClient.GetFromJsonAsync<BenchmarkHistorySummary[]>(
+      "api/benchmarks/history?limit=20&model=historical&harness=native&suite=basic-crud"
+    );
+    Assert.IsNotNull(history);
+    Assert.IsTrue(history.Any(item => item.RunId == baseline.RunId));
+    var baselineSummary = history.Single(item => item.RunId == baseline.RunId);
+    Assert.AreEqual(3, baselineSummary.SchemaVersion);
+    Assert.AreEqual(BenchmarkScoringProfileIds.Default, baselineSummary.CurrentScoringProfileId);
+    Assert.AreNotEqual(0, baselineSummary.OriginalScore);
+
+    var comparable = await GetComparisonAsync(baseline.RunId, candidate.RunId);
+    Assert.AreEqual(BenchmarkComparabilityIds.Comparable, comparable.Comparability);
+    Assert.HasCount(0, comparable.Reasons);
+    Assert.IsTrue(comparable.Deltas.Any(delta => delta.Metric == "score"));
+    Assert.IsTrue(comparable.Signals.Any(signal => signal.Kind == "pass-to-fail"));
+    Assert.IsTrue(comparable.Signals.Any(signal => signal.Kind == "terminal-to-timeout"));
+    Assert.IsTrue(comparable.Signals.Any(signal => signal.Kind == "correct-to-partial"));
+    Assert.IsTrue(comparable.Signals.Any(signal => signal.Kind == "unexpected-mutation"));
+
+    var partialComparison = await GetComparisonAsync(baseline.RunId, partial.RunId);
+    Assert.AreEqual(
+      BenchmarkComparabilityIds.PartiallyComparable,
+      partialComparison.Comparability
+    );
+    Assert.IsTrue(partialComparison.Reasons.Any(reason => reason.Contains(
+      "Harness version",
+      StringComparison.Ordinal
+    )));
+    Assert.HasCount(0, partialComparison.Signals);
+
+    var incompatibleComparison = await GetComparisonAsync(
+      baseline.RunId,
+      incompatible.RunId
+    );
+    Assert.AreEqual(
+      BenchmarkComparabilityIds.NotDirectlyComparable,
+      incompatibleComparison.Comparability
+    );
+    Assert.IsTrue(incompatibleComparison.Reasons.Any(reason => reason.Contains(
+      "suite versions",
+      StringComparison.OrdinalIgnoreCase
+    )));
+    Assert.HasCount(0, incompatibleComparison.Signals);
+
+    var legacyComparison = await GetComparisonAsync(baseline.RunId, legacy.RunId);
+    Assert.AreEqual(
+      BenchmarkComparabilityIds.PartiallyComparable,
+      legacyComparison.Comparability
+    );
+    Assert.IsTrue(legacyComparison.Reasons.Any(reason => reason.Contains(
+      "unavailable",
+      StringComparison.OrdinalIgnoreCase
+    )));
+    Assert.HasCount(0, legacyComparison.Signals);
+
+    var matrixComparison = await GetComparisonAsync(
+      matrixBaseline.RunId,
+      matrixCandidate.RunId
+    );
+    Assert.AreEqual(BenchmarkComparabilityIds.Comparable, matrixComparison.Comparability);
+    Assert.IsTrue(matrixComparison.Deltas.Any(delta => delta.Metric == "score"));
+
+    var legacyRaw = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+      $"api/benchmarks/suite-runs/{legacy.RunId}/raw"
+    );
+    Assert.IsNotNull(legacyRaw);
+    Assert.AreEqual(1, legacyRaw.SchemaVersion);
+    Assert.IsNull(legacyRaw.Environment);
+    Assert.IsNull(legacyRaw.ScoringProfileVersion);
+    Assert.AreEqual(
+      BenchmarkEvidenceStatusIds.Unavailable,
+      legacyRaw.RawMeasurementsStatus
+    );
+    Assert.AreEqual(
+      BenchmarkEvidenceStatusIds.Unavailable,
+      legacyRaw.ValidationEvidenceStatus
+    );
+
+    using var rescore = await _environment.HttpClient.PostAsync(
+      $"api/benchmarks/suite-runs/{baseline.RunId}/rescore",
+      null
+    );
+    rescore.EnsureSuccessStatusCode();
+    CollectionAssert.AreEqual(baselineBytes, await File.ReadAllBytesAsync(baselinePath));
+    Assert.HasCount(providerRequests, _environment.FakeOllama.AllRequests);
+
+    using var duplicate = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        baseline.Model,
+        [HarnessIds.Native],
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: baseline.RunId
+      )
+    );
+    Assert.AreEqual(HttpStatusCode.BadRequest, duplicate.StatusCode);
+    CollectionAssert.AreEqual(baselineBytes, await File.ReadAllBytesAsync(baselinePath));
+
+    await _environment.RestartApplicationAsync();
+    var reloaded = await _environment.HttpClient.GetFromJsonAsync<BenchmarkHistorySummary[]>(
+      "api/benchmarks/history?limit=20&model=historical"
+    );
+    Assert.IsNotNull(reloaded);
+    Assert.IsTrue(reloaded.Any(item => item.RunId == baseline.RunId));
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#benchmark-history-title"))
+      .ToContainTextAsync("Histórico e comparação");
+    await Page.Locator("#benchmark-history-model-filter")
+      .FillAsync("missing-history-model-fixture");
+    await Expect(Page.Locator("#benchmark-history option")).ToHaveCountAsync(1);
+    await Page.Locator("#benchmark-history-model-filter").FillAsync("historical");
+    await Expect(Page.Locator("#benchmark-history option")).Not.ToHaveCountAsync(1);
+    await Page.Locator("#benchmark-history-harness-filter")
+      .SelectOptionAsync(HarnessIds.Native);
+    await Page.Locator("#benchmark-history-suite-filter")
+      .SelectOptionAsync(BenchmarkSuiteIds.BasicCrud);
+    await Page.Locator("#benchmark-compare-baseline").SelectOptionAsync(baseline.RunId);
+    await Page.Locator("#benchmark-compare-candidate").SelectOptionAsync(candidate.RunId);
+    var baselineLabel = await Page.Locator("#benchmark-compare-baseline option:checked")
+      .TextContentAsync();
+    Assert.IsNotNull(baselineLabel);
+    Assert.IsFalse(baselineLabel.Contains("native,", StringComparison.OrdinalIgnoreCase));
+    Assert.IsLessThan(100, baselineLabel.Length);
+    var baselineBox = await Page.Locator("#benchmark-compare-baseline").BoundingBoxAsync();
+    var candidateBox = await Page.Locator("#benchmark-compare-candidate").BoundingBoxAsync();
+    var compareButtonBox = await Page.Locator("#compare-benchmark-runs").BoundingBoxAsync();
+    Assert.IsNotNull(baselineBox);
+    Assert.IsNotNull(candidateBox);
+    Assert.IsNotNull(compareButtonBox);
+    Assert.IsGreaterThanOrEqualTo(baselineBox.Y + baselineBox.Height, candidateBox.Y);
+    Assert.IsGreaterThanOrEqualTo(candidateBox.Y + candidateBox.Height, compareButtonBox.Y);
+    var historyHeaderBox = await Page.Locator(".benchmark-results-header").BoundingBoxAsync();
+    var persistedSelectBox = await Page.Locator("#benchmark-history").BoundingBoxAsync();
+    Assert.IsNotNull(historyHeaderBox);
+    Assert.IsNotNull(persistedSelectBox);
+    Assert.IsLessThanOrEqualTo(historyHeaderBox.Width, persistedSelectBox.Width);
+    await Page.Locator("#compare-benchmark-runs").ClickAsync();
+    await Expect(Page.Locator("#benchmark-comparison")).ToContainTextAsync("Comparable");
+    await Expect(Page.Locator("#benchmark-comparison")).ToContainTextAsync("PASS changed");
+    await Page.Locator("#benchmark-history").SelectOptionAsync(baseline.RunId);
+    await Expect(Page.Locator("#benchmark-score-context"))
+      .ToContainTextAsync("Original score");
+    await Expect(Page.Locator("#benchmark-score-context"))
+      .ToContainTextAsync("Current-profile score");
+    await Page.Locator("#benchmark-raw-evidence summary").ClickAsync();
+    await Expect(Page.Locator("#benchmark-raw-evidence-content"))
+      .ToContainTextAsync(baseline.RunId);
+
+    async Task<BenchmarkHistoricalComparison> GetComparisonAsync(
+      string baselineRunId,
+      string candidateRunId
+    )
+    {
+      var path = "api/benchmarks/comparisons?baselineRunId="
+        + Uri.EscapeDataString(baselineRunId)
+        + "&candidateRunId="
+        + Uri.EscapeDataString(candidateRunId);
+      return (await _environment.HttpClient
+        .GetFromJsonAsync<BenchmarkHistoricalComparison>(path))!;
+    }
+  }
+
+  private static BenchmarkSuiteRunResult WithHistoricalEvidence(
+    BenchmarkSuiteRunResult result,
+    string runId,
+    DateTimeOffset startedAt
+  )
+  {
+    BenchmarkEvidenceValue Detected(string value, string? unit = null) => new(
+      BenchmarkEvidenceStatusIds.Detected,
+      value,
+      unit
+    );
+    var harnesses = result.HarnessResults.Select(harness => harness.Harness).ToArray();
+    return result with
+    {
+      RunId = runId,
+      StartedAt = startedAt,
+      EndedAt = startedAt.AddMilliseconds(result.DurationMilliseconds),
+      SchemaVersion = 3,
+      SelectedModels = [result.Model],
+      SelectedHarnesses = harnesses,
+      ModelIdentities =
+      [
+        new BenchmarkModelIdentity(
+          result.Model,
+          result.ModelDigest,
+          result.Provider,
+          1_000,
+          startedAt,
+          "Q4_K_M",
+          32_768,
+          16_384,
+          "fixture",
+          "gguf",
+          "qwen",
+          16_384
+        )
+      ],
+      HarnessIdentities = harnesses.Select(harness => new BenchmarkHarnessIdentity(
+        harness,
+        "fixture-v1",
+        BenchmarkEvidenceStatusIds.Detected
+      )).ToArray(),
+      Environment = new BenchmarkEnvironmentIdentity(
+        "ollama-local",
+        "fixture-runtime-v1",
+        true,
+        16_384,
+        startedAt,
+        Detected("Windows fixture"),
+        Detected("CPU fixture"),
+        [new BenchmarkGpuIdentity("gpu-0", Detected("GPU fixture"), Detected("24000000000", "bytes"))],
+        Detected("64000000000", "bytes"),
+        Detected("1.0.0"),
+        Detected("commit-fixture"),
+        BenchmarkEvidenceStatusIds.Detected
+      ),
+      Configuration = new BenchmarkConfigurationIdentity(
+        result.TimeoutSeconds,
+        true,
+        "fixture-conditions-v1"
+      ),
+      ScoringProfileVersion = BenchmarkScoringProfileIds.DefaultVersion,
+      RawMeasurementsStatus = BenchmarkEvidenceStatusIds.Measured,
+      ValidationEvidenceStatus = BenchmarkEvidenceStatusIds.Measured
+    };
+  }
+
+  private static BenchmarkSuiteRunResult AsHistoricalMatrix(
+    BenchmarkSuiteRunResult result,
+    string runId,
+    DateTimeOffset startedAt
+  )
+  {
+    var cells = result.HarnessResults.Select((harness, index) =>
+      new BenchmarkMatrixCellResult(
+        index + 1,
+        result.Model,
+        result.ModelDigest,
+        result.Provider,
+        harness.Harness,
+        harness.HarnessVersion,
+        BenchmarkMatrixCellStatusIds.Completed,
+        BenchmarkMatrixCellStatusIds.Available,
+        null,
+        harness.Passed,
+        harness.Total,
+        harness.Score,
+        harness.DurationMilliseconds,
+        harness.Terminality,
+        (int)Math.Round(harness.Tests.Average(test => test.Score?.Correctness ?? 0)),
+        null,
+        null,
+        null,
+        harness
+      )).ToArray();
+    return result with
+    {
+      RunId = runId,
+      Model = "matrix",
+      ModelDigest = null,
+      StartedAt = startedAt,
+      EndedAt = startedAt.AddMilliseconds(result.DurationMilliseconds),
+      Cells = cells,
+      ExecutionOrder = cells.Select(cell => $"{cell.Model}|{cell.Harness}").ToArray()
+    };
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task EvidenceBasedRecommendationsAreDeterministicTraceableAndNeverExecuteAutomatically()
+  {
+    await _environment.HttpClient.PostAsync("api/benchmarks/scoring-profile/reset", null);
+    var resultsDirectory = Path.Combine(_environment.DataDirectory, "benchmark-results");
+    Directory.CreateDirectory(resultsDirectory);
+    var options = new JsonSerializerOptions { WriteIndented = true };
+    var startedAt = new DateTimeOffset(2026, 8, 23, 20, 0, 0, TimeSpan.Zero);
+    const string measuredModel = "aaa-m12-measured:latest";
+    const string partialModel = "aaa-m12-partial:latest";
+    const string conflictModel = "aaa-m12-conflict:latest";
+    const string incompatibleModel = "aaa-m12-incompatible:latest";
+    const string legacyModel = "aaa-m12-legacy:latest";
+
+    var measuredOne = WithRecommendationIdentity(
+      WithHistoricalEvidence(
+        CreateScoringProjectionFixture(),
+        Guid.NewGuid().ToString("N"),
+        startedAt
+      ),
+      measuredModel
+    );
+    var measuredTwo = measuredOne with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddMinutes(1),
+      EndedAt = startedAt.AddMinutes(1).AddSeconds(1)
+    };
+    var measuredThree = measuredOne with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddMinutes(2),
+      EndedAt = startedAt.AddMinutes(2).AddSeconds(1)
+    };
+    var partialOne = WithRecommendationIdentity(
+      measuredOne with
+      {
+        RunId = Guid.NewGuid().ToString("N"),
+        StartedAt = startedAt.AddMinutes(3)
+      },
+      partialModel
+    );
+    var partialTwo = partialOne with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddMinutes(4),
+      HarnessIdentities = partialOne.HarnessIdentities!.Select(identity =>
+        identity with { Version = identity.Version + "-changed" }
+      ).ToArray()
+    };
+    var conflictOne = WithRecommendationIdentity(
+      measuredOne with
+      {
+        RunId = Guid.NewGuid().ToString("N"),
+        StartedAt = startedAt.AddMinutes(5)
+      },
+      conflictModel
+    );
+    var conflictTwo = FailRecommendationHarness(
+      conflictOne with
+      {
+        RunId = Guid.NewGuid().ToString("N"),
+        StartedAt = startedAt.AddMinutes(6)
+      },
+      HarnessIds.Native
+    );
+    var incompatibleOne = WithRecommendationIdentity(
+      measuredOne with
+      {
+        RunId = Guid.NewGuid().ToString("N"),
+        StartedAt = startedAt.AddMinutes(7)
+      },
+      incompatibleModel
+    );
+    var incompatibleTwo = incompatibleOne with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      StartedAt = startedAt.AddMinutes(8),
+      SuiteVersion = 99
+    };
+    var legacy = CreateIncompleteScoringFixture() with
+    {
+      RunId = Guid.NewGuid().ToString("N"),
+      Model = legacyModel,
+      ModelDigest = "legacy-digest",
+      StartedAt = startedAt.AddMinutes(9)
+    };
+    var fixtures = new[]
+    {
+      measuredOne,
+      measuredTwo,
+      measuredThree,
+      partialOne,
+      partialTwo,
+      conflictOne,
+      conflictTwo,
+      incompatibleOne,
+      incompatibleTwo,
+      legacy
+    };
+    foreach (var result in fixtures)
+    {
+      await File.WriteAllTextAsync(
+        Path.Combine(resultsDirectory, result.RunId + ".json"),
+        JsonSerializer.Serialize(result, options)
+      );
+    }
+    var persistedResultCount = Directory.EnumerateFiles(resultsDirectory, "*.json").Count();
+    _environment.FakeOllama.Reset();
+    _environment.FakeCloud.Reset();
+
+    var local = await RecommendAsync(
+      BenchmarkRecommendationCategoryIds.GeneralCoding,
+      "default"
+    );
+    Assert.AreEqual(
+      BenchmarkRecommendationService.AlgorithmVersion,
+      local.AlgorithmVersion
+    );
+    Assert.AreEqual("not-requested", local.ExternalResearchStatus);
+    Assert.HasCount(0, local.ExternalEvidence);
+    var measuredNative = Candidate(local, measuredModel, HarnessIds.Native);
+    var measuredCodex = Candidate(local, measuredModel, HarnessIds.Codex);
+    Assert.IsGreaterThan(measuredNative.Rank, measuredCodex.Rank);
+    Assert.AreEqual(BenchmarkRecommendationConfidenceIds.Strong, measuredNative.Confidence);
+    Assert.AreEqual(2, measuredNative.ComparableHistoricalRunCount);
+    Assert.IsTrue(measuredNative.EvidenceSources.Contains(
+      BenchmarkRecommendationEvidenceSourceIds.MeasuredLocally
+    ));
+    Assert.IsTrue(measuredNative.EvidenceSources.Contains(
+      BenchmarkRecommendationEvidenceSourceIds.HistoricalLocal
+    ));
+    Assert.HasCount(3, measuredNative.Evidence);
+    Assert.IsTrue(measuredNative.Evidence.All(link => fixtures.Any(result =>
+      result.RunId == link.RunId)));
+
+    var repeated = await RecommendAsync(
+      BenchmarkRecommendationCategoryIds.GeneralCoding,
+      "default"
+    );
+    Assert.AreEqual(local.RecommendationId, repeated.RecommendationId);
+    Assert.AreEqual(
+      JsonSerializer.Serialize(local.Candidates),
+      JsonSerializer.Serialize(repeated.Candidates)
+    );
+    var persistedRecommendation = await _environment.HttpClient
+      .GetFromJsonAsync<BenchmarkRecommendationResult>(
+        $"api/benchmarks/recommendations/{local.RecommendationId}"
+      );
+    Assert.IsNotNull(persistedRecommendation);
+    Assert.AreEqual(local.EvidenceSetFingerprint, persistedRecommendation.EvidenceSetFingerprint);
+
+    var correctness = await RecommendAsync(
+      BenchmarkRecommendationCategoryIds.CorrectnessFirst,
+      "default"
+    );
+    Assert.IsGreaterThan(
+      Candidate(correctness, measuredModel, HarnessIds.Codex).Rank,
+      Candidate(correctness, measuredModel, HarnessIds.Native).Rank
+    );
+    var terminality = await RecommendAsync(
+      BenchmarkRecommendationCategoryIds.TerminalityFirst,
+      "default"
+    );
+    Assert.IsGreaterThan(
+      Candidate(terminality, measuredModel, HarnessIds.Native).Rank,
+      Candidate(terminality, measuredModel, HarnessIds.Codex).Rank
+    );
+
+    try
+    {
+      using var custom = await _environment.HttpClient.PutAsJsonAsync(
+        "api/benchmarks/scoring-profile",
+        new BenchmarkScoreWeights(0, 100, 0, 0, 0)
+      );
+      custom.EnsureSuccessStatusCode();
+      var active = await RecommendAsync(
+        BenchmarkRecommendationCategoryIds.GeneralCoding,
+        "active"
+      );
+      Assert.AreEqual(BenchmarkScoringProfileIds.Custom, active.ScoringProfile.Id);
+      Assert.IsGreaterThan(
+        Candidate(active, measuredModel, HarnessIds.Codex).Rank,
+        Candidate(active, measuredModel, HarnessIds.Native).Rank
+      );
+    }
+    finally
+    {
+      using var reset = await _environment.HttpClient.PostAsync(
+        "api/benchmarks/scoring-profile/reset",
+        null
+      );
+      reset.EnsureSuccessStatusCode();
+    }
+
+    var partialCandidate = Candidate(local, partialModel, HarnessIds.Native);
+    Assert.AreEqual(
+      BenchmarkRecommendationConfidenceIds.Limited,
+      partialCandidate.Confidence
+    );
+    Assert.AreEqual(1, partialCandidate.PartialHistoricalRunCount);
+    Assert.IsTrue(partialCandidate.Evidence.Any(link =>
+      link.Comparability == BenchmarkComparabilityIds.PartiallyComparable));
+    var conflictingCandidate = Candidate(local, conflictModel, HarnessIds.Native);
+    Assert.AreEqual(
+      BenchmarkRecommendationConfidenceIds.Mixed,
+      conflictingCandidate.Confidence
+    );
+    Assert.IsTrue(conflictingCandidate.Weaknesses.Any(weakness => weakness.Contains(
+      "conflict",
+      StringComparison.OrdinalIgnoreCase
+    )));
+    var incompatibleCandidate = Candidate(
+      local,
+      incompatibleModel,
+      HarnessIds.Native
+    );
+    Assert.AreEqual(
+      BenchmarkRecommendationConfidenceIds.Limited,
+      incompatibleCandidate.Confidence
+    );
+    Assert.AreEqual(1, incompatibleCandidate.IncompatibleHistoricalRunCount);
+    Assert.IsTrue(incompatibleCandidate.Evidence.Any(link =>
+      link.Comparability == BenchmarkComparabilityIds.NotDirectlyComparable));
+
+    var insufficient = await RecommendAsync(
+      BenchmarkRecommendationCategoryIds.RecoveryHeavy,
+      "default"
+    );
+    Assert.IsTrue(insufficient.MissingEvidence.Any(item =>
+      item.Model == measuredModel
+      && item.Reason.Contains("No relevant local", StringComparison.Ordinal)));
+
+    using (var invalid = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/recommendations",
+      new BenchmarkRecommendationRequest("invented-category")
+    ))
+    {
+      Assert.AreEqual(HttpStatusCode.BadRequest, invalid.StatusCode);
+    }
+    Assert.HasCount(0, _environment.FakeOllama.Requests);
+    Assert.HasCount(0, _environment.FakeCloud.Requests);
+    Assert.AreEqual(
+      persistedResultCount,
+      Directory.EnumerateFiles(resultsDirectory, "*.json").Count()
+    );
+
+    using (var saved = await _environment.HttpClient.PutAsJsonAsync(
+      "api/web-search/key",
+      new { apiKey = "ollama_fake_m12_search_key" }
+    ))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    try
+    {
+      _environment.FakeCloud.Reset();
+      var external = await RecommendAsync(
+        BenchmarkRecommendationCategoryIds.GeneralCoding,
+        "default",
+        includeExternalEvidence: true
+      );
+      Assert.AreEqual("completed", external.ExternalResearchStatus);
+      Assert.HasCount(3, external.ExternalEvidence);
+      Assert.IsTrue(external.ExternalEvidence.All(item =>
+        item.Source == BenchmarkRecommendationEvidenceSourceIds.ExternalEvidence
+        && item.Status == "unverified-external"));
+      Assert.IsTrue(external.Candidates.All(candidate =>
+        !candidate.EvidenceSources.Contains(
+          BenchmarkRecommendationEvidenceSourceIds.ExternalEvidence
+        )));
+      var webRequest = _environment.FakeCloud.Requests.Single(request =>
+        request.Path == "/ollama/api/web_search");
+      Assert.DoesNotContain(measuredOne.RunId, webRequest.Body);
+      Assert.DoesNotContain(measuredOne.ModelDigest!, webRequest.Body);
+      Assert.HasCount(0, _environment.FakeOllama.Requests);
+
+      await Page.GotoAsync("/");
+      await Page.Locator("#open-benchmarks").ClickAsync();
+      await Expect(Page.Locator("#benchmark-recommendation-results")).ToBeHiddenAsync();
+      await Page.Locator("#benchmark-recommendation-category")
+        .SelectOptionAsync(BenchmarkRecommendationCategoryIds.GeneralCoding);
+      await Page.Locator("#benchmark-recommendation-profile").SelectOptionAsync("default");
+      await Page.Locator("#generate-benchmark-recommendation").ClickAsync();
+      var measuredCard = Page.Locator(".benchmark-recommendation-card").Filter(
+        new LocatorFilterOptions { HasTextString = measuredModel }
+      ).First;
+      await Expect(measuredCard).ToBeVisibleAsync();
+      await Expect(measuredCard).ToContainTextAsync("Measured locally + Historical local");
+      await measuredCard.Locator("details summary").ClickAsync();
+      await measuredCard.Locator("[data-recommendation-run-id]").First.ClickAsync();
+      await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync(measuredModel);
+      await Page.Locator("#research-benchmark-recommendation").ClickAsync();
+      await Expect(Page.Locator(".benchmark-recommendation-external"))
+        .ToContainTextAsync("completed");
+      await Expect(Page.Locator(".benchmark-recommendation-external a"))
+        .ToHaveCountAsync(3);
+      Assert.AreEqual(
+        persistedResultCount,
+        Directory.EnumerateFiles(resultsDirectory, "*.json").Count()
+      );
+      Assert.HasCount(0, _environment.FakeOllama.Requests);
+    }
+    finally
+    {
+      await _environment.HttpClient.DeleteAsync(
+        "api/web-search/key?confirmed=true"
+      );
+    }
+
+    async Task<BenchmarkRecommendationResult> RecommendAsync(
+      string category,
+      string profile,
+      bool includeExternalEvidence = false
+    )
+    {
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/benchmarks/recommendations",
+        new BenchmarkRecommendationRequest(
+          category,
+          profile,
+          includeExternalEvidence
+        )
+      );
+      response.EnsureSuccessStatusCode();
+      return (await response.Content
+        .ReadFromJsonAsync<BenchmarkRecommendationResult>())!;
+    }
+
+    static BenchmarkRecommendationCandidate Candidate(
+      BenchmarkRecommendationResult result,
+      string model,
+      string harness
+    )
+    {
+      return result.Candidates.Single(candidate =>
+        candidate.Model == model && candidate.Harness == harness);
+    }
+  }
+
+  private static BenchmarkSuiteRunResult WithRecommendationIdentity(
+    BenchmarkSuiteRunResult result,
+    string model
+  )
+  {
+    var digest = $"digest-{model}";
+    return result with
+    {
+      Model = model,
+      ModelDigest = digest,
+      SelectedModels = [model],
+      ModelIdentities = result.ModelIdentities!.Select(identity => identity with
+      {
+        Model = model,
+        Digest = digest
+      }).ToArray()
+    };
+  }
+
+  private static BenchmarkSuiteRunResult FailRecommendationHarness(
+    BenchmarkSuiteRunResult result,
+    string harnessId
+  )
+  {
+    return result with
+    {
+      HarnessResults = result.HarnessResults.Select(harness =>
+      {
+        if (!string.Equals(harness.Harness, harnessId, StringComparison.Ordinal))
+        {
+          return harness;
+        }
+        return harness with
+        {
+          Passed = 0,
+          Score = 0,
+          Terminality = 0,
+          Tests = harness.Tests.Select(test => test with
+          {
+            RawResult = test.RawResult with
+            {
+              Status = BenchmarkResultStatusIds.Fail,
+              ObjectiveAchieved = false,
+              ByteAccuracy = 0,
+              ContainmentAccuracy = 0,
+              ExecutionStatus = BenchmarkExecutionStatusIds.TimedOut,
+              Exactness = 0,
+              UsefulPartialOutcome = false,
+              HostValidationResult = "fail",
+              BehaviorMetrics = null
+            },
+            Score = new BenchmarkScore(0, 0, 0, 0, 0, 0)
+          }).ToArray()
+        };
+      }).ToArray()
+    };
+  }
+
   private static BenchmarkSuiteRunResult CreateScoringProjectionFixture()
   {
     var startedAt = new DateTimeOffset(2026, 8, 22, 0, 0, 0, TimeSpan.Zero);
@@ -790,7 +1562,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var result = view.Events.Single(item => item.Type == BenchmarkProgressTypeIds.RunCompleted)
       .FinalResult;
     Assert.IsNotNull(result);
-    Assert.AreEqual(2, result.SchemaVersion);
+    Assert.AreEqual(3, result.SchemaVersion);
     Assert.AreEqual(BenchmarkScoringProfileIds.Custom, result.ScoringProfileId);
     Assert.AreEqual(100, result.ScoreWeights.Correctness);
     CollectionAssert.AreEqual(models, result.SelectedModels!.ToArray());
@@ -840,6 +1612,30 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual("Q4_K_M", modelIdentities.Single(
       model => model.Model == "alpha:latest").Quantization);
     Assert.IsTrue(result.Environment!.Sequential);
+    Assert.IsNotNull(result.Environment.CapturedAt);
+    Assert.AreEqual(
+      BenchmarkEvidenceStatusIds.Detected,
+      result.Environment.OperatingSystem!.Status
+    );
+    Assert.IsNotNull(result.Environment.Ram);
+    Assert.HasCount(2, result.HarnessIdentities!);
+    Assert.IsTrue(result.HarnessIdentities!.All(identity =>
+      identity.VersionStatus == BenchmarkEvidenceStatusIds.Detected));
+    Assert.IsNotNull(result.Configuration);
+    Assert.AreEqual(20, result.Configuration.TimeoutSeconds);
+    Assert.IsFalse(string.IsNullOrWhiteSpace(result.Configuration.Fingerprint));
+    Assert.AreEqual(
+      BenchmarkScoringProfileIds.DefaultVersion,
+      result.ScoringProfileVersion
+    );
+    Assert.AreEqual(
+      BenchmarkEvidenceStatusIds.Measured,
+      result.RawMeasurementsStatus
+    );
+    Assert.AreEqual(
+      BenchmarkEvidenceStatusIds.Measured,
+      result.ValidationEvidenceStatus
+    );
 
     long previousCompletion = 0;
     foreach (var cell in completed.OrderBy(cell => cell.ExecutionOrder))
@@ -879,6 +1675,11 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.HasCount(3, projection.ModelRanking!);
     Assert.HasCount(2, projection.HarnessRanking!);
     Assert.HasCount(inferenceCount, _environment.FakeOllama.AllRequests);
+    using var resetProfile = await _environment.HttpClient.PostAsync(
+      "api/benchmarks/scoring-profile/reset",
+      null
+    );
+    resetProfile.EnsureSuccessStatusCode();
     _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
     _environment.FakeOllama.RemoveLoadedModel("beta:code");
   }

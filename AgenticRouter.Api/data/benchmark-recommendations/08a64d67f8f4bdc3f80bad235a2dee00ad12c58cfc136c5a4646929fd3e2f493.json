@@ -1,0 +1,1010 @@
+{
+  "RecommendationId": "08a64d67f8f4bdc3f80bad235a2dee00ad12c58cfc136c5a4646929fd3e2f493",
+  "AlgorithmVersion": "benchmark-recommendation-v1",
+  "GeneratedAt": "2026-08-23T14:39:29.1368557+00:00",
+  "Category": "general-coding",
+  "ScoringProfile": {
+    "Id": "custom",
+    "Version": 1,
+    "DisplayName": "Custom",
+    "Weights": {
+      "ObjectiveSuccess": 35,
+      "Correctness": 20,
+      "Terminality": 20,
+      "WorkspaceAccuracy": 20,
+      "Efficiency": 5,
+      "Total": 100
+    }
+  },
+  "EvidenceSetFingerprint": "08a64d67f8f4bdc3f80bad235a2dee00ad12c58cfc136c5a4646929fd3e2f493",
+  "Candidates": [
+    {
+      "Rank": 1,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "codex",
+      "Recommendation": "Recommended",
+      "Score": 99.07,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally \u002B Historical local",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Correctness 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally",
+        "historical-local"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 99.07,
+          "Passed": 7,
+          "Total": 7
+        },
+        {
+          "RunId": "40d60568404a4918ab5df358106ad353",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:09:25.7678118+00:00",
+          "Source": "historical-local",
+          "Comparability": "partially-comparable",
+          "CategoryScore": 99.07,
+          "Passed": 7,
+          "Total": 7
+        },
+        {
+          "RunId": "722b2217611d4277bd207a6f552e284a",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T02:59:40.2879906+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.38,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "f8d2969b257d4a019002be7effe87a7f",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T01:31:09.2295356+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.38,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "1136ed98ea6349089721a19e8b4c2130",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T00:29:54.2606639+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.88,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "ef1aa8bf25d94e679629c386b09e7c3b",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T23:26:52.0606155+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.25,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "b8379741152b4798a2c0fa10e7fc9bd6",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T14:53:18.452084+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 94.0,
+          "Passed": 3,
+          "Total": 4
+        },
+        {
+          "RunId": "dadee7382249482db41e7ed7163e0501",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T01:28:53.6210061+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.69,
+          "Passed": 4,
+          "Total": 4
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 1,
+      "IncompatibleHistoricalRunCount": 6
+    },
+    {
+      "Rank": 2,
+      "Model": "qwen3.8:27b",
+      "Harness": "opencode",
+      "Recommendation": "Alternative",
+      "Score": 98.41,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Correctness 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Efficiency is 68,29 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 98.41,
+          "Passed": 7,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 3,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "opencode",
+      "Recommendation": "Alternative",
+      "Score": 98.24,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally \u002B Historical local",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Correctness 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Efficiency is 64 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally",
+        "historical-local"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 98.2,
+          "Passed": 7,
+          "Total": 7
+        },
+        {
+          "RunId": "40d60568404a4918ab5df358106ad353",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:09:25.7678118+00:00",
+          "Source": "historical-local",
+          "Comparability": "partially-comparable",
+          "CategoryScore": 98.59,
+          "Passed": 7,
+          "Total": 7
+        },
+        {
+          "RunId": "722b2217611d4277bd207a6f552e284a",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T02:59:40.2879906+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.44,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "f8d2969b257d4a019002be7effe87a7f",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T01:31:09.2295356+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.44,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "1136ed98ea6349089721a19e8b4c2130",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T00:29:54.2606639+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.94,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "ef1aa8bf25d94e679629c386b09e7c3b",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T23:26:52.0606155+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.75,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "b8379741152b4798a2c0fa10e7fc9bd6",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T14:53:18.452084+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 80.06,
+          "Passed": 3,
+          "Total": 4
+        },
+        {
+          "RunId": "cb86554c930f4c71adc437334ae9c141",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T02:47:23.8135926+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.56,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "dadee7382249482db41e7ed7163e0501",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T01:28:53.6210061+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.56,
+          "Passed": 4,
+          "Total": 4
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 1,
+      "IncompatibleHistoricalRunCount": 7
+    },
+    {
+      "Rank": 4,
+      "Model": "qwen3.8:27b",
+      "Harness": "claude-code",
+      "Recommendation": "Alternative",
+      "Score": 96.02,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Hygiene 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Convergence is 0 in local evidence.",
+        "Recovery is 33,33 in local evidence.",
+        "Efficiency is 67,86 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 96.02,
+          "Passed": 4,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 5,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "claude-code",
+      "Recommendation": "Alternative",
+      "Score": 96.00,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally \u002B Historical local",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Hygiene 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Convergence is 0 in local evidence.",
+        "Recovery is 33,33 in local evidence.",
+        "Efficiency is 67,86 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally",
+        "historical-local"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 96.02,
+          "Passed": 4,
+          "Total": 7
+        },
+        {
+          "RunId": "40d60568404a4918ab5df358106ad353",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:09:25.7678118+00:00",
+          "Source": "historical-local",
+          "Comparability": "partially-comparable",
+          "CategoryScore": 95.79,
+          "Passed": 4,
+          "Total": 7
+        },
+        {
+          "RunId": "722b2217611d4277bd207a6f552e284a",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T02:59:40.2879906+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.13,
+          "Passed": 4,
+          "Total": 4
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 1,
+      "IncompatibleHistoricalRunCount": 1
+    },
+    {
+      "Rank": 6,
+      "Model": "qwen3.8:27b",
+      "Harness": "codex",
+      "Recommendation": "Alternative",
+      "Score": 92.16,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Hygiene 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 92.16,
+          "Passed": 6,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 7,
+      "Model": "gpt-oss:20b",
+      "Harness": "native",
+      "Recommendation": "Alternative",
+      "Score": 91.39,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Convergence 100 from local evidence.",
+        "Hygiene 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Continuity is 50 in local evidence.",
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 91.39,
+          "Passed": 6,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 8,
+      "Model": "gpt-oss:20b",
+      "Harness": "codex",
+      "Recommendation": "Alternative",
+      "Score": 91.21,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Hygiene 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 91.21,
+          "Passed": 6,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 9,
+      "Model": "qwen3.8:27b",
+      "Harness": "native",
+      "Recommendation": "Alternative",
+      "Score": 87.91,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 87.91,
+          "Passed": 6,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 10,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "native",
+      "Recommendation": "Alternative",
+      "Score": 87.91,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally \u002B Historical local",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally",
+        "historical-local"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 87.91,
+          "Passed": 6,
+          "Total": 7
+        },
+        {
+          "RunId": "40d60568404a4918ab5df358106ad353",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:09:25.7678118+00:00",
+          "Source": "historical-local",
+          "Comparability": "partially-comparable",
+          "CategoryScore": 87.91,
+          "Passed": 6,
+          "Total": 7
+        },
+        {
+          "RunId": "fd4b597ef6c74eb78d4b90886bdd973e",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T14:09:05.299581+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 22.5,
+          "Passed": 0,
+          "Total": 1
+        },
+        {
+          "RunId": "722b2217611d4277bd207a6f552e284a",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T02:59:40.2879906+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 80.69,
+          "Passed": 3,
+          "Total": 4
+        },
+        {
+          "RunId": "f8d2969b257d4a019002be7effe87a7f",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T01:31:09.2295356+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 80.69,
+          "Passed": 3,
+          "Total": 4
+        },
+        {
+          "RunId": "1136ed98ea6349089721a19e8b4c2130",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T00:29:54.2606639+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 80.69,
+          "Passed": 3,
+          "Total": 4
+        },
+        {
+          "RunId": "ef1aa8bf25d94e679629c386b09e7c3b",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T23:26:52.0606155+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 80.69,
+          "Passed": 3,
+          "Total": 4
+        },
+        {
+          "RunId": "b8379741152b4798a2c0fa10e7fc9bd6",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T14:53:18.452084+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 36.63,
+          "Passed": 0,
+          "Total": 4
+        },
+        {
+          "RunId": "dadee7382249482db41e7ed7163e0501",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T01:28:53.6210061+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 80.56,
+          "Passed": 3,
+          "Total": 4
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 1,
+      "IncompatibleHistoricalRunCount": 7
+    },
+    {
+      "Rank": 11,
+      "Model": "gpt-oss:20b",
+      "Harness": "claude-code",
+      "Recommendation": "Alternative",
+      "Score": 86.81,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Terminality 100 from local evidence.",
+        "Hygiene 85,71 from local evidence."
+      ],
+      "Weaknesses": [
+        "Convergence is 0 in local evidence.",
+        "Recovery is 33,33 in local evidence.",
+        "Efficiency is 69,29 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 86.81,
+          "Passed": 4,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 12,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "qwen-code",
+      "Recommendation": "Alternative",
+      "Score": 80.04,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally \u002B Historical local",
+      "Strengths": [
+        "Convergence 100 from local evidence.",
+        "Terminality 100 from local evidence.",
+        "Hygiene 85,71 from local evidence."
+      ],
+      "Weaknesses": [
+        "Continuity is 50 in local evidence.",
+        "Efficiency is 56,43 in local evidence.",
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally",
+        "historical-local"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 79.25,
+          "Passed": 5,
+          "Total": 7
+        },
+        {
+          "RunId": "40d60568404a4918ab5df358106ad353",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:09:25.7678118+00:00",
+          "Source": "historical-local",
+          "Comparability": "partially-comparable",
+          "CategoryScore": 87.13,
+          "Passed": 6,
+          "Total": 7
+        },
+        {
+          "RunId": "722b2217611d4277bd207a6f552e284a",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T02:59:40.2879906+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.94,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "f8d2969b257d4a019002be7effe87a7f",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T01:31:09.2295356+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 98.44,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "1136ed98ea6349089721a19e8b4c2130",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-23T00:29:54.2606639+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 99.0,
+          "Passed": 4,
+          "Total": 4
+        },
+        {
+          "RunId": "ef1aa8bf25d94e679629c386b09e7c3b",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T23:26:52.0606155+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 38.63,
+          "Passed": 0,
+          "Total": 4
+        },
+        {
+          "RunId": "b8379741152b4798a2c0fa10e7fc9bd6",
+          "SuiteId": "basic-crud",
+          "SuiteVersion": 1,
+          "StartedAt": "2026-08-22T14:53:18.452084+00:00",
+          "Source": "historical-local",
+          "Comparability": "not-directly-comparable",
+          "CategoryScore": 37.38,
+          "Passed": 0,
+          "Total": 4
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 1,
+      "IncompatibleHistoricalRunCount": 5
+    },
+    {
+      "Rank": 13,
+      "Model": "gpt-oss:20b",
+      "Harness": "opencode",
+      "Recommendation": "Alternative",
+      "Score": 79.71,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Efficiency is 65,71 in local evidence.",
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 79.71,
+          "Passed": 5,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 14,
+      "Model": "gpt-oss:20b",
+      "Harness": "qwen-code",
+      "Recommendation": "Alternative",
+      "Score": 78.71,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Continuity 100 from local evidence.",
+        "Convergence 100 from local evidence.",
+        "Terminality 100 from local evidence."
+      ],
+      "Weaknesses": [
+        "Efficiency is 45,71 in local evidence.",
+        "Recovery is 66,67 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 78.71,
+          "Passed": 5,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    },
+    {
+      "Rank": 15,
+      "Model": "qwen3.8:27b",
+      "Harness": "qwen-code",
+      "Recommendation": "Alternative",
+      "Score": 70.34,
+      "Confidence": "limited",
+      "EvidenceStrength": "Measured locally",
+      "Strengths": [
+        "Convergence 100 from local evidence.",
+        "Recovery 100 from local evidence.",
+        "Terminality 85,71 from local evidence."
+      ],
+      "Weaknesses": [
+        "Efficiency is 49,71 in local evidence.",
+        "Continuity is 50 in local evidence.",
+        "Correctness is 57,14 in local evidence.",
+        "Evidence is limited; another comparable run would improve confidence."
+      ],
+      "EvidenceSources": [
+        "measured-locally"
+      ],
+      "Evidence": [
+        {
+          "RunId": "473340df451f4bceac3e7a0e7d0eee96",
+          "SuiteId": "agent-behavior",
+          "SuiteVersion": 2,
+          "StartedAt": "2026-08-23T14:39:29.1368557+00:00",
+          "Source": "measured-locally",
+          "Comparability": "comparable",
+          "CategoryScore": 70.34,
+          "Passed": 4,
+          "Total": 7
+        }
+      ],
+      "CurrentRunCount": 1,
+      "ComparableHistoricalRunCount": 0,
+      "PartialHistoricalRunCount": 0,
+      "IncompatibleHistoricalRunCount": 0
+    }
+  ],
+  "MissingEvidence": [
+    {
+      "Model": "gpt-oss:20b",
+      "Harness": "claude-code",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "gpt-oss:20b",
+      "Harness": "codex",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "gpt-oss:20b",
+      "Harness": "native",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "gpt-oss:20b",
+      "Harness": "opencode",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "gpt-oss:20b",
+      "Harness": "qwen-code",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "qwen3.8:27b",
+      "Harness": "claude-code",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "qwen3.8:27b",
+      "Harness": "codex",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    },
+    {
+      "Model": "qwen3.8:27b",
+      "Harness": "native",
+      "Reason": "Only one relevant local run; repeat it under comparable conditions.",
+      "SuggestedSuite": "agent-behavior",
+      "Priority": 2
+    }
+  ],
+  "ExternalEvidence": [],
+  "ExternalResearchStatus": "not-requested",
+  "Summary": "Ranked 15 Model x Harness candidate(s) from local benchmark evidence."
+}

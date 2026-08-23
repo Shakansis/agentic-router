@@ -329,6 +329,14 @@ builder.Services.AddSingleton<IBenchmarkScoringProfileStore>(services =>
 builder.Services.AddSingleton<IBenchmarkResultStore>(
   new JsonBenchmarkResultStore(dataDirectory)
 );
+builder.Services.AddSingleton<IBenchmarkHistoryService, BenchmarkHistoryService>();
+builder.Services.AddSingleton<IBenchmarkRecommendationStore>(
+  new JsonBenchmarkRecommendationStore(dataDirectory)
+);
+builder.Services.AddSingleton<
+  IBenchmarkRecommendationService,
+  BenchmarkRecommendationService
+>();
 builder.Services.AddSingleton<
   IBenchmarkRunCancellationRegistry,
   BenchmarkRunCancellationRegistry
@@ -356,6 +364,10 @@ builder.Services.AddSingleton<
 >();
 builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
 builder.Services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
+builder.Services.AddSingleton<
+  IBenchmarkEnvironmentSnapshotProvider,
+  BenchmarkEnvironmentSnapshotProvider
+>();
 builder.Services.AddSingleton<
   IResidentCoordinationEligibilityService,
   ResidentCoordinationEligibilityService

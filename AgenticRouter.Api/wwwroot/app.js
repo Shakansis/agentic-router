@@ -185,6 +185,20 @@ function bindElements() {
     "benchmark-suite",
     "benchmark-timeout",
     "benchmark-history",
+    "benchmark-history-model-filter",
+    "benchmark-history-harness-filter",
+    "benchmark-history-suite-filter",
+    "benchmark-compare-baseline",
+    "benchmark-compare-candidate",
+    "compare-benchmark-runs",
+    "benchmark-comparison",
+    "benchmark-recommendation-version",
+    "benchmark-recommendation-category",
+    "benchmark-recommendation-profile",
+    "generate-benchmark-recommendation",
+    "research-benchmark-recommendation",
+    "benchmark-recommendation-status",
+    "benchmark-recommendation-results",
     "benchmark-harness-list",
     "benchmark-scoring-profile-choice",
     "benchmark-score-profile",
@@ -207,6 +221,8 @@ function bindElements() {
     "benchmark-ranking-scope",
     "benchmark-results-body",
     "benchmark-result-detail",
+    "benchmark-raw-evidence",
+    "benchmark-raw-evidence-content",
     "close-benchmarks",
     "settings-dialog",
     "settings-form",
@@ -515,6 +531,18 @@ function bindEvents() {
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
+  elements.benchmarkHistoryModelFilter.addEventListener("input", scheduleBenchmarkHistoryRefresh);
+  elements.benchmarkHistoryHarnessFilter.addEventListener("change", refreshBenchmarkHistory);
+  elements.benchmarkHistorySuiteFilter.addEventListener("change", refreshBenchmarkHistory);
+  elements.compareBenchmarkRuns.addEventListener("click", compareBenchmarkRuns);
+  elements.generateBenchmarkRecommendation.addEventListener("click", () =>
+    generateBenchmarkRecommendation(false));
+  elements.researchBenchmarkRecommendation.addEventListener("click", () =>
+    generateBenchmarkRecommendation(true));
+  elements.benchmarkRecommendationResults.addEventListener(
+    "click",
+    openBenchmarkRecommendationEvidence
+  );
   for (const input of benchmarkWeightInputs()) {
     input.addEventListener("input", scheduleBenchmarkScoringUpdate);
   }
@@ -1133,25 +1161,42 @@ async function openBenchmarks() {
   elements.benchmarkStatus.textContent = "Carregando catálogo e histórico…";
 
   try {
-    const [catalog, history, modelsResponse, scoringProfile] = await Promise.all([
+    const [
+      catalog,
+      history,
+      modelsResponse,
+      scoringProfile,
+      recommendationCatalog
+    ] = await Promise.all([
       fetchJson("/api/benchmarks/catalog"),
-      fetchJson("/api/benchmarks/suite-runs?limit=25"),
+      fetchJson("/api/benchmarks/history?limit=100"),
       fetchJson("/api/models"),
-      fetchJson("/api/benchmarks/scoring-profile")
+      fetchJson("/api/benchmarks/scoring-profile"),
+      fetchJson("/api/benchmarks/recommendation-catalog")
     ]);
     state.models = modelsResponse.models;
     const retainedLive = state.benchmark?.live ?? null;
+    const initialResult = retainedLive
+      ? state.benchmark?.result ?? null
+      : history[0]
+        ? await fetchJson(`/api/benchmarks/suite-runs/${encodeURIComponent(history[0].runId)}`)
+        : null;
     state.benchmark = {
       catalog,
       history,
-      result: retainedLive ? state.benchmark?.result ?? null : history[0] ?? null,
+      result: initialResult,
       scoringProfile,
       scoringProjection: null,
       scoringUpdateTimer: null,
+      historyUpdateTimer: null,
+      comparison: null,
+      recommendationCatalog,
+      recommendation: null,
       live: retainedLive
     };
     renderBenchmarkControls();
     renderBenchmarkHistory();
+    renderBenchmarkRecommendationControls();
     const storedRunId = sessionStorage.getItem("agentic-router-benchmark-live-run");
     if (retainedLive && state.activeBenchmarkRunId) {
       renderBenchmarkLive();
@@ -1233,6 +1278,28 @@ function renderBenchmarkControls() {
   elements.benchmarkScoringProfileChoice.value = state.benchmark?.scoringProfile?.id === "custom"
     ? "custom"
     : "default";
+  replaceOptions(
+    elements.benchmarkHistoryHarnessFilter,
+    [
+      { value: "", label: "Todos os harnesses" },
+      ...(catalog?.harnesses ?? []).map(status => ({
+        value: status.definition.id,
+        label: harnessDisplayLabel(status.definition)
+      }))
+    ],
+    elements.benchmarkHistoryHarnessFilter.value
+  );
+  replaceOptions(
+    elements.benchmarkHistorySuiteFilter,
+    [
+      { value: "", label: "Todas as suites" },
+      ...suites.map(suite => ({
+        value: suite.id,
+        label: `${suite.name} v${suite.version}`
+      }))
+    ],
+    elements.benchmarkHistorySuiteFilter.value
+  );
   renderBenchmarkScoringProfile();
   updateBenchmarkSuiteSelection();
 }
@@ -1332,9 +1399,17 @@ async function saveBenchmarkScoringProfile() {
       body: JSON.stringify(weights)
     });
     state.benchmark.scoringProfile = profile;
+    if (state.benchmark.recommendationCatalog) {
+      state.benchmark.recommendationCatalog.activeScoringProfile = profile;
+    }
     state.benchmark.scoringUpdateTimer = null;
     renderBenchmarkScoringProfile();
+    renderBenchmarkRecommendationControls();
     await rescoreBenchmarkResult();
+    await refreshBenchmarkHistory();
+    if (state.benchmark.comparison) {
+      await compareBenchmarkRuns();
+    }
     elements.benchmarkStatus.textContent = "Perfil Custom salvo; ranking recalculado sem executar o benchmark.";
   } catch (error) {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
@@ -1348,8 +1423,16 @@ async function resetBenchmarkScoringProfile() {
       method: "POST"
     });
     state.benchmark.scoringProfile = profile;
+    if (state.benchmark.recommendationCatalog) {
+      state.benchmark.recommendationCatalog.activeScoringProfile = profile;
+    }
     renderBenchmarkScoringProfile();
+    renderBenchmarkRecommendationControls();
     await rescoreBenchmarkResult();
+    await refreshBenchmarkHistory();
+    if (state.benchmark.comparison) {
+      await compareBenchmarkRuns();
+    }
     elements.benchmarkStatus.textContent = "Perfil Default restaurado; ranking original recalculado.";
   } catch (error) {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
@@ -1377,8 +1460,7 @@ function renderBenchmarkHistory() {
     { value: "", label: "Selecione um resultado persistido" },
     ...(state.benchmark?.history ?? []).map(result => ({
       value: result.runId,
-      label: `${new Date(result.startedAt).toLocaleString()} · ${result.suiteId} v${result.suiteVersion} · `
-        + `${result.selectedModels?.length ? `${result.selectedModels.length} modelo(s)` : result.model} · ${result.finalStatus}`
+      label: benchmarkHistoryRunLabel(result)
     }))
   ];
   replaceOptions(
@@ -1386,6 +1468,398 @@ function renderBenchmarkHistory() {
     options,
     state.benchmark?.result?.runId ?? ""
   );
+  const compareOptions = [
+    { value: "", label: "Selecione uma execução" },
+    ...(state.benchmark?.history ?? []).map(result => ({
+      value: result.runId,
+      label: benchmarkHistoryRunLabel(result)
+    }))
+  ];
+  const previousBaseline = elements.benchmarkCompareBaseline.value;
+  const previousCandidate = elements.benchmarkCompareCandidate.value;
+  const history = state.benchmark?.history ?? [];
+  replaceOptions(
+    elements.benchmarkCompareBaseline,
+    compareOptions,
+    previousBaseline || history[1]?.runId || ""
+  );
+  replaceOptions(
+    elements.benchmarkCompareCandidate,
+    compareOptions,
+    previousCandidate || history[0]?.runId || ""
+  );
+  elements.compareBenchmarkRuns.disabled = history.length < 2;
+}
+
+function benchmarkHistoryRunLabel(result) {
+  const timestamp = new Date(result.startedAt).toLocaleString([], {
+    dateStyle: "short",
+    timeStyle: "short"
+  });
+  return `${timestamp} · ${result.suiteId} v${result.suiteVersion} · `
+    + `${result.models.length}M × ${result.harnesses.length}H · ${result.finalStatus}`;
+}
+
+function scheduleBenchmarkHistoryRefresh() {
+  if (!state.benchmark) {
+    return;
+  }
+  clearTimeout(state.benchmark.historyUpdateTimer);
+  state.benchmark.historyUpdateTimer = setTimeout(refreshBenchmarkHistory, 180);
+}
+
+async function refreshBenchmarkHistory(options = {}) {
+  if (!state.benchmark) {
+    return;
+  }
+  clearTimeout(state.benchmark.historyUpdateTimer);
+  state.benchmark.historyUpdateTimer = null;
+  const query = new URLSearchParams({ limit: "100" });
+  const model = elements.benchmarkHistoryModelFilter.value.trim();
+  const harness = elements.benchmarkHistoryHarnessFilter.value;
+  const suite = elements.benchmarkHistorySuiteFilter.value;
+  if (model) {
+    query.set("model", model);
+  }
+  if (harness) {
+    query.set("harness", harness);
+  }
+  if (suite) {
+    query.set("suite", suite);
+  }
+  try {
+    state.benchmark.history = await fetchJson(`/api/benchmarks/history?${query}`);
+    renderBenchmarkHistory();
+    if (options.selectRunId) {
+      elements.benchmarkHistory.value = options.selectRunId;
+    }
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+async function compareBenchmarkRuns() {
+  const baselineRunId = elements.benchmarkCompareBaseline.value;
+  const candidateRunId = elements.benchmarkCompareCandidate.value;
+  if (!baselineRunId || !candidateRunId) {
+    elements.benchmarkStatus.textContent = "Selecione duas execuções históricas.";
+    return;
+  }
+  if (baselineRunId === candidateRunId) {
+    elements.benchmarkStatus.textContent = "Selecione execuções diferentes para comparar.";
+    return;
+  }
+  try {
+    const query = new URLSearchParams({ baselineRunId, candidateRunId });
+    const comparison = await fetchJson(`/api/benchmarks/comparisons?${query}`);
+    state.benchmark.comparison = comparison;
+    renderBenchmarkComparison(comparison);
+    elements.benchmarkStatus.textContent = "Comparação histórica calculada sem alterar a evidência original.";
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+function renderBenchmarkComparison(comparison) {
+  elements.benchmarkComparison.hidden = !comparison;
+  elements.benchmarkComparison.replaceChildren();
+  if (!comparison) {
+    return;
+  }
+  const heading = document.createElement("div");
+  heading.className = "benchmark-comparison-heading";
+  const title = document.createElement("strong");
+  title.textContent = benchmarkComparabilityLabel(comparison.comparability);
+  const score = document.createElement("span");
+  score.textContent = `Original ${Number(comparison.baseline.originalScore).toFixed(2)} → ${Number(comparison.candidate.originalScore).toFixed(2)} · `
+    + `Current-profile ${Number(comparison.baseline.currentProfileScore).toFixed(2)} → ${Number(comparison.candidate.currentProfileScore).toFixed(2)}`;
+  heading.append(title, score);
+  elements.benchmarkComparison.append(heading);
+
+  if (comparison.reasons.length > 0) {
+    const reasons = document.createElement("ul");
+    reasons.className = "benchmark-comparison-reasons";
+    for (const reason of comparison.reasons) {
+      const item = document.createElement("li");
+      item.textContent = reason;
+      reasons.append(item);
+    }
+    elements.benchmarkComparison.append(reasons);
+  }
+
+  const deltas = document.createElement("dl");
+  deltas.className = "benchmark-comparison-deltas";
+  for (const delta of comparison.deltas) {
+    const term = document.createElement("dt");
+    term.textContent = delta.metric;
+    const value = document.createElement("dd");
+    const numericDelta = Number(delta.delta);
+    value.textContent = `${Number(delta.baseline).toFixed(2)} → ${Number(delta.candidate).toFixed(2)} `
+      + `(${numericDelta >= 0 ? "+" : ""}${numericDelta.toFixed(2)} ${delta.unit ?? ""})`;
+    deltas.append(term, value);
+  }
+  elements.benchmarkComparison.append(deltas);
+
+  if (comparison.comparability !== "comparable") {
+    const warning = document.createElement("p");
+    warning.className = "benchmark-comparison-warning";
+    warning.textContent = "Deltas numéricos são apenas evidência; nenhuma regressão ou melhoria foi classificada porque as condições não são diretamente comparáveis.";
+    elements.benchmarkComparison.append(warning);
+  } else if (comparison.signals.length > 0) {
+    const signals = document.createElement("ul");
+    signals.className = "benchmark-comparison-signals";
+    for (const signal of comparison.signals) {
+      const item = document.createElement("li");
+      item.dataset.direction = signal.direction;
+      const scope = [signal.model, signal.harness, signal.testId].filter(Boolean).join(" × ");
+      item.textContent = `${signal.direction}: ${signal.message}${scope ? ` · ${scope}` : ""}`;
+      signals.append(item);
+    }
+    elements.benchmarkComparison.append(signals);
+  }
+
+  if (comparison.changedMetadata.length > 0) {
+    const metadata = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = `Metadados alterados (${comparison.changedMetadata.length})`;
+    const list = document.createElement("dl");
+    list.className = "benchmark-comparison-metadata";
+    for (const change of comparison.changedMetadata) {
+      const term = document.createElement("dt");
+      term.textContent = change.field;
+      const value = document.createElement("dd");
+      value.textContent = `${change.baseline} → ${change.candidate}`;
+      list.append(term, value);
+    }
+    metadata.append(summary, list);
+    elements.benchmarkComparison.append(metadata);
+  }
+}
+
+function benchmarkComparabilityLabel(value) {
+  return {
+    comparable: "Comparable",
+    "partially-comparable": "Partially comparable",
+    "not-directly-comparable": "Not directly comparable"
+  }[value] ?? value;
+}
+
+function benchmarkAggregateOriginalScore(result) {
+  const scores = (result.cells?.length ? result.cells : result.harnessResults ?? [])
+    .map(item => Number(item.score));
+  return scores.length
+    ? scores.reduce((total, value) => total + value, 0) / scores.length
+    : 0;
+}
+
+function benchmarkAggregateCurrentScore(projection, result) {
+  const scores = projection?.matrixCellScores?.length
+    ? projection.matrixCellScores.map(item => Number(item.score))
+    : projection?.harnessScores?.length
+      ? projection.harnessScores.map(item => Number(item.score))
+      : [];
+  return scores.length
+    ? scores.reduce((total, value) => total + value, 0) / scores.length
+    : benchmarkAggregateOriginalScore(result);
+}
+
+function renderBenchmarkRecommendationControls() {
+  const catalog = state.benchmark?.recommendationCatalog;
+  if (!catalog) {
+    return;
+  }
+  elements.benchmarkRecommendationVersion.textContent = catalog.algorithmVersion;
+  replaceOptions(
+    elements.benchmarkRecommendationCategory,
+    catalog.categories.map(category => ({
+      value: category.id,
+      label: category.name
+    })),
+    elements.benchmarkRecommendationCategory.value || catalog.categories[0]?.id
+  );
+  const active = catalog.activeScoringProfile;
+  replaceOptions(
+    elements.benchmarkRecommendationProfile,
+    [
+      {
+        value: "active",
+        label: `Perfil ativo · ${active.displayName} v${active.version}`
+      },
+      { value: "default", label: "Default v1" }
+    ],
+    elements.benchmarkRecommendationProfile.value || "active"
+  );
+  elements.researchBenchmarkRecommendation.disabled = !catalog.externalResearchAvailable;
+  elements.researchBenchmarkRecommendation.title = catalog.externalResearchAvailable
+    ? "Solicitar pesquisa externa explícita e separada da evidência local."
+    : "Configure Ollama Web Search para habilitar pesquisa externa opcional.";
+}
+
+async function generateBenchmarkRecommendation(includeExternalEvidence) {
+  if (!state.benchmark || state.activeBenchmarkRunId) {
+    return;
+  }
+  elements.generateBenchmarkRecommendation.disabled = true;
+  elements.researchBenchmarkRecommendation.disabled = true;
+  elements.benchmarkRecommendationStatus.textContent = includeExternalEvidence
+    ? "Pesquisando fontes externas explicitamente; os dados locais não serão enviados."
+    : "Calculando recomendação somente com evidência local persistida.";
+  try {
+    const recommendation = await fetchJson("/api/benchmarks/recommendations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        category: elements.benchmarkRecommendationCategory.value,
+        scoringProfile: elements.benchmarkRecommendationProfile.value,
+        includeExternalEvidence
+      })
+    });
+    state.benchmark.recommendation = recommendation;
+    renderBenchmarkRecommendation(recommendation);
+    elements.benchmarkRecommendationStatus.textContent = recommendation.summary;
+  } catch (error) {
+    elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
+  } finally {
+    elements.generateBenchmarkRecommendation.disabled = false;
+    elements.researchBenchmarkRecommendation.disabled =
+      !state.benchmark?.recommendationCatalog?.externalResearchAvailable;
+  }
+}
+
+function renderBenchmarkRecommendation(recommendation) {
+  const container = elements.benchmarkRecommendationResults;
+  container.hidden = !recommendation;
+  container.replaceChildren();
+  if (!recommendation) {
+    return;
+  }
+  const trace = document.createElement("p");
+  trace.className = "benchmark-recommendation-trace";
+  trace.textContent = `${recommendation.algorithmVersion} · ${recommendation.category} · `
+    + `${recommendation.scoringProfile.displayName} v${recommendation.scoringProfile.version} · `
+    + `ID ${recommendation.recommendationId.slice(0, 12)}`;
+  container.append(trace);
+
+  for (const candidate of recommendation.candidates) {
+    const card = document.createElement("article");
+    card.className = "benchmark-recommendation-card";
+    const heading = document.createElement("div");
+    heading.className = "benchmark-recommendation-card-heading";
+    const title = document.createElement("h4");
+    title.textContent = `#${candidate.rank} ${candidate.model} × ${benchmarkHarnessLabel(candidate.harness)}`;
+    const label = document.createElement("span");
+    label.className = "badge";
+    label.textContent = candidate.recommendation;
+    heading.append(title, label);
+    const summary = document.createElement("p");
+    summary.className = "benchmark-recommendation-card-summary";
+    summary.textContent = `Score ${Number(candidate.score).toFixed(2)} · ${candidate.confidence} · `
+      + `${candidate.evidenceStrength} · ${candidate.comparableHistoricalRunCount} comparable · `
+      + `${candidate.partialHistoricalRunCount} partial · ${candidate.incompatibleHistoricalRunCount} incompatible`;
+    card.append(heading, summary);
+    card.append(
+      recommendationList("Pontos fortes", candidate.strengths, "strengths"),
+      recommendationList("Limitações", candidate.weaknesses, "weaknesses")
+    );
+    const evidence = document.createElement("details");
+    const evidenceSummary = document.createElement("summary");
+    evidenceSummary.textContent = `Evidência local (${candidate.evidence.length})`;
+    const links = document.createElement("div");
+    links.className = "benchmark-recommendation-evidence-links";
+    for (const item of candidate.evidence) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "benchmark-result-link";
+      button.dataset.recommendationRunId = item.runId;
+      button.textContent = `${new Date(item.startedAt).toLocaleDateString()} · ${item.suiteId} v${item.suiteVersion} · `
+        + `${item.source} · ${item.comparability} · ${Number(item.categoryScore).toFixed(2)}`;
+      links.append(button);
+    }
+    evidence.append(evidenceSummary, links);
+    card.append(evidence);
+    container.append(card);
+  }
+
+  if (recommendation.candidates.length === 0) {
+    const insufficient = document.createElement("p");
+    insufficient.className = "benchmark-recommendation-warning";
+    insufficient.textContent = "Not enough local evidence. Benchmark these combinations?";
+    container.append(insufficient);
+  }
+  if (recommendation.missingEvidence.length > 0) {
+    const missing = document.createElement("details");
+    missing.className = "benchmark-recommendation-missing";
+    const summary = document.createElement("summary");
+    summary.textContent = `Evidência que mais aumentaria a confiança (${recommendation.missingEvidence.length})`;
+    const list = document.createElement("ul");
+    for (const item of recommendation.missingEvidence) {
+      const row = document.createElement("li");
+      row.textContent = `${item.model} × ${benchmarkHarnessLabel(item.harness)} · ${item.reason} · suite sugerida: ${item.suggestedSuite}`;
+      list.append(row);
+    }
+    missing.append(summary, list);
+    container.append(missing);
+  }
+  const external = document.createElement("section");
+  external.className = "benchmark-recommendation-external";
+  const externalTitle = document.createElement("h4");
+  externalTitle.textContent = "Evidência externa (separada)";
+  const externalStatus = document.createElement("p");
+  externalStatus.textContent = `Status: ${recommendation.externalResearchStatus}`;
+  external.append(externalTitle, externalStatus);
+  if (recommendation.externalEvidence.length > 0) {
+    const sources = document.createElement("ul");
+    for (const source of recommendation.externalEvidence) {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = source.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = source.title;
+      const status = document.createElement("span");
+      status.textContent = ` · ${source.status}`;
+      item.append(link, status);
+      sources.append(item);
+    }
+    external.append(sources);
+  }
+  container.append(external);
+}
+
+function recommendationList(title, items, kind) {
+  const section = document.createElement("section");
+  section.className = `benchmark-recommendation-${kind}`;
+  const heading = document.createElement("h5");
+  heading.textContent = title;
+  const list = document.createElement("ul");
+  for (const value of items) {
+    const item = document.createElement("li");
+    item.textContent = value;
+    list.append(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
+async function openBenchmarkRecommendationEvidence(event) {
+  const button = event.target.closest("[data-recommendation-run-id]");
+  if (!button) {
+    return;
+  }
+  try {
+    const runId = button.dataset.recommendationRunId;
+    const selected = await fetchJson(
+      `/api/benchmarks/suite-runs/${encodeURIComponent(runId)}`
+    );
+    state.benchmark.result = selected;
+    state.benchmark.scoringProjection = null;
+    elements.benchmarkHistory.value = runId;
+    await rescoreBenchmarkResult();
+    elements.benchmarkResultDetail.scrollIntoView({ behavior: "smooth", block: "start" });
+    elements.benchmarkStatus.textContent = "Evidência local de suporte aberta.";
+  } catch (error) {
+    elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
+  }
 }
 
 async function runBenchmarkSuite(event) {
@@ -1821,12 +2295,8 @@ function finishBenchmarkLive(result) {
   elements.benchmarkPermission.checked = false;
   setBenchmarkRunning(false);
   state.benchmark.result = result;
-  state.benchmark.history = [
-    result,
-    ...(state.benchmark.history ?? []).filter(item => item.runId !== result.runId)
-  ];
-  renderBenchmarkHistory();
   renderBenchmarkResult(result);
+  refreshBenchmarkHistory({ selectRunId: result.runId });
   rescoreBenchmarkResult().catch(error => {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
   });
@@ -1886,21 +2356,32 @@ function setBenchmarkRunning(running) {
   elements.benchmarkScoringProfileChoice.disabled = running;
   elements.benchmarkTimeout.disabled = running;
   elements.benchmarkHistory.disabled = running;
+  elements.benchmarkHistoryModelFilter.disabled = running;
+  elements.benchmarkHistoryHarnessFilter.disabled = running;
+  elements.benchmarkHistorySuiteFilter.disabled = running;
+  elements.benchmarkCompareBaseline.disabled = running;
+  elements.benchmarkCompareCandidate.disabled = running;
+  elements.compareBenchmarkRuns.disabled = running
+    || (state.benchmark?.history?.length ?? 0) < 2;
+  elements.generateBenchmarkRecommendation.disabled = running;
+  elements.researchBenchmarkRecommendation.disabled = running
+    || !state.benchmark?.recommendationCatalog?.externalResearchAvailable;
   for (const input of elements.benchmarkHarnessList.querySelectorAll("input")) {
     input.disabled = running || input.dataset.available === "false";
   }
 }
 
 async function openPersistedBenchmark() {
-  const selected = state.benchmark?.history?.find(
-    result => result.runId === elements.benchmarkHistory.value
-  ) ?? null;
-  state.benchmark.result = selected;
-  state.benchmark.scoringProjection = null;
   try {
+    const runId = elements.benchmarkHistory.value;
+    const selected = runId
+      ? await fetchJson(`/api/benchmarks/suite-runs/${encodeURIComponent(runId)}`)
+      : null;
+    state.benchmark.result = selected;
+    state.benchmark.scoringProjection = null;
     await rescoreBenchmarkResult();
   } catch (error) {
-    renderBenchmarkResult(selected);
+    renderBenchmarkResult(state.benchmark?.result ?? null);
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
   }
 }
@@ -1911,6 +2392,11 @@ function renderBenchmarkResult(result) {
   elements.benchmarkMatrix.hidden = true;
   elements.benchmarkResultsBody.replaceChildren();
   elements.benchmarkResultDetail.replaceChildren();
+  elements.benchmarkRawEvidence.hidden = !result;
+  elements.benchmarkRawEvidence.open = false;
+  elements.benchmarkRawEvidenceContent.textContent = result
+    ? JSON.stringify(result, null, 2)
+    : "";
   if (!result) {
     elements.benchmarkRunSummary.textContent = "Execute ou abra um resultado persistido.";
     elements.benchmarkResultDetail.textContent = "Selecione um harness na tabela para inspecionar os cenários.";
@@ -1927,8 +2413,10 @@ function renderBenchmarkResult(result) {
   elements.benchmarkRunSummary.textContent =
     `${modelSummary} · ${result.suiteId} v${result.suiteVersion} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)} · `
     + `${result.fixtureId} v${result.fixtureVersion}`;
+  const originalScore = benchmarkAggregateOriginalScore(result);
+  const currentScore = benchmarkAggregateCurrentScore(projection, result);
   elements.benchmarkScoreContext.textContent = profile
-    ? `Measured evidence inalterada · Calculated score com ${profile.displayName} v${profile.version}`
+    ? `Measured evidence inalterada · Original score ${originalScore.toFixed(2)} · Current-profile score ${currentScore.toFixed(2)} com ${profile.displayName} v${profile.version}`
     : "Measured evidence e Calculated score são apresentados separadamente.";
   if ((result.cells ?? []).length > 0) {
     renderBenchmarkMatrix(result, projection);

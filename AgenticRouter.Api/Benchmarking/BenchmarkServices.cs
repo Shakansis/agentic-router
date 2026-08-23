@@ -485,6 +485,14 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
     try
     {
       Directory.CreateDirectory(_directory);
+      if (File.Exists(path))
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-run-id-conflict",
+          $"Benchmark run '{result.RunId}' already exists.",
+          "runId"
+        );
+      }
       var temporary = path + $".{Guid.NewGuid():N}.tmp";
       try
       {
@@ -495,7 +503,7 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
           new UTF8Encoding(false),
           cancellationToken
         );
-        File.Move(temporary, path, true);
+        File.Move(temporary, path, false);
       }
       finally
       {

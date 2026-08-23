@@ -61,6 +61,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private readonly IBenchmarkScorer _scorer;
   private readonly IBenchmarkResultStore _results;
   private readonly IBenchmarkRunCancellationRegistry _cancellations;
+  private readonly IBenchmarkEnvironmentSnapshotProvider _environmentSnapshots;
 
   public BenchmarkEngine(
     IBenchmarkTestRegistry tests,
@@ -71,7 +72,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IBenchmarkNativeExecutor nativeExecutor,
     IBenchmarkScorer scorer,
     IBenchmarkResultStore results,
-    IBenchmarkRunCancellationRegistry cancellations
+    IBenchmarkRunCancellationRegistry cancellations,
+    IBenchmarkEnvironmentSnapshotProvider environmentSnapshots
   )
   {
     _tests = tests;
@@ -83,6 +85,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _scorer = scorer;
     _results = results;
     _cancellations = cancellations;
+    _environmentSnapshots = environmentSnapshots;
   }
 
   public async Task<BenchmarkRunResult> RunAsync(
@@ -380,6 +383,19 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       OllamaRuntimeRoleIds.Benchmark,
       out var benchmarkRuntime
     ) ? benchmarkRuntime.TargetContextTokens : null;
+    var environment = _environmentSnapshots.Capture(
+      "ollama-local",
+      runtimeVersion,
+      true,
+      configuredContext
+    );
+    var harnessIdentities = harnesses.Select(harness => new BenchmarkHarnessIdentity(
+      harness.Adapter.Definition.Id,
+      harness.Availability.Version,
+      string.IsNullOrWhiteSpace(harness.Availability.Version)
+        ? BenchmarkEvidenceStatusIds.Unavailable
+        : BenchmarkEvidenceStatusIds.Detected
+    )).ToArray();
     var suiteResult = new BenchmarkSuiteRunResult(
       runId,
       models.Length == 1 ? models[0].RequestedName : "matrix",
@@ -398,7 +414,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       scoreWeights,
       harnessResults,
       ranking,
-      SchemaVersion: 2,
+      SchemaVersion: 3,
       ScoringProfileId: scoringProfileId,
       SelectedModels: requestedModels,
       SelectedHarnesses: requestedHarnesses,
@@ -410,12 +426,22 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       ExecutionOrder: matrixCells.OrderBy(cell => cell.ExecutionOrder)
         .Select(cell => $"{cell.Model}|{cell.Harness}")
         .ToArray(),
-      Environment: new BenchmarkEnvironmentIdentity(
-        "ollama-local",
-        runtimeVersion,
+      Environment: environment,
+      HarnessIdentities: harnessIdentities,
+      Configuration: new BenchmarkConfigurationIdentity(
+        request.TimeoutSeconds,
         true,
-        configuredContext
-      )
+        ConfigurationFingerprint(
+          suite,
+          request.TimeoutSeconds,
+          requestedModels,
+          requestedHarnesses,
+          configuredContext
+        )
+      ),
+      ScoringProfileVersion: BenchmarkScoringProfileIds.DefaultVersion,
+      RawMeasurementsStatus: BenchmarkEvidenceStatusIds.Measured,
+      ValidationEvidenceStatus: BenchmarkEvidenceStatusIds.Measured
     );
     await _results.SaveAsync(suiteResult, CancellationToken.None);
     Publish(progressSink, new BenchmarkProgressEvent(
@@ -1756,6 +1782,18 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       OllamaRuntimeRoleIds.Benchmark,
       out var benchmarkRuntime
     ) ? benchmarkRuntime.TargetContextTokens : null;
+    IReadOnlyList<OllamaRunningModel> runningModels;
+    try
+    {
+      runningModels = await _ollamaClient.GetRunningModelsAsync(
+        providerEndpoint,
+        cancellationToken
+      );
+    }
+    catch (OllamaProviderException)
+    {
+      runningModels = [];
+    }
     var identities = new List<BenchmarkModelIdentity>(models.Count);
     foreach (var resolved in models)
     {
@@ -1774,6 +1812,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         {
         }
       }
+      var running = runningModels.FirstOrDefault(candidate => string.Equals(
+        candidate.Name,
+        resolved.RequestedName,
+        StringComparison.OrdinalIgnoreCase
+      ));
       identities.Add(new BenchmarkModelIdentity(
         resolved.RequestedName,
         resolved.Installed?.Digest,
@@ -1785,10 +1828,33 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         configuredContext,
         metadata?.ParameterSize,
         metadata?.Format,
-        metadata?.Family
+        metadata?.Family,
+        running?.ContextLength
       ));
     }
     return identities;
+  }
+
+  private static string ConfigurationFingerprint(
+    BenchmarkSuiteMetadata suite,
+    int timeoutSeconds,
+    IReadOnlyList<string> models,
+    IReadOnlyList<string> harnesses,
+    int? configuredContextTokens
+  )
+  {
+    var canonical = string.Join("\n", new[]
+    {
+      $"suite={suite.Id}:{suite.Version}",
+      $"fixture={suite.FixtureId}:{suite.FixtureVersion}",
+      $"timeout={timeoutSeconds}",
+      $"context={configuredContextTokens?.ToString() ?? "unavailable"}",
+      "sequential=true",
+      $"models={string.Join('|', models)}",
+      $"harnesses={string.Join('|', harnesses)}"
+    });
+    return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+      .ToLowerInvariant();
   }
 
   private static IReadOnlyList<BenchmarkMatrixRankingEntry> RankPairs(
