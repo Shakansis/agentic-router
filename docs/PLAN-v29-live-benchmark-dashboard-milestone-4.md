@@ -266,6 +266,9 @@ raw v1 evidence.
 - The request names one exact provider/model and explicit harness set. Real
   model execution requires explicit permission. There is no silent fallback or
   substitution.
+- Suite execution is strictly sequential in normalized request order: one test
+  runs at a time, all tests for one harness finish before the next harness
+  starts, and no selected harnesses compete concurrently for the local model.
 - Workspaces remain disposable, bounded, containment-checked, reparse-point
   safe, and outside the source repository. Cleanup must validate ownership.
 - Host policy, approvals, workspace confinement, stale/conflict checks, effect

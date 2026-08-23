@@ -137,7 +137,7 @@ internal sealed record TestRuntimeSettings
 
 internal sealed record TestOllamaRuntimeSettings
 {
-  public int ProfileSchemaVersion { get; init; } = 1;
+  public int ProfileSchemaVersion { get; init; } = 2;
 
   public Dictionary<string, TestOllamaRoleRuntimeSettings> RoleDefaults
   {
@@ -235,10 +235,10 @@ internal static class TestOllamaRuntimeDefaults
         4_096
       ),
       ["benchmark"] = Profile(
-        4_096,
-        8_192,
-        16_384,
-        1_024
+        32_768,
+        32_768,
+        40_960,
+        4_096
       ),
       ["modelTest"] = Profile(
         4_096,

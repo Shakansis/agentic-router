@@ -133,3 +133,27 @@ Correction evidence:
   7m56s; isolated Release build remained clean with zero warnings/errors.
 - No real model inference, GPU workload, cloud request, or user workspace
   mutation was used to validate the correction.
+
+## Real CRUD diagnosis and correction
+
+The later four-harness real CRUD run does not contradict the deterministic M6
+evidence above: M6 deliberately did not run a real CRUD benchmark. Its 4/4
+Qwen result came from the fake external boundary, while the earlier real Qwen
+acceptance proved only a narrower Host-bridged delete path.
+
+The real CRUD run exposed four independent defects:
+
+- the Host configured an 8,192-token hard limit while each minimal Qwen turn
+  arrived at about 23,700 prompt tokens;
+- Qwen received nine native and seventeen Host MCP tools even though Basic
+  CRUD exposed only six canonical Host capabilities;
+- the workspace-scoped daemon remained alive during cleanup and locked the
+  disposable directory on Windows; and
+- cleanup failure replaced the primary Qwen/context failure in persisted
+  benchmark evidence.
+
+PLAN v34 corrects those defects with a 32,768-token benchmark floor, exact
+active-profile tool scoping, benchmark-only daemon release before cleanup, and
+primary-error preservation. Deterministic validation is complete; a real-model
+rerun remains an explicit manual gate and must preserve the failed run as
+historical evidence.

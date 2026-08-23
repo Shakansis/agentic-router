@@ -1286,24 +1286,30 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       ladder = current.ContextEscalationLadder.ToArray();
     }
 
+    var importedRuntime = current with
+    {
+      ProfileSchemaVersion = ReadInt(
+        section,
+        "profile_schema_version",
+        current.ProfileSchemaVersion,
+        "ollama_runtime.profile_schema_version",
+        errors
+      ),
+      RoleDefaults = roles,
+      ContextEscalationLadder = ladder,
+      Memory = memory,
+      ModelOverrides = overrideMap is null
+        ? current.ModelOverrides
+        : overrides
+    };
+    if (importedRuntime.ProfileSchemaVersion == 1)
+    {
+      importedRuntime = OllamaRuntimeDefaults.Upgrade(importedRuntime);
+    }
+
     return settings with
     {
-      OllamaRuntime = current with
-      {
-        ProfileSchemaVersion = ReadInt(
-          section,
-          "profile_schema_version",
-          current.ProfileSchemaVersion,
-          "ollama_runtime.profile_schema_version",
-          errors
-        ),
-        RoleDefaults = roles,
-        ContextEscalationLadder = ladder,
-        Memory = memory,
-        ModelOverrides = overrideMap is null
-          ? current.ModelOverrides
-          : overrides
-      }
+      OllamaRuntime = importedRuntime
     };
   }
 

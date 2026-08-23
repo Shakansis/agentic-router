@@ -116,6 +116,26 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
+    try
+    {
+      return await ValidateCoreAsync(
+        proposal,
+        executionSession,
+        cancellationToken
+      );
+    }
+    catch (GitDeliveryException exception)
+    {
+      throw ConvertGitFailure(exception);
+    }
+  }
+
+  private async Task<ValidatedLocalAction> ValidateCoreAsync(
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
     var resolution = _toolNames.Resolve(
       proposal.Tool,
       _toolNames.ExecutableTools
@@ -382,6 +402,10 @@ public sealed class LocalActionService : ILocalActionService
 
       return result;
     }
+    catch (GitDeliveryException exception)
+    {
+      throw ConvertGitFailure(exception);
+    }
     catch (Exception exception) when (
       exception is IOException
       or UnauthorizedAccessException
@@ -393,6 +417,17 @@ public sealed class LocalActionService : ILocalActionService
         exception
       );
     }
+  }
+
+  private static LocalActionException ConvertGitFailure(
+    GitDeliveryException exception
+  )
+  {
+    return new LocalActionException(
+      exception.Stage,
+      exception.Message,
+      exception
+    );
   }
 
   private async Task<LocalActionResult> RunValidationProfileAsync(

@@ -1446,12 +1446,15 @@ public sealed class SettingsValidator : ISettingsValidator
     int providerContextCeiling
   )
   {
-    if (runtime.ProfileSchemaVersion != 1)
+    if (
+      runtime.ProfileSchemaVersion
+      != OllamaRuntimeDefaults.CurrentProfileSchemaVersion
+    )
     {
       AddError(
         errors,
         "ollamaRuntime.profileSchemaVersion",
-        "Ollama runtime profile schema version must be 1."
+        $"Ollama runtime profile schema version must be {OllamaRuntimeDefaults.CurrentProfileSchemaVersion}."
       );
     }
 

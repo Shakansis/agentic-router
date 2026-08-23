@@ -7,6 +7,7 @@ using System.Threading.Channels;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.ProjectAwareness;
@@ -1940,6 +1941,7 @@ public sealed class ChatStreamService : IChatStreamService
       );
     var observer = await HarnessWorkspaceObserver.CaptureAsync(
       workspacePath,
+      harnessDefinition.Id,
       executionSettings,
       cancellationToken
     );
@@ -2132,6 +2134,7 @@ public sealed class ChatStreamService : IChatStreamService
             harnessEvent,
             approvedDeletionPaths,
             projectAwareness,
+            observer,
             cancellationToken
           ))
           {
@@ -2355,6 +2358,7 @@ public sealed class ChatStreamService : IChatStreamService
           );
           break;
         case "turn.failed":
+        case "turn.timed-out":
           terminalFailure = harnessEvent;
           break;
         case "error":
@@ -2511,7 +2515,8 @@ public sealed class ChatStreamService : IChatStreamService
         terminalFailure.ErrorCode ?? $"{harnessDefinition.Id}-turn-failed",
         terminalFailure.Message ?? $"{harnessDefinition.DisplayName} turn failed.",
         terminalFailure.Message ?? $"{harnessDefinition.DisplayName} reported a failed turn.",
-        true
+        true,
+        harnessId: harnessDefinition.Id
       );
     }
 
@@ -2597,6 +2602,7 @@ public sealed class ChatStreamService : IChatStreamService
     HarnessEvent harnessEvent,
     ISet<string> approvedDeletionPaths,
     ProjectAwarenessSettings projectAwareness,
+    HarnessWorkspaceObserver observer,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -2869,9 +2875,21 @@ public sealed class ChatStreamService : IChatStreamService
       "executing",
       requiresApproval
     );
+    var hostGitMutation = !action.ReadOnly && action.Tool.StartsWith(
+      "git_",
+      StringComparison.Ordinal
+    );
+    if (hostGitMutation)
+    {
+      await observer.VerifyProtectedGitUnchangedAsync(cancellationToken);
+    }
     var execution = await TryExecuteAsync(
       () => _actionService.ExecuteAsync(action, session, cancellationToken)
     );
+    if (hostGitMutation)
+    {
+      await observer.AcceptHostGitMutationAsync(cancellationToken);
+    }
     if (execution.Result?.Succeeded == true)
     {
       var result = execution.Result;
@@ -8788,6 +8806,13 @@ public sealed class ChatStreamService : IChatStreamService
     LocalActionException exception
   )
   {
+    if (exception.InnerException is GitDeliveryException gitFailure)
+    {
+      var code = $" Code: {gitFailure.Code}.";
+      return string.IsNullOrWhiteSpace(gitFailure.Diagnostic)
+        ? $"{gitFailure.Message}{code}"
+        : $"{gitFailure.Message}{code} Details: {gitFailure.Diagnostic}";
+    }
     var technical = exception.InnerException?.Message;
 
     return string.IsNullOrWhiteSpace(

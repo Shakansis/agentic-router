@@ -73,6 +73,14 @@ public sealed class JsonSettingsStore : ISettingsStore
       using var document = JsonDocument.Parse(
         json
       );
+      var runtimeProfileUpgraded = settings.OllamaRuntime.ProfileSchemaVersion == 1;
+      if (runtimeProfileUpgraded)
+      {
+        settings = settings with
+        {
+          OllamaRuntime = OllamaRuntimeDefaults.Upgrade(settings.OllamaRuntime)
+        };
+      }
       var hasCoordinatorModel = document.RootElement.TryGetProperty(
         "coordinatorModel",
         out _
@@ -218,7 +226,8 @@ public sealed class JsonSettingsStore : ISettingsStore
         )
         || !hasCoordinatorModel
         || !hasActionModel
-        || !hasMaxRecoveryAttempts;
+        || !hasMaxRecoveryAttempts
+        || runtimeProfileUpgraded;
 
       if (
         document.RootElement.TryGetProperty(

@@ -137,7 +137,7 @@
     tabindex="0"
   ></div>
 
-  <main class="workspace">
+  <main id="conversation-view" class="workspace">
     <header class="chat-header">
       <div class="title-group">
         <span class="eyebrow">Sessão local</span>
@@ -331,48 +331,77 @@
     </footer>
   </main>
 
-  <dialog id="benchmark-dialog" class="settings-dialog benchmark-dialog">
-    <form id="benchmark-form" method="dialog" class="benchmark-shell">
-      <header class="dialog-header">
+  <main id="benchmark-view" class="benchmark-workspace" hidden>
+    <form id="benchmark-form" class="benchmark-page">
+      <header class="benchmark-page-header">
         <div>
           <span class="eyebrow">Model × Harness</span>
           <h2>Benchmark CRUD</h2>
+          <p>Compare o mesmo modelo em workspaces descartáveis equivalentes.</p>
         </div>
-        <button id="close-benchmarks" class="icon-button" type="button" aria-label="Fechar">×</button>
+        <button id="close-benchmarks" class="secondary-button benchmark-back-button" type="button">
+          <span aria-hidden="true">←</span>
+          <span>Voltar à conversa</span>
+        </button>
       </header>
 
-      <div class="dialog-body benchmark-body">
-        <section class="benchmark-controls" aria-labelledby="benchmark-selection-title">
-          <div class="section-heading">
-            <h3 id="benchmark-selection-title">Seleção</h3>
-            <p>O mesmo modelo será usado em workspaces descartáveis equivalentes.</p>
+      <div class="benchmark-body">
+        <aside class="benchmark-panel benchmark-setup-panel" aria-labelledby="benchmark-selection-title">
+          <div class="benchmark-panel-header">
+            <div>
+              <span class="eyebrow">Configuração</span>
+              <h3 id="benchmark-selection-title">Preparar execução</h3>
+            </div>
           </div>
-          <div class="benchmark-selection-grid">
-            <label>
-              <span>Modelo Ollama Local</span>
-              <select id="benchmark-model" required></select>
+          <div class="benchmark-panel-body benchmark-controls">
+            <div class="benchmark-selection-grid">
+              <label>
+                <span>Modelo Ollama Local</span>
+                <select id="benchmark-model" required></select>
+              </label>
+              <label>
+                <span>Suite</span>
+                <select id="benchmark-suite" disabled>
+                  <option value="basic-crud">Basic CRUD v1</option>
+                </select>
+              </label>
+              <label>
+                <span>Timeout por teste (segundos)</span>
+                <input id="benchmark-timeout" type="number" min="5" max="600" value="120" required>
+              </label>
+            </div>
+            <fieldset class="benchmark-harnesses">
+              <legend>Harnesses disponíveis</legend>
+              <div id="benchmark-harness-list"></div>
+            </fieldset>
+          </div>
+          <div class="benchmark-action-box">
+            <label class="benchmark-permission">
+              <input id="benchmark-permission" type="checkbox">
+              <span>Autorizo agora a execução do modelo selecionado para este benchmark.</span>
             </label>
-            <label>
-              <span>Suite</span>
-              <select id="benchmark-suite" disabled>
-                <option value="basic-crud">Basic CRUD v1</option>
-              </select>
-            </label>
-            <label>
-              <span>Timeout por teste (segundos)</span>
-              <input id="benchmark-timeout" type="number" min="5" max="600" value="120" required>
-            </label>
-            <label>
+            <div class="benchmark-actions">
+              <button id="run-benchmark" class="primary-button" type="submit">Executar CRUD</button>
+              <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>Cancelar execução</button>
+            </div>
+            <output id="benchmark-status" role="status">Pronto.</output>
+          </div>
+        </aside>
+
+        <section class="benchmark-panel benchmark-results-panel" aria-labelledby="benchmark-results-title">
+          <div class="benchmark-panel-header benchmark-results-header">
+            <div>
+              <span class="eyebrow">Acompanhamento e histórico</span>
+              <h3 id="benchmark-results-title">Resultados</h3>
+            </div>
+            <label class="benchmark-history-control">
               <span>Resultado persistido</span>
               <select id="benchmark-history">
                 <option value="">Nenhum resultado carregado</option>
               </select>
             </label>
           </div>
-          <fieldset class="benchmark-harnesses">
-            <legend>Harnesses disponíveis</legend>
-            <div id="benchmark-harness-list"></div>
-          </fieldset>
+
           <section class="benchmark-scoring" aria-labelledby="benchmark-scoring-title">
             <div class="benchmark-scoring-heading">
               <div>
@@ -383,11 +412,11 @@
             </div>
             <div class="benchmark-weight-grid">
               <label>
-                <span>Objective success</span>
+                <span>Objective</span>
                 <input id="benchmark-weight-objective" type="number" min="0" max="100" step="1">
               </label>
               <label>
-                <span>Correctness / exactness</span>
+                <span>Correctness</span>
                 <input id="benchmark-weight-correctness" type="number" min="0" max="100" step="1">
               </label>
               <label>
@@ -395,7 +424,7 @@
                 <input id="benchmark-weight-terminality" type="number" min="0" max="100" step="1">
               </label>
               <label>
-                <span>Workspace accuracy</span>
+                <span>Workspace</span>
                 <input id="benchmark-weight-workspace" type="number" min="0" max="100" step="1">
               </label>
               <label>
@@ -408,55 +437,41 @@
               <button id="reset-benchmark-weights" class="secondary-button" type="button">Restaurar padrão</button>
             </div>
           </section>
-          <label class="benchmark-permission">
-            <input id="benchmark-permission" type="checkbox">
-            <span>Autorizo agora a execução do modelo selecionado para este benchmark.</span>
-          </label>
-          <div class="benchmark-actions">
-            <button id="run-benchmark" class="primary-button" type="submit">Executar CRUD</button>
-            <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>Cancelar execução</button>
-            <output id="benchmark-status" role="status">Pronto.</output>
-          </div>
-        </section>
 
-        <section class="benchmark-results" aria-labelledby="benchmark-results-title">
-          <div class="section-heading">
-            <h3 id="benchmark-results-title">Resultados</h3>
-            <p id="benchmark-run-summary">Execute ou abra um resultado persistido.</p>
-            <p id="benchmark-score-context" class="benchmark-score-context">
-              Measured evidence e Calculated score são apresentados separadamente.
+          <div class="benchmark-panel-body benchmark-results">
+            <div class="section-heading">
+              <p id="benchmark-run-summary">Execute ou abra um resultado persistido.</p>
+              <p id="benchmark-score-context" class="benchmark-score-context">
+                Measured evidence e Calculated score são apresentados separadamente.
+              </p>
+            </div>
+            <p id="benchmark-ranking-note" class="benchmark-ranking-note" hidden>
+              Ranking provisório: harnesses ainda em execução são identificados abaixo.
             </p>
-          </div>
-          <p id="benchmark-ranking-note" class="benchmark-ranking-note" hidden>
-            Ranking provisório: harnesses ainda em execução são identificados abaixo.
-          </p>
-          <div id="benchmark-live-dashboard" class="benchmark-live-dashboard" hidden></div>
-          <div class="benchmark-table-shell">
-            <table>
-              <thead>
-                <tr>
-                  <th>Harness</th>
-                  <th>State</th>
-                  <th>Passed</th>
-                  <th>Score</th>
-                  <th>Duration</th>
-                  <th>Terminality</th>
-                </tr>
-              </thead>
-              <tbody id="benchmark-results-body"></tbody>
-            </table>
-          </div>
-          <div id="benchmark-result-detail" class="benchmark-result-detail">
-            <p>Selecione um harness na tabela para inspecionar os quatro testes.</p>
+            <div id="benchmark-live-dashboard" class="benchmark-live-dashboard" hidden></div>
+            <div class="benchmark-table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Harness</th>
+                    <th>State</th>
+                    <th>Passed</th>
+                    <th>Score</th>
+                    <th>Duration</th>
+                    <th>Terminality</th>
+                  </tr>
+                </thead>
+                <tbody id="benchmark-results-body"></tbody>
+              </table>
+            </div>
+            <div id="benchmark-result-detail" class="benchmark-result-detail">
+              <p>Selecione um harness na tabela para inspecionar os quatro testes.</p>
+            </div>
           </div>
         </section>
       </div>
-
-      <footer class="dialog-footer">
-        <button id="dismiss-benchmarks" class="secondary-button" type="button">Fechar</button>
-      </footer>
     </form>
-  </dialog>
+  </main>
 
   <dialog id="settings-dialog" class="settings-dialog">
     <form id="settings-form" method="post" class="settings-shell">

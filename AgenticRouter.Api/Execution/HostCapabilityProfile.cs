@@ -64,6 +64,13 @@ public static class HarnessCapabilityProjection
     "apply_patch"
   ];
 
+  private static readonly string[] ClaudeNativeCommon =
+  [
+    "read_file",
+    "replace_text",
+    "apply_patch"
+  ];
+
   public static IReadOnlyList<string> HostBridgeTools(
     string harnessId,
     HostCapabilityProfile profile
@@ -77,6 +84,7 @@ public static class HarnessCapabilityProjection
       harnessId is not HarnessIds.Codex
         and not HarnessIds.OpenCode
         and not HarnessIds.QwenCode
+        and not HarnessIds.ClaudeCode
     )
     {
       return [];
@@ -91,7 +99,9 @@ public static class HarnessCapabilityProjection
   {
     return string.Equals(harnessId, HarnessIds.Codex, StringComparison.OrdinalIgnoreCase)
       ? CodexNativeCommon
-      : harnessId is HarnessIds.OpenCode or HarnessIds.QwenCode
+      : string.Equals(harnessId, HarnessIds.ClaudeCode, StringComparison.OrdinalIgnoreCase)
+        ? ClaudeNativeCommon
+        : harnessId is HarnessIds.OpenCode or HarnessIds.QwenCode
         ? ExternalNativeCommon
         : [];
   }
@@ -106,6 +116,7 @@ public static class HarnessCapabilityProjection
         or HarnessIds.Codex
         or HarnessIds.OpenCode
         or HarnessIds.QwenCode
+        or HarnessIds.ClaudeCode
     )
     {
       return [];

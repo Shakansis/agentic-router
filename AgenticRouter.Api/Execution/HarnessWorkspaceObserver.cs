@@ -9,6 +9,7 @@ public sealed class HarnessWorkspaceObserver
 {
   private const int MaximumFiles = 5_000;
   private readonly string _root;
+  private readonly string _harnessId;
   private readonly int _maximumRollbackBytesPerFile;
   private readonly int _maximumRollbackBytesPerSession;
   private readonly Dictionary<string, FileSnapshot> _files;
@@ -16,6 +17,7 @@ public sealed class HarnessWorkspaceObserver
 
   private HarnessWorkspaceObserver(
     string root,
+    string harnessId,
     int maximumRollbackBytesPerFile,
     int maximumRollbackBytesPerSession,
     Dictionary<string, FileSnapshot> files,
@@ -23,6 +25,7 @@ public sealed class HarnessWorkspaceObserver
   )
   {
     _root = root;
+    _harnessId = harnessId;
     _maximumRollbackBytesPerFile = maximumRollbackBytesPerFile;
     _maximumRollbackBytesPerSession = maximumRollbackBytesPerSession;
     _files = files;
@@ -31,6 +34,7 @@ public sealed class HarnessWorkspaceObserver
 
   public static async Task<HarnessWorkspaceObserver> CaptureAsync(
     string workspacePath,
+    string harnessId,
     ExecutionSettings limits,
     CancellationToken cancellationToken
   )
@@ -46,6 +50,7 @@ public sealed class HarnessWorkspaceObserver
     var protectedGit = await CaptureProtectedGitAsync(root, cancellationToken);
     return new HarnessWorkspaceObserver(
       root,
+      harnessId,
       limits.MaxRollbackBytesPerFile,
       limits.MaxRollbackBytesPerSession,
       files,
@@ -59,16 +64,7 @@ public sealed class HarnessWorkspaceObserver
     CancellationToken cancellationToken
   )
   {
-    var currentGit = await CaptureProtectedGitAsync(_root, cancellationToken);
-    if (!Equivalent(_protectedGit, currentGit))
-    {
-      throw new HarnessException(
-        "codex-git-boundary-rejected",
-        "Codex changed protected Git state.",
-        "A protected .git control path changed during the Codex turn.",
-        false
-      );
-    }
+    await VerifyProtectedGitUnchangedAsync(cancellationToken);
 
     var current = await CaptureFilesAsync(
       _root,
@@ -129,7 +125,7 @@ public sealed class HarnessWorkspaceObserver
         DateTimeOffset.UtcNow,
         true,
         undoAvailable,
-        undoAvailable ? null : "The original file exceeded the bounded Codex-harness rollback budget or was unavailable.",
+        undoAvailable ? null : "The original file exceeded the bounded harness rollback budget or was unavailable.",
         undoAvailable ? originalBytes : 0,
         OriginalBinaryBase64: before?.Text is null && before?.Bytes is not null
           ? Convert.ToBase64String(before.Bytes)
@@ -138,6 +134,35 @@ public sealed class HarnessWorkspaceObserver
     }
 
     return changes;
+  }
+
+  public async Task VerifyProtectedGitUnchangedAsync(
+    CancellationToken cancellationToken
+  )
+  {
+    var currentGit = await CaptureProtectedGitAsync(_root, cancellationToken);
+    if (!Equivalent(_protectedGit, currentGit))
+    {
+      throw new HarnessException(
+        $"{_harnessId}-git-boundary-rejected",
+        "The selected harness changed protected Git state.",
+        "A protected .git control path changed during the external harness turn.",
+        false,
+        harnessId: _harnessId
+      );
+    }
+  }
+
+  public async Task AcceptHostGitMutationAsync(
+    CancellationToken cancellationToken
+  )
+  {
+    var currentGit = await CaptureProtectedGitAsync(_root, cancellationToken);
+    _protectedGit.Clear();
+    foreach (var pair in currentGit)
+    {
+      _protectedGit[pair.Key] = pair.Value;
+    }
   }
 
   public static void Record(
@@ -162,13 +187,13 @@ public sealed class HarnessWorkspaceObserver
           document.RootElement.Clone(),
           Path.Combine(session.WorkspacePath, change.RelativePath),
           null,
-          $"Host-observed Codex {change.Operation}: {change.RelativePath}",
+          $"Host-observed harness {change.Operation}: {change.RelativePath}",
           null,
           false,
           false
         ),
         "completed",
-        "Observed and hashed by Agentic Router after the Codex turn."
+        "Observed and hashed by Agentic Router after the external harness turn."
       );
     }
   }
@@ -183,7 +208,7 @@ public sealed class HarnessWorkspaceObserver
     {
       throw new HarnessException(
         "codex-delete-rollback-unavailable",
-        "Codex deleted a file without approval and the Host could not restore it.",
+        "The selected harness deleted a file without approval and the Host could not restore it.",
         $"'{relativePath}' exceeded the bounded rollback snapshot.",
         false
       );
@@ -217,7 +242,7 @@ public sealed class HarnessWorkspaceObserver
         {
           throw new HarnessException(
             "codex-workspace-reparse-point",
-            "Codex (Experimental) cannot use a workspace containing directory reparse points.",
+            "The selected external harness cannot use a workspace containing directory reparse points.",
             info.FullName,
             false
           );
@@ -234,7 +259,7 @@ public sealed class HarnessWorkspaceObserver
         {
           throw new HarnessException(
             "codex-workspace-too-large",
-            "The trusted workspace is too large for bounded Codex effect observation.",
+            "The trusted workspace is too large for bounded external-harness effect observation.",
             $"More than {MaximumFiles} files were found.",
             true
           );
@@ -242,7 +267,7 @@ public sealed class HarnessWorkspaceObserver
         var info = new FileInfo(file);
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
         {
-          throw new HarnessException("codex-workspace-reparse-point", "Codex (Experimental) cannot use file reparse points.", info.FullName, false);
+          throw new HarnessException("codex-workspace-reparse-point", "The selected external harness cannot use file reparse points.", info.FullName, false);
         }
         var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
         byte[]? bytes = info.Length <= maximumSnapshotBytes
@@ -313,7 +338,7 @@ public sealed class HarnessWorkspaceObserver
     {
       throw new HarnessException(
         "codex-git-state-too-large",
-        "The protected Git state is too large for bounded Codex observation.",
+        "The protected Git state is too large for bounded external-harness observation.",
         $"More than {MaximumFiles} protected Git files were found.",
         true
       );
@@ -355,7 +380,7 @@ public sealed class HarnessWorkspaceObserver
     {
       throw new HarnessException(
         "codex-workspace-reparse-point",
-        "Codex (Experimental) cannot observe protected state through reparse points.",
+        "The selected external harness cannot observe protected state through reparse points.",
         path,
         false
       );
@@ -396,7 +421,7 @@ public sealed class HarnessWorkspaceObserver
     var prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
     if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
     {
-      throw new HarnessException("codex-workspace-boundary", "A Codex workspace path escaped the trusted root.", path, false);
+      throw new HarnessException("codex-workspace-boundary", "An external-harness workspace path escaped the trusted root.", path, false);
     }
   }
 

@@ -22,6 +22,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\AgenticRouter.Api\AgenticRouter.Api.csproj" />
     <ProjectReference Include="..\FakeCodexAppServer\FakeCodexAppServer.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\FakeClaudeCodeCli\FakeClaudeCodeCli.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\FakeOpenCodeServer\FakeOpenCodeServer.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\FakeQwenCodeServer\FakeQwenCodeServer.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>

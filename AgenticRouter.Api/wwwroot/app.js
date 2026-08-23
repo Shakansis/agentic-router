@@ -177,8 +177,9 @@ function bindElements() {
     "model-count",
     "device-count",
     "device-diagnostic",
+    "conversation-view",
     "open-benchmarks",
-    "benchmark-dialog",
+    "benchmark-view",
     "benchmark-form",
     "benchmark-model",
     "benchmark-suite",
@@ -204,7 +205,6 @@ function bindElements() {
     "benchmark-results-body",
     "benchmark-result-detail",
     "close-benchmarks",
-    "dismiss-benchmarks",
     "settings-dialog",
     "settings-form",
     "settings-errors",
@@ -510,17 +510,12 @@ function bindEvents() {
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
-  elements.dismissBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
   for (const input of benchmarkWeightInputs()) {
     input.addEventListener("input", scheduleBenchmarkScoringUpdate);
   }
   elements.resetBenchmarkWeights.addEventListener("click", resetBenchmarkScoringProfile);
   elements.benchmarkResultsBody.addEventListener("click", openBenchmarkHarnessResult);
-  elements.benchmarkDialog.addEventListener("cancel", event => {
-    event.preventDefault();
-    closeBenchmarks();
-  });
   elements.composer.addEventListener("click", handleComposerClick);
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
@@ -1120,7 +1115,9 @@ async function loadApplicationState() {
 }
 
 async function openBenchmarks() {
-  elements.benchmarkDialog.showModal();
+  elements.conversationView.hidden = true;
+  elements.benchmarkView.hidden = false;
+  elements.closeBenchmarks.focus();
   elements.benchmarkStatus.textContent = "Carregando catálogo e histórico…";
 
   try {
@@ -1160,7 +1157,9 @@ async function openBenchmarks() {
 }
 
 function closeBenchmarks() {
-  elements.benchmarkDialog.close();
+  elements.benchmarkView.hidden = true;
+  elements.conversationView.hidden = false;
+  elements.openBenchmarks.focus();
 }
 
 function renderBenchmarkControls() {
@@ -8011,7 +8010,9 @@ function harnessDisplayLabel(definition) {
   if (!definition.experimental) {
     return definition.displayName;
   }
-  return definition.id === "opencode" || definition.id === "qwen-code"
+  return definition.id === "opencode"
+    || definition.id === "qwen-code"
+    || definition.id === "claude-code"
     ? `${definition.displayName} [Experimental]`
     : `${definition.displayName} (Experimental)`;
 }

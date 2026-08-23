@@ -26,6 +26,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     FakeOllamaServer fakeOllama,
     FakeCloudProviderServer fakeCloud,
     string fakeCodexExecutablePath,
+    string fakeClaudeCodeExecutablePath,
     string fakeOpenCodeExecutablePath,
     string fakeQwenCodeExecutablePath,
     Process apiProcess,
@@ -42,6 +43,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     _fakeOllama = fakeOllama;
     _fakeCloud = fakeCloud;
     FakeCodexExecutablePath = fakeCodexExecutablePath;
+    FakeClaudeCodeExecutablePath = fakeClaudeCodeExecutablePath;
     FakeOpenCodeExecutablePath = fakeOpenCodeExecutablePath;
     FakeQwenCodeExecutablePath = fakeQwenCodeExecutablePath;
     _apiProcess = apiProcess;
@@ -74,6 +76,8 @@ internal sealed class TestEnvironment : IAsyncDisposable
   public FakeCloudProviderServer FakeCloud => _fakeCloud;
 
   public string FakeCodexExecutablePath { get; }
+
+  public string FakeClaudeCodeExecutablePath { get; }
 
   public string FakeOpenCodeExecutablePath { get; }
 
@@ -206,6 +210,33 @@ internal sealed class TestEnvironment : IAsyncDisposable
     processStartInfo.Environment[
       "AgenticRouter__Codex__ExecutablePath"
     ] = fakeCodexExecutablePath;
+    var fakeClaudeCodeExecutablePath = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_FAKE_CLAUDE_CODE_PATH"
+    );
+    if (string.IsNullOrWhiteSpace(fakeClaudeCodeExecutablePath))
+    {
+      fakeClaudeCodeExecutablePath = Path.Combine(
+        repositoryRoot,
+        "tests",
+        "FakeClaudeCodeCli",
+        "bin",
+        configuration,
+        "net10.0",
+        OperatingSystem.IsWindows()
+          ? "FakeClaudeCodeCli.exe"
+          : "FakeClaudeCodeCli"
+      );
+    }
+    else
+    {
+      fakeClaudeCodeExecutablePath = Path.GetFullPath(fakeClaudeCodeExecutablePath);
+    }
+    processStartInfo.Environment[
+      "AgenticRouter__ClaudeCode__ExecutablePath"
+    ] = fakeClaudeCodeExecutablePath;
+    processStartInfo.Environment["CLAUDE_CODE_USE_BEDROCK"] = "1";
+    processStartInfo.Environment["CLAUDE_CODE_USE_VERTEX"] = "1";
+    processStartInfo.Environment["CLAUDE_CODE_USE_FOUNDRY"] = "1";
     var fakeOpenCodeExecutablePath = Environment.GetEnvironmentVariable(
       "AGENTIC_ROUTER_E2E_FAKE_OPENCODE_PATH"
     );
@@ -307,6 +338,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
       fakeOllama,
       fakeCloud,
       fakeCodexExecutablePath,
+      fakeClaudeCodeExecutablePath,
       fakeOpenCodeExecutablePath,
       fakeQwenCodeExecutablePath,
       apiProcess,
@@ -538,6 +570,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
   {
     _apiProcess.StartInfo.Environment[
       "AgenticRouter__Codex__ExecutablePath"
+    ] = executablePath;
+    await RestartApplicationAsync();
+  }
+
+  public async Task SetClaudeCodeExecutableAndRestartAsync(
+    string executablePath
+  )
+  {
+    _apiProcess.StartInfo.Environment[
+      "AgenticRouter__ClaudeCode__ExecutablePath"
     ] = executablePath;
     await RestartApplicationAsync();
   }

@@ -10,10 +10,6 @@ namespace AgenticRouter.Api.Controllers;
 [Route("api/benchmarks")]
 public sealed class BenchmarksController : ControllerBase
 {
-  private static readonly IReadOnlySet<string> SupportedHarnesses = new HashSet<string>(
-    [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode, HarnessIds.QwenCode],
-    StringComparer.OrdinalIgnoreCase
-  );
   private readonly IBenchmarkEngine _engine;
   private readonly IBenchmarkTestRegistry _tests;
   private readonly IHarnessRegistry _harnesses;
@@ -123,9 +119,7 @@ public sealed class BenchmarksController : ControllerBase
       out var suite,
       out _
     );
-    var harnesses = (await _harnesses.DiscoverAsync(cancellationToken))
-      .Where(status => SupportedHarnesses.Contains(status.Definition.Id))
-      .ToArray();
+    var harnesses = await _harnesses.DiscoverAsync(cancellationToken);
     return Ok(new
     {
       suite,

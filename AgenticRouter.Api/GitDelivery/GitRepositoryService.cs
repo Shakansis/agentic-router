@@ -1200,17 +1200,40 @@ public sealed class GitRepositoryService : IGitRepositoryService
       repository.Root,
       paths
     );
-    await RunAsync(
-      repository.Root,
-      [
-        "restore",
-        "--staged",
-        "--",
-        .. normalized
-      ],
-      "git-unstage",
+    var status = await GetStatusAsync(
+      workspacePath,
+      false,
       cancellationToken
     );
+    if (string.IsNullOrWhiteSpace(status.Head))
+    {
+      await RunAsync(
+        repository.Root,
+        [
+          "rm",
+          "--cached",
+          "--force",
+          "--",
+          .. normalized
+        ],
+        "git-unstage",
+        cancellationToken
+      );
+    }
+    else
+    {
+      await RunAsync(
+        repository.Root,
+        [
+          "restore",
+          "--staged",
+          "--",
+          .. normalized
+        ],
+        "git-unstage",
+        cancellationToken
+      );
+    }
     return await GetStatusAsync(
       workspacePath,
       false,

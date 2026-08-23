@@ -8,6 +8,7 @@ public static class HarnessIds
   public const string Codex = "codex";
   public const string OpenCode = "opencode";
   public const string QwenCode = "qwen-code";
+  public const string ClaudeCode = "claude-code";
 }
 
 public enum HarnessAvailabilityState
@@ -109,7 +110,9 @@ public sealed record HarnessTurnRequest(
   HarnessConversationContext? Conversation = null,
   IReadOnlyDictionary<string, JsonElement>? NativeOptions = null,
   int? ContextWindowTokens = null,
-  HostCapabilityProfile? HostCapabilities = null
+  HostCapabilityProfile? HostCapabilities = null,
+  bool UseMinimalToolInventory = false,
+  bool ReleaseWorkspaceAfterTurn = false
 );
 
 public sealed record HarnessEvent

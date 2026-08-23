@@ -304,7 +304,8 @@ public sealed record RuntimeSettings
 
 public sealed record OllamaRuntimeSettings
 {
-  public int ProfileSchemaVersion { get; init; } = 1;
+  public int ProfileSchemaVersion { get; init; } =
+    OllamaRuntimeDefaults.CurrentProfileSchemaVersion;
 
   public Dictionary<string, OllamaRoleRuntimeSettings> RoleDefaults
   {
@@ -416,6 +417,8 @@ public static class OllamaRuntimeRoleIds
 
 public static class OllamaRuntimeDefaults
 {
+  public const int CurrentProfileSchemaVersion = 2;
+
   public static Dictionary<string, OllamaRoleRuntimeSettings> CreateRoleDefaults()
   {
     return new Dictionary<string, OllamaRoleRuntimeSettings>(
@@ -454,10 +457,10 @@ public static class OllamaRuntimeDefaults
         4_096
       ),
       [OllamaRuntimeRoleIds.Benchmark] = Profile(
-        4_096,
-        8_192,
-        16_384,
-        1_024
+        32_768,
+        32_768,
+        40_960,
+        4_096
       ),
       [OllamaRuntimeRoleIds.ModelTest] = Profile(
         4_096,
@@ -478,6 +481,44 @@ public static class OllamaRuntimeDefaults
         4_096
       )
     };
+  }
+
+  public static OllamaRuntimeSettings Upgrade(OllamaRuntimeSettings runtime)
+  {
+    if (runtime.ProfileSchemaVersion != 1)
+    {
+      return runtime;
+    }
+
+    var roles = runtime.RoleDefaults.ToDictionary(
+      pair => pair.Key,
+      pair => pair.Value,
+      StringComparer.Ordinal
+    );
+    if (
+      roles.TryGetValue(OllamaRuntimeRoleIds.Benchmark, out var benchmark)
+      && IsLegacyBenchmarkDefault(benchmark)
+    )
+    {
+      roles[OllamaRuntimeRoleIds.Benchmark] = CreateRoleDefaults()[
+        OllamaRuntimeRoleIds.Benchmark
+      ];
+    }
+
+    return runtime with
+    {
+      ProfileSchemaVersion = CurrentProfileSchemaVersion,
+      RoleDefaults = roles
+    };
+  }
+
+  private static bool IsLegacyBenchmarkDefault(OllamaRoleRuntimeSettings profile)
+  {
+    return profile.MinimumContextTokens == 4_096
+      && profile.TargetContextTokens == 8_192
+      && profile.MaximumContextTokens == 16_384
+      && profile.OutputTokenLimit == 1_024
+      && profile.KeepAlive == 300;
   }
 
   private static OllamaRoleRuntimeSettings Profile(

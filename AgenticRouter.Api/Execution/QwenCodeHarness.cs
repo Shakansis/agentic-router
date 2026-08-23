@@ -38,6 +38,18 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     "workspace_providers",
     "require_auth"
   ];
+  private static readonly string[] DefaultCoreTools =
+  [
+    "list_directory",
+    "read_file",
+    "glob",
+    "grep_search",
+    "edit",
+    "write_file",
+    "web_fetch",
+    "web_search",
+    "todo_write"
+  ];
   private static readonly HarnessDefinition AdapterDefinition = new(
     HarnessIds.QwenCode,
     "Qwen Code",
@@ -167,9 +179,14 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     ActiveTurn? active = null;
     try
     {
+      var hostProfile = request.HostCapabilities ?? throw Failure(
+        "qwen-code-host-profile-missing",
+        "Qwen Code requires the Agentic Router Host capability profile."
+      );
+      var hostBridgeTools = HostBridgeTools(hostProfile);
       var bridge = await _hostTools.ConfigureClientAsync(
         HarnessIds.QwenCode,
-        MaximumHostBridgeTools(HarnessIds.QwenCode),
+        hostBridgeTools,
         cancellationToken
       );
       await EnsureStartedAsync(
@@ -179,24 +196,33 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           ?? throw Failure(
             "qwen-code-context-missing",
             "Qwen Code requires a Host-resolved context window."
-          ),
+        ),
         request.WorkingDirectory,
         bridge,
+        hostProfile,
+        hostBridgeTools,
+        request.UseMinimalToolInventory,
         cancellationToken
       );
       var session = await GetOrCreateSessionAsync(request, cancellationToken);
+      var nativeCapabilities = request.UseMinimalToolInventory
+        ? ActiveNativeTools(hostProfile)
+        : HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode);
+      var hostBridgeNames = HarnessCapabilityProjection.HostBridgeTools(
+        HarnessIds.QwenCode,
+        hostProfile
+      );
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
         session.SynchronizedThroughVersion,
-        request.HostCapabilities is null
-          ? []
-          :
-          [
-            $"Agentic Router common capabilities implemented by Qwen native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode))}.",
-            $"Agentic Router common capabilities supplied through the Host bridge: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.QwenCode, request.HostCapabilities))}.",
-            "Qwen registers each Host bridge capability as a deferred MCP tool named mcp__agentic_router__<canonical-name>. If a required Host capability is not already declared, resolve its exact fully-qualified name once with tool_search before reporting it unavailable. For example, resolve delete_paths with select:mcp__agentic_router__delete_paths and run_process with select:mcp__agentic_router__run_process.",
-            $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}."
-          ]
+        [
+          $"Agentic Router common capabilities implemented by Qwen native tools for this turn: {string.Join(", ", nativeCapabilities)}.",
+          $"Agentic Router common capabilities supplied through the Host bridge for this turn: {string.Join(", ", hostBridgeNames)}.",
+          hostBridgeNames.Count == 0
+            ? "No Host bridge tool is available for this turn."
+            : $"Deferred Host tools use exact names mcp__agentic_router__<canonical-name>. Resolve only one permitted selector with tool_search when needed: {string.Join(", ", hostBridgeNames.Select(name => $"select:mcp__agentic_router__{name}"))}.",
+          $"Host approval policy: {hostProfile.ApprovalPolicy}."
+        ]
       );
       active = new ActiveTurn(
         request.SessionId,
@@ -246,10 +272,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         HarnessIds.QwenCode,
         session.SessionId,
         active.PromptId,
-        request.HostCapabilities ?? throw Failure(
-          "qwen-code-host-profile-missing",
-          "Qwen Code requires the Agentic Router Host capability profile."
-        )
+        hostProfile
       );
 
       await using var stream = await eventsResponse.Content.ReadAsStreamAsync(cancellationToken);
@@ -504,21 +527,31 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     }
     finally
     {
-      if (cancellationToken.IsCancellationRequested)
+      try
       {
-        await CancelTurnAsync(request.SessionId, CancellationToken.None);
-      }
-      _activeTurns.TryRemove(request.SessionId, out _);
-      if (active is not null)
-      {
-        foreach (var pending in _permissions.Where(
-          pair => string.Equals(pair.Value.SessionId, active.QwenSessionId, StringComparison.Ordinal)
-        ).ToArray())
+        if (cancellationToken.IsCancellationRequested)
         {
-          _permissions.TryRemove(pending.Key, out _);
+          await CancelTurnAsync(request.SessionId, CancellationToken.None);
+        }
+        _activeTurns.TryRemove(request.SessionId, out _);
+        if (active is not null)
+        {
+          foreach (var pending in _permissions.Where(
+            pair => string.Equals(pair.Value.SessionId, active.QwenSessionId, StringComparison.Ordinal)
+          ).ToArray())
+          {
+            _permissions.TryRemove(pending.Key, out _);
+          }
+        }
+        if (request.ReleaseWorkspaceAfterTurn)
+        {
+          await ReleaseWorkspaceAsync();
         }
       }
-      _turnGate.Release();
+      finally
+      {
+        _turnGate.Release();
+      }
     }
   }
 
@@ -578,6 +611,19 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       cancellationToken,
       HttpStatusCode.NoContent
     );
+  }
+
+  private async Task ReleaseWorkspaceAsync()
+  {
+    await _lifecycleGate.WaitAsync(CancellationToken.None);
+    try
+    {
+      await StopOwnedProcessAsync();
+    }
+    finally
+    {
+      _lifecycleGate.Release();
+    }
   }
 
   public async ValueTask DisposeAsync()
@@ -749,13 +795,19 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     int contextWindowTokens,
     string workingDirectory,
     HarnessMcpClientConfiguration bridge,
+    HostCapabilityProfile hostProfile,
+    IReadOnlyList<CanonicalToolDefinition> hostBridgeTools,
+    bool useMinimalToolInventory,
     CancellationToken cancellationToken
   )
   {
     await _lifecycleGate.WaitAsync(cancellationToken);
     try
     {
-      var key = $"{ollamaEndpoint.GetLeftPart(UriPartial.Authority)}|{model}|{contextWindowTokens}|{Path.GetFullPath(workingDirectory)}";
+      var toolInventoryKey = useMinimalToolInventory
+        ? hostProfile.Signature
+        : "full-native-inventory";
+      var key = $"{ollamaEndpoint.GetLeftPart(UriPartial.Authority)}|{model}|{contextWindowTokens}|{Path.GetFullPath(workingDirectory)}|{toolInventoryKey}";
       if (_process is { HasExited: false } && string.Equals(key, _configurationKey, StringComparison.Ordinal))
       {
         return;
@@ -767,6 +819,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         model,
         contextWindowTokens,
         bridge,
+        hostProfile,
+        hostBridgeTools,
+        useMinimalToolInventory,
         cancellationToken
       );
       var port = ReservePort();
@@ -1021,6 +1076,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     string model,
     int contextWindowTokens,
     HarnessMcpClientConfiguration bridge,
+    HostCapabilityProfile hostProfile,
+    IReadOnlyList<CanonicalToolDefinition> hostBridgeTools,
+    bool useMinimalToolInventory,
     CancellationToken cancellationToken
   )
   {
@@ -1035,7 +1093,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       },
       timeout = (long)_options.RequestTimeout.TotalMilliseconds,
       trust = true,
-      includeTools = MaximumHostBridgeTools(HarnessIds.QwenCode)
+      includeTools = (useMinimalToolInventory
+          ? hostBridgeTools
+          : MaximumHostBridgeTools(HarnessIds.QwenCode))
         .Select(tool => tool.Name)
         .ToArray()
     };
@@ -1076,18 +1136,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       ["tools"] = new
       {
         approvalMode = "default",
-        core = new[]
-        {
-          "list_directory",
-          "read_file",
-          "glob",
-          "grep_search",
-          "edit",
-          "write_file",
-          "web_fetch",
-          "web_search",
-          "todo_write"
-        }
+        core = useMinimalToolInventory
+          ? MinimalCoreTools(hostProfile)
+          : DefaultCoreTools
       },
       ["permissions"] = new
       {
@@ -1322,6 +1373,51 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     return LocalActionPlanner.GetToolDefinitions(
       HarnessCapabilityProjection.HostBridgeTools(harnessId, maximum)
     );
+  }
+
+  private static IReadOnlyList<CanonicalToolDefinition> HostBridgeTools(
+    HostCapabilityProfile profile
+  )
+  {
+    return LocalActionPlanner.GetToolDefinitions(
+      HarnessCapabilityProjection.HostBridgeTools(HarnessIds.QwenCode, profile)
+    );
+  }
+
+  private static IReadOnlyList<string> ActiveNativeTools(
+    HostCapabilityProfile profile
+  )
+  {
+    return HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode)
+      .Where(profile.Allows)
+      .ToArray();
+  }
+
+  private static string[] MinimalCoreTools(HostCapabilityProfile profile)
+  {
+    var tools = new List<string>();
+    if (profile.Allows("list_files"))
+    {
+      tools.Add("list_directory");
+    }
+    if (profile.Allows("read_file"))
+    {
+      tools.Add("read_file");
+    }
+    if (profile.Allows("search_text"))
+    {
+      tools.Add("glob");
+      tools.Add("grep_search");
+    }
+    if (profile.Allows("replace_text") || profile.Allows("apply_patch"))
+    {
+      tools.Add("edit");
+    }
+    if (profile.Allows("create_file") || profile.Allows("write_file"))
+    {
+      tools.Add("write_file");
+    }
+    return tools.ToArray();
   }
 
   private async Task StopOwnedProcessAsync()

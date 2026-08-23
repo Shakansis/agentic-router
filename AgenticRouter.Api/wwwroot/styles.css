@@ -499,6 +499,10 @@ body.resizing-sidebar {
   flex-direction: column;
 }
 
+.workspace[hidden] {
+  display: none;
+}
+
 .chat-header {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(0, auto) minmax(120px, 1fr);
@@ -4826,7 +4830,8 @@ textarea[readonly] {
 }
 
 .safe-mode-banner:not([hidden]) ~ .sidebar,
-.safe-mode-banner:not([hidden]) ~ .workspace {
+.safe-mode-banner:not([hidden]) ~ .workspace,
+.safe-mode-banner:not([hidden]) ~ .benchmark-workspace {
   margin-top: 2.4rem;
 }
 
@@ -4922,20 +4927,85 @@ textarea[readonly] {
   font-size: 0.82rem;
 }
 
-.settings-dialog.benchmark-dialog {
-  width: min(1120px, calc(100vw - 2rem));
-  height: min(860px, calc(100vh - 2rem));
+.benchmark-workspace {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  padding: 1rem;
+  overflow: hidden;
 }
 
-.benchmark-shell {
+.benchmark-workspace[hidden] {
+  display: none;
+}
+
+.benchmark-page {
+  display: grid;
+  width: min(100%, 1500px);
   height: 100%;
+  min-height: 0;
+  margin: 0 auto;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.benchmark-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 58px;
+}
+
+.benchmark-page-header h2,
+.benchmark-page-header p,
+.benchmark-panel-header h3 {
+  margin: 0;
+}
+
+.benchmark-page-header p {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.benchmark-back-button {
+  flex: 0 0 auto;
 }
 
 .benchmark-body {
   display: grid;
-  grid-template-columns: minmax(18rem, 0.8fr) minmax(28rem, 1.2fr);
+  grid-template-columns: minmax(18rem, 21rem) minmax(0, 1fr);
   gap: 1rem;
   min-height: 0;
+  overflow: hidden;
+}
+
+.benchmark-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.16);
+}
+
+.benchmark-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-raised) 82%, transparent);
+}
+
+.benchmark-panel-body {
+  min-height: 0;
+  padding: 1rem;
   overflow: auto;
 }
 
@@ -4943,13 +5013,14 @@ textarea[readonly] {
 .benchmark-results {
   display: grid;
   align-content: start;
+  grid-auto-rows: max-content;
   gap: 0.9rem;
   min-width: 0;
 }
 
 .benchmark-selection-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 0.75rem;
 }
 
@@ -4988,10 +5059,9 @@ textarea[readonly] {
 .benchmark-scoring {
   display: grid;
   gap: 0.7rem;
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 0.7rem;
-  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-raised) 52%, transparent);
 }
 
 .benchmark-scoring-heading,
@@ -5008,14 +5078,13 @@ textarea[readonly] {
 
 .benchmark-weight-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(5.5rem, 1fr));
   gap: 0.55rem;
 }
 
 .benchmark-weight-grid label {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 4.5rem;
-  align-items: center;
+  grid-template-columns: 1fr;
   gap: 0.45rem;
   color: var(--muted);
   font-size: 0.76rem;
@@ -5041,23 +5110,49 @@ textarea[readonly] {
 }
 
 .benchmark-permission {
-  padding: 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: 0.7rem;
-  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.benchmark-action-box {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: auto;
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-raised) 72%, transparent);
 }
 
 .benchmark-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 0.65rem;
 }
 
+.benchmark-actions button {
+  width: 100%;
+}
+
 #benchmark-status {
-  flex: 1 1 12rem;
   color: var(--muted);
   font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.benchmark-results-header {
+  align-items: flex-end;
+}
+
+.benchmark-history-control {
+  display: grid;
+  width: min(24rem, 48%);
+  gap: 0.3rem;
+}
+
+.benchmark-history-control span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
 }
 
 .benchmark-ranking-note {
@@ -5254,9 +5349,32 @@ textarea[readonly] {
   overflow-wrap: anywhere;
 }
 
+@media (max-width: 1200px) {
+  .benchmark-weight-grid {
+    grid-template-columns: repeat(3, minmax(5.5rem, 1fr));
+  }
+}
+
 @media (max-width: 920px) {
+  .benchmark-workspace {
+    padding: 0.75rem;
+  }
+
   .benchmark-body {
     grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .benchmark-panel {
+    min-height: 30rem;
+  }
+
+  .benchmark-results-panel {
+    min-height: 42rem;
+  }
+
+  .benchmark-weight-grid {
+    grid-template-columns: repeat(2, minmax(5.5rem, 1fr));
   }
 
   .runtime-profile-fields {
@@ -5265,6 +5383,17 @@ textarea[readonly] {
 }
 
 @media (max-width: 560px) {
+  .benchmark-page-header,
+  .benchmark-results-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .benchmark-back-button,
+  .benchmark-history-control {
+    width: 100%;
+  }
+
   .benchmark-selection-grid {
     grid-template-columns: 1fr;
   }

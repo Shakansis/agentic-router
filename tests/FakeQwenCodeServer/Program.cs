@@ -28,6 +28,11 @@ if (!int.TryParse(port, out var parsedPort) || parsedPort <= 0 || workspace.Leng
 
 var token = Environment.GetEnvironmentVariable("QWEN_SERVER_TOKEN") ?? string.Empty;
 var runtime = Environment.GetEnvironmentVariable("QWEN_HOME") ?? string.Empty;
+Directory.CreateDirectory(runtime);
+await File.WriteAllTextAsync(
+  Path.Combine(runtime, "fake-qwen-process-id.txt"),
+  Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+);
 var builder = WebApplication.CreateSlimBuilder(Array.Empty<string>());
 builder.WebHost.UseUrls($"http://127.0.0.1:{parsedPort}");
 var app = builder.Build();

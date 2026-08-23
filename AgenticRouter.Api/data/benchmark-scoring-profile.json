@@ -1,0 +1,13 @@
+{
+  "Id": "custom",
+  "Version": 1,
+  "DisplayName": "Custom",
+  "Weights": {
+    "ObjectiveSuccess": 35,
+    "Correctness": 20,
+    "Terminality": 20,
+    "WorkspaceAccuracy": 20,
+    "Efficiency": 5,
+    "Total": 100
+  }
+}

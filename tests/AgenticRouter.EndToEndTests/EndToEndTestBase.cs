@@ -889,6 +889,19 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     }
   }
 
+  private protected static bool ProcessIsAlive(int id)
+  {
+    try
+    {
+      using var process = Process.GetProcessById(id);
+      return !process.HasExited;
+    }
+    catch (ArgumentException)
+    {
+      return false;
+    }
+  }
+
   private protected static string ReadAllTextShared(string path)
   {
     using var stream = new FileStream(

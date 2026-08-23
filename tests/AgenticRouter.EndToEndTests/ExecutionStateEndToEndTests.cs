@@ -870,6 +870,42 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task GitDeliveryUnstagesExactFilesBeforeTheInitialCommit()
+  {
+    await RunGitAsync(
+      "init",
+      "-b",
+      "main"
+    );
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute create file");
+    await Page.Locator(".review-changes").ClickAsync();
+    var panel = Page.Locator(".git-delivery-panel");
+
+    await panel.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Stage selected", Exact = true }
+    ).ClickAsync();
+    await Expect(panel).ToHaveAttributeAsync("data-delivery-state", "validation-required");
+    Assert.AreEqual(
+      "hello.txt",
+      await RunGitTextAsync(_environment.WorkspaceDirectory, "diff", "--cached", "--name-only")
+    );
+
+    await panel.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Unstage selected", Exact = true }
+    ).ClickAsync();
+    await Expect(panel).ToHaveAttributeAsync("data-delivery-state", "changes-selected");
+    Assert.AreEqual(
+      "?? hello.txt",
+      await RunGitTextAsync(_environment.WorkspaceDirectory, "status", "--short", "--", "hello.txt")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task GitDeliveryCommitsTagsAndPushesExactFactsThroughDisposableRemote()
   {
     var remote = await InitializeDeliveryRepositoryAsync();

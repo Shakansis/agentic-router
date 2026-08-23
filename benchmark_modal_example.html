@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Benchmark CRUD - Interface Interativa</title>
+    <style>
+        :root {
+            --bg-base: #0d1117;
+            --bg-panel: #161b22;
+            --bg-card: #21262d;
+            --bg-hover: #30363d;
+            --text-main: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent: #238636;
+            --accent-hover: #2ea043;
+            --danger: #da3633;
+            --border: #30363d;
+            --running: #58a6ff;
+            --pending: #d29922;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .layout-grid {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 20px;
+            width: 100%;
+            max-width: 1400px;
+            height: 100%;
+        }
+
+        .panel {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            background-color: var(--bg-panel);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .panel-header h2 { margin: 0; font-size: 16px; }
+
+        .panel-body { padding: 16px; overflow-y: auto; flex: 1; }
+
+        /* Formulários e Inputs */
+        .form-group { margin-bottom: 16px; }
+        label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text-main); }
+        select, input[type="number"], input[type="text"] {
+            width: 100%;
+            background-color: var(--bg-base);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        
+        /* Lista de Harnesses Escalável */
+        .harness-list {
+            background-color: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 8px;
+        }
+        .harness-item {
+            display: flex;
+            align-items: center;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .harness-item:hover { background-color: var(--bg-hover); }
+        .harness-item input { margin-right: 10px; }
+
+        /* Ações e Botões */
+        .action-box {
+            margin-top: auto;
+            padding: 16px;
+            background-color: var(--bg-card);
+            border-top: 1px solid var(--border);
+        }
+        .auth-check {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 16px;
+        }
+        .auth-check input { margin-top: 2px; }
+        
+        .btn {
+            width: 100%;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: 0.2s;
+        }
+        .btn-primary { background-color: var(--accent); color: #fff; }
+        .btn-primary:hover:not(:disabled) { background-color: var(--accent-hover); }
+        .btn-primary:disabled { background-color: #1b4522; color: #555; cursor: not-allowed; }
+        .btn-danger { background-color: transparent; color: var(--danger); border-color: var(--danger); margin-top: 8px; display: none; }
+        .btn-danger:hover { background-color: rgba(218, 54, 51, 0.1); }
+
+        /* --- Lado Direito: Tabs e Conteúdo --- */
+        .tabs { display: flex; gap: 8px; }
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+        }
+        .tab-btn.active { color: var(--text-main); border-bottom-color: var(--running); font-weight: 600; }
+
+        /* Pesos (Filtro Superior) */
+        .weights-bar {
+            display: flex;
+            gap: 16px;
+            background-color: var(--bg-card);
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            align-items: center;
+        }
+        .weight-item { display: flex; flex-direction: column; flex: 1; }
+        .weight-item label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+        .weight-item input { padding: 4px 8px; text-align: center; }
+
+        /* Área de Acompanhamento (Running Cards) */
+        #view-running { display: none; }
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .harness-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .harness-card h3 { margin: 0 0 8px 0; font-size: 15px; display: flex; justify-content: space-between; }
+        .status-badge { font-size: 11px; padding: 2px 6px; border-radius: 12px; font-weight: normal; }
+        .status-running { background-color: rgba(88, 166, 255, 0.15); color: var(--running); }
+        .status-pending { background-color: rgba(210, 153, 34, 0.15); color: var(--pending); }
+        .status-completed { background-color: rgba(35, 134, 54, 0.15); color: var(--accent); }
+        
+        .card-stats { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+        .test-step { font-size: 12px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+        
+        /* Tabela de Resultados */
+        .results-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .results-table th { text-align: left; padding: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+        .results-table td { padding: 12px; border-bottom: 1px solid var(--border); }
+        .results-table tr:hover { background-color: var(--bg-card); }
+        
+        /* Mensagem Vazia */
+        .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+    </style>
+</head>
+<body>
+
+<div class="layout-grid">
+    <!-- COLUNA ESQUERDA: SETUP -->
+    <aside class="panel">
+        <div class="panel-header">
+            <h2>Configuração do Benchmark</h2>
+        </div>
+        <div class="panel-body">
+            <div class="form-group">
+                <label>Modelo Local</label>
+                <select><option>qwen3.8:27b-gpu0</option><option>llama3:8b-instruct</option></select>
+            </div>
+            
+            <div class="form-group">
+                <label>Suite de Testes</label>
+                <select><option>Basic CRUD v1</option><option>Advanced Auth v2</option></select>
+            </div>
+
+            <div class="form-group">
+                <label>Timeout por teste (seg)</label>
+                <input type="number" value="120">
+            </div>
+
+            <div class="form-group">
+                <label>Harnesses (Selecione os alvos)</label>
+                <div class="harness-list">
+                    <label class="harness-item"><input type="checkbox" checked> Native · built-in</label>
+                    <label class="harness-item"><input type="checkbox" checked> Codex [Exp]</label>
+                    <label class="harness-item"><input type="checkbox" checked> OpenCode [Exp]</label>
+                    <label class="harness-item"><input type="checkbox" checked> Qwen Code [Exp]</label>
+                    <label class="harness-item"><input type="checkbox"> GhostCoder v1.2</label>
+                    <label class="harness-item"><input type="checkbox"> Aider CLI</label>
+                    <!-- Mais itens podem ser adicionados sem quebrar o layout, gerando scroll -->
+                </div>
+            </div>
+        </div>
+
+        <div class="action-box">
+            <!-- CHECKBOX DEVE VIR ANTES DO BOTÃO -->
+            <label class="auth-check">
+                <input type="checkbox" id="authCheckbox" onchange="toggleRunButton()">
+                <span>Autorizo agora a execução do modelo selecionado para este benchmark usando recursos locais.</span>
+            </label>
+            <button class="btn btn-primary" id="btnRun" disabled onclick="startBenchmark()">Executar CRUD</button>
+            <button class="btn btn-danger" id="btnCancel" onclick="cancelBenchmark()">Cancelar execução</button>
+        </div>
+    </aside>
+
+    <!-- COLUNA DIREITA: ACOMPANHAMENTO E HISTÓRICO -->
+    <main class="panel">
+        <div class="panel-header">
+            <div class="tabs">
+                <button class="tab-btn active" id="tab-current" onclick="switchTab('current')">Execução Atual</button>
+                <button class="tab-btn" id="tab-history" onclick="switchTab('history')">Histórico Persistido</button>
+            </div>
+            
+            <!-- Controle de Histórico, visível apenas na aba histórico -->
+            <div id="history-selector" style="display: none;">
+                <select style="width: 250px; padding: 4px 8px;">
+                    <option>22/08/2026, 8:26:52 PM · Qwen</option>
+                    <option>21/08/2026, 9:15:00 AM · Llama</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Os Pesos do Ranking afetam ambas as visualizações matematicamente, logo ficam no topo do painel principal -->
+        <div class="weights-bar">
+            <span style="font-size: 13px; font-weight: bold; color: var(--text-main); margin-right: 8px;">Pesos<br>Custom V1</span>
+            <div class="weight-item"><label>Objective</label><input type="number" value="35"></div>
+            <div class="weight-item"><label>Correctness</label><input type="number" value="20"></div>
+            <div class="weight-item"><label>Terminality</label><input type="number" value="20"></div>
+            <div class="weight-item"><label>Workspace</label><input type="number" value="20"></div>
+            <div class="weight-item"><label>Efficiency</label><input type="number" value="5"></div>
+            <button style="padding: 6px; background: transparent; border: 1px solid var(--border); color: var(--text-main); border-radius: 4px; cursor: pointer;">Restaurar</button>
+        </div>
+
+        <div class="panel-body">
+            <!-- ESTADO 1: Ocioso -->
+            <div id="view-idle" class="empty-state">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--border); margin-bottom: 16px;"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                <h3>Nenhum benchmark rodando</h3>
+                <p>Configure os parâmetros à esquerda e inicie a execução para ver o acompanhamento em tempo real.</p>
+            </div>
+
+            <!-- ESTADO 2: Rodando (Cards) -->
+            <div id="view-running">
+                <p style="color: var(--running); font-size: 13px; margin-bottom: 16px;">▶ Benchmark em execução. Acompanhando eventos conectados...</p>
+                <div class="cards-grid">
+                    <!-- Card 1 -->
+                    <div class="harness-card">
+                        <h3>Native <span class="status-badge status-completed">Completed</span></h3>
+                        <div class="card-stats">4/4 tests · Score: 80.69 · 33.19s</div>
+                        <div class="test-step"><span>FS-CREATE-001</span> <span style="color:var(--accent)">passed</span></div>
+                        <div class="test-step"><span>FS-READ-001</span> <span style="color:var(--danger)">failed</span></div>
+                        <div class="test-step"><span>FS-UPDATE-001</span> <span style="color:var(--accent)">passed</span></div>
+                        <div class="test-step"><span>FS-DELETE-001</span> <span style="color:var(--accent)">passed</span></div>
+                    </div>
+                    <!-- Card 2 -->
+                    <div class="harness-card" style="border-color: var(--running);">
+                        <h3>Codex <span class="status-badge status-running">Running</span></h3>
+                        <div class="card-stats">2/4 tests · Score: ~99.75 · 69.38s</div>
+                        <div class="test-step"><span>FS-CREATE-001</span> <span style="color:var(--accent)">passed</span></div>
+                        <div class="test-step"><span>FS-READ-001</span> <span style="color:var(--accent)">passed</span></div>
+                        <div class="test-step"><span>FS-UPDATE-001</span> <span style="color:var(--running)">running...</span></div>
+                        <div class="test-step"><span>FS-DELETE-001</span> <span style="color:var(--text-muted)">pending</span></div>
+                    </div>
+                    <!-- Card 3 -->
+                    <div class="harness-card">
+                        <h3>OpenCode <span class="status-badge status-pending">Pending</span></h3>
+                        <div class="card-stats">0/4 tests · Awaiting queue</div>
+                        <div class="test-step"><span>FS-CREATE-001</span> <span style="color:var(--text-muted)">pending</span></div>
+                        <div class="test-step"><span>FS-READ-001</span> <span style="color:var(--text-muted)">pending</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ESTADO 3: Resultados Consolidados (Tabela) -->
+            <div id="view-results" style="display: none;">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>HARNESS</th>
+                            <th>STATE</th>
+                            <th>PASSED</th>
+                            <th>SCORE</th>
+                            <th>DURATION</th>
+                            <th>TERMINALITY</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong style="color: #58a6ff;">#1 Codex</strong></td>
+                            <td>completed</td>
+                            <td>4/4</td>
+                            <td>99.25</td>
+                            <td>101.02 s</td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td><strong style="color: #58a6ff;">#2 OpenCode</strong></td>
+                            <td>completed</td>
+                            <td>4/4</td>
+                            <td>98.75</td>
+                            <td>58.47 s</td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td><strong style="color: #58a6ff;">#3 Native</strong></td>
+                            <td>completed</td>
+                            <td>3/4</td>
+                            <td>80.69</td>
+                            <td>25.48 s</td>
+                            <td>75%</td>
+                        </tr>
+                        <tr style="background-color: rgba(218, 54, 51, 0.05);">
+                            <td><strong style="color: #58a6ff;">#4 Qwen Code</strong></td>
+                            <td>completed</td>
+                            <td>0/4</td>
+                            <td style="color: var(--danger)">38.63</td>
+                            <td>390.81 s</td>
+                            <td>0%</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+        </div>
+    </main>
+</div>
+
+<script>
+    // Lógica simples para demonstrar o fluxo e interatividade de estados
+    
+    function toggleRunButton() {
+        const checkbox = document.getElementById('authCheckbox');
+        const btnRun = document.getElementById('btnRun');
+        btnRun.disabled = !checkbox.checked;
+    }
+
+    function startBenchmark() {
+        // Altera botões
+        document.getElementById('btnRun').style.display = 'none';
+        document.getElementById('btnCancel').style.display = 'block';
+        document.getElementById('authCheckbox').disabled = true;
+
+        // Garante que estamos na aba de Execução Atual
+        switchTab('current');
+
+        // Mostra a view de acompanhamento (Cards)
+        document.getElementById('view-idle').style.display = 'none';
+        document.getElementById('view-results').style.display = 'none';
+        document.getElementById('view-running').style.display = 'block';
+    }
+
+    function cancelBenchmark() {
+        // Restaura botões
+        document.getElementById('btnRun').style.display = 'block';
+        document.getElementById('btnCancel').style.display = 'none';
+        document.getElementById('authCheckbox').disabled = false;
+        document.getElementById('authCheckbox').checked = false;
+        toggleRunButton();
+
+        // Volta pra view ociosa
+        document.getElementById('view-running').style.display = 'none';
+        document.getElementById('view-idle').style.display = 'block';
+    }
+
+    function switchTab(tab) {
+        document.getElementById('tab-current').classList.remove('active');
+        document.getElementById('tab-history').classList.remove('active');
+
+        if(tab === 'current') {
+            document.getElementById('tab-current').classList.add('active');
+            document.getElementById('history-selector').style.display = 'none';
+            
+            // Se estiver rodando mostra os cards, se não, mostra ocioso
+            if(document.getElementById('btnCancel').style.display === 'block') {
+                document.getElementById('view-running').style.display = 'block';
+                document.getElementById('view-results').style.display = 'none';
+                document.getElementById('view-idle').style.display = 'none';
+            } else {
+                document.getElementById('view-running').style.display = 'none';
+                document.getElementById('view-results').style.display = 'none';
+                document.getElementById('view-idle').style.display = 'block';
+            }
+        } else {
+            // Aba de histórico sempre mostra a tabela
+            document.getElementById('tab-history').classList.add('active');
+            document.getElementById('history-selector').style.display = 'block';
+            
+            document.getElementById('view-idle').style.display = 'none';
+            document.getElementById('view-running').style.display = 'none';
+            document.getElementById('view-results').style.display = 'block';
+        }
+    }
+</script>
+
+</body>
+</html>

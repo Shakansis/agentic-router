@@ -31,10 +31,6 @@ public interface IBenchmarkEngine
 
 public sealed class BenchmarkEngine : IBenchmarkEngine
 {
-  private static readonly IReadOnlySet<string> SupportedHarnesses = new HashSet<string>(
-    [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode, HarnessIds.QwenCode],
-    StringComparer.OrdinalIgnoreCase
-  );
   private static readonly HostCapabilityProfile BenchmarkHostCapabilities =
     HostCapabilityProfile.Create(
       new ExecutionTurnToolScope(
@@ -234,26 +230,23 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         tests.Count
       );
     }
-    var harnessTasks = harnesses.Select(harness => RunHarnessAsync(
-      runId,
-      harness,
-      tests,
-      model,
-      providerEndpoint,
-      settings,
-      request.TimeoutSeconds,
-      lease.Token,
-      progressSink,
-      liveResults
-    )).ToArray();
-    var completedHarnesses = await Task.WhenAll(harnessTasks);
-    var completedById = completedHarnesses.ToDictionary(
-      result => result.Harness,
-      StringComparer.OrdinalIgnoreCase
-    );
-    var harnessResults = harnesses
-      .Select(harness => completedById[harness.Adapter.Definition.Id])
-      .ToArray();
+    var completedHarnesses = new List<BenchmarkHarnessResult>(harnesses.Count);
+    foreach (var harness in harnesses)
+    {
+      completedHarnesses.Add(await RunHarnessAsync(
+        runId,
+        harness,
+        tests,
+        model,
+        providerEndpoint,
+        settings,
+        request.TimeoutSeconds,
+        lease.Token,
+        progressSink,
+        liveResults
+      ));
+    }
+    var harnessResults = completedHarnesses.ToArray();
 
     var endedAt = DateTimeOffset.UtcNow;
     var terminalState = lease.Token.IsCancellationRequested
@@ -638,18 +631,31 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     BenchmarkRunResult finalResult;
     if (!cleanedUp)
     {
-      var raw = result.RawResult with
-      {
-        Status = BenchmarkResultStatusIds.Error,
-        ExecutionStatus = BenchmarkExecutionStatusIds.Failed,
-        HostValidationResult = "error",
-        Error = new BenchmarkError(
-          "benchmark-cleanup-failed",
-          "The benchmark result was captured, but the disposable workspace could not be removed.",
-          "workspace-cleanup",
-          true
-        )
-      };
+      var validationFacts = result.RawResult.ValidationFacts is null
+        ? new Dictionary<string, string>(StringComparer.Ordinal)
+        : new Dictionary<string, string>(
+          result.RawResult.ValidationFacts,
+          StringComparer.Ordinal
+        );
+      validationFacts["workspaceCleanup"] = "failed";
+      var raw = result.RawResult.Error is null
+        ? result.RawResult with
+        {
+          Status = BenchmarkResultStatusIds.Error,
+          ExecutionStatus = BenchmarkExecutionStatusIds.Failed,
+          HostValidationResult = "error",
+          Error = new BenchmarkError(
+            "benchmark-cleanup-failed",
+            "The benchmark result was captured, but the disposable workspace could not be removed.",
+            "workspace-cleanup",
+            true
+          ),
+          ValidationFacts = validationFacts
+        }
+        : result.RawResult with
+        {
+          ValidationFacts = validationFacts
+        };
       finalResult = result with
       {
         Run = result.Run with
@@ -758,7 +764,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           "auto",
           providerEndpoint,
           ContextWindowTokens: contextTokens,
-          HostCapabilities: BenchmarkHostCapabilities
+          HostCapabilities: BenchmarkHostCapabilities,
+          UseMinimalToolInventory: true,
+          ReleaseWorkspaceAfterTurn: true
         ),
         cancellationToken
       ))
@@ -994,14 +1002,6 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       throw new BenchmarkRequestException(
         "benchmark-harness-required",
         "At least one harness must be selected.",
-        "harnesses"
-      );
-    }
-    if (!SupportedHarnesses.Contains(harnessId))
-    {
-      throw new BenchmarkRequestException(
-        "benchmark-harness-out-of-scope",
-        $"Harness '{harnessId}' is outside the Milestone 3 benchmark scope.",
         "harnesses"
       );
     }

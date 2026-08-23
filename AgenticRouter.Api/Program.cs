@@ -268,6 +268,26 @@ builder.Services.AddSingleton<QwenCodeHarnessAdapter>();
 builder.Services.AddSingleton<IAgentHarness>(
   services => services.GetRequiredService<QwenCodeHarnessAdapter>()
 );
+builder.Services.AddSingleton(
+  new ClaudeCodeHarnessOptions(
+    builder.Configuration["AgenticRouter:ClaudeCode:ExecutablePath"],
+    OperatingSystem.IsWindows()
+      ? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".local",
+        "bin",
+        "claude.exe"
+      )
+      : null,
+    Path.Combine(dataDirectory, "claude-code-runtime"),
+    TimeSpan.FromSeconds(15),
+    TimeSpan.FromMinutes(5)
+  )
+);
+builder.Services.AddSingleton<ClaudeCodeHarnessAdapter>();
+builder.Services.AddSingleton<IAgentHarness>(
+  services => services.GetRequiredService<ClaudeCodeHarnessAdapter>()
+);
 builder.Services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
 var configuredBenchmarkDirectory = builder.Configuration[
   "AgenticRouter:Benchmarking:RootDirectory"

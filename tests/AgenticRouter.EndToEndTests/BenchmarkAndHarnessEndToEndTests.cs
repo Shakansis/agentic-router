@@ -24,7 +24,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     response.EnsureSuccessStatusCode();
     var statuses = JsonNode.Parse(await response.Content.ReadAsStringAsync())!
       .AsArray();
-    Assert.HasCount(4, statuses);
+    Assert.HasCount(5, statuses);
 
     var native = statuses.Single(
       item => item!["definition"]!["id"]!.GetValue<string>() == "native"
@@ -84,6 +84,22 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     );
     Assert.IsFalse(
       qwenCode["definition"]!["capabilities"]!["supportsSubagents"]!.GetValue<bool>()
+    );
+
+    var claudeCode = statuses.Single(
+      item => item!["definition"]!["id"]!.GetValue<string>() == "claude-code"
+    )!;
+    Assert.IsTrue(claudeCode["definition"]!["experimental"]!.GetValue<bool>());
+    Assert.IsTrue(claudeCode["availability"]!["available"]!.GetValue<bool>());
+    Assert.AreEqual(
+      "2.1.234-fake (Claude Code)",
+      claudeCode["availability"]!["version"]!.GetValue<string>()
+    );
+    Assert.IsTrue(
+      claudeCode["definition"]!["capabilities"]!["supportsResume"]!.GetValue<bool>()
+    );
+    Assert.IsFalse(
+      claudeCode["definition"]!["capabilities"]!["supportsSandbox"]!.GetValue<bool>()
     );
   }
 
@@ -202,6 +218,43 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
     var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
     Assert.IsNotNull(payload["errors"]!["modelExecutionPermissionGranted"]);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task LegacyBenchmarkContextProfileMigratesTo32kOnce()
+  {
+    var legacy = JsonNode.Parse(_environment.BaselineSettings.ToJson())!.AsObject();
+    var runtime = legacy["ollamaRuntime"]!.AsObject();
+    runtime["profileSchemaVersion"] = 1;
+    var benchmark = runtime["roleDefaults"]!["benchmark"]!.AsObject();
+    benchmark["minimumContextTokens"] = 4_096;
+    benchmark["targetContextTokens"] = 8_192;
+    benchmark["maximumContextTokens"] = 16_384;
+    benchmark["outputTokenLimit"] = 1_024;
+    await File.WriteAllTextAsync(
+      _environment.SettingsPath,
+      legacy.ToJsonString(TestJson.Options) + "\n"
+    );
+
+    await _environment.RestartApplicationAsync();
+
+    var migrated = await GetSettingsJsonAsync();
+    var migratedRuntime = migrated["ollamaRuntime"]!.AsObject();
+    Assert.AreEqual(2, migratedRuntime["profileSchemaVersion"]!.GetValue<int>());
+    var migratedBenchmark = migratedRuntime["roleDefaults"]!["benchmark"]!.AsObject();
+    Assert.AreEqual(32_768, migratedBenchmark["minimumContextTokens"]!.GetValue<int>());
+    Assert.AreEqual(32_768, migratedBenchmark["targetContextTokens"]!.GetValue<int>());
+    Assert.AreEqual(40_960, migratedBenchmark["maximumContextTokens"]!.GetValue<int>());
+    Assert.AreEqual(4_096, migratedBenchmark["outputTokenLimit"]!.GetValue<int>());
+
+    var persisted = JsonNode.Parse(
+      await File.ReadAllTextAsync(_environment.SettingsPath)
+    )!.AsObject();
+    Assert.AreEqual(
+      2,
+      persisted["ollamaRuntime"]!["profileSchemaVersion"]!.GetValue<int>()
+    );
   }
 
   [TestMethod]
@@ -707,7 +760,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "api/benchmarks/suite-runs/live",
       new BenchmarkSuiteRunRequest(
         "alpha:latest",
-        [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode, HarnessIds.QwenCode],
+        [
+          HarnessIds.Native,
+          HarnessIds.Codex,
+          HarnessIds.OpenCode,
+          HarnessIds.QwenCode,
+          HarnessIds.ClaudeCode
+        ],
         TimeoutSeconds: 20,
         ModelExecutionPermissionGranted: true,
         ClientRunId: clientRunId
@@ -768,22 +827,40 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       && item.Ranking?.Any(entry => entry.Rank is null) == true
     ));
 
-    var firstHarnessCompletion = view.Events.First(
-      item => item.Type == BenchmarkProgressTypeIds.HarnessCompleted
-    ).Sequence;
-    foreach (var harnessId in new[]
+    var harnessOrder = new[]
     {
       HarnessIds.Native,
       HarnessIds.Codex,
       HarnessIds.OpenCode,
-      HarnessIds.QwenCode
-    })
+      HarnessIds.QwenCode,
+      HarnessIds.ClaudeCode
+    };
+    long? previousHarnessCompletion = null;
+    foreach (var harnessId in harnessOrder)
     {
-      Assert.IsTrue(view.Events.Any(item =>
+      var harnessStarted = view.Events.Single(item =>
         item.Type == BenchmarkProgressTypeIds.HarnessStarted
         && item.Harness == harnessId
-        && item.Sequence < firstHarnessCompletion
-      ), harnessId);
+      );
+      var harnessCompleted = view.Events.Single(item =>
+        item.Type == BenchmarkProgressTypeIds.HarnessCompleted
+        && item.Harness == harnessId
+      );
+      Assert.IsLessThan(
+        harnessCompleted.Sequence,
+        harnessStarted.Sequence,
+        harnessId
+      );
+      if (previousHarnessCompletion is not null)
+      {
+        Assert.IsLessThan(
+          harnessStarted.Sequence,
+          previousHarnessCompletion.Value,
+          $"Harness {harnessId} started before the preceding harness completed."
+        );
+      }
+
+      long? previousTestTerminal = null;
       foreach (var testId in new[]
       {
         BenchmarkIds.FileSystemCreate001,
@@ -809,7 +886,39 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
           states,
           $"{harnessId}/{testId}: {string.Join(", ", states)}"
         );
+        var running = view.Events.First(item =>
+          item.Type == BenchmarkProgressTypeIds.TestState
+          && item.Harness == harnessId
+          && item.TestId == testId
+          && item.State == BenchmarkLiveStateIds.Running
+        );
+        var terminal = view.Events.Single(item =>
+          item.Type == BenchmarkProgressTypeIds.TestState
+          && item.Harness == harnessId
+          && item.TestId == testId
+          && item.TestResult is not null
+        );
+        Assert.IsLessThan(
+          terminal.Sequence,
+          running.Sequence,
+          $"{harnessId}/{testId}"
+        );
+        Assert.IsLessThan(
+          harnessCompleted.Sequence,
+          terminal.Sequence,
+          $"{harnessId}/{testId} completed after its harness."
+        );
+        if (previousTestTerminal is not null)
+        {
+          Assert.IsLessThan(
+            running.Sequence,
+            previousTestTerminal.Value,
+            $"Test {harnessId}/{testId} started before the preceding test completed."
+          );
+        }
+        previousTestTerminal = terminal.Sequence;
       }
+      previousHarnessCompletion = harnessCompleted.Sequence;
     }
 
     var finalEvent = view.Events.Single(
@@ -832,12 +941,23 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsTrue(qwen.Tests.All(test => test.Run.Provider == "ollama-local"));
     Assert.IsTrue(qwen.Tests.All(test => test.RawResult.HostValidationResult == "pass"));
     Assert.IsTrue(qwen.Tests.All(test => test.WorkspaceCleanedUp));
+    Assert.IsTrue(qwen.Tests.All(test => !Directory.Exists(test.Run.WorkspacePath)));
     Assert.AreEqual(
       2,
       qwen.Tests.Single(test => test.Run.TestId == BenchmarkIds.FileSystemRead001)
         .RawResult.ToolCallCount
     );
     Assert.IsTrue(persisted.Ranking.Any(entry => entry.Harness == HarnessIds.QwenCode));
+    var claude = persisted.HarnessResults.Single(
+      result => result.Harness == HarnessIds.ClaudeCode
+    );
+    Assert.AreEqual("2.1.234-fake (Claude Code)", claude.HarnessVersion);
+    Assert.AreEqual(4, claude.Passed);
+    Assert.AreEqual(4, claude.Total);
+    Assert.AreEqual(100, claude.Terminality);
+    Assert.IsTrue(claude.Tests.All(test => test.RawResult.HostValidationResult == "pass"));
+    Assert.IsTrue(claude.Tests.All(test => test.WorkspaceCleanedUp));
+    Assert.IsTrue(persisted.Ranking.Any(entry => entry.Harness == HarnessIds.ClaudeCode));
     using var scoringResponse = await _environment.HttpClient.PostAsync(
       $"api/benchmarks/suite-runs/{clientRunId}/rescore",
       null
@@ -854,6 +974,41 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       JsonSerializer.Serialize(persisted.Ranking),
       JsonSerializer.Serialize(finalEvent.FinalResult.Ranking)
     );
+
+    var qwenRuntime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    using var qwenSettings = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(qwenRuntime, "settings.json"))
+    );
+    Assert.AreEqual(
+      32_768,
+      qwenSettings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]
+        .GetProperty("generationConfig").GetProperty("contextWindowSize").GetInt32()
+    );
+    CollectionAssert.AreEqual(
+      new[] { "read_file", "edit", "write_file" },
+      qwenSettings.RootElement.GetProperty("tools").GetProperty("core")
+        .EnumerateArray().Select(item => item.GetString()).ToArray()
+    );
+    CollectionAssert.AreEqual(
+      new[] { "create_files", "delete_paths" },
+      qwenSettings.RootElement.GetProperty("mcpServers").GetProperty("agentic_router")
+        .GetProperty("includeTools").EnumerateArray().Select(item => item.GetString()).ToArray()
+    );
+    var qwenProcessId = int.Parse(
+      await File.ReadAllTextAsync(Path.Combine(qwenRuntime, "fake-qwen-process-id.txt")),
+      System.Globalization.CultureInfo.InvariantCulture
+    );
+    Assert.IsFalse(
+      ProcessIsAlive(qwenProcessId),
+      "The workspace-scoped Qwen daemon must stop before benchmark cleanup."
+    );
+    using var qwenPrompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(qwenRuntime, "fake-qwen-prompt.json"))
+    );
+    var qwenPromptText = qwenPrompt.RootElement.GetProperty("text").GetString()!;
+    StringAssert.Contains(qwenPromptText, "create_files, delete_paths");
+    Assert.DoesNotContain("run_process", qwenPromptText);
+    Assert.DoesNotContain("git_status", qwenPromptText);
 
     var replayAfter = view.Events[view.Events.Count / 2].Sequence;
     using var replayResponse = await _environment.HttpClient.GetAsync(
@@ -969,13 +1124,18 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   {
     await Page.GotoAsync("/");
     await Page.Locator("#open-benchmarks").ClickAsync();
-    await Expect(Page.Locator("#benchmark-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#conversation-view")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#close-benchmarks"))
+      .ToContainTextAsync("Voltar à conversa");
     await Expect(Page.Locator("#benchmark-suite")).ToHaveValueAsync("basic-crud");
-    await Expect(Page.Locator("#benchmark-harness-list input")).ToHaveCountAsync(4);
+    await Expect(Page.Locator("#benchmark-harness-list input")).ToHaveCountAsync(5);
     await Expect(Page.Locator("#benchmark-harness-list input[value=\"qwen-code\"]"))
       .ToBeCheckedAsync();
     await Expect(Page.Locator("#benchmark-harness-list"))
       .ToContainTextAsync("Qwen Code [Experimental] · 0.21.13-fake");
+    await Expect(Page.Locator("#benchmark-harness-list"))
+      .ToContainTextAsync("Claude Code [Experimental] · 2.1.234-fake (Claude Code)");
 
     await Page.Locator("#benchmark-model").SelectOptionAsync("alpha:latest");
     await Page.Locator("#benchmark-harness-list input[value=\"native\"]").UncheckAsync();
@@ -985,7 +1145,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
     await Expect(Page.Locator("#benchmark-status"))
       .ToContainTextAsync("Benchmark concluído", new() { Timeout = 30_000 });
-    await Expect(Page.Locator("#benchmark-results-body tr")).ToHaveCountAsync(3);
+    await Expect(Page.Locator("#benchmark-results-body tr")).ToHaveCountAsync(4);
     await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("passed");
     await Expect(Page.Locator("#benchmark-results-body")).ToContainTextAsync("4/4");
     await Expect(Page.Locator("#benchmark-history")).Not.ToHaveValueAsync("");
@@ -1017,6 +1177,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-result-detail")).ToContainTextAsync("Qwen Code");
     await Expect(Page.Locator("#benchmark-result-detail .benchmark-test-detail"))
       .ToHaveCountAsync(4);
+    await Page.Locator("#benchmark-results-body [data-harness=\"claude-code\"]").ClickAsync();
+    await Expect(Page.Locator("#benchmark-result-detail")).ToContainTextAsync("Claude Code");
     await Page.Locator("#reset-benchmark-weights").ClickAsync();
     await Expect(Page.Locator("#benchmark-score-profile")).ToHaveTextAsync("Default v1");
     await Expect(Page.Locator("#benchmark-status")).ToContainTextAsync("Perfil Default restaurado");
@@ -1033,6 +1195,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#benchmark-harness-list input[value=\"codex\"]").UncheckAsync();
     await Page.Locator("#benchmark-harness-list input[value=\"opencode\"]").UncheckAsync();
     await Page.Locator("#benchmark-harness-list input[value=\"qwen-code\"]").UncheckAsync();
+    await Page.Locator("#benchmark-harness-list input[value=\"claude-code\"]").UncheckAsync();
     await Page.Locator("#benchmark-permission").CheckAsync();
     await Page.Locator("#benchmark-timeout").FillAsync("60");
     await Page.Locator("#run-benchmark").ClickAsync();
@@ -1046,9 +1209,11 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToContainTextAsync("file-create", new() { Timeout = 15_000 });
 
     await Page.Locator("#close-benchmarks").ClickAsync();
-    await Expect(Page.Locator("#benchmark-dialog")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#benchmark-view")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#conversation-view")).ToBeVisibleAsync();
     await Page.EvaluateAsync("document.getElementById('open-benchmarks').click()");
-    await Expect(Page.Locator("#benchmark-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#conversation-view")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
     await Expect(Page.Locator("#cancel-benchmark")).ToBeEnabledAsync();
     await Page.Locator("#cancel-benchmark").ClickAsync();
@@ -1201,6 +1366,32 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       ).RawResult.Status
     );
 
+    using var claudeTimeoutResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "unused:latest",
+        [HarnessIds.ClaudeCode],
+        TimeoutSeconds: 5,
+        ModelExecutionPermissionGranted: true
+      )
+    );
+    claudeTimeoutResponse.EnsureSuccessStatusCode();
+    var claudeTimeout = await claudeTimeoutResponse.Content
+      .ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(claudeTimeout);
+    Assert.AreEqual(
+      BenchmarkExecutionStatusIds.TimedOut,
+      claudeTimeout.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemRead001
+      ).RawResult.ExecutionStatus
+    );
+    Assert.AreEqual(
+      BenchmarkResultStatusIds.Pass,
+      claudeTimeout.HarnessResults.Single().Tests.Single(
+        item => item.Run.TestId == BenchmarkIds.FileSystemDelete001
+      ).RawResult.Status
+    );
+
     var cancelledRunId = Guid.NewGuid().ToString("N");
     var runTask = _environment.HttpClient.PostAsJsonAsync(
       "api/benchmarks/suite-runs",
@@ -1254,6 +1445,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       new[]
       {
         "Native",
+        "Claude Code [Experimental]",
         "Codex (Experimental)",
         "OpenCode [Experimental]",
         "Qwen Code [Experimental]"
@@ -1271,6 +1463,324 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await harness.SelectOptionAsync("opencode");
     await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
       "OpenCode [Experimental]"
+    );
+    await harness.SelectOptionAsync("claude-code");
+    await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
+      "Claude Code [Experimental]"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeUsesStructuredSdkStreamExactOllamaWorkspaceAndContinuity()
+  {
+    var browserSessionId = $"browser-claude-{Guid.NewGuid():N}";
+    var first = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude deterministic turn",
+      browserSessionId,
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, first.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(first.Any(item =>
+      item["type"]!.GetValue<string>() == "reasoning.delta"
+      && item["reasoningDelta"]!.GetValue<string>().Contains(
+        "Inspecting Claude Code workspace",
+        StringComparison.Ordinal
+      )
+    ));
+    Assert.IsTrue(first.Any(item =>
+      item["type"]!.GetValue<string>() == "response.delta"
+      && item["delta"]!.GetValue<string>().Contains(
+        "Claude Code streamed with qwen3.8:27b-gpu0",
+        StringComparison.Ordinal
+      )
+    ));
+    Assert.IsTrue(first.Any(item =>
+      item["type"]!.GetValue<string>() == "harness.claude-code-native-event-preserved"
+    ));
+
+    var runtime = Path.Combine(_environment.DataDirectory, "claude-code-runtime");
+    using (var invocation = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-claude-invocation.json"))
+    ))
+    {
+      Assert.AreEqual("qwen3.8:27b-gpu0", invocation.RootElement.GetProperty("model").GetString());
+      Assert.AreEqual(
+        Path.GetFullPath(_environment.WorkspaceDirectory),
+        Path.GetFullPath(invocation.RootElement.GetProperty("cwd").GetString()!),
+        true
+      );
+      Assert.AreEqual("ollama", invocation.RootElement.GetProperty("anthropicAuthToken").GetString());
+      Assert.AreEqual(JsonValueKind.Null, invocation.RootElement.GetProperty("claudeCodeUseBedrock").ValueKind);
+      Assert.AreEqual(JsonValueKind.Null, invocation.RootElement.GetProperty("claudeCodeUseVertex").ValueKind);
+      Assert.AreEqual(JsonValueKind.Null, invocation.RootElement.GetProperty("claudeCodeUseFoundry").ValueKind);
+      Assert.AreEqual("1", invocation.RootElement.GetProperty("nonessentialTrafficDisabled").GetString());
+      Assert.IsTrue(invocation.RootElement.GetProperty("hostTokenConfigured").GetBoolean());
+      var arguments = invocation.RootElement.GetProperty("args")
+        .EnumerateArray().Select(item => item.GetString()).ToArray();
+      CollectionAssert.Contains(arguments, "stream-json");
+      CollectionAssert.Contains(arguments, "--strict-mcp-config");
+      CollectionAssert.Contains(arguments, "Read,Glob,Grep,Edit,Write");
+      Assert.DoesNotContain("Bash", arguments);
+      Assert.DoesNotContain("WebSearch", arguments);
+      var allowedToolsIndex = Array.IndexOf(arguments, "--allowedTools");
+      Assert.IsGreaterThanOrEqualTo(0, allowedToolsIndex);
+      Assert.IsFalse(arguments[allowedToolsIndex + 1]!.Contains("Read", StringComparison.Ordinal));
+      Assert.IsTrue(arguments[allowedToolsIndex + 1]!.Contains(
+        "mcp__agentic_router__",
+        StringComparison.Ordinal
+      ));
+    }
+
+    var second = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude continuity follow-up",
+      browserSessionId,
+      "qwen3.8:27b-gpu0",
+      [
+        new { role = "user", content = "claude deterministic turn" },
+        new { role = "assistant", content = "Claude Code streamed with qwen3.8:27b-gpu0" }
+      ]
+    );
+    Assert.HasCount(1, second.Where(IsTerminalStreamEvent));
+    using var resumed = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-claude-invocation.json"))
+    );
+    Assert.IsTrue(resumed.RootElement.GetProperty("resumed").GetBoolean());
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeAcceptsReducedNativeInventoryAndKeepsHostBridge()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "reduced claude inventory",
+      $"browser-claude-reduced-tools-{Guid.NewGuid():N}"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(events.Any(item =>
+      item["type"]!.GetValue<string>() == "harness.claude-code-warning"
+      && item["message"]!.GetValue<string>().Contains("Glob, Grep, Write", StringComparison.Ordinal)
+    ));
+    Assert.IsTrue(events.Any(item =>
+      item["type"]!.GetValue<string>() == "response.completed"
+    ));
+    Assert.IsTrue(events.Any(item =>
+      item["type"]!.GetValue<string>() == "execution-capability-profile-projected"
+      && item["message"]!.GetValue<string>().Contains("list_files", StringComparison.Ordinal)
+      && item["message"]!.GetValue<string>().Contains("search_text", StringComparison.Ordinal)
+      && item["message"]!.GetValue<string>().Contains("write_file", StringComparison.Ordinal)
+    ));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeRecoversFromTypedHostGitFailureAndTerminatesOnce()
+  {
+    await RunGitAsync(
+      "init",
+      "-b",
+      "main"
+    );
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude git failure recovery",
+      $"browser-claude-git-recovery-{Guid.NewGuid():N}"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var eventDump = string.Join(
+      Environment.NewLine,
+      events.Select(item => item.ToJsonString())
+    );
+    Assert.IsTrue(events.Any(item =>
+      item["type"]!.GetValue<string>() == "action.execution-error"
+      && item["localAction"]?["resultOutput"]?.GetValue<string>().Contains(
+        "git-commit-failed",
+        StringComparison.Ordinal
+      ) == true
+    ), eventDump);
+    Assert.IsTrue(events.Any(item =>
+      item["type"]!.GetValue<string>() == "response.completed"
+    ));
+    Assert.IsFalse(events.Any(item => item["type"]!.GetValue<string>() == "error"));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeEnvelopeStormIsBoundedAndPreservesCompleteReasoning()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude envelope storm",
+      $"browser-claude-storm-{Guid.NewGuid():N}"
+    );
+
+    var reasoningDeltas = events.Where(item =>
+      item["type"]!.GetValue<string>() == "reasoning.delta"
+    ).ToArray();
+    var reasoning = string.Concat(reasoningDeltas.Select(item =>
+      item["reasoningDelta"]?.GetValue<string>() ?? string.Empty
+    ));
+    var nativeEvents = events.Where(item =>
+      item["type"]!.GetValue<string>() == "harness.claude-code-native-event-preserved"
+    ).ToArray();
+
+    Assert.IsTrue(reasoning.Contains(new string('x', 1_000), StringComparison.Ordinal));
+    Assert.IsLessThanOrEqualTo(10, reasoningDeltas.Length);
+    Assert.HasCount(2, nativeEvents, "Only init and the intentionally unknown future event should be preserved.");
+    Assert.IsLessThan(60, events.Length, "Known Claude transport frames must not flood the Host stream.");
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeMapsNativeApprovalAndFailsMalformedStreamExactlyOnce()
+  {
+    var approved = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude approval",
+      $"browser-claude-approval-{Guid.NewGuid():N}"
+    );
+    Assert.HasCount(1, approved.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, "claude-approved.txt")));
+    using var approval = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "claude-code-runtime",
+      "fake-claude-approval.json"
+    )));
+    Assert.AreEqual("allow", approval.RootElement.GetProperty("behavior").GetString());
+
+    var malformed = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "malformed claude event",
+      $"browser-claude-malformed-{Guid.NewGuid():N}"
+    );
+    Assert.HasCount(1, malformed.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(malformed.Any(item =>
+      item["type"]!.GetValue<string>() == "error"
+      && item["error"]!["code"]!.GetValue<string>() == "claude-code-protocol-json"
+      && item["error"]!["stage"]!.GetValue<string>() == "claude-code-harness"
+      && item["error"]!["details"]!["harnessId"]!.GetValue<string>() == HarnessIds.ClaudeCode
+    ));
+
+    var duplicate = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "duplicate claude terminal",
+      $"browser-claude-duplicate-{Guid.NewGuid():N}"
+    );
+    Assert.HasCount(1, duplicate.Where(IsTerminalStreamEvent));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeCancellationStopsTheOwnedProcessAndTerminatesOnce()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.ClaudeCode);
+
+    await StartMessageAsync("long claude task");
+    var invocationPath = Path.Combine(
+      _environment.DataDirectory,
+      "claude-code-runtime",
+      "fake-claude-invocation.json"
+    );
+    await WaitUntilAsync(() => File.Exists(invocationPath), TimeSpan.FromSeconds(15));
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    using var invocation = JsonDocument.Parse(await File.ReadAllTextAsync(invocationPath));
+    var processId = invocation.RootElement.GetProperty("processId").GetInt32();
+    await WaitUntilAsync(() => !ProcessIsAlive(processId), TimeSpan.FromSeconds(5));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeAskUsesTheExistingHostApprovalBeforeNativeWrite()
+  {
+    var target = Path.Combine(_environment.WorkspaceDirectory, "claude-approved.txt");
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("ask");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.ClaudeCode);
+
+    await StartMessageAsync("claude approval");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("claude-approved.txt");
+    Assert.IsFalse(File.Exists(target));
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Aprovar" }).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    Assert.IsTrue(File.Exists(target));
+    await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(1);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeRejectsExternalNativeReadAndRecoversInsideWorkspace()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude workspace recovery",
+      $"browser-claude-workspace-recovery-{Guid.NewGuid():N}"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(events.Any(item =>
+      item["type"]!.GetValue<string>() == "harness.claude-code-approval-corrected"
+    ));
+    using var recovery = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "claude-code-runtime",
+      "fake-claude-workspace-recovery.json"
+    )));
+    Assert.AreEqual("deny", recovery.RootElement.GetProperty("outsideBehavior").GetString());
+    Assert.AreEqual("allow", recovery.RootElement.GetProperty("insideBehavior").GetString());
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodePreservesAbsoluteNestedWindowsWorkspacePathWithSpaces()
+  {
+    var workspace = _environment.CreateWorkspaceDirectory(
+      Path.Combine("Claude workspace with spaces", "nested project")
+    );
+    using var created = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new { name = "Claude path test", path = workspace }
+    );
+    created.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+    var workspaceId = createdDocument.RootElement.GetProperty("id").GetString()!;
+    using var activated = await _environment.HttpClient.PostAsync(
+      $"api/workspaces/{workspaceId}/activate",
+      null
+    );
+    activated.EnsureSuccessStatusCode();
+
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude path turn",
+      $"browser-claude-path-{Guid.NewGuid():N}"
+    );
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(Path.IsPathFullyQualified(workspace));
+    using var invocation = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "claude-code-runtime",
+      "fake-claude-invocation.json"
+    )));
+    Assert.AreEqual(
+      Path.GetFullPath(workspace),
+      Path.GetFullPath(invocation.RootElement.GetProperty("cwd").GetString()!),
+      true
     );
   }
 
@@ -1380,19 +1890,6 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       () => !ProcessIsAlive(processId),
       TimeSpan.FromSeconds(5)
     );
-
-    static bool ProcessIsAlive(int id)
-    {
-      try
-      {
-        using var process = Process.GetProcessById(id);
-        return !process.HasExited;
-      }
-      catch (ArgumentException)
-      {
-        return false;
-      }
-    }
   }
 
   [TestMethod]
