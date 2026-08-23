@@ -1,0 +1,43 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/chat/stream",
+  "body": {
+    "message": "Pre-M10 canonical delete. Delete exactly fixture/delete.txt using the structured deletion capability. Do not modify, create, or delete anything else. Return exactly delete=completed.",
+    "model": "qwen3.8:27b-gpu0",
+    "history": [
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical read. Read only fixture/read.txt. Do not change any file. Return exactly validation-token=ORBIT-739."
+      },
+      {
+        "role": "assistant",
+        "content": "validation-token=ORBIT-739"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical continuity create. Using the token observed in the previous turn without rereading fixture/read.txt, create continuity/result.txt with exactly these two UTF-8 lines and no trailing newline: observed=ORBIT-739 then stage=created. Do not change any other file. Return exactly create=completed."
+      },
+      {
+        "role": "assistant",
+        "content": "create=completed"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical edit. In continuity/result.txt replace only stage=created with stage=edited. Preserve the observed line and every other byte. Do not change any other file. Return exactly edit=completed."
+      },
+      {
+        "role": "assistant",
+        "content": "edit=completed"
+      }
+    ],
+    "interactionMode": "execute",
+    "harness": "qwen-code",
+    "approvalPolicy": "auto",
+    "browserSessionId": "pre-m10-qwen-code-260050341d3845bfbcb06288b5862c62",
+    "conversationSessionId": "",
+    "webSearchEnabled": false,
+    "images": [],
+    "compactContext": false
+  },
+  "startedAt": "2026-08-23T05:53:04.1992464+00:00"
+}

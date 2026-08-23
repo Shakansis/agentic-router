@@ -113,16 +113,14 @@ public sealed class BenchmarksController : ControllerBase
   [HttpGet("catalog")]
   public async Task<IActionResult> Catalog(CancellationToken cancellationToken)
   {
-    _tests.TryGetSuite(
-      BenchmarkSuiteIds.BasicCrud,
-      BenchmarkSuiteIds.BasicCrudVersion,
-      out var suite,
-      out _
-    );
+    var suites = _tests.GetSuites();
+    var suite = suites.Single(item => item.Id == BenchmarkSuiteIds.BasicCrud
+      && item.Version == BenchmarkSuiteIds.BasicCrudVersion);
     var harnesses = await _harnesses.DiscoverAsync(cancellationToken);
     return Ok(new
     {
       suite,
+      suites,
       harnesses,
       defaultTimeoutSeconds = 120,
       minimumTimeoutSeconds = 5,

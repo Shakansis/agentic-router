@@ -208,6 +208,10 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
       "delete permission opencode",
       StringComparison.Ordinal
     );
+    var readRequested = text.Contains(
+      "read permission opencode",
+      StringComparison.Ordinal
+    );
     var directory = context.Request.Query["directory"].ToString();
     permissions[permissionId] = new PendingPermission(
       sessionId,
@@ -217,7 +221,7 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
     );
     var resources = deleteRequested
       ? new[] { "codex-created.txt" }
-      : text.Contains("outside permission opencode", StringComparison.Ordinal)
+      : text.Contains("outside", StringComparison.Ordinal)
         ? new[] { "../outside.txt" }
         : new[] { "README.md" };
     if (text.Contains("legacy permission opencode", StringComparison.Ordinal))
@@ -238,7 +242,7 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
       {
         id = permissionId,
         sessionID = sessionId,
-        action = deleteRequested ? "delete" : "edit",
+        action = deleteRequested ? "delete" : readRequested ? "read" : "edit",
         resources
       });
     }

@@ -1,0 +1,9 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5394/api/workspaces",
+  "body": {
+    "name": "Pre-M10 opencode",
+    "path": "C:\\Users\\Rodrigo\\source\\repos\\agentic-router\\.artifacts\\pre-m10-runtime\\workspaces-run-03\\opencode\\workspace"
+  },
+  "startedAt": "2026-08-23T05:39:28.7028794+00:00"
+}

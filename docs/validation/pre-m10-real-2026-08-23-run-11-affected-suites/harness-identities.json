@@ -1,0 +1,98 @@
+[
+  {
+    "definition": {
+      "id": "codex",
+      "displayName": "Codex",
+      "experimental": true,
+      "description": "OpenAI Codex App Server with Agentic Router Host-owned effects.",
+      "capabilities": {
+        "supportsStreaming": true,
+        "supportsThinking": true,
+        "supportsResume": true,
+        "supportsCancel": true,
+        "supportsApprovals": true,
+        "supportsToolEvents": true,
+        "supportsStructuredEdits": true,
+        "supportsStaleProtection": false,
+        "supportsSubagents": false,
+        "supportsSandbox": true,
+        "supportsSessionDiff": true,
+        "supportsNativePermissions": true
+      },
+      "supportedProviders": [
+        "ollama-local"
+      ]
+    },
+    "availability": {
+      "state": 0,
+      "version": "codex-cli 0.149.0-alpha.4.1",
+      "message": null,
+      "checkedAt": "2026-08-23T03:57:54.6907591-03:00",
+      "available": true
+    }
+  },
+  {
+    "definition": {
+      "id": "opencode",
+      "displayName": "OpenCode",
+      "experimental": true,
+      "description": "OpenCode headless server with isolated local configuration and Host-observed effects.",
+      "capabilities": {
+        "supportsStreaming": true,
+        "supportsThinking": true,
+        "supportsResume": true,
+        "supportsCancel": true,
+        "supportsApprovals": true,
+        "supportsToolEvents": true,
+        "supportsStructuredEdits": true,
+        "supportsStaleProtection": false,
+        "supportsSubagents": false,
+        "supportsSandbox": false,
+        "supportsSessionDiff": true,
+        "supportsNativePermissions": true
+      },
+      "supportedProviders": [
+        "ollama-local"
+      ]
+    },
+    "availability": {
+      "state": 0,
+      "version": "1.18.18",
+      "message": null,
+      "checkedAt": "2026-08-23T03:57:55.1833387-03:00",
+      "available": true
+    }
+  },
+  {
+    "definition": {
+      "id": "qwen-code",
+      "displayName": "Qwen Code",
+      "experimental": true,
+      "description": "Qwen Code HTTP daemon with typed SSE, isolated local configuration, and Host-observed effects.",
+      "capabilities": {
+        "supportsStreaming": true,
+        "supportsThinking": true,
+        "supportsResume": true,
+        "supportsCancel": true,
+        "supportsApprovals": true,
+        "supportsToolEvents": true,
+        "supportsStructuredEdits": true,
+        "supportsStaleProtection": true,
+        "supportsSubagents": false,
+        "supportsSandbox": false,
+        "supportsSessionDiff": false,
+        "supportsNativePermissions": true
+      },
+      "supportedProviders": [
+        "ollama-local"
+      ]
+    },
+    "availability": {
+      "state": 0,
+      "version": "0.21.13",
+      "message": null,
+      "checkedAt": "2026-08-23T03:57:55.2518997-03:00",
+      "available": true
+    }
+  }
+]

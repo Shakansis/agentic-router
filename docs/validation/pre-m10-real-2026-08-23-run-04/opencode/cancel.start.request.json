@@ -1,0 +1,16 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/benchmarks/suite-runs/live",
+  "body": {
+    "model": "qwen3.8:27b-gpu0",
+    "harnesses": [
+      "opencode"
+    ],
+    "suiteId": "basic-crud",
+    "suiteVersion": 1,
+    "timeoutSeconds": 600,
+    "modelExecutionPermissionGranted": true,
+    "clientRunId": "ae7574c977234cee83806242066df3e8"
+  },
+  "startedAt": "2026-08-23T05:46:55.4961191+00:00"
+}

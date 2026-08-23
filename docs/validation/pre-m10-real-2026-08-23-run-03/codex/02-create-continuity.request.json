@@ -1,0 +1,27 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5394/api/chat/stream",
+  "body": {
+    "message": "Pre-M10 canonical continuity create. Using the token observed in the previous turn without rereading fixture/read.txt, create continuity/result.txt with exactly these two UTF-8 lines and no trailing newline: observed=ORBIT-739 then stage=created. Do not change any other file. Return exactly create=completed.",
+    "model": "qwen3.8:27b-gpu0",
+    "history": [
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical read. Read only fixture/read.txt. Do not change any file. Return exactly validation-token=ORBIT-739."
+      },
+      {
+        "role": "assistant",
+        "content": "Native shell spawn was rejected; trying the Host process runner to read the file instead.The Host blocks shell interpreters for `run_process`, and the native exec hit a token error. Retrying the read via a non-shell route.The file exists; now reading its content with a line-matching utility.Read `fixture\\read.txt` (read-only, no changes) — it contains exactly the expected token.\n\nvalidation-token=ORBIT-739"
+      }
+    ],
+    "interactionMode": "execute",
+    "harness": "codex",
+    "approvalPolicy": "auto",
+    "browserSessionId": "pre-m10-codex-a706d2c625114783aa202d043b4a0b53",
+    "conversationSessionId": "",
+    "webSearchEnabled": false,
+    "images": [],
+    "compactContext": false
+  },
+  "startedAt": "2026-08-23T05:20:46.1754966+00:00"
+}

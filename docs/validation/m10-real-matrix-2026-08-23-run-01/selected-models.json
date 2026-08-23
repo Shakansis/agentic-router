@@ -1,0 +1,24 @@
+[
+  {
+    "name": "qwen3.8:27b-gpu0",
+    "sizeBytes": 17741872184,
+    "modifiedAt": "2026-08-19T22:09:32.5916985-03:00",
+    "digest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+    "provider": "ollama-local",
+    "displayName": null,
+    "capabilities": null,
+    "selectable": true,
+    "pricing": null
+  },
+  {
+    "name": "qwen3:4b-instruct",
+    "sizeBytes": 2497293803,
+    "modifiedAt": "2026-07-30T21:38:43.2157148-03:00",
+    "digest": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+    "provider": "ollama-local",
+    "displayName": null,
+    "capabilities": null,
+    "selectable": true,
+    "pricing": null
+  }
+]

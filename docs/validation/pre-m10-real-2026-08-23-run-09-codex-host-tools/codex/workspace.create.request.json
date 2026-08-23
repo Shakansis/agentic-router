@@ -1,0 +1,9 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5400/api/workspaces",
+  "body": {
+    "name": "Pre-M10 codex",
+    "path": "C:\\Users\\Rodrigo\\source\\repos\\agentic-router\\.artifacts\\pre-m10-boundary-real-04\\workspaces\\codex\\workspace"
+  },
+  "startedAt": "2026-08-23T06:54:24.7644342+00:00"
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "battery": "PRE_M10_AFFECTED_SUITE_RETEST",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T07:42:47.4061104+00:00",
+  "completedAt": "2026-08-23T07:44:52.4541972+00:00",
+  "sequential": true,
+  "cloudFallback": false,
+  "results": [
+    {
+      "harness": "opencode",
+      "version": "1.18.18",
+      "suites": [
+        {
+          "suite": "agent-behavior",
+          "statusCode": 200,
+          "runId": "6688ce27934e486594418a03a1ddb2ea",
+          "terminalState": "completed",
+          "finalStatus": "passed",
+          "passed": 7,
+          "total": 7,
+          "score": 98.59,
+          "allWorkspaceCleanupFlags": true,
+          "allWorkspacePathsAbsent": true,
+          "cleanupFailures": 0
+        }
+      ]
+    }
+  ]
+}

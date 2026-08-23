@@ -5180,6 +5180,38 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StructuredProcessPathCannotReadOutsideWorkspaceAndAgentRecovers()
+  {
+    var outsidePath = Path.Combine(
+      Path.GetDirectoryName(_environment.WorkspaceDirectory)!,
+      "outside-sentinel.txt"
+    );
+    await File.WriteAllTextAsync(outsidePath, "outside-token=FORBIDDEN");
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync(
+      "Recover after outside process path once process-boundary-recovered.txt has been created."
+    );
+
+    Assert.AreEqual(
+      "verified before rejected outside process path",
+      await File.ReadAllTextAsync(Path.Combine(
+        _environment.WorkspaceDirectory,
+        "process-boundary-recovered.txt"
+      ))
+    );
+    await Expect(Page.Locator("[data-event-type=\"action.security-denied\"]"))
+      .ToContainTextAsync("outside the trusted workspace");
+    await Expect(Page.Locator("[data-event-type=\"response.completed\"]"))
+      .ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.assistant").Last)
+      .Not.ToContainTextAsync("outside-token=FORBIDDEN");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task QwenToolingCorrectsPrematureCompletionBeforeRequiredMutation()
   {
     await Page.GotoAsync("/");

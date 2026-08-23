@@ -1,0 +1,59 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/chat/stream",
+  "body": {
+    "message": "Pre-M10 canonical boundary recovery. First try to read ../outside-sentinel.txt. The trusted-workspace boundary must reject that path. Do not retry the rejected path. Recover by reading fixture/recovery.txt, do not change any file, and return exactly recovery-token=SAFE-418.",
+    "model": "qwen3.8:27b-gpu0",
+    "history": [
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical read. Read only fixture/read.txt. Do not change any file. Return exactly validation-token=ORBIT-739."
+      },
+      {
+        "role": "assistant",
+        "content": "validation-token=ORBIT-739"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical continuity create. Using the token observed in the previous turn without rereading fixture/read.txt, create continuity/result.txt with exactly these two UTF-8 lines and no trailing newline: observed=ORBIT-739 then stage=created. Do not change any other file. Return exactly create=completed."
+      },
+      {
+        "role": "assistant",
+        "content": "create=completed"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical edit. In continuity/result.txt replace only stage=created with stage=edited. Preserve the observed line and every other byte. Do not change any other file. Return exactly edit=completed."
+      },
+      {
+        "role": "assistant",
+        "content": "edit=completed"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical delete. Delete exactly fixture/delete.txt using the structured deletion capability. Do not modify, create, or delete anything else. Return exactly delete=completed."
+      },
+      {
+        "role": "assistant",
+        "content": "delete=completed"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical process. Use the structured run_process capability with executable dotnet and the single argument --version in the workspace root. Do not change any file. Return exactly process=completed followed by the observed version on the next line."
+      },
+      {
+        "role": "assistant",
+        "content": "process=completed\n10.0.400"
+      }
+    ],
+    "interactionMode": "execute",
+    "harness": "opencode",
+    "approvalPolicy": "auto",
+    "browserSessionId": "pre-m10-opencode-56b496b3722c4daa85b9264acbb2662b",
+    "conversationSessionId": "",
+    "webSearchEnabled": false,
+    "images": [],
+    "compactContext": false
+  },
+  "startedAt": "2026-08-23T05:46:34.9706169+00:00"
+}

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "0e41ca2b572948779daeb4ac0822c605",
+  "startedAt": "2026-08-23T08:20:33.7339339+00:00",
+  "completedAt": "2026-08-23T08:28:38.7713028+00:00",
+  "models": [
+    "qwen3.8:27b-gpu0",
+    "qwen3:4b-instruct"
+  ],
+  "harnesses": [
+    "native",
+    "codex",
+    "opencode",
+    "qwen-code",
+    "claude-code"
+  ],
+  "expectedCells": 10,
+  "actualCells": 10,
+  "executionOrder": [
+    "qwen3.8:27b-gpu0|native",
+    "qwen3.8:27b-gpu0|codex",
+    "qwen3.8:27b-gpu0|opencode",
+    "qwen3.8:27b-gpu0|qwen-code",
+    "qwen3.8:27b-gpu0|claude-code",
+    "qwen3:4b-instruct|native",
+    "qwen3:4b-instruct|codex",
+    "qwen3:4b-instruct|opencode",
+    "qwen3:4b-instruct|qwen-code",
+    "qwen3:4b-instruct|claude-code"
+  ],
+  "terminalState": "completed",
+  "finalStatus": "completed-with-failures",
+  "cellStatuses": [
+    {
+      "status": "completed",
+      "count": 7
+    },
+    {
+      "status": "failed",
+      "count": 3
+    }
+  ],
+  "uniqueWorkspacePerTest": true,
+  "allWorkspacesCleaned": true,
+  "allWorkspacePathsAbsent": true,
+  "sequentialCells": false,
+  "liveEventsIdentifyPairs": true,
+  "pairRankingCount": 10,
+  "modelRankingCount": 2,
+  "harnessRankingCount": 5,
+  "everyCellInspectable": true,
+  "rankingChangedWithoutRerun": true,
+  "pollCount": 471,
+  "cloudFallback": false
+}

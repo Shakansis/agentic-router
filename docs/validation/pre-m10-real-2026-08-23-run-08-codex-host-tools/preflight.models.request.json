@@ -1,0 +1,6 @@
+{
+  "method": "Get",
+  "uri": "http://127.0.0.1:5399/api/models",
+  "body": null,
+  "startedAt": "2026-08-23T06:52:53.0189645+00:00"
+}

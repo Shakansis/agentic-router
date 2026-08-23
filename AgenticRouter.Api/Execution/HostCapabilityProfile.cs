@@ -42,22 +42,11 @@ public static class HarnessCapabilityProjection
 {
   private static readonly string[] CodexNativeCommon =
   [
-    "list_files",
-    "read_file",
-    "get_file_info",
-    "search_text",
-    "create_file",
-    "write_file",
-    "replace_text",
-    "apply_patch",
-    "create_directory"
+    "apply_patch"
   ];
 
-  private static readonly string[] ExternalNativeCommon =
+  private static readonly string[] OpenCodeNativeCommon =
   [
-    "list_files",
-    "read_file",
-    "search_text",
     "create_file",
     "write_file",
     "replace_text",
@@ -101,8 +90,8 @@ public static class HarnessCapabilityProjection
       ? CodexNativeCommon
       : string.Equals(harnessId, HarnessIds.ClaudeCode, StringComparison.OrdinalIgnoreCase)
         ? ClaudeNativeCommon
-        : harnessId is HarnessIds.OpenCode or HarnessIds.QwenCode
-        ? ExternalNativeCommon
+        : string.Equals(harnessId, HarnessIds.OpenCode, StringComparison.OrdinalIgnoreCase)
+        ? OpenCodeNativeCommon
         : [];
   }
 

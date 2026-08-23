@@ -39,14 +39,24 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
   {
     Validate(weights);
     var objective = rawResult.ObjectiveAchieved ? 100 : 0;
-    var correctness = Math.Clamp(rawResult.Exactness, 0, 100);
-    var terminality = string.Equals(
-      rawResult.ExecutionStatus,
-      BenchmarkExecutionStatusIds.Completed,
-      StringComparison.Ordinal
-    ) ? 100 : 0;
-    var workspace = Math.Clamp(rawResult.ContainmentAccuracy, 0, 100);
-    var efficiency = rawResult.ToolCallCount switch
+    var metrics = rawResult.BehaviorMetrics;
+    var correctness = AverageAvailable(
+      Math.Clamp(rawResult.Exactness, 0, 100),
+      metrics?.ContinuityPreservation,
+      metrics?.Recovery,
+      metrics?.TruthfulFinalReport
+    );
+    var terminality = metrics?.Terminality ?? (string.Equals(
+        rawResult.ExecutionStatus,
+        BenchmarkExecutionStatusIds.Completed,
+        StringComparison.Ordinal
+      ) ? 100 : 0);
+    var workspace = AverageAvailable(
+      Math.Clamp(rawResult.ContainmentAccuracy, 0, 100),
+      metrics?.ScopeAccuracy,
+      metrics?.Hygiene
+    );
+    var toolEfficiency = rawResult.ToolCallCount switch
     {
       null => 50,
       0 => 80,
@@ -56,6 +66,7 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
       4 => 60,
       _ => Math.Max(20, 60 - ((rawResult.ToolCallCount.Value - 4) * 10))
     };
+    var efficiency = AverageAvailable(toolEfficiency, metrics?.Convergence);
     var total = (
       (objective * weights.ObjectiveSuccess)
       + (correctness * weights.Correctness)
@@ -71,6 +82,15 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
       workspace,
       efficiency
     );
+  }
+
+  private static int AverageAvailable(int baseline, params int?[] additional)
+  {
+    var values = new List<int> { Math.Clamp(baseline, 0, 100) };
+    values.AddRange(additional.Where(value => value.HasValue).Select(
+      value => Math.Clamp(value!.Value, 0, 100)
+    ));
+    return (int)Math.Round(values.Average(), MidpointRounding.AwayFromZero);
   }
 
   public BenchmarkScoringProjection Rescore(
@@ -124,12 +144,125 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
         harness.Terminality
       ))
       .ToArray();
+    var matrixCells = result.Cells ?? [];
+    var projectedCells = matrixCells.Where(cell => cell.Result is not null).Select(cell =>
+    {
+      var harness = cell.Result!;
+      var tests = harness.Tests.Select(test => new BenchmarkTestScoreProjection(
+        test.Run.RunId,
+        test.Run.TestId,
+        Score(test.RawResult, profile.Weights)
+      )).ToArray();
+      var divisor = Math.Max(1, harness.Total);
+      decimal Average(Func<BenchmarkScore, decimal> selector) => decimal.Round(
+        tests.Sum(test => selector(test.Score)) / divisor,
+        2,
+        MidpointRounding.AwayFromZero
+      );
+      return new BenchmarkMatrixCellScoreProjection(
+        cell.Model,
+        cell.Harness,
+        Average(score => score.Total),
+        new BenchmarkScoreBreakdown(
+          Average(score => score.ObjectiveSuccess),
+          Average(score => score.Correctness),
+          Average(score => score.Terminality),
+          Average(score => score.WorkspaceAccuracy),
+          Average(score => score.Efficiency)
+        ),
+        tests
+      );
+    }).ToArray();
+    var projectedByCell = projectedCells.ToDictionary(
+      cell => $"{cell.Model}\u001f{cell.Harness}",
+      StringComparer.OrdinalIgnoreCase
+    );
+    decimal CellScore(BenchmarkMatrixCellResult cell)
+    {
+      return projectedByCell.TryGetValue(
+        $"{cell.Model}\u001f{cell.Harness}",
+        out var projected
+      ) ? projected.Score : 0m;
+    }
+    var pairRanking = matrixCells
+      .OrderByDescending(CellScore)
+      .ThenByDescending(cell => cell.Passed)
+      .ThenBy(cell => cell.DurationMilliseconds)
+      .ThenBy(cell => cell.Model, StringComparer.OrdinalIgnoreCase)
+      .ThenBy(cell => cell.Harness, StringComparer.OrdinalIgnoreCase)
+      .Select((cell, index) => new BenchmarkMatrixRankingEntry(
+        index + 1,
+        cell.Model,
+        cell.Harness,
+        cell.Passed,
+        CellScore(cell),
+        cell.DurationMilliseconds,
+        cell.Terminality,
+        cell.Status
+      ))
+      .ToArray();
+    IReadOnlyList<BenchmarkAggregateRankingEntry> Aggregate(
+      IReadOnlyList<string> identities,
+      Func<BenchmarkMatrixCellResult, string> selector
+    )
+    {
+      var summaries = identities.Select(id =>
+      {
+        var matching = matrixCells.Where(cell => string.Equals(
+          selector(cell),
+          id,
+          StringComparison.OrdinalIgnoreCase
+        )).ToArray();
+        var divisor = Math.Max(1, matching.Length);
+        return new
+        {
+          Id = id,
+          Completed = matching.Count(cell => string.Equals(
+            cell.Status,
+            BenchmarkMatrixCellStatusIds.Completed,
+            StringComparison.Ordinal
+          )),
+          Total = matching.Length,
+          Passed = matching.Sum(cell => cell.Passed),
+          Score = decimal.Round(
+            matching.Sum(CellScore) / divisor,
+            2,
+            MidpointRounding.AwayFromZero
+          ),
+          Duration = matching.Sum(cell => Math.Max(0, cell.DurationMilliseconds)),
+          Terminality = (int)Math.Round(
+            matching.Sum(cell => cell.Terminality) / (decimal)divisor,
+            MidpointRounding.AwayFromZero
+          )
+        };
+      }).OrderByDescending(item => item.Score)
+        .ThenByDescending(item => item.Passed)
+        .ThenBy(item => item.Duration)
+        .ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+      return summaries.Select((item, index) => new BenchmarkAggregateRankingEntry(
+        index + 1,
+        item.Id,
+        item.Completed,
+        item.Total,
+        item.Passed,
+        item.Score,
+        item.Duration,
+        item.Terminality
+      )).ToArray();
+    }
+    var selectedModels = result.SelectedModels ?? [];
+    var selectedHarnesses = result.SelectedHarnesses ?? [];
     return new BenchmarkScoringProjection(
       result.RunId,
       result.ScoreWeights ?? BenchmarkScoreWeights.Default,
       profile,
       projectedHarnesses,
-      ranking
+      ranking,
+      matrixCells.Count > 0 ? projectedCells : null,
+      matrixCells.Count > 0 ? pairRanking : null,
+      matrixCells.Count > 0 ? Aggregate(selectedModels, cell => cell.Model) : null,
+      matrixCells.Count > 0 ? Aggregate(selectedHarnesses, cell => cell.Harness) : null
     );
   }
 

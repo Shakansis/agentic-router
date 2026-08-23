@@ -1,0 +1,6 @@
+{
+  "method": "Get",
+  "uri": "http://127.0.0.1:5395/api/benchmarks/suite-runs/82435d451dba434fac586795efac9bf6",
+  "body": null,
+  "startedAt": "2026-08-23T06:04:22.5048323+00:00"
+}

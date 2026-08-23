@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "battery": "PRE_M10_REAL_HARNESS_VALIDATION",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T05:44:49.4826585+00:00",
+  "completedAt": "2026-08-23T06:07:52.8494354+00:00",
+  "sequential": true,
+  "cloudFallback": false,
+  "results": [
+    {
+      "harness": "opencode",
+      "direct": {
+        "passed": true,
+        "processToolObserved": true,
+        "boundaryRejectionObserved": false
+      },
+      "cancellation": {
+        "runId": "ae7574c977234cee83806242066df3e8",
+        "sawRunning": true,
+        "cancelStatusCode": 202,
+        "finalState": "cancelled",
+        "persistedStatusCode": 200,
+        "passed": true
+      },
+      "basicCrud": {
+        "runId": "ba00d7e00d544c8a928f5762d44101a3",
+        "httpStatusCode": 200,
+        "finalStatus": "completed-with-failures",
+        "terminalState": "completed",
+        "passed": 2,
+        "total": 4,
+        "score": 91.13
+      },
+      "agentBehavior": {
+        "runId": "ce84e4bf32e9416b8bc6e99b03a5f565",
+        "httpStatusCode": 200,
+        "finalStatus": "completed-with-failures",
+        "terminalState": "completed",
+        "passed": 3,
+        "total": 7,
+        "score": 94.7
+      }
+    },
+    {
+      "harness": "qwen-code",
+      "direct": {
+        "passed": true,
+        "processToolObserved": true,
+        "boundaryRejectionObserved": false
+      },
+      "cancellation": {
+        "runId": "ee51fdae709143bbad2efd2ac74221f3",
+        "sawRunning": true,
+        "cancelStatusCode": 202,
+        "finalState": "cancelled",
+        "persistedStatusCode": 200,
+        "passed": true
+      },
+      "basicCrud": {
+        "runId": "b635709e076946469aa7622a43afe88d",
+        "httpStatusCode": 200,
+        "finalStatus": "passed",
+        "terminalState": "completed",
+        "passed": 4,
+        "total": 4,
+        "score": 98.94
+      },
+      "agentBehavior": {
+        "runId": "d9c9036ccb3649e8b10ddff6c58478d8",
+        "httpStatusCode": 200,
+        "finalStatus": "completed-with-failures",
+        "terminalState": "completed",
+        "passed": 4,
+        "total": 7,
+        "score": 81.99
+      }
+    },
+    {
+      "harness": "claude-code",
+      "direct": {
+        "passed": true,
+        "processToolObserved": true,
+        "boundaryRejectionObserved": false
+      },
+      "cancellation": {
+        "runId": "82435d451dba434fac586795efac9bf6",
+        "sawRunning": true,
+        "cancelStatusCode": 202,
+        "finalState": "cancelled",
+        "persistedStatusCode": 200,
+        "passed": true
+      },
+      "basicCrud": {
+        "runId": "8d67e9ce68bd445a8c9e912ca1180d91",
+        "httpStatusCode": 200,
+        "finalStatus": "passed",
+        "terminalState": "completed",
+        "passed": 4,
+        "total": 4,
+        "score": 99.31
+      },
+      "agentBehavior": {
+        "runId": "7a46e9925cba4d96bb2b902ede21064f",
+        "httpStatusCode": 200,
+        "finalStatus": "completed-with-failures",
+        "terminalState": "completed",
+        "passed": 4,
+        "total": 7,
+        "score": 95.2
+      }
+    }
+  ]
+}

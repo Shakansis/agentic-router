@@ -13,6 +13,8 @@ public interface IBenchmarkNativeExecutor
 {
   IAsyncEnumerable<BenchmarkHarnessEvidence> ExecuteAsync(
     IBenchmarkTestDefinition test,
+    BenchmarkScenarioTurn turn,
+    BenchmarkNativeSession session,
     InstalledModel model,
     Uri providerEndpoint,
     BenchmarkWorkspace workspace,
@@ -32,6 +34,7 @@ public interface IBenchmarkNativeExecutor
 public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
 {
   public const string PromptMarker = "BENCHMARK_NATIVE_CRUD_V1";
+  public const string BehaviorPromptMarker = "BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2";
   private const int MaximumTurns = 8;
   private const int MaximumReadBytes = 1024 * 1024;
   private static readonly UTF8Encoding Utf8 = new(false);
@@ -60,6 +63,8 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
 
   public async IAsyncEnumerable<BenchmarkHarnessEvidence> ExecuteAsync(
     IBenchmarkTestDefinition test,
+    BenchmarkScenarioTurn turn,
+    BenchmarkNativeSession session,
     InstalledModel model,
     Uri providerEndpoint,
     BenchmarkWorkspace workspace,
@@ -68,19 +73,34 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    var messages = new List<OllamaToolMessage>
+    var messages = session.Messages;
+    if (messages.Count == 0)
     {
-      new(
-        "system",
-        PromptMarker + "\n"
-          + "You are executing one deterministic filesystem benchmark in the supplied trusted workspace. "
+      var systemPrompt = string.Equals(
+        test.Metadata.Suite,
+        BenchmarkSuiteIds.BasicCrud,
+        StringComparison.OrdinalIgnoreCase
+      )
+        ? "You are executing one deterministic filesystem benchmark in the supplied trusted workspace. "
           + "Use only the provided structured tools. Never use or request a shell. Paths are relative to the workspace. "
           + "After the required effect is complete, return a concise final report with no tool call."
-      ),
-      new("user", test.CreateTask())
-    };
+        : "You are executing a deterministic filesystem benchmark in the supplied trusted workspace. "
+          + "Use only the provided structured tools. Never use or request a shell. Paths are relative to the workspace. "
+          + "Preserve requirements across benchmark turns in this same session. After each requested effect is complete, "
+          + "return a concise terminal report with no tool call.";
+      messages.Add(new(
+        "system",
+        (string.Equals(
+          test.Metadata.Suite,
+          BenchmarkSuiteIds.BasicCrud,
+          StringComparison.OrdinalIgnoreCase
+        ) ? PromptMarker : BehaviorPromptMarker) + "\n" + systemPrompt
+      ));
+    }
+    messages.Add(new("user", turn.Prompt));
     var toolCalls = 0;
     var surfacedErrors = 0;
+    var toolEvidence = new List<BenchmarkToolCallEvidence>();
     long? inputTokens = null;
     long? outputTokens = null;
 
@@ -114,6 +134,7 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
       if (response.ToolCalls.Count == 0)
       {
         var report = response.Content?.Trim() ?? string.Empty;
+        messages.Add(new OllamaToolMessage("assistant", response.Content, response.Thinking));
         if (surfacedErrors > 0)
         {
           progress?.Publish(
@@ -137,7 +158,8 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
           surfacedErrors,
           surfacedErrors,
           inputTokens,
-          outputTokens
+          outputTokens,
+          ToolCalls: toolEvidence
         );
         yield break;
       }
@@ -157,6 +179,15 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
 
       var call = response.ToolCalls[0];
       toolCalls++;
+      var sequence = session.NextToolSequence();
+      var path = ToolPath(call.Arguments);
+      toolEvidence.Add(new BenchmarkToolCallEvidence(
+        sequence,
+        turn.Order,
+        call.Name,
+        "started",
+        path
+      ));
       progress?.Publish(
         BenchmarkProgressTypeIds.Activity,
         BenchmarkLiveStateIds.Running,
@@ -180,6 +211,13 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
           call.Arguments,
           cancellationToken
         );
+        toolEvidence.Add(new BenchmarkToolCallEvidence(
+          sequence,
+          turn.Order,
+          call.Name,
+          "completed",
+          path
+        ));
       }
       catch (BenchmarkNativeToolException exception)
       {
@@ -191,6 +229,14 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
           $"{exception.Code}: {exception.Message}",
           BenchmarkActivityKindIds.Tool
         );
+        toolEvidence.Add(new BenchmarkToolCallEvidence(
+          sequence,
+          turn.Order,
+          call.Name,
+          "failed",
+          path,
+          exception.Code
+        ));
       }
       messages.Add(
         new OllamaToolMessage(
@@ -210,6 +256,38 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
       inputTokens,
       outputTokens
     );
+  }
+
+  private static string? ToolPath(JsonElement arguments)
+  {
+    if (
+      arguments.ValueKind == JsonValueKind.Object
+      && arguments.TryGetProperty("path", out var path)
+      && path.ValueKind == JsonValueKind.String
+    )
+    {
+      return Normalize(path.GetString() ?? string.Empty);
+    }
+    if (
+      arguments.ValueKind == JsonValueKind.Object
+      && arguments.TryGetProperty("paths", out var paths)
+      && paths.ValueKind == JsonValueKind.Array
+      && paths.GetArrayLength() == 1
+    )
+    {
+      return Normalize(paths[0].GetString() ?? string.Empty);
+    }
+    if (
+      arguments.ValueKind == JsonValueKind.Object
+      && arguments.TryGetProperty("files", out var files)
+      && files.ValueKind == JsonValueKind.Array
+      && files.GetArrayLength() == 1
+      && files[0].TryGetProperty("path", out var filePath)
+    )
+    {
+      return Normalize(filePath.GetString() ?? string.Empty);
+    }
+    return null;
   }
 
   internal static string ActivityKind(string tool)
@@ -602,6 +680,18 @@ public sealed class BenchmarkNativeExecutor : IBenchmarkNativeExecutor
   private static StringComparison PathComparison => OperatingSystem.IsWindows()
     ? StringComparison.OrdinalIgnoreCase
     : StringComparison.Ordinal;
+}
+
+public sealed class BenchmarkNativeSession
+{
+  private int _toolSequence;
+
+  internal List<OllamaToolMessage> Messages { get; } = [];
+
+  internal int NextToolSequence()
+  {
+    return ++_toolSequence;
+  }
 }
 
 public sealed class BenchmarkNativeToolException : Exception

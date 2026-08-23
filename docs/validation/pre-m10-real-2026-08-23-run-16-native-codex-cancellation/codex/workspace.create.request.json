@@ -1,0 +1,9 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5402/api/workspaces",
+  "body": {
+    "name": "Pre-M10 codex",
+    "path": "C:\\Users\\Rodrigo\\source\\repos\\agentic-router\\.artifacts\\pre-m10-cancel-run-16-workspaces\\codex\\workspace"
+  },
+  "startedAt": "2026-08-23T07:46:42.0569852+00:00"
+}

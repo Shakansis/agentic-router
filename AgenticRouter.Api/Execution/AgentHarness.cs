@@ -19,6 +19,7 @@ public sealed record CodexHarnessOptions(
 public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAsyncDisposable
 {
   private const int MaximumActivityText = 8_192;
+  private const string PermissionProfileId = ":workspace";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
 
   private static readonly HarnessDefinition AdapterDefinition = new(
@@ -266,12 +267,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           },
           cwd = request.WorkingDirectory,
           approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
-          sandboxPolicy = new
-          {
-            type = "workspaceWrite",
-            writableRoots = new[] { request.WorkingDirectory },
-            networkAccess = false
-          },
+          permissions = PermissionProfileId,
+          runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
           model = request.Model
         },
         _options.StartupTimeout,
@@ -617,7 +614,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
             modelProvider = "ollama",
             cwd = request.WorkingDirectory,
             approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
-            sandbox = "workspace-write"
+            permissions = PermissionProfileId,
+            runtimeWorkspaceRoots = new[] { request.WorkingDirectory }
           },
           _options.StartupTimeout,
           cancellationToken
@@ -646,7 +644,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         modelProvider = "ollama",
         cwd = request.WorkingDirectory,
         approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
-        sandbox = "workspace-write",
+        permissions = PermissionProfileId,
+        runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
         serviceName = "agentic_router",
         dynamicTools = CreateDynamicTools(request.HostCapabilities)
       },
@@ -672,6 +671,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     var provider = RequiredString(result, "thread", "modelProvider");
     var selectedModel = RequiredString(result, "model");
     var sandboxType = RequiredString(result, "sandbox", "type");
+    var permissionProfile = RequiredString(result, "activePermissionProfile", "id");
 
     if (!string.Equals(provider, "ollama", StringComparison.OrdinalIgnoreCase))
     {
@@ -697,6 +697,15 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         "codex-sandbox-incompatible",
         "Codex did not activate the required workspace-write sandbox.",
         $"App Server reported sandbox type '{sandboxType}'.",
+        false
+      );
+    }
+    if (!string.Equals(permissionProfile, PermissionProfileId, StringComparison.Ordinal))
+    {
+      throw new HarnessException(
+        "codex-permission-profile-incompatible",
+        "Codex did not activate the Agentic Router workspace permission profile.",
+        $"App Server reported permission profile '{permissionProfile}'.",
         false
       );
     }
@@ -1349,7 +1358,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     var content = "model_provider = \"ollama\"\n"
       + "oss_provider = \"ollama\"\n"
       + "approval_policy = \"on-request\"\n"
-      + "sandbox_mode = \"workspace-write\"\n"
+      + $"default_permissions = \"{PermissionProfileId}\"\n"
       + "check_for_update_on_startup = false\n"
       + "web_search = \"disabled\"\n\n"
       + "[agents]\n"
@@ -1359,6 +1368,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       + "[feedback]\n"
       + "enabled = false\n\n"
       + "[features]\n"
+      + "shell_tool = false\n"
+      + "unified_exec = false\n"
       + "memories = false\n"
       + "multi_agent = false\n"
       + "remote_plugin = false\n"

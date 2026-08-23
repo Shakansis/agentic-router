@@ -1,0 +1,9 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5394/api/workspaces",
+  "body": {
+    "name": "Pre-M10 native",
+    "path": "C:\\Users\\Rodrigo\\source\\repos\\agentic-router\\.artifacts\\pre-m10-runtime\\workspaces\\native\\workspace"
+  },
+  "startedAt": "2026-08-23T04:56:08.5185637+00:00"
+}

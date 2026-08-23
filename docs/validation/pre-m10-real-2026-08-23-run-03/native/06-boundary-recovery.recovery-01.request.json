@@ -1,0 +1,10 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5394/api/recovery/309e648756904061bd512bfaefe2d059/decision",
+  "body": {
+    "option": "stop",
+    "browserSessionId": "pre-m10-native-c8e084e3b1a844138a8c1261853a502a",
+    "executionSessionId": "cd5e4ab35f844910b2a50885502bced1"
+  },
+  "startedAt": "2026-08-23T05:15:41.4642640+00:00"
+}

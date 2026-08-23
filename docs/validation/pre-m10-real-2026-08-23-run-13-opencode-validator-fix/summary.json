@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "battery": "PRE_M10_AFFECTED_SUITE_RETEST",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T07:31:53.2378208+00:00",
+  "completedAt": "2026-08-23T07:31:53.5291820+00:00",
+  "sequential": true,
+  "cloudFallback": false,
+  "results": [
+    {
+      "harness": "opencode",
+      "version": "1.18.18",
+      "suites": [
+        {
+          "suite": "missing",
+          "statusCode": 500,
+          "runId": null,
+          "terminalState": "failed",
+          "finalStatus": "transport-error",
+          "passed": 0,
+          "total": 0,
+          "score": null,
+          "allWorkspaceCleanupFlags": false,
+          "allWorkspacePathsAbsent": false,
+          "cleanupFailures": 0
+        },
+        {
+          "suite": "missing",
+          "statusCode": 500,
+          "runId": null,
+          "terminalState": "failed",
+          "finalStatus": "transport-error",
+          "passed": 0,
+          "total": 0,
+          "score": null,
+          "allWorkspaceCleanupFlags": false,
+          "allWorkspacePathsAbsent": false,
+          "cleanupFailures": 0
+        }
+      ]
+    }
+  ]
+}

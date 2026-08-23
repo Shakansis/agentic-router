@@ -1,0 +1,19 @@
+{
+  "statusCode": 404,
+  "elapsedMilliseconds": 11,
+  "completedAt": "2026-08-23T05:42:10.1127467+00:00",
+  "headers": {
+    "Date": [
+      "Sun, 23 Aug 2026 05:42:09 GMT"
+    ],
+    "Server": [
+      "Kestrel"
+    ],
+    "Transfer-Encoding": [
+      "chunked"
+    ],
+    "Content-Type": [
+      "application/problem+json; charset=utf-8"
+    ]
+  }
+}

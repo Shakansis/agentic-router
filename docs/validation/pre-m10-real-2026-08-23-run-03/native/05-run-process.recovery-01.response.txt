@@ -1,0 +1,1 @@
+{"checkpointId":"526dc1a0e2cc4490ac852bce04cd77a2","accepted":true,"option":"stop","diagnostic":null}

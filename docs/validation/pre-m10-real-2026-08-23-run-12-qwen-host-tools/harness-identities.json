@@ -1,0 +1,32 @@
+{
+  "definition": {
+    "id": "qwen-code",
+    "displayName": "Qwen Code",
+    "experimental": true,
+    "description": "Qwen Code HTTP daemon with typed SSE, isolated local configuration, and Host-observed effects.",
+    "capabilities": {
+      "supportsStreaming": true,
+      "supportsThinking": true,
+      "supportsResume": true,
+      "supportsCancel": true,
+      "supportsApprovals": true,
+      "supportsToolEvents": true,
+      "supportsStructuredEdits": true,
+      "supportsStaleProtection": true,
+      "supportsSubagents": false,
+      "supportsSandbox": false,
+      "supportsSessionDiff": false,
+      "supportsNativePermissions": true
+    },
+    "supportedProviders": [
+      "ollama-local"
+    ]
+  },
+  "availability": {
+    "state": 0,
+    "version": "0.21.13",
+    "message": null,
+    "checkedAt": "2026-08-23T04:14:39.3296799-03:00",
+    "available": true
+  }
+}

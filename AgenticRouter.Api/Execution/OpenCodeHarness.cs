@@ -595,6 +595,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 sessionId,
                 turnId,
                 message: $"OpenCode requests {permission}.",
+                tool: permission,
                 approvalId: permissionId,
                 approvalCanBeMapped: !readOnlyPermission && resources.Count > 0,
                 readOnlyPermission: readOnlyPermission,
@@ -667,26 +668,42 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     }
     finally
     {
-      if (cancellationToken.IsCancellationRequested)
+      try
       {
-        await CancelTurnAsync(request.SessionId, CancellationToken.None);
-      }
-      _activeTurns.TryRemove(request.SessionId, out _);
-      if (active is not null)
-      {
-        foreach (var pending in _permissions)
+        if (cancellationToken.IsCancellationRequested)
         {
-          if (string.Equals(
-            pending.Value.SessionId,
-            active.OpenCodeSessionId,
-            StringComparison.Ordinal
-          ))
+          await CancelTurnAsync(request.SessionId, CancellationToken.None);
+        }
+        _activeTurns.TryRemove(request.SessionId, out _);
+        if (active is not null)
+        {
+          foreach (var pending in _permissions)
           {
-            _permissions.TryRemove(pending.Key, out _);
+            if (string.Equals(
+              pending.Value.SessionId,
+              active.OpenCodeSessionId,
+              StringComparison.Ordinal
+            ))
+            {
+              _permissions.TryRemove(pending.Key, out _);
+            }
           }
         }
+        if (
+          request.ReleaseWorkspaceAfterTurn
+          || (
+            request.ReleaseWorkspaceOnCancellation
+            && cancellationToken.IsCancellationRequested
+          )
+        )
+        {
+          await ReleaseWorkspaceAsync();
+        }
       }
-      _turnGate.Release();
+      finally
+      {
+        _turnGate.Release();
+      }
     }
   }
 
@@ -752,6 +769,19 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     _availabilityGate.Dispose();
     _lifecycleGate.Dispose();
     _turnGate.Dispose();
+  }
+
+  private async Task ReleaseWorkspaceAsync()
+  {
+    await _lifecycleGate.WaitAsync(CancellationToken.None);
+    try
+    {
+      await StopOwnedProcessAsync();
+    }
+    finally
+    {
+      _lifecycleGate.Release();
+    }
   }
 
   private async Task EnsureStartedAsync(
@@ -1028,10 +1058,10 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       ["permission"] = new Dictionary<string, string>
       {
         ["*"] = "ask",
-        ["read"] = "allow",
-        ["glob"] = "allow",
-        ["grep"] = "allow",
-        ["list"] = "allow",
+        ["read"] = "deny",
+        ["glob"] = "deny",
+        ["grep"] = "deny",
+        ["list"] = "deny",
         ["edit"] = "ask",
         ["bash"] = "deny",
         ["task"] = "deny",

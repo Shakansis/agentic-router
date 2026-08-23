@@ -1,0 +1,6 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/workspaces/01ecca5a1b50410e9ebadfc10f03f318/activate",
+  "body": null,
+  "startedAt": "2026-08-23T06:01:31.0658649+00:00"
+}

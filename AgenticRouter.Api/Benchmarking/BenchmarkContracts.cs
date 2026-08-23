@@ -8,6 +8,10 @@ public static class BenchmarkSuiteIds
   public const int BasicCrudVersion = 1;
   public const string FixtureId = "basic-crud-fixture";
   public const int FixtureVersion = 1;
+  public const string AgentBehavior = "agent-behavior";
+  public const int AgentBehaviorVersion = 2;
+  public const string AgentBehaviorFixtureId = "agent-behavior-fixture";
+  public const int AgentBehaviorFixtureVersion = 1;
 }
 
 public static class BenchmarkIds
@@ -16,6 +20,13 @@ public static class BenchmarkIds
   public const string FileSystemRead001 = "FS-READ-001";
   public const string FileSystemUpdate001 = "FS-UPDATE-001";
   public const string FileSystemDelete001 = "FS-DELETE-001";
+  public const string Continuity001 = "CONTINUITY-001";
+  public const string ScopeRetention001 = "SCOPE-RETENTION-001";
+  public const string Recovery001 = "RECOVERY-001";
+  public const string Convergence001 = "CONVERGENCE-001";
+  public const string Terminality001 = "TERMINALITY-001";
+  public const string StaleConflict001 = "STALE-CONFLICT-001";
+  public const string TruthfulReport001 = "TRUTHFUL-REPORT-001";
 }
 
 public static class BenchmarkHarnessCapabilityIds
@@ -33,6 +44,7 @@ public static class BenchmarkExecutionStatusIds
   public const string Cancelled = "cancelled";
   public const string TimedOut = "timed-out";
   public const string Unavailable = "unavailable";
+  public const string Partial = "partial";
 }
 
 public static class BenchmarkResultStatusIds
@@ -49,6 +61,17 @@ public static class BenchmarkRunStatusIds
   public const string Failed = "failed";
   public const string Passed = "passed";
   public const string CompletedWithFailures = "completed-with-failures";
+}
+
+public static class BenchmarkMatrixCellStatusIds
+{
+  public const string Available = "available";
+  public const string Unsupported = "unsupported";
+  public const string Unavailable = "unavailable";
+  public const string Failed = "failed";
+  public const string TimedOut = "timed-out";
+  public const string Cancelled = "cancelled";
+  public const string Completed = "completed";
 }
 
 public static class BenchmarkLiveStateIds
@@ -93,6 +116,8 @@ public static class BenchmarkActivityKindIds
   public const string HarnessTerminal = "harness-terminal";
   public const string Timeout = "timeout";
   public const string HostValidation = "host-validation";
+  public const string HostMutation = "host-mutation";
+  public const string Turn = "turn";
 }
 
 public sealed record BenchmarkTestMetadata(
@@ -104,7 +129,13 @@ public sealed record BenchmarkTestMetadata(
   bool Deterministic,
   IReadOnlyList<string> RequiredHarnessCapabilities,
   int AcceptanceVersion = 1,
-  int Order = 0
+  int Order = 0,
+  int SuiteVersion = BenchmarkSuiteIds.BasicCrudVersion,
+  string FixtureId = BenchmarkSuiteIds.FixtureId,
+  int FixtureVersion = BenchmarkSuiteIds.FixtureVersion,
+  int TimeoutSeconds = 120,
+  int TurnBudget = 1,
+  bool AllowsPartialTerminal = false
 );
 
 public sealed record BenchmarkSuiteMetadata(
@@ -131,7 +162,10 @@ public sealed record BenchmarkSuiteRunRequest(
   int SuiteVersion = BenchmarkSuiteIds.BasicCrudVersion,
   int TimeoutSeconds = 120,
   bool ModelExecutionPermissionGranted = false,
-  string? ClientRunId = null
+  string? ClientRunId = null,
+  IReadOnlyList<string>? Models = null,
+  string ScoringProfileId = BenchmarkScoringProfileIds.Default,
+  BenchmarkScoreWeights? ScoreWeights = null
 );
 
 public sealed record BenchmarkRun(
@@ -186,7 +220,60 @@ public sealed record BenchmarkRawResult(
   IReadOnlyList<string>? UnexpectedFiles = null,
   string HostValidationResult = "fail",
   string FinalHarnessReport = "",
-  IReadOnlyDictionary<string, string>? ValidationFacts = null
+  IReadOnlyDictionary<string, string>? ValidationFacts = null,
+  BenchmarkBehaviorMetrics? BehaviorMetrics = null,
+  IReadOnlyList<BenchmarkTurnEvidence>? Turns = null,
+  IReadOnlyList<BenchmarkHostEvent>? HostEvents = null,
+  IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null
+);
+
+public sealed record BenchmarkBehaviorMetrics(
+  int? ContinuityPreservation = null,
+  int? ScopeAccuracy = null,
+  int? Recovery = null,
+  int? Convergence = null,
+  int? Hygiene = null,
+  int? TruthfulFinalReport = null,
+  int? Terminality = null,
+  string? NarrationClassification = null,
+  int UnnecessaryToolCalls = 0,
+  int RepeatedValidationCount = 0,
+  int SuccessfulTerminalTurns = 0,
+  int TotalTurns = 0
+);
+
+public sealed record BenchmarkScenarioTurn(
+  int Order,
+  string Name,
+  string Prompt
+);
+
+public sealed record BenchmarkTurnEvidence(
+  int Order,
+  string Name,
+  string Prompt,
+  string ExecutionStatus,
+  string FinalReport,
+  int? ToolCallCount,
+  int? SurfacedErrorCount,
+  int? RecoveredErrorCount,
+  long DurationMilliseconds
+);
+
+public sealed record BenchmarkHostEvent(
+  int AfterTurn,
+  string Type,
+  string Message,
+  IReadOnlyDictionary<string, string>? Facts = null
+);
+
+public sealed record BenchmarkToolCallEvidence(
+  int Sequence,
+  int Turn,
+  string Tool,
+  string State,
+  string? Path = null,
+  string? ErrorCode = null
 );
 
 public sealed record BenchmarkScoreWeights(
@@ -287,12 +374,89 @@ public sealed record BenchmarkHarnessScoreProjection(
   IReadOnlyList<BenchmarkTestScoreProjection> Tests
 );
 
+public sealed record BenchmarkMatrixCellScoreProjection(
+  string Model,
+  string Harness,
+  decimal Score,
+  BenchmarkScoreBreakdown Breakdown,
+  IReadOnlyList<BenchmarkTestScoreProjection> Tests
+);
+
+public sealed record BenchmarkMatrixRankingEntry(
+  int Rank,
+  string Model,
+  string Harness,
+  int Passed,
+  decimal Score,
+  long DurationMilliseconds,
+  int Terminality,
+  string Status
+);
+
+public sealed record BenchmarkAggregateRankingEntry(
+  int Rank,
+  string Id,
+  int CompletedCells,
+  int TotalCells,
+  int Passed,
+  decimal Score,
+  long DurationMilliseconds,
+  int Terminality
+);
+
 public sealed record BenchmarkScoringProjection(
   string RunId,
   BenchmarkScoreWeights OriginalScoreWeights,
   BenchmarkScoringProfile ActiveProfile,
   IReadOnlyList<BenchmarkHarnessScoreProjection> HarnessScores,
-  IReadOnlyList<BenchmarkRankingEntry> Ranking
+  IReadOnlyList<BenchmarkRankingEntry> Ranking,
+  IReadOnlyList<BenchmarkMatrixCellScoreProjection>? MatrixCellScores = null,
+  IReadOnlyList<BenchmarkMatrixRankingEntry>? PairRanking = null,
+  IReadOnlyList<BenchmarkAggregateRankingEntry>? ModelRanking = null,
+  IReadOnlyList<BenchmarkAggregateRankingEntry>? HarnessRanking = null
+);
+
+public sealed record BenchmarkModelIdentity(
+  string Model,
+  string? Digest,
+  string Provider,
+  long? SizeBytes,
+  DateTimeOffset? ModifiedAt,
+  string? Quantization,
+  int? DeclaredContextTokens,
+  int? ConfiguredContextTokens,
+  string? ParameterSize,
+  string? Format,
+  string? Family
+);
+
+public sealed record BenchmarkMatrixCellResult(
+  int ExecutionOrder,
+  string Model,
+  string? ModelDigest,
+  string Provider,
+  string Harness,
+  string? HarnessVersion,
+  string Status,
+  string Compatibility,
+  string? Message,
+  int Passed,
+  int Total,
+  decimal Score,
+  long DurationMilliseconds,
+  int Terminality,
+  int Correctness,
+  int? Recovery,
+  int? Convergence,
+  int? Hygiene,
+  BenchmarkHarnessResult? Result
+);
+
+public sealed record BenchmarkEnvironmentIdentity(
+  string Runtime,
+  string? RuntimeVersion,
+  bool Sequential,
+  int? ConfiguredContextTokens
 );
 
 public sealed record BenchmarkSuiteRunResult(
@@ -312,7 +476,18 @@ public sealed record BenchmarkSuiteRunResult(
   int TimeoutSeconds,
   BenchmarkScoreWeights ScoreWeights,
   IReadOnlyList<BenchmarkHarnessResult> HarnessResults,
-  IReadOnlyList<BenchmarkRankingEntry> Ranking
+  IReadOnlyList<BenchmarkRankingEntry> Ranking,
+  int SchemaVersion = 1,
+  string ScoringProfileId = BenchmarkScoringProfileIds.Default,
+  IReadOnlyList<string>? SelectedModels = null,
+  IReadOnlyList<string>? SelectedHarnesses = null,
+  IReadOnlyList<BenchmarkModelIdentity>? ModelIdentities = null,
+  IReadOnlyList<BenchmarkMatrixCellResult>? Cells = null,
+  IReadOnlyList<BenchmarkMatrixRankingEntry>? PairRanking = null,
+  IReadOnlyList<BenchmarkAggregateRankingEntry>? ModelRanking = null,
+  IReadOnlyList<BenchmarkAggregateRankingEntry>? HarnessRanking = null,
+  IReadOnlyList<string>? ExecutionOrder = null,
+  BenchmarkEnvironmentIdentity? Environment = null
 );
 
 public sealed record BenchmarkLiveRankingEntry(
@@ -324,7 +499,8 @@ public sealed record BenchmarkLiveRankingEntry(
   decimal? Score,
   long DurationMilliseconds,
   int Terminality,
-  string State
+  string State,
+  string? Model = null
 );
 
 public sealed record BenchmarkProgressEvent(
@@ -350,7 +526,13 @@ public sealed record BenchmarkProgressEvent(
   IReadOnlyList<string>? SelectedHarnesses = null,
   IReadOnlyList<BenchmarkTestMetadata>? Tests = null,
   DateTimeOffset? StartedAt = null,
-  long Sequence = 0
+  long Sequence = 0,
+  int TurnNumber = 0,
+  int TotalTurns = 0,
+  string? Model = null,
+  IReadOnlyList<string>? SelectedModels = null,
+  int CompletedCells = 0,
+  int TotalCells = 0
 );
 
 public sealed record BenchmarkLiveRunStart(
@@ -373,6 +555,7 @@ public interface IBenchmarkProgressSink
 
 public sealed record BenchmarkProgressContext(
   string RunId,
+  string Model,
   string Harness,
   string TestId,
   IBenchmarkProgressSink Sink
@@ -382,7 +565,9 @@ public sealed record BenchmarkProgressContext(
     string type,
     string state,
     string? message = null,
-    string? activityKind = null
+    string? activityKind = null,
+    int turnNumber = 0,
+    int totalTurns = 0
   )
   {
     try
@@ -396,7 +581,10 @@ public sealed record BenchmarkProgressContext(
           Harness,
           TestId,
           message,
-          ActivityKind: activityKind
+          ActivityKind: activityKind,
+          TurnNumber: turnNumber,
+          TotalTurns: totalTurns,
+          Model: Model
         )
       );
     }
@@ -426,6 +614,23 @@ public interface IBenchmarkTestDefinition
 
   string CreateTask();
 
+  IReadOnlyList<BenchmarkScenarioTurn> CreateTurns()
+  {
+    return [new BenchmarkScenarioTurn(1, "Objective", CreateTask())];
+  }
+
+  Task<BenchmarkHostEvent?> AfterTurnAsync(
+    int completedTurn,
+    string workspacePath,
+    CancellationToken cancellationToken
+  )
+  {
+    _ = completedTurn;
+    _ = workspacePath;
+    _ = cancellationToken;
+    return Task.FromResult<BenchmarkHostEvent?>(null);
+  }
+
   Task<BenchmarkRawResult> ValidateAsync(
     BenchmarkValidationContext context,
     CancellationToken cancellationToken
@@ -446,6 +651,8 @@ public interface IBenchmarkTestRegistry
     out BenchmarkSuiteMetadata metadata,
     out IReadOnlyList<IBenchmarkTestDefinition> tests
   );
+
+  IReadOnlyList<BenchmarkSuiteMetadata> GetSuites();
 }
 
 public sealed class BenchmarkTestRegistry : IBenchmarkTestRegistry
@@ -489,40 +696,88 @@ public sealed class BenchmarkTestRegistry : IBenchmarkTestRegistry
     out IReadOnlyList<IBenchmarkTestDefinition> tests
   )
   {
-    if (
-      !string.Equals(suiteId, BenchmarkSuiteIds.BasicCrud, StringComparison.OrdinalIgnoreCase)
-      || version != BenchmarkSuiteIds.BasicCrudVersion
-    )
+    var matching = _tests.Values
+      .Where(test => string.Equals(
+        test.Metadata.Suite,
+        suiteId,
+        StringComparison.OrdinalIgnoreCase
+      ) && test.Metadata.SuiteVersion == version)
+      .OrderBy(test => test.Metadata.Order)
+      .ThenBy(test => test.Metadata.Id, StringComparer.Ordinal)
+      .ToArray();
+    var expectedCount = string.Equals(
+      suiteId,
+      BenchmarkSuiteIds.BasicCrud,
+      StringComparison.OrdinalIgnoreCase
+    ) && version == BenchmarkSuiteIds.BasicCrudVersion
+      ? 4
+      : string.Equals(
+        suiteId,
+        BenchmarkSuiteIds.AgentBehavior,
+        StringComparison.OrdinalIgnoreCase
+      ) && version == BenchmarkSuiteIds.AgentBehaviorVersion
+        ? 7
+        : 0;
+    if (expectedCount == 0 || matching.Length == 0)
     {
       metadata = null!;
       tests = [];
       return false;
     }
-
-    tests = _tests.Values
-      .Where(test => string.Equals(
-        test.Metadata.Suite,
-        BenchmarkSuiteIds.BasicCrud,
-        StringComparison.OrdinalIgnoreCase
-      ))
-      .OrderBy(test => test.Metadata.Order)
-      .ThenBy(test => test.Metadata.Id, StringComparer.Ordinal)
-      .ToArray();
-    if (tests.Count != 4)
+    if (matching.Length != expectedCount)
     {
       throw new InvalidOperationException(
-        "The basic CRUD benchmark suite must contain exactly four versioned tests."
+        $"Benchmark suite '{suiteId}' version {version} must contain exactly {expectedCount} versioned tests."
       );
     }
+    var fixtureId = matching[0].Metadata.FixtureId;
+    var fixtureVersion = matching[0].Metadata.FixtureVersion;
+    if (matching.Any(test =>
+      !string.Equals(test.Metadata.FixtureId, fixtureId, StringComparison.Ordinal)
+      || test.Metadata.FixtureVersion != fixtureVersion))
+    {
+      throw new InvalidOperationException(
+        $"Benchmark suite '{suiteId}' version {version} has inconsistent fixture identity."
+      );
+    }
+    tests = matching;
     metadata = new BenchmarkSuiteMetadata(
-      BenchmarkSuiteIds.BasicCrud,
-      BenchmarkSuiteIds.BasicCrudVersion,
-      "Basic filesystem CRUD",
-      BenchmarkSuiteIds.FixtureId,
-      BenchmarkSuiteIds.FixtureVersion,
+      matching[0].Metadata.Suite,
+      matching[0].Metadata.SuiteVersion,
+      string.Equals(
+        matching[0].Metadata.Suite,
+        BenchmarkSuiteIds.BasicCrud,
+        StringComparison.OrdinalIgnoreCase
+      ) ? "Basic filesystem CRUD" : "Agent behavior v2",
+      fixtureId,
+      fixtureVersion,
       tests.Select(test => test.Metadata).ToArray()
     );
     return true;
+  }
+
+  public IReadOnlyList<BenchmarkSuiteMetadata> GetSuites()
+  {
+    var identities = _tests.Values
+      .Select(test => (test.Metadata.Suite, test.Metadata.SuiteVersion))
+      .Distinct()
+      .OrderBy(item => string.Equals(
+        item.Suite,
+        BenchmarkSuiteIds.BasicCrud,
+        StringComparison.OrdinalIgnoreCase
+      ) ? 0 : 1)
+      .ThenBy(item => item.Suite, StringComparer.Ordinal)
+      .ThenBy(item => item.SuiteVersion)
+      .ToArray();
+    var suites = new List<BenchmarkSuiteMetadata>(identities.Length);
+    foreach (var identity in identities)
+    {
+      if (TryGetSuite(identity.Suite, identity.SuiteVersion, out var suite, out _))
+      {
+        suites.Add(suite);
+      }
+    }
+    return suites;
   }
 }
 
@@ -551,7 +806,10 @@ public sealed record BenchmarkHarnessEvidence(
   int? SurfacedErrorCount,
   int? RecoveredErrorCount,
   long? InputTokens,
-  long? OutputTokens
+  long? OutputTokens,
+  IReadOnlyList<BenchmarkTurnEvidence>? Turns = null,
+  IReadOnlyList<BenchmarkHostEvent>? HostEvents = null,
+  IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null
 )
 {
   public static BenchmarkHarnessEvidence FromTerminal(
@@ -560,12 +818,14 @@ public sealed record BenchmarkHarnessEvidence(
     int toolCallCount,
     int surfacedErrorCount,
     long? inputTokens,
-    long? outputTokens
+    long? outputTokens,
+    IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null
   )
   {
     var status = terminal.TerminalState switch
     {
       HarnessTerminalState.Completed => BenchmarkExecutionStatusIds.Completed,
+      HarnessTerminalState.Partial => BenchmarkExecutionStatusIds.Partial,
       HarnessTerminalState.Cancelled => BenchmarkExecutionStatusIds.Cancelled,
       HarnessTerminalState.TimedOut => BenchmarkExecutionStatusIds.TimedOut,
       HarnessTerminalState.Unavailable => BenchmarkExecutionStatusIds.Unavailable,
@@ -590,7 +850,8 @@ public sealed record BenchmarkHarnessEvidence(
         ? surfacedErrorCount
         : 0,
       inputTokens,
-      outputTokens
+      outputTokens,
+      ToolCalls: ToolCalls
     );
   }
 }

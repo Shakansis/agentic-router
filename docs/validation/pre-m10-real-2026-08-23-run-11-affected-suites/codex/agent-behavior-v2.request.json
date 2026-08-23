@@ -1,0 +1,11 @@
+{
+  "model": "qwen3.8:27b-gpu0",
+  "harnesses": [
+    "codex"
+  ],
+  "suiteId": "agent-behavior",
+  "suiteVersion": 2,
+  "timeoutSeconds": 600,
+  "modelExecutionPermissionGranted": true,
+  "clientRunId": "11805a1baea4432db0fc6d58151cf5dd"
+}

@@ -1,0 +1,35 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/chat/stream",
+  "body": {
+    "message": "Pre-M10 canonical edit. In continuity/result.txt replace only stage=created with stage=edited. Preserve the observed line and every other byte. Do not change any other file. Return exactly edit=completed.",
+    "model": "qwen3.8:27b-gpu0",
+    "history": [
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical read. Read only fixture/read.txt. Do not change any file. Return exactly validation-token=ORBIT-739."
+      },
+      {
+        "role": "assistant",
+        "content": "Read only `fixture/read.txt` (1 line); no files were created, modified, or deleted.\n\nvalidation-token=ORBIT-739"
+      },
+      {
+        "role": "user",
+        "content": "Pre-M10 canonical continuity create. Using the token observed in the previous turn without rereading fixture/read.txt, create continuity/result.txt with exactly these two UTF-8 lines and no trailing newline: observed=ORBIT-739 then stage=created. Do not change any other file. Return exactly create=completed."
+      },
+      {
+        "role": "assistant",
+        "content": "create=completed"
+      }
+    ],
+    "interactionMode": "execute",
+    "harness": "claude-code",
+    "approvalPolicy": "auto",
+    "browserSessionId": "pre-m10-claude-code-9b8fdd4ef84c4a1ea49cab1ffc8c1ef9",
+    "conversationSessionId": "",
+    "webSearchEnabled": false,
+    "images": [],
+    "compactContext": false
+  },
+  "startedAt": "2026-08-23T06:02:17.9486158+00:00"
+}

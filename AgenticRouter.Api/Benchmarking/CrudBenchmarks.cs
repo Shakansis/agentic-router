@@ -188,7 +188,7 @@ public abstract class BasicCrudBenchmark : IBenchmarkTestDefinition
     return File.Exists(path) || Directory.Exists(path);
   }
 
-  private static BenchmarkChangeSet CalculateChanges(
+  internal static BenchmarkChangeSet CalculateChanges(
     BenchmarkWorkspaceSnapshot initial,
     BenchmarkWorkspaceSnapshot final
   )

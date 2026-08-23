@@ -1,0 +1,32 @@
+{
+  "definition": {
+    "id": "opencode",
+    "displayName": "OpenCode",
+    "experimental": true,
+    "description": "OpenCode headless server with isolated local configuration and Host-observed effects.",
+    "capabilities": {
+      "supportsStreaming": true,
+      "supportsThinking": true,
+      "supportsResume": true,
+      "supportsCancel": true,
+      "supportsApprovals": true,
+      "supportsToolEvents": true,
+      "supportsStructuredEdits": true,
+      "supportsStaleProtection": false,
+      "supportsSubagents": false,
+      "supportsSandbox": false,
+      "supportsSessionDiff": true,
+      "supportsNativePermissions": true
+    },
+    "supportedProviders": [
+      "ollama-local"
+    ]
+  },
+  "availability": {
+    "state": 0,
+    "version": "1.18.18",
+    "message": null,
+    "checkedAt": "2026-08-23T04:31:46.4297893-03:00",
+    "available": true
+  }
+}

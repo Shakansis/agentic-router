@@ -223,7 +223,13 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
         }
       }
       active?.Dispose();
-      if (request.ReleaseWorkspaceAfterTurn)
+      if (
+        request.ReleaseWorkspaceAfterTurn
+        || (
+          request.ReleaseWorkspaceOnCancellation
+          && cancellationToken.IsCancellationRequested
+        )
+      )
       {
         _sessions.TryRemove(request.SessionId, out _);
       }

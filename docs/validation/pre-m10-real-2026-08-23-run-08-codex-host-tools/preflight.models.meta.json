@@ -1,0 +1,19 @@
+{
+  "statusCode": 200,
+  "elapsedMilliseconds": 16,
+  "completedAt": "2026-08-23T06:52:53.0563838+00:00",
+  "headers": {
+    "Date": [
+      "Sun, 23 Aug 2026 06:52:52 GMT"
+    ],
+    "Server": [
+      "Kestrel"
+    ],
+    "Transfer-Encoding": [
+      "chunked"
+    ],
+    "Content-Type": [
+      "application/json; charset=utf-8"
+    ]
+  }
+}

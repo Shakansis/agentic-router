@@ -636,6 +636,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         message => message.Content.Contains(
           BenchmarkNativeExecutor.PromptMarker,
           StringComparison.Ordinal
+        ) || message.Content.Contains(
+          BenchmarkNativeExecutor.BehaviorPromptMarker,
+          StringComparison.Ordinal
         )
       )
     )
@@ -766,6 +769,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       && messages.Any(
         message => message.Content.Contains(
           BenchmarkNativeExecutor.PromptMarker,
+          StringComparison.Ordinal
+        ) || message.Content.Contains(
+          BenchmarkNativeExecutor.BehaviorPromptMarker,
           StringComparison.Ordinal
         )
       )
@@ -3911,6 +3917,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "Recover after malformed process",
       StringComparison.OrdinalIgnoreCase
     ) || objective.Contains(
+      "Recover after outside process path",
+      StringComparison.OrdinalIgnoreCase
+    ) || objective.Contains(
       "Qwen premature completion correction",
       StringComparison.OrdinalIgnoreCase
     );
@@ -3967,6 +3976,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     if (results.Count == 0)
     {
+      if (objective.Contains(
+        "Recover after outside process path",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "process-boundary-recovered.txt",
+            content = "verified before rejected outside process path"
+          },
+          explanation = "Create and verify the requested file before the outside process path proposal."
+        };
+      }
       if (objective.Contains(
         "Recover after malformed process",
         StringComparison.OrdinalIgnoreCase
@@ -4044,6 +4069,30 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           content = "print(\"hello\")\n"
         },
         explanation = "Create the requested Python program."
+      };
+    }
+
+    if (
+      objective.Contains(
+        "Recover after outside process path",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && !results.Any(result => result.ToolName == "run_process")
+    )
+    {
+      return new
+      {
+        tool = (string?)"run_process",
+        arguments = (object)new
+        {
+          executable = OperatingSystem.IsWindows() ? "findstr" : "grep",
+          arguments = OperatingSystem.IsWindows()
+            ? new[] { "/n", "/R", "/C:.*", "../outside-sentinel.txt" }
+            : new[] { ".*", "../outside-sentinel.txt" },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Attempt one structured process read outside the trusted workspace."
       };
     }
 
@@ -5050,7 +5099,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   )
   {
     var request = messages.Last(message => message.Role == "user").Content;
-    var completedTools = messages.Count(message => message.Role == "tool");
+    var lastUserIndex = Array.FindLastIndex(
+      messages.ToArray(),
+      message => message.Role == "user"
+    );
+    var completedTools = messages.Skip(lastUserIndex + 1).Count(
+      message => message.Role == "tool"
+    );
     if (
       request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
       && model is "unused:latest" or "docs:latest"
@@ -5073,6 +5128,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         cancellationToken
       );
       return;
+    }
+    if (
+      request.Contains("Benchmark scenario: CONVERGENCE-001", StringComparison.Ordinal)
+      && string.Equals(model, "unused:latest", StringComparison.Ordinal)
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
     }
 
     string content = string.Empty;
@@ -5161,6 +5223,126 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       else
       {
         content = "Delete benchmark completed.";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: CONTINUITY-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "replace_text";
+        arguments = request.Contains("Set only title=ORION", StringComparison.Ordinal)
+          ? new { path = "app/config.txt", oldText = "title=Atlas", newText = "title=ORION", replaceAll = false }
+          : request.Contains("Enable the same application", StringComparison.Ordinal)
+            ? new { path = "app/config.txt", oldText = "enabled=false", newText = "enabled=true", replaceAll = false }
+            : new { path = "app/config.txt", oldText = "theme=amber", newText = "theme=violet", replaceAll = false };
+      }
+      else
+      {
+        content = request.Contains("theme to violet", StringComparison.Ordinal)
+          ? "turn-3=completed"
+          : request.Contains("Enable the same application", StringComparison.Ordinal)
+            ? "turn-2=completed"
+            : "turn-1=completed";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: SCOPE-RETENTION-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "replace_text";
+        arguments = new { path = "src/target.txt", oldText = "mode=old", newText = "mode=new", replaceAll = false };
+      }
+      else
+      {
+        content = "scope=retained";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: RECOVERY-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/recovery-old.txt" };
+      }
+      else if (completedTools == 1)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/recovery.txt" };
+      }
+      else if (completedTools == 2)
+      {
+        tool = "create_file";
+        arguments = new { path = "output/recovery.txt", content = "recovered=RECOVER-42" };
+      }
+      else
+      {
+        content = "recovery=completed";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: CONVERGENCE-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "replace_text";
+        arguments = new { path = "fixture/converge.txt", oldText = "status=pending", newText = "status=complete", replaceAll = false };
+      }
+      else if (completedTools == 1)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/converge.txt" };
+      }
+      else
+      {
+        content = "validation=passed";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: TERMINALITY-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "replace_text";
+        arguments = new { path = "required.txt", oldText = "required=pending", newText = "required=completed", replaceAll = false };
+      }
+      else
+      {
+        content = "required-change=completed\noptional-validation=unavailable";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: STALE-CONFLICT-001", StringComparison.Ordinal))
+    {
+      var continuation = request.Contains("continuation", StringComparison.Ordinal);
+      if (completedTools == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "state.txt" };
+      }
+      else if (continuation && completedTools == 1)
+      {
+        tool = "replace_text";
+        arguments = new { path = "state.txt", oldText = "mode=old", newText = "mode=updated", replaceAll = false };
+      }
+      else
+      {
+        content = continuation ? "external-change=preserved" : "observed-version=1";
+      }
+    }
+    else if (request.Contains("Benchmark scenario: TRUTHFUL-REPORT-001", StringComparison.Ordinal))
+    {
+      if (completedTools == 0)
+      {
+        tool = "replace_text";
+        arguments = new { path = "truth.txt", oldText = "required=pending", newText = "required=completed", replaceAll = false };
+      }
+      else if (completedTools == 1)
+      {
+        tool = "read_file";
+        arguments = new { path = "optional-validation.txt" };
+      }
+      else
+      {
+        content = string.Equals(model, "beta:code", StringComparison.Ordinal)
+          ? "required-change=completed\neverything passed"
+          : "required-change=completed\noptional-validation=failed";
       }
     }
 

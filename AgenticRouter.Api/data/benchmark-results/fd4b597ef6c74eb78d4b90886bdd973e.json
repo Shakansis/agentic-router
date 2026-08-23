@@ -1,0 +1,472 @@
+{
+  "RunId": "fd4b597ef6c74eb78d4b90886bdd973e",
+  "Model": "qwen3.8:27b-gpu0",
+  "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+  "Provider": "ollama-local",
+  "SuiteId": "basic-crud",
+  "SuiteVersion": 1,
+  "FixtureId": "basic-crud-fixture",
+  "FixtureVersion": 1,
+  "StartedAt": "2026-08-23T14:09:05.299581+00:00",
+  "EndedAt": "2026-08-23T14:09:21.0831545+00:00",
+  "DurationMilliseconds": 15783,
+  "TerminalState": "cancelled",
+  "FinalStatus": "cancelled",
+  "TimeoutSeconds": 120,
+  "ScoreWeights": {
+    "ObjectiveSuccess": 35,
+    "Correctness": 20,
+    "Terminality": 20,
+    "WorkspaceAccuracy": 20,
+    "Efficiency": 5,
+    "Total": 100
+  },
+  "HarnessResults": [
+    {
+      "Harness": "native",
+      "HarnessVersion": "built-in",
+      "Passed": 0,
+      "Total": 4,
+      "Score": 5.63,
+      "DurationMilliseconds": 15754,
+      "Terminality": 0,
+      "TerminalState": "cancelled",
+      "Tests": [
+        {
+          "Run": {
+            "RunId": "311ea533253b4a2fbaea08e6a6ef7103",
+            "TestId": "FS-CREATE-001",
+            "TestVersion": 1,
+            "Model": "qwen3.8:27b-gpu0",
+            "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+            "Provider": "ollama-local",
+            "Harness": "native",
+            "HarnessVersion": "built-in",
+            "WorkspaceId": "311ea533253b4a2fbaea08e6a6ef7103",
+            "WorkspacePath": "C:\\Users\\Rodrigo\\AppData\\Local\\Temp\\agentic-router\\benchmark-runs\\311ea533253b4a2fbaea08e6a6ef7103\\workspace",
+            "StartedAt": "2026-08-23T14:09:05.3052616+00:00",
+            "EndedAt": "2026-08-23T14:09:21.0600543+00:00",
+            "ExecutionStatus": "cancelled",
+            "SuiteId": "basic-crud",
+            "SuiteVersion": 1,
+            "FixtureId": "basic-crud-fixture",
+            "FixtureVersion": 1,
+            "Prompt": "Benchmark test: FS-CREATE-001 (version 1; acceptance 1).\nInside the provided workspace, create exactly benchmark-data/result.txt with the following UTF-8 text and no byte-order mark:\n\nAgentic Router Benchmark\noperation=create\nresult=success\n\nThe canonical file ends immediately after \u0027success\u0027; do not append a trailing newline. Do not modify or delete any existing file and do not create any other file.",
+            "FixtureFingerprint": "c2b0840ff77c6ff5cc4deca1944482de292a1bd9a43736535f4aae68e3bc4da9"
+          },
+          "RawResult": {
+            "Status": "ERROR",
+            "ObjectiveAchieved": false,
+            "ByteAccuracy": 0,
+            "DirectoryAccuracy": 0,
+            "FilenameAccuracy": 0,
+            "ContainmentAccuracy": 100,
+            "UnexpectedCreatedFiles": [],
+            "UnexpectedModifiedFiles": [],
+            "UnexpectedDeletedFiles": [],
+            "ExecutionStatus": "cancelled",
+            "Error": {
+              "Code": "benchmark-cancelled",
+              "Message": "The benchmark run was cancelled.",
+              "Stage": "harness-execution",
+              "Recoverable": true
+            },
+            "InputTokens": null,
+            "OutputTokens": null,
+            "Exactness": 0,
+            "UsefulPartialOutcome": false,
+            "ToolCallCount": null,
+            "SurfacedErrorCount": null,
+            "RecoveredErrorCount": null,
+            "ChangedFiles": [],
+            "UnexpectedFiles": [
+              "missing:benchmark-data/result.txt"
+            ],
+            "HostValidationResult": "fail",
+            "FinalHarnessReport": "",
+            "ValidationFacts": {
+              "expectedPath": "benchmark-data/result.txt",
+              "expectedByteLength": "56",
+              "actualByteLength": "missing",
+              "expectedSha256": "faca1098e03423bb669753af45e56c3b99ee0bfa53de741aa6e5a20650a3eee9",
+              "actualSha256": "missing"
+            },
+            "BehaviorMetrics": null,
+            "Turns": null,
+            "HostEvents": null,
+            "ToolCalls": null
+          },
+          "WorkspaceCleanedUp": true,
+          "Score": {
+            "Total": 22.5,
+            "ObjectiveSuccess": 0,
+            "Correctness": 0,
+            "Terminality": 0,
+            "WorkspaceAccuracy": 100,
+            "Efficiency": 50
+          },
+          "DurationMilliseconds": 15754
+        }
+      ]
+    }
+  ],
+  "Ranking": [
+    {
+      "Rank": 1,
+      "Harness": "native",
+      "Passed": 0,
+      "Score": 5.63,
+      "DurationMilliseconds": 15754,
+      "Terminality": 0
+    }
+  ],
+  "SchemaVersion": 2,
+  "ScoringProfileId": "custom",
+  "SelectedModels": [
+    "qwen3.8:27b-gpu0"
+  ],
+  "SelectedHarnesses": [
+    "native",
+    "claude-code",
+    "codex",
+    "opencode",
+    "qwen-code"
+  ],
+  "ModelIdentities": [
+    {
+      "Model": "qwen3.8:27b-gpu0",
+      "Digest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+      "Provider": "ollama-local",
+      "SizeBytes": 17741872184,
+      "ModifiedAt": "2026-08-19T22:09:32.5916985-03:00",
+      "Quantization": "Q4_K_M",
+      "DeclaredContextTokens": 262144,
+      "ConfiguredContextTokens": 32768,
+      "ParameterSize": "27.3B",
+      "Format": "gguf",
+      "Family": "qwen35"
+    }
+  ],
+  "Cells": [
+    {
+      "ExecutionOrder": 1,
+      "Model": "qwen3.8:27b-gpu0",
+      "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+      "Provider": "ollama-local",
+      "Harness": "native",
+      "HarnessVersion": "built-in",
+      "Status": "cancelled",
+      "Compatibility": "available",
+      "Message": "The benchmark run was cancelled.",
+      "Passed": 0,
+      "Total": 4,
+      "Score": 5.63,
+      "DurationMilliseconds": 15754,
+      "Terminality": 0,
+      "Correctness": 0,
+      "Recovery": null,
+      "Convergence": null,
+      "Hygiene": null,
+      "Result": {
+        "Harness": "native",
+        "HarnessVersion": "built-in",
+        "Passed": 0,
+        "Total": 4,
+        "Score": 5.63,
+        "DurationMilliseconds": 15754,
+        "Terminality": 0,
+        "TerminalState": "cancelled",
+        "Tests": [
+          {
+            "Run": {
+              "RunId": "311ea533253b4a2fbaea08e6a6ef7103",
+              "TestId": "FS-CREATE-001",
+              "TestVersion": 1,
+              "Model": "qwen3.8:27b-gpu0",
+              "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+              "Provider": "ollama-local",
+              "Harness": "native",
+              "HarnessVersion": "built-in",
+              "WorkspaceId": "311ea533253b4a2fbaea08e6a6ef7103",
+              "WorkspacePath": "C:\\Users\\Rodrigo\\AppData\\Local\\Temp\\agentic-router\\benchmark-runs\\311ea533253b4a2fbaea08e6a6ef7103\\workspace",
+              "StartedAt": "2026-08-23T14:09:05.3052616+00:00",
+              "EndedAt": "2026-08-23T14:09:21.0600543+00:00",
+              "ExecutionStatus": "cancelled",
+              "SuiteId": "basic-crud",
+              "SuiteVersion": 1,
+              "FixtureId": "basic-crud-fixture",
+              "FixtureVersion": 1,
+              "Prompt": "Benchmark test: FS-CREATE-001 (version 1; acceptance 1).\nInside the provided workspace, create exactly benchmark-data/result.txt with the following UTF-8 text and no byte-order mark:\n\nAgentic Router Benchmark\noperation=create\nresult=success\n\nThe canonical file ends immediately after \u0027success\u0027; do not append a trailing newline. Do not modify or delete any existing file and do not create any other file.",
+              "FixtureFingerprint": "c2b0840ff77c6ff5cc4deca1944482de292a1bd9a43736535f4aae68e3bc4da9"
+            },
+            "RawResult": {
+              "Status": "ERROR",
+              "ObjectiveAchieved": false,
+              "ByteAccuracy": 0,
+              "DirectoryAccuracy": 0,
+              "FilenameAccuracy": 0,
+              "ContainmentAccuracy": 100,
+              "UnexpectedCreatedFiles": [],
+              "UnexpectedModifiedFiles": [],
+              "UnexpectedDeletedFiles": [],
+              "ExecutionStatus": "cancelled",
+              "Error": {
+                "Code": "benchmark-cancelled",
+                "Message": "The benchmark run was cancelled.",
+                "Stage": "harness-execution",
+                "Recoverable": true
+              },
+              "InputTokens": null,
+              "OutputTokens": null,
+              "Exactness": 0,
+              "UsefulPartialOutcome": false,
+              "ToolCallCount": null,
+              "SurfacedErrorCount": null,
+              "RecoveredErrorCount": null,
+              "ChangedFiles": [],
+              "UnexpectedFiles": [
+                "missing:benchmark-data/result.txt"
+              ],
+              "HostValidationResult": "fail",
+              "FinalHarnessReport": "",
+              "ValidationFacts": {
+                "expectedPath": "benchmark-data/result.txt",
+                "expectedByteLength": "56",
+                "actualByteLength": "missing",
+                "expectedSha256": "faca1098e03423bb669753af45e56c3b99ee0bfa53de741aa6e5a20650a3eee9",
+                "actualSha256": "missing"
+              },
+              "BehaviorMetrics": null,
+              "Turns": null,
+              "HostEvents": null,
+              "ToolCalls": null
+            },
+            "WorkspaceCleanedUp": true,
+            "Score": {
+              "Total": 22.5,
+              "ObjectiveSuccess": 0,
+              "Correctness": 0,
+              "Terminality": 0,
+              "WorkspaceAccuracy": 100,
+              "Efficiency": 50
+            },
+            "DurationMilliseconds": 15754
+          }
+        ]
+      }
+    },
+    {
+      "ExecutionOrder": 2,
+      "Model": "qwen3.8:27b-gpu0",
+      "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+      "Provider": "ollama-local",
+      "Harness": "claude-code",
+      "HarnessVersion": "2.1.234 (Claude Code)",
+      "Status": "cancelled",
+      "Compatibility": "available",
+      "Message": "The matrix run was cancelled before this cell started.",
+      "Passed": 0,
+      "Total": 4,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Correctness": 0,
+      "Recovery": null,
+      "Convergence": null,
+      "Hygiene": null,
+      "Result": null
+    },
+    {
+      "ExecutionOrder": 3,
+      "Model": "qwen3.8:27b-gpu0",
+      "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+      "Provider": "ollama-local",
+      "Harness": "codex",
+      "HarnessVersion": "codex-cli 0.149.0-alpha.4.1",
+      "Status": "cancelled",
+      "Compatibility": "available",
+      "Message": "The matrix run was cancelled before this cell started.",
+      "Passed": 0,
+      "Total": 4,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Correctness": 0,
+      "Recovery": null,
+      "Convergence": null,
+      "Hygiene": null,
+      "Result": null
+    },
+    {
+      "ExecutionOrder": 4,
+      "Model": "qwen3.8:27b-gpu0",
+      "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+      "Provider": "ollama-local",
+      "Harness": "opencode",
+      "HarnessVersion": "1.18.18",
+      "Status": "cancelled",
+      "Compatibility": "available",
+      "Message": "The matrix run was cancelled before this cell started.",
+      "Passed": 0,
+      "Total": 4,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Correctness": 0,
+      "Recovery": null,
+      "Convergence": null,
+      "Hygiene": null,
+      "Result": null
+    },
+    {
+      "ExecutionOrder": 5,
+      "Model": "qwen3.8:27b-gpu0",
+      "ModelDigest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169",
+      "Provider": "ollama-local",
+      "Harness": "qwen-code",
+      "HarnessVersion": "0.21.13",
+      "Status": "cancelled",
+      "Compatibility": "available",
+      "Message": "The matrix run was cancelled before this cell started.",
+      "Passed": 0,
+      "Total": 4,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Correctness": 0,
+      "Recovery": null,
+      "Convergence": null,
+      "Hygiene": null,
+      "Result": null
+    }
+  ],
+  "PairRanking": [
+    {
+      "Rank": 1,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "native",
+      "Passed": 0,
+      "Score": 5.63,
+      "DurationMilliseconds": 15754,
+      "Terminality": 0,
+      "Status": "cancelled"
+    },
+    {
+      "Rank": 2,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "claude-code",
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Status": "cancelled"
+    },
+    {
+      "Rank": 3,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "codex",
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Status": "cancelled"
+    },
+    {
+      "Rank": 4,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "opencode",
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Status": "cancelled"
+    },
+    {
+      "Rank": 5,
+      "Model": "qwen3.8:27b-gpu0",
+      "Harness": "qwen-code",
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0,
+      "Status": "cancelled"
+    }
+  ],
+  "ModelRanking": [
+    {
+      "Rank": 1,
+      "Id": "qwen3.8:27b-gpu0",
+      "CompletedCells": 0,
+      "TotalCells": 5,
+      "Passed": 0,
+      "Score": 1.13,
+      "DurationMilliseconds": 15754,
+      "Terminality": 0
+    }
+  ],
+  "HarnessRanking": [
+    {
+      "Rank": 1,
+      "Id": "native",
+      "CompletedCells": 0,
+      "TotalCells": 1,
+      "Passed": 0,
+      "Score": 5.63,
+      "DurationMilliseconds": 15754,
+      "Terminality": 0
+    },
+    {
+      "Rank": 2,
+      "Id": "claude-code",
+      "CompletedCells": 0,
+      "TotalCells": 1,
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0
+    },
+    {
+      "Rank": 3,
+      "Id": "codex",
+      "CompletedCells": 0,
+      "TotalCells": 1,
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0
+    },
+    {
+      "Rank": 4,
+      "Id": "opencode",
+      "CompletedCells": 0,
+      "TotalCells": 1,
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0
+    },
+    {
+      "Rank": 5,
+      "Id": "qwen-code",
+      "CompletedCells": 0,
+      "TotalCells": 1,
+      "Passed": 0,
+      "Score": 0,
+      "DurationMilliseconds": 0,
+      "Terminality": 0
+    }
+  ],
+  "ExecutionOrder": [
+    "qwen3.8:27b-gpu0|native",
+    "qwen3.8:27b-gpu0|claude-code",
+    "qwen3.8:27b-gpu0|codex",
+    "qwen3.8:27b-gpu0|opencode",
+    "qwen3.8:27b-gpu0|qwen-code"
+  ],
+  "Environment": {
+    "Runtime": "ollama-local",
+    "RuntimeVersion": "0.32.14",
+    "Sequential": true,
+    "ConfiguredContextTokens": 32768
+  }
+}

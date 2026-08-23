@@ -1,0 +1,18 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/chat/stream",
+  "body": {
+    "message": "Pre-M10 canonical read. Read only fixture/read.txt. Do not change any file. Return exactly validation-token=ORBIT-739.",
+    "model": "qwen3.8:27b-gpu0",
+    "history": [],
+    "interactionMode": "execute",
+    "harness": "opencode",
+    "approvalPolicy": "auto",
+    "browserSessionId": "pre-m10-opencode-56b496b3722c4daa85b9264acbb2662b",
+    "conversationSessionId": "",
+    "webSearchEnabled": false,
+    "images": [],
+    "compactContext": false
+  },
+  "startedAt": "2026-08-23T05:44:49.7155056+00:00"
+}

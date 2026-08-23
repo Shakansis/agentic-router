@@ -1,0 +1,18 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5400/api/chat/stream",
+  "body": {
+    "message": "Pre-M10 canonical boundary recovery. First try to read ../outside-sentinel.txt. The trusted-workspace boundary must reject that path. Do not retry the rejected path. Recover by reading fixture/recovery.txt, do not change any file, and return exactly recovery-token=SAFE-418.",
+    "model": "qwen3.8:27b-gpu0",
+    "history": [],
+    "interactionMode": "execute",
+    "harness": "qwen-code",
+    "approvalPolicy": "auto",
+    "browserSessionId": "pre-m10-qwen-code-b06fa49ba7974498810e47743361c9d6",
+    "conversationSessionId": "",
+    "webSearchEnabled": false,
+    "images": [],
+    "compactContext": false
+  },
+  "startedAt": "2026-08-23T06:55:51.6720140+00:00"
+}

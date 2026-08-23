@@ -5036,6 +5036,16 @@ textarea[readonly] {
   font-weight: 700;
 }
 
+.benchmark-selection-grid small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+#benchmark-model {
+  min-height: 7.5rem;
+}
+
 .benchmark-harnesses {
   margin: 0;
   padding: 0.75rem;
@@ -5173,6 +5183,62 @@ textarea[readonly] {
 
 .benchmark-live-dashboard[hidden] {
   display: none;
+}
+
+.benchmark-matrix {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+}
+
+.benchmark-matrix[hidden] {
+  display: none;
+}
+
+.benchmark-matrix table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.benchmark-matrix th,
+.benchmark-matrix td {
+  padding: 0.55rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.benchmark-matrix th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  text-align: left;
+  background: var(--panel);
+}
+
+.benchmark-matrix-cell {
+  min-width: 5.5rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel-raised) 82%, transparent);
+  cursor: pointer;
+}
+
+.benchmark-matrix-cell[data-status="unsupported"],
+.benchmark-matrix-cell[data-status="unavailable"] {
+  color: var(--muted);
+}
+
+.benchmark-ranking-scope {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 .benchmark-live-harness {

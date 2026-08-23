@@ -40,12 +40,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   ];
   private static readonly string[] DefaultCoreTools =
   [
-    "list_directory",
-    "read_file",
-    "glob",
-    "grep_search",
-    "edit",
-    "write_file",
     "web_fetch",
     "web_search",
     "todo_write"
@@ -543,7 +537,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             _permissions.TryRemove(pending.Key, out _);
           }
         }
-        if (request.ReleaseWorkspaceAfterTurn)
+        if (
+          request.ReleaseWorkspaceAfterTurn
+          || (
+            request.ReleaseWorkspaceOnCancellation
+            && cancellationToken.IsCancellationRequested
+          )
+        )
         {
           await ReleaseWorkspaceAsync();
         }
@@ -1144,6 +1144,12 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       {
         deny = new[]
         {
+          "read_file",
+          "list_directory",
+          "glob",
+          "grep_search",
+          "edit",
+          "write_file",
           "run_shell_command",
           "agent",
           "skill",
@@ -1395,29 +1401,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
   private static string[] MinimalCoreTools(HostCapabilityProfile profile)
   {
-    var tools = new List<string>();
-    if (profile.Allows("list_files"))
-    {
-      tools.Add("list_directory");
-    }
-    if (profile.Allows("read_file"))
-    {
-      tools.Add("read_file");
-    }
-    if (profile.Allows("search_text"))
-    {
-      tools.Add("glob");
-      tools.Add("grep_search");
-    }
-    if (profile.Allows("replace_text") || profile.Allows("apply_patch"))
-    {
-      tools.Add("edit");
-    }
-    if (profile.Allows("create_file") || profile.Allows("write_file"))
-    {
-      tools.Add("write_file");
-    }
-    return tools.ToArray();
+    return [];
   }
 
   private async Task StopOwnedProcessAsync()

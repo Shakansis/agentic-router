@@ -1,0 +1,824 @@
+{
+  "runId": "0e41ca2b572948779daeb4ac0822c605",
+  "originalScoreWeights": {
+    "objectiveSuccess": 35,
+    "correctness": 25,
+    "terminality": 15,
+    "workspaceAccuracy": 20,
+    "efficiency": 5,
+    "total": 100
+  },
+  "activeProfile": {
+    "id": "default",
+    "version": 1,
+    "displayName": "Default",
+    "weights": {
+      "objectiveSuccess": 35,
+      "correctness": 25,
+      "terminality": 15,
+      "workspaceAccuracy": 20,
+      "efficiency": 5,
+      "total": 100
+    }
+  },
+  "harnessScores": [],
+  "ranking": [],
+  "matrixCellScores": [
+    {
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "native",
+      "score": 80.69,
+      "breakdown": {
+        "objectiveSuccess": 75,
+        "correctness": 75,
+        "terminality": 75,
+        "workspaceAccuracy": 100,
+        "efficiency": 88.75
+      },
+      "tests": [
+        {
+          "runId": "5611377e17874765b807f16f642dc8a0",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        },
+        {
+          "runId": "3fe10d779e644457b434cb25137beaaf",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 24,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 0,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "0cf42122943a4badbb58a25a53b356a7",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        },
+        {
+          "runId": "a53d81f762274d9baefd811804d95e77",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "codex",
+      "score": 99,
+      "breakdown": {
+        "objectiveSuccess": 100,
+        "correctness": 100,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 80
+      },
+      "tests": [
+        {
+          "runId": "b993f2650b2749a6be5fd13694a33494",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "77ea2e20a3e84d27bc0551428b05b9cd",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "7ae9f56a273943898eb77aa199bf29c9",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "ee483ac99b8b4768ab6c107ef52c8c8c",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "opencode",
+      "score": 98.25,
+      "breakdown": {
+        "objectiveSuccess": 100,
+        "correctness": 100,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 65
+      },
+      "tests": [
+        {
+          "runId": "6ddf119eb23041e7924552cc7c825286",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 98,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 60
+          }
+        },
+        {
+          "runId": "cfb7ac8d48194ea7964564bbe05c0cb8",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 99.5,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "ed5c7120b3c14a69b9e426b9812ee5c7",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 98,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 60
+          }
+        },
+        {
+          "runId": "b9a28bc7e806477b9dfbee893a7aaec9",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 97.5,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 50
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "qwen-code",
+      "score": 98.56,
+      "breakdown": {
+        "objectiveSuccess": 100,
+        "correctness": 100,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 71.25
+      },
+      "tests": [
+        {
+          "runId": "43d51efd25df48678d1955dd03da2dca",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        },
+        {
+          "runId": "5eababa907ba4280bd7ed9c611ee5bf6",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        },
+        {
+          "runId": "4f1a89f57a294b25ae51b897c6d90da8",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 98,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 60
+          }
+        },
+        {
+          "runId": "e73d18948a104338a7585e6e78626356",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "claude-code",
+      "score": 99.13,
+      "breakdown": {
+        "objectiveSuccess": 100,
+        "correctness": 100,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 82.5
+      },
+      "tests": [
+        {
+          "runId": "bbb0f0b0d5fe429182269ce7c917e1a7",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 99.5,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "0b1d9ae7e1ae488b84381fd91bdfdb1f",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 99.5,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "85cfc3fab01846d796f90503fdcc68d9",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        },
+        {
+          "runId": "d7b1219861d447ddb5159328d20a29b3",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3:4b-instruct",
+      "harness": "native",
+      "score": 81,
+      "breakdown": {
+        "objectiveSuccess": 75,
+        "correctness": 75,
+        "terminality": 75,
+        "workspaceAccuracy": 100,
+        "efficiency": 95
+      },
+      "tests": [
+        {
+          "runId": "6e4dae07c64a4622a26feb7b1b419153",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        },
+        {
+          "runId": "f871f7f6a8e34faf9e905f232a2f1b85",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 24,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 0,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "3eedd02184f041309788603a0a223025",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        },
+        {
+          "runId": "db90fb8bf07b47d99608f029dd50ec11",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3:4b-instruct",
+      "harness": "codex",
+      "score": 99,
+      "breakdown": {
+        "objectiveSuccess": 100,
+        "correctness": 100,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 80
+      },
+      "tests": [
+        {
+          "runId": "88f7b2a0a8da4e4cb45d7fb27cc946f3",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "26d50d579e2f47bdb722d0b2d7a1fe37",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "567ed389a2ff4931b5ed4db6032456a4",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        },
+        {
+          "runId": "c236978871c4492ea5ef9a41cebd080d",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 99,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 80
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3:4b-instruct",
+      "harness": "opencode",
+      "score": 69.06,
+      "breakdown": {
+        "objectiveSuccess": 50,
+        "correctness": 50,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 81.25
+      },
+      "tests": [
+        {
+          "runId": "e687e25d2388441f994935edc8319900",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 39.5,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "77b2f03fd3264a09b4fee94bca6a4d8a",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 98,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 60
+          }
+        },
+        {
+          "runId": "05278f0a85a0448d984e3fad451b5b81",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 98.75,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 75
+          }
+        },
+        {
+          "runId": "62ac3200dd5e4c6c9c53386896403224",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 40,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3:4b-instruct",
+      "harness": "qwen-code",
+      "score": 32.38,
+      "breakdown": {
+        "objectiveSuccess": 0,
+        "correctness": 0,
+        "terminality": 50,
+        "workspaceAccuracy": 100,
+        "efficiency": 97.5
+      },
+      "tests": [
+        {
+          "runId": "96127991d3334b8c9560a367db4fb23f",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 25,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 0,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        },
+        {
+          "runId": "ae2926297372416a800727e8a2aab373",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 39.5,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "8912b68f081a49d7bd312048e9d48458",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 40,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        },
+        {
+          "runId": "c886cc04233a4796bfb83ff1c7cd3048",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 25,
+            "objectiveSuccess": 0,
+            "correctness": 0,
+            "terminality": 0,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen3:4b-instruct",
+      "harness": "claude-code",
+      "score": 99.75,
+      "breakdown": {
+        "objectiveSuccess": 100,
+        "correctness": 100,
+        "terminality": 100,
+        "workspaceAccuracy": 100,
+        "efficiency": 95
+      },
+      "tests": [
+        {
+          "runId": "01328c4cf63d470d88e24dbcd8c517c9",
+          "testId": "FS-CREATE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        },
+        {
+          "runId": "1c16a20926154006b0c9896b2ff6f444",
+          "testId": "FS-READ-001",
+          "score": {
+            "total": 99.5,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "ca150ed9d5074e65a15c4ed96641c2fb",
+          "testId": "FS-UPDATE-001",
+          "score": {
+            "total": 99.5,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 90
+          }
+        },
+        {
+          "runId": "cf38387122994d37a3c0d023042723cd",
+          "testId": "FS-DELETE-001",
+          "score": {
+            "total": 100,
+            "objectiveSuccess": 100,
+            "correctness": 100,
+            "terminality": 100,
+            "workspaceAccuracy": 100,
+            "efficiency": 100
+          }
+        }
+      ]
+    }
+  ],
+  "pairRanking": [
+    {
+      "rank": 1,
+      "model": "qwen3:4b-instruct",
+      "harness": "claude-code",
+      "passed": 4,
+      "score": 99.75,
+      "durationMilliseconds": 7947,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 2,
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "claude-code",
+      "passed": 4,
+      "score": 99.13,
+      "durationMilliseconds": 66723,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 3,
+      "model": "qwen3:4b-instruct",
+      "harness": "codex",
+      "passed": 4,
+      "score": 99,
+      "durationMilliseconds": 10885,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 4,
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "codex",
+      "passed": 4,
+      "score": 99,
+      "durationMilliseconds": 69571,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 5,
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "qwen-code",
+      "passed": 4,
+      "score": 98.56,
+      "durationMilliseconds": 167953,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 6,
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "opencode",
+      "passed": 4,
+      "score": 98.25,
+      "durationMilliseconds": 77521,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 7,
+      "model": "qwen3:4b-instruct",
+      "harness": "native",
+      "passed": 3,
+      "score": 81,
+      "durationMilliseconds": 7366,
+      "terminality": 75,
+      "status": "failed"
+    },
+    {
+      "rank": 8,
+      "model": "qwen3.8:27b-gpu0",
+      "harness": "native",
+      "passed": 3,
+      "score": 80.69,
+      "durationMilliseconds": 37104,
+      "terminality": 75,
+      "status": "failed"
+    },
+    {
+      "rank": 9,
+      "model": "qwen3:4b-instruct",
+      "harness": "opencode",
+      "passed": 2,
+      "score": 69.06,
+      "durationMilliseconds": 16868,
+      "terminality": 100,
+      "status": "completed"
+    },
+    {
+      "rank": 10,
+      "model": "qwen3:4b-instruct",
+      "harness": "qwen-code",
+      "passed": 0,
+      "score": 32.38,
+      "durationMilliseconds": 21438,
+      "terminality": 50,
+      "status": "failed"
+    }
+  ],
+  "modelRanking": [
+    {
+      "rank": 1,
+      "id": "qwen3.8:27b-gpu0",
+      "completedCells": 4,
+      "totalCells": 5,
+      "passed": 19,
+      "score": 95.13,
+      "durationMilliseconds": 418872,
+      "terminality": 95
+    },
+    {
+      "rank": 2,
+      "id": "qwen3:4b-instruct",
+      "completedCells": 3,
+      "totalCells": 5,
+      "passed": 13,
+      "score": 76.24,
+      "durationMilliseconds": 64504,
+      "terminality": 85
+    }
+  ],
+  "harnessRanking": [
+    {
+      "rank": 1,
+      "id": "claude-code",
+      "completedCells": 2,
+      "totalCells": 2,
+      "passed": 8,
+      "score": 99.44,
+      "durationMilliseconds": 74670,
+      "terminality": 100
+    },
+    {
+      "rank": 2,
+      "id": "codex",
+      "completedCells": 2,
+      "totalCells": 2,
+      "passed": 8,
+      "score": 99,
+      "durationMilliseconds": 80456,
+      "terminality": 100
+    },
+    {
+      "rank": 3,
+      "id": "opencode",
+      "completedCells": 2,
+      "totalCells": 2,
+      "passed": 6,
+      "score": 83.66,
+      "durationMilliseconds": 94389,
+      "terminality": 100
+    },
+    {
+      "rank": 4,
+      "id": "native",
+      "completedCells": 0,
+      "totalCells": 2,
+      "passed": 6,
+      "score": 80.85,
+      "durationMilliseconds": 44470,
+      "terminality": 75
+    },
+    {
+      "rank": 5,
+      "id": "qwen-code",
+      "completedCells": 1,
+      "totalCells": 2,
+      "passed": 4,
+      "score": 65.47,
+      "durationMilliseconds": 189391,
+      "terminality": 75
+    }
+  ]
+}

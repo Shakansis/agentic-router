@@ -186,6 +186,7 @@ function bindElements() {
     "benchmark-timeout",
     "benchmark-history",
     "benchmark-harness-list",
+    "benchmark-scoring-profile-choice",
     "benchmark-score-profile",
     "benchmark-weight-objective",
     "benchmark-weight-correctness",
@@ -202,6 +203,8 @@ function bindElements() {
     "benchmark-score-context",
     "benchmark-ranking-note",
     "benchmark-live-dashboard",
+    "benchmark-matrix",
+    "benchmark-ranking-scope",
     "benchmark-results-body",
     "benchmark-result-detail",
     "close-benchmarks",
@@ -508,6 +511,7 @@ function bindEvents() {
   elements.composer.addEventListener("submit", handleComposerSubmit);
   elements.openBenchmarks.addEventListener("click", openBenchmarks);
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
+  elements.benchmarkSuite.addEventListener("change", updateBenchmarkSuiteSelection);
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
@@ -516,6 +520,14 @@ function bindEvents() {
   }
   elements.resetBenchmarkWeights.addEventListener("click", resetBenchmarkScoringProfile);
   elements.benchmarkResultsBody.addEventListener("click", openBenchmarkHarnessResult);
+  elements.benchmarkMatrix.addEventListener("click", openBenchmarkMatrixCell);
+  elements.benchmarkRankingScope.addEventListener("change", () => {
+    if ((state.benchmark?.result?.cells ?? []).length > 0) {
+      renderBenchmarkRankings(state.benchmark.result, state.benchmark?.scoringProjection);
+    } else {
+      renderBenchmarkResult(state.benchmark?.result);
+    }
+  });
   elements.composer.addEventListener("click", handleComposerClick);
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
@@ -1169,9 +1181,30 @@ function renderBenchmarkControls() {
   const selectedModel = localModels.some(option => option.value === state.settings?.defaultModel)
     ? state.settings.defaultModel
     : localModels[0]?.value;
-  replaceOptions(elements.benchmarkModel, localModels, selectedModel);
+  elements.benchmarkModel.replaceChildren();
+  for (const model of localModels) {
+    const option = document.createElement("option");
+    option.value = model.value;
+    option.textContent = model.label;
+    option.selected = model.value === selectedModel;
+    elements.benchmarkModel.append(option);
+  }
 
   const catalog = state.benchmark?.catalog;
+  const suites = catalog?.suites ?? (catalog?.suite ? [catalog.suite] : []);
+  const selectedSuite = suites.some(suite => suite.id === state.benchmark?.result?.suiteId)
+    ? state.benchmark.result.suiteId
+    : suites.some(suite => suite.id === "basic-crud")
+      ? "basic-crud"
+      : suites[0]?.id;
+  replaceOptions(
+    elements.benchmarkSuite,
+    suites.map(suite => ({
+      value: suite.id,
+      label: `${suite.name} v${suite.version}`
+    })),
+    selectedSuite
+  );
   elements.benchmarkTimeout.value = String(catalog?.defaultTimeoutSeconds ?? 120);
   elements.benchmarkTimeout.min = String(catalog?.minimumTimeoutSeconds ?? 5);
   elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 600);
@@ -1197,7 +1230,38 @@ function renderBenchmarkControls() {
     label.append(input, text);
     elements.benchmarkHarnessList.append(label);
   }
+  elements.benchmarkScoringProfileChoice.value = state.benchmark?.scoringProfile?.id === "custom"
+    ? "custom"
+    : "default";
   renderBenchmarkScoringProfile();
+  updateBenchmarkSuiteSelection();
+}
+
+function selectedBenchmarkModels() {
+  return [...elements.benchmarkModel.selectedOptions].map(option => option.value);
+}
+
+function selectedBenchmarkSuite() {
+  return (state.benchmark?.catalog?.suites ?? []).find(
+    suite => suite.id === elements.benchmarkSuite.value
+  ) ?? state.benchmark?.catalog?.suite;
+}
+
+function updateBenchmarkSuiteSelection() {
+  const suite = selectedBenchmarkSuite();
+  if (!suite) {
+    return;
+  }
+  const scenarioTimeout = Math.max(
+    ...suite.tests.map(test => Number(test.timeoutSeconds || 120))
+  );
+  elements.benchmarkTimeout.value = String(Math.min(
+    Number(elements.benchmarkTimeout.max || 600),
+    scenarioTimeout
+  ));
+  elements.runBenchmark.textContent = suite.id === "basic-crud"
+    ? "Executar CRUD"
+    : "Executar Agent Behavior v2";
 }
 
 function benchmarkWeightInputs() {
@@ -1313,7 +1377,8 @@ function renderBenchmarkHistory() {
     { value: "", label: "Selecione um resultado persistido" },
     ...(state.benchmark?.history ?? []).map(result => ({
       value: result.runId,
-      label: `${new Date(result.startedAt).toLocaleString()} · ${result.model} · ${result.finalStatus}`
+      label: `${new Date(result.startedAt).toLocaleString()} · ${result.suiteId} v${result.suiteVersion} · `
+        + `${result.selectedModels?.length ? `${result.selectedModels.length} modelo(s)` : result.model} · ${result.finalStatus}`
     }))
   ];
   replaceOptions(
@@ -1335,16 +1400,26 @@ async function runBenchmarkSuite(event) {
     elements.benchmarkStatus.textContent = "Selecione ao menos um harness disponível.";
     return;
   }
+  const models = selectedBenchmarkModels();
+  if (models.length === 0) {
+    elements.benchmarkStatus.textContent = "Selecione ao menos um modelo local instalado.";
+    return;
+  }
   if (!elements.benchmarkPermission.checked) {
     elements.benchmarkStatus.textContent = "Confirme a autorização imediata para executar o modelo.";
     return;
   }
 
   const clientRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
+  const suite = selectedBenchmarkSuite();
+  if (!suite) {
+    elements.benchmarkStatus.textContent = "Selecione uma suite disponível.";
+    return;
+  }
   state.activeBenchmarkRunId = clientRunId;
   sessionStorage.setItem("agentic-router-benchmark-live-run", clientRunId);
   setBenchmarkRunning(true);
-  initializeBenchmarkLive(clientRunId, harnesses);
+  initializeBenchmarkLive(clientRunId, models, harnesses, suite);
   elements.benchmarkStatus.textContent = "Iniciando dashboard ao vivo…";
   elements.benchmarkResultsBody.replaceChildren();
   renderBenchmarkLive();
@@ -1354,11 +1429,16 @@ async function runBenchmarkSuite(event) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: elements.benchmarkModel.value,
+        model: models[0],
+        models,
         harnesses,
-        suiteId: "basic-crud",
-        suiteVersion: 1,
+        suiteId: suite.id,
+        suiteVersion: suite.version,
         timeoutSeconds: Number(elements.benchmarkTimeout.value),
+        scoringProfileId: elements.benchmarkScoringProfileChoice.value,
+        scoreWeights: elements.benchmarkScoringProfileChoice.value === "custom"
+          ? benchmarkWeightsFromInputs()
+          : state.benchmark.catalog.scoreWeights,
         modelExecutionPermissionGranted: true,
         clientRunId
       })
@@ -1379,33 +1459,51 @@ async function runBenchmarkSuite(event) {
   }
 }
 
-function initializeBenchmarkLive(runId, harnessIds = []) {
-  const tests = state.benchmark?.catalog?.suite?.tests ?? [];
+function initializeBenchmarkLive(
+  runId,
+  modelIds = selectedBenchmarkModels(),
+  harnessIds = [],
+  suite = selectedBenchmarkSuite()
+) {
+  const tests = suite?.tests ?? [];
+  const cells = {};
+  for (const model of modelIds) {
+    for (const harness of harnessIds) {
+      const key = benchmarkCellKey(model, harness);
+      cells[key] = {
+        id: key,
+        model,
+        harness,
+        state: "pending",
+        completed: 0,
+        total: tests.length,
+        passed: 0,
+        score: null,
+        terminality: 0,
+        elapsedMilliseconds: 0,
+        startedAt: null,
+        currentTest: null,
+        tests: Object.fromEntries(tests.map(test => [test.id, {
+          id: test.id,
+          state: "pending",
+          currentTurn: 0,
+          totalTurns: test.turnBudget ?? 1,
+          activities: [],
+          checks: {},
+          result: null
+        }]))
+      };
+    }
+  }
   state.benchmark.live = {
     runId,
     startedAt: new Date().toISOString(),
     lastSequence: 0,
     terminal: false,
     ranking: [],
-    harnesses: Object.fromEntries(harnessIds.map(harness => [harness, {
-      id: harness,
-      state: "pending",
-      completed: 0,
-      total: tests.length,
-      passed: 0,
-      score: null,
-      terminality: 0,
-      elapsedMilliseconds: 0,
-      startedAt: null,
-      currentTest: null,
-      tests: Object.fromEntries(tests.map(test => [test.id, {
-        id: test.id,
-        state: "pending",
-        activities: [],
-        checks: {},
-        result: null
-      }]))
-    }]))
+    models: modelIds,
+    harnessIds,
+    cells
   };
 }
 
@@ -1472,11 +1570,18 @@ function connectBenchmarkEvents(runId, afterSequence = 0, eventsUrl = null) {
   }
 }
 
-function ensureLiveHarness(harnessId, total = 0) {
+function benchmarkCellKey(model, harness) {
+  return `${model}\u001f${harness}`;
+}
+
+function ensureLiveCell(model, harnessId, total = 0) {
   const live = state.benchmark.live;
-  if (!live.harnesses[harnessId]) {
-    live.harnesses[harnessId] = {
-      id: harnessId,
+  const key = benchmarkCellKey(model, harnessId);
+  if (!live.cells[key]) {
+    live.cells[key] = {
+      id: key,
+      model,
+      harness: harnessId,
       state: "pending",
       completed: 0,
       total,
@@ -1489,7 +1594,7 @@ function ensureLiveHarness(harnessId, total = 0) {
       tests: {}
     };
   }
-  return live.harnesses[harnessId];
+  return live.cells[key];
 }
 
 function ensureLiveTest(harness, testId) {
@@ -1497,6 +1602,8 @@ function ensureLiveTest(harness, testId) {
     harness.tests[testId] = {
       id: testId,
       state: "pending",
+      currentTurn: 0,
+      totalTurns: 1,
       activities: [],
       checks: {},
       result: null
@@ -1507,7 +1614,11 @@ function ensureLiveTest(harness, testId) {
 
 function applyBenchmarkProgress(progressEvent, render = true) {
   if (!state.benchmark?.live || progressEvent.runId !== state.benchmark.live.runId) {
-    initializeBenchmarkLive(progressEvent.runId, progressEvent.selectedHarnesses ?? []);
+    initializeBenchmarkLive(
+      progressEvent.runId,
+      progressEvent.selectedModels ?? (progressEvent.model ? [progressEvent.model] : []),
+      progressEvent.selectedHarnesses ?? []
+    );
   }
   const live = state.benchmark.live;
   if (progressEvent.sequence <= live.lastSequence) {
@@ -1516,15 +1627,20 @@ function applyBenchmarkProgress(progressEvent, render = true) {
   live.lastSequence = progressEvent.sequence;
   if (progressEvent.type === "run.started") {
     live.startedAt = progressEvent.startedAt ?? progressEvent.timestamp;
-    for (const harnessId of progressEvent.selectedHarnesses ?? []) {
-      const harness = ensureLiveHarness(harnessId, progressEvent.totalTests);
-      for (const test of progressEvent.tests ?? []) {
-        ensureLiveTest(harness, test.id);
+    live.models = progressEvent.selectedModels ?? live.models;
+    live.harnessIds = progressEvent.selectedHarnesses ?? live.harnessIds;
+    for (const model of live.models ?? []) {
+      for (const harnessId of live.harnessIds ?? []) {
+        const cell = ensureLiveCell(model, harnessId, progressEvent.totalTests);
+        for (const test of progressEvent.tests ?? []) {
+          ensureLiveTest(cell, test.id);
+        }
       }
     }
   }
+  const model = progressEvent.model ?? live.models?.[0] ?? state.benchmark?.result?.model ?? "model";
   const harness = progressEvent.harness
-    ? ensureLiveHarness(progressEvent.harness, progressEvent.totalTests)
+    ? ensureLiveCell(model, progressEvent.harness, progressEvent.totalTests)
     : null;
   const test = harness && progressEvent.testId
     ? ensureLiveTest(harness, progressEvent.testId)
@@ -1560,10 +1676,16 @@ function applyBenchmarkProgress(progressEvent, render = true) {
       harness.currentTest = progressEvent.testId;
     }
   } else if (progressEvent.type === "activity" && test) {
+    if (progressEvent.turnNumber) {
+      test.currentTurn = progressEvent.turnNumber;
+      test.totalTurns = progressEvent.totalTurns || test.totalTurns;
+    }
     test.activities.push({
       kind: progressEvent.activityKind ?? "activity",
       message: progressEvent.message ?? "Activity recorded.",
-      timestamp: progressEvent.timestamp
+      timestamp: progressEvent.timestamp,
+      turnNumber: progressEvent.turnNumber || 0,
+      totalTurns: progressEvent.totalTurns || 0
     });
     test.activities = test.activities.slice(-8);
   } else if (progressEvent.type === "validation" && test) {
@@ -1571,7 +1693,7 @@ function applyBenchmarkProgress(progressEvent, render = true) {
   } else if (progressEvent.type === "ranking.provisional") {
     live.ranking = progressEvent.ranking ?? [];
   } else if (progressEvent.type === "run.cancelling") {
-    for (const item of Object.values(live.harnesses)) {
+    for (const item of Object.values(live.cells)) {
       if (!["completed", "cancelled"].includes(item.state)) {
         item.state = "cancelling";
       }
@@ -1596,10 +1718,16 @@ function renderBenchmarkLive() {
   }
   elements.benchmarkLiveDashboard.hidden = false;
   elements.benchmarkRankingNote.hidden = false;
+  const cells = Object.values(live.cells);
+  const terminalStates = new Set(["completed", "cancelled", "failed", "timed-out", "unsupported", "unavailable"]);
+  const completedCells = cells.filter(cell => terminalStates.has(cell.state)).length;
+  const currentCell = cells.find(cell => ["running", "validating", "harness-completed"].includes(cell.state));
   elements.benchmarkRunSummary.textContent =
-    `Execução ao vivo · ${Object.keys(live.harnesses).length} harness(es) · estado transitório`;
+    `Execução ao vivo · ${completedCells}/${cells.length} célula(s) · `
+    + `${currentCell ? `atual ${currentCell.model} × ${benchmarkHarnessLabel(currentCell.harness)}` : "sem célula ativa"} · `
+    + `${Math.max(0, cells.length - completedCells)} restante(s) · local sequencial`;
   elements.benchmarkLiveDashboard.replaceChildren();
-  for (const harness of Object.values(live.harnesses)) {
+  for (const harness of cells) {
     const card = document.createElement("article");
     card.className = "benchmark-live-harness";
     card.dataset.state = harness.state;
@@ -1607,7 +1735,7 @@ function renderBenchmarkLive() {
       ? Date.now() - new Date(harness.startedAt).getTime()
       : harness.elapsedMilliseconds;
     const heading = document.createElement("h4");
-    heading.textContent = benchmarkHarnessLabel(harness.id);
+    heading.textContent = `${harness.model} · ${benchmarkHarnessLabel(harness.harness)}`;
     const summary = document.createElement("p");
     summary.className = "benchmark-live-summary";
     summary.textContent = `${harness.state} · ${harness.completed}/${harness.total} · `
@@ -1617,6 +1745,9 @@ function renderBenchmarkLive() {
     current.className = "benchmark-live-current";
     current.textContent = harness.currentTest
       ? `Atual: ${harness.currentTest} · ${harness.tests[harness.currentTest]?.state ?? harness.state}`
+        + (harness.tests[harness.currentTest]?.currentTurn
+          ? ` · turn ${harness.tests[harness.currentTest].currentTurn}/${harness.tests[harness.currentTest].totalTurns}`
+          : "")
       : "Sem teste ativo.";
     card.append(heading, summary, current);
     for (const test of Object.values(harness.tests)) {
@@ -1629,7 +1760,9 @@ function renderBenchmarkLive() {
         const list = document.createElement("ul");
         for (const activity of test.activities) {
           const item = document.createElement("li");
-          item.textContent = `${activity.kind}: ${activity.message}`;
+          item.textContent = activity.turnNumber
+            ? `Turn ${activity.turnNumber}/${activity.totalTurns} · ${activity.kind}: ${activity.message}`
+            : `${activity.kind}: ${activity.message}`;
           list.append(item);
         }
         details.append(list);
@@ -1660,7 +1793,9 @@ function renderProvisionalBenchmarkRanking(ranking) {
   for (const entry of ranking) {
     const row = document.createElement("tr");
     for (const value of [
-      entry.rank ? `#${entry.rank} ${benchmarkHarnessLabel(entry.harness)}` : `— ${benchmarkHarnessLabel(entry.harness)}`,
+      entry.rank
+        ? `#${entry.rank} ${entry.model ?? ""} × ${benchmarkHarnessLabel(entry.harness)}`
+        : `— ${entry.model ?? ""} × ${benchmarkHarnessLabel(entry.harness)}`,
       entry.state,
       `${entry.passed}/${entry.total}`,
       entry.score === null ? "—" : `${Number(entry.score).toFixed(2)}*`,
@@ -1728,7 +1863,7 @@ async function cancelBenchmarkSuite() {
     return;
   }
   elements.benchmarkStatus.textContent = "Solicitando cancelamento limpo…";
-  for (const harness of Object.values(state.benchmark?.live?.harnesses ?? {})) {
+  for (const harness of Object.values(state.benchmark?.live?.cells ?? {})) {
     if (!["completed", "cancelled"].includes(harness.state)) {
       harness.state = "cancelling";
     }
@@ -1748,6 +1883,7 @@ function setBenchmarkRunning(running) {
   elements.runBenchmark.disabled = running;
   elements.cancelBenchmark.disabled = !running;
   elements.benchmarkModel.disabled = running;
+  elements.benchmarkScoringProfileChoice.disabled = running;
   elements.benchmarkTimeout.disabled = running;
   elements.benchmarkHistory.disabled = running;
   for (const input of elements.benchmarkHarnessList.querySelectorAll("input")) {
@@ -1772,11 +1908,12 @@ async function openPersistedBenchmark() {
 function renderBenchmarkResult(result) {
   elements.benchmarkLiveDashboard.hidden = true;
   elements.benchmarkRankingNote.hidden = true;
+  elements.benchmarkMatrix.hidden = true;
   elements.benchmarkResultsBody.replaceChildren();
   elements.benchmarkResultDetail.replaceChildren();
   if (!result) {
     elements.benchmarkRunSummary.textContent = "Execute ou abra um resultado persistido.";
-    elements.benchmarkResultDetail.textContent = "Selecione um harness na tabela para inspecionar os quatro testes.";
+    elements.benchmarkResultDetail.textContent = "Selecione um harness na tabela para inspecionar os cenários.";
     return;
   }
 
@@ -1784,12 +1921,24 @@ function renderBenchmarkResult(result) {
     ? state.benchmark.scoringProjection
     : null;
   const profile = projection?.activeProfile ?? state.benchmark?.scoringProfile;
+  const modelSummary = result.selectedModels?.length > 1
+    ? `${result.selectedModels.length} modelos × ${result.selectedHarnesses?.length ?? 0} harnesses`
+    : result.selectedModels?.[0] ?? result.model;
   elements.benchmarkRunSummary.textContent =
-    `${result.model} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)} · `
+    `${modelSummary} · ${result.suiteId} v${result.suiteVersion} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)} · `
     + `${result.fixtureId} v${result.fixtureVersion}`;
   elements.benchmarkScoreContext.textContent = profile
     ? `Measured evidence inalterada · Calculated score com ${profile.displayName} v${profile.version}`
     : "Measured evidence e Calculated score são apresentados separadamente.";
+  if ((result.cells ?? []).length > 0) {
+    renderBenchmarkMatrix(result, projection);
+    renderBenchmarkRankings(result, projection);
+    const first = (projection?.pairRanking ?? result.pairRanking ?? [])[0];
+    if (first) {
+      renderBenchmarkMatrixCellDetail(first.model, first.harness);
+    }
+    return;
+  }
   const byHarness = new Map(result.harnessResults.map(item => [item.harness, item]));
   const scoreByHarness = new Map(
     (projection?.harnessScores ?? []).map(item => [item.harness, item])
@@ -1828,9 +1977,149 @@ function renderBenchmarkResult(result) {
   }
 }
 
+function renderBenchmarkMatrix(result, projection) {
+  elements.benchmarkMatrix.hidden = false;
+  elements.benchmarkMatrix.replaceChildren();
+  const models = result.selectedModels ?? [...new Set(result.cells.map(cell => cell.model))];
+  const harnesses = result.selectedHarnesses ?? [...new Set(result.cells.map(cell => cell.harness))];
+  const scoreByCell = new Map(
+    (projection?.matrixCellScores ?? []).map(cell => [benchmarkCellKey(cell.model, cell.harness), cell.score])
+  );
+  const byCell = new Map(result.cells.map(cell => [benchmarkCellKey(cell.model, cell.harness), cell]));
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  const modelHeading = document.createElement("th");
+  modelHeading.textContent = "Modelo";
+  headRow.append(modelHeading);
+  for (const harness of harnesses) {
+    const heading = document.createElement("th");
+    heading.textContent = benchmarkHarnessLabel(harness);
+    headRow.append(heading);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const model of models) {
+    const row = document.createElement("tr");
+    const label = document.createElement("th");
+    label.scope = "row";
+    label.textContent = model;
+    row.append(label);
+    for (const harness of harnesses) {
+      const cellElement = document.createElement("td");
+      const cell = byCell.get(benchmarkCellKey(model, harness));
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "benchmark-matrix-cell";
+      button.dataset.model = model;
+      button.dataset.harness = harness;
+      button.dataset.status = cell?.status ?? "unavailable";
+      const calculated = scoreByCell.get(benchmarkCellKey(model, harness));
+      button.textContent = cell?.status === "completed"
+        ? Number(calculated ?? cell.score).toFixed(2)
+        : cell?.status ?? "unavailable";
+      button.title = cell?.message ?? `${model} × ${benchmarkHarnessLabel(harness)}`;
+      cellElement.append(button);
+      row.append(cellElement);
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  elements.benchmarkMatrix.append(table);
+}
+
+function renderBenchmarkRankings(result, projection) {
+  elements.benchmarkResultsBody.replaceChildren();
+  if (!result) {
+    return;
+  }
+  const scope = elements.benchmarkRankingScope.value;
+  if (scope === "model" || scope === "harness") {
+    const ranking = scope === "model"
+      ? projection?.modelRanking ?? result.modelRanking ?? []
+      : projection?.harnessRanking ?? result.harnessRanking ?? [];
+    for (const entry of ranking) {
+      const row = document.createElement("tr");
+      const label = scope === "model" ? entry.id : benchmarkHarnessLabel(entry.id);
+      for (const value of [
+        `#${entry.rank} ${label}`,
+        `${entry.completedCells}/${entry.totalCells} completed`,
+        String(entry.passed),
+        Number(entry.score).toFixed(2),
+        formatBenchmarkDuration(entry.durationMilliseconds),
+        `${entry.terminality}%`
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      elements.benchmarkResultsBody.append(row);
+    }
+    return;
+  }
+  const ranking = projection?.pairRanking ?? result.pairRanking ?? [];
+  for (const entry of ranking) {
+    const resultCell = result.cells?.find(cell =>
+      cell.model === entry.model && cell.harness === entry.harness
+    );
+    const row = document.createElement("tr");
+    const identity = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "benchmark-result-link";
+    button.dataset.model = entry.model;
+    button.dataset.harness = entry.harness;
+    button.textContent = `#${entry.rank} ${entry.model} × ${benchmarkHarnessLabel(entry.harness)}`;
+    identity.append(button);
+    row.append(identity);
+    for (const value of [
+      entry.status,
+      `${entry.passed}/${resultCell?.total ?? 0}`,
+      Number(entry.score).toFixed(2),
+      formatBenchmarkDuration(entry.durationMilliseconds),
+      `${entry.terminality}%`
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    elements.benchmarkResultsBody.append(row);
+  }
+}
+
+function openBenchmarkMatrixCell(event) {
+  const button = event.target.closest("[data-model][data-harness]");
+  if (button) {
+    renderBenchmarkMatrixCellDetail(button.dataset.model, button.dataset.harness);
+  }
+}
+
+function renderBenchmarkMatrixCellDetail(model, harnessId) {
+  const cell = state.benchmark?.result?.cells?.find(item =>
+    item.model === model && item.harness === harnessId
+  );
+  const calculated = state.benchmark?.scoringProjection?.matrixCellScores?.find(item =>
+    item.model === model && item.harness === harnessId
+  );
+  if (!cell?.result) {
+    elements.benchmarkResultDetail.replaceChildren();
+    const heading = document.createElement("h4");
+    heading.textContent = `${model} × ${benchmarkHarnessLabel(harnessId)} · ${cell?.status ?? "unavailable"}`;
+    const message = document.createElement("p");
+    message.textContent = cell?.message ?? "Esta combinação não produziu resultado executável.";
+    elements.benchmarkResultDetail.append(heading, message);
+    return;
+  }
+  renderBenchmarkHarnessDetail(cell.result, calculated, model);
+}
+
 function openBenchmarkHarnessResult(event) {
   const button = event.target.closest("[data-harness]");
   if (!button) {
+    return;
+  }
+  if (button.dataset.model) {
+    renderBenchmarkMatrixCellDetail(button.dataset.model, button.dataset.harness);
     return;
   }
   const harness = state.benchmark?.result?.harnessResults?.find(
@@ -1842,14 +2131,14 @@ function openBenchmarkHarnessResult(event) {
   renderBenchmarkHarnessDetail(harness, score);
 }
 
-function renderBenchmarkHarnessDetail(harness, calculated) {
+function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
   elements.benchmarkResultDetail.replaceChildren();
   if (!harness) {
     elements.benchmarkResultDetail.textContent = "Resultado do harness indisponível.";
     return;
   }
   const heading = document.createElement("h4");
-  heading.textContent = `${benchmarkHarnessLabel(harness.harness)} · ${harness.passed}/${harness.total} passed`;
+  heading.textContent = `${model ? `${model} × ` : ""}${benchmarkHarnessLabel(harness.harness)} · ${harness.passed}/${harness.total} passed`;
   elements.benchmarkResultDetail.append(heading);
   if (calculated) {
     const scoreHeading = document.createElement("strong");
@@ -1901,6 +2190,14 @@ function renderBenchmarkHarnessDetail(harness, calculated) {
       ["Errors / recovered", `${test.rawResult.surfacedErrorCount ?? "n/d"} / ${test.rawResult.recoveredErrorCount ?? "n/d"}`],
       ["Changed files", (test.rawResult.changedFiles ?? []).join(", ") || "none"],
       ["Unexpected", (test.rawResult.unexpectedFiles ?? []).join(", ") || "none"],
+      ["Turns", `${test.rawResult.behaviorMetrics?.successfulTerminalTurns ?? 0}/${test.rawResult.behaviorMetrics?.totalTurns ?? 0}`],
+      ["Continuity", benchmarkMetric(test.rawResult.behaviorMetrics?.continuityPreservation)],
+      ["Scope accuracy", benchmarkMetric(test.rawResult.behaviorMetrics?.scopeAccuracy)],
+      ["Recovery", benchmarkMetric(test.rawResult.behaviorMetrics?.recovery)],
+      ["Convergence", benchmarkMetric(test.rawResult.behaviorMetrics?.convergence)],
+      ["Hygiene", benchmarkMetric(test.rawResult.behaviorMetrics?.hygiene)],
+      ["Truthful report", benchmarkMetric(test.rawResult.behaviorMetrics?.truthfulFinalReport)],
+      ["Narration", test.rawResult.behaviorMetrics?.narrationClassification ?? "n/d"],
       ...Object.entries(test.rawResult.validationFacts ?? {}).map(
         ([key, value]) => [`Validation · ${key}`, value]
       )
@@ -1928,8 +2225,34 @@ function renderBenchmarkHarnessDetail(harness, calculated) {
     const report = document.createElement("pre");
     report.textContent = test.rawResult.finalHarnessReport || "(sem relatório)";
     details.append(promptLabel, prompt, reportLabel, report);
+    if ((test.rawResult.turns ?? []).length > 0) {
+      const turnsLabel = document.createElement("strong");
+      turnsLabel.textContent = "Turnos persistidos";
+      const turns = document.createElement("ol");
+      for (const turn of test.rawResult.turns) {
+        const item = document.createElement("li");
+        item.textContent = `${turn.order}. ${turn.name} · ${turn.executionStatus} · ${turn.durationMilliseconds} ms · ${turn.finalReport || "(sem relatório)"}`;
+        turns.append(item);
+      }
+      details.append(turnsLabel, turns);
+    }
+    if ((test.rawResult.hostEvents ?? []).length > 0) {
+      const hostLabel = document.createElement("strong");
+      hostLabel.textContent = "Eventos do Host";
+      const hostEvents = document.createElement("ul");
+      for (const hostEvent of test.rawResult.hostEvents) {
+        const item = document.createElement("li");
+        item.textContent = `After turn ${hostEvent.afterTurn} · ${hostEvent.type}: ${hostEvent.message}`;
+        hostEvents.append(item);
+      }
+      details.append(hostLabel, hostEvents);
+    }
     elements.benchmarkResultDetail.append(details);
   }
+}
+
+function benchmarkMetric(value) {
+  return value === null || value === undefined ? "n/d" : `${value}%`;
 }
 
 function benchmarkHarnessLabel(harnessId) {

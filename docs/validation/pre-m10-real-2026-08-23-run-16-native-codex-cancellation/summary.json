@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "battery": "PRE_M10_REAL_HARNESS_VALIDATION",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T07:46:40.1512375+00:00",
+  "completedAt": "2026-08-23T07:46:42.9070229+00:00",
+  "sequential": true,
+  "cloudFallback": false,
+  "results": [
+    {
+      "harness": "native",
+      "direct": {
+        "skipped": true,
+        "reason": "targeted cancellation rerun"
+      },
+      "cancellation": {
+        "runId": "276c99b8dff74c879cfdfd5ef1d1a480",
+        "sawRunning": true,
+        "cancelStatusCode": 202,
+        "finalState": "cancelled",
+        "persistedStatusCode": 200,
+        "passed": true
+      },
+      "basicCrud": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      },
+      "agentBehavior": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      }
+    },
+    {
+      "harness": "codex",
+      "direct": {
+        "skipped": true,
+        "reason": "targeted cancellation rerun"
+      },
+      "cancellation": {
+        "runId": "4c3d90bec5374ab081b7c15413799ece",
+        "sawRunning": true,
+        "cancelStatusCode": 202,
+        "finalState": "cancelled",
+        "persistedStatusCode": 200,
+        "passed": true
+      },
+      "basicCrud": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      },
+      "agentBehavior": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      }
+    }
+  ]
+}

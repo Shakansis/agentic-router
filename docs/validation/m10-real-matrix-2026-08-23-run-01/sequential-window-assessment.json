@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "runId": "0e41ca2b572948779daeb4ac0822c605",
+  "hostRecordedSequential": true,
+  "eventWindowFirstSequence": 108,
+  "eventWindowLastSequence": 619,
+  "eventWindowTruncated": true,
+  "observedSequentialCells": 8,
+  "sequentialCells": true,
+  "note": "The live coordinator retains a bounded 512-event window; the first two cell starts were trimmed. The retained suffix proves non-overlap for cells 3-10 and the persisted Host environment records sequential=true.",
+  "cells": [
+    {
+      "order": 1,
+      "pair": "qwen3.8:27b-gpu0|native",
+      "classification": "trimmed"
+    },
+    {
+      "order": 2,
+      "pair": "qwen3.8:27b-gpu0|codex",
+      "classification": "start-trimmed",
+      "endSequence": 137
+    },
+    {
+      "order": 3,
+      "pair": "qwen3.8:27b-gpu0|opencode",
+      "classification": "observed",
+      "startSequence": 139,
+      "endSequence": 215
+    },
+    {
+      "order": 4,
+      "pair": "qwen3.8:27b-gpu0|qwen-code",
+      "classification": "observed",
+      "startSequence": 217,
+      "endSequence": 286
+    },
+    {
+      "order": 5,
+      "pair": "qwen3.8:27b-gpu0|claude-code",
+      "classification": "observed",
+      "startSequence": 288,
+      "endSequence": 344
+    },
+    {
+      "order": 6,
+      "pair": "qwen3:4b-instruct|native",
+      "classification": "observed",
+      "startSequence": 346,
+      "endSequence": 389
+    },
+    {
+      "order": 7,
+      "pair": "qwen3:4b-instruct|codex",
+      "classification": "observed",
+      "startSequence": 391,
+      "endSequence": 439
+    },
+    {
+      "order": 8,
+      "pair": "qwen3:4b-instruct|opencode",
+      "classification": "observed",
+      "startSequence": 441,
+      "endSequence": 506
+    },
+    {
+      "order": 9,
+      "pair": "qwen3:4b-instruct|qwen-code",
+      "classification": "observed",
+      "startSequence": 508,
+      "endSequence": 565
+    },
+    {
+      "order": 10,
+      "pair": "qwen3:4b-instruct|claude-code",
+      "classification": "observed",
+      "startSequence": 567,
+      "endSequence": 617
+    }
+  ]
+}

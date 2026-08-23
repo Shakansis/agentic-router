@@ -182,6 +182,17 @@ public sealed class ProcessPolicyService : IProcessPolicyService
       );
     }
 
+    foreach (var argument in arguments)
+    {
+      var pathCandidate = ExtractPathCandidate(argument);
+      if (pathCandidate is null)
+      {
+        continue;
+      }
+      var absoluteCandidate = Path.GetFullPath(pathCandidate, resolvedWorkingDirectory);
+      await _workspace.ResolvePathAsync(absoluteCandidate, cancellationToken);
+    }
+
     var command = arguments.FirstOrDefault() ?? string.Empty;
 
     if (
@@ -246,5 +257,37 @@ public sealed class ProcessPolicyService : IProcessPolicyService
           + "Use '/' for path separators in tool arguments; a JSON backslash must be escaped."
       );
     }
+  }
+
+  private static string? ExtractPathCandidate(string argument)
+  {
+    var candidate = argument.Trim();
+    if (candidate.Length >= 2
+      && candidate[0] == candidate[^1]
+      && candidate[0] is '\'' or '"')
+    {
+      candidate = candidate[1..^1];
+    }
+    var assignment = candidate.LastIndexOf('=');
+    if (assignment >= 0 && assignment < candidate.Length - 1)
+    {
+      candidate = candidate[(assignment + 1)..];
+    }
+    if (Uri.TryCreate(candidate, UriKind.Absolute, out var uri) && !uri.IsFile)
+    {
+      return null;
+    }
+    if (OperatingSystem.IsWindows()
+      && candidate.StartsWith("/", StringComparison.Ordinal)
+      && candidate.IndexOfAny(['/', '\\'], 1) < 0)
+    {
+      return null;
+    }
+    return Path.IsPathRooted(candidate)
+      || candidate.StartsWith(".", StringComparison.Ordinal)
+      || candidate.Contains(Path.DirectorySeparatorChar)
+      || candidate.Contains(Path.AltDirectorySeparatorChar)
+        ? candidate
+        : null;
   }
 }

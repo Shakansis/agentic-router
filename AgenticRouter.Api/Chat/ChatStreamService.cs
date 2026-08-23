@@ -2156,6 +2156,38 @@ public sealed class ChatStreamService : IChatStreamService
             }
             if (harnessEvent.ReadOnlyPermission)
             {
+              if (WorkspaceReadOnlyPermissionRequiresPaths(harnessEvent.Tool))
+              {
+                LocalActionException? readPathRejection = null;
+                try
+                {
+                  await ResolveHarnessApprovalPathsAsync(
+                    harnessEvent.Paths,
+                    workspacePath,
+                    cancellationToken
+                  );
+                }
+                catch (LocalActionException exception)
+                {
+                  readPathRejection = exception;
+                }
+                if (readPathRejection is not null)
+                {
+                  await harness.ResolveApprovalAsync(harnessEvent.ApprovalId, false, cancellationToken);
+                  var correction = $"Agentic Router denied only this native read: {readPathRejection.Message} "
+                    + $"{harnessDefinition.DisplayName} may continue with a workspace-confined capability.";
+                  session.AddWarning(correction);
+                  yield return Event(
+                    requestId,
+                    $"harness.{harnessDefinition.Id}-approval-corrected",
+                    correction,
+                    stopwatch,
+                    model,
+                    intention
+                  );
+                  break;
+                }
+              }
               await harness.ResolveApprovalAsync(
                 harnessEvent.ApprovalId,
                 true,
@@ -2588,6 +2620,13 @@ public sealed class ChatStreamService : IChatStreamService
       }
     }
     return resolved;
+  }
+
+  private static bool WorkspaceReadOnlyPermissionRequiresPaths(string? tool)
+  {
+    return tool is not null && tool.ToLowerInvariant() is
+      "read" or "list" or "glob" or "grep" or "lsp"
+      or "read_file" or "list_directory" or "grep_search";
   }
 
   private async IAsyncEnumerable<ChatStreamEvent> ExecuteHarnessHostToolAsync(

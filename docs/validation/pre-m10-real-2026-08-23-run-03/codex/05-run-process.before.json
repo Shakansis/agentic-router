@@ -1,0 +1,22 @@
+[
+  {
+    "path": "continuity/result.txt",
+    "length": 31,
+    "sha256": "62aa37603cbb37487bc8ae1fd46ccc9d5c048894d43b8e2bf452e9ddce389f01"
+  },
+  {
+    "path": "fixture/edit.txt",
+    "length": 31,
+    "sha256": "290beb274195924de6072f2e5123b91c0cc5382fe6ac0077fd92507bf31140d8"
+  },
+  {
+    "path": "fixture/read.txt",
+    "length": 27,
+    "sha256": "bf03fe6456a2141a923f5a2446952539d2991537db3c5b3a0dae8da181ef3920"
+  },
+  {
+    "path": "fixture/recovery.txt",
+    "length": 24,
+    "sha256": "7dbabdda722c90ee4fbd59110592a60203d96333386473cf87e6a5d1ff4462a4"
+  }
+]

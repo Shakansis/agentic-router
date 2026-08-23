@@ -1,0 +1,13 @@
+{
+  "id": "default",
+  "version": 1,
+  "displayName": "Default",
+  "weights": {
+    "objectiveSuccess": 35,
+    "correctness": 25,
+    "terminality": 15,
+    "workspaceAccuracy": 20,
+    "efficiency": 5,
+    "total": 100
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "model": "qwen3.8:27b-gpu0",
+  "harnesses": [
+    "opencode"
+  ],
+  "suiteId": "basic-crud",
+  "suiteVersion": 1,
+  "timeoutSeconds": 600,
+  "modelExecutionPermissionGranted": true,
+  "clientRunId": "fcd9ae3f61284df59398f792c5dc7b00"
+}

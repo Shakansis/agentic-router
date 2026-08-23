@@ -1,0 +1,16 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/benchmarks/suite-runs",
+  "body": {
+    "model": "qwen3.8:27b-gpu0",
+    "harnesses": [
+      "qwen-code"
+    ],
+    "suiteId": "agent-behavior",
+    "suiteVersion": 2,
+    "timeoutSeconds": 600,
+    "modelExecutionPermissionGranted": true,
+    "clientRunId": "d9c9036ccb3649e8b10ddff6c58478d8"
+  },
+  "startedAt": "2026-08-23T05:56:41.2710157+00:00"
+}

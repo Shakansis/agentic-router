@@ -1,0 +1,9 @@
+{
+  "method": "Post",
+  "uri": "http://127.0.0.1:5395/api/workspaces",
+  "body": {
+    "name": "Pre-M10 qwen-code",
+    "path": "C:\\Users\\Rodrigo\\source\\repos\\agentic-router\\.artifacts\\pre-m10-runtime-escalated\\workspaces-run-04\\qwen-code\\workspace"
+  },
+  "startedAt": "2026-08-23T05:51:58.5554331+00:00"
+}

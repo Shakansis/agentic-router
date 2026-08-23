@@ -310,6 +310,13 @@ builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemCreateBenchmar
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemReadBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemUpdateBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemDeleteBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, ContinuityBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, ScopeRetentionBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, RecoveryBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, ConvergenceBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, TerminalityBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, StaleConflictBenchmark>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, TruthfulReportBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestRegistry, BenchmarkTestRegistry>();
 builder.Services.AddScoped<IBenchmarkNativeExecutor, BenchmarkNativeExecutor>();
 builder.Services.AddSingleton<IBenchmarkScorer, BenchmarkScorer>();

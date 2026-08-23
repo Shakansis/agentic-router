@@ -1,0 +1,16 @@
+{
+  "statusCode": 500,
+  "elapsedMilliseconds": 12,
+  "completedAt": "2026-08-23T05:42:10.6452228+00:00",
+  "headers": {
+    "Date": [
+      "Sun, 23 Aug 2026 05:42:09 GMT"
+    ],
+    "Server": [
+      "Kestrel"
+    ],
+    "Content-Length": [
+      "0"
+    ]
+  }
+}

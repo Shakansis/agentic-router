@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "battery": "PRE_M10_REAL_HARNESS_VALIDATION",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T06:52:53.0097994+00:00",
+  "completedAt": "2026-08-23T06:52:54.5578266+00:00",
+  "sequential": true,
+  "cloudFallback": false,
+  "results": [
+    {
+      "harness": "codex",
+      "direct": {
+        "passed": false,
+        "processToolObserved": false,
+        "boundaryRejectionObserved": false,
+        "forbiddenBoundaryContentObserved": false
+      },
+      "cancellation": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      },
+      "basicCrud": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      },
+      "agentBehavior": {
+        "skipped": true,
+        "reason": "targeted boundary rerun"
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "battery": "PRE_M10_AFFECTED_SUITE_RETEST",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T07:14:38.4682413+00:00",
+  "completedAt": "2026-08-23T07:25:35.7948652+00:00",
+  "sequential": true,
+  "cloudFallback": false,
+  "results": [
+    {
+      "harness": "qwen-code",
+      "version": "0.21.13",
+      "suites": [
+        {
+          "suite": "basic-crud",
+          "statusCode": 200,
+          "runId": "f751cf75e21049a28cacf656e6018c07",
+          "terminalState": "completed",
+          "finalStatus": "passed",
+          "passed": 4,
+          "total": 4,
+          "score": 98.31,
+          "allWorkspaceCleanupFlags": true,
+          "allWorkspacePathsAbsent": true,
+          "cleanupFailures": 0
+        },
+        {
+          "suite": "agent-behavior",
+          "statusCode": 200,
+          "runId": "037b1f4563984ea4b83ad558649edfc4",
+          "terminalState": "completed",
+          "finalStatus": "completed-with-failures",
+          "passed": 5,
+          "total": 7,
+          "score": 71.09,
+          "allWorkspaceCleanupFlags": true,
+          "allWorkspacePathsAbsent": true,
+          "cleanupFailures": 0
+        }
+      ]
+    }
+  ]
+}

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
@@ -116,7 +117,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       harness.Availability,
       providerEndpoint,
       settings,
-      TimeSpan.FromSeconds(120),
+      TimeSpan.FromSeconds(test.Metadata.TimeoutSeconds),
+      BenchmarkScoreWeights.Default,
       cancellationToken
     );
   }
@@ -170,17 +172,26 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       );
     }
     var requestedHarnesses = NormalizeHarnesses(request.Harnesses);
+    var requestedModels = NormalizeModels(request);
+    var scoreWeights = request.ScoreWeights ?? BenchmarkScoreWeights.Default;
+    _scorer.Validate(scoreWeights);
+    var scoringProfileId = NormalizeScoringProfileId(request.ScoringProfileId);
     var settings = await _settingsStore.GetAsync(cancellationToken);
     var providerEndpoint = new Uri(settings.OllamaUrl, UriKind.Absolute);
-    var model = await ResolveModelAsync(
-      request.Model,
+    var installedModels = await _ollamaClient.GetModelsAsync(
       providerEndpoint,
       cancellationToken
     );
+    var models = requestedModels.Select(name => new ResolvedBenchmarkModel(
+      name,
+      installedModels.FirstOrDefault(candidate =>
+        string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(candidate.Provider, ModelProviderIds.OllamaLocal, StringComparison.Ordinal))
+    )).ToArray();
     var harnesses = new List<ResolvedBenchmarkHarness>(requestedHarnesses.Count);
     foreach (var harnessId in requestedHarnesses)
     {
-      harnesses.Add(await ResolveHarnessAsync(harnessId, cancellationToken));
+      harnesses.Add(await ResolveHarnessStatusAsync(harnessId, cancellationToken));
     }
 
     var runId = NormalizeRunId(request.ClientRunId);
@@ -202,59 +213,121 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       TotalTests: tests.Count,
       SelectedHarnesses: harnesses.Select(item => item.Adapter.Definition.Id).ToArray(),
       Tests: tests.Select(item => item.Metadata).ToArray(),
-      StartedAt: startedAt
+      StartedAt: startedAt,
+      SelectedModels: requestedModels,
+      TotalCells: models.Length * harnesses.Count
     ));
-    foreach (var harness in harnesses)
+    foreach (var model in models)
     {
-      foreach (var test in tests)
+      foreach (var harness in harnesses)
       {
-        Publish(progressSink, new BenchmarkProgressEvent(
-          runId,
-          BenchmarkProgressTypeIds.TestState,
-          DateTimeOffset.UtcNow,
-          BenchmarkLiveStateIds.Pending,
-          harness.Adapter.Definition.Id,
-          test.Metadata.Id,
-          TotalTests: tests.Count
-        ));
+        foreach (var test in tests)
+        {
+          Publish(progressSink, new BenchmarkProgressEvent(
+            runId,
+            BenchmarkProgressTypeIds.TestState,
+            DateTimeOffset.UtcNow,
+            BenchmarkLiveStateIds.Pending,
+            harness.Adapter.Definition.Id,
+            test.Metadata.Id,
+            TotalTests: tests.Count,
+            Model: model.RequestedName,
+            TotalCells: models.Length * harnesses.Count
+          ));
+        }
       }
     }
 
     var liveResults = new ConcurrentDictionary<string, BenchmarkHarnessResult>(
       StringComparer.OrdinalIgnoreCase
     );
-    foreach (var harness in harnesses)
+    foreach (var model in models)
     {
-      liveResults[harness.Adapter.Definition.Id] = EmptyPendingHarness(
-        harness,
-        tests.Count
-      );
+      foreach (var harness in harnesses)
+      {
+        liveResults[CellKey(model.RequestedName, harness.Adapter.Definition.Id)] =
+          EmptyPendingHarness(harness, tests.Count);
+      }
     }
-    var completedHarnesses = new List<BenchmarkHarnessResult>(harnesses.Count);
-    foreach (var harness in harnesses)
+    var cells = new List<BenchmarkMatrixCellResult>(models.Length * harnesses.Count);
+    var executionOrder = 0;
+    foreach (var model in models)
     {
-      completedHarnesses.Add(await RunHarnessAsync(
-        runId,
-        harness,
-        tests,
-        model,
-        providerEndpoint,
-        settings,
-        request.TimeoutSeconds,
-        lease.Token,
-        progressSink,
-        liveResults
-      ));
+      foreach (var harness in harnesses)
+      {
+        executionOrder++;
+        var compatibility = Compatibility(model, harness);
+        string? preCancellationCompatibility = null;
+        if (lease.Token.IsCancellationRequested)
+        {
+          preCancellationCompatibility = compatibility.Status;
+          compatibility = new CellCompatibility(
+            BenchmarkMatrixCellStatusIds.Cancelled,
+            "The matrix run was cancelled before this cell started."
+          );
+        }
+        if (!string.Equals(
+          compatibility.Status,
+          BenchmarkMatrixCellStatusIds.Available,
+          StringComparison.Ordinal
+        ))
+        {
+          cells.Add(CreateNonExecutableCell(
+            executionOrder,
+            model,
+            harness,
+            compatibility,
+            tests.Count,
+            preCancellationCompatibility
+          ));
+          Publish(progressSink, new BenchmarkProgressEvent(
+            runId,
+            BenchmarkProgressTypeIds.HarnessCompleted,
+            DateTimeOffset.UtcNow,
+            compatibility.Status,
+            harness.Adapter.Definition.Id,
+            Message: compatibility.Message,
+            TotalTests: tests.Count,
+            Model: model.RequestedName,
+            CompletedCells: cells.Count,
+            TotalCells: models.Length * harnesses.Count
+          ));
+          continue;
+        }
+        var result = await RunHarnessAsync(
+          runId,
+          harness,
+          tests,
+          model.Installed!,
+          providerEndpoint,
+          settings,
+          request.TimeoutSeconds,
+          scoreWeights,
+          lease.Token,
+          progressSink,
+          liveResults
+        );
+        cells.Add(CreateCell(executionOrder, model.Installed!, result));
+      }
     }
-    var harnessResults = completedHarnesses.ToArray();
+    var matrixCells = cells.ToArray();
+    var harnessResults = models.Length == 1
+      ? matrixCells.Where(cell => cell.Result is not null)
+        .Select(cell => cell.Result!)
+        .ToArray()
+      : [];
 
     var endedAt = DateTimeOffset.UtcNow;
     var terminalState = lease.Token.IsCancellationRequested
       ? BenchmarkRunStatusIds.Cancelled
       : BenchmarkRunStatusIds.Completed;
     var allPassed = !lease.Token.IsCancellationRequested
-      && harnessResults.Length == harnesses.Count
-      && harnessResults.All(result => result.Passed == tests.Count);
+      && matrixCells.Length == models.Length * harnesses.Count
+      && matrixCells.All(cell => string.Equals(
+        cell.Status,
+        BenchmarkMatrixCellStatusIds.Completed,
+        StringComparison.Ordinal
+      ) && cell.Passed == tests.Count);
     var finalStatus = terminalState == BenchmarkRunStatusIds.Cancelled
       ? BenchmarkRunStatusIds.Cancelled
       : allPassed
@@ -274,11 +347,44 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         result.Terminality
       ))
       .ToArray();
+    var pairRanking = RankPairs(matrixCells);
+    var modelRanking = RankAggregate(
+      matrixCells,
+      cell => cell.Model,
+      requestedModels
+    );
+    var harnessRanking = RankAggregate(
+      matrixCells,
+      cell => cell.Harness,
+      requestedHarnesses
+    );
+    var identities = await CreateModelIdentitiesAsync(
+      models,
+      providerEndpoint,
+      settings,
+      cancellationToken
+    );
+    string? runtimeVersion;
+    try
+    {
+      runtimeVersion = await _ollamaClient.GetVersionAsync(
+        providerEndpoint,
+        cancellationToken
+      );
+    }
+    catch (OllamaProviderException)
+    {
+      runtimeVersion = null;
+    }
+    int? configuredContext = settings.OllamaRuntime.RoleDefaults.TryGetValue(
+      OllamaRuntimeRoleIds.Benchmark,
+      out var benchmarkRuntime
+    ) ? benchmarkRuntime.TargetContextTokens : null;
     var suiteResult = new BenchmarkSuiteRunResult(
       runId,
-      model.Name,
-      model.Digest,
-      model.Provider,
+      models.Length == 1 ? models[0].RequestedName : "matrix",
+      models.Length == 1 ? models[0].Installed?.Digest : null,
+      ModelProviderIds.OllamaLocal,
       suite.Id,
       suite.Version,
       suite.FixtureId,
@@ -289,9 +395,27 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       terminalState,
       finalStatus,
       request.TimeoutSeconds,
-      _scorer.Weights,
+      scoreWeights,
       harnessResults,
-      ranking
+      ranking,
+      SchemaVersion: 2,
+      ScoringProfileId: scoringProfileId,
+      SelectedModels: requestedModels,
+      SelectedHarnesses: requestedHarnesses,
+      ModelIdentities: identities,
+      Cells: matrixCells,
+      PairRanking: pairRanking,
+      ModelRanking: modelRanking,
+      HarnessRanking: harnessRanking,
+      ExecutionOrder: matrixCells.OrderBy(cell => cell.ExecutionOrder)
+        .Select(cell => $"{cell.Model}|{cell.Harness}")
+        .ToArray(),
+      Environment: new BenchmarkEnvironmentIdentity(
+        "ollama-local",
+        runtimeVersion,
+        true,
+        configuredContext
+      )
     );
     await _results.SaveAsync(suiteResult, CancellationToken.None);
     Publish(progressSink, new BenchmarkProgressEvent(
@@ -312,12 +436,14 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     Uri providerEndpoint,
     ApplicationSettings settings,
     int timeoutSeconds,
+    BenchmarkScoreWeights scoreWeights,
     CancellationToken cancellationToken,
     IBenchmarkProgressSink? progressSink,
     ConcurrentDictionary<string, BenchmarkHarnessResult> liveResults
   )
   {
     var harnessId = harness.Adapter.Definition.Id;
+    var liveKey = CellKey(model.Name, harnessId);
     var startedAt = DateTimeOffset.UtcNow;
     Publish(progressSink, new BenchmarkProgressEvent(
       runId,
@@ -326,13 +452,22 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       BenchmarkLiveStateIds.Running,
       harnessId,
       TotalTests: tests.Count,
-      StartedAt: startedAt
+      StartedAt: startedAt,
+      Model: model.Name
     ));
     if (cancellationToken.IsCancellationRequested)
     {
       var empty = EmptyCancelledHarness(harness, tests.Count);
-      liveResults[harnessId] = empty;
-      PublishHarnessResult(runId, empty, startedAt, progressSink, liveResults, true);
+      liveResults[liveKey] = empty;
+      PublishHarnessResult(
+        runId,
+        model.Name,
+        empty,
+        startedAt,
+        progressSink,
+        liveResults,
+        true
+      );
       return empty;
     }
 
@@ -353,7 +488,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         TotalTests: tests.Count,
         CompletedTests: testResults.Count,
         PassedTests: CountPassed(testResults),
-        StartedAt: DateTimeOffset.UtcNow
+        StartedAt: DateTimeOffset.UtcNow,
+        Model: model.Name
       ));
       var result = await RunTestAsync(
         test,
@@ -363,10 +499,17 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         providerEndpoint,
         settings,
         TimeSpan.FromSeconds(timeoutSeconds),
+        scoreWeights,
         cancellationToken,
         progressSink is null
           ? null
-          : new BenchmarkProgressContext(runId, harnessId, test.Metadata.Id, progressSink)
+          : new BenchmarkProgressContext(
+            runId,
+            model.Name,
+            harnessId,
+            test.Metadata.Id,
+            progressSink
+          )
       );
       testResults.Add(result);
       var partial = CreateHarnessResult(
@@ -375,7 +518,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         testResults,
         cancellationToken.IsCancellationRequested
       );
-      liveResults[harnessId] = partial;
+      liveResults[liveKey] = partial;
       Publish(progressSink, new BenchmarkProgressEvent(
         runId,
         BenchmarkProgressTypeIds.HarnessProgress,
@@ -389,9 +532,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         PassedTests: partial.Passed,
         ProvisionalScore: ProvisionalScore(testResults),
         Terminality: partial.Terminality,
-        ElapsedMilliseconds: Elapsed(startedAt)
+        ElapsedMilliseconds: Elapsed(startedAt),
+        Model: model.Name
       ));
-      PublishRanking(runId, progressSink, liveResults, harnessId);
+      PublishRanking(runId, progressSink, liveResults, harnessId, model.Name);
     }
 
     var final = CreateHarnessResult(
@@ -400,8 +544,16 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       testResults,
       cancellationToken.IsCancellationRequested
     );
-    liveResults[harnessId] = final;
-    PublishHarnessResult(runId, final, startedAt, progressSink, liveResults, false);
+    liveResults[liveKey] = final;
+    PublishHarnessResult(
+      runId,
+      model.Name,
+      final,
+      startedAt,
+      progressSink,
+      liveResults,
+      false
+    );
     return final;
   }
 
@@ -413,6 +565,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     Uri providerEndpoint,
     ApplicationSettings settings,
     TimeSpan timeout,
+    BenchmarkScoreWeights scoreWeights,
     CancellationToken runCancellationToken,
     BenchmarkProgressContext? progress = null
   )
@@ -420,7 +573,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var testRunId = Guid.NewGuid().ToString("N");
     var startedAt = DateTimeOffset.UtcNow;
     var workspace = await _workspaces.CreateAsync(testRunId, CancellationToken.None);
-    var prompt = test.CreateTask();
+    var prompt = string.Join(
+      "\n\n",
+      test.CreateTurns().OrderBy(turn => turn.Order).Select(turn => turn.Prompt)
+    );
     var fingerprint = string.Empty;
     BenchmarkRunResult? result = null;
     var cleanedUp = false;
@@ -436,7 +592,17 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(
         runCancellationToken
       );
-      timeoutSource.CancelAfter(timeout);
+      var effectiveTimeout = string.Equals(
+        test.Metadata.Suite,
+        BenchmarkSuiteIds.AgentBehavior,
+        StringComparison.OrdinalIgnoreCase
+      )
+        ? TimeSpan.FromSeconds(Math.Min(
+          timeout.TotalSeconds,
+          test.Metadata.TimeoutSeconds
+        ))
+        : timeout;
+      timeoutSource.CancelAfter(effectiveTimeout);
       BenchmarkHarnessEvidence evidence;
       try
       {
@@ -462,7 +628,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
             cancelled ? "benchmark-cancelled" : "benchmark-timeout",
             cancelled
               ? "The benchmark run was cancelled."
-              : $"The harness exceeded the configured {timeout.TotalSeconds:0}-second test timeout.",
+              : $"The harness exceeded the configured {effectiveTimeout.TotalSeconds:0}-second scenario timeout.",
             "harness-execution",
             true
           ),
@@ -558,7 +724,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         ),
         raw,
         false,
-        _scorer.Score(raw),
+        _scorer.Score(raw, scoreWeights),
         Math.Max(0, (long)(endedAt - startedAt).TotalMilliseconds)
       );
     }
@@ -574,6 +740,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         startedAt,
         prompt,
         fingerprint,
+        scoreWeights,
         runCancellationToken.IsCancellationRequested
           ? BenchmarkExecutionStatusIds.Cancelled
           : BenchmarkExecutionStatusIds.Failed,
@@ -601,6 +768,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         startedAt,
         prompt,
         fingerprint,
+        scoreWeights,
         BenchmarkExecutionStatusIds.Failed,
         new BenchmarkError(
           "benchmark-preparation-failed",
@@ -665,7 +833,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         },
         RawResult = raw,
         WorkspaceCleanedUp = false,
-        Score = _scorer.Score(raw)
+        Score = _scorer.Score(raw, scoreWeights)
       };
     }
     else
@@ -693,9 +861,122 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     )
       ? benchmarkRuntime.TargetContextTokens
       : null;
+    var turns = test.CreateTurns().OrderBy(turn => turn.Order).ToArray();
+    if (
+      turns.Length != test.Metadata.TurnBudget
+      || turns.Select(turn => turn.Order).Distinct().Count() != turns.Length
+      || turns.Where((turn, index) => turn.Order != index + 1).Any()
+    )
+    {
+      throw new InvalidOperationException(
+        $"Benchmark scenario '{test.Metadata.Id}' does not match its ordered turn budget."
+      );
+    }
+    var nativeSession = new BenchmarkNativeSession();
+    var toolTrace = new BenchmarkToolTrace();
+    var turnEvidence = new List<BenchmarkTurnEvidence>(turns.Length);
+    var hostEvents = new List<BenchmarkHostEvent>();
+    var outcomes = new List<BenchmarkHarnessEvidence>(turns.Length);
+
+    foreach (var turn in turns)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      progress?.Publish(
+        BenchmarkProgressTypeIds.Activity,
+        BenchmarkLiveStateIds.Running,
+        $"Turn {turn.Order}/{turns.Length}: {turn.Name}.",
+        BenchmarkActivityKindIds.Turn,
+        turn.Order,
+        turns.Length
+      );
+      var turnStarted = DateTimeOffset.UtcNow;
+      var outcome = await ExecuteHarnessTurnAsync(
+        harness,
+        test,
+        turn,
+        turn.Order == turns.Length,
+        nativeSession,
+        toolTrace,
+        model,
+        providerEndpoint,
+        workspace,
+        contextTokens,
+        progress,
+        cancellationToken
+      );
+      outcomes.Add(outcome);
+      turnEvidence.Add(new BenchmarkTurnEvidence(
+        turn.Order,
+        turn.Name,
+        turn.Prompt,
+        outcome.ExecutionStatus,
+        outcome.FinalReport,
+        outcome.ToolCallCount,
+        outcome.SurfacedErrorCount,
+        outcome.RecoveredErrorCount,
+        Math.Max(0, (long)(DateTimeOffset.UtcNow - turnStarted).TotalMilliseconds)
+      ));
+      if (turn.Order < turns.Length && outcome.ExecutionStatus is
+        BenchmarkExecutionStatusIds.Completed or BenchmarkExecutionStatusIds.Partial)
+      {
+        var hostEvent = await test.AfterTurnAsync(
+          turn.Order,
+          workspace.WorkspacePath,
+          cancellationToken
+        );
+        if (hostEvent is not null)
+        {
+          hostEvents.Add(hostEvent);
+          progress?.Publish(
+            BenchmarkProgressTypeIds.Activity,
+            BenchmarkLiveStateIds.Running,
+            hostEvent.Message,
+            BenchmarkActivityKindIds.HostMutation,
+            turn.Order,
+            turns.Length
+          );
+        }
+      }
+    }
+
+    var status = AggregateExecutionStatus(outcomes, turns.Length);
+    var error = outcomes.Select(outcome => outcome.Error).FirstOrDefault(item => item is not null);
+    var finalReport = outcomes.LastOrDefault()?.FinalReport ?? string.Empty;
+    return new BenchmarkHarnessEvidence(
+      status,
+      error,
+      finalReport,
+      Sum(outcomes, outcome => outcome.ToolCallCount),
+      Sum(outcomes, outcome => outcome.SurfacedErrorCount),
+      Sum(outcomes, outcome => outcome.RecoveredErrorCount),
+      SumLong(outcomes, outcome => outcome.InputTokens),
+      SumLong(outcomes, outcome => outcome.OutputTokens),
+      turnEvidence,
+      hostEvents,
+      toolTrace.Events
+    );
+  }
+
+  private async Task<BenchmarkHarnessEvidence> ExecuteHarnessTurnAsync(
+    IAgentHarness harness,
+    IBenchmarkTestDefinition test,
+    BenchmarkScenarioTurn turn,
+    bool releaseWorkspaceAfterTurn,
+    BenchmarkNativeSession nativeSession,
+    BenchmarkToolTrace toolTrace,
+    InstalledModel model,
+    Uri providerEndpoint,
+    BenchmarkWorkspace workspace,
+    int? contextTokens,
+    BenchmarkProgressContext? progress,
+    CancellationToken cancellationToken
+  )
+  {
     var execution = new AgentHarnessExecution<BenchmarkHarnessEvidence>(
       nativeCancellationToken => _nativeExecutor.ExecuteAsync(
         test,
+        turn,
+        nativeSession,
         model,
         providerEndpoint,
         workspace,
@@ -707,6 +988,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         transport,
         _nativeExecutor,
         test,
+        turn,
+        releaseWorkspaceAfterTurn,
+        toolTrace,
         model,
         providerEndpoint,
         workspace,
@@ -726,6 +1010,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       }
       outcome = current;
     }
+    if (
+      string.Equals(harness.Definition.Id, HarnessIds.Native, StringComparison.OrdinalIgnoreCase)
+      && outcome?.ToolCalls is { Count: > 0 }
+    )
+    {
+      toolTrace.AddRange(outcome.ToolCalls);
+    }
     return outcome ?? FailureEvidence(
       "benchmark-terminal-missing",
       "The harness stream ended without a terminal outcome.",
@@ -737,6 +1028,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IAgentHarnessTransport harness,
     IBenchmarkNativeExecutor toolExecutor,
     IBenchmarkTestDefinition test,
+    BenchmarkScenarioTurn turn,
+    bool releaseWorkspaceAfterTurn,
+    BenchmarkToolTrace toolTrace,
     InstalledModel model,
     Uri providerEndpoint,
     BenchmarkWorkspace workspace,
@@ -760,13 +1054,14 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           model.Name,
           ModelProviderIds.OllamaLocal,
           workspace.WorkspacePath,
-          test.CreateTask(),
+          turn.Prompt,
           "auto",
           providerEndpoint,
           ContextWindowTokens: contextTokens,
           HostCapabilities: BenchmarkHostCapabilities,
           UseMinimalToolInventory: true,
-          ReleaseWorkspaceAfterTurn: true
+          ReleaseWorkspaceAfterTurn: releaseWorkspaceAfterTurn,
+          ReleaseWorkspaceOnCancellation: true
         ),
         cancellationToken
       ))
@@ -799,6 +1094,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           {
             toolIds.Add(harnessEvent.ItemId);
           }
+          toolTrace.Start(
+            turn.Order,
+            harnessEvent.ItemId ?? $"anonymous-{anonymousToolCalls}",
+            harnessEvent.Tool ?? "unknown",
+            ToolPath(harnessEvent.Arguments, harnessEvent.Paths, workspace.WorkspacePath)
+          );
           progress?.Publish(
             BenchmarkProgressTypeIds.Activity,
             BenchmarkLiveStateIds.Running,
@@ -809,12 +1110,31 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           );
         }
         if (
+          string.Equals(harnessEvent.Type, "tool.completed", StringComparison.Ordinal)
+          || string.Equals(harnessEvent.Type, "tool.succeeded", StringComparison.Ordinal)
+        )
+        {
+          toolTrace.Complete(
+            turn.Order,
+            harnessEvent.ItemId ?? harnessEvent.ToolCallId,
+            harnessEvent.Tool ?? "unknown",
+            ToolPath(harnessEvent.Arguments, harnessEvent.Paths, workspace.WorkspacePath)
+          );
+        }
+        if (
           string.Equals(harnessEvent.Type, "error", StringComparison.Ordinal)
           || string.Equals(harnessEvent.Type, "tool.failed", StringComparison.Ordinal)
           || (!harnessEvent.IsTerminal && harnessEvent.ErrorCode is not null)
         )
         {
           surfacedErrors++;
+          toolTrace.Fail(
+            turn.Order,
+            harnessEvent.ItemId ?? harnessEvent.ToolCallId,
+            harnessEvent.Tool ?? "unknown",
+            ToolPath(harnessEvent.Arguments, harnessEvent.Paths, workspace.WorkspacePath),
+            harnessEvent.ErrorCode
+          );
           progress?.Publish(
             BenchmarkProgressTypeIds.Activity,
             BenchmarkLiveStateIds.Running,
@@ -850,6 +1170,17 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           && harnessEvent.ToolCallId is not null
         )
         {
+          var path = ToolPath(
+            harnessEvent.Arguments,
+            harnessEvent.Paths,
+            workspace.WorkspacePath
+          );
+          toolTrace.Start(
+            turn.Order,
+            harnessEvent.ToolCallId,
+            harnessEvent.Tool ?? "unknown",
+            path
+          );
           try
           {
             if (harnessEvent.Tool is null || harnessEvent.Arguments is null)
@@ -877,6 +1208,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
               output,
               cancellationToken
             );
+            toolTrace.Complete(
+              turn.Order,
+              harnessEvent.ToolCallId,
+              harnessEvent.Tool,
+              path
+            );
           }
           catch (BenchmarkNativeToolException exception)
           {
@@ -892,6 +1229,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
               false,
               $"{exception.Code}: {exception.Message}",
               cancellationToken
+            );
+            toolTrace.Fail(
+              turn.Order,
+              harnessEvent.ToolCallId,
+              harnessEvent.Tool ?? "unknown",
+              path,
+              exception.Code
             );
           }
         }
@@ -937,7 +1281,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       toolIds.Count + anonymousToolCalls,
       surfacedErrors,
       inputTokens,
-      null
+      null,
+      ToolCalls: toolTrace.Events.Where(item => item.Turn == turn.Order).ToArray()
     );
   }
 
@@ -992,6 +1337,129 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     }
   }
 
+  private static string AggregateExecutionStatus(
+    IReadOnlyList<BenchmarkHarnessEvidence> outcomes,
+    int expectedTurns
+  )
+  {
+    if (outcomes.Count != expectedTurns)
+    {
+      return BenchmarkExecutionStatusIds.Failed;
+    }
+    foreach (var status in new[]
+    {
+      BenchmarkExecutionStatusIds.Cancelled,
+      BenchmarkExecutionStatusIds.TimedOut,
+      BenchmarkExecutionStatusIds.Unavailable,
+      BenchmarkExecutionStatusIds.Failed,
+      BenchmarkExecutionStatusIds.Partial
+    })
+    {
+      if (outcomes.Any(outcome => string.Equals(
+        outcome.ExecutionStatus,
+        status,
+        StringComparison.Ordinal
+      )))
+      {
+        return status;
+      }
+    }
+    return BenchmarkExecutionStatusIds.Completed;
+  }
+
+  private static int? Sum(
+    IReadOnlyList<BenchmarkHarnessEvidence> outcomes,
+    Func<BenchmarkHarnessEvidence, int?> selector
+  )
+  {
+    var values = outcomes.Select(selector).Where(value => value.HasValue).ToArray();
+    return values.Length == 0 ? null : values.Sum(value => value!.Value);
+  }
+
+  private static long? SumLong(
+    IReadOnlyList<BenchmarkHarnessEvidence> outcomes,
+    Func<BenchmarkHarnessEvidence, long?> selector
+  )
+  {
+    var values = outcomes.Select(selector).Where(value => value.HasValue).ToArray();
+    return values.Length == 0 ? null : values.Sum(value => value!.Value);
+  }
+
+  private static string? ToolPath(
+    JsonElement? arguments,
+    IReadOnlyList<string>? paths,
+    string workspacePath
+  )
+  {
+    if (paths is { Count: 1 })
+    {
+      return NormalizeToolPath(paths[0], workspacePath);
+    }
+    if (arguments is not { ValueKind: JsonValueKind.Object } value)
+    {
+      return null;
+    }
+    if (
+      value.TryGetProperty("path", out var path)
+      && path.ValueKind == JsonValueKind.String
+    )
+    {
+      return NormalizeToolPath(path.GetString(), workspacePath);
+    }
+    if (
+      value.TryGetProperty("paths", out var pathList)
+      && pathList.ValueKind == JsonValueKind.Array
+      && pathList.GetArrayLength() == 1
+    )
+    {
+      return NormalizeToolPath(pathList[0].GetString(), workspacePath);
+    }
+    if (
+      value.TryGetProperty("files", out var files)
+      && files.ValueKind == JsonValueKind.Array
+      && files.GetArrayLength() == 1
+      && files[0].TryGetProperty("path", out var filePath)
+    )
+    {
+      return NormalizeToolPath(filePath.GetString(), workspacePath);
+    }
+    return null;
+  }
+
+  private static string? NormalizeToolPath(string? path, string workspacePath)
+  {
+    if (string.IsNullOrWhiteSpace(path))
+    {
+      return null;
+    }
+    try
+    {
+      if (Path.IsPathRooted(path))
+      {
+        var relative = Path.GetRelativePath(
+          Path.GetFullPath(workspacePath),
+          Path.GetFullPath(path)
+        );
+        if (
+          !Path.IsPathRooted(relative)
+          && relative != ".."
+          && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+          && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
+        )
+        {
+          path = relative;
+        }
+      }
+    }
+    catch (Exception exception) when (
+      exception is ArgumentException or NotSupportedException or PathTooLongException
+    )
+    {
+      return null;
+    }
+    return path.Replace('\\', '/');
+  }
+
   private async Task<ResolvedBenchmarkHarness> ResolveHarnessAsync(
     string harnessId,
     CancellationToken cancellationToken
@@ -1023,6 +1491,25 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       );
     }
     return new ResolvedBenchmarkHarness(harness, availability);
+  }
+
+  private async Task<ResolvedBenchmarkHarness> ResolveHarnessStatusAsync(
+    string harnessId,
+    CancellationToken cancellationToken
+  )
+  {
+    if (string.IsNullOrWhiteSpace(harnessId) || !_harnesses.TryGetAdapter(harnessId, out var harness))
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-harness-unknown",
+        $"Harness '{harnessId}' is not registered.",
+        "harnesses"
+      );
+    }
+    return new ResolvedBenchmarkHarness(
+      harness,
+      await harness.GetAvailabilityAsync(cancellationToken)
+    );
   }
 
   private async Task<InstalledModel> ResolveModelAsync(
@@ -1084,6 +1571,310 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       );
     }
     return normalized;
+  }
+
+  private static IReadOnlyList<string> NormalizeModels(BenchmarkSuiteRunRequest request)
+  {
+    var selections = request.Models is { Count: > 0 }
+      ? request.Models
+      : [request.Model];
+    var normalized = selections
+      .Where(model => !string.IsNullOrWhiteSpace(model))
+      .Select(model => model.Trim())
+      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+    if (normalized.Length == 0)
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-model-required",
+        "Select at least one benchmark model.",
+        "models"
+      );
+    }
+    if (normalized.Length != selections.Count)
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-model-selection-invalid",
+        "Benchmark model selections must be non-empty and unique.",
+        "models"
+      );
+    }
+    return normalized;
+  }
+
+  private static string NormalizeScoringProfileId(string? profileId)
+  {
+    var normalized = string.IsNullOrWhiteSpace(profileId)
+      ? BenchmarkScoringProfileIds.Default
+      : profileId.Trim().ToLowerInvariant();
+    if (normalized is not BenchmarkScoringProfileIds.Default
+      and not BenchmarkScoringProfileIds.Custom)
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-scoring-profile-invalid",
+        $"Benchmark scoring profile '{profileId}' is unavailable.",
+        "scoringProfileId"
+      );
+    }
+    return normalized;
+  }
+
+  private static CellCompatibility Compatibility(
+    ResolvedBenchmarkModel model,
+    ResolvedBenchmarkHarness harness
+  )
+  {
+    if (model.Installed is null)
+    {
+      return new CellCompatibility(
+        BenchmarkMatrixCellStatusIds.Unavailable,
+        $"Ollama Local model '{model.RequestedName}' is unavailable."
+      );
+    }
+    if (!harness.Availability.Available)
+    {
+      return new CellCompatibility(
+        BenchmarkMatrixCellStatusIds.Unavailable,
+        harness.Availability.Message ?? $"Harness '{harness.Adapter.Definition.Id}' is unavailable."
+      );
+    }
+    var providers = harness.Adapter.Definition.SupportedProviders;
+    if (providers is { Count: > 0 } && !providers.Contains(
+      model.Installed.Provider,
+      StringComparer.OrdinalIgnoreCase
+    ))
+    {
+      return new CellCompatibility(
+        BenchmarkMatrixCellStatusIds.Unsupported,
+        $"Harness '{harness.Adapter.Definition.Id}' does not support provider '{model.Installed.Provider}'."
+      );
+    }
+    return new CellCompatibility(BenchmarkMatrixCellStatusIds.Available, null);
+  }
+
+  private static BenchmarkMatrixCellResult CreateNonExecutableCell(
+    int executionOrder,
+    ResolvedBenchmarkModel model,
+    ResolvedBenchmarkHarness harness,
+    CellCompatibility compatibility,
+    int totalTests,
+    string? compatibilityStatus = null
+  )
+  {
+    return new BenchmarkMatrixCellResult(
+      executionOrder,
+      model.RequestedName,
+      model.Installed?.Digest,
+      model.Installed?.Provider ?? ModelProviderIds.OllamaLocal,
+      harness.Adapter.Definition.Id,
+      harness.Availability.Version,
+      compatibility.Status,
+      compatibilityStatus ?? compatibility.Status,
+      compatibility.Message,
+      0,
+      totalTests,
+      0,
+      0,
+      0,
+      0,
+      null,
+      null,
+      null,
+      null
+    );
+  }
+
+  private static BenchmarkMatrixCellResult CreateCell(
+    int executionOrder,
+    InstalledModel model,
+    BenchmarkHarnessResult result
+  )
+  {
+    var status = string.Equals(
+      result.TerminalState,
+      BenchmarkRunStatusIds.Cancelled,
+      StringComparison.Ordinal
+    )
+      ? BenchmarkMatrixCellStatusIds.Cancelled
+      : result.Tests.Any(test => string.Equals(
+        test.RawResult.ExecutionStatus,
+        BenchmarkExecutionStatusIds.TimedOut,
+        StringComparison.Ordinal
+      ))
+        ? BenchmarkMatrixCellStatusIds.TimedOut
+        : result.Tests.Any(test => test.RawResult.ExecutionStatus is
+          BenchmarkExecutionStatusIds.Failed or BenchmarkExecutionStatusIds.Unavailable)
+          ? BenchmarkMatrixCellStatusIds.Failed
+          : BenchmarkMatrixCellStatusIds.Completed;
+    var message = result.Tests.Select(test => test.RawResult.Error?.Message)
+      .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+    int AverageScore(Func<BenchmarkRunResult, int?> selector)
+    {
+      var values = result.Tests.Select(selector).Where(value => value.HasValue).ToArray();
+      return values.Length == 0
+        ? 0
+        : (int)Math.Round(values.Average(value => value!.Value), MidpointRounding.AwayFromZero);
+    }
+    int? AverageMetric(Func<BenchmarkRunResult, int?> selector)
+    {
+      var values = result.Tests.Select(selector).Where(value => value.HasValue).ToArray();
+      return values.Length == 0
+        ? null
+        : (int)Math.Round(values.Average(value => value!.Value), MidpointRounding.AwayFromZero);
+    }
+    return new BenchmarkMatrixCellResult(
+      executionOrder,
+      model.Name,
+      model.Digest,
+      model.Provider,
+      result.Harness,
+      result.HarnessVersion,
+      status,
+      BenchmarkMatrixCellStatusIds.Available,
+      message,
+      result.Passed,
+      result.Total,
+      result.Score,
+      result.DurationMilliseconds,
+      result.Terminality,
+      AverageScore(test => test.Score?.Correctness),
+      AverageMetric(test => test.RawResult.BehaviorMetrics?.Recovery),
+      AverageMetric(test => test.RawResult.BehaviorMetrics?.Convergence),
+      AverageMetric(test => test.RawResult.BehaviorMetrics?.Hygiene),
+      result
+    );
+  }
+
+  private async Task<IReadOnlyList<BenchmarkModelIdentity>> CreateModelIdentitiesAsync(
+    IReadOnlyList<ResolvedBenchmarkModel> models,
+    Uri providerEndpoint,
+    ApplicationSettings settings,
+    CancellationToken cancellationToken
+  )
+  {
+    int? configuredContext = settings.OllamaRuntime.RoleDefaults.TryGetValue(
+      OllamaRuntimeRoleIds.Benchmark,
+      out var benchmarkRuntime
+    ) ? benchmarkRuntime.TargetContextTokens : null;
+    var identities = new List<BenchmarkModelIdentity>(models.Count);
+    foreach (var resolved in models)
+    {
+      OllamaModelMetadata? metadata = null;
+      if (resolved.Installed is not null)
+      {
+        try
+        {
+          metadata = await _ollamaClient.GetModelMetadataAsync(
+            providerEndpoint,
+            resolved.Installed.Name,
+            cancellationToken
+          );
+        }
+        catch (OllamaProviderException)
+        {
+        }
+      }
+      identities.Add(new BenchmarkModelIdentity(
+        resolved.RequestedName,
+        resolved.Installed?.Digest,
+        resolved.Installed?.Provider ?? ModelProviderIds.OllamaLocal,
+        resolved.Installed?.SizeBytes,
+        resolved.Installed?.ModifiedAt,
+        metadata?.Quantization,
+        metadata?.DeclaredContextTokens,
+        configuredContext,
+        metadata?.ParameterSize,
+        metadata?.Format,
+        metadata?.Family
+      ));
+    }
+    return identities;
+  }
+
+  private static IReadOnlyList<BenchmarkMatrixRankingEntry> RankPairs(
+    IReadOnlyList<BenchmarkMatrixCellResult> cells
+  )
+  {
+    return cells
+      .OrderByDescending(cell => cell.Score)
+      .ThenByDescending(cell => cell.Passed)
+      .ThenBy(cell => cell.DurationMilliseconds)
+      .ThenBy(cell => cell.Model, StringComparer.OrdinalIgnoreCase)
+      .ThenBy(cell => cell.Harness, StringComparer.OrdinalIgnoreCase)
+      .Select((cell, index) => new BenchmarkMatrixRankingEntry(
+        index + 1,
+        cell.Model,
+        cell.Harness,
+        cell.Passed,
+        cell.Score,
+        cell.DurationMilliseconds,
+        cell.Terminality,
+        cell.Status
+      ))
+      .ToArray();
+  }
+
+  private static IReadOnlyList<BenchmarkAggregateRankingEntry> RankAggregate(
+    IReadOnlyList<BenchmarkMatrixCellResult> cells,
+    Func<BenchmarkMatrixCellResult, string> selector,
+    IReadOnlyList<string> identities
+  )
+  {
+    var summaries = identities.Select(id =>
+    {
+      var matching = cells.Where(cell => string.Equals(
+        selector(cell),
+        id,
+        StringComparison.OrdinalIgnoreCase
+      )).ToArray();
+      var divisor = Math.Max(1, matching.Length);
+      return new
+      {
+        Id = id,
+        Completed = matching.Count(cell => string.Equals(
+          cell.Status,
+          BenchmarkMatrixCellStatusIds.Completed,
+          StringComparison.Ordinal
+        )),
+        Total = matching.Length,
+        Passed = matching.Sum(cell => cell.Passed),
+        Score = decimal.Round(
+          matching.Sum(cell => cell.Score) / divisor,
+          2,
+          MidpointRounding.AwayFromZero
+        ),
+        Duration = matching.Sum(cell => Math.Max(0, cell.DurationMilliseconds)),
+        Terminality = (int)Math.Round(
+          matching.Sum(cell => cell.Terminality) / (decimal)divisor,
+          MidpointRounding.AwayFromZero
+        )
+      };
+    }).OrderByDescending(item => item.Score)
+      .ThenByDescending(item => item.Passed)
+      .ThenBy(item => item.Duration)
+      .ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+    return summaries.Select((item, index) => new BenchmarkAggregateRankingEntry(
+      index + 1,
+      item.Id,
+      item.Completed,
+      item.Total,
+      item.Passed,
+      item.Score,
+      item.Duration,
+      item.Terminality
+    )).ToArray();
+  }
+
+  private static string CellKey(string model, string harness)
+  {
+    return $"{model}\u001f{harness}";
+  }
+
+  private static string CellModel(string key)
+  {
+    var separator = key.IndexOf('\u001f');
+    return separator < 0 ? string.Empty : key[..separator];
   }
 
   private static void RequirePermission(bool granted)
@@ -1171,7 +1962,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       progress.Harness,
       progress.TestId,
       "Deterministic Host validation completed.",
-      ValidationChecks: checks
+      ValidationChecks: checks,
+      Model: progress.Model
     ));
   }
 
@@ -1204,12 +1996,14 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       progress.TestId,
       result.RawResult.Error?.Message,
       ElapsedMilliseconds: result.DurationMilliseconds,
-      TestResult: result
+      TestResult: result,
+      Model: progress.Model
     ));
   }
 
   private static void PublishHarnessResult(
     string runId,
+    string model,
     BenchmarkHarnessResult result,
     DateTimeOffset startedAt,
     IBenchmarkProgressSink? progressSink,
@@ -1236,29 +2030,37 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       PassedTests: result.Passed,
       ProvisionalScore: ProvisionalScore(result.Tests),
       Terminality: result.Terminality,
-      ElapsedMilliseconds: Elapsed(startedAt)
+      ElapsedMilliseconds: Elapsed(startedAt),
+      Model: model
     ));
-    PublishRanking(runId, progressSink, liveResults, result.Harness);
+    PublishRanking(runId, progressSink, liveResults, result.Harness, model);
   }
 
   private static void PublishRanking(
     string runId,
     IBenchmarkProgressSink? progressSink,
     ConcurrentDictionary<string, BenchmarkHarnessResult> liveResults,
-    string changedHarness
+    string changedHarness,
+    string changedModel
   )
   {
-    var snapshot = liveResults.Values.ToArray();
+    var snapshot = liveResults.Select(pair => (
+      Key: pair.Key,
+      Model: CellModel(pair.Key),
+      Result: pair.Value
+    )).ToArray();
     var ranks = snapshot
-      .Where(result => result.Tests.Count > 0)
-      .OrderByDescending(result => ProvisionalScore(result.Tests))
-      .ThenByDescending(result => result.Passed)
-      .ThenBy(result => result.DurationMilliseconds)
-      .ThenBy(result => result.Harness, StringComparer.OrdinalIgnoreCase)
-      .Select((result, index) => (result.Harness, Rank: index + 1))
-      .ToDictionary(item => item.Harness, item => item.Rank, StringComparer.OrdinalIgnoreCase);
-    var ranking = snapshot.Select(result =>
+      .Where(item => item.Result.Tests.Count > 0)
+      .OrderByDescending(item => ProvisionalScore(item.Result.Tests))
+      .ThenByDescending(item => item.Result.Passed)
+      .ThenBy(item => item.Result.DurationMilliseconds)
+      .ThenBy(item => item.Model, StringComparer.OrdinalIgnoreCase)
+      .ThenBy(item => item.Result.Harness, StringComparer.OrdinalIgnoreCase)
+      .Select((item, index) => (item.Key, Rank: index + 1))
+      .ToDictionary(item => item.Key, item => item.Rank, StringComparer.OrdinalIgnoreCase);
+    var ranking = snapshot.Select(item =>
     {
+      var result = item.Result;
       var cancelled = string.Equals(
         result.TerminalState,
         BenchmarkRunStatusIds.Cancelled,
@@ -1272,7 +2074,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
             ? BenchmarkLiveStateIds.Running
             : BenchmarkLiveStateIds.Pending;
       return new BenchmarkLiveRankingEntry(
-        ranks.TryGetValue(result.Harness, out var rank) ? rank : null,
+        ranks.TryGetValue(item.Key, out var rank) ? rank : null,
         result.Harness,
         result.Tests.Count,
         result.Total,
@@ -1280,9 +2082,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         ProvisionalScore(result.Tests),
         result.DurationMilliseconds,
         result.Terminality,
-        state
+        state,
+        item.Model
       );
     }).OrderBy(entry => entry.Rank ?? int.MaxValue)
+      .ThenBy(entry => entry.Model, StringComparer.OrdinalIgnoreCase)
       .ThenBy(entry => entry.Harness, StringComparer.OrdinalIgnoreCase)
       .ToArray();
     Publish(progressSink, new BenchmarkProgressEvent(
@@ -1292,7 +2096,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       BenchmarkLiveStateIds.Running,
       changedHarness,
       Message: "Ranking is provisional while any harness remains unfinished.",
-      Ranking: ranking
+      Ranking: ranking,
+      Model: changedModel
     ));
   }
 
@@ -1344,11 +2149,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       BenchmarkResultStatusIds.Pass,
       StringComparison.Ordinal
     ));
-    var completed = tests.Count(test => string.Equals(
-      test.RawResult.ExecutionStatus,
-      BenchmarkExecutionStatusIds.Completed,
-      StringComparison.Ordinal
-    ));
+    var terminality = tests.Sum(test => test.RawResult.BehaviorMetrics?.Terminality
+      ?? (string.Equals(
+        test.RawResult.ExecutionStatus,
+        BenchmarkExecutionStatusIds.Completed,
+        StringComparison.Ordinal
+      ) ? 100 : 0));
     var score = tests.Sum(test => test.Score?.Total ?? 0m) / totalTests;
     return new BenchmarkHarnessResult(
       harness.Adapter.Definition.Id,
@@ -1357,7 +2163,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       totalTests,
       decimal.Round(score, 2, MidpointRounding.AwayFromZero),
       duration,
-      (int)Math.Round(completed * 100m / totalTests, MidpointRounding.AwayFromZero),
+      (int)Math.Round(terminality / (decimal)totalTests, MidpointRounding.AwayFromZero),
       cancelled ? BenchmarkRunStatusIds.Cancelled : BenchmarkRunStatusIds.Completed,
       tests
     );
@@ -1481,10 +2287,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       startedAt,
       endedAt,
       executionStatus,
-      BenchmarkSuiteIds.BasicCrud,
-      BenchmarkSuiteIds.BasicCrudVersion,
-      BenchmarkSuiteIds.FixtureId,
-      BenchmarkSuiteIds.FixtureVersion,
+      test.Metadata.Suite,
+      test.Metadata.SuiteVersion,
+      test.Metadata.FixtureId,
+      test.Metadata.FixtureVersion,
       prompt,
       fingerprint
     );
@@ -1500,6 +2306,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     DateTimeOffset startedAt,
     string prompt,
     string fingerprint,
+    BenchmarkScoreWeights scoreWeights,
     string status,
     BenchmarkError error
   )
@@ -1535,7 +2342,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       ),
       raw,
       false,
-      _scorer.Score(raw),
+      _scorer.Score(raw, scoreWeights),
       Math.Max(0, (long)(endedAt - startedAt).TotalMilliseconds)
     );
   }
@@ -1544,6 +2351,116 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IAgentHarness Adapter,
     HarnessAvailability Availability
   );
+
+  private sealed record ResolvedBenchmarkModel(
+    string RequestedName,
+    InstalledModel? Installed
+  );
+
+  private sealed record CellCompatibility(
+    string Status,
+    string? Message
+  );
+
+  private sealed class BenchmarkToolTrace
+  {
+    private readonly List<BenchmarkToolCallEvidence> _events = [];
+    private readonly Dictionary<(int Turn, string Id), int> _sequences = [];
+    private int _sequence;
+
+    public IReadOnlyList<BenchmarkToolCallEvidence> Events => _events.ToArray();
+
+    public void AddRange(IEnumerable<BenchmarkToolCallEvidence> events)
+    {
+      foreach (var item in events)
+      {
+        if (_events.Any(existing => existing.Sequence == item.Sequence
+          && existing.Turn == item.Turn
+          && existing.State == item.State))
+        {
+          continue;
+        }
+        _events.Add(item);
+        _sequence = Math.Max(_sequence, item.Sequence);
+      }
+    }
+
+    public void Start(
+      int turn,
+      string? id,
+      string tool,
+      string? path
+    )
+    {
+      var key = (turn, id ?? $"anonymous-{_sequence + 1}");
+      if (_sequences.ContainsKey(key))
+      {
+        return;
+      }
+      var sequence = ++_sequence;
+      _sequences[key] = sequence;
+      _events.Add(new BenchmarkToolCallEvidence(
+        sequence,
+        turn,
+        tool,
+        "started",
+        path
+      ));
+    }
+
+    public void Complete(
+      int turn,
+      string? id,
+      string tool,
+      string? path
+    )
+    {
+      Finish(turn, id, tool, "completed", path, null);
+    }
+
+    public void Fail(
+      int turn,
+      string? id,
+      string tool,
+      string? path,
+      string? errorCode
+    )
+    {
+      Finish(turn, id, tool, "failed", path, errorCode);
+    }
+
+    private void Finish(
+      int turn,
+      string? id,
+      string tool,
+      string state,
+      string? path,
+      string? errorCode
+    )
+    {
+      var key = (turn, id ?? string.Empty);
+      if (!_sequences.TryGetValue(key, out var sequence))
+      {
+        sequence = ++_sequence;
+        if (id is not null)
+        {
+          _sequences[(turn, id)] = sequence;
+        }
+      }
+      if (_events.Any(item => item.Sequence == sequence && item.State == state))
+      {
+        return;
+      }
+      _events.Add(new BenchmarkToolCallEvidence(
+        sequence,
+        turn,
+        tool,
+        state,
+        path,
+        errorCode
+      ));
+    }
+  }
 
   private sealed record FinalSnapshotResult(
     BenchmarkWorkspaceSnapshot Snapshot,

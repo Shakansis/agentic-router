@@ -112,7 +112,8 @@ public sealed record HarnessTurnRequest(
   int? ContextWindowTokens = null,
   HostCapabilityProfile? HostCapabilities = null,
   bool UseMinimalToolInventory = false,
-  bool ReleaseWorkspaceAfterTurn = false
+  bool ReleaseWorkspaceAfterTurn = false,
+  bool ReleaseWorkspaceOnCancellation = false
 );
 
 public sealed record HarnessEvent

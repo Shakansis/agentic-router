@@ -121,7 +121,15 @@ while (await Console.In.ReadLineAsync() is { } line)
           "git_create_commit"
         }.All(expected => dynamicToolNames.Contains(expected, StringComparer.Ordinal));
         var benchmarkProjection = uniqueDynamicTools.Order(StringComparer.Ordinal).SequenceEqual(
-          new[] { "create_files", "delete_paths" }.Order(StringComparer.Ordinal),
+          new[]
+          {
+            "read_file",
+            "create_file",
+            "create_files",
+            "write_file",
+            "replace_text",
+            "delete_paths"
+          }.Order(StringComparer.Ordinal),
           StringComparer.Ordinal
         );
         if (dynamicToolNames.Length > 0
@@ -147,10 +155,12 @@ while (await Console.In.ReadLineAsync() is { } line)
         if (
           parameters.GetProperty("approvalPolicy").GetString() is not ("on-request" or "never")
           || !string.Equals(
-            parameters.GetProperty("sandbox").GetString(),
-            "workspace-write",
+            parameters.GetProperty("permissions").GetString(),
+            ":workspace",
             StringComparison.Ordinal
           )
+          || parameters.TryGetProperty("sandbox", out _)
+          || !HasExactRuntimeWorkspaceRoot(parameters)
         )
         {
           await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the supported thread policy values." } });
@@ -177,6 +187,7 @@ while (await Console.In.ReadLineAsync() is { } line)
           result = new
           {
             model,
+            activePermissionProfile = new { id = ":workspace" },
             sandbox = new
             {
               type = "workspaceWrite"
@@ -194,6 +205,15 @@ while (await Console.In.ReadLineAsync() is { } line)
       }
     case "thread/resume":
       {
+        if (
+          !string.Equals(parameters.GetProperty("permissions").GetString(), ":workspace", StringComparison.Ordinal)
+          || parameters.TryGetProperty("sandbox", out _)
+          || !HasExactRuntimeWorkspaceRoot(parameters)
+        )
+        {
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the supported resumed thread policy values." } });
+          break;
+        }
         var threadId = parameters.GetProperty("threadId").GetString()!;
         var model = parameters.GetProperty("model").GetString();
         if (!string.IsNullOrWhiteSpace(codexHome))
@@ -215,6 +235,7 @@ while (await Console.In.ReadLineAsync() is { } line)
           result = new
           {
             model,
+            activePermissionProfile = new { id = ":workspace" },
             sandbox = new { type = "workspaceWrite" },
             thread = new
             {
@@ -241,15 +262,15 @@ while (await Console.In.ReadLineAsync() is { } line)
         }
         var cwd = parameters.GetProperty("cwd").GetString()!;
         var model = parameters.GetProperty("model").GetString()!;
-        var sandboxPolicy = parameters.GetProperty("sandboxPolicy");
         if (
           parameters.GetProperty("approvalPolicy").GetString() is not ("on-request" or "never")
           || !string.Equals(
-            sandboxPolicy.GetProperty("type").GetString(),
-            "workspaceWrite",
+            parameters.GetProperty("permissions").GetString(),
+            ":workspace",
             StringComparison.Ordinal
           )
-          || sandboxPolicy.TryGetProperty("readOnlyAccess", out _)
+          || parameters.TryGetProperty("sandboxPolicy", out _)
+          || !HasExactRuntimeWorkspaceRoot(parameters)
         )
         {
           await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the supported turn policy values." } });
@@ -289,6 +310,15 @@ while (await Console.In.ReadLineAsync() is { } line)
       }
       break;
   }
+}
+
+static bool HasExactRuntimeWorkspaceRoot(JsonElement parameters)
+{
+  var cwd = parameters.GetProperty("cwd").GetString();
+  return parameters.TryGetProperty("runtimeWorkspaceRoots", out var roots)
+    && roots.ValueKind == JsonValueKind.Array
+    && roots.GetArrayLength() == 1
+    && string.Equals(roots[0].GetString(), cwd, StringComparison.OrdinalIgnoreCase);
 }
 
 async Task RunTurnAsync(
@@ -608,6 +638,22 @@ async Task RunTurnAsync(
         @params = new { threadId, turnId, diff = "benchmark fixture outcome prepared" }
       });
     }
+    else if (currentRequest.Contains("Benchmark scenario: CONTINUITY-001", StringComparison.Ordinal))
+    {
+      var path = Path.Combine(cwd, "app", "config.txt");
+      var content = await File.ReadAllTextAsync(path, cancellationToken);
+      content = currentRequest.Contains("Set only title=ORION", StringComparison.Ordinal)
+        ? content.Replace("title=Atlas", "title=ORION", StringComparison.Ordinal)
+        : currentRequest.Contains("Enable the same application", StringComparison.Ordinal)
+          ? content.Replace("enabled=false", "enabled=true", StringComparison.Ordinal)
+          : content.Replace("theme=amber", "theme=violet", StringComparison.Ordinal);
+      await File.WriteAllTextAsync(path, content, cancellationToken);
+      await SendAsync(new
+      {
+        method = "turn/diff/updated",
+        @params = new { threadId, turnId, diff = "continuity fixture updated" }
+      });
+    }
     else if (currentRequest.Contains("create codex file", StringComparison.OrdinalIgnoreCase))
     {
       await File.WriteAllTextAsync(Path.Combine(cwd, "codex-created.txt"), "created by fake Codex App Server\n", cancellationToken);
@@ -629,7 +675,13 @@ async Task RunTurnAsync(
         item = new { type = "commandExecution", id = itemId, command, cwd, status = "completed", aggregatedOutput = "fake output\n", exitCode = 0, durationMs = 5 }
       }
     });
-    var finalReport = currentRequest.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+    var finalReport = currentRequest.Contains("Benchmark scenario: CONTINUITY-001", StringComparison.Ordinal)
+      ? (currentRequest.Contains("theme to violet", StringComparison.Ordinal)
+        ? "turn-3=completed"
+        : currentRequest.Contains("Enable the same application", StringComparison.Ordinal)
+          ? "turn-2=completed"
+          : "turn-1=completed") + $" on {threadId}"
+      : currentRequest.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
       ? string.Equals(model, "beta:code", StringComparison.Ordinal)
         ? "codename=ORBIT-41"
         : "codename=ORBIT-41\nverification-word=marigold"

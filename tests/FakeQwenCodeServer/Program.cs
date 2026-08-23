@@ -355,13 +355,17 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
       StringComparison.Ordinal
     );
     var outsideWorkspace = text.Contains(
-      "outside permission qwen code",
+      "outside",
+      StringComparison.Ordinal
+    );
+    var readOnlyFile = text.Contains(
+      "read permission qwen code",
       StringComparison.Ordinal
     );
     permissions[requestId] = new PendingPermission(
       sessionId,
       promptId,
-      unmappableNativeExtra || outsideWorkspace
+      unmappableNativeExtra || outsideWorkspace || readOnlyFile
     );
     await EmitAsync(session, "permission_request", new
     {
@@ -375,12 +379,28 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
           kind = "other",
           _meta = new { toolName = "computer_use__list_apps" }
         }
-        : new
-        {
-          toolCallId = "qwen-edit-permission",
-          title = "Edit README.md",
-          kind = "edit",
-          locations = new[]
+        : readOnlyFile
+          ? new
+          {
+            toolCallId = "qwen-read-permission",
+            title = "Read workspace file",
+            kind = "read",
+            locations = new[]
+            {
+              new
+              {
+                path = outsideWorkspace ? "../outside.txt" : "README.md",
+                line = 1
+              }
+            },
+            _meta = new { toolName = "read_file" }
+          }
+          : new
+          {
+            toolCallId = "qwen-edit-permission",
+            title = "Edit README.md",
+            kind = "edit",
+            locations = new[]
           {
             new
             {
@@ -388,8 +408,8 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
               line = 1
             }
           },
-          _meta = new { toolName = "edit" }
-        },
+            _meta = new { toolName = "edit" }
+          },
       options = new[]
       {
         new { optionId = "proceed_once", name = "Allow once", kind = "allow_once" },
@@ -802,20 +822,7 @@ async Task RunBenchmarkToolAsync(
   McpToolResult result;
   if (tool == "read_file")
   {
-    result = new McpToolResult(
-      true,
-      await File.ReadAllTextAsync(Path.Combine(session.Cwd, path))
-    );
-  }
-  else if (tool == "replace_text")
-  {
-    var fullPath = Path.Combine(session.Cwd, path);
-    var content = await File.ReadAllTextAsync(fullPath);
-    await File.WriteAllTextAsync(
-      fullPath,
-      content.Replace("retries=2", "retries=3", StringComparison.Ordinal)
-    );
-    result = new McpToolResult(true, "Replaced benchmark text.");
+    result = await InvokeHostToolAsync(tool, arguments);
   }
   else
   {

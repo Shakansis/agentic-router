@@ -1,0 +1,28 @@
+{
+  "model": "qwen3.8:27b-gpu0",
+  "models": [
+    "qwen3.8:27b-gpu0",
+    "qwen3:4b-instruct"
+  ],
+  "harnesses": [
+    "native",
+    "codex",
+    "opencode",
+    "qwen-code",
+    "claude-code"
+  ],
+  "suiteId": "basic-crud",
+  "suiteVersion": 1,
+  "timeoutSeconds": 120,
+  "scoringProfileId": "default",
+  "scoreWeights": {
+    "objectiveSuccess": 35,
+    "correctness": 25,
+    "terminality": 15,
+    "workspaceAccuracy": 20,
+    "efficiency": 5,
+    "total": 100
+  },
+  "modelExecutionPermissionGranted": true,
+  "clientRunId": "0e41ca2b572948779daeb4ac0822c605"
+}

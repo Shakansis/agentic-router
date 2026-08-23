@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "repairCycle": 1,
+  "defect": "opencode-benchmark-workspace-release",
+  "model": "qwen3.8:27b-gpu0",
+  "startedAt": "2026-08-23T06:14:46.4899014+00:00",
+  "completedAt": "2026-08-23T06:19:52.3331362+00:00",
+  "openCodeVersion": "1.18.18",
+  "openCodeProcessAliveAfterFinalSuite": null,
+  "suites": [
+    {
+      "suite": "basic-crud",
+      "statusCode": 200,
+      "runId": "fcd9ae3f61284df59398f792c5dc7b00",
+      "terminalState": "completed",
+      "finalStatus": "passed",
+      "passed": 4,
+      "total": 4,
+      "score": 98.56,
+      "allWorkspaceCleanupFlags": true,
+      "allWorkspacePathsAbsent": true,
+      "cleanupFailures": 0
+    },
+    {
+      "suite": "agent-behavior",
+      "statusCode": 200,
+      "runId": "88cfa6b0bbcb49d394d9602505e1327c",
+      "terminalState": "completed",
+      "finalStatus": "completed-with-failures",
+      "passed": 4,
+      "total": 7,
+      "score": 94.88,
+      "allWorkspaceCleanupFlags": true,
+      "allWorkspacePathsAbsent": true,
+      "cleanupFailures": 0
+    }
+  ]
+}
