@@ -87,7 +87,8 @@ public sealed record ChatRequest(
   string? ConversationSessionId = null,
   bool WebSearchEnabled = false,
   IReadOnlyList<ChatImageAttachment>? Images = null,
-  bool CompactContext = false
+  bool CompactContext = false,
+  bool AutoModelHarness = false
 );
 
 public sealed record ModelCapabilityView(
@@ -599,7 +600,24 @@ public sealed record ExecutionSessionSummary(
   string? SelectedModel = null,
   string? ResidentModel = null,
   string? ConformanceIdentity = null,
-  string? HandoffReason = null
+  string? HandoffReason = null,
+  ExecutionRoutingEvidence? RoutingEvidence = null
+);
+
+public sealed record ExecutionRoutingEvidence(
+  string RouterVersion,
+  string TaskCategory,
+  string RecommendationId,
+  string RecommendationVersion,
+  string ScoringProfileId,
+  int ScoringProfileVersion,
+  string SelectedModel,
+  string SelectedHarness,
+  string Confidence,
+  string Reason,
+  bool Fallback,
+  string? FallbackReason,
+  IReadOnlyList<string> SupportingRunIds
 );
 
 public sealed record ExecutionFileReview(

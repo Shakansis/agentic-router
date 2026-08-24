@@ -300,7 +300,14 @@
             </select>
           </label>
           <label class="model-field harness-field">
-            <span>Harness</span>
+            <span class="field-label-with-help">Harness
+              <button
+                class="information-button compact-information-button"
+                type="button"
+                aria-label="Informação sobre Harness e Auto Model por Harness"
+                data-tooltip="Harness é o runtime que conduz o modelo durante o Execute. Auto Model × Harness escolhe uma combinação uma vez, antes da execução, usando evidência local."
+              >i</button>
+            </span>
             <select id="harness-selector" aria-label="Harness de execução" disabled>
               <option value="native" selected>Native</option>
             </select>
@@ -336,8 +343,8 @@
       <header class="benchmark-page-header">
         <div>
           <span class="eyebrow">Model × Harness</span>
-          <h2>Benchmark CRUD</h2>
-          <p>Compare o mesmo modelo em workspaces descartáveis equivalentes.</p>
+          <h2>Benchmark Lab</h2>
+          <p>Escolha modelos, harnesses e testes. Execute, compare o resultado e veja a recomendação.</p>
         </div>
         <button id="close-benchmarks" class="secondary-button benchmark-back-button" type="button">
           <span aria-hidden="true">←</span>
@@ -355,21 +362,35 @@
           </div>
           <div class="benchmark-panel-body benchmark-controls">
             <div class="benchmark-selection-grid">
+              <fieldset class="benchmark-models">
+                <legend>Modelos Ollama Local</legend>
+                <div
+                  id="benchmark-model-list"
+                  class="benchmark-switch-list benchmark-model-list"
+                  role="group"
+                  aria-describedby="benchmark-model-help"
+                ></div>
+                <select id="benchmark-model" multiple hidden aria-hidden="true" tabindex="-1"></select>
+                <small id="benchmark-model-help">Ative um ou mais modelos. A execução local será sequencial.</small>
+              </fieldset>
+              <fieldset id="benchmark-suite" class="benchmark-test-groups">
+                <legend>Testes</legend>
+                <div id="benchmark-suite-list" class="benchmark-switch-list"></div>
+              </fieldset>
               <label>
-                <span>Modelos Ollama Local</span>
-                <select id="benchmark-model" multiple size="5" required aria-describedby="benchmark-model-help"></select>
-                <small id="benchmark-model-help">Selecione um ou mais modelos. A execução local será sequencial.</small>
-              </label>
-              <label>
-                <span>Suite</span>
-                <select id="benchmark-suite"></select>
-              </label>
-              <label>
-                <span>Timeout por teste (segundos)</span>
+                <span class="field-label-with-help">Timeout por teste (segundos)
+                  <button class="information-button compact-information-button" type="button"
+                    aria-label="Informação sobre timeout"
+                    data-tooltip="Tempo máximo concedido a cada teste. Um timeout é registrado como resultado, e as próximas células independentes continuam.">i</button>
+                </span>
                 <input id="benchmark-timeout" type="number" min="5" max="600" value="120" required>
               </label>
               <label>
-                <span>Perfil de score</span>
+                <span class="field-label-with-help">Perfil de score
+                  <button class="information-button compact-information-button" type="button"
+                    aria-label="Informação sobre perfil de score"
+                    data-tooltip="Define os pesos usados para calcular o ranking a partir da evidência medida. Alterar o perfil não executa novamente os modelos.">i</button>
+                </span>
                 <select id="benchmark-scoring-profile-choice">
                   <option value="default">Default</option>
                   <option value="custom">Custom atual</option>
@@ -377,17 +398,17 @@
               </label>
             </div>
             <fieldset class="benchmark-harnesses">
-              <legend>Harnesses disponíveis</legend>
-              <div id="benchmark-harness-list"></div>
+              <legend class="field-label-with-help">Harnesses
+                <button class="information-button compact-information-button" type="button"
+                  aria-label="Informação sobre harness"
+                  data-tooltip="Harness é o runtime que conduz o modelo e expõe suas capacidades ao Host. Cada Modelo × Harness é medido como uma combinação separada.">i</button>
+              </legend>
+              <div id="benchmark-harness-list" class="benchmark-switch-list"></div>
             </fieldset>
           </div>
           <div class="benchmark-action-box">
-            <label class="benchmark-permission">
-              <input id="benchmark-permission" type="checkbox">
-              <span>Autorizo agora a execução dos modelos selecionados para este benchmark.</span>
-            </label>
             <div class="benchmark-actions">
-              <button id="run-benchmark" class="primary-button" type="submit">Executar suite</button>
+              <button id="run-benchmark" class="primary-button" type="submit">Executar benchmark</button>
               <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>Cancelar execução</button>
             </div>
             <output id="benchmark-status" role="status">Pronto.</output>
@@ -400,22 +421,28 @@
               <span class="eyebrow">Acompanhamento e histórico</span>
               <h3 id="benchmark-results-title">Resultados</h3>
             </div>
+          </div>
+
+          <details class="benchmark-advanced benchmark-history-advanced">
+            <summary>Advanced · histórico e comparação</summary>
+          <section class="benchmark-history-tools" aria-labelledby="benchmark-history-title">
+            <div class="benchmark-history-heading">
+              <div>
+                <span class="eyebrow">Historical evidence</span>
+                <h3 id="benchmark-history-title">Histórico e comparação
+                  <button class="information-button compact-information-button" type="button"
+                    aria-label="Informação sobre comparação histórica e comparabilidade"
+                    data-tooltip="A comparação histórica confronta duas execuções persistidas. Comparabilidade indica se suite, versões, ambiente e identidades permitem interpretar os deltas diretamente.">i</button>
+                </h3>
+              </div>
+              <span class="badge">Persistido localmente</span>
+            </div>
             <label class="benchmark-history-control">
               <span>Resultado persistido</span>
               <select id="benchmark-history">
                 <option value="">Nenhum resultado carregado</option>
               </select>
             </label>
-          </div>
-
-          <section class="benchmark-history-tools" aria-labelledby="benchmark-history-title">
-            <div class="benchmark-history-heading">
-              <div>
-                <span class="eyebrow">Historical evidence</span>
-                <h3 id="benchmark-history-title">Histórico e comparação</h3>
-              </div>
-              <span class="badge">Persistido localmente</span>
-            </div>
             <div class="benchmark-history-filters" aria-label="Filtros do histórico">
               <label>
                 <span>Modelo</span>
@@ -451,15 +478,25 @@
             </div>
             <div id="benchmark-comparison" class="benchmark-comparison" hidden></div>
           </section>
+          </details>
 
           <section class="benchmark-recommendations" aria-labelledby="benchmark-recommendation-title">
             <div class="benchmark-recommendation-heading">
               <div>
-                <span class="eyebrow">Evidence-based recommendation</span>
-                <h3 id="benchmark-recommendation-title">Recomendar Modelo × Harness</h3>
+                <span class="eyebrow">Recomendação geral</span>
+                <h3 id="benchmark-recommendation-title">Qual Modelo × Harness devo usar?
+                  <button class="information-button compact-information-button" type="button"
+                    aria-label="Informação sobre confiança e evidência da recomendação"
+                    data-tooltip="A confiança descreve a quantidade, comparabilidade e consistência da evidência local. Os links de evidência abrem os benchmarks que sustentam a recomendação.">i</button>
+                </h3>
               </div>
               <span id="benchmark-recommendation-version" class="badge">v1</span>
             </div>
+            <button id="generate-benchmark-recommendation" class="primary-button benchmark-recommend-button" type="button">
+              Ver recomendação geral
+            </button>
+            <details class="benchmark-inline-advanced">
+              <summary>Opções avançadas de recomendação</summary>
             <div class="benchmark-recommendation-controls">
               <label>
                 <span>Categoria</span>
@@ -472,24 +509,28 @@
                   <option value="default">Default v1</option>
                 </select>
               </label>
-              <button id="generate-benchmark-recommendation" class="secondary-button" type="button">
-                Recomendar com evidência local
-              </button>
               <button id="research-benchmark-recommendation" class="secondary-button" type="button">
                 Pesquisar evidência externa
               </button>
             </div>
+            </details>
             <output id="benchmark-recommendation-status" role="status">
               Selecione uma categoria. Nenhum benchmark será iniciado automaticamente.
             </output>
             <div id="benchmark-recommendation-results" class="benchmark-recommendation-results" hidden></div>
           </section>
 
+          <details class="benchmark-advanced benchmark-scoring-advanced">
+            <summary>Advanced · perfil de score</summary>
           <section class="benchmark-scoring" aria-labelledby="benchmark-scoring-title">
             <div class="benchmark-scoring-heading">
               <div>
                 <span class="eyebrow">Calculated score</span>
-                <h3 id="benchmark-scoring-title">Pesos do ranking</h3>
+                <h3 id="benchmark-scoring-title">Pesos do ranking
+                  <button class="information-button compact-information-button" type="button"
+                    aria-label="Informação sobre as métricas do benchmark"
+                    data-tooltip="Correctness mede precisão do resultado; Terminality mede conclusão clara; Recovery e Convergence medem recuperação e estabilização; Hygiene mede mudanças desnecessárias.">i</button>
+                </h3>
               </div>
               <span id="benchmark-score-profile" class="badge">Default v1</span>
             </div>
@@ -520,6 +561,7 @@
               <button id="reset-benchmark-weights" class="secondary-button" type="button">Restaurar padrão</button>
             </div>
           </section>
+          </details>
 
           <div class="benchmark-panel-body benchmark-results">
             <div class="section-heading">
@@ -548,9 +590,9 @@
                     <th>Modelo × Harness</th>
                     <th>State</th>
                     <th>Passed</th>
-                    <th>Score</th>
+                    <th title="Score calculado pelo perfil ativo a partir da evidência medida.">Score</th>
                     <th>Duration</th>
-                    <th>Terminality</th>
+                    <th title="Conclusão clara e exatamente um estado terminal.">Terminality</th>
                   </tr>
                 </thead>
                 <tbody id="benchmark-results-body"></tbody>

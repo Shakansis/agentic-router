@@ -338,6 +338,10 @@ builder.Services.AddSingleton<
   BenchmarkRecommendationService
 >();
 builder.Services.AddSingleton<
+  IAutoModelHarnessRoutingService,
+  AutoModelHarnessRoutingService
+>();
+builder.Services.AddSingleton<
   IBenchmarkRunCancellationRegistry,
   BenchmarkRunCancellationRegistry
 >();

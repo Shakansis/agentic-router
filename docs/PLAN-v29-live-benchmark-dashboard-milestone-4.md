@@ -1,6 +1,6 @@
 # PLAN v29: Model × Harness Benchmark Roadmap
 
-Status date: 2026-08-22
+Status date: 2026-08-23
 
 This document is the active roadmap for the Model × Harness benchmark work.
 The repository and accepted milestone evidence are authoritative. A milestone
@@ -13,6 +13,11 @@ separately so it is not scheduled twice.
 Manual closure: on 2026-08-22, the user confirmed that the manual tests for
 M0–M3 were completed successfully. Their manual gates are closed; no additional
 M0–M3 acceptance work remains scheduled.
+
+Current closure: the Milestone 13 request identifies M0–M12 as complete. M13
+implementation and deterministic validation are complete; its requested manual
+acceptance pass remains the next gate. Goose, DeepSeek Harness, and shared or
+community benchmark work are deferred and are not in the active sequence.
 
 ### M0 — Generic Harness Boundary (completed)
 
@@ -55,12 +60,11 @@ and validation rules are part of M3 and the benchmark design below.
 - Completed the manual end-to-end validation gate for Native, Codex, and
   OpenCode.
 
-## Remaining roadmap
+## Milestone record through M13
 
-### M4 — Live Benchmark Dashboard
+### M4 — Live Benchmark Dashboard (completed)
 
-Status: implementation and deterministic validation exist; manual acceptance
-is still required before this milestone is completed.
+Status: completed before the M13 implementation request.
 
 - Show live harness and per-test progress.
 - Show useful harness activity and deterministic Host validation as separate
@@ -79,7 +83,7 @@ Acceptance requires a manual Native + Codex + OpenCode Basic CRUD run through
 the live dashboard, independent inspection of final persisted evidence, and
 confirmation that reconnect/cancellation/terminal state behave as presented.
 
-### M5 — Scoring & Ranking v2
+### M5 — Scoring & Ranking v2 (completed)
 
 - Add user-editable weights for objective success, correctness, terminality,
   workspace accuracy, and efficiency.
@@ -92,11 +96,10 @@ confirmation that reconnect/cancellation/terminal state behave as presented.
 - Treat a ranking as a view over evidence, never as a replacement for the
   underlying test results.
 
-### M6 — Qwen Code Experimental Harness
+### M6 — Qwen Code Experimental Harness (completed)
 
-Status: the Qwen Code adapter and Host capability bridge already exist behind
-`IAgentHarness`; do not reimplement that integration. The milestone remains
-open because its manual acceptance and Basic CRUD benchmark are not completed.
+Status: completed before the M13 implementation request. The Qwen Code adapter
+and Host capability bridge remain behind `IAgentHarness`.
 
 - Revalidate the existing integration against the installed Qwen Code runtime
   and current generic harness contract.
@@ -107,7 +110,7 @@ open because its manual acceptance and Basic CRUD benchmark are not completed.
   scoring, and acceptance rules as the completed harnesses.
 - Stop for explicit acceptance before beginning the next harness milestone.
 
-### M7 — Claude Code Experimental Harness
+### M7 — Claude Code Experimental Harness (completed)
 
 - Integrate Claude Code through `IHarnessRegistry` -> `IAgentHarness` without a
   selector bypass.
@@ -116,16 +119,12 @@ open because its manual acceptance and Basic CRUD benchmark are not completed.
 - Run Basic CRUD v1 with the same fixture and acceptance rules.
 - Stop for explicit acceptance before beginning the next harness milestone.
 
-### M8 — Goose Experimental Harness
+### M8 — Goose Experimental Harness (deferred)
 
-- Integrate Goose through `IHarnessRegistry` -> `IAgentHarness` without a
-  selector bypass.
-- Preserve Host authority and retain safe reviewed native capabilities.
-- Complete a manual acceptance gate before enabling benchmark execution.
-- Run Basic CRUD v1 with the same fixture and acceptance rules.
-- Stop for explicit acceptance before beginning the next harness milestone.
+Goose remains deferred. Do not integrate or benchmark it as part of the active
+Model x Harness sequence.
 
-### M9 — Benchmark Suite v2
+### M9 — Benchmark Suite v2 (completed)
 
 Add advanced, versioned scenarios only after the harness acceptance milestones
 above. Keep fixtures, prompts, acceptance rules, and Host validators identical
@@ -144,7 +143,7 @@ Scenarios should cover:
 Suite v2 must preserve individual scenario evidence. A combined score must not
 hide timeout, false completion, unintended changes, or failed recovery.
 
-### M10 — Model × Harness Matrix
+### M10 — Model × Harness Matrix (completed)
 
 - Benchmark multiple exact models against multiple accepted harnesses.
 - Use the same versioned fixtures, prompts, timeouts, Host validators, and
@@ -154,7 +153,7 @@ hide timeout, false completion, unintended changes, or failed recovery.
 - Compare and rank combinations automatically while retaining per-cell raw
   evidence.
 
-### M11 — Historical Benchmark Evidence
+### M11 — Historical Benchmark Evidence (completed)
 
 Persist enough environment identity to explain and compare results over time:
 
@@ -169,7 +168,7 @@ Historical evidence is append-only from the benchmark user's perspective.
 Recalculated scores may be added as derived views, but must not rewrite raw
 measurements from the original run.
 
-### M12 — Evidence-based Recommendations
+### M12 — Evidence-based Recommendations (completed)
 
 - Derive recommendations from comparable local benchmark evidence first.
 - Allow optional web research or reference evidence only as a separately
@@ -181,17 +180,29 @@ measurements from the original run.
 - Keep the user's machine and current runtime evidence authoritative for local
   recommendations.
 
-### M13 — Experimental Model × Harness Router
+### M13 — Experimental Model × Harness Router (implementation complete)
 
-- Choose an eligible model + harness combination from accepted benchmark
-  evidence.
-- Make the evidence basis, deterministic eligibility rules, and selected
-  combination visible.
-- Preserve explicit user selection and existing Host policy authority.
-- Do not implement benchmark-driven routing before sufficient comparable
-  benchmark evidence exists.
+- Auto classifies the task into the existing M12 category vocabulary, requests
+  the existing recommendation ranking, filters it by installed local Ollama
+  models and currently available registered harnesses, and selects the first
+  acceptable candidate.
+- Selection happens once per active conversation/task session. The exact model
+  and harness then execute through the existing `IAgentHarness` path; there is
+  no mid-turn switching, session migration, cloud fallback, or cross-harness
+  recovery.
+- The compact route event and persisted execution review retain category,
+  router/recommendation/profile versions, confidence, supporting run links,
+  and availability fallback without duplicating benchmark evidence.
+- Manual Model x Harness selection bypasses Auto.
+- The benchmark UI now supports CRUD, Agent Behavior, or both in one run,
+  keeps internal versions as reproducibility metadata, removes the redundant
+  authorization checkbox, loads persisted results visibly, and moves
+  historical/comparison/scoring detail behind Advanced surfaces.
+- Deterministic validation passed 304/304 E2E tests, Release build with zero
+  warnings/errors, format verification, JavaScript syntax validation, and
+  `git diff --check`. Manual M13 acceptance remains open.
 
-### M14+ — Optional Shared Benchmark Dataset
+### M14+ — Optional Shared Benchmark Dataset (deferred)
 
 - Explicit opt-in only.
 - Share only anonymized, bounded benchmark evidence with a reviewed schema.

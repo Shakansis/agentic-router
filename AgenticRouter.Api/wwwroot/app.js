@@ -69,6 +69,9 @@ const state = {
   benchmarkElapsedTimer: null
 };
 
+let benchmarkTooltip = null;
+let benchmarkTooltipTrigger = null;
+
 const elements = {};
 let resizeObserver;
 
@@ -182,7 +185,9 @@ function bindElements() {
     "benchmark-view",
     "benchmark-form",
     "benchmark-model",
+    "benchmark-model-list",
     "benchmark-suite",
+    "benchmark-suite-list",
     "benchmark-timeout",
     "benchmark-history",
     "benchmark-history-model-filter",
@@ -209,7 +214,6 @@ function bindElements() {
     "benchmark-weight-efficiency",
     "benchmark-weight-total",
     "reset-benchmark-weights",
-    "benchmark-permission",
     "run-benchmark",
     "cancel-benchmark",
     "benchmark-status",
@@ -528,6 +532,12 @@ function bindEvents() {
   elements.openBenchmarks.addEventListener("click", openBenchmarks);
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
   elements.benchmarkSuite.addEventListener("change", updateBenchmarkSuiteSelection);
+  elements.benchmarkView.addEventListener("pointerover", handleBenchmarkTooltipShow);
+  elements.benchmarkView.addEventListener("pointerout", handleBenchmarkTooltipHide);
+  elements.benchmarkView.addEventListener("focusin", handleBenchmarkTooltipShow);
+  elements.benchmarkView.addEventListener("focusout", handleBenchmarkTooltipHide);
+  elements.benchmarkView.addEventListener("scroll", hideBenchmarkTooltip, true);
+  window.addEventListener("resize", hideBenchmarkTooltip);
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
@@ -1175,7 +1185,9 @@ async function openBenchmarks() {
       fetchJson("/api/benchmarks/recommendation-catalog")
     ]);
     state.models = modelsResponse.models;
-    const retainedLive = state.benchmark?.live ?? null;
+    const retainedLive = state.benchmark?.live?.terminal
+      ? null
+      : state.benchmark?.live ?? null;
     const initialResult = retainedLive
       ? state.benchmark?.result ?? null
       : history[0]
@@ -1206,7 +1218,10 @@ async function openBenchmarks() {
       await resumeLiveBenchmark(storedRunId);
     } else {
       await rescoreBenchmarkResult();
-      elements.benchmarkStatus.textContent = "Pronto.";
+      await generateGeneralBenchmarkRecommendation();
+      if (!state.benchmark?.live?.terminal) {
+        elements.benchmarkStatus.textContent = "Pronto.";
+      }
     }
   } catch (error) {
     elements.benchmarkStatus.textContent = error.message;
@@ -1214,9 +1229,70 @@ async function openBenchmarks() {
 }
 
 function closeBenchmarks() {
+  hideBenchmarkTooltip();
   elements.benchmarkView.hidden = true;
   elements.conversationView.hidden = false;
   elements.openBenchmarks.focus();
+}
+
+function handleBenchmarkTooltipShow(event) {
+  const trigger = event.target.closest(".information-button[data-tooltip]");
+  if (!trigger || !elements.benchmarkView.contains(trigger)) {
+    return;
+  }
+  if (event.relatedTarget && trigger.contains(event.relatedTarget)) {
+    return;
+  }
+  showBenchmarkTooltip(trigger);
+}
+
+function handleBenchmarkTooltipHide(event) {
+  const trigger = event.target.closest(".information-button[data-tooltip]");
+  if (!trigger || trigger !== benchmarkTooltipTrigger) {
+    return;
+  }
+  if (event.relatedTarget && trigger.contains(event.relatedTarget)) {
+    return;
+  }
+  hideBenchmarkTooltip();
+}
+
+function showBenchmarkTooltip(trigger) {
+  hideBenchmarkTooltip();
+  const tooltip = document.createElement("div");
+  tooltip.id = "benchmark-floating-tooltip";
+  tooltip.className = "benchmark-floating-tooltip";
+  tooltip.role = "tooltip";
+  tooltip.textContent = trigger.dataset.tooltip;
+  tooltip.style.visibility = "hidden";
+  tooltip.style.maxWidth = `${Math.max(180, Math.min(320, window.innerWidth - 24))}px`;
+  document.body.append(tooltip);
+
+  const triggerRect = trigger.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const margin = 12;
+  const left = Math.min(
+    Math.max(margin, triggerRect.left),
+    Math.max(margin, window.innerWidth - tooltipRect.width - margin)
+  );
+  let top = triggerRect.bottom + 8;
+  if (top + tooltipRect.height > window.innerHeight - margin) {
+    top = triggerRect.top - tooltipRect.height - 8;
+  }
+  top = Math.max(margin, top);
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+  tooltip.style.visibility = "visible";
+  trigger.setAttribute("aria-describedby", tooltip.id);
+  benchmarkTooltip = tooltip;
+  benchmarkTooltipTrigger = trigger;
+}
+
+function hideBenchmarkTooltip() {
+  benchmarkTooltipTrigger?.removeAttribute("aria-describedby");
+  benchmarkTooltip?.remove();
+  benchmarkTooltip = null;
+  benchmarkTooltipTrigger = null;
 }
 
 function renderBenchmarkControls() {
@@ -1227,36 +1303,75 @@ function renderBenchmarkControls() {
     ? state.settings.defaultModel
     : localModels[0]?.value;
   elements.benchmarkModel.replaceChildren();
+  elements.benchmarkModelList.replaceChildren();
   for (const model of localModels) {
     const option = document.createElement("option");
     option.value = model.value;
     option.textContent = model.label;
     option.selected = model.value === selectedModel;
     elements.benchmarkModel.append(option);
+
+    const label = document.createElement("label");
+    label.className = "benchmark-switch benchmark-model-option";
+    const identity = document.createElement("span");
+    identity.className = "benchmark-switch-identity";
+    const name = document.createElement("strong");
+    name.textContent = model.label;
+    const detail = document.createElement("small");
+    detail.textContent = model.label === model.value
+      ? "Ollama Local"
+      : model.value;
+    identity.append(name, detail);
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "benchmark-model-toggle";
+    input.value = model.value;
+    input.checked = model.value === selectedModel;
+    input.setAttribute("role", "switch");
+    input.setAttribute("aria-label", `Usar modelo ${model.label}`);
+    input.addEventListener("change", syncBenchmarkModelSelection);
+    label.append(identity, input);
+    elements.benchmarkModelList.append(label);
   }
 
   const catalog = state.benchmark?.catalog;
   const suites = catalog?.suites ?? (catalog?.suite ? [catalog.suite] : []);
-  const selectedSuite = suites.some(suite => suite.id === state.benchmark?.result?.suiteId)
-    ? state.benchmark.result.suiteId
-    : suites.some(suite => suite.id === "basic-crud")
-      ? "basic-crud"
-      : suites[0]?.id;
-  replaceOptions(
-    elements.benchmarkSuite,
-    suites.map(suite => ({
-      value: suite.id,
-      label: `${suite.name} v${suite.version}`
-    })),
-    selectedSuite
-  );
+  const persistedSelections = state.benchmark?.result?.selectedSuites
+    ?? (state.benchmark?.result && state.benchmark.result.suiteId !== "combined"
+      ? [{ id: state.benchmark.result.suiteId, version: state.benchmark.result.suiteVersion }]
+      : []);
+  elements.benchmarkSuiteList.replaceChildren();
+  for (const suite of suites) {
+    const label = document.createElement("label");
+    label.className = "benchmark-switch benchmark-test-group-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "benchmark-suite";
+    input.value = suite.id;
+    input.dataset.version = String(suite.version);
+    input.setAttribute("role", "switch");
+    input.checked = persistedSelections.length > 0
+      ? persistedSelections.some(item => item.id === suite.id && item.version === suite.version)
+      : true;
+    const text = document.createElement("span");
+    text.className = "benchmark-switch-identity";
+    const name = document.createElement("strong");
+    name.textContent = suite.id === "basic-crud" ? "CRUD" : "Agent Behavior";
+    input.setAttribute("aria-label", `Executar testes ${name.textContent}`);
+    const detail = document.createElement("small");
+    detail.textContent = `${suite.tests.length} testes`;
+    text.title = `${suite.name}; versão interna ${suite.version}.`;
+    text.append(name, detail);
+    label.append(text, input);
+    elements.benchmarkSuiteList.append(label);
+  }
   elements.benchmarkTimeout.value = String(catalog?.defaultTimeoutSeconds ?? 120);
   elements.benchmarkTimeout.min = String(catalog?.minimumTimeoutSeconds ?? 5);
   elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 600);
   elements.benchmarkHarnessList.replaceChildren();
   for (const status of catalog?.harnesses ?? []) {
     const label = document.createElement("label");
-    label.className = "benchmark-harness-option";
+    label.className = "benchmark-switch benchmark-harness-option";
     const input = document.createElement("input");
     input.type = "checkbox";
     input.name = "benchmark-harness";
@@ -1264,15 +1379,22 @@ function renderBenchmarkControls() {
     input.disabled = !status.availability.available;
     input.dataset.available = String(status.availability.available);
     input.checked = status.availability.available;
+    input.setAttribute("role", "switch");
     const text = document.createElement("span");
+    text.className = "benchmark-switch-identity benchmark-harness-identity";
     const harnessLabel = harnessDisplayLabel(status.definition);
-    text.textContent = status.availability.available
-      ? `${harnessLabel} · ${status.availability.version ?? "disponível"}`
-      : `${harnessLabel} · indisponível`;
+    const name = document.createElement("strong");
+    name.textContent = harnessLabel;
+    input.setAttribute("aria-label", `Usar harness ${harnessLabel}`);
+    const version = document.createElement("small");
+    version.textContent = status.availability.available
+      ? status.availability.version ?? "Versão não informada"
+      : "Indisponível";
+    text.append(name, version);
     if (!status.availability.available && status.availability.message) {
       label.title = status.availability.message;
     }
-    label.append(input, text);
+    label.append(text, input);
     elements.benchmarkHarnessList.append(label);
   }
   elements.benchmarkScoringProfileChoice.value = state.benchmark?.scoringProfile?.id === "custom"
@@ -1295,7 +1417,7 @@ function renderBenchmarkControls() {
       { value: "", label: "Todas as suites" },
       ...suites.map(suite => ({
         value: suite.id,
-        label: `${suite.name} v${suite.version}`
+        label: suite.id === "basic-crud" ? "CRUD" : "Agent Behavior"
       }))
     ],
     elements.benchmarkHistorySuiteFilter.value
@@ -1305,30 +1427,43 @@ function renderBenchmarkControls() {
 }
 
 function selectedBenchmarkModels() {
-  return [...elements.benchmarkModel.selectedOptions].map(option => option.value);
+  return [...elements.benchmarkModelList.querySelectorAll(
+    'input[name="benchmark-model-toggle"]:checked:not(:disabled)'
+  )].map(input => input.value);
 }
 
-function selectedBenchmarkSuite() {
-  return (state.benchmark?.catalog?.suites ?? []).find(
-    suite => suite.id === elements.benchmarkSuite.value
-  ) ?? state.benchmark?.catalog?.suite;
+function syncBenchmarkModelSelection() {
+  const selected = new Set(selectedBenchmarkModels());
+  for (const option of elements.benchmarkModel.options) {
+    option.selected = selected.has(option.value);
+  }
+}
+
+function selectedBenchmarkSuites() {
+  const selected = [...elements.benchmarkSuiteList.querySelectorAll(
+    'input[name="benchmark-suite"]:checked'
+  )].map(input => ({ id: input.value, version: Number(input.dataset.version) }));
+  const suites = state.benchmark?.catalog?.suites ?? [];
+  return selected.map(selection => suites.find(suite =>
+    suite.id === selection.id && suite.version === selection.version
+  )).filter(Boolean);
 }
 
 function updateBenchmarkSuiteSelection() {
-  const suite = selectedBenchmarkSuite();
-  if (!suite) {
+  const suites = selectedBenchmarkSuites();
+  if (suites.length === 0) {
+    elements.runBenchmark.textContent = "Selecione testes";
     return;
   }
   const scenarioTimeout = Math.max(
-    ...suite.tests.map(test => Number(test.timeoutSeconds || 120))
+    ...suites.flatMap(suite => suite.tests)
+      .map(test => Number(test.timeoutSeconds || 120))
   );
   elements.benchmarkTimeout.value = String(Math.min(
     Number(elements.benchmarkTimeout.max || 600),
     scenarioTimeout
   ));
-  elements.runBenchmark.textContent = suite.id === "basic-crud"
-    ? "Executar CRUD"
-    : "Executar Agent Behavior v2";
+  elements.runBenchmark.textContent = "Executar benchmark";
 }
 
 function benchmarkWeightInputs() {
@@ -1496,8 +1631,21 @@ function benchmarkHistoryRunLabel(result) {
     dateStyle: "short",
     timeStyle: "short"
   });
-  return `${timestamp} · ${result.suiteId} v${result.suiteVersion} · `
+  return `${timestamp} · ${benchmarkSuiteLabel(result.suiteId)} · `
     + `${result.models.length}M × ${result.harnesses.length}H · ${result.finalStatus}`;
+}
+
+function benchmarkSuiteLabel(suiteId) {
+  if (suiteId === "basic-crud") {
+    return "CRUD";
+  }
+  if (suiteId === "agent-behavior") {
+    return "Agent Behavior";
+  }
+  if (suiteId === "combined") {
+    return "CRUD + Agent Behavior";
+  }
+  return suiteId || "Testes";
 }
 
 function scheduleBenchmarkHistoryRefresh() {
@@ -1701,6 +1849,7 @@ async function generateBenchmarkRecommendation(includeExternalEvidence) {
   }
   elements.generateBenchmarkRecommendation.disabled = true;
   elements.researchBenchmarkRecommendation.disabled = true;
+  renderBenchmarkRecommendation(null);
   elements.benchmarkRecommendationStatus.textContent = includeExternalEvidence
     ? "Pesquisando fontes externas explicitamente; os dados locais não serão enviados."
     : "Calculando recomendação somente com evidência local persistida.";
@@ -1726,6 +1875,15 @@ async function generateBenchmarkRecommendation(includeExternalEvidence) {
   }
 }
 
+async function generateGeneralBenchmarkRecommendation() {
+  if (!state.benchmark?.recommendationCatalog) {
+    return;
+  }
+  elements.benchmarkRecommendationCategory.value = "general-coding";
+  elements.benchmarkRecommendationProfile.value = "active";
+  await generateBenchmarkRecommendation(false);
+}
+
 function renderBenchmarkRecommendation(recommendation) {
   const container = elements.benchmarkRecommendationResults;
   container.hidden = !recommendation;
@@ -1733,13 +1891,19 @@ function renderBenchmarkRecommendation(recommendation) {
   if (!recommendation) {
     return;
   }
-  const trace = document.createElement("p");
+  const trace = document.createElement("details");
   trace.className = "benchmark-recommendation-trace";
-  trace.textContent = `${recommendation.algorithmVersion} · ${recommendation.category} · `
+  const traceSummary = document.createElement("summary");
+  traceSummary.textContent = "Detalhes da recomendação";
+  const traceBody = document.createElement("p");
+  traceBody.textContent = `${recommendation.algorithmVersion} · ${recommendation.category} · `
     + `${recommendation.scoringProfile.displayName} v${recommendation.scoringProfile.version} · `
     + `ID ${recommendation.recommendationId.slice(0, 12)}`;
+  trace.append(traceSummary, traceBody);
   container.append(trace);
 
+  let alternatives = null;
+  let alternativesBody = null;
   for (const candidate of recommendation.candidates) {
     const card = document.createElement("article");
     card.className = "benchmark-recommendation-card";
@@ -1771,13 +1935,28 @@ function renderBenchmarkRecommendation(recommendation) {
       button.type = "button";
       button.className = "benchmark-result-link";
       button.dataset.recommendationRunId = item.runId;
-      button.textContent = `${new Date(item.startedAt).toLocaleDateString()} · ${item.suiteId} v${item.suiteVersion} · `
+      button.textContent = `${new Date(item.startedAt).toLocaleDateString()} · ${benchmarkSuiteLabel(item.suiteId)} · `
         + `${item.source} · ${item.comparability} · ${Number(item.categoryScore).toFixed(2)}`;
       links.append(button);
     }
     evidence.append(evidenceSummary, links);
     card.append(evidence);
-    container.append(card);
+    if (candidate.rank === 1) {
+      container.append(card);
+    } else {
+      if (!alternatives) {
+        alternatives = document.createElement("details");
+        alternatives.className = "benchmark-recommendation-alternatives";
+        const alternativesSummary = document.createElement("summary");
+        alternativesSummary.textContent =
+          `Alternativas ranqueadas (${recommendation.candidates.length - 1})`;
+        alternativesBody = document.createElement("div");
+        alternativesBody.className = "benchmark-recommendation-alternatives-body";
+        alternatives.append(alternativesSummary, alternativesBody);
+        container.append(alternatives);
+      }
+      alternativesBody.append(card);
+    }
   }
 
   if (recommendation.candidates.length === 0) {
@@ -1799,6 +1978,12 @@ function renderBenchmarkRecommendation(recommendation) {
     }
     missing.append(summary, list);
     container.append(missing);
+  }
+  if (
+    recommendation.externalResearchStatus === "not-requested"
+    && recommendation.externalEvidence.length === 0
+  ) {
+    return;
   }
   const external = document.createElement("section");
   external.className = "benchmark-recommendation-external";
@@ -1879,21 +2064,16 @@ async function runBenchmarkSuite(event) {
     elements.benchmarkStatus.textContent = "Selecione ao menos um modelo local instalado.";
     return;
   }
-  if (!elements.benchmarkPermission.checked) {
-    elements.benchmarkStatus.textContent = "Confirme a autorização imediata para executar o modelo.";
-    return;
-  }
-
   const clientRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
-  const suite = selectedBenchmarkSuite();
-  if (!suite) {
-    elements.benchmarkStatus.textContent = "Selecione uma suite disponível.";
+  const suites = selectedBenchmarkSuites();
+  if (suites.length === 0) {
+    elements.benchmarkStatus.textContent = "Selecione CRUD, Agent Behavior ou ambos.";
     return;
   }
   state.activeBenchmarkRunId = clientRunId;
   sessionStorage.setItem("agentic-router-benchmark-live-run", clientRunId);
   setBenchmarkRunning(true);
-  initializeBenchmarkLive(clientRunId, models, harnesses, suite);
+  initializeBenchmarkLive(clientRunId, models, harnesses, suites);
   elements.benchmarkStatus.textContent = "Iniciando dashboard ao vivo…";
   elements.benchmarkResultsBody.replaceChildren();
   renderBenchmarkLive();
@@ -1906,8 +2086,9 @@ async function runBenchmarkSuite(event) {
         model: models[0],
         models,
         harnesses,
-        suiteId: suite.id,
-        suiteVersion: suite.version,
+        suiteId: suites[0].id,
+        suiteVersion: suites[0].version,
+        suites: suites.map(suite => ({ id: suite.id, version: suite.version })),
         timeoutSeconds: Number(elements.benchmarkTimeout.value),
         scoringProfileId: elements.benchmarkScoringProfileChoice.value,
         scoreWeights: elements.benchmarkScoringProfileChoice.value === "custom"
@@ -1928,7 +2109,6 @@ async function runBenchmarkSuite(event) {
     state.activeBenchmarkRunId = null;
     state.benchmark.live = null;
     sessionStorage.removeItem("agentic-router-benchmark-live-run");
-    elements.benchmarkPermission.checked = false;
     setBenchmarkRunning(false);
   }
 }
@@ -1937,9 +2117,9 @@ function initializeBenchmarkLive(
   runId,
   modelIds = selectedBenchmarkModels(),
   harnessIds = [],
-  suite = selectedBenchmarkSuite()
+  suites = selectedBenchmarkSuites()
 ) {
-  const tests = suite?.tests ?? [];
+  const tests = suites.flatMap(suite => suite.tests ?? []);
   const cells = {};
   for (const model of modelIds) {
     for (const harness of harnessIds) {
@@ -2292,13 +2472,15 @@ function finishBenchmarkLive(result) {
   clearBenchmarkLiveConnection();
   state.activeBenchmarkRunId = null;
   sessionStorage.removeItem("agentic-router-benchmark-live-run");
-  elements.benchmarkPermission.checked = false;
   setBenchmarkRunning(false);
   state.benchmark.result = result;
   renderBenchmarkResult(result);
   refreshBenchmarkHistory({ selectRunId: result.runId });
   rescoreBenchmarkResult().catch(error => {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  });
+  generateGeneralBenchmarkRecommendation().catch(error => {
+    elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
   });
   elements.benchmarkStatus.textContent = result.terminalState === "cancelled"
     ? "Execução cancelada com resultado final persistido."
@@ -2312,7 +2494,6 @@ function failBenchmarkLive(message) {
   clearBenchmarkLiveConnection();
   state.activeBenchmarkRunId = null;
   sessionStorage.removeItem("agentic-router-benchmark-live-run");
-  elements.benchmarkPermission.checked = false;
   setBenchmarkRunning(false);
   elements.benchmarkStatus.textContent = message ?? "O benchmark ao vivo falhou antes do resultado final.";
 }
@@ -2353,8 +2534,14 @@ function setBenchmarkRunning(running) {
   elements.runBenchmark.disabled = running;
   elements.cancelBenchmark.disabled = !running;
   elements.benchmarkModel.disabled = running;
+  for (const input of elements.benchmarkModelList.querySelectorAll("input")) {
+    input.disabled = running;
+  }
   elements.benchmarkScoringProfileChoice.disabled = running;
   elements.benchmarkTimeout.disabled = running;
+  for (const input of elements.benchmarkSuiteList.querySelectorAll("input")) {
+    input.disabled = running;
+  }
   elements.benchmarkHistory.disabled = running;
   elements.benchmarkHistoryModelFilter.disabled = running;
   elements.benchmarkHistoryHarnessFilter.disabled = running;
@@ -2374,12 +2561,31 @@ function setBenchmarkRunning(running) {
 async function openPersistedBenchmark() {
   try {
     const runId = elements.benchmarkHistory.value;
+    elements.benchmarkStatus.textContent = runId
+      ? "Carregando resultado persistido…"
+      : "Limpando resultado carregado…";
     const selected = runId
       ? await fetchJson(`/api/benchmarks/suite-runs/${encodeURIComponent(runId)}`)
       : null;
     state.benchmark.result = selected;
     state.benchmark.scoringProjection = null;
+    if (selected) {
+      const selections = selected.selectedSuites
+        ?? [{ id: selected.suiteId, version: selected.suiteVersion }];
+      for (const input of elements.benchmarkSuiteList.querySelectorAll(
+        'input[name="benchmark-suite"]'
+      )) {
+        input.checked = selections.some(item =>
+          item.id === input.value && item.version === Number(input.dataset.version)
+        );
+      }
+      updateBenchmarkSuiteSelection();
+    }
     await rescoreBenchmarkResult();
+    await generateGeneralBenchmarkRecommendation();
+    elements.benchmarkStatus.textContent = selected
+      ? `Resultado persistido carregado: ${benchmarkSuiteLabel(selected.suiteId)} · ${selected.runId.slice(0, 8)}.`
+      : "Nenhum resultado persistido carregado.";
   } catch (error) {
     renderBenchmarkResult(state.benchmark?.result ?? null);
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
@@ -2411,8 +2617,7 @@ function renderBenchmarkResult(result) {
     ? `${result.selectedModels.length} modelos × ${result.selectedHarnesses?.length ?? 0} harnesses`
     : result.selectedModels?.[0] ?? result.model;
   elements.benchmarkRunSummary.textContent =
-    `${modelSummary} · ${result.suiteId} v${result.suiteVersion} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)} · `
-    + `${result.fixtureId} v${result.fixtureVersion}`;
+    `${modelSummary} · ${benchmarkSuiteLabel(result.suiteId)} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)}`;
   const originalScore = benchmarkAggregateOriginalScore(result);
   const currentScore = benchmarkAggregateCurrentScore(projection, result);
   elements.benchmarkScoreContext.textContent = profile
@@ -2746,7 +2951,10 @@ function benchmarkMetric(value) {
 function benchmarkHarnessLabel(harnessId) {
   return state.benchmark?.catalog?.harnesses?.find(
     item => item.definition.id === harnessId
-  )?.definition.displayName ?? harnessId;
+  )?.definition.displayName
+    ?? state.harnesses?.find(item => item.definition.id === harnessId)
+      ?.definition.displayName
+    ?? harnessId;
 }
 
 function formatBenchmarkDuration(milliseconds) {
@@ -8782,6 +8990,10 @@ function handleModeChange(event) {
 
 function setInteractionMode(mode) {
   state.interactionMode = mode;
+  if (mode !== "execute" && state.harness === "auto-model-harness") {
+    state.harness = "native";
+    elements.harnessSelector.value = "native";
+  }
   updateInteractionControls();
   updateHarnessControls();
   updateComposerStatus();
@@ -8814,6 +9026,7 @@ function updateInteractionControls() {
 
 function handleHarnessChange() {
   state.harness = elements.harnessSelector.value;
+  updateHarnessControls();
   updateComposerStatus();
 }
 
@@ -8847,6 +9060,11 @@ function renderHarnesses() {
         : availability.message ?? `${label} is unavailable.`
     };
   });
+  options.unshift({
+    value: "auto-model-harness",
+    label: "Auto Model × Harness",
+    title: "Escolhe uma vez, antes do Execute, usando recomendação local e disponibilidade atual."
+  });
   if (!options.some(option => option.value === "native")) {
     options.unshift({ value: "native", label: "Native" });
   }
@@ -8863,7 +9081,9 @@ function updateHarnessControls() {
   const disabled = Boolean(
     state.requestController
   ) || state.conversationTransitioning;
-  elements.modelSelector.disabled = disabled;
+  const automaticRoute = state.interactionMode === "execute"
+    && state.harness === "auto-model-harness";
+  elements.modelSelector.disabled = disabled || automaticRoute;
   elements.harnessSelector.disabled = disabled
     || state.interactionMode !== "execute";
   elements.harnessSelector.value = state.harness;
@@ -9262,7 +9482,11 @@ async function handleComposerSubmit(event) {
     return;
   }
 
-  const selectedModel = elements.modelSelector.value;
+  const autoModelHarness = state.interactionMode === "execute"
+    && state.harness === "auto-model-harness";
+  const selectedModel = autoModelHarness
+    ? "auto"
+    : elements.modelSelector.value;
 
   if (!await ensureCloudImageApproval(selectedModel)) {
     return;
@@ -9352,7 +9576,8 @@ async function handleComposerSubmit(event) {
           conversationSessionId: state.conversationSessionId,
           webSearchEnabled: state.webEnabled,
           images: requestAttachments,
-          compactContext
+          compactContext,
+          autoModelHarness
         }),
         signal: controller.signal
       }
@@ -10630,6 +10855,9 @@ function updateExecutionSession(assistant, session) {
     + `Roteador residente: ${session.residentModel || "indisponível"} · `
     + session.executionPath;
   coordinator.title = [
+    session.routingEvidence
+      ? `Auto Model × Harness: ${session.routingEvidence.selectedModel} × ${benchmarkHarnessLabel(session.routingEvidence.selectedHarness)} · ${session.routingEvidence.confidence} · recommendation ${session.routingEvidence.recommendationId.slice(0, 12)}`
+      : null,
     session.conformanceIdentity
       ? `Conformidade: ${session.conformanceIdentity}`
       : null,
@@ -10794,6 +11022,46 @@ function renderChangeReview(review, focusRelativePath = null) {
   objective.textContent = review.objective;
   summary.append(heading, metadata, objective);
   elements.changeReviewBody.append(summary);
+
+  if (review.summary.routingEvidence) {
+    const route = review.summary.routingEvidence;
+    const routing = document.createElement("section");
+    routing.className = "change-review-context routing-evidence";
+    const title = document.createElement("h3");
+    title.textContent = "Auto Model × Harness";
+    const selection = document.createElement("p");
+    selection.textContent =
+      `${route.selectedModel} × ${benchmarkHarnessLabel(route.selectedHarness)} · `
+      + `${route.confidence} · ${route.taskCategory}`
+      + (route.fallback ? " · fallback de disponibilidade" : "");
+    const reason = document.createElement("p");
+    reason.textContent = route.reason;
+    const trace = document.createElement("p");
+    trace.className = "runtime-note";
+    trace.textContent =
+      `${route.routerVersion} · ${route.recommendationVersion} · `
+      + `${route.scoringProfileId} v${route.scoringProfileVersion} · `
+      + `recommendation ${route.recommendationId.slice(0, 12)}`;
+    routing.append(title, selection, reason, trace);
+    if (route.supportingRunIds.length > 0) {
+      const evidence = document.createElement("details");
+      const evidenceSummary = document.createElement("summary");
+      evidenceSummary.textContent = `Abrir evidência de suporte (${route.supportingRunIds.length})`;
+      const links = document.createElement("div");
+      links.className = "benchmark-recommendation-evidence-links";
+      for (const runId of route.supportingRunIds) {
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "benchmark-result-link";
+        link.textContent = `Benchmark ${runId.slice(0, 12)}`;
+        link.addEventListener("click", () => openRoutingEvidence(runId));
+        links.append(link);
+      }
+      evidence.append(evidenceSummary, links);
+      routing.append(evidence);
+    }
+    elements.changeReviewBody.append(routing);
+  }
 
   if (review.project) {
     const project = document.createElement("section");
@@ -10961,6 +11229,23 @@ function renderChangeReview(review, focusRelativePath = null) {
   elements.undoExecution.disabled = !review.summary.undoAvailable;
   elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
   elements.validateChanges.disabled = review.files.length === 0;
+}
+
+async function openRoutingEvidence(runId) {
+  closeChangeReview();
+  await openBenchmarks();
+  const advanced = document.querySelector(".benchmark-history-advanced");
+  if (advanced) {
+    advanced.open = true;
+  }
+  const option = [...elements.benchmarkHistory.options].some(item => item.value === runId);
+  if (!option) {
+    elements.benchmarkStatus.textContent =
+      "A evidência de suporte não está disponível no histórico filtrado atual.";
+    return;
+  }
+  elements.benchmarkHistory.value = runId;
+  await openPersistedBenchmark();
 }
 
 async function loadGitDelivery(review) {
@@ -12503,6 +12788,13 @@ function updateComposerStatus() {
   } else if (state.editingTurn) {
     elements.composerStatus.textContent = "Editando mensagem · Esc para cancelar";
   } else if (state.interactionMode === "execute") {
+    if (state.harness === "auto-model-harness") {
+      elements.composerStatus.textContent =
+        `Execute · Auto Model × Harness · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
+      updateActiveAgentLabel();
+      renderCapabilityContext();
+      return;
+    }
     const status = state.harnesses.find(
       item => item.definition.id === state.harness
     );

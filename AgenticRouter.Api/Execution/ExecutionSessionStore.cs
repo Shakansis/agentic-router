@@ -989,6 +989,7 @@ public sealed class ExecutionSession
   private string? _deliveryCommitHash;
   private string _completionStatus = "not-evaluated";
   private string? _forcedCompletionStatus;
+  private ExecutionRoutingEvidence? _routingEvidence;
 
   public ExecutionSession(
     string id,
@@ -1724,6 +1725,15 @@ public sealed class ExecutionSession
     }
   }
 
+  public void RecordRoutingEvidence(ExecutionRoutingEvidence evidence)
+  {
+    ArgumentNullException.ThrowIfNull(evidence);
+    lock (_gate)
+    {
+      _routingEvidence = evidence;
+    }
+  }
+
   public void RecordAction(
     ValidatedLocalAction action,
     string state,
@@ -2067,7 +2077,8 @@ public sealed class ExecutionSession
         SelectedModel,
         ResidentModel,
         ConformanceIdentity,
-        HandoffReason
+        HandoffReason,
+        _routingEvidence
       );
     }
   }
@@ -2153,6 +2164,7 @@ public sealed class ExecutionSession
       ResidentModel = snapshot.Review.Summary.ResidentModel;
       ConformanceIdentity = snapshot.Review.Summary.ConformanceIdentity;
       HandoffReason = snapshot.Review.Summary.HandoffReason;
+      _routingEvidence = snapshot.Review.Summary.RoutingEvidence;
       State = snapshot.State is "completed" or "completed-with-warnings" or "blocked"
         ? snapshot.State
         : "interrupted";

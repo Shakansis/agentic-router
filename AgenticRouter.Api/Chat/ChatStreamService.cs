@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
@@ -55,6 +56,7 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IImageAttachmentValidator _imageValidator;
   private readonly ICloudImageApprovalStore _cloudImageApprovals;
   private readonly IHarnessRegistry _harnesses;
+  private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
   private ExecutionSession? _executionSession;
@@ -97,6 +99,7 @@ public sealed class ChatStreamService : IChatStreamService
     IImageAttachmentValidator imageValidator,
     ICloudImageApprovalStore cloudImageApprovals,
     IHarnessRegistry harnesses,
+    IAutoModelHarnessRoutingService autoModelHarnessRouter,
     ITraceContext trace,
     ILogger<ChatStreamService> logger
   )
@@ -130,6 +133,7 @@ public sealed class ChatStreamService : IChatStreamService
     _imageValidator = imageValidator;
     _cloudImageApprovals = cloudImageApprovals;
     _harnesses = harnesses;
+    _autoModelHarnessRouter = autoModelHarnessRouter;
     _trace = trace;
     _logger = logger;
   }
@@ -207,6 +211,64 @@ public sealed class ChatStreamService : IChatStreamService
         baseUri,
         cancellationToken
       );
+      AutoModelHarnessRoutingResult? autoModelHarnessRoute = null;
+      if (request.AutoModelHarness)
+      {
+        autoModelHarnessRoute = await _autoModelHarnessRouter.RouteAsync(
+          request.ConversationSessionId ?? requestId,
+          request.Message,
+          models,
+          cancellationToken
+        );
+        if (
+          autoModelHarnessRoute.Status
+            != AutoModelHarnessRoutingStatusIds.Selected
+          || autoModelHarnessRoute.SelectedCandidate is null
+        )
+        {
+          yield return Event(
+            requestId,
+            "router.model-harness-insufficient",
+            $"Auto Model × Harness could not select a route: {autoModelHarnessRoute.Reason} Choose a Model × Harness manually or benchmark candidates.",
+            stopwatch
+          );
+          throw new ChatStageException(
+            "auto-model-harness-routing",
+            "Auto Model × Harness needs more usable local evidence. Choose a route manually or benchmark candidates.",
+            autoModelHarnessRoute.Reason,
+            request.Model,
+            autoModelHarnessRoute.TaskCategory,
+            409,
+            true,
+            details: new Dictionary<string, string?>
+            {
+              ["routerVersion"] = autoModelHarnessRoute.RouterVersion,
+              ["recommendationId"] = autoModelHarnessRoute.RecommendationId,
+              ["category"] = autoModelHarnessRoute.TaskCategory,
+              ["confidence"] = BenchmarkRecommendationConfidenceIds.Insufficient
+            }
+          );
+        }
+        var selectedRoute = autoModelHarnessRoute.SelectedCandidate;
+        request = request with
+        {
+          Model = selectedRoute.Model,
+          Harness = selectedRoute.Harness
+        };
+        yield return Event(
+          requestId,
+          autoModelHarnessRoute.Fallback
+            ? "router.model-harness-fallback"
+            : "router.model-harness-selected",
+          $"Auto selected: {selectedRoute.Model} × {HarnessLabel(GetHarnessDefinition(selectedRoute.Harness))}. Reason: {autoModelHarnessRoute.Reason} Confidence: {selectedRoute.Confidence}."
+            + (autoModelHarnessRoute.Fallback
+              ? $" Fallback: {autoModelHarnessRoute.FallbackReason}"
+              : string.Empty),
+          stopwatch,
+          selectedRoute.Model,
+          autoModelHarnessRoute.TaskCategory
+        );
+      }
       var usageWorkspace = await _workspaceProfiles.GetActiveDataAsync(
         cancellationToken
       );
@@ -930,6 +992,31 @@ public sealed class ChatStreamService : IChatStreamService
         _executionSession.AttachProject(
           project
         );
+        if (
+          autoModelHarnessRoute?.SelectedCandidate is
+            BenchmarkRecommendationCandidate routedCandidate
+        )
+        {
+          _executionSession.RecordRoutingEvidence(
+            new ExecutionRoutingEvidence(
+              autoModelHarnessRoute.RouterVersion,
+              autoModelHarnessRoute.TaskCategory,
+              autoModelHarnessRoute.RecommendationId,
+              autoModelHarnessRoute.RecommendationVersion,
+              autoModelHarnessRoute.ScoringProfile.Id,
+              autoModelHarnessRoute.ScoringProfile.Version,
+              routedCandidate.Model,
+              routedCandidate.Harness,
+              routedCandidate.Confidence,
+              autoModelHarnessRoute.Reason,
+              autoModelHarnessRoute.Fallback,
+              autoModelHarnessRoute.FallbackReason,
+              routedCandidate.Evidence.Select(evidence => evidence.RunId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray()
+            )
+          );
+        }
         _executionSession.ApplyInstructions(
           rootInstructions
         );
@@ -7289,14 +7376,37 @@ public sealed class ChatStreamService : IChatStreamService
     }
 
     if (
-      string.IsNullOrWhiteSpace(request.Harness)
-      || !_harnesses.TryGetDefinition(request.Harness, out _)
+      !request.AutoModelHarness
+      && (
+        string.IsNullOrWhiteSpace(request.Harness)
+        || !_harnesses.TryGetDefinition(request.Harness, out _)
+      )
     )
     {
       throw new ChatStageException(
         "request-validation",
         "The selected harness is not registered.",
         $"Unsupported harness: {request.Harness}.",
+        request.Model,
+        null,
+        400,
+        true
+      );
+    }
+
+    if (
+      request.AutoModelHarness
+      && !string.Equals(
+        request.InteractionMode,
+        "execute",
+        StringComparison.Ordinal
+      )
+    )
+    {
+      throw new ChatStageException(
+        "request-validation",
+        "Auto Model × Harness is available in Execute mode only.",
+        "The request enabled Auto Model × Harness outside Execute mode.",
         request.Model,
         null,
         400,

@@ -151,21 +151,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   )
   {
     RequirePermission(request.ModelExecutionPermissionGranted);
-    if (
-      !_tests.TryGetSuite(
-        request.SuiteId,
-        request.SuiteVersion,
-        out var suite,
-        out var tests
-      )
-    )
-    {
-      throw new BenchmarkRequestException(
-        "benchmark-suite-unknown",
-        $"Benchmark suite '{request.SuiteId}' version {request.SuiteVersion} is unavailable.",
-        "suiteId"
-      );
-    }
+    var resolvedSuites = ResolveSuites(request);
+    var suite = resolvedSuites.Metadata;
+    var tests = resolvedSuites.Tests;
     if (request.TimeoutSeconds is < 5 or > 600)
     {
       throw new BenchmarkRequestException(
@@ -414,7 +402,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       scoreWeights,
       harnessResults,
       ranking,
-      SchemaVersion: 3,
+      SchemaVersion: 4,
       ScoringProfileId: scoringProfileId,
       SelectedModels: requestedModels,
       SelectedHarnesses: requestedHarnesses,
@@ -441,7 +429,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       ),
       ScoringProfileVersion: BenchmarkScoringProfileIds.DefaultVersion,
       RawMeasurementsStatus: BenchmarkEvidenceStatusIds.Measured,
-      ValidationEvidenceStatus: BenchmarkEvidenceStatusIds.Measured
+      ValidationEvidenceStatus: BenchmarkEvidenceStatusIds.Measured,
+      SelectedSuites: resolvedSuites.Selections
     );
     await _results.SaveAsync(suiteResult, CancellationToken.None);
     Publish(progressSink, new BenchmarkProgressEvent(
@@ -1847,6 +1836,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     {
       $"suite={suite.Id}:{suite.Version}",
       $"fixture={suite.FixtureId}:{suite.FixtureVersion}",
+      $"tests={string.Join('|', suite.Tests.Select(test => $"{test.Suite}:{test.SuiteVersion}:{test.Id}:{test.Version}"))}",
       $"timeout={timeoutSeconds}",
       $"context={configuredContextTokens?.ToString() ?? "unavailable"}",
       "sequential=true",
@@ -1855,6 +1845,67 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     });
     return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
       .ToLowerInvariant();
+  }
+
+  private ResolvedBenchmarkSuites ResolveSuites(BenchmarkSuiteRunRequest request)
+  {
+    var requested = request.Suites is { Count: > 0 }
+      ? request.Suites
+      : [new BenchmarkSuiteSelection(request.SuiteId, request.SuiteVersion)];
+    var selections = new List<BenchmarkSuiteSelection>(requested.Count);
+    var definitions = new List<IBenchmarkTestDefinition>();
+    var metadata = new List<BenchmarkSuiteMetadata>(requested.Count);
+    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var selection in requested)
+    {
+      if (
+        string.IsNullOrWhiteSpace(selection.Id)
+        || !seen.Add($"{selection.Id.Trim()}|{selection.Version}")
+      )
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-suite-selection-invalid",
+          "Benchmark test groups must be non-empty and unique.",
+          "suites"
+        );
+      }
+      if (!_tests.TryGetSuite(
+        selection.Id,
+        selection.Version,
+        out var suite,
+        out var tests
+      ))
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-suite-unknown",
+          $"Benchmark suite '{selection.Id}' version {selection.Version} is unavailable.",
+          "suites"
+        );
+      }
+      selections.Add(new BenchmarkSuiteSelection(suite.Id, suite.Version));
+      metadata.Add(suite);
+      definitions.AddRange(tests);
+    }
+    if (selections.Count == 1)
+    {
+      return new ResolvedBenchmarkSuites(
+        metadata[0],
+        definitions,
+        selections
+      );
+    }
+    return new ResolvedBenchmarkSuites(
+      new BenchmarkSuiteMetadata(
+        BenchmarkSuiteIds.Combined,
+        BenchmarkSuiteIds.CombinedVersion,
+        "Selected benchmark tests",
+        BenchmarkSuiteIds.CombinedFixtureId,
+        BenchmarkSuiteIds.CombinedFixtureVersion,
+        definitions.Select(definition => definition.Metadata).ToArray()
+      ),
+      definitions,
+      selections
+    );
   }
 
   private static IReadOnlyList<BenchmarkMatrixRankingEntry> RankPairs(
@@ -2421,6 +2472,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private sealed record ResolvedBenchmarkModel(
     string RequestedName,
     InstalledModel? Installed
+  );
+
+  private sealed record ResolvedBenchmarkSuites(
+    BenchmarkSuiteMetadata Metadata,
+    IReadOnlyList<IBenchmarkTestDefinition> Tests,
+    IReadOnlyList<BenchmarkSuiteSelection> Selections
   );
 
   private sealed record CellCompatibility(

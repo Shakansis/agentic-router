@@ -193,7 +193,12 @@ public sealed class BenchmarkHistoryService : IBenchmarkHistoryService
       .Where(result => Matches(GetModels(result), model))
       .Where(result => Matches(GetHarnesses(result), harness))
       .Where(result => string.IsNullOrWhiteSpace(suite)
-        || string.Equals(result.SuiteId, suite.Trim(), StringComparison.OrdinalIgnoreCase))
+        || string.Equals(result.SuiteId, suite.Trim(), StringComparison.OrdinalIgnoreCase)
+        || (result.SelectedSuites?.Any(selection => string.Equals(
+          selection.Id,
+          suite.Trim(),
+          StringComparison.OrdinalIgnoreCase
+        )) ?? false))
       .Take(Math.Clamp(limit, 1, 100))
       .Select(result => Summarize(result, profile))
       .ToArray();

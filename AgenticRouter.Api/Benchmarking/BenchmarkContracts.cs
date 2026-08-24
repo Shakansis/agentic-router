@@ -12,6 +12,10 @@ public static class BenchmarkSuiteIds
   public const int AgentBehaviorVersion = 2;
   public const string AgentBehaviorFixtureId = "agent-behavior-fixture";
   public const int AgentBehaviorFixtureVersion = 1;
+  public const string Combined = "combined";
+  public const int CombinedVersion = 1;
+  public const string CombinedFixtureId = "multiple-versioned-fixtures";
+  public const int CombinedFixtureVersion = 1;
 }
 
 public static class BenchmarkIds
@@ -179,7 +183,13 @@ public sealed record BenchmarkSuiteRunRequest(
   string? ClientRunId = null,
   IReadOnlyList<string>? Models = null,
   string ScoringProfileId = BenchmarkScoringProfileIds.Default,
-  BenchmarkScoreWeights? ScoreWeights = null
+  BenchmarkScoreWeights? ScoreWeights = null,
+  IReadOnlyList<BenchmarkSuiteSelection>? Suites = null
+);
+
+public sealed record BenchmarkSuiteSelection(
+  string Id,
+  int Version
 );
 
 public sealed record BenchmarkRun(
@@ -540,7 +550,8 @@ public sealed record BenchmarkSuiteRunResult(
   BenchmarkConfigurationIdentity? Configuration = null,
   int? ScoringProfileVersion = null,
   string RawMeasurementsStatus = BenchmarkEvidenceStatusIds.Unavailable,
-  string ValidationEvidenceStatus = BenchmarkEvidenceStatusIds.Unavailable
+  string ValidationEvidenceStatus = BenchmarkEvidenceStatusIds.Unavailable,
+  IReadOnlyList<BenchmarkSuiteSelection>? SelectedSuites = null
 );
 
 public sealed record BenchmarkHistorySummary(
@@ -714,6 +725,26 @@ public sealed record BenchmarkRecommendationCatalog(
   IReadOnlyList<BenchmarkRecommendationCategory> Categories,
   BenchmarkScoringProfile ActiveScoringProfile,
   bool ExternalResearchAvailable
+);
+
+public static class AutoModelHarnessRoutingStatusIds
+{
+  public const string Selected = "selected";
+  public const string InsufficientEvidence = "insufficient-evidence";
+}
+
+public sealed record AutoModelHarnessRoutingResult(
+  string RouterVersion,
+  string Status,
+  string TaskCategory,
+  string RecommendationId,
+  string RecommendationVersion,
+  BenchmarkScoringProfile ScoringProfile,
+  BenchmarkRecommendationCandidate? SelectedCandidate,
+  string Reason,
+  bool Fallback,
+  string? FallbackReason,
+  IReadOnlyList<string> UnavailableCandidates
 );
 
 public sealed record BenchmarkLiveRankingEntry(
