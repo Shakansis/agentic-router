@@ -1378,7 +1378,11 @@ public sealed class ExecutionSession
     }
     if (string.IsNullOrWhiteSpace(stepId))
     {
-      return "The specialist must bind every action to an exact Host-owned stepId while an accepted plan exists.";
+      var actionableStepIds = ActionablePlanStepIdsUnsafe();
+      return actionableStepIds.Length == 0
+        ? "The accepted Host plan has no actionable stepId. Return the final answer if the objective is complete; otherwise revise the existing plan before requesting another action."
+        : "The specialist must bind every action to an exact Host-owned stepId while an accepted plan exists. "
+          + $"Actionable stepIds: {string.Join(", ", actionableStepIds)}.";
     }
     var step = _plan.Steps.FirstOrDefault(
       candidate => string.Equals(
@@ -1393,7 +1397,11 @@ public sealed class ExecutionSession
     }
     if (step.Status is "completed" or "failed" or "blocked" or "skipped")
     {
-      return $"Plan step '{stepId}' is already terminal ({step.Status}).";
+      var actionableStepIds = ActionablePlanStepIdsUnsafe();
+      return $"Plan step '{stepId}' is already terminal ({step.Status}). "
+        + (actionableStepIds.Length == 0
+          ? "No actionable stepId remains; return the final answer if the objective is complete or revise the existing plan."
+          : $"Actionable stepIds: {string.Join(", ", actionableStepIds)}.");
     }
     var blockedDependencies = (step.Dependencies ?? []).Where(
       dependency => _plan.Steps.FirstOrDefault(
@@ -1407,6 +1415,24 @@ public sealed class ExecutionSession
     return blockedDependencies.Length == 0
       ? null
       : $"Plan step '{stepId}' is waiting for completed dependencies: {string.Join(", ", blockedDependencies)}.";
+  }
+
+  private string[] ActionablePlanStepIdsUnsafe()
+  {
+    return _plan?.Steps.Where(
+      step => step.Status is "pending" or "in-progress"
+        && (step.Dependencies ?? []).All(
+          dependency => _plan.Steps.FirstOrDefault(
+            candidate => string.Equals(
+              candidate.Id,
+              dependency,
+              StringComparison.Ordinal
+            )
+          )?.Status == "completed"
+        )
+    ).Select(
+      step => step.Id
+    ).ToArray() ?? [];
   }
 
   public bool RecordPlanActionResult(

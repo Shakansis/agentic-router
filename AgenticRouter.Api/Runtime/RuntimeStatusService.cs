@@ -58,7 +58,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
       loadedModels = running.Select(
         model => MapModel(
           model,
-          settings
+          settings,
+          gpuMemory.Devices
         )
       ).ToArray();
 
@@ -166,7 +167,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
 
   private static LoadedModelStatus MapModel(
     OllamaRunningModel model,
-    ApplicationSettings settings
+    ApplicationSettings settings,
+    IReadOnlyList<GpuMemoryStatus> devices
   )
   {
     long? estimatedRam = null;
@@ -227,6 +229,20 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     var residentReference = ProviderModelReference.Parse(
       settings.ActionModel
     );
+    var gpuIndex = OllamaGpuSelection.Resolve(
+      role switch
+      {
+        OllamaRuntimeRoleIds.Router => settings.RouterGpu,
+        OllamaRuntimeRoleIds.ResidentCoordinator => settings.ActionGpu,
+        _ => settings.DefaultGpu
+      },
+      settings.DefaultGpu
+    );
+    var gpuName = gpuIndex is null
+      ? null
+      : devices.FirstOrDefault(
+        device => device.OllamaIndex == gpuIndex
+      )?.Name;
 
     return new LoadedModelStatus(
       model.Name,
@@ -245,7 +261,9 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
         StringComparison.OrdinalIgnoreCase
       ),
       profileStatus,
-      configuredRoles.Count > 1
+      configuredRoles.Count > 1,
+      gpuIndex,
+      gpuName
     );
   }
 }

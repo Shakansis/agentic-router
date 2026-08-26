@@ -13,6 +13,7 @@ public static class UsageModelRoles
   public const string Benchmark = "benchmark";
   public const string ModelTest = "model-test";
   public const string Summary = "summary";
+  public const string CommitMessage = "commit-message";
   public const string WebSearchSynthesis = "web-search-synthesis";
   public const string VisionRequest = "vision-request";
 
@@ -27,6 +28,7 @@ public static class UsageModelRoles
       Benchmark,
       ModelTest,
       Summary,
+      CommitMessage,
       WebSearchSynthesis,
       VisionRequest
     ],

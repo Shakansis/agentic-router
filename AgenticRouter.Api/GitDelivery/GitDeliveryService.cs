@@ -1138,7 +1138,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
       "validation required",
       StringComparison.OrdinalIgnoreCase
     ) || objective.Contains(
-      "validação obrigatória",
+      "required validation",
       StringComparison.OrdinalIgnoreCase
     ) || objective.Contains(
       "teste deve passar",

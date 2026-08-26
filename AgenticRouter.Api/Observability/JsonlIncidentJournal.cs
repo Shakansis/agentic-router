@@ -52,7 +52,11 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
       {
         Directory.CreateDirectory(_directory);
         var existing = await CountTraceEventsAsync(incident.TraceId, policy.MaximumEventsPerTrace, cancellationToken);
-        if (existing >= policy.MaximumEventsPerTrace)
+        var terminal = incident.Status is "completed" or "failed" or "cancelled";
+        var maximumBeforeAppend = terminal
+          ? policy.MaximumEventsPerTrace
+          : policy.MaximumEventsPerTrace - 1;
+        if (existing >= maximumBeforeAppend)
         {
           return new IncidentAppendResult(false, FailureCode: "incident-trace-limit-reached");
         }

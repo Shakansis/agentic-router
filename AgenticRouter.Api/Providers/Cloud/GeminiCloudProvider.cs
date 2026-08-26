@@ -184,9 +184,11 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     IReadOnlyList<ChatMessage> messages,
     JsonElement? schema,
     string stage,
+    ProviderChatOptions? options,
     CancellationToken cancellationToken
   )
   {
+    options ??= ProviderChatOptions.Empty;
     var generationConfig = new Dictionary<string, object?>
     {
       ["temperature"] = 0,
@@ -204,7 +206,8 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
       new
       {
         contents = ToGeminiContents(
-          messages
+          messages,
+          options.Images
         ),
         generationConfig
       }
@@ -929,6 +932,22 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
           {
             text = message.Content
           }
+        );
+      }
+
+      if (message.Images is { Count: > 0 })
+      {
+        parts.AddRange(
+          message.Images.Select(
+            image => (object)new
+            {
+              inlineData = new
+              {
+                mimeType = image.MimeType,
+                data = Convert.ToBase64String(image.Bytes)
+              }
+            }
+          )
         );
       }
 

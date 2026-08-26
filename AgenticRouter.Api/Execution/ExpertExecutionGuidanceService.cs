@@ -1,5 +1,6 @@
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Usage;
 
@@ -33,7 +34,8 @@ public interface IExpertExecutionGuidanceService
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Action<ProviderTokenUsage?>? usageObserver = null
+    Action<ProviderTokenUsage?>? usageObserver = null,
+    ProviderChatOptions? options = null
   );
 }
 
@@ -244,7 +246,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     IReadOnlyList<ChatMessage> messages,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Action<ProviderTokenUsage?>? usageObserver = null
+    Action<ProviderTokenUsage?>? usageObserver = null,
+    ProviderChatOptions? options = null
   )
   {
     var scope = ExecutionTurnToolPolicy.Resolve(
@@ -267,7 +270,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
       "expert-execution-guidance",
       usageContext,
       cancellationToken,
-      usageObserver
+      usageObserver,
+      options
     );
 
     if (string.IsNullOrWhiteSpace(

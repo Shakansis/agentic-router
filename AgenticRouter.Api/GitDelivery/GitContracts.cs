@@ -87,7 +87,9 @@ public sealed record GitWorkspaceOverviewView(
   string? DefaultBranch,
   IReadOnlyList<GitRemoteView> Remotes,
   IReadOnlyList<string> CurrentSessionPaths,
-  string InitializeActionId
+  string InitializeActionId,
+  string CommitActionId = "",
+  string PushActionId = ""
 );
 
 public sealed record GitInitializeRequest(
@@ -95,6 +97,30 @@ public sealed record GitInitializeRequest(
   string InteractionMode,
   string ActionId,
   bool Confirmed
+);
+
+public sealed record GitWorkspaceCommitRequest(
+  string BrowserSessionId,
+  string InteractionMode,
+  string ActionId,
+  bool Confirmed,
+  string? Message,
+  string? Model,
+  bool CommitWithoutValidation = false
+);
+
+public sealed record GitWorkspacePushRequest(
+  string BrowserSessionId,
+  string InteractionMode,
+  string ActionId,
+  bool Confirmed
+);
+
+public sealed record GitWorkspaceActionView(
+  GitWorkspaceOverviewView Overview,
+  string? CommitMessage = null,
+  string? CommitHash = null,
+  string? CommitSubject = null
 );
 
 public sealed record GitIdentityRequest(

@@ -166,7 +166,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       await Page.Locator(".routing-evidence .benchmark-result-link").First.ClickAsync();
       await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
       await Expect(Page.Locator("#benchmark-status"))
-        .ToContainTextAsync("Resultado persistido carregado");
+        .ToContainTextAsync("Persisted result loaded");
     }
     finally
     {
@@ -954,7 +954,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#open-benchmarks").ClickAsync();
     await Page.Locator(".benchmark-history-advanced > summary").ClickAsync();
     await Expect(Page.Locator("#benchmark-history-title"))
-      .ToContainTextAsync("Histórico e comparação");
+      .ToContainTextAsync("History and comparison");
     await Page.Locator("#benchmark-history-model-filter")
       .FillAsync("missing-history-model-fixture");
     await Expect(Page.Locator("#benchmark-history option")).ToHaveCountAsync(1);
@@ -2701,7 +2701,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
     await Expect(Page.Locator("#conversation-view")).ToBeHiddenAsync();
     await Expect(Page.Locator("#close-benchmarks"))
-      .ToContainTextAsync("Voltar à conversa");
+      .ToContainTextAsync("Back to conversation");
     await Expect(Page.Locator("#benchmark-suite-list input")).ToHaveCountAsync(2);
     await Expect(Page.Locator("#benchmark-suite-list input").First)
       .ToHaveAttributeAsync("role", "switch");
@@ -2709,7 +2709,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .CheckAsync();
     await Page.Locator("#benchmark-suite-list input[value=\"agent-behavior\"]")
       .UncheckAsync();
-    await Expect(Page.Locator("#run-benchmark")).ToContainTextAsync("Executar benchmark");
+    await Expect(Page.Locator("#run-benchmark")).ToContainTextAsync("Run benchmark");
     await Expect(Page.Locator("#benchmark-harness-list input")).ToHaveCountAsync(5);
     await Expect(Page.Locator("#benchmark-harness-list input").First)
       .ToHaveAttributeAsync("role", "switch");
@@ -2769,8 +2769,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "Harness version must render on its own line below the harness name."
     );
 
-    var tooltipTrigger = Page.GetByRole(AriaRole.Button, new() { Name = "Informação sobre timeout" });
-    await tooltipTrigger.HoverAsync();
+    var tooltipTrigger = Page.GetByRole(AriaRole.Button, new() { Name = "Timeout information" });
+    await tooltipTrigger.DispatchEventAsync("pointerover");
     var tooltip = Page.Locator("#benchmark-floating-tooltip");
     await Expect(tooltip).ToBeVisibleAsync();
     var triggerBox = await tooltipTrigger.BoundingBoxAsync();
@@ -2792,7 +2792,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#run-benchmark").ClickAsync();
 
     await Expect(Page.Locator("#benchmark-status"))
-      .ToContainTextAsync("Benchmark concluído", new() { Timeout = 30_000 });
+      .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
     await Expect(Page.Locator("#benchmark-results-body tr")).ToHaveCountAsync(4);
     await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("passed");
     await Expect(Page.Locator("#benchmark-results-body")).ToContainTextAsync("4/4");
@@ -2807,9 +2807,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#benchmark-weight-workspace").FillAsync("0");
     await Page.Locator("#benchmark-weight-efficiency").FillAsync("0");
     await Expect(Page.Locator("#benchmark-status"))
-      .ToContainTextAsync("ranking recalculado", new() { Timeout = 10_000 });
+      .ToContainTextAsync("ranking recalculated", new() { Timeout = 10_000 });
     await Expect(Page.Locator("#benchmark-score-profile")).ToHaveTextAsync("Custom v1");
-    await Expect(Page.Locator("#benchmark-score-context")).ToContainTextAsync("Measured evidence inalterada");
+    await Expect(Page.Locator("#benchmark-score-context")).ToContainTextAsync("Measured evidence unchanged");
 
     await Page.Locator("#benchmark-results-body [data-harness=\"codex\"]").ClickAsync();
     await Expect(Page.Locator("#benchmark-result-detail .benchmark-test-detail"))
@@ -2830,7 +2830,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-result-detail")).ToContainTextAsync("Claude Code");
     await Page.Locator("#reset-benchmark-weights").ClickAsync();
     await Expect(Page.Locator("#benchmark-score-profile")).ToHaveTextAsync("Default v1");
-    await Expect(Page.Locator("#benchmark-status")).ToContainTextAsync("Perfil Default restaurado");
+    await Expect(Page.Locator("#benchmark-status")).ToContainTextAsync("Default profile restored");
     _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
   }
 
@@ -2876,12 +2876,12 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#benchmark-timeout").FillAsync("20");
     await Page.Locator("#run-benchmark").ClickAsync();
     await Expect(Page.Locator("#benchmark-status"))
-      .ToContainTextAsync("Benchmark concluído", new() { Timeout = 30_000 });
+      .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
     await Expect(Page.Locator("#benchmark-matrix")).ToBeVisibleAsync();
     await Expect(Page.Locator("#benchmark-matrix tbody tr")).ToHaveCountAsync(2);
     await Expect(Page.Locator("#benchmark-matrix .benchmark-matrix-cell"))
       .ToHaveCountAsync(2);
-    await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("2 modelos × 1 harnesses");
+    await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("2 models × 1 harnesses");
     await Page.Locator("#benchmark-matrix [data-model=\"beta:code\"][data-harness=\"native\"]")
       .ClickAsync();
     await Expect(Page.Locator("#benchmark-result-detail"))
@@ -2903,7 +2903,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator(".benchmark-history-advanced > summary").ClickAsync();
     await Page.Locator("#benchmark-history").SelectOptionAsync(persistedRun);
     await Expect(Page.Locator("#benchmark-status"))
-      .ToContainTextAsync("Resultado persistido carregado");
+      .ToContainTextAsync("Persisted result loaded");
     await Expect(Page.Locator("#benchmark-matrix tbody tr")).ToHaveCountAsync(2);
     await Expect(Page.Locator("#benchmark-recommendation-results")).ToBeVisibleAsync();
     await Expect(Page.Locator("#benchmark-result-detail"))
@@ -2948,7 +2948,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#cancel-benchmark")).ToBeEnabledAsync();
     await Page.Locator("#cancel-benchmark").ClickAsync();
     await Expect(Page.Locator("#benchmark-status"))
-      .ToContainTextAsync("cancelada", new() { Timeout = 15_000 });
+      .ToContainTextAsync("canceled", new() { Timeout = 15_000 });
     await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-ranking-note")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("cancelled");
@@ -3242,6 +3242,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsTrue(first.Any(item =>
       item["type"]!.GetValue<string>() == "harness.claude-code-native-event-preserved"
     ));
+    var exactUsage = first.Last(item =>
+      item["type"]!.GetValue<string>() == "context.usage"
+      && item["contextUsage"]!["accuracy"]!.GetValue<string>() == "exact"
+    );
+    Assert.AreEqual(
+      155,
+      exactUsage["contextUsage"]!["activeContextTokens"]!.GetValue<long>()
+    );
 
     var runtime = Path.Combine(_environment.DataDirectory, "claude-code-runtime");
     using (var invocation = JsonDocument.Parse(
@@ -3435,7 +3443,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     );
     await WaitUntilAsync(() => File.Exists(invocationPath), TimeSpan.FromSeconds(15));
     await Page.Locator("#send-button").ClickAsync();
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     using var invocation = JsonDocument.Parse(await File.ReadAllTextAsync(invocationPath));
@@ -3458,7 +3466,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(approval).ToBeVisibleAsync();
     await Expect(approval).ToContainTextAsync("claude-approved.txt");
     Assert.IsFalse(File.Exists(target));
-    await approval.GetByRole(AriaRole.Button, new() { Name = "Aprovar" }).ClickAsync();
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     Assert.IsTrue(File.Exists(target));
@@ -3548,7 +3556,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(assistant.Locator(".assistant-answer"))
       .Not.ToContainTextAsync("Agentic Router context for this turn");
     await Expect(Page.Locator("#context-usage-summary"))
-      .ToContainTextAsync("exato");
+      .ToContainTextAsync("exact");
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
     var capabilityProjection = assistant.Locator(
@@ -3668,6 +3676,11 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "estimated",
       contextEvents.First()["contextUsage"]!["accuracy"]!.GetValue<string>()
     );
+    Assert.IsTrue(contextEvents.Any(item =>
+      item["contextUsage"]!["accuracy"]!.GetValue<string>() == "estimated"
+      && item["contextUsage"]!["activeContextTokens"]!.GetValue<long>()
+        > item["contextUsage"]!["inputTokens"]!.GetValue<long>()
+    ));
     Assert.AreEqual(
       "exact",
       contextEvents.Last()["contextUsage"]!["accuracy"]!.GetValue<string>()
@@ -3675,6 +3688,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual(
       1_234,
       contextEvents.Last()["contextUsage"]!["inputTokens"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      1_274,
+      contextEvents.Last()["contextUsage"]!["activeContextTokens"]!.GetValue<long>()
     );
   }
 
@@ -3870,7 +3887,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting long OpenCode task");
     await Page.Locator("#send-button").ClickAsync();
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
@@ -3931,7 +3948,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(assistant.Locator(".assistant-answer"))
       .ToContainTextAsync("Qwen Code streamed with qwen3.8:27b-gpu0");
     await Expect(Page.Locator("#context-usage-summary"))
-      .ToContainTextAsync("exato");
+      .ToContainTextAsync("live estimated");
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToBeVisibleAsync();
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToHaveAttributeAsync(
+        "title",
+        new Regex("Qwen Code.*does not report exact", RegexOptions.IgnoreCase)
+      );
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
     var capabilityProjection = assistant.Locator(
@@ -4167,13 +4191,25 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "estimated",
       contextEvents.First()["contextUsage"]!["accuracy"]!.GetValue<string>()
     );
-    Assert.AreEqual(
-      "exact",
-      contextEvents.Last()["contextUsage"]!["accuracy"]!.GetValue<string>()
+    Assert.IsTrue(contextEvents.Any(item =>
+      item["contextUsage"]!["accuracy"]!.GetValue<string>() == "estimated"
+      && item["contextUsage"]!["activeContextTokens"]!.GetValue<long>()
+        > item["contextUsage"]!["inputTokens"]!.GetValue<long>()
+    ));
+    var exactContext = contextEvents.Last(item =>
+      item["contextUsage"]!["accuracy"]!.GetValue<string>() == "exact"
     );
     Assert.AreEqual(
       4_321,
-      contextEvents.Last()["contextUsage"]!["inputTokens"]!.GetValue<long>()
+      exactContext["contextUsage"]!["inputTokens"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      "estimated",
+      contextEvents.Last()["contextUsage"]!["accuracy"]!.GetValue<string>()
+    );
+    Assert.IsGreaterThan(
+      exactContext["contextUsage"]!["activeContextTokens"]!.GetValue<long>(),
+      contextEvents.Last()["contextUsage"]!["activeContextTokens"]!.GetValue<long>()
     );
   }
 
@@ -4335,7 +4371,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(approval).ToContainTextAsync("README.md");
     await approval.GetByRole(
       AriaRole.Button,
-      new() { Name = "Aprovar", Exact = true }
+      new() { Name = "Approve", Exact = true }
     ).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -4402,7 +4438,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsFalse(File.Exists(Path.Combine(_environment.WorkspaceDirectory, relativePath)));
     await approval.GetByRole(
       AriaRole.Button,
-      new() { Name = "Aprovar", Exact = true }
+      new() { Name = "Approve", Exact = true }
     ).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -4503,7 +4539,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting long Qwen Code task");
     await Page.Locator("#send-button").ClickAsync();
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
@@ -4644,6 +4680,12 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CodexHarnessStreamsThinkingToolsAssistantAndReusesConversationThread()
   {
+    var settings = await GetSettingsJsonAsync();
+    var projectAwareness = settings["projectAwareness"]!.AsObject();
+    Assert.AreEqual(2, projectAwareness["planLimitsSchemaVersion"]!.GetValue<int>());
+    Assert.AreEqual(20, projectAwareness["maxPlanSteps"]!.GetValue<int>());
+    Assert.AreEqual(6, projectAwareness["maxPlanRevisions"]!.GetValue<int>());
+
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
     await SetExecuteModeAsync("auto");
@@ -4684,6 +4726,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     );
     var codexConfig = await File.ReadAllTextAsync(Path.Combine(codexRuntime, "config.toml"));
     StringAssert.Contains(codexConfig, "model_provider = \"ollama\"");
+    StringAssert.Contains(codexConfig, "model_catalog_json = \"");
     StringAssert.Contains(codexConfig, "default_permissions = \":workspace\"");
     StringAssert.Contains(codexConfig, "shell_tool = false");
     StringAssert.Contains(codexConfig, "unified_exec = false");
@@ -4721,6 +4764,35 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         "ollama",
         threadRequest.RootElement.GetProperty("provider").GetString()
       );
+      Assert.AreEqual(
+        32_768,
+        threadRequest.RootElement.GetProperty("contextWindowTokens").GetInt32()
+      );
+      Assert.AreEqual(
+        32_112,
+        threadRequest.RootElement.GetProperty("autoCompactTokenLimit").GetInt32()
+      );
+      Assert.AreEqual(
+        "total",
+        threadRequest.RootElement.GetProperty("autoCompactTokenLimitScope").GetString()
+      );
+      var planSchema = threadRequest.RootElement.GetProperty("planSchema");
+      Assert.AreEqual(500, planSchema.GetProperty("objectiveMaximumLength").GetInt32());
+      Assert.AreEqual(20, planSchema.GetProperty("maximumSteps").GetInt32());
+      Assert.AreEqual(160, planSchema.GetProperty("titleMaximumLength").GetInt32());
+      Assert.AreEqual(20, planSchema.GetProperty("maximumDependencies").GetInt32());
+    }
+    using (var modelCatalog = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(codexRuntime, "model-catalog.json"))
+    ))
+    {
+      var alphaMetadata = modelCatalog.RootElement.GetProperty("models")
+        .EnumerateArray()
+        .Single(model => model.GetProperty("slug").GetString() == "alpha:latest");
+      Assert.AreEqual(32_768, alphaMetadata.GetProperty("context_window").GetInt32());
+      Assert.AreEqual(32_768, alphaMetadata.GetProperty("max_context_window").GetInt32());
+      Assert.AreEqual(100, alphaMetadata.GetProperty("effective_context_window_percent").GetInt32());
+      Assert.AreEqual("shell_command", alphaMetadata.GetProperty("shell_type").GetString());
     }
     var codexTurnInput = await File.ReadAllTextAsync(
       Path.Combine(codexRuntime, "fake-app-server-turn-input.txt")
@@ -4746,6 +4818,150 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         Path.Combine(_environment.WorkspaceDirectory, "codex-created.txt")
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessRegistersExactQwenLocalModelMetadataBeforeStartup()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "codex",
+      "inspect the exact local model metadata",
+      "browser-codex-qwen-metadata",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.AreEqual("response.completed", events.Single(IsTerminalStreamEvent)["type"]!.GetValue<string>());
+    var codexRuntime = Path.Combine(_environment.DataDirectory, "codex-runtime");
+    using var threadRequest = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(codexRuntime, "fake-app-server-thread-request.json"))
+    );
+    var resolvedContext = threadRequest.RootElement.GetProperty("contextWindowTokens").GetInt32();
+    using var catalog = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(codexRuntime, "model-catalog.json"))
+    );
+    var metadata = catalog.RootElement.GetProperty("models")
+      .EnumerateArray()
+      .Single(model => model.GetProperty("slug").GetString() == "qwen3.8:27b-gpu0");
+    Assert.AreEqual(resolvedContext, metadata.GetProperty("context_window").GetInt32());
+    Assert.AreEqual(resolvedContext, metadata.GetProperty("max_context_window").GetInt32());
+    Assert.IsTrue(metadata.GetProperty("supported_in_api").GetBoolean());
+    CollectionAssert.Contains(
+      metadata.GetProperty("input_modalities").EnumerateArray()
+        .Select(item => item.GetString())
+        .ToArray(),
+      "text"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHarnessForwardsImagesAndPublishesLiveContextUsage()
+  {
+    const string png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    var imagePath = Path.Combine(_environment.WorkspaceDirectory, "codex-vision.png");
+    await File.WriteAllBytesAsync(imagePath, Convert.FromBase64String(png));
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("codex");
+    await Page.Locator("#image-input").SetInputFilesAsync(imagePath);
+
+    await StartMessageAsync("codex live context usage");
+    await Expect(Page.Locator("#context-usage-summary"))
+      .ToContainTextAsync("30.0k / 32.8k · live exact", new() { Timeout = 10_000 });
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToBeHiddenAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Cancel");
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 20_000 });
+
+    var imageEvidencePath = Path.Combine(
+      _environment.DataDirectory,
+      "codex-runtime",
+      "fake-app-server-turn-images.json"
+    );
+    using var evidence = JsonDocument.Parse(await File.ReadAllTextAsync(imageEvidencePath));
+    var images = evidence.RootElement.GetProperty("images");
+    Assert.AreEqual(1, images.GetArrayLength());
+    Assert.AreEqual("image", images[0].GetProperty("type").GetString());
+    Assert.AreEqual("auto", images[0].GetProperty("detail").GetString());
+    StringAssert.StartsWith(
+      images[0].GetProperty("urlPrefix").GetString(),
+      "data:image/png;base64,"
+    );
+    using var catalog = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.DataDirectory, "codex-runtime", "model-catalog.json")
+      )
+    );
+    var alphaMetadata = catalog.RootElement.GetProperty("models")
+      .EnumerateArray()
+      .Single(model => model.GetProperty("slug").GetString() == "alpha:latest");
+    CollectionAssert.Contains(
+      alphaMetadata.GetProperty("input_modalities").EnumerateArray()
+        .Select(item => item.GetString())
+        .ToArray(),
+      "image"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeHarnessPublishesLiveEstimatedContextDuringThinking()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("native");
+
+    await StartMessageAsync(
+      "create file native-live-context.txt with marker LIVE-CONTEXT chronological thinking stream"
+    );
+    await Expect(Page.Locator("#context-usage-summary"))
+      .ToContainTextAsync("live estimated", new() { Timeout = 10_000 });
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToBeVisibleAsync();
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToHaveAttributeAsync(
+        "title",
+        new Regex("Native.*does not report exact", RegexOptions.IgnoreCase)
+      );
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Cancel");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodePublishesEstimatedLiveContextThenExactReportedUsage()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.ClaudeCode);
+
+    await StartMessageAsync("claude live context usage");
+    await Expect(Page.Locator("#context-usage-summary"))
+      .ToContainTextAsync("live estimated", new() { Timeout = 10_000 });
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToBeVisibleAsync();
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToHaveAttributeAsync(
+        "title",
+        new Regex("Claude Code.*does not report exact", RegexOptions.IgnoreCase)
+      );
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Cancel");
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 20_000 });
+    await Expect(Page.Locator("#context-usage-summary"))
+      .ToContainTextAsync("155 / 32.8k · live exact");
+    await Expect(Page.Locator("#context-usage-estimate-warning"))
+      .ToBeHiddenAsync();
   }
 
   [TestMethod]
@@ -5062,6 +5278,18 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual(
       "ollama",
       resumed.RootElement.GetProperty("provider").GetString()
+    );
+    Assert.AreEqual(
+      32_768,
+      resumed.RootElement.GetProperty("contextWindowTokens").GetInt32()
+    );
+    Assert.AreEqual(
+      32_112,
+      resumed.RootElement.GetProperty("autoCompactTokenLimit").GetInt32()
+    );
+    Assert.AreEqual(
+      "total",
+      resumed.RootElement.GetProperty("autoCompactTokenLimitScope").GetString()
     );
   }
 

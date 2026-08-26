@@ -85,6 +85,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private string? _adaptiveConformanceModel;
   private string? _evictOnNextLoadedModel;
   private string? _evictOnNextRemovedModel;
+  private int _nextModelTestDelayMilliseconds;
   private Task? _listenTask;
 
   private FakeOllamaServer(
@@ -131,6 +132,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     _adaptiveConformanceModel = null;
     _evictOnNextLoadedModel = null;
     _evictOnNextRemovedModel = null;
+    Interlocked.Exchange(
+      ref _nextModelTestDelayMilliseconds,
+      0
+    );
+  }
+
+  public void DelayNextModelTestResponse(
+    TimeSpan delay
+  )
+  {
+    Interlocked.Exchange(
+      ref _nextModelTestDelayMilliseconds,
+      checked((int)delay.TotalMilliseconds)
+    );
   }
 
   public void EvictModelOnNextLoad(
@@ -612,6 +627,38 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       return;
     }
 
+    if (
+      messages.Any(
+        message => message.Content.Contains(
+          "CHAT_READ_ONLY_WORKSPACE_V1",
+          StringComparison.Ordinal
+        )
+      )
+      && messages.Any(
+        message => message.Role == "user"
+          && (
+            message.Content.Contains(
+              "chat workspace read request",
+              StringComparison.OrdinalIgnoreCase
+            )
+            || message.Content.Contains(
+              "chat workspace mutation attempt",
+              StringComparison.OrdinalIgnoreCase
+            )
+          )
+      )
+    )
+    {
+      await RespondToChatWorkspaceReadAsync(
+        context.Response,
+        model,
+        messages,
+        stream,
+        cancellationToken
+      );
+      return;
+    }
+
     if (!stream)
     {
       AddLoadedModel(
@@ -796,6 +843,31 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       await RespondToSessionSummaryAsync(
         response,
+        cancellationToken
+      );
+      return;
+    }
+
+    if (messages.Any(
+      message => message.Content.Contains(
+        "GIT_COMMIT_SUBJECT_V1",
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.OK,
+        new
+        {
+          model,
+          message = new
+          {
+            role = "assistant",
+            content = "chore: update project changes"
+          },
+          done = true
+        },
         cancellationToken
       );
       return;
@@ -3403,7 +3475,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           "chronological thinking stream",
           StringComparison.OrdinalIgnoreCase
         )
-          ? 800
+          ? 1_500
           : 0,
         cancellationToken
       );
@@ -3741,7 +3813,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       };
     }
 
-    var planObjective = objective.Length <= 240
+    var planObjective = objective.Length <= 500
       ? objective
       : "Complete the requested local action";
     var steps = new List<object>();
@@ -4802,6 +4874,24 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       300,
       contextTokens
     );
+    var modelTestDelayMilliseconds = string.Equals(
+      current,
+      "Reply with exactly: OK",
+      StringComparison.Ordinal
+    )
+      ? Interlocked.Exchange(
+        ref _nextModelTestDelayMilliseconds,
+        0
+      )
+      : 0;
+
+    if (modelTestDelayMilliseconds > 0)
+    {
+      await Task.Delay(
+        modelTestDelayMilliseconds,
+        cancellationToken
+      );
+    }
     var answer = BuildAnswer(
       current,
       model,
@@ -4885,6 +4975,95 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       cancellationToken
     );
     response.Close();
+  }
+
+  private static async Task RespondToChatWorkspaceReadAsync(
+    HttpListenerResponse response,
+    string model,
+    IReadOnlyList<RecordedMessage> messages,
+    bool stream,
+    CancellationToken cancellationToken
+  )
+  {
+    var mutationAttempt = messages.Any(
+      message => message.Role == "user"
+        && message.Content.Contains(
+          "chat workspace mutation attempt",
+          StringComparison.OrdinalIgnoreCase
+        )
+    );
+    var toolResult = messages.LastOrDefault(
+      message => message.Role == "tool"
+    );
+    var content = toolResult is null
+      ? string.Empty
+      : mutationAttempt
+        ? $"Chat mutation was rejected by the read-only boundary. {toolResult.Content}"
+        : $"Chat used trusted-workspace evidence without approval. {toolResult.Content}";
+    var toolCalls = toolResult is null
+      ? new[]
+      {
+        new
+        {
+          function = new
+          {
+            name = mutationAttempt
+              ? "create_file"
+              : "read_file",
+            arguments = mutationAttempt
+              ? JsonSerializer.SerializeToElement(
+                new
+                {
+                  path = "chat-mutation.txt",
+                  content = "must not be written"
+                },
+                CompactJsonOptions
+              )
+              : JsonSerializer.SerializeToElement(
+                new
+                {
+                  path = "chat-readable.txt"
+                },
+                CompactJsonOptions
+              )
+          }
+        }
+      }
+      : null;
+
+    if (stream)
+    {
+      await WriteStreamingToolResponseAsync(
+        response,
+        model,
+        content,
+        toolResult is null
+          ? mutationAttempt
+            ? "I will try a mutation that Chat must reject."
+            : "I will inspect the requested workspace file."
+          : null,
+        toolCalls,
+        0,
+        cancellationToken
+      );
+      return;
+    }
+
+    await WriteJsonAsync(
+      response,
+      HttpStatusCode.OK,
+      new
+      {
+        message = new
+        {
+          role = "assistant",
+          content,
+          tool_calls = toolCalls
+        },
+        done = true
+      },
+      cancellationToken
+    );
   }
 
   private static string BuildAnswer(

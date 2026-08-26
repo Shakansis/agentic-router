@@ -157,7 +157,8 @@ public sealed class OllamaClient : IOllamaClient
     string stage,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Action<ProviderTokenUsage?>? usageObserver = null
+    Action<ProviderTokenUsage?>? usageObserver = null,
+    ProviderChatOptions? options = null
   )
   {
     return await GenerateAsync(
@@ -168,7 +169,8 @@ public sealed class OllamaClient : IOllamaClient
       schema,
       usageContext,
       cancellationToken,
-      usageObserver
+      usageObserver,
+      options
     );
   }
 
@@ -180,7 +182,9 @@ public sealed class OllamaClient : IOllamaClient
     string stage,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
+    Func<string, CancellationToken, ValueTask>? onContentDelta = null,
+    bool toolOutput = true
   )
   {
     var stopwatch = Stopwatch.StartNew();
@@ -204,13 +208,13 @@ public sealed class OllamaClient : IOllamaClient
         model,
         usageContext,
         estimatedInput,
-        true,
+        toolOutput,
         cancellationToken
       );
       var payload = CreateRequest(
         model,
         messages,
-        onThinkingDelta is not null,
+        onThinkingDelta is not null || onContentDelta is not null,
         null,
         new OllamaOptions(
           0,
@@ -238,13 +242,13 @@ public sealed class OllamaClient : IOllamaClient
         onThinkingDelta is null
           ? HttpCompletionOption.ResponseContentRead
           : HttpCompletionOption.ResponseHeadersRead,
-        requestTimeout: onThinkingDelta is null
+        requestTimeout: onThinkingDelta is null && onContentDelta is null
           ? policy.Timeout
           : Timeout.InfiniteTimeSpan
       );
       OllamaToolResponse toolResponse;
 
-      if (onThinkingDelta is null)
+      if (onThinkingDelta is null && onContentDelta is null)
       {
         OllamaChatChunk result;
 
@@ -303,6 +307,7 @@ public sealed class OllamaClient : IOllamaClient
           stage,
           policy.Resolution,
           onThinkingDelta,
+          onContentDelta,
           cancellationToken
         );
         toolResponse = streamed.Response;
@@ -347,7 +352,8 @@ public sealed class OllamaClient : IOllamaClient
     HttpResponseMessage response,
     string stage,
     OllamaContextResolution contextResolution,
-    Func<string, CancellationToken, ValueTask> onThinkingDelta,
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta,
+    Func<string, CancellationToken, ValueTask>? onContentDelta,
     CancellationToken cancellationToken
   )
   {
@@ -421,10 +427,13 @@ public sealed class OllamaClient : IOllamaClient
         thinking.Append(
           chunk.Message.Thinking
         );
-        await onThinkingDelta(
-          chunk.Message.Thinking,
-          cancellationToken
-        );
+        if (onThinkingDelta is not null)
+        {
+          await onThinkingDelta(
+            chunk.Message.Thinking,
+            cancellationToken
+          );
+        }
       }
 
       if (!string.IsNullOrEmpty(
@@ -434,6 +443,13 @@ public sealed class OllamaClient : IOllamaClient
         content.Append(
           chunk.Message.Content
         );
+        if (onContentDelta is not null)
+        {
+          await onContentDelta(
+            chunk.Message.Content,
+            cancellationToken
+          );
+        }
       }
 
       if (chunk.Message?.ToolCalls is not null)
@@ -483,12 +499,16 @@ public sealed class OllamaClient : IOllamaClient
     JsonElement? format,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Action<ProviderTokenUsage?>? usageObserver = null
+    Action<ProviderTokenUsage?>? usageObserver = null,
+    ProviderChatOptions? options = null
   )
   {
+    options ??= ProviderChatOptions.Empty;
     var stopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
+    ) + options.Images.Sum(
+      image => Math.Max(1_024L, (long)Math.Ceiling(image.Bytes.LongLength / 512d))
     ) + (format is null ? 0 : _tokenEstimator.EstimateText(format.Value.GetRawText()));
     long estimatedOutput = 0;
     ProviderTokenUsage? providerUsage = null;
@@ -516,7 +536,8 @@ public sealed class OllamaClient : IOllamaClient
           policy.OutputTokens,
           policy.MainGpu
         ),
-        null
+        null,
+        images: options.Images
       );
       using var response = await SendChatAsync(
         baseUri,
@@ -1857,7 +1878,10 @@ public sealed class OllamaClient : IOllamaClient
               )
             )
           ).ToArray(),
-          message.ToolName
+          message.ToolName,
+          Images: message.Images?.Select(
+            image => Convert.ToBase64String(image.Bytes)
+          ).ToArray()
         )
       ).ToArray(),
       stream,

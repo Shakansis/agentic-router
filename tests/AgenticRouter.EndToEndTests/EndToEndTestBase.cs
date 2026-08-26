@@ -529,7 +529,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       AriaRole.Button,
       new()
       {
-        Name = "Configurações",
+        Name = "Settings",
         Exact = true
       }
     ).ClickAsync();
@@ -796,7 +796,10 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     string model,
     string browserSessionId = "browser-v095",
     bool webSearchEnabled = false,
-    IReadOnlyList<object>? images = null
+    IReadOnlyList<object>? images = null,
+    string interactionMode = "chat",
+    string harness = "native",
+    string approvalPolicy = "ask"
   )
   {
     using var response = await _environment.HttpClient.PostAsJsonAsync(
@@ -806,8 +809,9 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
         message,
         model,
         history = Array.Empty<object>(),
-        interactionMode = "chat",
-        approvalPolicy = "ask",
+        interactionMode,
+        harness,
+        approvalPolicy,
         browserSessionId,
         conversationSessionId = (string?)null,
         webSearchEnabled,
@@ -920,7 +924,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
   {
     await Expect(
       Page.Locator("#send-button-label")
-    ).ToHaveTextAsync("Enviar");
+    ).ToHaveTextAsync("Send");
     var input = Page.Locator(
       "#message-input"
     );

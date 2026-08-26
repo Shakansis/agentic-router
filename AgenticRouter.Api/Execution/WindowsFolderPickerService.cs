@@ -96,7 +96,7 @@ public sealed class WindowsFolderPickerService : IFolderPickerService
           | FileOpenOptions.DontAddToRecent
       );
       dialog.SetTitle(
-        "Selecionar workspace confiável"
+        "Select trusted workspace"
       );
       dialog.SetOkButtonLabel(
         "Selecionar pasta"

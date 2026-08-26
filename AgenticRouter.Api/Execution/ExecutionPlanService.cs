@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 
 namespace AgenticRouter.Api.Execution;
@@ -235,11 +236,14 @@ public sealed class ExecutionPlanService : IExecutionPlanService
 
     var objective = objectiveElement.GetString()?.Trim() ?? string.Empty;
 
-    if (objective.Length is < 1 or > 240)
+    if (
+      objective.Length is < 1
+        or > ProjectAwarenessSettings.MaximumPlanObjectiveCharacters
+    )
     {
       throw new LocalActionException(
         "execution-plan",
-        $"Execution plan objective must contain between 1 and 240 characters; received {objective.Length}."
+        $"Execution plan objective must contain between 1 and {ProjectAwarenessSettings.MaximumPlanObjectiveCharacters} characters; received {objective.Length}."
       );
     }
 
@@ -300,7 +304,8 @@ public sealed class ExecutionPlanService : IExecutionPlanService
       var title = titleElement.GetString()?.Trim() ?? string.Empty;
 
       if (
-        title.Length is < 1 or > 100
+        title.Length is < 1
+          or > ProjectAwarenessSettings.MaximumPlanStepTitleCharacters
         || title.Contains(
           '\n',
           StringComparison.Ordinal

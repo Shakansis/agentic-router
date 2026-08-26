@@ -107,6 +107,15 @@ while (await Console.In.ReadLineAsync() is { } line)
       break;
     case "thread/start":
       {
+        if (!TryReadContextConfiguration(
+          parameters,
+          out var contextWindowTokens,
+          out var autoCompactTokenLimit
+        ))
+        {
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the Host-resolved Codex context and 98-percent total compaction limit." } });
+          break;
+        }
         var dynamicTools = parameters.GetProperty("dynamicTools");
         var dynamicToolNames = dynamicTools.EnumerateArray()
           .Select(tool => tool.GetProperty("name").GetString())
@@ -168,6 +177,21 @@ while (await Console.In.ReadLineAsync() is { } line)
         }
         var threadId = $"fake-thread-{Interlocked.Increment(ref threadNumber)}";
         var model = parameters.GetProperty("model").GetString();
+        var catalogError = "Expected an exact model identifier.";
+        if (
+          string.IsNullOrWhiteSpace(model)
+          || !TryValidateModelCatalog(
+            codexHome,
+            model,
+            contextWindowTokens,
+            out catalogError
+          )
+        )
+        {
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = catalogError } });
+          break;
+        }
+        var planSchema = ReadPlanSchema(dynamicTools);
         if (!string.IsNullOrWhiteSpace(codexHome))
         {
           await File.WriteAllTextAsync(
@@ -177,7 +201,11 @@ while (await Console.In.ReadLineAsync() is { } line)
               method,
               cwd = parameters.GetProperty("cwd").GetString(),
               model,
-              provider = parameters.GetProperty("modelProvider").GetString()
+              provider = parameters.GetProperty("modelProvider").GetString(),
+              contextWindowTokens,
+              autoCompactTokenLimit,
+              autoCompactTokenLimitScope = "total",
+              planSchema
             })
           );
         }
@@ -205,6 +233,15 @@ while (await Console.In.ReadLineAsync() is { } line)
       }
     case "thread/resume":
       {
+        if (!TryReadContextConfiguration(
+          parameters,
+          out var contextWindowTokens,
+          out var autoCompactTokenLimit
+        ))
+        {
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the Host-resolved Codex context and 98-percent total compaction limit." } });
+          break;
+        }
         if (
           !string.Equals(parameters.GetProperty("permissions").GetString(), ":workspace", StringComparison.Ordinal)
           || parameters.TryGetProperty("sandbox", out _)
@@ -216,6 +253,20 @@ while (await Console.In.ReadLineAsync() is { } line)
         }
         var threadId = parameters.GetProperty("threadId").GetString()!;
         var model = parameters.GetProperty("model").GetString();
+        var catalogError = "Expected an exact model identifier.";
+        if (
+          string.IsNullOrWhiteSpace(model)
+          || !TryValidateModelCatalog(
+            codexHome,
+            model,
+            contextWindowTokens,
+            out catalogError
+          )
+        )
+        {
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = catalogError } });
+          break;
+        }
         if (!string.IsNullOrWhiteSpace(codexHome))
         {
           await File.WriteAllTextAsync(
@@ -225,7 +276,10 @@ while (await Console.In.ReadLineAsync() is { } line)
               threadId,
               cwd = parameters.GetProperty("cwd").GetString(),
               model,
-              provider = parameters.GetProperty("modelProvider").GetString()
+              provider = parameters.GetProperty("modelProvider").GetString(),
+              contextWindowTokens,
+              autoCompactTokenLimit,
+              autoCompactTokenLimitScope = "total"
             })
           );
         }
@@ -252,12 +306,36 @@ while (await Console.In.ReadLineAsync() is { } line)
       {
         var threadId = parameters.GetProperty("threadId").GetString()!;
         var turnId = $"fake-turn-{Interlocked.Increment(ref turnNumber)}";
-        var input = parameters.GetProperty("input")[0].GetProperty("text").GetString() ?? string.Empty;
+        var turnInput = parameters.GetProperty("input");
+        var input = turnInput.EnumerateArray()
+          .First(item => item.GetProperty("type").GetString() == "text")
+          .GetProperty("text")
+          .GetString() ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(codexHome))
         {
           await File.WriteAllTextAsync(
             Path.Combine(codexHome, "fake-app-server-turn-input.txt"),
             input
+          );
+          await File.WriteAllTextAsync(
+            Path.Combine(codexHome, "fake-app-server-turn-images.json"),
+            JsonSerializer.Serialize(
+              new
+              {
+                images = turnInput.EnumerateArray()
+                  .Where(item => item.GetProperty("type").GetString() == "image")
+                  .Select(item => new
+                  {
+                    type = item.GetProperty("type").GetString(),
+                    detail = item.GetProperty("detail").GetString(),
+                    urlPrefix = (item.GetProperty("url").GetString() ?? string.Empty)[..Math.Min(
+                      32,
+                      (item.GetProperty("url").GetString() ?? string.Empty).Length
+                    )]
+                  })
+                  .ToArray()
+              }
+            )
           );
         }
         var cwd = parameters.GetProperty("cwd").GetString()!;
@@ -321,6 +399,109 @@ static bool HasExactRuntimeWorkspaceRoot(JsonElement parameters)
     && string.Equals(roots[0].GetString(), cwd, StringComparison.OrdinalIgnoreCase);
 }
 
+static bool TryReadContextConfiguration(
+  JsonElement parameters,
+  out int contextWindowTokens,
+  out int autoCompactTokenLimit
+)
+{
+  contextWindowTokens = 0;
+  autoCompactTokenLimit = 0;
+  if (
+    !parameters.TryGetProperty("config", out var config)
+    || config.ValueKind != JsonValueKind.Object
+    || !config.TryGetProperty("model_context_window", out var contextWindow)
+    || !contextWindow.TryGetInt32(out contextWindowTokens)
+    || contextWindowTokens <= 0
+    || !config.TryGetProperty("model_auto_compact_token_limit", out var compactLimit)
+    || !compactLimit.TryGetInt32(out autoCompactTokenLimit)
+    || autoCompactTokenLimit != (int)((long)contextWindowTokens * 98 / 100)
+    || !config.TryGetProperty("model_auto_compact_token_limit_scope", out var compactScope)
+    || !string.Equals(compactScope.GetString(), "total", StringComparison.Ordinal)
+  )
+  {
+    return false;
+  }
+  return true;
+}
+
+static object? ReadPlanSchema(JsonElement dynamicTools)
+{
+  var planTool = dynamicTools.EnumerateArray().FirstOrDefault(
+    tool => string.Equals(
+      tool.GetProperty("name").GetString(),
+      "create_execution_plan",
+      StringComparison.Ordinal
+    )
+  );
+  if (planTool.ValueKind == JsonValueKind.Undefined)
+  {
+    return null;
+  }
+  var properties = planTool.GetProperty("inputSchema").GetProperty("properties");
+  var steps = properties.GetProperty("steps");
+  var stepProperties = steps.GetProperty("items").GetProperty("properties");
+  return new
+  {
+    objectiveMaximumLength = properties.GetProperty("objective").GetProperty("maxLength").GetInt32(),
+    maximumSteps = steps.GetProperty("maxItems").GetInt32(),
+    titleMaximumLength = stepProperties.GetProperty("title").GetProperty("maxLength").GetInt32(),
+    maximumDependencies = stepProperties.GetProperty("dependsOn").GetProperty("maxItems").GetInt32()
+  };
+}
+
+static bool TryValidateModelCatalog(
+  string? codexHome,
+  string model,
+  int contextWindowTokens,
+  out string error
+)
+{
+  error = "Expected exact Agentic Router local-model metadata in the isolated Codex catalog.";
+  if (string.IsNullOrWhiteSpace(codexHome))
+  {
+    return false;
+  }
+  var configPath = Path.Combine(codexHome, "config.toml");
+  var expectedCatalogPath = Path.Combine(codexHome, "model-catalog.json");
+  if (!File.Exists(configPath) || !File.Exists(expectedCatalogPath))
+  {
+    return false;
+  }
+  var expectedConfigEntry = $"model_catalog_json = \"{Path.GetFullPath(expectedCatalogPath).Replace('\\', '/')}\"";
+  if (!File.ReadAllText(configPath).Contains(expectedConfigEntry, StringComparison.Ordinal))
+  {
+    return false;
+  }
+  using var document = JsonDocument.Parse(File.ReadAllText(expectedCatalogPath));
+  var entry = document.RootElement.GetProperty("models").EnumerateArray().FirstOrDefault(
+    candidate => string.Equals(
+      candidate.GetProperty("slug").GetString(),
+      model,
+      StringComparison.Ordinal
+    )
+  );
+  if (entry.ValueKind == JsonValueKind.Undefined)
+  {
+    return false;
+  }
+  var modalities = entry.GetProperty("input_modalities").EnumerateArray()
+    .Select(item => item.GetString())
+    .ToArray();
+  var valid = entry.GetProperty("context_window").GetInt32() == contextWindowTokens
+    && entry.GetProperty("max_context_window").GetInt32() == contextWindowTokens
+    && entry.GetProperty("effective_context_window_percent").GetInt32() == 100
+    && string.Equals(entry.GetProperty("shell_type").GetString(), "shell_command", StringComparison.Ordinal)
+    && entry.GetProperty("supported_in_api").GetBoolean()
+    && modalities.Contains("text", StringComparer.Ordinal)
+    && !string.IsNullOrWhiteSpace(entry.GetProperty("base_instructions").GetString());
+  if (valid)
+  {
+    error = string.Empty;
+  }
+  return valid;
+}
+
 async Task RunTurnAsync(
   string threadId,
   string turnId,
@@ -335,6 +516,42 @@ async Task RunTurnAsync(
     var currentRequest = CurrentUserRequest(input);
     await SendAsync(new { method = "turn/started", @params = new { threadId, turn = new { id = turnId, status = "inProgress" } } });
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "Inspecting — revisão " } });
+
+    if (currentRequest.Contains("codex live context usage", StringComparison.OrdinalIgnoreCase))
+    {
+      await SendAsync(new
+      {
+        method = "thread/tokenUsage/updated",
+        @params = new
+        {
+          threadId,
+          turnId,
+          tokenUsage = new
+          {
+            last = new
+            {
+              inputTokens = 29_000,
+              outputTokens = 1_000,
+              totalTokens = 30_000,
+              cachedInputTokens = 0,
+              cacheWriteInputTokens = 0,
+              reasoningOutputTokens = 1_000
+            },
+            total = new
+            {
+              inputTokens = 29_000,
+              outputTokens = 1_000,
+              totalTokens = 30_000,
+              cachedInputTokens = 0,
+              cacheWriteInputTokens = 0,
+              reasoningOutputTokens = 1_000
+            },
+            modelContextWindow = 32_768
+          }
+        }
+      });
+      await Task.Delay(1_500, cancellationToken);
+    }
 
     if (currentRequest.Contains("crash codex child", StringComparison.OrdinalIgnoreCase))
     {
@@ -391,6 +608,67 @@ async Task RunTurnAsync(
     await Task.Delay(200, cancellationToken);
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "the trusted workspace." } });
 
+    if (currentRequest.Contains("codex host idle timeout", StringComparison.OrdinalIgnoreCase))
+    {
+      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+      return;
+    }
+
+    if (currentRequest.Contains("codex native idle failure", StringComparison.OrdinalIgnoreCase))
+    {
+      turns.TryRemove(turnId, out _);
+      await SendAsync(new
+      {
+        method = "turn/completed",
+        @params = new
+        {
+          threadId,
+          turn = new
+          {
+            id = turnId,
+            status = "failed",
+            error = new
+            {
+              message = "stream disconnected before completion: idle timeout waiting for SSE",
+              codexErrorInfo = new { type = "other" }
+            }
+          }
+        }
+      });
+      return;
+    }
+
+    if (currentRequest.Contains("codex incident reasoning flood", StringComparison.OrdinalIgnoreCase))
+    {
+      for (var index = 0; index < 150; index++)
+      {
+        await SendAsync(new
+        {
+          method = "item/reasoning/summaryTextDelta",
+          @params = new
+          {
+            threadId,
+            turnId,
+            itemId = $"reason-flood-{turnId}",
+            delta = "x"
+          }
+        });
+      }
+      for (var index = 0; index < 120; index++)
+      {
+        await SendAsync(new
+        {
+          method = "warning",
+          @params = new
+          {
+            threadId,
+            turnId,
+            message = $"Retained incident saturation marker {index}."
+          }
+        });
+      }
+    }
+
     if (currentRequest.Contains("chronological codex content", StringComparison.OrdinalIgnoreCase))
     {
       await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-first-{turnId}", delta = "First **response** " } });
@@ -417,6 +695,118 @@ async Task RunTurnAsync(
       }
     });
     await SendAsync(new { method = "item/commandExecution/outputDelta", @params = new { threadId, turnId, itemId, delta = "fake output\n" } });
+
+    if (currentRequest.Contains("codex plan automatic validation", StringComparison.OrdinalIgnoreCase))
+    {
+      var turnIndex = int.Parse(
+        turnId["fake-turn-".Length..],
+        System.Globalization.CultureInfo.InvariantCulture
+      );
+      var plan = new
+      {
+        objective = "Create one verified file while preserving a pending plan step",
+        steps = new[]
+        {
+          new { title = "Create the requested validation fixture" },
+          new { title = "Preserve the remaining follow-up work" }
+        }
+      };
+      var acceptedPlan = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "create_execution_plan",
+        plan,
+        60_000L + turnIndex,
+        cancellationToken
+      );
+      if (!acceptedPlan.Success)
+      {
+        throw new InvalidOperationException(
+          $"The fake Host plan was rejected: {acceptedPlan.Text}"
+        );
+      }
+
+      var unboundSpecialistAction = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "run_process",
+        new
+        {
+          executable = "node",
+          arguments = new[] { "--version" },
+          workingDirectory = cwd
+        },
+        61_000L + turnIndex,
+        cancellationToken
+      );
+      if (unboundSpecialistAction.Success)
+      {
+        throw new InvalidOperationException(
+          "The unbound specialist action unexpectedly bypassed plan-step binding."
+        );
+      }
+
+      var created = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "create_files",
+        new
+        {
+          files = new[]
+          {
+            new
+            {
+              path = "codex-plan-validation.txt",
+              content = "created before automatic Host validation\n"
+            }
+          },
+          stepId = "step-1"
+        },
+        62_000L + turnIndex,
+        cancellationToken
+      );
+      if (!created.Success)
+      {
+        throw new InvalidOperationException(
+          $"The plan-bound fixture creation failed: {created.Text}"
+        );
+      }
+    }
+
+    if (currentRequest.Contains("codex expanded plan limits", StringComparison.OrdinalIgnoreCase))
+    {
+      const string titlePrefix = "Detailed validation stage 01 ";
+      var maximumTitle = titlePrefix + new string('x', 160 - titlePrefix.Length);
+      var plan = new
+      {
+        objective = new string('o', 500),
+        steps = Enumerable.Range(1, 20)
+          .Select(index => new
+          {
+            title = index == 1
+              ? maximumTitle
+              : $"Detailed validation stage {index:00}"
+          })
+          .ToArray()
+      };
+      var acceptedPlan = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "create_execution_plan",
+        plan,
+        63_000L + int.Parse(
+          turnId["fake-turn-".Length..],
+          System.Globalization.CultureInfo.InvariantCulture
+        ),
+        cancellationToken
+      );
+      if (!acceptedPlan.Success)
+      {
+        throw new InvalidOperationException(
+          $"The expanded Host plan was rejected: {acceptedPlan.Text}"
+        );
+      }
+    }
 
     if (currentRequest.Contains("recover command deletion with host batch", StringComparison.OrdinalIgnoreCase))
     {
@@ -719,6 +1109,81 @@ string CurrentUserRequest(string input)
   return markerIndex < 0
     ? input
     : input[(markerIndex + marker.Length)..];
+}
+
+async Task<(bool Success, string Text)> CallDynamicToolAsync(
+  string threadId,
+  string turnId,
+  string tool,
+  object arguments,
+  long requestId,
+  CancellationToken cancellationToken
+)
+{
+  var dynamicItemId = $"dynamic-{tool}-{turnId}";
+  var callId = $"call-{tool}-{turnId}";
+  await SendAsync(new
+  {
+    method = "item/started",
+    @params = new
+    {
+      threadId,
+      turnId,
+      item = new
+      {
+        type = "dynamicToolCall",
+        id = dynamicItemId,
+        status = "inProgress",
+        tool,
+        arguments
+      }
+    }
+  });
+  var response = new TaskCompletionSource<(bool Success, string Text)>(
+    TaskCreationOptions.RunContinuationsAsynchronously
+  );
+  toolResponses[requestId] = response;
+  await SendAsync(new
+  {
+    method = "item/tool/call",
+    id = requestId,
+    @params = new
+    {
+      threadId,
+      turnId,
+      callId,
+      tool,
+      arguments
+    }
+  });
+  var result = await response.Task.WaitAsync(cancellationToken);
+  await SendAsync(new
+  {
+    method = "item/completed",
+    @params = new
+    {
+      threadId,
+      turnId,
+      item = new
+      {
+        type = "dynamicToolCall",
+        id = dynamicItemId,
+        status = result.Success ? "completed" : "failed",
+        tool,
+        arguments,
+        success = result.Success,
+        contentItems = new[]
+        {
+          new
+          {
+            type = "inputText",
+            text = result.Text
+          }
+        }
+      }
+    }
+  });
+  return result;
 }
 
 async Task PrepareBenchmarkOutcomeAsync(

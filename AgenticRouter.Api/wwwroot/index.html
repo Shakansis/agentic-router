@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en" data-locale="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,126 +10,85 @@
 <body>
   <div id="safe-mode-banner" class="safe-mode-banner" role="status" hidden>
     <strong>Safe mode</strong>
-    <span id="safe-mode-reason">Execute, cloud e alteraÃ§Ãµes de configuraÃ§Ã£o estÃ£o desativados.</span>
+    <span id="safe-mode-reason">Execute, cloud, and configuration changes are disabled.</span>
   </div>
-  <aside id="sidebar" class="sidebar" aria-label="Status local">
+  <aside id="sidebar" class="sidebar" aria-label="Projects and conversations">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">AR</span>
-      <div>
+      <div class="sidebar-expanded-only">
         <strong>Agentic Router</strong>
         <span>Local model chat</span>
       </div>
+      <button
+        id="toggle-sidebar"
+        class="icon-button sidebar-collapse-button"
+        type="button"
+        aria-label="Collapse sidebar"
+        aria-expanded="true"
+        title="Collapse sidebar"
+      >‹</button>
     </div>
 
-    <section class="status-list" aria-label="Provider status">
-      <article class="status-card">
-        <div class="status-heading">
-          <span class="status-label"><span class="status-icon" aria-hidden="true">●</span>Ollama</span>
-          <span id="provider-badge" class="badge muted">Verificando</span>
+    <section id="session-history" class="projects-area" aria-labelledby="projects-title">
+      <header class="projects-heading">
+        <div class="projects-title-row">
+          <span class="sidebar-section-icon" aria-hidden="true">⌂</span>
+          <h2 id="projects-title" class="sidebar-expanded-only">Projects</h2>
+          <button
+            id="open-workspace"
+            class="icon-button sidebar-expanded-only"
+            type="button"
+            aria-label="Manage projects"
+            title="Manage projects"
+          >＋</button>
         </div>
-        <strong id="provider-detail">Conectando…</strong>
-      </article>
-      <article class="status-card">
-        <div class="status-heading">
-          <span class="status-label"><span class="status-icon" aria-hidden="true">◆</span>Modelos disponíveis</span>
-        </div>
-        <strong id="model-count">—</strong>
-      </article>
-      <article class="status-card">
-        <div class="status-heading">
-          <span class="status-label"><span class="status-icon" aria-hidden="true">▦</span>Dispositivos gráficos</span>
-        </div>
-        <strong id="device-count">—</strong>
-        <small id="device-diagnostic"></small>
-      </article>
-      <button id="open-workspace" class="status-card workspace-card" type="button">
-        <span class="status-heading">
-          <span class="status-label"><span class="status-icon" aria-hidden="true">⌂</span>Workspace confiável</span>
-          <span id="workspace-badge" class="badge muted">Não configurado</span>
-        </span>
-        <strong id="workspace-path">Nenhuma pasta selecionada</strong>
-        <small>Configura onde o modo Execute pode atuar.</small>
+        <button
+          id="open-session-search"
+          class="project-search-button sidebar-expanded-only"
+          type="button"
+          aria-label="Search conversations across all projects"
+        ><span aria-hidden="true">⌕</span><span>Search conversations</span></button>
+      </header>
+      <span id="workspace-path" class="visually-hidden">No folder selected</span>
+      <div id="project-list" class="project-list"></div>
+      <button id="enable-session-history" class="secondary-button sidebar-expanded-only" type="button" hidden>
+        Enable history for the active project
       </button>
-      <button
-        id="git-card"
-        class="status-card workspace-card git-card"
-        type="button"
-        aria-label="Git: carregando estado do workspace"
-      >
-        <span class="status-heading">
-          <span class="status-label"><span class="status-icon" aria-hidden="true">⑂</span>Git</span>
-          <span id="git-badge" class="badge muted">Carregando</span>
-        </span>
-        <strong id="git-summary">Verificando repositório…</strong>
-        <small id="git-upstream-summary">Abra para ver alterações e configuração.</small>
-      </button>
-      <article id="runtime-usage-summary" class="status-card usage-sidebar-card">
-        <div class="status-heading">
-          <span class="status-label">
-            <span class="status-icon" aria-hidden="true">◴</span>Uso de tokens
-          </span>
-          <span id="runtime-usage-accuracy" class="usage-accuracy-badge">
-            carregando
-          </span>
-        </div>
-        <span id="runtime-usage-details">Carregando uso local…</span>
-      </article>
-      <button
-        id="cloud-usage-card"
-        class="status-card workspace-card cloud-usage-sidebar-card"
-        type="button"
-        aria-haspopup="dialog"
-        aria-controls="cloud-usage-dialog"
-      >
-        <span class="status-heading">
-          <span class="status-label">
-            <span class="status-icon" aria-hidden="true">☁</span>Uso cloud
-          </span>
-          <span id="cloud-usage-badge" class="usage-accuracy-badge">
-            carregando
-          </span>
-        </span>
-        <strong id="cloud-usage-summary">Carregando provedores…</strong>
-        <small id="cloud-usage-detail">Abra para ver quota, custos e modelos.</small>
-      </button>
+      <p id="conversation-persistence-sidebar" class="persistence-status sidebar-expanded-only">Unsaved</p>
     </section>
 
-    <details id="session-history" class="session-history">
-      <summary><span class="summary-icon" aria-hidden="true">◷</span>Conversas recentes</summary>
-      <div class="session-history-actions">
-        <button id="history-new-conversation" class="secondary-button" type="button">
-          Nova conversa
-        </button>
-        <button id="open-session-search" class="secondary-button" type="button">
-          Buscar
-        </button>
-        <button id="enable-session-history" class="secondary-button" type="button" hidden>
-          Ativar histórico
-        </button>
+    <section class="sidebar-git" aria-labelledby="sidebar-git-title">
+      <div class="sidebar-git-heading">
+        <span class="sidebar-section-icon git-section-icon" aria-hidden="true">⑂</span>
+        <h2 id="sidebar-git-title" class="sidebar-expanded-only">Git</h2>
       </div>
-      <p id="conversation-persistence-sidebar" class="persistence-status">Unsaved</p>
-      <section id="pinned-session-section" class="pinned-session-section" hidden>
-        <h2>Fixadas</h2>
-        <div id="pinned-sessions" class="session-list"></div>
-      </section>
-      <div id="recent-sessions" class="session-list"></div>
-      <details id="archived-session-section" class="archived-session-section">
-        <summary>Arquivadas</summary>
-        <div id="archived-sessions" class="session-list"></div>
-      </details>
-    </details>
+      <button
+        id="git-card"
+        class="git-status-button sidebar-expanded-only"
+        type="button"
+        aria-label="Git: loading workspace state"
+      >
+        <strong id="git-summary">Checking repository…</strong>
+        <span id="git-badge" class="badge muted">Loading</span>
+        <small id="git-upstream-summary" class="visually-hidden">Open for details.</small>
+      </button>
+      <div id="git-quick-actions" class="git-quick-actions sidebar-expanded-only">
+        <button id="git-initialize-quick" class="secondary-button" type="button" hidden>Initialize</button>
+        <button id="git-commit-quick" class="secondary-button" type="button" hidden>Commit</button>
+        <button id="git-push-quick" class="secondary-button" type="button" hidden>Push</button>
+        <button id="git-view-folder" class="secondary-button" type="button" hidden>View folder</button>
+      </div>
+      <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
+    </section>
 
-    <p class="sidebar-note">
-      RAM, VRAM e memória dos modelos são medições separadas. O Ollama continua responsável pela execução.
-    </p>
-    <span class="app-version">v0.9.14</span>
+    <span class="app-version sidebar-expanded-only">v0.9.14</span>
   </aside>
 
   <div
     id="sidebar-resizer"
     class="sidebar-resizer"
     role="separator"
-    aria-label="Redimensionar menu lateral"
+    aria-label="Resize sidebar"
     aria-orientation="vertical"
     aria-valuemin="220"
     aria-valuemax="460"
@@ -137,46 +96,78 @@
     tabindex="0"
   ></div>
 
+  <div
+    id="project-menu-popover"
+    class="project-menu-popover"
+    role="dialog"
+    aria-labelledby="project-menu-title"
+    hidden
+  >
+    <header>
+      <span class="project-icon" aria-hidden="true"></span>
+      <strong id="project-menu-title"></strong>
+    </header>
+    <div class="project-menu-row">
+      <span class="project-conversation-icon" aria-hidden="true"></span>
+      <span id="project-menu-count"></span>
+    </div>
+    <div id="project-menu-git-row" class="project-menu-row" hidden>
+      <span aria-hidden="true">⑂</span>
+      <span id="project-menu-git"></span>
+    </div>
+    <div class="project-menu-row project-menu-path-row">
+      <span class="project-icon" aria-hidden="true"></span>
+      <span id="project-menu-path"></span>
+    </div>
+    <button id="project-menu-edit" class="project-menu-edit" type="button">
+      <span aria-hidden="true">⚙</span>
+      <span>Edit project</span>
+    </button>
+  </div>
+
   <main id="conversation-view" class="workspace">
     <header class="chat-header">
       <div class="title-group">
-        <span class="eyebrow">Sessão local</span>
-        <h1>Conversa</h1>
+        <span class="eyebrow">Local session</span>
+        <h1>Conversation</h1>
         <span id="conversation-persistence" class="persistence-status" role="status">
           Unsaved
         </span>
       </div>
 
       <details id="runtime-details" class="runtime-details">
-        <summary id="runtime-summary">Memória carregando…</summary>
+        <summary id="runtime-summary">
+          <span class="runtime-provider-indicator">
+            <span class="runtime-provider-dot" aria-hidden="true"></span>
+            <span>Ollama</span>
+            <span id="provider-badge" class="visually-hidden">Checking</span>
+          </span>
+          <span id="runtime-compact-meters" class="runtime-compact-meters"></span>
+        </summary>
         <div class="runtime-popover">
           <div id="runtime-memory-list" class="runtime-memory-list"></div>
-          <section>
-            <h2>Modelos carregados</h2>
+          <section class="loaded-models-section">
+            <div class="runtime-section-heading">
+              <h2>Loaded models</h2>
+              <span id="runtime-model-summary">Loading…</span>
+            </div>
             <div id="runtime-model-list" class="runtime-model-list"></div>
           </section>
-          <section>
-            <h2>Modelo residente</h2>
-            <p id="resident-model-status">Carregando…</p>
-          </section>
-          <p class="runtime-note">
-            VRAM do adaptador e alocação reportada por modelo não representam a mesma medição.
-          </p>
         </div>
       </details>
 
       <div class="header-actions">
-        <button id="open-benchmarks" class="secondary-button" type="button">
+        <button id="new-conversation" class="secondary-button" type="button" aria-label="New conversation" title="New conversation">
+          <span class="button-icon" aria-hidden="true">＋</span>
+          <span>New conversation</span>
+        </button>
+        <button id="open-benchmarks" class="secondary-button" type="button" aria-label="Benchmark" title="Benchmark">
           <span class="button-icon" aria-hidden="true">◫</span>
           <span>Benchmark</span>
         </button>
-        <button id="new-conversation" class="secondary-button" type="button">
-          <span class="button-icon" aria-hidden="true">＋</span>
-          <span>Nova conversa</span>
-        </button>
-        <button id="open-settings" class="secondary-button" type="button">
+        <button id="open-settings" class="secondary-button" type="button" aria-label="Settings" title="Settings">
           <span class="button-icon" aria-hidden="true">⚙</span>
-          <span>Configurações</span>
+          <span>Settings</span>
         </button>
       </div>
     </header>
@@ -184,13 +175,13 @@
     <section id="messages" class="messages" aria-live="polite">
       <div id="empty-state" class="empty-state">
         <div class="empty-icon" aria-hidden="true">✦</div>
-        <h2>Pronto para conversar</h2>
-        <p>Use Auto para classificar a intenção e escolher o modelo configurado.</p>
+        <h2>Ready to chat</h2>
+        <p>Use Auto to classify intent and choose the configured model.</p>
       </div>
     </section>
 
     <button id="jump-latest" class="jump-latest" type="button" hidden>
-      Ir para o mais recente
+      Jump to latest
     </button>
 
     <footer class="composer-shell">
@@ -198,46 +189,55 @@
         <div class="composer-context">
           <span class="active-agent-pill">
             <span class="agent-icon" aria-hidden="true">⚡</span>
-            <span>Agente:</span>
-            <strong id="active-agent-label">Auto (Roteador)</strong>
+            <span>Agent:</span>
+            <strong id="active-agent-label">Auto (Router)</strong>
           </span>
           <span id="active-provider-model" class="active-provider-model">
-            Capacidade sendo verificada
+            Checking capabilities
           </span>
           <span
             id="capability-tags"
             class="capability-tags"
-            aria-label="Capacidades do agente selecionado"
+            aria-label="Selected agent capabilities"
           ></span>
           <span id="fallback-indicator" class="fallback-indicator" hidden>
-            Fallback local disponível
+            Local fallback available
           </span>
           <details id="context-usage" class="context-usage">
-            <summary id="context-usage-summary">Contexto estimado</summary>
+            <summary id="context-usage-summary">
+              <span id="context-usage-summary-text">Estimated context</span>
+              <span
+                id="context-usage-estimate-warning"
+                class="context-usage-estimate-warning"
+                role="img"
+                tabindex="0"
+                hidden
+              >⚠</span>
+            </summary>
             <div class="context-usage-popover">
               <strong id="context-usage-warning" hidden></strong>
               <dl id="context-usage-details"></dl>
-              <small>O histórico visível pode ser maior que o contexto enviado.</small>
+              <small>Visible history may be larger than the submitted context.</small>
               <button
                 id="compact-context"
                 class="secondary-button compact-context-button"
                 type="button"
                 hidden
-              >Compactar contexto</button>
+              >Compact context</button>
             </div>
           </details>
         </div>
         <div
           id="attachment-previews"
           class="attachment-previews"
-          aria-label="Imagens anexadas"
+          aria-label="Attached images"
           hidden
         ></div>
         <textarea
           id="message-input"
           rows="1"
-          aria-label="Mensagem"
-          placeholder="Envie uma mensagem…"
+          aria-label="Message"
+          placeholder="Send a message…"
         ></textarea>
         <div class="composer-actions">
           <div class="capability-controls">
@@ -247,26 +247,26 @@
               type="button"
               data-state="unavailable"
               aria-pressed="false"
-              aria-label="Web indisponível"
-              title="A disponibilidade depende do modelo e da integração configurada."
+              aria-label="Web unavailable"
+              title="Availability depends on the model and configured integration."
               disabled
             >
               <svg aria-hidden="true" viewBox="0 0 20 20">
                 <path d="M10 18C14.4183 18 18 14.4183 18 10C18 5.58172 14.4183 2 10 2C5.58172 2 2 5.58172 2 10C2 14.4183 5.58172 18 10 18ZM10 3C10.6568 3 11.4068 3.59025 12.0218 4.90814C12.2393 5.37419 12.4283 5.90978 12.5806 6.5H7.41936C7.57172 5.90978 7.76073 5.37419 7.97822 4.90814C8.59323 3.59025 9.34315 3 10 3ZM6.19265 7.5C6.06723 8.28832 6 9.12934 6 10C6 10.8707 6.06723 11.7117 6.19265 12.5H3.45963C3.16268 11.7236 3 10.8808 3 10C3 9.1192 3.16268 8.2764 3.45963 7.5H6.19265ZM7.41936 13.5H12.5806C12.4283 14.0902 12.2393 14.6258 12.0218 15.0919C11.4068 16.4097 10.6568 17 10 17C9.34315 17 8.59323 16.4097 7.97822 15.0919C7.76073 14.6258 7.57172 14.0902 7.41936 13.5ZM12.7938 12.5H7.20617C7.07345 11.7253 7 10.8833 7 10C7 9.11669 7.07345 8.27472 7.20617 7.5H12.7938C12.9266 8.27472 13 9.11669 13 10C13 10.8833 12.9266 11.7253 12.7938 12.5ZM16.5404 12.5H13.8074C13.9328 11.7117 14 10.8707 14 10C14 9.12934 13.9328 8.28832 13.8074 7.5H16.5404C16.8373 8.2764 17 9.1192 17 10C17 10.8808 16.8373 11.7236 16.5404 12.5ZM13.6107 6.5C13.435 5.75696 13.2044 5.07753 12.928 4.48526C12.7417 4.08617 12.527 3.71222 12.2856 3.38163C13.8882 3.93497 15.2271 5.05399 16.0635 6.5H13.6107ZM6.38931 6.5H3.93648C4.77295 5.05399 6.11182 3.93497 7.71442 3.38163C7.47297 3.71222 7.25828 4.08617 7.07203 4.48526C6.79564 5.07753 6.56498 5.75696 6.38931 6.5ZM6.38931 13.5C6.56498 14.243 6.79564 14.9225 7.07203 15.5147C7.25828 15.9138 7.47297 16.2878 7.71442 16.6184C6.11182 16.065 4.77295 14.946 3.93648 13.5H6.38931ZM13.6107 13.5H16.0635C15.2271 14.946 13.8882 16.065 12.2856 16.6184C12.527 16.2878 12.7417 15.9138 12.928 15.5147C13.2044 14.9225 13.435 14.243 13.6107 13.5Z"/>
               </svg>
-              <span id="web-toggle-label" class="visually-hidden">Web indisponível</span>
+              <span id="web-toggle-label" class="visually-hidden">Web unavailable</span>
             </button>
             <button
               id="attach-image"
               class="capability-control capability-icon-button"
               type="button"
-              aria-label="Anexar imagem"
-              title="Anexar JPEG, PNG, WebP ou GIF"
+              aria-label="Attach image"
+              title="Attach JPEG, PNG, WebP, or GIF"
             >
               <svg aria-hidden="true" viewBox="0 0 20 20">
                 <path d="M14 7.5C14 8.32843 13.3284 9 12.5 9C11.6716 9 11 8.32843 11 7.5C11 6.67157 11.6716 6 12.5 6C13.3284 6 14 6.67157 14 7.5ZM13 7.5C13 7.22386 12.7761 7 12.5 7C12.2239 7 12 7.22386 12 7.5C12 7.77614 12.2239 8 12.5 8C12.7761 8 13 7.77614 13 7.5ZM3 6C3 4.34315 4.34315 3 6 3H14C15.6569 3 17 4.34315 17 6V14C17 15.6569 15.6569 17 14 17H6C4.34315 17 3 15.6569 3 14V6ZM6 4C4.89543 4 4 4.89543 4 6V14C4 14.3726 4.10191 14.7215 4.27937 15.0201L8.94868 10.432C9.53227 9.85859 10.4677 9.85859 11.0513 10.432L15.7206 15.0201C15.8981 14.7215 16 14.3726 16 14V6C16 4.89543 15.1046 4 14 4H6ZM6 16H14C14.3692 16 14.7149 15.9 15.0118 15.7256L10.3504 11.1453C10.1559 10.9542 9.84409 10.9542 9.64956 11.1453L4.98824 15.7256C5.28505 15.9 5.63085 16 6 16Z"/>
               </svg>
-              <span class="visually-hidden">Imagem</span>
+              <span class="visually-hidden">Image</span>
             </button>
             <input
               id="image-input"
@@ -276,7 +276,7 @@
               hidden
             >
           </div>
-          <div class="interaction-mode" role="group" aria-label="Modo de interação">
+          <div class="interaction-mode" role="group" aria-label="Interaction mode">
             <button class="mode-option active" type="button" data-mode="chat" aria-pressed="true">
               <span class="mode-icon" aria-hidden="true">◌</span>
               <span>Chat</span>
@@ -287,15 +287,15 @@
             </button>
           </div>
           <label class="model-field approval-field">
-            <span>Aprovação</span>
-            <select id="approval-policy" aria-label="Política de aprovação">
+            <span>Approval</span>
+            <select id="approval-policy" aria-label="Approval policy">
               <option value="ask">Ask for approval</option>
               <option value="auto" selected>Approve for me</option>
             </select>
           </label>
           <label class="model-field">
-            <span>Modelo</span>
-            <select id="model-selector" aria-label="Modelo da solicitação">
+            <span>Model</span>
+            <select id="model-selector" aria-label="Request model">
               <option value="auto">Auto</option>
             </select>
           </label>
@@ -304,32 +304,32 @@
               <button
                 class="information-button compact-information-button"
                 type="button"
-                aria-label="Informação sobre Harness e Auto Model por Harness"
-                data-tooltip="Harness é o runtime que conduz o modelo durante o Execute. Auto Model × Harness escolhe uma combinação uma vez, antes da execução, usando evidência local."
+                aria-label="Information about Harness and Auto Model by Harness"
+                data-tooltip="A harness is the runtime that drives the model during Execute. Auto Model × Harness selects one combination before execution using local evidence."
               >i</button>
             </span>
-            <select id="harness-selector" aria-label="Harness de execução" disabled>
+            <select id="harness-selector" aria-label="Execution harness" disabled>
               <option value="native" selected>Native</option>
             </select>
           </label>
-          <span id="composer-status" class="composer-status">Enter para enviar</span>
+          <span id="composer-status" class="composer-status">Press Enter to send</span>
           <div class="composer-submit-actions">
             <button
               id="cancel-message-edit"
               class="icon-button edit-cancel-button"
               type="button"
-              aria-label="Cancelar edição"
-              title="Cancelar edição (Esc)"
+              aria-label="Cancel editing"
+              title="Cancel editing (Esc)"
               hidden
             >×</button>
             <button
               id="send-button"
               class="primary-button"
               type="submit"
-              aria-label="Enviar mensagem"
-              title="Enviar mensagem"
+              aria-label="Send message"
+              title="Send message"
             >
-              <span id="send-button-label">Enviar</span>
+              <span id="send-button-label">Send</span>
               <span class="button-icon send-icon" aria-hidden="true">↑</span>
             </button>
           </div>
@@ -344,11 +344,11 @@
         <div>
           <span class="eyebrow">Model × Harness</span>
           <h2>Benchmark Lab</h2>
-          <p>Escolha modelos, harnesses e testes. Execute, compare o resultado e veja a recomendação.</p>
+          <p>Choose models, harnesses, and tests. Run them, compare results, and view the recommendation.</p>
         </div>
         <button id="close-benchmarks" class="secondary-button benchmark-back-button" type="button">
           <span aria-hidden="true">←</span>
-          <span>Voltar à conversa</span>
+          <span>Back to conversation</span>
         </button>
       </header>
 
@@ -356,14 +356,14 @@
         <aside class="benchmark-panel benchmark-setup-panel" aria-labelledby="benchmark-selection-title">
           <div class="benchmark-panel-header">
             <div>
-              <span class="eyebrow">Configuração</span>
-              <h3 id="benchmark-selection-title">Preparar execução</h3>
+              <span class="eyebrow">Configuration</span>
+              <h3 id="benchmark-selection-title">Prepare run</h3>
             </div>
           </div>
           <div class="benchmark-panel-body benchmark-controls">
             <div class="benchmark-selection-grid">
               <fieldset class="benchmark-models">
-                <legend>Modelos Ollama Local</legend>
+                <legend>Ollama Local models</legend>
                 <div
                   id="benchmark-model-list"
                   class="benchmark-switch-list benchmark-model-list"
@@ -371,93 +371,93 @@
                   aria-describedby="benchmark-model-help"
                 ></div>
                 <select id="benchmark-model" multiple hidden aria-hidden="true" tabindex="-1"></select>
-                <small id="benchmark-model-help">Ative um ou mais modelos. A execução local será sequencial.</small>
+                <small id="benchmark-model-help">Enable one or more models. Local execution will be sequential.</small>
               </fieldset>
               <fieldset id="benchmark-suite" class="benchmark-test-groups">
-                <legend>Testes</legend>
+                <legend>Tests</legend>
                 <div id="benchmark-suite-list" class="benchmark-switch-list"></div>
               </fieldset>
               <label>
-                <span class="field-label-with-help">Timeout por teste (segundos)
+                <span class="field-label-with-help">Per-test timeout (seconds)
                   <button class="information-button compact-information-button" type="button"
-                    aria-label="Informação sobre timeout"
-                    data-tooltip="Tempo máximo concedido a cada teste. Um timeout é registrado como resultado, e as próximas células independentes continuam.">i</button>
+                    aria-label="Timeout information"
+                    data-tooltip="Maximum time allowed for each test. A timeout is recorded as a result, and subsequent independent cells continue.">i</button>
                 </span>
                 <input id="benchmark-timeout" type="number" min="5" max="600" value="120" required>
               </label>
               <label>
-                <span class="field-label-with-help">Perfil de score
+                <span class="field-label-with-help">Scoring profile
                   <button class="information-button compact-information-button" type="button"
-                    aria-label="Informação sobre perfil de score"
-                    data-tooltip="Define os pesos usados para calcular o ranking a partir da evidência medida. Alterar o perfil não executa novamente os modelos.">i</button>
+                    aria-label="Scoring-profile information"
+                    data-tooltip="Defines the weights used to calculate ranking from measured evidence. Changing the profile does not rerun models.">i</button>
                 </span>
                 <select id="benchmark-scoring-profile-choice">
                   <option value="default">Default</option>
-                  <option value="custom">Custom atual</option>
+                  <option value="custom">Current custom</option>
                 </select>
               </label>
             </div>
             <fieldset class="benchmark-harnesses">
               <legend class="field-label-with-help">Harnesses
                 <button class="information-button compact-information-button" type="button"
-                  aria-label="Informação sobre harness"
-                  data-tooltip="Harness é o runtime que conduz o modelo e expõe suas capacidades ao Host. Cada Modelo × Harness é medido como uma combinação separada.">i</button>
+                  aria-label="Harness information"
+                  data-tooltip="A harness is the runtime that drives the model and exposes its capabilities to the Host. Each Model × Harness is measured as a separate combination.">i</button>
               </legend>
               <div id="benchmark-harness-list" class="benchmark-switch-list"></div>
             </fieldset>
           </div>
           <div class="benchmark-action-box">
             <div class="benchmark-actions">
-              <button id="run-benchmark" class="primary-button" type="submit">Executar benchmark</button>
-              <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>Cancelar execução</button>
+              <button id="run-benchmark" class="primary-button" type="submit">Run benchmark</button>
+              <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>Cancel run</button>
             </div>
-            <output id="benchmark-status" role="status">Pronto.</output>
+            <output id="benchmark-status" role="status">Ready.</output>
           </div>
         </aside>
 
         <section class="benchmark-panel benchmark-results-panel" aria-labelledby="benchmark-results-title">
           <div class="benchmark-panel-header benchmark-results-header">
             <div>
-              <span class="eyebrow">Acompanhamento e histórico</span>
-              <h3 id="benchmark-results-title">Resultados</h3>
+              <span class="eyebrow">Tracking and history</span>
+              <h3 id="benchmark-results-title">Results</h3>
             </div>
           </div>
 
           <details class="benchmark-advanced benchmark-history-advanced">
-            <summary>Advanced · histórico e comparação</summary>
+            <summary>Advanced · history and comparison</summary>
           <section class="benchmark-history-tools" aria-labelledby="benchmark-history-title">
             <div class="benchmark-history-heading">
               <div>
                 <span class="eyebrow">Historical evidence</span>
-                <h3 id="benchmark-history-title">Histórico e comparação
+                <h3 id="benchmark-history-title">History and comparison
                   <button class="information-button compact-information-button" type="button"
-                    aria-label="Informação sobre comparação histórica e comparabilidade"
-                    data-tooltip="A comparação histórica confronta duas execuções persistidas. Comparabilidade indica se suite, versões, ambiente e identidades permitem interpretar os deltas diretamente.">i</button>
+                    aria-label="Information about historical comparison and comparability"
+                    data-tooltip="Historical comparison contrasts two persisted runs. Comparability indicates whether suite, versions, environment, and identities allow direct interpretation of deltas.">i</button>
                 </h3>
               </div>
-              <span class="badge">Persistido localmente</span>
+              <span class="badge">Persisted locally</span>
             </div>
             <label class="benchmark-history-control">
-              <span>Resultado persistido</span>
+              <span>Persisted result</span>
               <select id="benchmark-history">
-                <option value="">Nenhum resultado carregado</option>
+                <option value="">No result loaded</option>
               </select>
             </label>
-            <div class="benchmark-history-filters" aria-label="Filtros do histórico">
+            <div class="benchmark-history-filters" aria-label="History filters">
               <label>
-                <span>Modelo</span>
-                <input id="benchmark-history-model-filter" type="search" placeholder="Todos os modelos">
+                <span>Model</span>
+                <input id="benchmark-history-model-filter" type="search" placeholder="All models">
               </label>
               <label>
                 <span>Harness</span>
                 <select id="benchmark-history-harness-filter">
-                  <option value="">Todos os harnesses</option>
+                  <option value="">All harnesses</option>
                 </select>
               </label>
               <label>
                 <span>Suite</span>
                 <select id="benchmark-history-suite-filter">
-                  <option value="">Todas as suites</option>
+                  <option value="">All suites</option>
                 </select>
               </label>
             </div>
@@ -465,16 +465,16 @@
               <label>
                 <span>Base</span>
                 <select id="benchmark-compare-baseline">
-                  <option value="">Selecione uma execução</option>
+                  <option value="">Select a run</option>
                 </select>
               </label>
               <label>
                 <span>Candidata</span>
                 <select id="benchmark-compare-candidate">
-                  <option value="">Selecione uma execução</option>
+                  <option value="">Select a run</option>
                 </select>
               </label>
-              <button id="compare-benchmark-runs" class="secondary-button" type="button">Comparar</button>
+              <button id="compare-benchmark-runs" class="secondary-button" type="button">Compare</button>
             </div>
             <div id="benchmark-comparison" class="benchmark-comparison" hidden></div>
           </section>
@@ -483,53 +483,53 @@
           <section class="benchmark-recommendations" aria-labelledby="benchmark-recommendation-title">
             <div class="benchmark-recommendation-heading">
               <div>
-                <span class="eyebrow">Recomendação geral</span>
-                <h3 id="benchmark-recommendation-title">Qual Modelo × Harness devo usar?
+                <span class="eyebrow">Overall recommendation</span>
+                <h3 id="benchmark-recommendation-title">Which Model × Harness should I use?
                   <button class="information-button compact-information-button" type="button"
-                    aria-label="Informação sobre confiança e evidência da recomendação"
-                    data-tooltip="A confiança descreve a quantidade, comparabilidade e consistência da evidência local. Os links de evidência abrem os benchmarks que sustentam a recomendação.">i</button>
+                    aria-label="Information about recommendation confidence and evidence"
+                    data-tooltip="Confidence describes the amount, comparability, and consistency of local evidence. Evidence links open the benchmarks supporting the recommendation.">i</button>
                 </h3>
               </div>
               <span id="benchmark-recommendation-version" class="badge">v1</span>
             </div>
             <button id="generate-benchmark-recommendation" class="primary-button benchmark-recommend-button" type="button">
-              Ver recomendação geral
+              View overall recommendation
             </button>
             <details class="benchmark-inline-advanced">
-              <summary>Opções avançadas de recomendação</summary>
+              <summary>Advanced recommendation options</summary>
             <div class="benchmark-recommendation-controls">
               <label>
-                <span>Categoria</span>
+                <span>Category</span>
                 <select id="benchmark-recommendation-category"></select>
               </label>
               <label>
                 <span>Scoring</span>
                 <select id="benchmark-recommendation-profile">
-                  <option value="active">Perfil ativo</option>
+                  <option value="active">Active profile</option>
                   <option value="default">Default v1</option>
                 </select>
               </label>
               <button id="research-benchmark-recommendation" class="secondary-button" type="button">
-                Pesquisar evidência externa
+                Research external evidence
               </button>
             </div>
             </details>
             <output id="benchmark-recommendation-status" role="status">
-              Selecione uma categoria. Nenhum benchmark será iniciado automaticamente.
+              Select a category. No benchmark will start automatically.
             </output>
             <div id="benchmark-recommendation-results" class="benchmark-recommendation-results" hidden></div>
           </section>
 
           <details class="benchmark-advanced benchmark-scoring-advanced">
-            <summary>Advanced · perfil de score</summary>
+            <summary>Advanced · scoring profile</summary>
           <section class="benchmark-scoring" aria-labelledby="benchmark-scoring-title">
             <div class="benchmark-scoring-heading">
               <div>
                 <span class="eyebrow">Calculated score</span>
-                <h3 id="benchmark-scoring-title">Pesos do ranking
+                <h3 id="benchmark-scoring-title">Ranking weights
                   <button class="information-button compact-information-button" type="button"
-                    aria-label="Informação sobre as métricas do benchmark"
-                    data-tooltip="Correctness mede precisão do resultado; Terminality mede conclusão clara; Recovery e Convergence medem recuperação e estabilização; Hygiene mede mudanças desnecessárias.">i</button>
+                    aria-label="Benchmark metrics information"
+                    data-tooltip="Correctness measures result accuracy; Terminality measures clear completion; Recovery and Convergence measure recovery and stabilization; Hygiene measures unnecessary changes.">i</button>
                 </h3>
               </div>
               <span id="benchmark-score-profile" class="badge">Default v1</span>
@@ -557,52 +557,52 @@
               </label>
             </div>
             <div class="benchmark-scoring-footer">
-              <output id="benchmark-weight-total" role="status">Total 100 · sem normalização</output>
-              <button id="reset-benchmark-weights" class="secondary-button" type="button">Restaurar padrão</button>
+              <output id="benchmark-weight-total" role="status">Total 100 · no normalization</output>
+              <button id="reset-benchmark-weights" class="secondary-button" type="button">Restore default</button>
             </div>
           </section>
           </details>
 
           <div class="benchmark-panel-body benchmark-results">
             <div class="section-heading">
-              <p id="benchmark-run-summary">Execute ou abra um resultado persistido.</p>
+              <p id="benchmark-run-summary">Run or open a persisted result.</p>
               <p id="benchmark-score-context" class="benchmark-score-context">
-                Measured evidence e Calculated score são apresentados separadamente.
+                Measured evidence and Calculated score are presented separately.
               </p>
             </div>
             <p id="benchmark-ranking-note" class="benchmark-ranking-note" hidden>
-              Ranking provisório: harnesses ainda em execução são identificados abaixo.
+              Provisional ranking: harnesses still running are identified below.
             </p>
             <div id="benchmark-live-dashboard" class="benchmark-live-dashboard" hidden></div>
             <div id="benchmark-matrix" class="benchmark-matrix" hidden></div>
             <label class="benchmark-ranking-scope">
               <span>Ranking</span>
               <select id="benchmark-ranking-scope">
-                <option value="pair">Modelo × Harness</option>
-                <option value="model">Por modelo</option>
-                <option value="harness">Por harness</option>
+                <option value="pair">Model × Harness</option>
+                <option value="model">By model</option>
+                <option value="harness">By harness</option>
               </select>
             </label>
             <div class="benchmark-table-shell">
               <table>
                 <thead>
                   <tr>
-                    <th>Modelo × Harness</th>
+                    <th>Model × Harness</th>
                     <th>State</th>
                     <th>Passed</th>
-                    <th title="Score calculado pelo perfil ativo a partir da evidência medida.">Score</th>
+                    <th title="Score calculated by the active profile from measured evidence.">Score</th>
                     <th>Duration</th>
-                    <th title="Conclusão clara e exatamente um estado terminal.">Terminality</th>
+                    <th title="Clear conclusion and exactly one terminal state.">Terminality</th>
                   </tr>
                 </thead>
                 <tbody id="benchmark-results-body"></tbody>
               </table>
             </div>
             <div id="benchmark-result-detail" class="benchmark-result-detail">
-              <p>Selecione um harness na tabela para inspecionar os cenários.</p>
+              <p>Select a harness in the table to inspect scenarios.</p>
             </div>
             <details id="benchmark-raw-evidence" class="benchmark-raw-evidence" hidden>
-              <summary>Abrir evidência bruta original</summary>
+              <summary>Open original raw evidence</summary>
               <pre id="benchmark-raw-evidence-content"></pre>
             </details>
           </div>
@@ -615,36 +615,36 @@
     <form id="settings-form" method="post" class="settings-shell">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Configuração local</span>
-          <h2>Configurações</h2>
-          <p>Modelos, execução, workspaces, Git e armazenamento local.</p>
+          <span class="eyebrow">Local configuration</span>
+          <h2>Settings</h2>
+          <p>Models, execution, workspaces, Git, and local storage.</p>
         </div>
-        <span id="settings-dirty" class="badge muted">Sem alterações</span>
-        <button id="close-settings" class="icon-button" type="button" aria-label="Fechar">×</button>
+        <span id="settings-dirty" class="badge muted">No changes</span>
+        <button id="close-settings" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
 
       <div class="settings-responsive-navigation">
-        <label for="settings-section-select">Seção</label>
+        <label for="settings-section-select">Section</label>
         <select id="settings-section-select">
-          <option value="general">Geral</option>
-          <option value="models-routing">Modelos e roteamento</option>
-          <option value="providers">Provedores</option>
+          <option value="general">General</option>
+          <option value="models-routing">Models and routing</option>
+          <option value="providers">Providers</option>
           <option value="harnesses">Harnesses</option>
-          <option value="execution">Execução e aprovações</option>
-          <option value="workspaces">Workspaces e histórico</option>
-          <option value="advanced">Avançado</option>
+          <option value="execution">Execution and approvals</option>
+          <option value="workspaces">Workspaces and history</option>
+          <option value="advanced">Advanced</option>
         </select>
       </div>
 
       <div class="settings-layout">
-        <nav id="settings-navigation" class="settings-navigation" aria-label="Seções de configuração">
-          <button type="button" data-settings-target="general" aria-current="page">Geral</button>
-          <button type="button" data-settings-target="models-routing">Modelos e roteamento</button>
-          <button type="button" data-settings-target="providers">Provedores</button>
+        <nav id="settings-navigation" class="settings-navigation" aria-label="Configuration sections">
+          <button type="button" data-settings-target="general" aria-current="page">General</button>
+          <button type="button" data-settings-target="models-routing">Models and routing</button>
+          <button type="button" data-settings-target="providers">Providers</button>
           <button type="button" data-settings-target="harnesses">Harnesses</button>
-          <button type="button" data-settings-target="execution">Execução e aprovações</button>
-          <button type="button" data-settings-target="workspaces">Workspaces e histórico</button>
-          <button type="button" data-settings-target="advanced">Avançado</button>
+          <button type="button" data-settings-target="execution">Execution and approvals</button>
+          <button type="button" data-settings-target="workspaces">Workspaces and history</button>
+          <button type="button" data-settings-target="advanced">Advanced</button>
         </nav>
 
         <div id="settings-content" class="settings-content">
@@ -652,16 +652,16 @@
 
           <section id="settings-general" class="settings-section" data-settings-section="general" tabindex="-1">
             <div class="section-heading">
-              <h3>Geral</h3>
-              <p>Escolhas padrão usadas quando uma conversa não fixa um modelo ou dispositivo.</p>
+              <h3>General</h3>
+              <p>Defaults used when a conversation does not lock a model or device.</p>
             </div>
             <div class="settings-grid">
               <label>
-                <span>Modelo padrão</span>
+                <span>Default model</span>
                 <select id="default-model" name="defaultModel" required></select>
               </label>
               <label>
-                <span>GPU padrão</span>
+                <span>Default GPU</span>
                 <select id="default-gpu" name="defaultGpu"></select>
               </label>
             </div>
@@ -670,22 +670,22 @@
           <section id="settings-ollama" class="settings-section" data-settings-section="ollama" tabindex="-1">
             <div class="section-heading">
               <h3>Ollama</h3>
-              <p>Conexão local, modelos instalados e diagnóstico executado fora da conversa.</p>
+              <p>Local connection, installed models, and diagnostics run outside the conversation.</p>
             </div>
             <div class="settings-grid">
             <label>
-              <span>URL do Ollama</span>
+              <span>Ollama URL</span>
               <input id="ollama-url" name="ollamaUrl" type="url" required>
             </label>
             </div>
             <div id="model-diagnostics-list" class="model-diagnostics-list"></div>
-            <p id="model-context-diagnostic">Carregando diagnóstico…</p>
+            <p id="model-context-diagnostic">Loading diagnostic…</p>
             <div class="model-test-panel">
               <label>
-                <span>Modelo para teste</span>
+                <span>Test model</span>
                 <select id="model-test-selector"></select>
               </label>
-              <button id="test-model" class="secondary-button" type="button">Testar modelo</button>
+              <button id="test-model" class="secondary-button" type="button">Test model</button>
               <output id="model-test-result" class="model-test-result"></output>
             </div>
           </section>
@@ -698,61 +698,61 @@
           >
             <div class="section-heading">
               <div class="heading-title-row">
-                <h3>Provedores cloud</h3>
+                <h3>Cloud providers</h3>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: as chaves são protegidas pelo Windows para o usuário atual e nunca retornam ao navegador depois de salvas."
-                  data-tooltip="Groq, Google AI Studio e Cerebras. As chaves ficam protegidas pelo Windows; somente referências opacas são mantidas nas configurações."
+                  aria-label="Information: keys are protected by Windows for the current user and never return to the browser after being saved."
+                  data-tooltip="Groq, Google AI Studio, and Cerebras. Keys are protected by Windows; only opaque references are kept in settings."
                 >i</button>
               </div>
-              <p>Conecte apenas os provedores que deseja usar. Testes e atualização de modelos podem consumir quota.</p>
+              <p>Connect only the providers you want to use. Tests and model refreshes may consume quota.</p>
             </div>
             <div class="provider-health-heading">
-              <h4>Configuração e estatísticas</h4>
+              <h4>Configuration and statistics</h4>
               <button
                 id="refresh-provider-health"
                 class="secondary-button"
                 type="button"
-              >Atualizar</button>
+              >Refresh</button>
             </div>
             <div id="cloud-providers-list" class="cloud-providers-list"></div>
           </section>
 
           <section id="settings-models" class="settings-section" data-settings-section="models" tabindex="-1">
             <div class="section-heading">
-              <h3>Modelos e roteamento</h3>
-              <p>O roteador classifica a intenção; cada intenção escolhe seu especialista.</p>
+              <h3>Models and routing</h3>
+              <p>The router classifies intent; each intent selects its specialist.</p>
             </div>
             <div class="settings-grid">
             <label>
-              <span>Modelo roteador residente</span>
+              <span>Resident router model</span>
               <select id="router-model" name="routerModel" required></select>
             </label>
             <label>
-              <span>GPU do roteador</span>
+              <span>Router GPU</span>
               <select id="router-gpu" name="routerGpu"></select>
             </label>
             </div>
             <div id="intentions-grid" class="intentions-grid"></div>
             <details class="model-organization-panel" data-ignore-settings-dirty>
-              <summary>Organização e filtros de modelos</summary>
+              <summary>Model organization and filters</summary>
               <div class="model-organization-body">
                 <div class="model-filter-grid">
                   <label>
-                    <span>Buscar alias ou ID exato</span>
+                    <span>Search exact alias or ID</span>
                     <input id="model-filter-search" type="search" autocomplete="off">
                   </label>
                   <label>
-                    <span>Origem</span>
+                    <span>Source</span>
                     <select id="model-filter-location">
-                      <option value="all">Local e cloud</option>
+                      <option value="all">Local and cloud</option>
                       <option value="local">Local</option>
                       <option value="cloud">Cloud</option>
                     </select>
                   </label>
                   <label>
-                    <span>Contexto mínimo</span>
+                    <span>Minimum context</span>
                     <input id="model-filter-context" type="number" min="0" step="1024" value="0">
                   </label>
                 </div>
@@ -761,24 +761,24 @@
                   <label><input id="model-filter-web" type="checkbox"> Web</label>
                   <label><input id="model-filter-vision" type="checkbox"> Vision</label>
                   <label><input id="model-filter-structured" type="checkbox"> Structured output</label>
-                  <label><input id="model-filter-conformance" type="checkbox"> Conformidade aprovada</label>
-                  <label><input id="model-filter-available" type="checkbox"> Somente disponíveis</label>
-                  <label><input id="model-filter-favorites" type="checkbox"> Somente favoritos</label>
-                  <label><input id="model-filter-hidden" type="checkbox"> Mostrar ocultos</label>
+                  <label><input id="model-filter-conformance" type="checkbox"> Approved conformance</label>
+                  <label><input id="model-filter-available" type="checkbox"> Available only</label>
+                  <label><input id="model-filter-favorites" type="checkbox"> Favorites only</label>
+                  <label><input id="model-filter-hidden" type="checkbox"> Show hidden</label>
                 </div>
                 <div id="model-organization-list" class="model-organization-list"></div>
               </div>
             </details>
             <details class="model-organization-panel" data-ignore-settings-dirty>
-              <summary>Perfis de configuração</summary>
+              <summary>Configuration profiles</summary>
               <div class="model-organization-body">
                 <div class="settings-grid model-profile-grid">
                   <label>
-                    <span>Perfil salvo</span>
+                    <span>Saved profile</span>
                     <select id="model-profile-selector"></select>
                   </label>
                   <label>
-                    <span>Nome</span>
+                    <span>Name</span>
                     <input id="model-profile-name" type="text" maxlength="80">
                   </label>
                   <label>
@@ -798,7 +798,7 @@
                     <select id="model-profile-coordinator"></select>
                   </label>
                   <label>
-                    <span>Preferência Web</span>
+                    <span>Web preference</span>
                     <select id="model-profile-web">
                       <option value="off">Off</option>
                       <option value="available">Available</option>
@@ -806,31 +806,31 @@
                     </select>
                   </label>
                   <label>
-                    <span>Janela de uso</span>
+                    <span>Usage window</span>
                     <select id="model-profile-usage-window">
-                      <option value="">Manter atual</option>
-                      <option value="rolling-hour">Última hora</option>
-                      <option value="day">Hoje</option>
-                      <option value="rolling-seven-days">Últimos 7 dias</option>
-                      <option value="calendar-month">Mês atual</option>
+                      <option value="">Keep current</option>
+                      <option value="rolling-hour">Last hour</option>
+                      <option value="day">Today</option>
+                      <option value="rolling-seven-days">Last 7 days</option>
+                      <option value="calendar-month">Current month</option>
                     </select>
                   </label>
                   <label>
-                    <span>Perfil preferido do workspace</span>
+                    <span>Preferred workspace profile</span>
                     <select id="workspace-model-profile"></select>
                   </label>
                 </div>
                 <div class="settings-action-row">
-                  <button id="save-model-profile" class="secondary-button" type="button">Salvar perfil</button>
-                  <button id="apply-model-profile" class="primary-button" type="button">Aplicar perfil</button>
-                  <button id="delete-model-profile" class="secondary-button danger-button" type="button">Excluir perfil</button>
+                  <button id="save-model-profile" class="secondary-button" type="button">Save profile</button>
+                  <button id="apply-model-profile" class="primary-button" type="button">Apply profile</button>
+                  <button id="delete-model-profile" class="secondary-button danger-button" type="button">Delete profile</button>
                 </div>
-                <pre id="model-profile-preview" class="model-profile-preview">Selecione ou salve um perfil para visualizar a cadeia.</pre>
+                <pre id="model-profile-preview" class="model-profile-preview">Select or save a profile to preview the chain.</pre>
                 <output id="model-profile-status" class="runtime-note" role="status"></output>
               </div>
             </details>
             <div class="model-chain-preview-shell">
-              <h4>Cadeia efetiva antes de salvar</h4>
+              <h4>Effective chain before saving</h4>
               <pre id="model-chain-preview" class="model-profile-preview"></pre>
             </div>
           </section>
@@ -838,32 +838,32 @@
           <section id="settings-coordinator" class="settings-section" data-settings-section="coordinator" tabindex="-1">
             <div class="section-heading">
               <div class="heading-title-row">
-                <h3>Coordenador e recuperação</h3>
+                <h3>Coordinator and recovery</h3>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: coordenação direta depende do benchmark comportamental do modelo e do digest instalados. Falhas determinísticas de protocolo mudam a estratégia; retries idênticos permanecem desabilitados."
-                  data-tooltip="Coordenação direta depende do benchmark comportamental do modelo e do digest instalados. Falhas determinísticas de protocolo mudam a estratégia; retries idênticos permanecem desabilitados."
+                  aria-label="Information: direct coordination depends on the behavioral benchmark of the installed model and digest. Deterministic protocol failures change strategy; identical retries remain disabled."
+                  data-tooltip="Direct coordination depends on the behavioral benchmark of the installed model and digest. Deterministic protocol failures change strategy; identical retries remain disabled."
                 >i</button>
               </div>
             </div>
             <div class="settings-grid">
             <label>
-              <span>Modelo de aÃ§Ãµes residente</span>
+              <span>Resident action model</span>
               <select id="action-model" name="actionModel" required></select>
-              <small>Seleciona apenas a prÃ³xima ferramenta; padrÃ£o leve: FunctionGemma 270M.</small>
+              <small>Selects only the next tool; lightweight default: FunctionGemma 270M.</small>
             </label>
             <label>
-              <span>GPU do residente</span>
+              <span>Resident GPU</span>
               <select id="action-gpu" name="actionGpu"></select>
-              <small>A afinidade é enviada ao preload e a todas as chamadas do residente.</small>
+              <small>Affinity is sent to preload and every resident call.</small>
             </label>
             <label>
-              <span>Fallback coordenador sob demanda</span>
+              <span>On-demand coordinator fallback</span>
               <select id="coordinator-model" name="coordinatorModel" required></select>
             </label>
             <label>
-              <span>GPU do fallback coordenador</span>
+              <span>Coordinator fallback GPU</span>
               <select id="coordinator-gpu" name="coordinatorGpu"></select>
             </label>
             </div>
@@ -872,18 +872,18 @@
           <section id="settings-execution" class="settings-section" data-settings-section="execution" tabindex="-1">
             <div class="section-heading">
               <div class="heading-title-row">
-                <h3>Execução e aprovações</h3>
+                <h3>Execution and approvals</h3>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: escritas Git, processos sensíveis e ações destrutivas nunca são liberados silenciosamente."
-                  data-tooltip="Limites de ferramentas e proteções de execução supervisionada. Escritas Git, processos sensíveis e ações destrutivas nunca são liberados silenciosamente."
+                  aria-label="Information: Git writes, sensitive processes, and destructive actions are never released silently."
+                  data-tooltip="Tool limits and supervised-execution protections. Git writes, sensitive processes, and destructive actions are never released silently."
                 >i</button>
               </div>
             </div>
             <div class="settings-grid">
               <label>
-                <span>Saída máxima de ferramentas</span>
+                <span>Maximum tool output</span>
                 <input id="max-tool-output-tokens" type="number" min="256" max="16384" required>
               </label>
             </div>
@@ -892,19 +892,19 @@
           <section id="settings-workspaces" class="settings-section" data-settings-section="workspaces" tabindex="-1">
             <div class="section-heading">
               <div class="heading-title-row">
-                <h3>Workspaces e histórico</h3>
+                <h3>Workspaces and history</h3>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.14."
-                  data-tooltip="O histórico é local, opcional e não é criptografado pelo Agentic Router v0.9.14."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.9.14."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.9.14."
                 >i</button>
               </div>
             </div>
             <div id="settings-workspace-summary" class="settings-summary-card"></div>
             <div class="settings-action-row">
-              <button id="settings-open-workspace" class="secondary-button" type="button">Gerenciar workspaces</button>
-              <button id="settings-open-recent" class="secondary-button" type="button">Abrir conversas recentes</button>
+              <button id="settings-open-workspace" class="secondary-button" type="button">Manage workspaces</button>
+              <button id="settings-open-recent" class="secondary-button" type="button">Open recent conversations</button>
             </div>
           </section>
 
@@ -915,187 +915,186 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: não há force push, comandos arbitrários, mutação de remotes ou reescrita de histórico."
-                  data-tooltip="Estado autoritativo do workspace e entrega segura. Não há force push, comandos arbitrários, mutação de remotes ou reescrita de histórico."
+                  aria-label="Information: there is no force push, arbitrary commands, remote mutation, or history rewriting."
+                  data-tooltip="Authoritative workspace state and safe delivery. There is no force push, arbitrary commands, remote mutation, or history rewriting."
                 >i</button>
               </div>
             </div>
             <div id="settings-git-summary" class="settings-summary-card"></div>
-            <button id="settings-open-git" class="secondary-button" type="button">Abrir painel Git</button>
+            <button id="settings-open-git" class="secondary-button" type="button">Open Git panel</button>
           </section>
 
           <section id="settings-validation" class="settings-section" data-settings-section="validation" tabindex="-1">
             <div class="section-heading">
-              <h3>Validação</h3>
-              <p>Perfil de validação ativo e comandos estruturados do workspace.</p>
+              <h3>Validation</h3>
+              <p>Active validation profile and structured workspace commands.</p>
             </div>
             <div id="settings-validation-summary" class="settings-summary-card"></div>
-            <button id="settings-open-validation" class="secondary-button" type="button">Editar perfil de validação</button>
+            <button id="settings-open-validation" class="secondary-button" type="button">Edit validation profile</button>
           </section>
 
           <section id="settings-runtime" class="settings-section" data-settings-section="runtime" tabindex="-1">
             <div class="section-heading">
-              <h3>Runtime e memória</h3>
-              <p>Memória, uso de tokens e estimativas equivalentes com origem explícita.</p>
+              <h3>Runtime and memory</h3>
+              <p>Memory, token usage, and equivalent estimates with explicit provenance.</p>
             </div>
             <div class="settings-grid context-settings-grid">
             <label>
-              <span>Contexto padrão estimado</span>
+              <span>Estimated default context</span>
               <input id="default-context-tokens" type="number" min="1024" max="131072" required>
             </label>
             <label>
-              <span>Contexto enviado ao Ollama</span>
+              <span>Context sent to Ollama</span>
               <input id="provider-context-tokens" type="number" min="1024" max="131072" required>
             </label>
             <label>
-              <span>Reserva para resposta</span>
+              <span>Response reserve</span>
               <input id="reserved-response-tokens" type="number" min="256" required>
             </label>
             <label>
-              <span>Timeout de geração (segundos)</span>
+              <span>Generation timeout (seconds)</span>
               <input id="generation-timeout-seconds" type="number" min="1" max="1800" required>
             </label>
             <label>
-              <span>Máximo de mensagens</span>
+              <span>Maximum messages</span>
               <input id="max-conversation-messages" type="number" min="2" max="200" required>
             </label>
             <label>
-              <span>Janela de uso selecionada</span>
+              <span>Selected usage window</span>
               <select id="usage-selected-window">
-                <option value="rolling-hour">Última hora</option>
-                <option value="provider-short">Janela curta do provedor</option>
-                <option value="day">Hoje (UTC)</option>
-                <option value="provider-long">Janela longa do provedor</option>
-                <option value="rolling-seven-days">Últimos 7 dias</option>
-                <option value="calendar-month">Mês atual (UTC)</option>
-                <option value="custom-rolling">Janela personalizada</option>
+                <option value="rolling-hour">Last hour</option>
+                <option value="provider-short">Provider short window</option>
+                <option value="day">Today (UTC)</option>
+                <option value="provider-long">Provider long window</option>
+                <option value="rolling-seven-days">Last 7 days</option>
+                <option value="calendar-month">Current month (UTC)</option>
+                <option value="custom-rolling">Custom window</option>
               </select>
             </label>
             <label>
-              <span>Janelas fixadas (até 4)</span>
+              <span>Pinned windows (up to 4)</span>
               <select id="usage-pinned-windows" multiple size="4">
-                <option value="rolling-hour">Última hora</option>
-                <option value="provider-short">Janela curta do provedor</option>
-                <option value="day">Hoje (UTC)</option>
-                <option value="provider-long">Janela longa do provedor</option>
-                <option value="rolling-seven-days">Últimos 7 dias</option>
-                <option value="calendar-month">Mês atual (UTC)</option>
-                <option value="custom-rolling">Janela personalizada</option>
+                <option value="rolling-hour">Last hour</option>
+                <option value="provider-short">Provider short window</option>
+                <option value="day">Today (UTC)</option>
+                <option value="provider-long">Provider long window</option>
+                <option value="rolling-seven-days">Last 7 days</option>
+                <option value="calendar-month">Current month (UTC)</option>
+                <option value="custom-rolling">Custom window</option>
               </select>
             </label>
             <label>
-              <span>Retenção do ledger (dias)</span>
+              <span>Ledger retention (days)</span>
               <input id="usage-retention-days" type="number" min="1" max="730" required>
             </label>
             <label>
-              <span>Janela curta (minutos)</span>
+              <span>Short window (minutes)</span>
               <input id="usage-provider-short-minutes" type="number" min="5" max="10080" required>
             </label>
             <label>
-              <span>Janela longa (minutos)</span>
+              <span>Long window (minutes)</span>
               <input id="usage-provider-long-minutes" type="number" min="5" max="43200" required>
             </label>
             <label>
-              <span>Janela personalizada (minutos)</span>
+              <span>Custom window (minutes)</span>
               <input id="usage-custom-minutes" type="number" min="5" max="43200" required>
             </label>
             <label>
-              <span>Alertas de quota (%)</span>
+              <span>Quota alerts (%)</span>
               <input id="usage-alert-thresholds" type="text" inputmode="numeric" placeholder="70, 85, 95" required>
             </label>
             <label>
-              <span>Comparação cloud equivalente</span>
+              <span>Equivalent cloud comparison</span>
               <select id="usage-comparison-model"></select>
             </label>
             <label>
-              <span>Referência de plano Ollama</span>
+              <span>Ollama plan reference</span>
               <select id="usage-ollama-plan"></select>
             </label>
             </div>
             <section class="runtime-profile-panel" aria-labelledby="runtime-profile-heading">
               <div class="heading-title-row">
-                <h4 id="runtime-profile-heading">Perfis de contexto do Ollama</h4>
+                <h4 id="runtime-profile-heading">Ollama context profiles</h4>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação sobre perfis de contexto"
-                  data-tooltip="Cada papel herda um perfil. Overrides usam o ID e o digest exatos do modelo. O Host envia num_ctx em /api/chat e verifica o residente em /api/ps."
+                  aria-label="Context-profile information"
+                  data-tooltip="Each role inherits a profile. Overrides use the exact model ID and digest. The Host sends num_ctx in /api/chat and verifies residency in /api/ps."
                 >i</button>
               </div>
               <p class="runtime-note">
-                O coordenador residente usa 8.192 tokens por padrão. Contextos maiores são
-                escolhidos somente por perfil ou quando o cálculo da requisição exige.
+                The resident coordinator uses 8,192 tokens by default. Larger contexts are selected only by profile or when request calculation requires them.
               </p>
               <div id="runtime-role-profiles" class="runtime-role-profiles"></div>
 
               <details class="runtime-profile-subsection">
-                <summary>Override por modelo e digest</summary>
+                <summary>Override by model and digest</summary>
                 <div class="settings-grid context-settings-grid">
                   <label>
-                    <span>Modelo local instalado</span>
+                    <span>Installed local model</span>
                     <select id="runtime-override-model"></select>
                   </label>
                   <label>
-                    <span>Papel</span>
+                    <span>Role</span>
                     <select id="runtime-override-role"></select>
                   </label>
                   <label>
-                    <span>Mínimo</span>
+                    <span>Minimum</span>
                     <input id="runtime-override-minimum" type="number" min="1024" max="131072">
                   </label>
                   <label>
-                    <span>Alvo</span>
+                    <span>Target</span>
                     <input id="runtime-override-target" type="number" min="1024" max="131072">
                   </label>
                   <label>
-                    <span>Máximo</span>
+                    <span>Maximum</span>
                     <input id="runtime-override-maximum" type="number" min="1024" max="131072">
                   </label>
                   <label>
-                    <span>Limite de saída</span>
+                    <span>Output limit</span>
                     <input id="runtime-override-output" type="number" min="128" max="32768">
                   </label>
                   <label>
-                    <span>Keep-alive (segundos; -1 residente)</span>
+                    <span>Keep-alive (seconds; -1 resident)</span>
                     <input id="runtime-override-keep-alive" type="number" min="-1" max="86400">
                   </label>
                 </div>
                 <div class="settings-action-row">
                   <button id="save-runtime-override" class="secondary-button" type="button">
-                    Aplicar override
+                    Apply override
                   </button>
                   <button id="remove-runtime-override" class="secondary-button danger-button" type="button">
-                    Remover override
+                    Remove override
                   </button>
                 </div>
               </details>
 
               <details class="runtime-profile-subsection">
-                <summary>Política de memória</summary>
+                <summary>Memory policy</summary>
                 <div class="settings-grid context-settings-grid">
                   <label>
-                    <span>Uso máximo alvo de GPU (%)</span>
+                    <span>Target maximum GPU usage (%)</span>
                     <input id="runtime-memory-gpu-percent" type="number" min="1" max="100">
                   </label>
                   <label>
-                    <span>VRAM livre mínima (GiB)</span>
+                    <span>Minimum free VRAM (GiB)</span>
                     <input id="runtime-memory-free-vram" type="number" min="0" step="0.25">
                   </label>
                   <label>
-                    <span>RAM livre mínima (GiB)</span>
+                    <span>Minimum free RAM (GiB)</span>
                     <input id="runtime-memory-free-ram" type="number" min="0" step="0.25">
                   </label>
                   <label class="checkbox-label">
                     <input id="runtime-memory-cpu-offload" type="checkbox">
-                    <span>Permitir offload para CPU</span>
+                    <span>Allow CPU offload</span>
                   </label>
                   <label class="checkbox-label">
                     <input id="runtime-memory-prefer-full-gpu" type="checkbox">
-                    <span>Preferir modelo primário inteiro na GPU</span>
+                    <span>Prefer the entire primary model on GPU</span>
                   </label>
                 </div>
                 <div>
-                  <h5>Overrides por GPU</h5>
+                  <h5>Overrides by GPU</h5>
                   <div
                     id="runtime-memory-device-policies"
                     class="runtime-memory-device-policies"
@@ -1104,37 +1103,47 @@
               </details>
 
               <details class="runtime-profile-subsection">
-                <summary>Análise e medição</summary>
+                <summary>Analysis and measurement</summary>
                 <p class="runtime-note">
-                  Analisar usa apenas metadados e não carrega o modelo. Medir carrega o modelo e
-                  exige confirmação explícita porque pode usar GPU e RAM.
+                  Analyze uses metadata only and does not load the model. Measure loads the model and requires explicit confirmation because it may use GPU and RAM.
                 </p>
                 <div class="settings-action-row">
                   <button id="analyze-runtime-profile" class="secondary-button" type="button">
-                    Analisar metadados
+                    Analyze metadata
                   </button>
                   <button id="measure-runtime-profile" class="secondary-button" type="button">
-                    Medir com modelo real
+                    Measure with a real model
                   </button>
                 </div>
                 <div id="runtime-profile-result" class="settings-summary-card" role="status">
-                  Nenhuma análise executada.
+                  No analysis has been run.
                 </div>
               </details>
               <div id="runtime-shared-model-warnings" class="runtime-shared-warnings"></div>
             </section>
             <div id="settings-usage-summary" class="settings-summary-card usage-summary-card">
               <span id="settings-usage-accuracy" class="usage-accuracy-badge">
-                carregando
+                loading
               </span>
-              <span id="settings-usage-details">Carregando uso de tokens…</span>
+              <span id="settings-usage-details">Loading token usage…</span>
             </div>
+            <button
+              id="cloud-usage-card"
+              class="secondary-button runtime-cloud-usage"
+              type="button"
+              aria-haspopup="dialog"
+              aria-controls="cloud-usage-dialog"
+            >
+              <span id="cloud-usage-summary">Cloud usage</span>
+              <span id="cloud-usage-badge" class="usage-accuracy-badge">loading</span>
+              <small id="cloud-usage-detail">Open to view quota, costs, and models.</small>
+            </button>
             <div class="validation-profile-actions">
               <button id="reconcile-usage" class="secondary-button" type="button">
-                Reconstruir agregados de uso
+                Rebuild usage aggregates
               </button>
               <button id="purge-usage" class="secondary-button danger-button" type="button">
-                Excluir histórico de uso
+                Delete usage history
               </button>
               <span id="usage-purge-status" class="runtime-note" role="status"></span>
             </div>
@@ -1142,34 +1151,34 @@
 
           <section id="settings-advanced" class="settings-section" data-settings-section="advanced" tabindex="-1">
             <div class="section-heading">
-              <h3>Avançado</h3>
-              <p>Limites persistidos e diagnósticos que normalmente não precisam ser alterados.</p>
+              <h3>Advanced</h3>
+              <p>Persisted limits and diagnostics that normally do not need to be changed.</p>
             </div>
-            <div id="settings-advanced-subnavigation" class="settings-subnavigation" role="tablist" aria-label="Subseções avançadas">
+            <div id="settings-advanced-subnavigation" class="settings-subnavigation" role="tablist" aria-label="Advanced subsections">
               <button type="button" data-settings-subtarget="portable-yaml" aria-current="page">YAML</button>
               <button type="button" data-settings-subtarget="backup">Backup</button>
             </div>
             <div id="settings-advanced-yaml" class="settings-subsection active" data-settings-subsection="portable-yaml">
               <div id="settings-advanced-summary" class="settings-summary-card"></div>
               <div class="heading-title-row">
-                <h4>Configuração portátil YAML</h4>
+                <h4>Portable YAML configuration</h4>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Informação: o arquivo inclui referências qualificadas de modelos, Ollama, GPUs, prompts e limites globais, mas nunca chaves de API. Caminhos de workspace, conversas, comandos de validação e aprovações não são exportados."
-                  data-tooltip="Inclui referências qualificadas de modelos, Ollama, GPUs, prompts e limites globais, mas nunca chaves de API. Workspaces, conversas, comandos de validação e aprovações permanecem locais."
+                  aria-label="Information: the file includes qualified model, Ollama, GPU, prompt, and global-limit references, but never API keys. Workspace paths, conversations, validation commands, and approvals are not exported."
+                  data-tooltip="Includes qualified model, Ollama, GPU, prompt, and global-limit references, but never API keys. Workspaces, conversations, validation commands, and approvals remain local."
                 >i</button>
               </div>
               <p class="portable-yaml-description">
-                Edite, importe, compartilhe ou salve um backup. Papéis de agentes aceitam somente
-                <code>primary</code> e <code>fallback</code>.
+                Edit, import, share, or save a backup. Agent roles accept only
+                <code>primary</code> and <code>fallback</code>.
               </p>
               <textarea
                 id="settings-yaml"
                 class="portable-yaml-editor"
                 data-ignore-settings-dirty
                 spellcheck="false"
-                aria-label="Configuração portátil YAML"
+                aria-label="Portable YAML configuration"
               ></textarea>
               <input
                 id="settings-yaml-file"
@@ -1179,40 +1188,40 @@
               >
               <div class="settings-action-row portable-yaml-actions">
                 <button id="refresh-settings-yaml" class="secondary-button" type="button">Recarregar</button>
-                <button id="open-settings-yaml-file" class="secondary-button" type="button">Abrir arquivo</button>
+                <button id="open-settings-yaml-file" class="secondary-button" type="button">Open file</button>
                 <button
                   id="copy-settings-yaml"
                   class="secondary-button"
                   type="button"
-                  aria-label="Copiar YAML"
-                  data-original-label="Copiar YAML"
-                >Copiar</button>
-                <button id="download-settings-yaml" class="secondary-button" type="button">Baixar .yaml</button>
-                <button id="import-settings-yaml" class="primary-button" type="button">Importar e aplicar</button>
+                  aria-label="Copy YAML"
+                  data-original-label="Copy YAML"
+                >Copy</button>
+                <button id="download-settings-yaml" class="secondary-button" type="button">Download .yaml</button>
+                <button id="import-settings-yaml" class="primary-button" type="button">Import and apply</button>
                 </div>
                 <output id="settings-yaml-status" class="portable-yaml-status" role="status"></output>
               </div>
             <div id="settings-advanced-backup" class="settings-subsection" data-settings-subsection="backup">
               <div class="heading-title-row">
-                <h4>Backup local completo</h4>
+                <h4>Full local backup</h4>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="InformaÃ§Ã£o: o backup local possui manifesto e hashes, nunca inclui chaves ou processos ativos e Ã© diferente do YAML portÃ¡til."
-                  data-tooltip="Inclui configuraÃ§Ãµes e perfis locais. Conversas, resumos, uso e dados limitados de revisÃ£o sÃ£o opcionais. Chaves, aprovaÃ§Ãµes e estado ativo nunca sÃ£o incluÃ­dos."
+                  aria-label="Information: the local backup has a manifest and hashes, never includes keys or active processes, and differs from portable YAML."
+                  data-tooltip="Includes local configuration and profiles. Conversations, summaries, usage, and bounded review data are optional. Keys, approvals, and active state are never included."
                 >i</button>
               </div>
               <div class="backup-options">
-                <label><input id="backup-conversations" type="checkbox"> Conversas</label>
-                <label><input id="backup-summaries" type="checkbox"> Resumos</label>
-                <label><input id="backup-usage" type="checkbox"> HistÃ³rico de uso</label>
-                <label><input id="backup-reviews" type="checkbox"> Review changes limitado</label>
+                <label><input id="backup-conversations" type="checkbox"> Conversations</label>
+                <label><input id="backup-summaries" type="checkbox"> Summaries</label>
+                <label><input id="backup-usage" type="checkbox"> Usage history</label>
+                <label><input id="backup-reviews" type="checkbox"> Bounded review changes</label>
               </div>
               <input id="backup-restore-file" type="file" accept=".zip,application/zip" hidden>
               <div class="settings-action-row">
-                <button id="create-local-backup" class="secondary-button" type="button">Criar backup .zip</button>
-                <button id="open-local-backup" class="secondary-button" type="button">Inspecionar backup</button>
-                <button id="restore-local-backup" class="primary-button" type="button" disabled>Restaurar categorias</button>
+                <button id="create-local-backup" class="secondary-button" type="button">Create backup .zip</button>
+                <button id="open-local-backup" class="secondary-button" type="button">Inspect backup</button>
+                <button id="restore-local-backup" class="primary-button" type="button" disabled>Restore categories</button>
               </div>
               <output id="local-backup-status" class="portable-yaml-status" role="status"></output>
             </div>
@@ -1222,8 +1231,8 @@
 
       <footer class="dialog-footer">
         <span id="save-status" class="save-status"></span>
-        <button id="cancel-settings" class="secondary-button" type="button">Cancelar</button>
-        <button id="save-settings" class="primary-button" type="submit">Salvar alterações</button>
+        <button id="cancel-settings" class="secondary-button" type="button">Cancel</button>
+        <button id="save-settings" class="primary-button" type="submit">Save changes</button>
       </footer>
     </form>
   </dialog>
@@ -1232,10 +1241,10 @@
     <form id="workspace-form" method="dialog">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Execução controlada</span>
-          <h2>Workspace confiável</h2>
+          <span class="eyebrow">Controlled execution</span>
+          <h2>Trusted workspace</h2>
         </div>
-        <button id="close-workspace" class="icon-button" type="button" aria-label="Fechar">×</button>
+        <button id="close-workspace" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
 
       <div class="dialog-body workspace-sections">
@@ -1244,19 +1253,19 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: somente um workspace fica ativo por vez."
-              data-tooltip="Somente um workspace fica ativo por vez."
+              aria-label="Information: only one workspace is active at a time."
+              data-tooltip="Only one workspace is active at a time."
             >i</button>
             <button
               id="add-workspace"
               class="add-workspace-button"
               type="button"
-              aria-label="Adicionar novo workspace"
-              title="Adicionar novo workspace"
+              aria-label="Add new workspace"
+              title="Add new workspace"
             >+</button>
           </div>
           <details id="saved-workspaces-section" class="workspace-accordion" open>
-            <summary>Workspaces salvos</summary>
+            <summary>Saved workspaces</summary>
             <div class="workspace-section-panel">
               <div id="workspace-profile-list" class="workspace-profile-list"></div>
             </div>
@@ -1268,46 +1277,46 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: no modo Execute, o agente fica confinado à pasta confiável e caminhos externos são bloqueados."
-              data-tooltip="No modo Execute, o agente só poderá ler, criar, editar e executar processos dentro desta pasta. Caminhos externos e tentativas de escape serão bloqueados."
+              aria-label="Information: in Execute mode, the agent is confined to the trusted folder and external paths are blocked."
+              data-tooltip="In Execute mode, the agent can read, create, edit, and run processes only inside this folder. External paths and escape attempts are blocked."
             >i</button>
           </div>
           <details id="new-workspace-accordion" class="workspace-accordion" open>
-            <summary>Novo workspace</summary>
+            <summary>New workspace</summary>
             <div class="workspace-section-panel new-workspace-fields">
               <label class="workspace-path-field">
-                <span>Nome do workspace</span>
+                <span>Workspace name</span>
                 <input
                   id="workspace-profile-name"
                   type="text"
                   maxlength="80"
                   autocomplete="off"
-                  placeholder="Meu projeto"
+                  placeholder="My project"
                 >
               </label>
               <label class="workspace-path-field">
-                <span>Caminho da pasta</span>
+                <span>Folder path</span>
                 <span class="workspace-picker-row">
                   <input
                     id="trusted-workspace-path"
                     type="text"
                     autocomplete="off"
-                    placeholder="C:\meu-projeto"
+                    placeholder="C:\my-project"
                   >
                   <button id="pick-workspace" class="secondary-button" type="button">
-                    Selecionar pasta
+                    Select folder
                   </button>
                 </span>
               </label>
               <div id="workspace-validation" class="workspace-validation" role="status">
-                Não configurado
+                Not configured
               </div>
               <div class="workspace-form-actions">
                 <button id="cancel-new-workspace" class="secondary-button" type="button">
-                  Cancelar
+                  Cancel
                 </button>
                 <button id="workspace-submit" class="primary-button" type="submit">
-                  Salvar workspace
+                  Save workspace
                 </button>
               </div>
             </div>
@@ -1319,26 +1328,26 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Informação: o histórico local pode conter conteúdo da conversa, caminhos, diffs e saída limitada de comandos e não é criptografado pelo Agentic Router v0.9.14."
-              data-tooltip="O conteúdo fica somente neste computador e pode incluir prompts, respostas, caminhos, diffs e saída limitada de comandos. O histórico não é criptografado pelo Agentic Router v0.9.14. Desativar interrompe novas gravações, mas não apaga registros existentes."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.9.14."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.9.14. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
-            <summary>Histórico local</summary>
+            <summary>Local history</summary>
             <div id="local-history-data" class="workspace-section-panel local-history-data">
               <div class="workspace-project-header">
-                <p id="history-usage" class="workspace-usage">Nenhuma sessão armazenada.</p>
+                <p id="history-usage" class="workspace-usage">No stored sessions.</p>
                 <label class="history-toggle">
                   <input id="workspace-history-enabled" type="checkbox">
-                  <span>Salvar histórico neste workspace</span>
+                  <span>Save history in this workspace</span>
                 </label>
               </div>
               <div class="validation-profile-actions">
                 <button id="delete-archived-sessions" class="secondary-button danger-button" type="button">
-                  Excluir arquivadas
+                  Delete archived
                 </button>
                 <button id="delete-all-sessions" class="secondary-button danger-button" type="button">
-                  Excluir todo o histórico
+                  Delete all history
                 </button>
               </div>
             </div>
@@ -1347,12 +1356,12 @@
 
         <section class="workspace-section-shell">
           <details id="project-profile-section" class="workspace-accordion">
-            <summary>Perfil do projeto</summary>
+            <summary>Project profile</summary>
             <div class="workspace-section-panel">
               <div class="workspace-project-header">
-                <div id="project-profile-summary">Carregando perfil…</div>
+                <div id="project-profile-summary">Loading profile…</div>
                 <button id="refresh-project-profile" class="secondary-button" type="button">
-                  Atualizar
+                  Refresh
                 </button>
               </div>
               <div id="project-profile-details" class="project-profile-details"></div>
@@ -1362,26 +1371,26 @@
 
         <section class="workspace-section-shell">
           <details id="validation-profile-section" class="workspace-accordion">
-            <summary>Perfil de validação</summary>
+            <summary>Validation profile</summary>
             <div class="workspace-section-panel validation-profile-editor">
               <p id="detected-validation-profile" class="inline-status"></p>
               <label>
-                <span>Nome do perfil ativo</span>
+                <span>Active profile name</span>
                 <input id="validation-profile-name" type="text" maxlength="80">
               </label>
               <div id="validation-steps" class="validation-steps"></div>
               <div class="validation-profile-actions">
                 <button id="add-validation-step" class="secondary-button" type="button">
-                  Adicionar etapa
+                  Add step
                 </button>
                 <button id="reset-validation-profile" class="secondary-button" type="button">
-                  Usar sugestão detectada
+                  Use detected suggestion
                 </button>
                 <button id="clear-validation-profile" class="secondary-button danger-button" type="button">
-                  Limpar perfil
+                  Clear profile
                 </button>
                 <button id="save-validation-profile" class="primary-button" type="button">
-                  Salvar perfil
+                  Save profile
                 </button>
               </div>
               <pre id="validation-command-preview" class="validation-command-preview"></pre>
@@ -1394,9 +1403,9 @@
       <footer class="dialog-footer">
         <span id="workspace-save-status" class="save-status"></span>
         <button id="clear-workspace" class="secondary-button danger-button" type="button">
-          Remover perfil ativo
+          Remove active profile
         </button>
-        <button id="cancel-workspace" class="secondary-button" type="button">Fechar</button>
+        <button id="cancel-workspace" class="secondary-button" type="button">Close</button>
       </footer>
     </form>
   </dialog>
@@ -1405,23 +1414,23 @@
     <section class="git-panel-shell">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Workspace ativo</span>
-          <h2>Painel Git</h2>
-          <p id="git-panel-status">Carregando estado autoritativo…</p>
+          <span class="eyebrow">Active workspace</span>
+          <h2>Git panel</h2>
+          <p id="git-panel-status">Loading authoritative state…</p>
         </div>
-        <button id="close-git" class="icon-button" type="button" aria-label="Fechar painel Git">×</button>
+        <button id="close-git" class="icon-button" type="button" aria-label="Close Git panel">×</button>
       </header>
 
       <div class="git-panel-body">
         <details id="git-overview-section" class="git-panel-section git-panel-details" open>
           <summary>
             <span>Overview</span>
-            <small>Branch, HEAD, upstream, operação em andamento e instalação do Git.</small>
+            <small>Branch, HEAD, upstream, in-progress operation, and Git installation.</small>
           </summary>
           <div class="git-panel-details-body">
             <dl id="git-overview" class="git-overview-grid"></dl>
             <div id="git-initialize-panel" class="git-initialize-panel" hidden>
-              <p>Este workspace ainda não possui um repositório Git.</p>
+              <p>This workspace does not have a Git repository yet.</p>
               <button id="initialize-git" class="primary-button" type="button">
                 Initialize Git repository
               </button>
@@ -1433,21 +1442,21 @@
           <div class="git-panel-heading-row">
             <div class="section-heading">
               <h3>Changes</h3>
-              <p>Diffs limitados pelo Host; nenhum terminal Git livre é exposto.</p>
+              <p>Diffs are bounded by the Host; no unrestricted Git terminal is exposed.</p>
             </div>
-            <button id="refresh-git" class="secondary-button" type="button">Atualizar</button>
+            <button id="refresh-git" class="secondary-button" type="button">Refresh</button>
           </div>
-          <div class="git-view-tabs" role="tablist" aria-label="Visualização das alterações">
+          <div class="git-view-tabs" role="tablist" aria-label="Changes view">
             <button type="button" role="tab" data-git-view="current-session" aria-selected="true">Current execution session</button>
             <button type="button" role="tab" data-git-view="working-tree" aria-selected="false">Working tree</button>
             <button type="button" role="tab" data-git-view="staged" aria-selected="false">Staged</button>
             <button type="button" role="tab" data-git-view="last-commit" aria-selected="false">Last commit</button>
           </div>
           <div class="git-diff-layout">
-            <div id="git-file-list" class="git-file-list" aria-label="Arquivos alterados"></div>
+            <div id="git-file-list" class="git-file-list" aria-label="Changed files"></div>
             <div class="git-diff-viewer">
               <div id="git-diff-metadata" class="git-diff-metadata"></div>
-              <pre id="git-diff-content" tabindex="0">Selecione uma visualização.</pre>
+              <pre id="git-diff-content" tabindex="0">Select a view.</pre>
             </div>
           </div>
         </section>
@@ -1455,7 +1464,7 @@
         <details id="git-configuration-section" class="git-panel-section git-panel-details">
           <summary>
             <span>Repository configuration</span>
-            <small>Identidade local e endereço do origin, protegidos contra edição acidental.</small>
+            <small>Local identity and origin address, protected against accidental editing.</small>
           </summary>
           <div class="git-panel-details-body">
           <div class="settings-grid git-configuration-grid">
@@ -1472,13 +1481,13 @@
             <label class="git-origin-field">
               <span>Repository address (origin)</span>
               <input id="git-origin-url" type="text" maxlength="2048" autocomplete="off" readonly>
-              <small>HTTPS ou SSH; credenciais incorporadas são recusadas.</small>
+              <small>HTTPS or SSH; embedded credentials are rejected.</small>
             </label>
           </div>
           <div class="settings-action-row">
-            <button id="edit-git-configuration" class="secondary-button" type="button">Editar</button>
-            <button id="save-git-configuration" class="primary-button" type="button" hidden>Salvar alterações</button>
-            <button id="cancel-git-configuration" class="secondary-button" type="button" hidden>Cancelar edição</button>
+            <button id="edit-git-configuration" class="secondary-button" type="button">Edit</button>
+            <button id="save-git-configuration" class="primary-button" type="button" hidden>Save changes</button>
+            <button id="cancel-git-configuration" class="secondary-button" type="button" hidden>Cancel editing</button>
           </div>
           <div id="git-remotes" class="git-remotes"></div>
           </div>
@@ -1487,7 +1496,7 @@
         <section id="git-delivery-section" class="git-panel-section">
           <div class="section-heading">
             <h3>Delivery</h3>
-            <p>Commit, tag e push continuam vinculados a uma execução e aprovação imutável.</p>
+            <p>Commit, tag, and push remain bound to immutable execution and approval evidence.</p>
           </div>
           <button id="git-open-review" class="secondary-button" type="button">
             Open Review changes
@@ -1497,7 +1506,7 @@
 
       <footer class="dialog-footer">
         <span id="git-action-status" class="save-status" role="status"></span>
-        <button id="dismiss-git" class="secondary-button" type="button">Fechar</button>
+        <button id="dismiss-git" class="secondary-button" type="button">Close</button>
       </footer>
     </section>
   </dialog>
@@ -1506,22 +1515,22 @@
     <div class="change-review-shell">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Visibilidade local</span>
-          <h2>Uso de provedores cloud</h2>
-          <p>Quota observada, custos e alertas calculados pelo Host sem chamadas em segundo plano.</p>
+          <span class="eyebrow">Local visibility</span>
+          <h2>Cloud provider usage</h2>
+          <p>Observed quota, costs, and alerts calculated by the Host without background calls.</p>
         </div>
-        <button id="close-cloud-usage" class="icon-button" type="button" aria-label="Fechar">×</button>
+        <button id="close-cloud-usage" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
       <div class="dialog-body cloud-usage-body">
         <div id="cloud-usage-dashboard-summary" class="settings-summary-card">
-          Carregando dashboard…
+          Loading dashboard…
         </div>
         <div id="cloud-usage-provider-cards" class="cloud-usage-provider-cards"></div>
       </div>
       <footer class="dialog-footer">
         <span id="cloud-usage-refresh-status" class="save-status"></span>
-        <button id="refresh-cloud-usage" class="secondary-button" type="button">Atualizar dados locais</button>
-        <button id="dismiss-cloud-usage" class="primary-button" type="button">Fechar</button>
+        <button id="refresh-cloud-usage" class="secondary-button" type="button">Refresh local data</button>
+        <button id="dismiss-cloud-usage" class="primary-button" type="button">Close</button>
       </footer>
     </div>
   </dialog>
@@ -1530,58 +1539,58 @@
     <form id="session-search-form" method="dialog">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Histórico local</span>
-          <h2>Buscar conversas</h2>
-          <p>Busca literal e limitada nos registros locais. Nenhum modelo é chamado.</p>
+          <span class="eyebrow">Local history</span>
+          <h2>Search conversations</h2>
+          <p>Bounded literal search over local records. No model is called.</p>
         </div>
-        <button id="close-session-search" class="icon-button" type="button" aria-label="Fechar busca">×</button>
+        <button id="close-session-search" class="icon-button" type="button" aria-label="Close search">×</button>
       </header>
       <div class="dialog-body productivity-dialog-body">
         <div class="session-search-grid">
           <label>
-            <span>Texto, título, workspace, provedor ou modelo</span>
+            <span>Text, title, workspace, provider, or model</span>
             <input id="session-search-query" type="search" autocomplete="off">
           </label>
           <label>
-            <span>Modelo</span>
+            <span>Model</span>
             <input id="session-search-model" type="text" autocomplete="off">
           </label>
           <label>
-            <span>Arquivo alterado</span>
+            <span>Changed file</span>
             <input id="session-search-file" type="text" autocomplete="off">
           </label>
           <label>
-            <span>Resultado de validação</span>
+            <span>Validation result</span>
             <input id="session-search-validation" type="text" autocomplete="off">
           </label>
           <label>
-            <span>De</span>
+            <span>From</span>
             <input id="session-search-from" type="date">
           </label>
           <label>
-            <span>Até</span>
+            <span>To</span>
             <input id="session-search-to" type="date">
           </label>
           <label>
-            <span>Estado</span>
+            <span>Status</span>
             <select id="session-search-state">
-              <option value="all">Ativas e arquivadas</option>
-              <option value="active">Somente ativas</option>
-              <option value="archived">Somente arquivadas</option>
-              <option value="pinned">Somente fixadas</option>
+              <option value="all">Active and archived</option>
+              <option value="active">Active only</option>
+              <option value="archived">Archived only</option>
+              <option value="pinned">Pinned only</option>
             </select>
           </label>
           <label class="history-toggle">
             <input id="session-search-all-workspaces" type="checkbox">
-            <span>Todos os workspaces</span>
+            <span>All workspaces</span>
           </label>
         </div>
         <p id="session-search-status" class="runtime-note" role="status"></p>
         <div id="session-search-results" class="session-search-results"></div>
       </div>
       <footer class="dialog-footer">
-        <button id="cancel-session-search" class="secondary-button" type="button">Fechar</button>
-        <button id="run-session-search" class="primary-button" type="submit">Buscar</button>
+        <button id="cancel-session-search" class="secondary-button" type="button">Close</button>
+        <button id="run-session-search" class="primary-button" type="submit">Search</button>
       </footer>
     </form>
   </dialog>
@@ -1590,50 +1599,49 @@
     <section class="session-details-shell">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Conversa salva</span>
-          <h2 id="session-details-title">Detalhes da conversa</h2>
-          <p id="session-details-metadata">Selecione uma conversa salva.</p>
+          <span class="eyebrow">Saved conversation</span>
+          <h2 id="session-details-title">Conversation details</h2>
+          <p id="session-details-metadata">Select a saved conversation.</p>
         </div>
-        <button id="close-session-details" class="icon-button" type="button" aria-label="Fechar detalhes da conversa">×</button>
+        <button id="close-session-details" class="icon-button" type="button" aria-label="Close conversation details">×</button>
       </header>
       <div class="dialog-body productivity-dialog-body">
         <section class="session-details-section" aria-labelledby="session-details-actions-title">
           <div class="session-details-section-heading">
             <div>
-              <h3 id="session-details-actions-title">Ações da conversa</h3>
+              <h3 id="session-details-actions-title">Conversation actions</h3>
               <p id="session-details-state" class="runtime-note"></p>
             </div>
           </div>
           <div class="session-details-actions">
-            <button id="session-details-pin" class="secondary-button" type="button">Fixar</button>
-            <button id="session-details-rename" class="secondary-button" type="button">Renomear</button>
-            <button id="session-details-duplicate" class="secondary-button" type="button">Duplicar</button>
-            <button id="session-details-archive" class="secondary-button" type="button">Arquivar</button>
-            <a id="session-details-markdown" class="secondary-button" href="#" download>Exportar Markdown</a>
-            <a id="session-details-json" class="secondary-button" href="#" download>Exportar JSON</a>
-            <button id="session-details-delete" class="secondary-button danger-button" type="button">Excluir</button>
+            <button id="session-details-pin" class="secondary-button" type="button">Pin</button>
+            <button id="session-details-rename" class="secondary-button" type="button">Rename</button>
+            <button id="session-details-duplicate" class="secondary-button" type="button">Duplicate</button>
+            <button id="session-details-archive" class="secondary-button" type="button">Archive</button>
+            <a id="session-details-markdown" class="secondary-button" href="#" download>Export Markdown</a>
+            <a id="session-details-json" class="secondary-button" href="#" download>Export JSON</a>
+            <button id="session-details-delete" class="secondary-button danger-button" type="button">Delete</button>
           </div>
         </section>
         <section class="session-details-section session-details-summary-section" aria-labelledby="session-details-summary-title">
           <div class="session-details-section-heading">
             <div>
-              <h3 id="session-details-summary-title">Resumo de continuidade</h3>
+              <h3 id="session-details-summary-title">Continuity summary</h3>
               <p>
-                Opcional. Organiza decisões e próximos passos para exportação ou passagem de contexto;
-                não é necessário para retomar a conversa.
+                Optional. Organizes decisions and next steps for export or context handoff; it is not required to resume the conversation.
               </p>
             </div>
-            <button id="edit-session-summary" class="secondary-button" type="button">Criar ou editar resumo</button>
+            <button id="edit-session-summary" class="secondary-button" type="button">Create or edit summary</button>
           </div>
           <div id="session-details-summary" class="session-details-summary" aria-live="polite">
-            Carregando resumo…
+            Loading summary…
           </div>
         </section>
       </div>
       <footer class="dialog-footer">
         <span id="session-details-status" class="save-status" role="status"></span>
-        <button id="dismiss-session-details" class="secondary-button" type="button">Fechar</button>
-        <button id="resume-session-details" class="primary-button" type="button">Retomar conversa</button>
+        <button id="dismiss-session-details" class="secondary-button" type="button">Close</button>
+        <button id="resume-session-details" class="primary-button" type="button">Resume conversation</button>
       </footer>
     </section>
   </dialog>
@@ -1642,68 +1650,66 @@
     <form id="session-summary-form" method="dialog">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Continuidade opcional</span>
-          <h2>Editar resumo da conversa</h2>
-          <p id="session-summary-session-title">Selecione uma conversa salva.</p>
+          <span class="eyebrow">Optional continuity</span>
+          <h2>Edit conversation summary</h2>
+          <p id="session-summary-session-title">Select a saved conversation.</p>
         </div>
-        <button id="close-session-summary" class="icon-button" type="button" aria-label="Fechar resumo">×</button>
+        <button id="close-session-summary" class="icon-button" type="button" aria-label="Close summary">×</button>
       </header>
       <div class="dialog-body productivity-dialog-body">
         <p class="workspace-note">
-          Este registro não substitui o histórico e não é necessário para retomar. Use-o somente quando quiser
-          uma síntese revisável para exportação, duplicação ou continuidade do trabalho.
+          This record does not replace history and is not required to resume. Use it only when you want a reviewable summary for export, duplication, or work continuity.
         </p>
         <div class="settings-grid">
           <label>
-            <span>Modelo para gerar ou regenerar</span>
+            <span>Model to generate or regenerate</span>
             <select id="session-summary-model"></select>
           </label>
           <div>
-            <span>Estimativa antes da execução</span>
-            <p id="session-summary-estimate" class="runtime-note">Selecione um modelo.</p>
+            <span>Pre-execution estimate</span>
+            <p id="session-summary-estimate" class="runtime-note">Select a model.</p>
           </div>
         </div>
         <label>
-          <span>Objetivo</span>
+          <span>Objective</span>
           <textarea id="session-summary-objective" rows="3" maxlength="2000"></textarea>
         </label>
         <label>
-          <span>Decisões — uma por linha</span>
+          <span>Decisions — one per line</span>
           <textarea id="session-summary-decisions" rows="4"></textarea>
         </label>
         <label>
-          <span>Arquivos alterados — um por linha</span>
+          <span>Changed files — one per line</span>
           <textarea id="session-summary-files" rows="4"></textarea>
         </label>
         <label>
-          <span>Comandos e validação — um por linha</span>
+          <span>Commands and validation — one per line</span>
           <textarea id="session-summary-validation" rows="4"></textarea>
         </label>
         <label>
-          <span>Questões não resolvidas — uma por linha</span>
+          <span>Unresolved issues — one per line</span>
           <textarea id="session-summary-unresolved" rows="4"></textarea>
         </label>
         <label>
-          <span>Próximo passo sugerido</span>
+          <span>Suggested next step</span>
           <textarea id="session-summary-next-step" rows="3" maxlength="2000"></textarea>
         </label>
         <p id="session-summary-status" class="runtime-note" role="status"></p>
       </div>
       <footer class="dialog-footer">
-        <button id="delete-session-summary" class="secondary-button danger-button" type="button">Excluir resumo</button>
-        <button id="generate-session-summary" class="secondary-button" type="button">Gerar com modelo</button>
-        <button id="cancel-session-summary" class="secondary-button" type="button">Fechar</button>
-        <button id="save-session-summary" class="primary-button" type="submit">Salvar edição</button>
+        <button id="delete-session-summary" class="secondary-button danger-button" type="button">Delete summary</button>
+        <button id="generate-session-summary" class="secondary-button" type="button">Generate with model</button>
+        <button id="cancel-session-summary" class="secondary-button" type="button">Close</button>
+        <button id="save-session-summary" class="primary-button" type="submit">Save edit</button>
       </footer>
     </form>
   </dialog>
 
   <dialog id="new-conversation-dialog" class="confirmation-dialog">
     <form method="dialog">
-      <h2>Esta conversa não está salva</h2>
+      <h2>This conversation is not saved</h2>
       <p>
-        O histórico local está desativado. Se iniciar sem salvar, esta conversa
-        não poderá ser recuperada depois que o aplicativo fechar.
+        Local history is disabled. If you start without saving, this conversation cannot be recovered after the application closes.
       </p>
       <div class="confirmation-actions">
         <button id="new-conversation-enable-history" class="primary-button" type="button">
@@ -1724,20 +1730,20 @@
       <header class="dialog-header">
         <div>
           <span class="eyebrow">Execution session</span>
-          <h2>Revisar alterações</h2>
+          <h2>Review changes</h2>
         </div>
-        <button id="close-change-review" class="icon-button" type="button" aria-label="Fechar">×</button>
+        <button id="close-change-review" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
       <div id="change-review-body" class="dialog-body change-review-body"></div>
       <footer class="dialog-footer">
         <span id="undo-status" class="save-status"></span>
         <button id="validate-changes" class="secondary-button" type="button">
-          Validar alterações
+          Validate changes
         </button>
         <button id="undo-execution" class="secondary-button danger-button" type="button">
-          Desfazer alterações
+          Undo changes
         </button>
-        <button id="dismiss-change-review" class="primary-button" type="button">Fechar</button>
+        <button id="dismiss-change-review" class="primary-button" type="button">Close</button>
       </footer>
     </section>
   </dialog>
@@ -1746,11 +1752,11 @@
     <section class="trace-diagnostic-shell">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Diagnostico local sanitizado</span>
-          <h2>Trace da execucao</h2>
+          <span class="eyebrow">Sanitized local diagnostic</span>
+          <h2>Execution trace</h2>
           <p id="trace-diagnostic-id"></p>
         </div>
-        <button id="close-trace-diagnostic" class="icon-button" type="button" aria-label="Fechar">&times;</button>
+        <button id="close-trace-diagnostic" class="icon-button" type="button" aria-label="Close">&times;</button>
       </header>
       <div class="dialog-body trace-diagnostic-body">
         <p id="trace-diagnostic-status" class="runtime-note" role="status"></p>
@@ -1758,8 +1764,8 @@
         <ol id="trace-diagnostic-timeline" class="trace-diagnostic-timeline"></ol>
       </div>
       <footer class="dialog-footer">
-        <button id="copy-trace-diagnostic" class="secondary-button" type="button">Copiar trace ID</button>
-        <button id="dismiss-trace-diagnostic" class="primary-button" type="button">Fechar</button>
+        <button id="copy-trace-diagnostic" class="secondary-button" type="button">Copy trace ID</button>
+        <button id="dismiss-trace-diagnostic" class="primary-button" type="button">Close</button>
       </footer>
     </section>
   </dialog>
@@ -1775,27 +1781,24 @@
     <form id="app-modal-form" class="app-modal-card">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Confirmação</span>
-          <h2 id="app-modal-title">Confirmar ação</h2>
+          <span class="eyebrow" data-i18n="modal.confirm.eyebrow">Confirmation</span>
+          <h2 id="app-modal-title" data-i18n="modal.confirm.title">Confirm action</h2>
         </div>
-        <button id="app-modal-close" class="icon-button" type="button" aria-label="Fechar">×</button>
+        <button id="app-modal-close" class="icon-button" type="button" aria-label="Close" data-i18n-aria-label="action.close">×</button>
       </header>
-      <div class="dialog-body app-modal-body">
+      <div id="app-modal-body" class="dialog-body app-modal-body">
         <p id="app-modal-message"></p>
-        <label id="app-modal-field" hidden>
-          <span id="app-modal-label"></span>
-          <input id="app-modal-input" type="text" autocomplete="off">
-        </label>
       </div>
       <footer class="dialog-footer">
-        <button id="app-modal-cancel" class="secondary-button" type="button">Cancelar</button>
-        <button id="app-modal-confirm" class="primary-button" type="submit">Confirmar</button>
+        <button id="app-modal-cancel" class="secondary-button" type="button" data-i18n="action.cancel">Cancel</button>
+        <button id="app-modal-confirm" class="primary-button" type="submit" data-i18n="action.confirm">Confirm</button>
       </footer>
     </form>
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
+  <script src="/i18n.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

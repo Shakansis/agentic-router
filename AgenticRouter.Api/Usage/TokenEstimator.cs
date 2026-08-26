@@ -63,6 +63,9 @@ public sealed class ConservativeTokenEstimator : ITokenEstimator
         + EstimateText(
           message.ToolCallId
         )
+        + (message.Images?.Sum(
+          image => Math.Max(1_024L, (long)Math.Ceiling(image.Bytes.LongLength / 512d))
+        ) ?? 0)
         + (
           message.ToolCalls?.Sum(
             call => EstimateText(

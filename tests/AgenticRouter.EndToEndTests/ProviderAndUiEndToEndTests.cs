@@ -227,7 +227,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     ).ClickAsync();
     await Expect(
       Page.Locator("#save-status")
-    ).ToHaveTextAsync("Salvo");
+    ).ToHaveTextAsync("Saved");
     await Expect(
       Page.Locator(
         "#settings-dialog"
@@ -288,7 +288,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#default-model option[value=\"cerebras::gpt-oss-120b\"]"
       )
     ).ToContainTextAsync(
-      "indisponível"
+      "unavailable"
     );
     await Expect(
       Page.Locator(
@@ -937,6 +937,27 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       )
     );
 
+    _environment.FakeOllama.Reset();
+    var nativeExecute = await PostChatStreamAsync(
+      "Describe the attached pixel without changing files.",
+      "alpha:latest",
+      "browser-native-vision-v47",
+      images: new object[]
+      {
+        image
+      },
+      interactionMode: "execute",
+      approvalPolicy: "auto"
+    );
+    StringAssert.Contains(nativeExecute, "\"type\":\"response.completed\"");
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Model == "alpha:latest"
+          && !request.Stream
+          && request.Messages.Any(message => message.ImageCount == 1)
+      )
+    );
+
     var textOnly = await PostChatStreamAsync(
       "Do not silently discard this image.",
       "docs:latest",
@@ -1415,7 +1436,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     );
     await Expect(Page.Locator("#attach-image")).ToHaveAttributeAsync(
       "aria-label",
-      "Anexar imagem"
+      "Attach image"
     );
     await Page.Locator(
       "#web-toggle"
@@ -1448,7 +1469,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
 
     await WaitUntilAsync(
@@ -1603,7 +1624,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".capability-popover-status"
       )
     ).ToHaveTextAsync(
-      "Habilitado para este modelo"
+      "Enabled for this model"
     );
     await Expect(
       visionDocumentation
@@ -1641,7 +1662,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#capability-tags .capability-info:has([data-kind=\"web\"]) .capability-popover-status"
       )
     ).ToHaveTextAsync(
-      "Disponível, mas desabilitado nesta conversa"
+      "Available, but disabled in this conversation"
     );
     await Page.Keyboard.PressAsync(
       "Escape"
@@ -1670,7 +1691,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#capability-tags .capability-info:has([data-kind=\"web\"]) .capability-popover-status"
       )
     ).ToHaveTextAsync(
-      "Habilitado nesta conversa"
+      "Enabled in this conversation"
     );
     await Page.Keyboard.PressAsync(
       "Escape"
@@ -1835,7 +1856,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#composer-status"
       )
     ).ToContainTextAsync(
-      "pedir aprova\u00e7\u00e3o"
+      "ask for approval"
     );
 
     await Page.SetViewportSizeAsync(
@@ -1932,7 +1953,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#composer-status"
       )
     ).ToContainTextAsync(
-      "não autorizado"
+      "was not authorized"
     );
     await Expect(
       Page.Locator(
@@ -1950,7 +1971,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     );
     StringAssert.Contains(
       firstDialogMessage,
-      "sairão deste computador"
+      "will leave this computer"
     );
 
     await StartMessageAsync(
@@ -2249,6 +2270,10 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       ).GetInt32()
     );
 
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "[data-settings-target=\"harnesses\"]"
+    ).ClickAsync();
     await Page.Locator(
       "#cloud-usage-card"
     ).ClickAsync();
@@ -2269,11 +2294,12 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#cloud-usage-provider-cards"
       )
     ).ToContainTextAsync(
-      "não garante faturamento ou gratuidade"
+      "does not guarantee billing or free usage"
     );
     await Page.Locator(
       "#dismiss-cloud-usage"
     ).ClickAsync();
+    await Page.Locator("#close-settings").ClickAsync();
 
     _environment.FakeOllama.Reset();
     _environment.FakeCloud.Reset();
@@ -2285,7 +2311,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".message.assistant .activity > summary"
       ).Last
     ).ToContainTextAsync(
-      "Falhou"
+      "Failed"
     );
     Assert.AreEqual(
       0,
@@ -2610,24 +2636,19 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         )
     );
 
+    await Page.Locator(
+      "#runtime-summary"
+    ).ClickAsync();
     await Expect(
       Page.Locator(
-        ".sidebar #runtime-usage-summary"
+        "#runtime-details #runtime-memory-list"
       )
     ).ToBeVisibleAsync();
-    Assert.AreEqual(
-      0,
-      await Page.Locator(
-        "#runtime-details #runtime-usage-summary"
-      ).CountAsync()
-    );
     await Expect(
       Page.Locator(
-        "#runtime-usage-summary"
+        "#runtime-details #runtime-usage-summary, #runtime-details #cloud-usage-card"
       )
-    ).ToContainTextAsync(
-      "exato"
-    );
+    ).ToHaveCountAsync(0);
     await OpenSettingsAsync();
     await Page.Locator(
       "[data-settings-target=\"harnesses\"]"
@@ -2637,7 +2658,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#settings-usage-summary"
       )
     ).ToContainTextAsync(
-      "Principais modelos"
+      "Top models"
     );
     await Expect(
       Page.Locator(
@@ -2646,6 +2667,8 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     ).ToContainTextAsync(
       "router"
     );
+    await Expect(Page.Locator("#settings-runtime #cloud-usage-card"))
+      .ToBeVisibleAsync();
     await Page.Locator(
       "#purge-usage"
     ).ClickAsync();
@@ -2655,14 +2678,14 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#usage-purge-status"
       )
     ).ToContainTextAsync(
-      "evento(s) de uso excluído(s)"
+      "usage event(s) deleted"
     );
     await Expect(
       Page.Locator(
         "#settings-usage-details"
       )
     ).ToContainTextAsync(
-      "Entrada / saída / total: 0 / 0 / 0"
+      "Input / output / total: 0 / 0 / 0"
     );
   }
 
@@ -3124,7 +3147,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Page.Locator("[data-settings-target=\"providers\"]").ClickAsync();
     await Expect(
       Page.Locator("[data-provider=\"ollama-local\"] summary .badge")
-    ).ToHaveTextAsync("Saudável");
+    ).ToHaveTextAsync("Healthy");
   }
 
   [TestMethod]
@@ -3154,7 +3177,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         AriaRole.Heading,
         new()
         {
-          Name = "Conversa",
+          Name = "Conversation",
           Exact = true
         }
       )
@@ -3180,13 +3203,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     ).ToHaveCountAsync(
       1
     );
-    await Expect(
-      Page.Locator(
-        "#model-count"
-      )
-    ).ToHaveTextAsync(
-      "12 instalados"
-    );
+    await Expect(Page.Locator("#provider-badge")).ToHaveTextAsync("Online");
 
     using var response = await _environment.HttpClient.GetAsync(
       "api/devices"
@@ -3622,21 +3639,21 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".execution-session-header"
       )
     ).ToContainTextAsync(
-      $"Alvo: {groqModel}"
+      $"Target: {groqModel}"
     );
     await Expect(
       Page.Locator(
         ".execution-session-header"
       )
     ).ToContainTextAsync(
-      $"Especialista: {groqModel}"
+      $"Specialist: {groqModel}"
     );
     await Expect(
       Page.Locator(
         ".execution-session-header"
       )
     ).ToContainTextAsync(
-      "Roteador residente: unused:latest"
+      "Resident router: unused:latest"
     );
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
@@ -3812,8 +3829,96 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".activity > summary"
       )
     ).ToHaveTextAsync(
-      "Cancelado"
+      "Canceled"
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DecisionModalHasNoFieldPromptCreatesOneAndEnglishI18nIsActive()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator("html")
+    ).ToHaveAttributeAsync(
+      "lang",
+      "en"
+    );
+    await Expect(
+      Page.Locator("html")
+    ).ToHaveAttributeAsync(
+      "data-locale",
+      "en"
+    );
+    Assert.IsTrue(
+      await Page.EvaluateAsync<bool>(
+        "() => window.AgenticRouterI18n.locale === 'en'"
+          + " && typeof window.AgenticRouterI18n.registerCatalog === 'function'"
+      )
+    );
+
+    await OpenSettingsAsync();
+    var ollamaUrl = Page.Locator("#ollama-url");
+    await ollamaUrl.FillAsync(
+      $"{await ollamaUrl.InputValueAsync()}?unsaved=true"
+    );
+    await Page.Locator("#close-settings").ClickAsync();
+
+    var modal = Page.Locator("#app-modal");
+    await Expect(modal).ToBeVisibleAsync();
+    await Expect(modal.Locator(".eyebrow")).ToHaveTextAsync("Confirmation");
+    await Expect(Page.Locator("#app-modal-title")).ToHaveTextAsync("Close without saving?");
+    await Expect(Page.Locator("#app-modal-message")).ToHaveTextAsync(
+      "Discard the unsaved configuration changes?"
+    );
+    await Expect(Page.Locator("#app-modal-confirm")).ToHaveTextAsync("Discard");
+    await Expect(
+      modal.Locator("input, textarea, #app-modal-field")
+    ).ToHaveCountAsync(0);
+    Assert.IsLessThan(
+      420,
+      await modal.Locator(".app-modal-card").EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().height"
+      )
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      4.5,
+      await Page.Locator("#app-modal-confirm").EvaluateAsync<double>(
+        "element => {"
+          + " const parse = value => value.match(/[\\d.]+/g).slice(0, 3).map(Number);"
+          + " const luminance = rgb => {"
+          + "   const channels = rgb.map(value => {"
+          + "     const channel = value / 255;"
+          + "     return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);"
+          + "   });"
+          + "   return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];"
+          + " };"
+          + " const style = getComputedStyle(element);"
+          + " const foreground = luminance(parse(style.color));"
+          + " const background = luminance(parse(style.backgroundColor));"
+          + " return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);"
+          + "}"
+      )
+    );
+    await Page.Locator("#app-modal-confirm").ClickAsync();
+    await Expect(modal).ToBeHiddenAsync();
+
+    await Page.Locator("#open-workspace").ClickAsync();
+    await Page.Locator(
+      ".workspace-profile-entry.active"
+    ).GetByRole(
+      AriaRole.Button,
+      new() { Name = "Rename" }
+    ).ClickAsync();
+    await Expect(modal).ToBeVisibleAsync();
+    await Expect(Page.Locator("#app-modal-title")).ToHaveTextAsync("Rename workspace");
+    await Expect(Page.Locator("#app-modal-label")).ToHaveTextAsync("Workspace name");
+    await Expect(Page.Locator("#app-modal-input")).ToBeVisibleAsync();
+    await Expect(modal.Locator("input")).ToHaveCountAsync(1);
+    await Expect(modal.Locator("textarea")).ToHaveCountAsync(0);
+    await Page.Locator("#app-modal-cancel").ClickAsync();
   }
 
   [TestMethod]
@@ -3828,15 +3933,18 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#active-agent-label"
       )
     ).ToHaveTextAsync(
-      "Auto (Roteador)"
+      "Auto (Router)"
     );
     await Expect(
       Page.Locator(
-        ".status-icon"
+        ".runtime-provider-indicator"
       )
-    ).ToHaveCountAsync(
-      7
-    );
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        ".runtime-compact-indicator"
+      ).First
+    ).ToBeVisibleAsync();
     await Expect(
       Page.Locator(
         "#new-conversation .button-icon, "
@@ -3846,8 +3954,28 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     ).ToHaveCountAsync(
       3
     );
+    await Expect(
+      Page.Locator(
+        ".sidebar-shortcuts"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "#git-view-folder"
+      )
+    ).ToBeVisibleAsync();
+    Assert.IsGreaterThanOrEqualTo(
+      18,
+      await Page.Locator(
+        ".git-section-icon"
+      ).EvaluateAsync<double>(
+        "element => Number.parseFloat(getComputedStyle(element).fontSize)"
+      )
+    );
     Assert.AreEqual(
-      "16px",
+      "12px",
       await Page.Locator(
         ".sidebar"
       ).EvaluateAsync<string>(
@@ -3914,5 +4042,291 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#harness-selector"
       )
     ).ToBeAttachedAsync();
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ProjectsSidebarGroupsSearchesCollapsesAndResumesAcrossWorkspaces()
+  {
+    var firstWorkspaceId = await ActiveWorkspaceIdAsync();
+    using var profilesResponse = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    profilesResponse.EnsureSuccessStatusCode();
+    using var profilesDocument = JsonDocument.Parse(
+      await profilesResponse.Content.ReadAsStringAsync()
+    );
+    var firstProfile = profilesDocument.RootElement.GetProperty(
+      "profiles"
+    ).EnumerateArray().Single(
+      profile => profile.GetProperty("id").GetString() == firstWorkspaceId
+    );
+    var firstPath = firstProfile.GetProperty("path").GetString()!;
+
+    await EnableHistoryAsync(
+      firstWorkspaceId
+    );
+    await CreateConversationAsync(
+      "Conversation from the first project with cobalt marker."
+    );
+
+    var secondPath = _environment.CreateWorkspaceDirectory(
+      $"project-sidebar-{Guid.NewGuid():N}"
+    );
+    using var createdResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Project Sidebar B",
+        path = secondPath
+      }
+    );
+    createdResponse.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(
+      await createdResponse.Content.ReadAsStringAsync()
+    );
+    var secondWorkspaceId = createdDocument.RootElement.GetProperty(
+      "id"
+    ).GetString()!;
+    using (
+      var activateResponse = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{secondWorkspaceId}/activate",
+        null
+      )
+    )
+    {
+      activateResponse.EnsureSuccessStatusCode();
+    }
+    await EnableHistoryAsync(
+      secondWorkspaceId
+    );
+    for (var index = 0; index < 14; index++)
+    {
+      await CreateConversationAsync(
+        $"Project B conversation {index:00}."
+      );
+    }
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Expect(
+      Page.Locator(
+        ".project-accordion"
+      )
+    ).ToHaveCountAsync(
+      2
+    );
+    var firstProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{firstWorkspaceId}\"]"
+    );
+    var secondProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{secondWorkspaceId}\"]"
+    );
+    await Expect(
+      secondProject
+    ).ToHaveClassAsync(
+      new Regex("active")
+    );
+    await Expect(
+      secondProject.Locator(
+        ".project-active-marker"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      secondProject.Locator(
+        ".badge.success"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await secondProject.Locator(
+      ".project-menu-button"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#project-menu-popover"
+      )
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator(
+        "#project-menu-title"
+      )
+    ).ToHaveTextAsync(
+      "Project Sidebar B"
+    );
+    await Expect(
+      Page.Locator(
+        "#project-menu-count"
+      )
+    ).ToContainTextAsync(
+      "conversations"
+    );
+    await Expect(
+      Page.Locator(
+        "#project-menu-path"
+      )
+    ).ToHaveTextAsync(
+      secondPath
+    );
+    await Expect(
+      Page.Locator(
+        "#project-menu-edit"
+      )
+    ).ToBeVisibleAsync();
+    await Page.Keyboard.PressAsync(
+      "Escape"
+    );
+    await Expect(
+      Page.Locator(
+        "#project-menu-popover"
+      )
+    ).ToBeHiddenAsync();
+    Assert.AreEqual(
+      firstPath,
+      await firstProject.Locator("summary").GetAttributeAsync("title")
+    );
+    await firstProject.Locator("summary").ClickAsync();
+    Assert.IsTrue(
+      await firstProject.EvaluateAsync<bool>("element => element.open")
+    );
+    Assert.IsTrue(
+      await secondProject.EvaluateAsync<bool>("element => element.open")
+    );
+    Assert.IsTrue(
+      await secondProject.Locator(
+        "#recent-sessions"
+      ).EvaluateAsync<bool>(
+        "element => element.scrollHeight > element.clientHeight"
+      )
+    );
+
+    await Page.Locator(
+      "#open-session-search"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#session-search-all-workspaces"
+      )
+    ).ToBeCheckedAsync();
+    await Page.Locator(
+      "#session-search-query"
+    ).FillAsync(
+      "cobalt"
+    );
+    await Page.Locator(
+      "#run-session-search"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#session-search-results"
+      )
+    ).ToContainTextAsync(
+      "first project"
+    );
+    await Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Resume safely",
+        Exact = true
+      }
+    ).ClickAsync();
+    await ConfirmAppModalAsync();
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToContainTextAsync(
+      "cobalt marker"
+    );
+    await Page.Locator(
+      "#toggle-sidebar"
+    ).ClickAsync();
+    Assert.IsLessThanOrEqualTo(
+      60,
+      await Page.Locator("#sidebar").EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().width"
+      )
+    );
+    await Page.Locator(
+      "#toggle-sidebar"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        ".message.user"
+      )
+    ).ToContainTextAsync(
+      "cobalt marker"
+    );
+    await Page.Locator(
+      "#toggle-sidebar"
+    ).ClickAsync();
+    await Page.ReloadAsync();
+    Assert.IsTrue(
+      await Page.Locator("body").EvaluateAsync<bool>(
+        "element => element.classList.contains('sidebar-collapsed')"
+      )
+    );
+    await Page.Locator(
+      "#toggle-sidebar"
+    ).ClickAsync();
+    await Expect(
+      Page.Locator(
+        $".project-accordion[data-workspace-id=\"{firstWorkspaceId}\"]"
+      )
+    ).ToHaveClassAsync(
+      new Regex("active")
+    );
+
+    async Task EnableHistoryAsync(string workspaceId)
+    {
+      using var response = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      );
+      response.EnsureSuccessStatusCode();
+    }
+
+    async Task CreateConversationAsync(string content)
+    {
+      var browserSessionId = Guid.NewGuid().ToString("N");
+      using var created = await _environment.HttpClient.PostAsJsonAsync(
+        "api/sessions/new",
+        new
+        {
+          browserSessionId
+        }
+      );
+      created.EnsureSuccessStatusCode();
+      using var document = JsonDocument.Parse(
+        await created.Content.ReadAsStringAsync()
+      );
+      var sessionId = document.RootElement.GetProperty(
+        "sessionId"
+      ).GetString()!;
+      using var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId,
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = (string?)null,
+          state = "completed"
+        }
+      );
+      saved.EnsureSuccessStatusCode();
+    }
   }
 }

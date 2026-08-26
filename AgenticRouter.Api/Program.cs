@@ -168,6 +168,7 @@ builder.Services.AddScoped<ITrustedWorkspaceService, TrustedWorkspaceService>();
 builder.Services.AddScoped<IProjectAwarenessService, ProjectAwarenessService>();
 builder.Services.AddScoped<IRepositoryInstructionService, RepositoryInstructionService>();
 builder.Services.AddSingleton<IFolderPickerService, WindowsFolderPickerService>();
+builder.Services.AddSingleton<IFolderLauncherService, WindowsFolderLauncherService>();
 builder.Services.AddSingleton<IToolNameResolver, ToolNameResolver>();
 builder.Services.AddSingleton<
   ISpecialistToolingProfileResolver,
@@ -184,6 +185,7 @@ builder.Services.AddScoped<IProcessPolicyService, ProcessPolicyService>();
 builder.Services.AddScoped<IValidationProfileService, ValidationProfileService>();
 builder.Services.AddSingleton<IGitRepositoryService, GitRepositoryService>();
 builder.Services.AddSingleton<IGitDeliveryService, GitDeliveryService>();
+builder.Services.AddScoped<IWorkspaceGitActionService, WorkspaceGitActionService>();
 builder.Services.AddScoped<ILocalActionPlanner, LocalActionPlanner>();
 builder.Services.AddScoped<IFunctionGemmaResidentProtocol, FunctionGemmaResidentProtocol>();
 builder.Services.AddSingleton<IPlanningFailureClassifier, PlanningFailureClassifier>();

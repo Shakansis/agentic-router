@@ -523,6 +523,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 var inputTokens = Number(tokens, "input")
                   + CacheTokens(tokens, "read")
                   + CacheTokens(tokens, "write");
+                var outputTokens = Number(tokens, "output");
                 if (inputTokens > 0)
                 {
                   yield return Event(
@@ -530,7 +531,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                     sessionId,
                     turnId,
                     native: payload,
-                    contextInputTokens: inputTokens
+                    contextInputTokens: inputTokens,
+                    contextTotalTokens: inputTokens + Math.Max(0, outputTokens)
                   );
                   break;
                 }
@@ -1249,6 +1251,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     HarnessTerminalState? terminal = null,
     JsonElement? native = null,
     long? contextInputTokens = null,
+    long? contextTotalTokens = null,
     bool readOnlyPermission = false
   )
   {
@@ -1271,6 +1274,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       terminalState: terminal,
       nativePayload: native,
       contextInputTokens: contextInputTokens,
+      contextTotalTokens: contextTotalTokens,
       readOnlyPermission: readOnlyPermission
     );
   }

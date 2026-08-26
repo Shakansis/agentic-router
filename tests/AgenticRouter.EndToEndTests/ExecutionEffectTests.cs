@@ -242,15 +242,28 @@ public sealed class ExecutionEffectTests
           0
         )
       );
-      StringAssert.Contains(
-        session.ValidatePlanStepBinding(null),
-        "must bind every action"
-      );
+      var missingBinding = session.ValidatePlanStepBinding(null);
+      StringAssert.Contains(missingBinding, "must bind every action");
+      StringAssert.Contains(missingBinding, "Actionable stepIds: style, script");
       Assert.IsNull(session.ValidatePlanStepBinding("style"));
       StringAssert.Contains(
         session.ValidatePlanStepBinding("missing"),
         "does not exist"
       );
+
+      var completed = CreateSession("Completed browser artifacts", workspace);
+      completed.CreatePlan(
+        new ExecutionPlanView(
+          "Completed browser artifacts",
+          [new ExecutionPlanStep("done", "Completed step", "completed")],
+          null,
+          1,
+          0
+        )
+      );
+      var completedBinding = completed.ValidatePlanStepBinding(null);
+      StringAssert.Contains(completedBinding, "no actionable stepId");
+      StringAssert.Contains(completedBinding, "revise the existing plan");
     }
     finally
     {

@@ -28,7 +28,8 @@ public sealed record LocalActionProposal(
   string? Explanation,
   string? OriginalTool = null,
   string ToolResolutionSource = ToolNameResolver.CanonicalSource,
-  string? PlanStepId = null
+  string? PlanStepId = null,
+  bool HostInitiated = false
 );
 
 public sealed record ValidatedLocalAction(
@@ -249,9 +250,11 @@ public sealed class LocalActionService : ILocalActionService
       ToolResolutionSource = proposal.ToolResolutionSource,
       PlanStepId = proposal.PlanStepId
     };
-    var bindingFailure = executionSession?.ValidatePlanStepBinding(
-      proposal.PlanStepId
-    );
+    var bindingFailure = proposal.HostInitiated
+      ? null
+      : executionSession?.ValidatePlanStepBinding(
+        proposal.PlanStepId
+      );
     if (bindingFailure is not null)
     {
       throw new LocalActionException(

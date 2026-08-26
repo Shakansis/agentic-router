@@ -14,18 +14,21 @@ public sealed class GitWorkspaceController : ControllerBase
   private readonly IWorkspaceProfileService _profiles;
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IProjectAwarenessService _projectAwareness;
+  private readonly IWorkspaceGitActionService _actions;
 
   public GitWorkspaceController(
     IGitRepositoryService git,
     IWorkspaceProfileService profiles,
     IExecutionSessionStore executionSessions,
-    IProjectAwarenessService projectAwareness
+    IProjectAwarenessService projectAwareness,
+    IWorkspaceGitActionService actions
   )
   {
     _git = git;
     _profiles = profiles;
     _executionSessions = executionSessions;
     _projectAwareness = projectAwareness;
+    _actions = actions;
   }
 
   [HttpGet]
@@ -141,6 +144,44 @@ public sealed class GitWorkspaceController : ControllerBase
         );
         return overview;
       }
+    );
+  }
+
+  [HttpPost("commit")]
+  public async Task<IActionResult> Commit(
+    [FromBody] GitWorkspaceCommitRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      "git-project-commit",
+      async active => await _actions.CommitAsync(
+        active,
+        CurrentSessionPaths(
+          active.Path
+        ),
+        request,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPost("push")]
+  public async Task<IActionResult> Push(
+    [FromBody] GitWorkspacePushRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      "git-project-push",
+      async active => await _actions.PushAsync(
+        active,
+        CurrentSessionPaths(
+          active.Path
+        ),
+        request,
+        cancellationToken
+      )
     );
   }
 

@@ -1,3 +1,5 @@
+const { t } = window.AgenticRouterI18n;
+
 const state = {
   models: [],
   devices: [],
@@ -38,6 +40,7 @@ const state = {
   pendingDeliveryAction: null,
   activeAgentModel: null,
   activeAgentRole: null,
+  activeHarness: null,
   usageOverview: null,
   pricingCatalog: null,
   cloudProviders: null,
@@ -66,11 +69,16 @@ const state = {
   benchmark: null,
   activeBenchmarkRunId: null,
   benchmarkEventSource: null,
-  benchmarkElapsedTimer: null
+  benchmarkElapsedTimer: null,
+  projectSessions: [],
+  expandedProjectIds: new Set(),
+  sidebarCollapsed: false,
+  runtime: null
 };
 
 let benchmarkTooltip = null;
 let benchmarkTooltipTrigger = null;
+let projectMenuAnchor = null;
 
 const elements = {};
 let resizeObserver;
@@ -124,6 +132,7 @@ function visibleSettingsSectionIds(section) {
 document.addEventListener("DOMContentLoaded", initialize);
 
 async function initialize() {
+  window.AgenticRouterI18n.localizeDocument();
   bindElements();
   bindEvents();
   initializeSidebarResize();
@@ -134,9 +143,9 @@ async function initialize() {
     renderRecoveryState();
     await loadApplicationState();
   } catch (error) {
-    elements.providerBadge.textContent = "Erro";
+    elements.providerBadge.textContent = "Error";
     elements.providerBadge.className = "badge error";
-    elements.providerDetail.textContent = error.message;
+    elements.runtimeCompactMeters.textContent = error.message;
   }
 
   await refreshRuntimeStatus();
@@ -166,6 +175,8 @@ function bindElements() {
     "fallback-indicator",
     "context-usage",
     "context-usage-summary",
+    "context-usage-summary-text",
+    "context-usage-estimate-warning",
     "context-usage-warning",
     "context-usage-details",
     "compact-context",
@@ -176,10 +187,6 @@ function bindElements() {
     "attachment-previews",
     "composer-status",
     "provider-badge",
-    "provider-detail",
-    "model-count",
-    "device-count",
-    "device-diagnostic",
     "conversation-view",
     "open-benchmarks",
     "benchmark-view",
@@ -249,12 +256,11 @@ function bindElements() {
     "default-gpu",
     "jump-latest",
     "runtime-summary",
+    "runtime-details",
+    "runtime-compact-meters",
     "runtime-memory-list",
+    "runtime-model-summary",
     "runtime-model-list",
-    "resident-model-status",
-    "runtime-usage-summary",
-    "runtime-usage-accuracy",
-    "runtime-usage-details",
     "cloud-usage-card",
     "cloud-usage-badge",
     "cloud-usage-summary",
@@ -343,23 +349,30 @@ function bindElements() {
     "test-model",
     "model-test-result",
     "approval-policy",
-    "workspace-badge",
     "workspace-path",
     "git-card",
     "git-badge",
     "git-summary",
     "git-upstream-summary",
+    "git-initialize-quick",
+    "git-commit-quick",
+    "git-push-quick",
+    "git-view-folder",
+    "git-quick-status",
     "session-history",
+    "project-list",
+    "toggle-sidebar",
+    "project-menu-popover",
+    "project-menu-title",
+    "project-menu-count",
+    "project-menu-git-row",
+    "project-menu-git",
+    "project-menu-path",
+    "project-menu-edit",
     "conversation-persistence",
     "conversation-persistence-sidebar",
     "enable-session-history",
     "open-session-search",
-    "pinned-session-section",
-    "pinned-sessions",
-    "recent-sessions",
-    "archived-session-section",
-    "archived-sessions",
-    "history-new-conversation",
     "session-search-dialog",
     "session-search-form",
     "session-search-query",
@@ -515,9 +528,7 @@ function bindElements() {
     "app-modal-form",
     "app-modal-title",
     "app-modal-message",
-    "app-modal-field",
-    "app-modal-label",
-    "app-modal-input",
+    "app-modal-body",
     "app-modal-close",
     "app-modal-cancel",
     "app-modal-confirm",
@@ -538,6 +549,7 @@ function bindEvents() {
   elements.benchmarkView.addEventListener("focusout", handleBenchmarkTooltipHide);
   elements.benchmarkView.addEventListener("scroll", hideBenchmarkTooltip, true);
   window.addEventListener("resize", hideBenchmarkTooltip);
+  window.addEventListener("resize", closeProjectMenu);
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
@@ -576,7 +588,7 @@ function bindEvents() {
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
   elements.newConversation.addEventListener("click", requestNewConversation);
-  elements.historyNewConversation.addEventListener("click", requestNewConversation);
+  elements.toggleSidebar.addEventListener("click", toggleSidebar);
   elements.modelSelector.addEventListener("change", handleModelSelectionChange);
   elements.capabilityTags.addEventListener("click", handleCapabilityTagClick);
   elements.webToggle.addEventListener("click", toggleWebSearch);
@@ -613,8 +625,8 @@ function bindEvents() {
     "click",
     deleteAllSessions
   );
-  elements.openSessionSearch.addEventListener("click", openSessionSearch);
   elements.sessionSearchForm.addEventListener("submit", runSessionSearch);
+  elements.openSessionSearch.addEventListener("click", openSessionSearch);
   elements.closeSessionSearch.addEventListener("click", closeSessionSearch);
   elements.cancelSessionSearch.addEventListener("click", closeSessionSearch);
   elements.sessionSearchDialog.addEventListener(
@@ -791,6 +803,11 @@ function bindEvents() {
   elements.undoExecution.addEventListener("click", undoExecution);
   elements.validateChanges.addEventListener("click", validateChanges);
   elements.gitCard.addEventListener("click", openGitPanel);
+  elements.gitInitializeQuick.addEventListener("click", initializeGitRepositoryQuick);
+  elements.gitCommitQuick.addEventListener("click", commitProjectChanges);
+  elements.gitPushQuick.addEventListener("click", pushProjectBranch);
+  elements.gitViewFolder.addEventListener("click", viewCurrentWorkspaceFolder);
+  elements.projectMenuEdit.addEventListener("click", editSelectedProject);
   elements.closeGit.addEventListener("click", closeGitPanel);
   elements.dismissGit.addEventListener("click", closeGitPanel);
   elements.refreshGit.addEventListener("click", refreshGitPanel);
@@ -825,7 +842,7 @@ function bindEvents() {
     () => copyText(
       elements.traceDiagnosticDialog.dataset.traceId ?? "",
       elements.copyTraceDiagnostic,
-      "Trace ID copiado"
+      "Trace ID copied"
     )
   );
   elements.traceDiagnosticDialog.addEventListener(
@@ -872,6 +889,7 @@ function bindEvents() {
   );
   document.addEventListener("visibilitychange", handleVisibilityChange);
   document.addEventListener("click", handleCapabilityDocumentClick);
+  document.addEventListener("click", handlePopoverDocumentClick);
   document.addEventListener("keydown", handleCapabilityKeyDown);
   document.querySelector("#open-settings").addEventListener(
     "click",
@@ -886,10 +904,10 @@ function bindEvents() {
 
 function showAppModal(options) {
   const {
-    title = "Confirmar ação",
+    title = t("modal.confirm.title"),
     message = "",
-    confirmLabel = "Confirmar",
-    cancelLabel = "Cancelar",
+    confirmLabel = t("action.confirm"),
+    cancelLabel = t("action.cancel"),
     inputLabel = "",
     inputValue = "",
     inputType = "text",
@@ -907,10 +925,24 @@ function showAppModal(options) {
   elements.appModalConfirm.className = danger
     ? "primary-button danger-button"
     : "primary-button";
-  elements.appModalField.hidden = !inputLabel;
-  elements.appModalLabel.textContent = inputLabel;
-  elements.appModalInput.type = inputType;
-  elements.appModalInput.value = inputValue;
+  elements.appModalBody.querySelector(".app-modal-field")?.remove();
+  let input = null;
+  let field = null;
+  if (inputLabel) {
+    field = document.createElement("label");
+    field.id = "app-modal-field";
+    field.className = "app-modal-field";
+    const label = document.createElement("span");
+    label.id = "app-modal-label";
+    label.textContent = inputLabel;
+    input = document.createElement("input");
+    input.id = "app-modal-input";
+    input.type = inputType;
+    input.autocomplete = "off";
+    input.value = inputValue;
+    field.append(label, input);
+    elements.appModalBody.append(field);
+  }
   const previousFocus = document.activeElement;
 
   return new Promise(resolve => {
@@ -922,15 +954,16 @@ function showAppModal(options) {
       settled = true;
       cleanup();
       elements.appModal.hidden = true;
+      field?.remove();
       document.body.append(elements.appModal);
       previousFocus?.focus?.();
       resolve(value);
     };
     const submit = event => {
       event.preventDefault();
-      finish(inputLabel ? elements.appModalInput.value : true);
+      finish(input ? input.value : true);
     };
-    const cancel = () => finish(inputLabel ? null : false);
+    const cancel = () => finish(input ? null : false);
     const keydown = event => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -952,7 +985,7 @@ function showAppModal(options) {
     ).at(-1) ?? document.body;
     modalHost.append(elements.appModal);
     elements.appModal.hidden = false;
-    (inputLabel ? elements.appModalInput : elements.appModalConfirm).focus();
+    (input ?? elements.appModalConfirm).focus();
   });
 }
 
@@ -967,7 +1000,7 @@ function showAppPrompt(message, options = {}) {
   return showAppModal({
     ...options,
     message,
-    inputLabel: options.inputLabel ?? "Valor"
+    inputLabel: options.inputLabel ?? t("prompt.value")
   });
 }
 
@@ -980,7 +1013,7 @@ function showToast(message, tone = "error", timeout = 30000) {
   text.textContent = message;
   const close = document.createElement("button");
   close.type = "button";
-  close.setAttribute("aria-label", "Fechar notificação");
+  close.setAttribute("aria-label", t("toast.close"));
   close.textContent = "×";
   let timer;
   const dismiss = () => {
@@ -998,6 +1031,7 @@ function initializeSidebarResize() {
   const minimum = 220;
   const maximum = 460;
   const storageKey = "agentic-router.sidebar-width";
+  const collapsedStorageKey = "agentic-router.sidebar-collapsed";
   const clampWidth = value => Math.min(
     Math.max(minimum, value),
     Math.min(maximum, Math.max(minimum, window.innerWidth - 360))
@@ -1027,6 +1061,20 @@ function initializeSidebarResize() {
   } catch {
     // Keep the CSS default when browser storage is unavailable.
   }
+
+  try {
+    state.sidebarCollapsed = localStorage.getItem(collapsedStorageKey) === "true";
+    const expanded = JSON.parse(
+      localStorage.getItem("agentic-router.expanded-projects") ?? "[]"
+    );
+    state.expandedProjectIds = new Set(
+      Array.isArray(expanded) ? expanded.filter(id => typeof id === "string") : []
+    );
+  } catch {
+    state.sidebarCollapsed = false;
+    state.expandedProjectIds = new Set();
+  }
+  applySidebarCollapsedState();
 
   elements.sidebarResizer.addEventListener(
     "pointerdown",
@@ -1079,6 +1127,54 @@ function initializeSidebarResize() {
       applyWidth(next, true);
     }
   );
+}
+
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  applySidebarCollapsedState();
+  try {
+    localStorage.setItem(
+      "agentic-router.sidebar-collapsed",
+      String(state.sidebarCollapsed)
+    );
+  } catch {
+    // A blocked localStorage must not make the sidebar unusable.
+  }
+}
+
+function applySidebarCollapsedState() {
+  document.body.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  elements.toggleSidebar.textContent = state.sidebarCollapsed ? "›" : "‹";
+  elements.toggleSidebar.setAttribute(
+    "aria-label",
+    state.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+  );
+  elements.toggleSidebar.setAttribute(
+    "title",
+    state.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+  );
+  elements.toggleSidebar.setAttribute(
+    "aria-expanded",
+    String(!state.sidebarCollapsed)
+  );
+  elements.sidebarResizer.hidden = state.sidebarCollapsed;
+}
+
+function handlePopoverDocumentClick(event) {
+  if (
+    elements.runtimeDetails.open
+    && !elements.runtimeDetails.contains(event.target)
+  ) {
+    elements.runtimeDetails.open = false;
+  }
+
+  if (
+    !elements.projectMenuPopover.hidden
+    && !elements.projectMenuPopover.contains(event.target)
+    && event.target !== projectMenuAnchor
+  ) {
+    closeProjectMenu();
+  }
 }
 
 function initializeScrollFollowing() {
@@ -1165,10 +1261,11 @@ async function loadApplicationState() {
 }
 
 async function openBenchmarks() {
+  elements.runtimeDetails.open = false;
   elements.conversationView.hidden = true;
   elements.benchmarkView.hidden = false;
   elements.closeBenchmarks.focus();
-  elements.benchmarkStatus.textContent = "Carregando catálogo e histórico…";
+  elements.benchmarkStatus.textContent = "Loading catalog and history…";
 
   try {
     const [
@@ -1220,7 +1317,7 @@ async function openBenchmarks() {
       await rescoreBenchmarkResult();
       await generateGeneralBenchmarkRecommendation();
       if (!state.benchmark?.live?.terminal) {
-        elements.benchmarkStatus.textContent = "Pronto.";
+        elements.benchmarkStatus.textContent = "Ready.";
       }
     }
   } catch (error) {
@@ -1328,7 +1425,7 @@ function renderBenchmarkControls() {
     input.value = model.value;
     input.checked = model.value === selectedModel;
     input.setAttribute("role", "switch");
-    input.setAttribute("aria-label", `Usar modelo ${model.label}`);
+    input.setAttribute("aria-label", `Use model ${model.label}`);
     input.addEventListener("change", syncBenchmarkModelSelection);
     label.append(identity, input);
     elements.benchmarkModelList.append(label);
@@ -1357,10 +1454,10 @@ function renderBenchmarkControls() {
     text.className = "benchmark-switch-identity";
     const name = document.createElement("strong");
     name.textContent = suite.id === "basic-crud" ? "CRUD" : "Agent Behavior";
-    input.setAttribute("aria-label", `Executar testes ${name.textContent}`);
+    input.setAttribute("aria-label", `Run tests ${name.textContent}`);
     const detail = document.createElement("small");
-    detail.textContent = `${suite.tests.length} testes`;
-    text.title = `${suite.name}; versão interna ${suite.version}.`;
+    detail.textContent = `${suite.tests.length} tests`;
+    text.title = `${suite.name}; internal version ${suite.version}.`;
     text.append(name, detail);
     label.append(text, input);
     elements.benchmarkSuiteList.append(label);
@@ -1385,11 +1482,11 @@ function renderBenchmarkControls() {
     const harnessLabel = harnessDisplayLabel(status.definition);
     const name = document.createElement("strong");
     name.textContent = harnessLabel;
-    input.setAttribute("aria-label", `Usar harness ${harnessLabel}`);
+    input.setAttribute("aria-label", `Use harness ${harnessLabel}`);
     const version = document.createElement("small");
     version.textContent = status.availability.available
-      ? status.availability.version ?? "Versão não informada"
-      : "Indisponível";
+      ? status.availability.version ?? "Version not reported"
+      : "Unavailable";
     text.append(name, version);
     if (!status.availability.available && status.availability.message) {
       label.title = status.availability.message;
@@ -1403,7 +1500,7 @@ function renderBenchmarkControls() {
   replaceOptions(
     elements.benchmarkHistoryHarnessFilter,
     [
-      { value: "", label: "Todos os harnesses" },
+      { value: "", label: "All harnesses" },
       ...(catalog?.harnesses ?? []).map(status => ({
         value: status.definition.id,
         label: harnessDisplayLabel(status.definition)
@@ -1414,7 +1511,7 @@ function renderBenchmarkControls() {
   replaceOptions(
     elements.benchmarkHistorySuiteFilter,
     [
-      { value: "", label: "Todas as suites" },
+      { value: "", label: "All suites" },
       ...suites.map(suite => ({
         value: suite.id,
         label: suite.id === "basic-crud" ? "CRUD" : "Agent Behavior"
@@ -1452,7 +1549,7 @@ function selectedBenchmarkSuites() {
 function updateBenchmarkSuiteSelection() {
   const suites = selectedBenchmarkSuites();
   if (suites.length === 0) {
-    elements.runBenchmark.textContent = "Selecione testes";
+    elements.runBenchmark.textContent = "Select tests";
     return;
   }
   const scenarioTimeout = Math.max(
@@ -1463,7 +1560,7 @@ function updateBenchmarkSuiteSelection() {
     Number(elements.benchmarkTimeout.max || 600),
     scenarioTimeout
   ));
-  elements.runBenchmark.textContent = "Executar benchmark";
+  elements.runBenchmark.textContent = "Run benchmark";
 }
 
 function benchmarkWeightInputs() {
@@ -1508,10 +1605,10 @@ function renderBenchmarkWeightTotal(weights) {
     + Number(weights.workspaceAccuracy)
     + Number(weights.efficiency);
   elements.benchmarkWeightTotal.textContent = total <= 0
-    ? "Total 0 · configuração inválida"
+    ? "Total 0 · invalid configuration"
     : total === 100
-      ? "Total 100 · sem normalização"
-      : `Total ${total} · normalizado para 100%`;
+      ? "Total 100 · no normalization"
+      : `Total ${total} · normalized to 100%`;
   elements.benchmarkWeightTotal.classList.toggle("error", total <= 0);
 }
 
@@ -1545,7 +1642,7 @@ async function saveBenchmarkScoringProfile() {
     if (state.benchmark.comparison) {
       await compareBenchmarkRuns();
     }
-    elements.benchmarkStatus.textContent = "Perfil Custom salvo; ranking recalculado sem executar o benchmark.";
+    elements.benchmarkStatus.textContent = "Custom profile saved; ranking recalculated without running the benchmark.";
   } catch (error) {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
   }
@@ -1568,7 +1665,7 @@ async function resetBenchmarkScoringProfile() {
     if (state.benchmark.comparison) {
       await compareBenchmarkRuns();
     }
-    elements.benchmarkStatus.textContent = "Perfil Default restaurado; ranking original recalculado.";
+    elements.benchmarkStatus.textContent = "Default profile restored; original ranking recalculated.";
   } catch (error) {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
   }
@@ -1592,7 +1689,7 @@ async function rescoreBenchmarkResult() {
 
 function renderBenchmarkHistory() {
   const options = [
-    { value: "", label: "Selecione um resultado persistido" },
+    { value: "", label: "Select a persisted result" },
     ...(state.benchmark?.history ?? []).map(result => ({
       value: result.runId,
       label: benchmarkHistoryRunLabel(result)
@@ -1604,7 +1701,7 @@ function renderBenchmarkHistory() {
     state.benchmark?.result?.runId ?? ""
   );
   const compareOptions = [
-    { value: "", label: "Selecione uma execução" },
+    { value: "", label: "Select a run" },
     ...(state.benchmark?.history ?? []).map(result => ({
       value: result.runId,
       label: benchmarkHistoryRunLabel(result)
@@ -1627,7 +1724,7 @@ function renderBenchmarkHistory() {
 }
 
 function benchmarkHistoryRunLabel(result) {
-  const timestamp = new Date(result.startedAt).toLocaleString([], {
+  const timestamp = new Date(result.startedAt).toLocaleString(window.AgenticRouterI18n.locale, {
     dateStyle: "short",
     timeStyle: "short"
   });
@@ -1645,7 +1742,7 @@ function benchmarkSuiteLabel(suiteId) {
   if (suiteId === "combined") {
     return "CRUD + Agent Behavior";
   }
-  return suiteId || "Testes";
+  return suiteId || "Tests";
 }
 
 function scheduleBenchmarkHistoryRefresh() {
@@ -1690,11 +1787,11 @@ async function compareBenchmarkRuns() {
   const baselineRunId = elements.benchmarkCompareBaseline.value;
   const candidateRunId = elements.benchmarkCompareCandidate.value;
   if (!baselineRunId || !candidateRunId) {
-    elements.benchmarkStatus.textContent = "Selecione duas execuções históricas.";
+    elements.benchmarkStatus.textContent = "Select two historical runs.";
     return;
   }
   if (baselineRunId === candidateRunId) {
-    elements.benchmarkStatus.textContent = "Selecione execuções diferentes para comparar.";
+    elements.benchmarkStatus.textContent = "Select different runs to compare.";
     return;
   }
   try {
@@ -1702,7 +1799,7 @@ async function compareBenchmarkRuns() {
     const comparison = await fetchJson(`/api/benchmarks/comparisons?${query}`);
     state.benchmark.comparison = comparison;
     renderBenchmarkComparison(comparison);
-    elements.benchmarkStatus.textContent = "Comparação histórica calculada sem alterar a evidência original.";
+    elements.benchmarkStatus.textContent = "Historical comparison calculated without changing the original evidence.";
   } catch (error) {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
   }
@@ -1751,7 +1848,7 @@ function renderBenchmarkComparison(comparison) {
   if (comparison.comparability !== "comparable") {
     const warning = document.createElement("p");
     warning.className = "benchmark-comparison-warning";
-    warning.textContent = "Deltas numéricos são apenas evidência; nenhuma regressão ou melhoria foi classificada porque as condições não são diretamente comparáveis.";
+    warning.textContent = "Numeric deltas are evidence only; no regression or improvement was classified because the conditions are not directly comparable.";
     elements.benchmarkComparison.append(warning);
   } else if (comparison.signals.length > 0) {
     const signals = document.createElement("ul");
@@ -1769,7 +1866,7 @@ function renderBenchmarkComparison(comparison) {
   if (comparison.changedMetadata.length > 0) {
     const metadata = document.createElement("details");
     const summary = document.createElement("summary");
-    summary.textContent = `Metadados alterados (${comparison.changedMetadata.length})`;
+    summary.textContent = `Changed metadata (${comparison.changedMetadata.length})`;
     const list = document.createElement("dl");
     list.className = "benchmark-comparison-metadata";
     for (const change of comparison.changedMetadata) {
@@ -1831,7 +1928,7 @@ function renderBenchmarkRecommendationControls() {
     [
       {
         value: "active",
-        label: `Perfil ativo · ${active.displayName} v${active.version}`
+        label: `Active profile · ${active.displayName} v${active.version}`
       },
       { value: "default", label: "Default v1" }
     ],
@@ -1839,8 +1936,8 @@ function renderBenchmarkRecommendationControls() {
   );
   elements.researchBenchmarkRecommendation.disabled = !catalog.externalResearchAvailable;
   elements.researchBenchmarkRecommendation.title = catalog.externalResearchAvailable
-    ? "Solicitar pesquisa externa explícita e separada da evidência local."
-    : "Configure Ollama Web Search para habilitar pesquisa externa opcional.";
+    ? "Request explicit external research separate from local evidence."
+    : "Configure Ollama Web Search to enable optional external research.";
 }
 
 async function generateBenchmarkRecommendation(includeExternalEvidence) {
@@ -1851,8 +1948,8 @@ async function generateBenchmarkRecommendation(includeExternalEvidence) {
   elements.researchBenchmarkRecommendation.disabled = true;
   renderBenchmarkRecommendation(null);
   elements.benchmarkRecommendationStatus.textContent = includeExternalEvidence
-    ? "Pesquisando fontes externas explicitamente; os dados locais não serão enviados."
-    : "Calculando recomendação somente com evidência local persistida.";
+    ? "Explicitly researching external sources; local data will not be sent."
+    : "Calculating recommendation using persisted local evidence only.";
   try {
     const recommendation = await fetchJson("/api/benchmarks/recommendations", {
       method: "POST",
@@ -1894,7 +1991,7 @@ function renderBenchmarkRecommendation(recommendation) {
   const trace = document.createElement("details");
   trace.className = "benchmark-recommendation-trace";
   const traceSummary = document.createElement("summary");
-  traceSummary.textContent = "Detalhes da recomendação";
+  traceSummary.textContent = "Recommendation details";
   const traceBody = document.createElement("p");
   traceBody.textContent = `${recommendation.algorithmVersion} · ${recommendation.category} · `
     + `${recommendation.scoringProfile.displayName} v${recommendation.scoringProfile.version} · `
@@ -1922,12 +2019,12 @@ function renderBenchmarkRecommendation(recommendation) {
       + `${candidate.partialHistoricalRunCount} partial · ${candidate.incompatibleHistoricalRunCount} incompatible`;
     card.append(heading, summary);
     card.append(
-      recommendationList("Pontos fortes", candidate.strengths, "strengths"),
-      recommendationList("Limitações", candidate.weaknesses, "weaknesses")
+      recommendationList("Strengths", candidate.strengths, "strengths"),
+      recommendationList("Limitations", candidate.weaknesses, "weaknesses")
     );
     const evidence = document.createElement("details");
     const evidenceSummary = document.createElement("summary");
-    evidenceSummary.textContent = `Evidência local (${candidate.evidence.length})`;
+    evidenceSummary.textContent = `Local evidence (${candidate.evidence.length})`;
     const links = document.createElement("div");
     links.className = "benchmark-recommendation-evidence-links";
     for (const item of candidate.evidence) {
@@ -1935,7 +2032,7 @@ function renderBenchmarkRecommendation(recommendation) {
       button.type = "button";
       button.className = "benchmark-result-link";
       button.dataset.recommendationRunId = item.runId;
-      button.textContent = `${new Date(item.startedAt).toLocaleDateString()} · ${benchmarkSuiteLabel(item.suiteId)} · `
+      button.textContent = `${new Date(item.startedAt).toLocaleDateString(window.AgenticRouterI18n.locale)} · ${benchmarkSuiteLabel(item.suiteId)} · `
         + `${item.source} · ${item.comparability} · ${Number(item.categoryScore).toFixed(2)}`;
       links.append(button);
     }
@@ -1949,7 +2046,7 @@ function renderBenchmarkRecommendation(recommendation) {
         alternatives.className = "benchmark-recommendation-alternatives";
         const alternativesSummary = document.createElement("summary");
         alternativesSummary.textContent =
-          `Alternativas ranqueadas (${recommendation.candidates.length - 1})`;
+          `Ranked alternatives (${recommendation.candidates.length - 1})`;
         alternativesBody = document.createElement("div");
         alternativesBody.className = "benchmark-recommendation-alternatives-body";
         alternatives.append(alternativesSummary, alternativesBody);
@@ -1969,11 +2066,11 @@ function renderBenchmarkRecommendation(recommendation) {
     const missing = document.createElement("details");
     missing.className = "benchmark-recommendation-missing";
     const summary = document.createElement("summary");
-    summary.textContent = `Evidência que mais aumentaria a confiança (${recommendation.missingEvidence.length})`;
+    summary.textContent = `Evidence that would most increase confidence (${recommendation.missingEvidence.length})`;
     const list = document.createElement("ul");
     for (const item of recommendation.missingEvidence) {
       const row = document.createElement("li");
-      row.textContent = `${item.model} × ${benchmarkHarnessLabel(item.harness)} · ${item.reason} · suite sugerida: ${item.suggestedSuite}`;
+      row.textContent = `${item.model} × ${benchmarkHarnessLabel(item.harness)} · ${item.reason} · suggested suite: ${item.suggestedSuite}`;
       list.append(row);
     }
     missing.append(summary, list);
@@ -1988,7 +2085,7 @@ function renderBenchmarkRecommendation(recommendation) {
   const external = document.createElement("section");
   external.className = "benchmark-recommendation-external";
   const externalTitle = document.createElement("h4");
-  externalTitle.textContent = "Evidência externa (separada)";
+  externalTitle.textContent = "External evidence (separate)";
   const externalStatus = document.createElement("p");
   externalStatus.textContent = `Status: ${recommendation.externalResearchStatus}`;
   external.append(externalTitle, externalStatus);
@@ -2041,7 +2138,7 @@ async function openBenchmarkRecommendationEvidence(event) {
     elements.benchmarkHistory.value = runId;
     await rescoreBenchmarkResult();
     elements.benchmarkResultDetail.scrollIntoView({ behavior: "smooth", block: "start" });
-    elements.benchmarkStatus.textContent = "Evidência local de suporte aberta.";
+    elements.benchmarkStatus.textContent = "Supporting local evidence opened.";
   } catch (error) {
     elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
   }
@@ -2056,25 +2153,25 @@ async function runBenchmarkSuite(event) {
     'input[name="benchmark-harness"]:checked:not(:disabled)'
   )].map(input => input.value);
   if (harnesses.length === 0) {
-    elements.benchmarkStatus.textContent = "Selecione ao menos um harness disponível.";
+    elements.benchmarkStatus.textContent = "Select at least one available harness.";
     return;
   }
   const models = selectedBenchmarkModels();
   if (models.length === 0) {
-    elements.benchmarkStatus.textContent = "Selecione ao menos um modelo local instalado.";
+    elements.benchmarkStatus.textContent = "Select at least one installed local model.";
     return;
   }
   const clientRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
   const suites = selectedBenchmarkSuites();
   if (suites.length === 0) {
-    elements.benchmarkStatus.textContent = "Selecione CRUD, Agent Behavior ou ambos.";
+    elements.benchmarkStatus.textContent = "Select CRUD, Agent Behavior, or both.";
     return;
   }
   state.activeBenchmarkRunId = clientRunId;
   sessionStorage.setItem("agentic-router-benchmark-live-run", clientRunId);
   setBenchmarkRunning(true);
   initializeBenchmarkLive(clientRunId, models, harnesses, suites);
-  elements.benchmarkStatus.textContent = "Iniciando dashboard ao vivo…";
+  elements.benchmarkStatus.textContent = "Starting live dashboard…";
   elements.benchmarkResultsBody.replaceChildren();
   renderBenchmarkLive();
 
@@ -2101,7 +2198,7 @@ async function runBenchmarkSuite(event) {
     state.activeBenchmarkRunId = started.runId;
     sessionStorage.setItem("agentic-router-benchmark-live-run", started.runId);
     state.benchmark.live.runId = started.runId;
-    elements.benchmarkStatus.textContent = "Benchmark em execução; eventos conectados.";
+    elements.benchmarkStatus.textContent = "Benchmark running; events connected.";
     connectBenchmarkEvents(started.runId, 0, started.eventsUrl);
   } catch (error) {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
@@ -2174,8 +2271,8 @@ async function resumeLiveBenchmark(runId) {
     }
     if (!view.terminal) {
       elements.benchmarkStatus.textContent = view.cancellationRequested
-        ? "Cancelamento em andamento…"
-        : "Dashboard reconectado ao benchmark em execução.";
+        ? "Cancellation in progress…"
+        : "Dashboard reconnected to the running benchmark.";
       connectBenchmarkEvents(runId, view.lastSequence);
       renderBenchmarkLive();
     }
@@ -2202,17 +2299,17 @@ function connectBenchmarkEvents(runId, afterSequence = 0, eventsUrl = null) {
     try {
       applyBenchmarkProgress(JSON.parse(event.data));
     } catch {
-      elements.benchmarkStatus.textContent = "Evento ao vivo inválido; aguardando reconexão.";
+      elements.benchmarkStatus.textContent = "Invalid live event; waiting to reconnect.";
     }
   });
   source.onopen = () => {
     if (state.activeBenchmarkRunId) {
-      elements.benchmarkStatus.textContent = "Benchmark em execução; eventos conectados.";
+      elements.benchmarkStatus.textContent = "Benchmark running; events connected.";
     }
   };
   source.onerror = () => {
     if (state.activeBenchmarkRunId) {
-      elements.benchmarkStatus.textContent = "Conexão interrompida; reconectando sem cancelar a execução…";
+      elements.benchmarkStatus.textContent = "Connection interrupted; reconnecting without canceling the run…";
     }
   };
   if (!state.benchmarkElapsedTimer) {
@@ -2352,7 +2449,7 @@ function applyBenchmarkProgress(progressEvent, render = true) {
         item.state = "cancelling";
       }
     }
-    elements.benchmarkStatus.textContent = "Cancelamento em andamento…";
+    elements.benchmarkStatus.textContent = "Cancellation in progress…";
   } else if (progressEvent.type === "run.completed" && progressEvent.finalResult) {
     finishBenchmarkLive(progressEvent.finalResult);
     return;
@@ -2377,9 +2474,9 @@ function renderBenchmarkLive() {
   const completedCells = cells.filter(cell => terminalStates.has(cell.state)).length;
   const currentCell = cells.find(cell => ["running", "validating", "harness-completed"].includes(cell.state));
   elements.benchmarkRunSummary.textContent =
-    `Execução ao vivo · ${completedCells}/${cells.length} célula(s) · `
-    + `${currentCell ? `atual ${currentCell.model} × ${benchmarkHarnessLabel(currentCell.harness)}` : "sem célula ativa"} · `
-    + `${Math.max(0, cells.length - completedCells)} restante(s) · local sequencial`;
+    `Live run · ${completedCells}/${cells.length} cell(s) · `
+    + `${currentCell ? `current ${currentCell.model} × ${benchmarkHarnessLabel(currentCell.harness)}` : "no active cell"} · `
+    + `${Math.max(0, cells.length - completedCells)} remaining · sequential local run`;
   elements.benchmarkLiveDashboard.replaceChildren();
   for (const harness of cells) {
     const card = document.createElement("article");
@@ -2398,11 +2495,11 @@ function renderBenchmarkLive() {
     const current = document.createElement("p");
     current.className = "benchmark-live-current";
     current.textContent = harness.currentTest
-      ? `Atual: ${harness.currentTest} · ${harness.tests[harness.currentTest]?.state ?? harness.state}`
+      ? `Current: ${harness.currentTest} · ${harness.tests[harness.currentTest]?.state ?? harness.state}`
         + (harness.tests[harness.currentTest]?.currentTurn
           ? ` · turn ${harness.tests[harness.currentTest].currentTurn}/${harness.tests[harness.currentTest].totalTurns}`
           : "")
-      : "Sem teste ativo.";
+      : "No active test.";
     card.append(heading, summary, current);
     for (const test of Object.values(harness.tests)) {
       const details = document.createElement("details");
@@ -2439,7 +2536,7 @@ function renderBenchmarkLive() {
   }
   renderProvisionalBenchmarkRanking(live.ranking);
   elements.benchmarkResultDetail.textContent =
-    "Expanda um teste no card para ver atividade útil e fatos de validação. O resultado final substituirá este estado.";
+    "Expand a test in the card to view useful activity and validation facts. The final result will replace this state.";
 }
 
 function renderProvisionalBenchmarkRanking(ranking) {
@@ -2483,8 +2580,8 @@ function finishBenchmarkLive(result) {
     elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
   });
   elements.benchmarkStatus.textContent = result.terminalState === "cancelled"
-    ? "Execução cancelada com resultado final persistido."
-    : "Benchmark concluído e persistido.";
+    ? "Run canceled with a persisted final result."
+    : "Benchmark completed and persisted.";
 }
 
 function failBenchmarkLive(message) {
@@ -2495,7 +2592,7 @@ function failBenchmarkLive(message) {
   state.activeBenchmarkRunId = null;
   sessionStorage.removeItem("agentic-router-benchmark-live-run");
   setBenchmarkRunning(false);
-  elements.benchmarkStatus.textContent = message ?? "O benchmark ao vivo falhou antes do resultado final.";
+  elements.benchmarkStatus.textContent = message ?? "The live benchmark failed before the final result.";
 }
 
 function clearBenchmarkLiveConnection() {
@@ -2513,7 +2610,7 @@ async function cancelBenchmarkSuite() {
   if (!state.activeBenchmarkRunId) {
     return;
   }
-  elements.benchmarkStatus.textContent = "Solicitando cancelamento limpo…";
+  elements.benchmarkStatus.textContent = "Requesting clean cancellation…";
   for (const harness of Object.values(state.benchmark?.live?.cells ?? {})) {
     if (!["completed", "cancelled"].includes(harness.state)) {
       harness.state = "cancelling";
@@ -2562,8 +2659,8 @@ async function openPersistedBenchmark() {
   try {
     const runId = elements.benchmarkHistory.value;
     elements.benchmarkStatus.textContent = runId
-      ? "Carregando resultado persistido…"
-      : "Limpando resultado carregado…";
+      ? "Loading persisted result…"
+      : "Clearing loaded result…";
     const selected = runId
       ? await fetchJson(`/api/benchmarks/suite-runs/${encodeURIComponent(runId)}`)
       : null;
@@ -2584,8 +2681,8 @@ async function openPersistedBenchmark() {
     await rescoreBenchmarkResult();
     await generateGeneralBenchmarkRecommendation();
     elements.benchmarkStatus.textContent = selected
-      ? `Resultado persistido carregado: ${benchmarkSuiteLabel(selected.suiteId)} · ${selected.runId.slice(0, 8)}.`
-      : "Nenhum resultado persistido carregado.";
+      ? `Persisted result loaded: ${benchmarkSuiteLabel(selected.suiteId)} · ${selected.runId.slice(0, 8)}.`
+      : "No persisted result loaded.";
   } catch (error) {
     renderBenchmarkResult(state.benchmark?.result ?? null);
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
@@ -2604,8 +2701,8 @@ function renderBenchmarkResult(result) {
     ? JSON.stringify(result, null, 2)
     : "";
   if (!result) {
-    elements.benchmarkRunSummary.textContent = "Execute ou abra um resultado persistido.";
-    elements.benchmarkResultDetail.textContent = "Selecione um harness na tabela para inspecionar os cenários.";
+    elements.benchmarkRunSummary.textContent = "Run or open a persisted result.";
+    elements.benchmarkResultDetail.textContent = "Select a harness in the table to inspect scenarios.";
     return;
   }
 
@@ -2614,15 +2711,15 @@ function renderBenchmarkResult(result) {
     : null;
   const profile = projection?.activeProfile ?? state.benchmark?.scoringProfile;
   const modelSummary = result.selectedModels?.length > 1
-    ? `${result.selectedModels.length} modelos × ${result.selectedHarnesses?.length ?? 0} harnesses`
+    ? `${result.selectedModels.length} models × ${result.selectedHarnesses?.length ?? 0} harnesses`
     : result.selectedModels?.[0] ?? result.model;
   elements.benchmarkRunSummary.textContent =
     `${modelSummary} · ${benchmarkSuiteLabel(result.suiteId)} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)}`;
   const originalScore = benchmarkAggregateOriginalScore(result);
   const currentScore = benchmarkAggregateCurrentScore(projection, result);
   elements.benchmarkScoreContext.textContent = profile
-    ? `Measured evidence inalterada · Original score ${originalScore.toFixed(2)} · Current-profile score ${currentScore.toFixed(2)} com ${profile.displayName} v${profile.version}`
-    : "Measured evidence e Calculated score são apresentados separadamente.";
+    ? `Measured evidence unchanged · Original score ${originalScore.toFixed(2)} · Current-profile score ${currentScore.toFixed(2)} with ${profile.displayName} v${profile.version}`
+    : "Measured evidence and Calculated score are presented separately.";
   if ((result.cells ?? []).length > 0) {
     renderBenchmarkMatrix(result, projection);
     renderBenchmarkRankings(result, projection);
@@ -2683,7 +2780,7 @@ function renderBenchmarkMatrix(result, projection) {
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
   const modelHeading = document.createElement("th");
-  modelHeading.textContent = "Modelo";
+  modelHeading.textContent = "Model";
   headRow.append(modelHeading);
   for (const harness of harnesses) {
     const heading = document.createElement("th");
@@ -2799,7 +2896,7 @@ function renderBenchmarkMatrixCellDetail(model, harnessId) {
     const heading = document.createElement("h4");
     heading.textContent = `${model} × ${benchmarkHarnessLabel(harnessId)} · ${cell?.status ?? "unavailable"}`;
     const message = document.createElement("p");
-    message.textContent = cell?.message ?? "Esta combinação não produziu resultado executável.";
+    message.textContent = cell?.message ?? "This combination did not produce an executable result.";
     elements.benchmarkResultDetail.append(heading, message);
     return;
   }
@@ -2827,7 +2924,7 @@ function openBenchmarkHarnessResult(event) {
 function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
   elements.benchmarkResultDetail.replaceChildren();
   if (!harness) {
-    elements.benchmarkResultDetail.textContent = "Resultado do harness indisponível.";
+    elements.benchmarkResultDetail.textContent = "Harness result unavailable.";
     return;
   }
   const heading = document.createElement("h4");
@@ -2855,7 +2952,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
   }
   if (harness.tests.length === 0) {
     const empty = document.createElement("p");
-    empty.textContent = "Nenhum teste iniciou antes do cancelamento.";
+    empty.textContent = "No test started before cancellation.";
     elements.benchmarkResultDetail.append(empty);
     return;
   }
@@ -2910,28 +3007,28 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       details.append(error);
     }
     const promptLabel = document.createElement("strong");
-    promptLabel.textContent = "Prompt canônico";
+    promptLabel.textContent = "Canonical prompt";
     const prompt = document.createElement("pre");
     prompt.textContent = test.run.prompt;
     const reportLabel = document.createElement("strong");
-    reportLabel.textContent = "Relatório final do harness";
+    reportLabel.textContent = "Final harness report";
     const report = document.createElement("pre");
-    report.textContent = test.rawResult.finalHarnessReport || "(sem relatório)";
+    report.textContent = test.rawResult.finalHarnessReport || "(no report)";
     details.append(promptLabel, prompt, reportLabel, report);
     if ((test.rawResult.turns ?? []).length > 0) {
       const turnsLabel = document.createElement("strong");
-      turnsLabel.textContent = "Turnos persistidos";
+      turnsLabel.textContent = "Persisted turns";
       const turns = document.createElement("ol");
       for (const turn of test.rawResult.turns) {
         const item = document.createElement("li");
-        item.textContent = `${turn.order}. ${turn.name} · ${turn.executionStatus} · ${turn.durationMilliseconds} ms · ${turn.finalReport || "(sem relatório)"}`;
+        item.textContent = `${turn.order}. ${turn.name} · ${turn.executionStatus} · ${turn.durationMilliseconds} ms · ${turn.finalReport || "(no report)"}`;
         turns.append(item);
       }
       details.append(turnsLabel, turns);
     }
     if ((test.rawResult.hostEvents ?? []).length > 0) {
       const hostLabel = document.createElement("strong");
-      hostLabel.textContent = "Eventos do Host";
+      hostLabel.textContent = "Host events";
       const hostEvents = document.createElement("ul");
       for (const hostEvent of test.rawResult.hostEvents) {
         const item = document.createElement("li");
@@ -2978,7 +3075,7 @@ function renderRecoveryState() {
   document.body.dataset.historyAutoload =
     recovery?.historyAutoLoadDisabled ? "disabled" : "enabled";
   elements.safeModeReason.textContent = recovery?.reason
-    ?? "Execute, cloud e alteraÃ§Ãµes de configuraÃ§Ã£o estÃ£o desativados.";
+    ?? "Execute, cloud, and configuration changes are disabled.";
 
   if (!recovery?.safeMode) {
     return;
@@ -2992,39 +3089,24 @@ function renderRecoveryState() {
 }
 
 function updateProviderStatus(response) {
-  elements.providerBadge.textContent = response.available ? "Online" : "Indisponível";
+  elements.providerBadge.textContent = response.available ? "Online" : "Unavailable";
   elements.providerBadge.className = `badge ${response.available ? "success" : "error"}`;
-  elements.providerDetail.textContent = response.available
-    ? "HTTP conectado"
-    : response.error?.message ?? "Falha de conexão";
-  elements.modelCount.textContent =
-    `${response.models.length} instalado${response.models.length === 1 ? "" : "s"}`;
+  elements.runtimeDetails.dataset.provider = response.available ? "online" : "offline";
 }
 
-function updateDeviceStatus(response) {
-  const physicalDevices = response.devices.filter(device => !device.isAuto);
-  elements.deviceCount.textContent =
-    `${physicalDevices.length} detectado${physicalDevices.length === 1 ? "" : "s"}`;
-  elements.deviceDiagnostic.textContent = response.diagnostic ?? "";
-}
+function updateDeviceStatus() {}
 
 function renderWorkspace() {
   const active = activeWorkspaceProfile();
   const workspace = state.workspace;
   const valid = Boolean(workspace?.valid);
-  elements.workspaceBadge.textContent = active?.available
-    ? "Ativo"
-    : active
-      ? "Indisponível"
-      : "Não configurado";
-  elements.workspaceBadge.className =
-    `badge ${active?.available ? "success" : active ? "error" : "muted"}`;
   elements.workspacePath.textContent = active
-    ? `${active.name} · ${shortenPath(active.path)}`
-    : "Nenhuma pasta selecionada";
+    ? `${active.name} · ${active.path}`
+    : "No folder selected";
+  renderProjectSidebar();
   elements.workspaceValidation.textContent = workspace?.diagnostic
     ?? workspace?.status
-    ?? "Não configurado";
+    ?? "Not configured";
   elements.workspaceValidation.className =
     `workspace-validation ${valid ? "valid" : workspace?.configured ? "invalid" : ""}`;
   elements.trustedWorkspacePath.value = workspace?.path ?? "";
@@ -3082,6 +3164,10 @@ async function refreshGit() {
 function renderGitCard() {
   const git = state.git;
   const repository = git?.repository;
+  elements.gitViewFolder.hidden = !activeWorkspaceProfile()?.available;
+  elements.gitInitializeQuick.hidden = git?.state !== "not-initialized";
+  elements.gitCommitQuick.hidden = git?.state !== "available";
+  elements.gitPushQuick.hidden = git?.state !== "available";
   elements.gitCard.classList.toggle(
     "has-conflicts",
     (repository?.conflictedPaths?.length ?? 0) > 0
@@ -3119,6 +3205,12 @@ function renderGitCard() {
         + `${repository.upstream ?? "No upstream"}. `
         + `Ahead ${repository.ahead}, behind ${repository.behind}.`
     );
+    elements.gitCommitQuick.disabled = repository.clean
+      || repository.truncated
+      || repository.conflictedPaths.length > 0
+      || Boolean(repository.operationInProgress);
+    elements.gitPushQuick.disabled = Boolean(repository.detachedHead)
+      || Boolean(repository.operationInProgress);
     return;
   }
 
@@ -3134,9 +3226,202 @@ function renderGitCard() {
     "aria-label",
     `Git: ${elements.gitSummary.textContent}. ${elements.gitUpstreamSummary.textContent}`
   );
+  elements.gitInitializeQuick.disabled = !notInitialized;
+}
+
+async function requireExecuteForGitAction(actionName) {
+  if (state.interactionMode === "execute") {
+    return true;
+  }
+
+  if (!await showAppConfirm(
+    `${actionName} changes the workspace and requires Execute mode. `
+      + "Switch to Execute now? The action will not run until you select it again.",
+    {
+      title: "Switch to Execute?",
+      confirmLabel: "Switch to Execute"
+    }
+  )) {
+    return false;
+  }
+
+  setInteractionMode("execute");
+  elements.gitQuickStatus.textContent =
+    "Execute mode enabled. Select the Git action again to confirm.";
+  return false;
+}
+
+async function initializeGitRepositoryQuick() {
+  if (!await requireExecuteForGitAction("Initialize the repository")) {
+    return;
+  }
+  if (!await showAppConfirm(
+    "Initialize Git at the active project root with the main branch? No commit or remote will be created.",
+    {
+      title: "Initialize Git repository?",
+      confirmLabel: "Initialize"
+    }
+  )) {
+    return;
+  }
+
+  elements.gitQuickStatus.textContent = "Initializing…";
+  try {
+    state.git = await fetchJson(
+      "/api/git/initialize",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          interactionMode: state.interactionMode,
+          actionId: state.git.initializeActionId,
+          confirmed: true
+        })
+      }
+    );
+    renderGitCard();
+    renderSettingsSummaries();
+    elements.gitQuickStatus.textContent = "Repository initialized on main.";
+  } catch (error) {
+    elements.gitQuickStatus.textContent = gitActionError(error);
+  }
+}
+
+async function commitProjectChanges() {
+  if (!await requireExecuteForGitAction("Create a commit")) {
+    return;
+  }
+  const requiresValidationOverride = Boolean(
+    state.settings?.gitDelivery?.requireValidationBeforeCommit
+  );
+  const message = await showAppPrompt(
+    "Enter a message or leave it blank to generate a concise message with the selected local model."
+      + `${requiresValidationOverride
+        ? " This compact flow confirms the configured option for an explicit commit without session validation."
+        : ""}`,
+    {
+      title: "Commit current changes",
+      inputLabel: "Optional message",
+      confirmLabel: "Commit"
+    }
+  );
+  if (message === null) {
+    return;
+  }
+
+  let model = null;
+  if (message.trim().length === 0) {
+    const selected = elements.modelSelector.value;
+    const selectedOption = modelOptions().find(option => option.value === selected);
+    if (selected === "auto" || selectedOption?.provider !== "ollama-local") {
+      elements.gitQuickStatus.textContent =
+        "Select a specific local model or enter a commit message.";
+      return;
+    }
+    model = selected;
+  }
+
+  elements.gitQuickStatus.textContent = message.trim().length === 0
+    ? "Generating a local message and creating the commit…"
+    : "Creating commit…";
+  try {
+    const result = await fetchJson(
+      "/api/git/commit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          interactionMode: state.interactionMode,
+          actionId: state.git.commitActionId,
+          confirmed: true,
+          message,
+          model,
+          commitWithoutValidation: requiresValidationOverride
+        })
+      }
+    );
+    state.git = result.overview;
+    renderGitCard();
+    renderSettingsSummaries();
+    elements.gitQuickStatus.textContent =
+      `Commit ${shortHash(result.commitHash)} created: ${result.commitSubject}`;
+  } catch (error) {
+    elements.gitQuickStatus.textContent = gitActionError(error);
+  }
+}
+
+async function pushProjectBranch() {
+  if (!await requireExecuteForGitAction("Push the current branch")) {
+    return;
+  }
+  const upstream = state.git?.repository?.upstream;
+  if (!await showAppConfirm(
+    upstream
+      ? `Push the current branch to ${upstream} using the existing configuration?`
+      : "The current branch has no upstream. Try the push to get the Host diagnostic?",
+    {
+      title: "Push the current branch?",
+      confirmLabel: "Push"
+    }
+  )) {
+    return;
+  }
+
+  elements.gitQuickStatus.textContent = "Running preflight and push…";
+  try {
+    const result = await fetchJson(
+      "/api/git/push",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          browserSessionId: state.browserSessionId,
+          interactionMode: state.interactionMode,
+          actionId: state.git.pushActionId,
+          confirmed: true
+        })
+      }
+    );
+    state.git = result.overview;
+    renderGitCard();
+    renderSettingsSummaries();
+    elements.gitQuickStatus.textContent = "Push confirmed by the upstream.";
+  } catch (error) {
+    elements.gitQuickStatus.textContent = gitActionError(error);
+  }
+}
+
+async function viewCurrentWorkspaceFolder() {
+  elements.gitViewFolder.disabled = true;
+  elements.gitQuickStatus.textContent = "Opening folder in Explorer…";
+
+  try {
+    await fetchJson(
+      "/api/workspaces/active/open-folder",
+      {
+        method: "POST"
+      }
+    );
+    elements.gitQuickStatus.textContent = "Folder opened in Explorer.";
+  } catch (error) {
+    elements.gitQuickStatus.textContent = error.message;
+  } finally {
+    elements.gitViewFolder.disabled = false;
+  }
+}
+
+function gitActionError(error) {
+  return `${error.message}${error.payload?.diagnostic
+    ? ` · ${error.payload.diagnostic}`
+    : ""}${error.payload?.traceId
+    ? ` · Trace ID: ${error.payload.traceId}`
+    : ""}`;
 }
 
 async function openGitPanel() {
+  elements.runtimeDetails.open = false;
   elements.gitActionStatus.textContent = "";
   await refreshGit();
   renderGitPanel();
@@ -3181,7 +3466,7 @@ function renderGitPanel() {
         ? `${shortHash(git.latestCommit.hash)} · ${git.latestCommit.subject}`
         : "No commits"],
       ["Latest timestamp", git.latestCommit?.authoredAt
-        ? new Date(git.latestCommit.authoredAt).toLocaleString()
+        ? new Date(git.latestCommit.authoredAt).toLocaleString(window.AgenticRouterI18n.locale)
         : "Unavailable"],
       ["Working state", repository.clean ? "clean" : "dirty"],
       ["Upstream", repository.upstream ?? "Not configured"],
@@ -3244,17 +3529,17 @@ function renderGitPanel() {
 async function initializeGitRepository() {
   if (state.interactionMode !== "execute") {
     const switchMode = await showAppConfirm(
-      "A criação do repositório exige o modo Execute. O painel Git será fechado e nenhuma alteração será feita até você reabri-lo e confirmar a inicialização.",
+      "Repository creation requires Execute mode. The Git panel will close and no change will be made until you reopen it and confirm initialization.",
       {
-        title: "Mudar para o modo Execute?",
-        confirmLabel: "Fechar e mudar para Execute"
+        title: "Switch to Execute mode?",
+        confirmLabel: "Close and switch to Execute"
       }
     );
     if (switchMode) {
       closeGitPanel();
       setInteractionMode("execute");
       showToast(
-        "Modo Execute ativado. Reabra o painel Git para revisar e confirmar a criação do repositório.",
+        "Execute mode enabled. Reopen the Git panel to review and confirm repository creation.",
         "success"
       );
     }
@@ -3263,8 +3548,8 @@ async function initializeGitRepository() {
   const facts = "Initialize Git repository at the trusted-workspace root.\n"
     + "Initial branch: main\nNo commit, staging, remote, or project file will be created.";
   if (!await showAppConfirm(facts, {
-    title: "Inicializar repositório Git?",
-    confirmLabel: "Inicializar"
+    title: "Initialize Git repository?",
+    confirmLabel: "Initialize"
   })) {
     return;
   }
@@ -3332,7 +3617,7 @@ function cancelGitConfigurationEdit() {
 
 async function saveGitConfiguration() {
   if (state.interactionMode !== "execute") {
-    showToast("Mude para o modo Execute antes de alterar a configuração do repositório.");
+    showToast("Switch to Execute mode before changing repository configuration.");
     return;
   }
 
@@ -3367,7 +3652,7 @@ async function saveGitConfiguration() {
     if (changes.length === 0) {
       state.gitConfigurationEditing = false;
       renderGitConfigurationEditState();
-      elements.gitActionStatus.textContent = "Nenhuma alteração para salvar.";
+      elements.gitActionStatus.textContent = "No changes to save.";
       return;
     }
     const summary = changes.map(change => change.kind === "identity"
@@ -3375,8 +3660,8 @@ async function saveGitConfiguration() {
       : `origin = "${change.value}"`
     ).join("\n");
     if (!await showAppConfirm(
-      `Aplicar no repositório local:\n${summary}\n\nA configuração global do Git não será alterada.`,
-      { title: "Salvar configuração do repositório?", confirmLabel: "Salvar" }
+      `Apply to the local repository:\n${summary}\n\nGlobal Git configuration will not be changed.`,
+      { title: "Save repository configuration?", confirmLabel: "Save" }
     )) {
       return;
     }
@@ -3422,8 +3707,8 @@ async function saveGitConfiguration() {
     renderGitCard();
     renderGitPanel();
     renderSettingsSummaries();
-    elements.gitActionStatus.textContent = "Configuração local do repositório salva.";
-    showToast("Configuração do repositório salva.", "success");
+    elements.gitActionStatus.textContent = "Local repository configuration saved.";
+    showToast("Repository configuration saved.", "success");
   } catch (error) {
     const message = `${error.message} ${error.payload?.traceId ? `Trace ID: ${error.payload.traceId}` : ""}`.trim();
     elements.gitActionStatus.textContent = message;
@@ -3541,32 +3826,32 @@ function renderWorkspaceProfiles() {
       + `${profile.available ? "" : " unavailable"}`;
     entry.dataset.workspaceId = profile.id;
     const name = document.createElement("strong");
-    name.textContent = `${profile.name}${profile.active ? " · ativo" : ""}`;
+    name.textContent = `${profile.name}${profile.active ? " · active" : ""}`;
     const path = document.createElement("small");
     path.textContent = profile.path;
     const metadata = document.createElement("small");
     metadata.textContent = [
-      profile.projectProfile?.projectTypes?.join(", ") || "perfil não detectado",
-      profile.historyEnabled ? "histórico ativo" : "histórico desativado",
-      profile.available ? null : profile.diagnostic || "indisponível"
+      profile.projectProfile?.projectTypes?.join(", ") || "profile not detected",
+      profile.historyEnabled ? "history enabled" : "history disabled",
+      profile.available ? null : profile.diagnostic || "unavailable"
     ].filter(Boolean).join(" · ");
     const actions = document.createElement("div");
     actions.className = "workspace-profile-actions";
     const activate = document.createElement("button");
     activate.type = "button";
     activate.className = "secondary-button";
-    activate.textContent = profile.active ? "Ativo" : "Ativar";
+    activate.textContent = profile.active ? "Active" : "Enable";
     activate.disabled = profile.active || !profile.available;
     activate.addEventListener("click", () => activateWorkspace(profile.id));
     const rename = document.createElement("button");
     rename.type = "button";
     rename.className = "secondary-button";
-    rename.textContent = "Renomear";
+    rename.textContent = "Rename";
     rename.addEventListener("click", () => renameWorkspace(profile));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "secondary-button danger-button";
-    remove.textContent = "Remover";
+    remove.textContent = "Remove";
     remove.addEventListener("click", () => removeWorkspace(profile));
     actions.append(activate, rename, remove);
     entry.append(name, path, metadata, actions);
@@ -3606,7 +3891,7 @@ async function activateWorkspace(id) {
   await requestConversationTransition(
     async () =>
     {
-      elements.workspaceSaveStatus.textContent = "Ativando…";
+      elements.workspaceSaveStatus.textContent = "Activating…";
 
       try {
         await fetchJson(
@@ -3618,7 +3903,7 @@ async function activateWorkspace(id) {
         await resetConversationForWorkspaceChange();
         await refreshWorkspaceState();
         elements.workspaceSaveStatus.textContent =
-          "Workspace ativado. Modo Chat e aprovação manual restaurados.";
+          "Workspace activated. Chat mode and manual approval restored.";
       } catch (error) {
         elements.workspaceSaveStatus.textContent = error.message;
       }
@@ -3627,11 +3912,11 @@ async function activateWorkspace(id) {
 }
 
 async function renameWorkspace(profile) {
-  const name = (await showAppPrompt("Informe o novo nome do workspace.", {
-    title: "Renomear workspace",
-    inputLabel: "Nome do workspace",
+  const name = (await showAppPrompt("Enter the new workspace name.", {
+    title: "Rename workspace",
+    inputLabel: "Workspace name",
     inputValue: profile.name,
-    confirmLabel: "Renomear"
+    confirmLabel: "Rename"
   }))?.trim();
 
   if (!name) {
@@ -3664,9 +3949,9 @@ async function renameWorkspace(profile) {
 
 async function removeWorkspace(profile) {
   if (!await showAppConfirm(
-    `Remover "${profile.name}" e seu histórico local do Agentic Router? `
-      + "A pasta real e os arquivos do projeto não serão excluídos.",
-    { title: "Remover workspace?", confirmLabel: "Remover", danger: true }
+    `Remove "${profile.name}" and its local Agentic Router history? `
+      + "The actual folder and project files will not be deleted.",
+    { title: "Remove workspace?", confirmLabel: "Remove", danger: true }
   )) {
     return;
   }
@@ -3702,9 +3987,9 @@ async function changeWorkspaceHistory(event) {
   if (
     enabled
     && !await showAppConfirm(
-      "Ativar histórico local para este workspace? O conteúdo não será criptografado "
-        + "pelo Agentic Router v0.9.12.",
-      { title: "Ativar histórico local?", confirmLabel: "Ativar" }
+      "Enable local history for this workspace? The content will not be encrypted "
+        + "by Agentic Router v0.9.12.",
+      { title: "Enable local history?", confirmLabel: "Enable" }
     )
   ) {
     event.currentTarget.checked = false;
@@ -3751,26 +4036,26 @@ function renderProjectProfile() {
 
   if (!profile || profile.status === "unavailable") {
     elements.projectProfileSummary.textContent =
-      profile?.diagnostic ?? "Perfil indisponível";
+      profile?.diagnostic ?? "Profile unavailable";
     elements.projectProfileDetails.replaceChildren();
     return;
   }
 
   elements.projectProfileSummary.textContent =
-    `${profile.displayName} · ${profile.projectTypes.join(", ") || "sem marcadores de projeto"}`;
+    `${profile.displayName} · ${profile.projectTypes.join(", ") || "no project markers"}`;
   elements.projectProfileDetails.replaceChildren();
   const repository = document.createElement("p");
   repository.textContent = profile.repository.isGitRepository
     ? `Git · ${profile.repository.branch ?? "detached"} · `
-      + `${profile.repository.hasUncommittedChanges ? "alterações existentes" : "limpo"}`
-    : "Git não detectado";
+      + `${profile.repository.hasUncommittedChanges ? "existing changes" : "clean"}`
+    : "Git not detected";
   const instructions = document.createElement("p");
   instructions.textContent =
-    `${profile.instructionFiles.length} arquivo(s) AGENTS.md`;
+    `${profile.instructionFiles.length} AGENTS.md file(s)`;
   const validation = document.createElement("p");
   validation.textContent =
-    `Validação: ${profile.validationProfile?.name ?? "não configurada"} `
-    + `(${profile.validationProfile?.source ?? "nenhuma"})`;
+    `Validation: ${profile.validationProfile?.name ?? "not configured"} `
+    + `(${profile.validationProfile?.source ?? "none"})`;
   elements.projectProfileDetails.append(
     repository,
     instructions,
@@ -3787,7 +4072,7 @@ function renderProjectProfile() {
 
 async function refreshProjectProfile() {
   elements.refreshProjectProfile.disabled = true;
-  elements.projectProfileSummary.textContent = "Atualizando…";
+  elements.projectProfileSummary.textContent = "Refreshing…";
 
   try {
     state.projectProfile = await fetchJson(
@@ -3812,8 +4097,8 @@ async function refreshProjectProfile() {
 function renderValidationProfile(profile = state.validationProfiles?.active) {
   const detected = state.validationProfiles?.detected;
   elements.detectedValidationProfile.textContent = detected
-    ? `Sugestão detectada: ${detected.name} · ${detected.steps.length} etapa(s)`
-    : "Nenhuma sugestão de validação foi detectada.";
+    ? `Detected suggestion: ${detected.name} · ${detected.steps.length} step(s)`
+    : "No validation suggestion was detected.";
   elements.validationProfileName.value = profile?.name ?? "";
   elements.validationSteps.replaceChildren();
 
@@ -3826,7 +4111,7 @@ function renderValidationProfile(profile = state.validationProfiles?.active) {
 
 function addValidationStep(step = {}) {
   if (elements.validationSteps.children.length >= 8) {
-    elements.validationProfileStatus.textContent = "O limite é de 8 etapas.";
+    elements.validationProfileStatus.textContent = "The limit is 8 steps.";
     return;
   }
 
@@ -3835,23 +4120,23 @@ function addValidationStep(step = {}) {
   row.innerHTML = `
     <div class="validation-step-grid">
       <label><span>ID</span><input data-field="id" maxlength="40"></label>
-      <label><span>Rótulo</span><input data-field="label" maxlength="100"></label>
-      <label><span>Executável</span><input data-field="executable" maxlength="260"></label>
+      <label><span>Label</span><input data-field="label" maxlength="100"></label>
+      <label><span>Executable</span><input data-field="executable" maxlength="260"></label>
       <label class="validation-arguments">
         <span>Argumentos (array JSON)</span>
         <input data-field="arguments" spellcheck="false">
       </label>
-      <label><span>Diretório relativo</span><input data-field="workingDirectory"></label>
+      <label><span>Relative directory</span><input data-field="workingDirectory"></label>
       <label><span>Timeout (s)</span><input data-field="timeoutSeconds" type="number" min="1" max="120"></label>
       <label class="validation-required">
         <input data-field="required" type="checkbox">
-        <span>Obrigatória</span>
+        <span>Required</span>
       </label>
     </div>
     <div class="validation-step-buttons">
       <button class="secondary-button" data-action="up" type="button">↑</button>
       <button class="secondary-button" data-action="down" type="button">↓</button>
-      <button class="secondary-button danger-button" data-action="remove" type="button">Remover</button>
+      <button class="secondary-button danger-button" data-action="remove" type="button">Remove</button>
     </div>
   `;
   row.querySelector('[data-field="id"]').value =
@@ -3904,11 +4189,11 @@ function readValidationProfileEditor() {
     try {
       args = JSON.parse(row.querySelector('[data-field="arguments"]').value);
     } catch {
-      throw new Error("Os argumentos de cada etapa devem ser um array JSON válido.");
+      throw new Error("Each step's arguments must be a valid JSON array.");
     }
 
     if (!Array.isArray(args) || args.some(item => typeof item !== "string")) {
-      throw new Error("Os argumentos de cada etapa devem ser um array JSON de strings.");
+      throw new Error("Each step's arguments must be a JSON string array.");
     }
 
     return {
@@ -3938,9 +4223,9 @@ function updateValidationCommandPreview() {
       ? profile.steps.map(step =>
         `${step.executable} ${step.arguments.map(JSON.stringify).join(" ")}`
         + `\n  cwd: ${step.workingDirectory} · ${step.timeoutSeconds}s · `
-        + `${step.required ? "obrigatória" : "opcional"}`
+        + `${step.required ? "required" : "optional"}`
       ).join("\n")
-      : "Nenhuma etapa configurada.";
+      : "No steps configured.";
   } catch (error) {
     elements.validationCommandPreview.textContent = error.message;
   }
@@ -3950,17 +4235,17 @@ function resetValidationProfile() {
   const detected = state.validationProfiles?.detected;
   if (!detected) {
     elements.validationProfileStatus.textContent =
-      "Nenhuma sugestão detectada está disponível.";
+      "No detected suggestion is available.";
     return;
   }
 
   renderValidationProfile(detected);
   elements.validationProfileStatus.textContent =
-    "Sugestão carregada. Salve para ativá-la.";
+    "Suggestion loaded. Save to activate it.";
 }
 
 async function saveValidationProfile() {
-  elements.validationProfileStatus.textContent = "Validando e salvando…";
+  elements.validationProfileStatus.textContent = "Validating and saving…";
 
   try {
     const profile = readValidationProfileEditor();
@@ -3974,7 +4259,7 @@ async function saveValidationProfile() {
         body: JSON.stringify(profile)
       }
     );
-    elements.validationProfileStatus.textContent = "Perfil salvo.";
+    elements.validationProfileStatus.textContent = "Profile saved.";
     await refreshProjectProfile();
   } catch (error) {
     const fieldErrors = error.payload?.errors
@@ -3986,7 +4271,7 @@ async function saveValidationProfile() {
 }
 
 async function clearValidationProfile() {
-  elements.validationProfileStatus.textContent = "Limpando…";
+  elements.validationProfileStatus.textContent = "Clearing…";
 
   try {
     state.validationProfiles = await fetchJson(
@@ -3997,7 +4282,7 @@ async function clearValidationProfile() {
     );
     renderValidationProfile();
     elements.validationProfileStatus.textContent =
-      "Perfil ativo removido. Validação não configurada.";
+      "Active profile removed. Validation is not configured.";
     await refreshProjectProfile();
   } catch (error) {
     elements.validationProfileStatus.textContent = error.message;
@@ -4005,6 +4290,7 @@ async function clearValidationProfile() {
 }
 
 function openWorkspace() {
+  elements.runtimeDetails.open = false;
   elements.workspaceSaveStatus.textContent = "";
   renderWorkspace();
   elements.savedWorkspacesSection.open = true;
@@ -4026,7 +4312,7 @@ function showNewWorkspaceForm() {
   elements.newWorkspaceAccordion.open = true;
   elements.workspaceProfileName.value = "";
   elements.trustedWorkspacePath.value = "";
-  elements.workspaceValidation.textContent = "Selecione uma pasta confiável.";
+  elements.workspaceValidation.textContent = "Select a trusted folder.";
   elements.workspaceValidation.className = "workspace-validation";
   elements.workspaceSaveStatus.textContent = "";
   elements.newWorkspaceSection.scrollIntoView({
@@ -4057,7 +4343,7 @@ async function saveWorkspace(event) {
   setWorkspaceSaving(
     true
   );
-  elements.workspaceSaveStatus.textContent = "Validando…";
+  elements.workspaceSaveStatus.textContent = "Validating…";
 
   try {
     const created = await fetchJson(
@@ -4084,11 +4370,11 @@ async function saveWorkspace(event) {
     await resetConversationForWorkspaceChange();
     hideNewWorkspaceForm();
     await refreshWorkspaceState();
-    elements.workspaceSaveStatus.textContent = "Workspace adicionado e ativado";
+    elements.workspaceSaveStatus.textContent = "Workspace added and activated";
   } catch (error) {
     elements.workspaceValidation.textContent = error.message;
     elements.workspaceValidation.className = "workspace-validation invalid";
-    elements.workspaceSaveStatus.textContent = "Não foi possível salvar";
+    elements.workspaceSaveStatus.textContent = "Could not save";
   } finally {
     setWorkspaceSaving(
       false
@@ -4120,14 +4406,14 @@ async function pickWorkspace() {
     if (result.selected && result.path) {
       elements.trustedWorkspacePath.value = result.path;
       elements.workspaceValidation.textContent =
-        "Pasta selecionada. Clique em Salvar para torná-la confiável.";
+        "Folder selected. Click Save to trust it.";
       elements.workspaceValidation.className = "workspace-validation valid";
       elements.workspaceSaveStatus.textContent = "";
     } else if (result.cancelled) {
-      elements.workspaceSaveStatus.textContent = "Seleção cancelada";
+      elements.workspaceSaveStatus.textContent = "Selection canceled";
     } else {
       elements.workspaceValidation.textContent =
-        result.error ?? "Não foi possível abrir o seletor de pastas.";
+        result.error ?? "Could not open the folder picker.";
       elements.workspaceValidation.className = "workspace-validation invalid";
       elements.workspaceSaveStatus.textContent = "";
     }
@@ -4151,106 +4437,313 @@ async function clearWorkspace() {
 async function refreshSessions() {
   if (!activeWorkspaceProfile()) {
     state.sessions = null;
+    state.projectSessions = [];
     renderSessionHistory();
     return;
   }
 
   try {
-    state.sessions = await fetchJson("/api/sessions");
+    const [sessions, projects] = await Promise.all([
+      fetchJson("/api/sessions"),
+      fetchProjectConversations("")
+    ]);
+    state.sessions = sessions;
+    state.projectSessions = projects.results;
   } catch {
     state.sessions = null;
+    state.projectSessions = [];
   }
 
   renderSessionHistory();
 }
 
 function renderSessionHistory() {
-  elements.pinnedSessions.replaceChildren();
-  elements.recentSessions.replaceChildren();
-  elements.archivedSessions.replaceChildren();
   const usage = state.sessions?.usage;
   elements.historyUsage.textContent = usage
-    ? `${usage.sessionCount} sessão(ões) · ${formatBytes(usage.storageBytes)} · `
-      + `${usage.enabled ? "histórico ativo" : "histórico desativado"}`
+    ? `${usage.sessionCount} session(s) · ${formatBytes(usage.storageBytes)} · `
+      + `${usage.enabled ? "history enabled" : "history disabled"}`
       + `${usage.oldestSessionAt
-        ? ` · mais antiga ${new Date(usage.oldestSessionAt).toLocaleDateString()}`
+        ? ` · oldest ${new Date(usage.oldestSessionAt).toLocaleDateString(window.AgenticRouterI18n.locale)}`
         : ""}`
       + `${usage.newestSessionAt
-        ? ` · mais recente ${new Date(usage.newestSessionAt).toLocaleDateString()}`
+        ? ` · newest ${new Date(usage.newestSessionAt).toLocaleDateString(window.AgenticRouterI18n.locale)}`
         : ""}`
-    : "Nenhuma sessão armazenada.";
+    : "No stored sessions.";
   elements.enableSessionHistory.hidden = Boolean(usage?.enabled);
   renderPersistenceStatus();
-
-  for (const session of state.sessions?.pinned ?? []) {
-    elements.pinnedSessions.append(
-      createSessionEntry(session)
-    );
-  }
-
-  for (const session of state.sessions?.recent ?? []) {
-    elements.recentSessions.append(
-      createSessionEntry(session)
-    );
-  }
-
-  for (const session of state.sessions?.archived ?? []) {
-    elements.archivedSessions.append(
-      createSessionEntry(session)
-    );
-  }
-
-  elements.archivedSessionSection.hidden =
-    (state.sessions?.archived?.length ?? 0) === 0;
-  elements.pinnedSessionSection.hidden =
-    (state.sessions?.pinned?.length ?? 0) === 0;
+  renderProjectSidebar();
   renderSettingsSummaries();
 }
 
-function createSessionEntry(session) {
+async function fetchProjectConversations(query) {
+  return await fetchJson(
+    "/api/sessions/search",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        query: query || null,
+        allWorkspaces: true,
+        archived: false,
+        limit: 100
+      })
+    }
+  );
+}
+
+function renderProjectSidebar() {
+  const projects = state.workspaceProfiles?.profiles ?? [];
+  const searching = false;
+  const sessionsByProject = new Map();
+  for (const session of state.projectSessions) {
+    const grouped = sessionsByProject.get(session.workspaceId) ?? [];
+    grouped.push(session);
+    sessionsByProject.set(session.workspaceId, grouped);
+  }
+  closeProjectMenu();
+  elements.projectList.replaceChildren();
+
+  if (projects.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "project-empty sidebar-expanded-only";
+    empty.textContent = "No projects configured.";
+    elements.projectList.append(empty);
+    return;
+  }
+
+  for (const project of projects) {
+    const projectSessions = sessionsByProject.get(project.id) ?? [];
+    if (searching && projectSessions.length === 0) {
+      continue;
+    }
+
+    const details = document.createElement("details");
+    details.className = `project-accordion${project.active ? " active" : ""}`
+      + `${project.available ? "" : " unavailable"}`;
+    details.dataset.workspaceId = project.id;
+    details.open = searching
+      || state.expandedProjectIds.has(project.id)
+      || (state.expandedProjectIds.size === 0 && project.active);
+    const summary = document.createElement("summary");
+    summary.title = project.path;
+    const icon = document.createElement("span");
+    icon.className = "project-icon";
+    icon.setAttribute("aria-hidden", "true");
+    const name = document.createElement("strong");
+    name.className = "sidebar-expanded-only";
+    name.textContent = project.name;
+    const active = document.createElement("span");
+    active.className = "project-active-marker sidebar-expanded-only";
+    active.title = "Active project";
+    active.setAttribute("aria-label", "Active project");
+    active.hidden = !project.active;
+    summary.append(icon, name, active);
+
+    const menu = document.createElement("button");
+    menu.type = "button";
+    menu.className = "project-menu-button sidebar-expanded-only";
+    menu.textContent = "…";
+    menu.setAttribute("aria-label", `Details for ${project.name}`);
+    menu.setAttribute("aria-haspopup", "dialog");
+    menu.setAttribute("aria-expanded", "false");
+
+    const body = document.createElement("div");
+    body.className = "project-body sidebar-expanded-only";
+    const actions = document.createElement("div");
+    actions.className = "project-actions";
+    if (!project.active) {
+      const activate = document.createElement("button");
+      activate.type = "button";
+      activate.className = "project-activate";
+      activate.textContent = "Use project";
+      activate.disabled = !project.available;
+      activate.addEventListener("click", () => activateWorkspace(project.id));
+      actions.append(activate);
+    }
+    const list = document.createElement("div");
+    list.className = "project-conversation-list";
+    list.setAttribute("aria-label", `Conversations in ${project.name}`);
+    if (project.active) {
+      const pinned = document.createElement("section");
+      pinned.id = "pinned-session-section";
+      pinned.className = "pinned-session-section";
+      pinned.hidden = (state.sessions?.pinned?.length ?? 0) === 0;
+      const pinnedTitle = document.createElement("h2");
+      pinnedTitle.textContent = "Pinned";
+      const pinnedList = document.createElement("div");
+      pinnedList.id = "pinned-sessions";
+      pinnedList.className = "project-conversation-list";
+      for (const session of state.sessions?.pinned ?? []) {
+        pinnedList.append(createProjectSessionEntry(session));
+      }
+      pinned.append(pinnedTitle, pinnedList);
+      list.append(pinned);
+      const recent = document.createElement("div");
+      recent.id = "recent-sessions";
+      recent.className = "project-conversation-list";
+      for (const session of state.sessions?.recent ?? []) {
+        recent.append(createProjectSessionEntry(session));
+      }
+      list.append(recent);
+      const archived = document.createElement("details");
+      archived.id = "archived-session-section";
+      archived.className = "archived-session-section";
+      archived.hidden = (state.sessions?.archived?.length ?? 0) === 0;
+      const archivedSummary = document.createElement("summary");
+      archivedSummary.textContent = "Archived";
+      const archivedList = document.createElement("div");
+      archivedList.id = "archived-sessions";
+      archivedList.className = "project-conversation-list";
+      for (const session of state.sessions?.archived ?? []) {
+        archivedList.append(createProjectSessionEntry(session));
+      }
+      archived.append(archivedSummary, archivedList);
+      list.append(archived);
+    } else {
+      for (const session of projectSessions) {
+        list.append(createProjectSessionEntry(session));
+      }
+    }
+    const activeCount = project.active
+      ? (state.sessions?.pinned?.length ?? 0) + (state.sessions?.recent?.length ?? 0)
+      : projectSessions.length;
+    if (activeCount === 0) {
+      const empty = document.createElement("p");
+      empty.className = "project-conversations-empty";
+      empty.textContent = project.historyEnabled
+        ? "No saved conversations."
+        : "History disabled.";
+      list.append(empty);
+    }
+    menu.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openProjectMenu(project, activeCount, menu);
+    });
+    body.append(actions, list);
+    details.append(summary, menu, body);
+    details.addEventListener("toggle", () => {
+      if (searching) {
+        return;
+      }
+      if (details.open) {
+        state.expandedProjectIds.add(project.id);
+      } else {
+        state.expandedProjectIds.delete(project.id);
+      }
+      persistExpandedProjects();
+    });
+    elements.projectList.append(details);
+  }
+}
+
+function openProjectMenu(project, conversationCount, anchor) {
+  if (
+    projectMenuAnchor === anchor
+    && !elements.projectMenuPopover.hidden
+  ) {
+    closeProjectMenu();
+    return;
+  }
+
+  closeProjectMenu();
+  projectMenuAnchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
+  elements.projectMenuPopover.dataset.workspaceId = project.id;
+  elements.projectMenuTitle.textContent = project.name;
+  elements.projectMenuCount.textContent = `${conversationCount} ${conversationCount === 1 ? "conversation" : "conversations"}`;
+  elements.projectMenuPath.textContent = project.path;
+
+  const repository = project.active && state.git?.state === "available"
+    ? state.git.repository
+    : null;
+  elements.projectMenuGitRow.hidden = !repository;
+  elements.projectMenuGit.textContent = repository
+    ? `Git · ${repository.detachedHead ? "detached" : repository.branch ?? "unborn"}`
+    : "";
+  elements.projectMenuPopover.hidden = false;
+  positionProjectMenu(anchor);
+}
+
+function positionProjectMenu(anchor) {
+  const margin = 12;
+  const gap = 10;
+  const anchorRect = anchor.getBoundingClientRect();
+  const sidebarRect = elements.sidebar.getBoundingClientRect();
+  const popoverRect = elements.projectMenuPopover.getBoundingClientRect();
+  let left = Math.max(
+    anchorRect.right + gap,
+    sidebarRect.right + gap
+  );
+
+  if (left + popoverRect.width > window.innerWidth - margin) {
+    left = anchorRect.left - popoverRect.width - gap;
+  }
+
+  const top = Math.min(
+    Math.max(margin, anchorRect.top - 8),
+    Math.max(margin, window.innerHeight - popoverRect.height - margin)
+  );
+  elements.projectMenuPopover.style.left = `${Math.max(margin, left)}px`;
+  elements.projectMenuPopover.style.top = `${top}px`;
+}
+
+function closeProjectMenu() {
+  projectMenuAnchor?.setAttribute("aria-expanded", "false");
+  projectMenuAnchor = null;
+  if (!elements.projectMenuPopover) {
+    return;
+  }
+  elements.projectMenuPopover.hidden = true;
+  delete elements.projectMenuPopover.dataset.workspaceId;
+}
+
+function editSelectedProject() {
+  closeProjectMenu();
+  openWorkspace();
+}
+
+function createProjectSessionEntry(session) {
   const entry = document.createElement("article");
   const current = state.conversationSessionId === session.id;
   entry.className = `session-entry${current ? " current" : ""}`;
   entry.dataset.sessionId = session.id;
-  entry.tabIndex = 0;
-  entry.setAttribute("role", "button");
-  entry.setAttribute("aria-label", `Abrir detalhes de ${session.title}`);
   entry.setAttribute(
     "aria-current",
     current ? "true" : "false"
   );
-  const content = document.createElement("div");
-  content.className = "session-entry-content";
+  const resume = document.createElement("button");
+  resume.type = "button";
+  resume.className = "session-entry-content";
+  resume.setAttribute("aria-label", `Resume ${session.title}`);
   const title = document.createElement("strong");
   title.textContent = session.title;
   const metadata = document.createElement("small");
-  metadata.textContent = new Date(session.updatedAt).toLocaleDateString();
-  const resume = document.createElement("button");
-  resume.type = "button";
-  resume.className = "secondary-button";
-  resume.textContent = "Retomar";
-  resume.addEventListener(
-    "click",
-    event => {
-      event.stopPropagation();
-      resumeSession(session.id);
-    }
-  );
-  content.append(title, metadata);
-  entry.append(content, resume);
-  entry.addEventListener("click", () => openSessionDetails(session));
-  entry.addEventListener(
-    "keydown",
-    event => {
-      if (event.target !== entry || !["Enter", " "].includes(event.key)) {
-        return;
-      }
-
-      event.preventDefault();
-      openSessionDetails(session);
-    }
-  );
+  metadata.textContent = `${session.pinned ? "Pinned · " : ""}`
+    + new Date(session.updatedAt).toLocaleDateString(window.AgenticRouterI18n.locale);
+  resume.append(title, metadata);
+  resume.addEventListener("click", () => resumeSession(session.id, session.workspaceId));
+  const details = document.createElement("button");
+  details.type = "button";
+  details.className = "session-details-button";
+  details.textContent = "…";
+  details.setAttribute("aria-label", `Details for ${session.title}`);
+  details.addEventListener("click", () => openSessionDetails(session));
+  entry.append(resume, details);
   return entry;
+}
+
+function persistExpandedProjects() {
+  try {
+    localStorage.setItem(
+      "agentic-router.expanded-projects",
+      JSON.stringify([...state.expandedProjectIds])
+    );
+  } catch {
+    // Project expansion still works when browser storage is unavailable.
+  }
 }
 
 async function openSessionDetails(session) {
@@ -4281,20 +4774,20 @@ async function openSessionDetails(session) {
 function renderSessionDetails(session) {
   elements.sessionDetailsTitle.textContent = session.title;
   elements.sessionDetailsMetadata.textContent = [
-    new Date(session.updatedAt).toLocaleString(),
+    new Date(session.updatedAt).toLocaleString(window.AgenticRouterI18n.locale),
     session.lastInteractionMode === "execute" ? "Execute" : "Chat",
     session.selectedModel
   ].filter(Boolean).join(" · ");
   elements.sessionDetailsState.textContent = [
-    state.conversationSessionId === session.id ? "Conversa atual" : null,
-    session.pinned ? "Fixada" : null,
-    session.hasSummary ? "Com resumo" : "Sem resumo",
-    session.interrupted ? "Interrompida" : null,
-    session.archived ? "Arquivada" : null
+    state.conversationSessionId === session.id ? "Current conversation" : null,
+    session.pinned ? "Pinned" : null,
+    session.hasSummary ? "Has summary" : "No summary",
+    session.interrupted ? "Interrupted" : null,
+    session.archived ? "Archived" : null
   ].filter(Boolean).join(" · ");
   elements.sessionDetailsPin.textContent = session.pinned
-    ? "Desafixar"
-    : "Fixar";
+    ? "Unpin"
+    : "Pin";
   elements.sessionDetailsArchive.hidden = session.archived;
   elements.sessionDetailsMarkdown.href =
     `/api/sessions/${encodeURIComponent(session.id)}/export/markdown`
@@ -4310,7 +4803,7 @@ function renderSessionDetailsSummary(content, loading) {
   if (loading) {
     const message = document.createElement("p");
     message.className = "runtime-note";
-    message.textContent = "Carregando resumo…";
+    message.textContent = "Loading summary…";
     elements.sessionDetailsSummary.append(message);
     return;
   }
@@ -4319,18 +4812,18 @@ function renderSessionDetailsSummary(content, loading) {
     const empty = document.createElement("p");
     empty.className = "runtime-note";
     empty.textContent =
-      "Nenhum resumo foi criado. A conversa pode ser retomada normalmente sem ele.";
+      "No summary was created. The conversation can be resumed normally without it.";
     elements.sessionDetailsSummary.append(empty);
     return;
   }
 
   const fields = [
-    ["Objetivo", content.objective],
-    ["Decisões", content.decisions],
-    ["Arquivos alterados", content.filesChanged],
-    ["Comandos e validação", content.commandsAndValidation],
-    ["Questões não resolvidas", content.unresolvedIssues],
-    ["Próximo passo", content.nextSuggestedStep]
+    ["Objective", content.objective],
+    ["Decisions", content.decisions],
+    ["Changed files", content.filesChanged],
+    ["Commands and validation", content.commandsAndValidation],
+    ["Unresolved issues", content.unresolvedIssues],
+    ["Next step", content.nextSuggestedStep]
   ];
 
   for (const [label, value] of fields) {
@@ -4396,7 +4889,7 @@ async function resumeSelectedSession() {
   }
 
   closeSessionDetails();
-  await resumeSession(session.id);
+  await resumeSession(session.id, session.workspaceId);
 }
 
 async function toggleSelectedSessionPin() {
@@ -4427,8 +4920,8 @@ async function duplicateSelectedSession() {
 
   const duplicate = await duplicateSession(session);
   elements.sessionDetailsStatus.textContent = duplicate
-    ? `Cópia criada: ${duplicate.session.title}`
-    : "A conversa não foi duplicada.";
+    ? `Copy created: ${duplicate.session.title}`
+    : "The conversation was not duplicated.";
 }
 
 async function archiveSelectedSession() {
@@ -4462,19 +4955,29 @@ async function editSelectedSessionSummary() {
   await openSessionSummary(session);
 }
 
-async function resumeSession(id) {
+async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
   await requestConversationTransition(
     async () =>
     {
       if (!await showAppConfirm(
-        "Retomar esta conversa? Modo Chat, aprovação manual e modelo não fixado serão restaurados.",
-        { title: "Retomar conversa?", confirmLabel: "Retomar" }
+        "Resume this conversation? Chat mode, manual approval, and an unlocked model will be restored.",
+        { title: "Resume conversation?", confirmLabel: "Resume" }
       )) {
         return;
       }
       const nextBrowserSessionId = createSessionId();
 
       try {
+        if (workspaceId && workspaceId !== activeWorkspaceProfile()?.id) {
+          await fetchJson(
+            `/api/workspaces/${encodeURIComponent(workspaceId)}/activate`,
+            {
+              method: "POST"
+            }
+          );
+          await resetConversationForWorkspaceChange();
+          await refreshWorkspaceState();
+        }
         const session = await fetchJson(
           `/api/sessions/${encodeURIComponent(id)}/resume`,
           {
@@ -4547,7 +5050,7 @@ function renderRestoredConversation(session) {
         cancelAnimationFrame(assistant.clockFrame);
         assistant.progress.hidden = true;
         assistant.details.open = false;
-        assistant.summary.textContent = "Histórico restaurado";
+        assistant.summary.textContent = "History restored";
         assistant.answer.classList.remove("pending");
         assistant.answer.textContent = message.content;
         assistant.rawAnswer = message.content;
@@ -4560,8 +5063,8 @@ function renderRestoredConversation(session) {
     const warning = document.createElement("article");
     warning.className = "message assistant";
     warning.textContent =
-      "A execução anterior foi interrompida. Ações concluídas foram preservadas. "
-      + "Nenhum processo ou aprovação pendente foi retomado. Continue com um novo turno.";
+      "The previous execution was interrupted. Completed actions were preserved. "
+      + "No pending process or approval was resumed. Continue with a new turn.";
     elements.messages.append(warning);
   }
 
@@ -4569,7 +5072,7 @@ function renderRestoredConversation(session) {
     const notice = document.createElement("p");
     notice.className = "workspace-note";
     notice.textContent =
-      "Mensagens antigas continuam visíveis, mas serão omitidas do próximo contexto do modelo.";
+      "Older messages remain visible but will be omitted from the model's next context.";
     elements.messages.append(notice);
   }
 
@@ -4579,7 +5082,7 @@ function renderRestoredConversation(session) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary-button";
-    button.textContent = "Revisar alterações concluídas";
+    button.textContent = "Review completed changes";
     button.addEventListener(
       "click",
       () => {
@@ -4593,11 +5096,11 @@ function renderRestoredConversation(session) {
 }
 
 async function renameSession(session) {
-  const title = (await showAppPrompt("Informe o novo título da conversa.", {
-    title: "Renomear conversa",
-    inputLabel: "Título",
+  const title = (await showAppPrompt("Enter the new conversation title.", {
+    title: "Rename conversation",
+    inputLabel: "Title",
     inputValue: session.title,
-    confirmLabel: "Renomear"
+    confirmLabel: "Rename"
   }))?.trim();
 
   if (!title) {
@@ -4652,7 +5155,7 @@ async function duplicateSession(session) {
       }
     );
     elements.sessionSearchStatus.textContent =
-      `Cópia criada: ${duplicate.session.title}`;
+      `Copy created: ${duplicate.session.title}`;
     await refreshSessions();
     return duplicate;
   } catch (error) {
@@ -4663,8 +5166,9 @@ async function duplicateSession(session) {
 
 function openSessionSearch() {
   elements.sessionSearchStatus.textContent =
-    "A busca usa somente os arquivos locais de sessão.";
+    "Search uses only local session files.";
   elements.sessionSearchResults.replaceChildren();
+  elements.sessionSearchAllWorkspaces.checked = true;
   elements.sessionSearchDialog.showModal();
   elements.sessionSearchQuery.focus();
 }
@@ -4682,7 +5186,7 @@ async function runSessionSearch(event) {
   const controller = new AbortController();
   state.sessionSearchController = controller;
   elements.runSessionSearch.disabled = true;
-  elements.sessionSearchStatus.textContent = "Buscando registros locais…";
+  elements.sessionSearchStatus.textContent = "Searching local records…";
   const stateFilter = elements.sessionSearchState.value;
 
   try {
@@ -4715,14 +5219,14 @@ async function runSessionSearch(event) {
     );
     renderSessionSearchResults(result);
     elements.sessionSearchStatus.textContent =
-      `${result.results.length} resultado(s) · ${result.scannedSessions} sessão(ões) examinadas`
-      + `${result.truncated ? " · resultado limitado" : ""}`
+      `${result.results.length} result(s) · ${result.scannedSessions} session(s) examined`
+      + `${result.truncated ? " · bounded result" : ""}`
       + ` · ${result.workspaceScope === "active-workspace"
-        ? "workspace ativo"
-        : "todos os workspaces"}`;
+        ? "active workspace"
+        : "all workspaces"}`;
   } catch (error) {
     elements.sessionSearchStatus.textContent = error.name === "AbortError"
-      ? "Busca cancelada."
+      ? "Search canceled."
       : error.message;
   } finally {
     if (state.sessionSearchController === controller) {
@@ -4754,13 +5258,13 @@ function renderSessionSearchResults(response) {
     const metadata = document.createElement("small");
     metadata.textContent = [
       result.workspaceName,
-      new Date(result.updatedAt).toLocaleString(),
+      new Date(result.updatedAt).toLocaleString(window.AgenticRouterI18n.locale),
       result.model,
-      result.pinned ? "fixada" : null,
-      result.archived ? "arquivada" : null
+      result.pinned ? "pinned" : null,
+      result.archived ? "archived" : null
     ].filter(Boolean).join(" · ");
     const field = document.createElement("small");
-    field.textContent = `Correspondência: ${result.matchField}`;
+    field.textContent = `Match: ${result.matchField}`;
     const snippet = document.createElement("p");
     appendHighlightedSnippet(
       snippet,
@@ -4770,12 +5274,12 @@ function renderSessionSearchResults(response) {
     const open = document.createElement("button");
     open.type = "button";
     open.className = "secondary-button";
-    open.textContent = "Retomar com segurança";
+    open.textContent = "Resume safely";
     open.addEventListener(
       "click",
       async () => {
         closeSessionSearch();
-        await resumeSession(result.id);
+        await resumeSession(result.id, result.workspaceId);
       }
     );
     entry.append(title, metadata, field, snippet, open);
@@ -4785,7 +5289,7 @@ function renderSessionSearchResults(response) {
   if (response.results.length === 0) {
     const empty = document.createElement("p");
     empty.className = "runtime-note";
-    empty.textContent = "Nenhuma conversa corresponde aos filtros.";
+    empty.textContent = "No conversation matches the filters.";
     elements.sessionSearchResults.append(empty);
   }
 }
@@ -4839,7 +5343,7 @@ async function openSessionSummary(session) {
       : state.settings.defaultModel
   );
   elements.sessionSummaryStatus.textContent =
-    "O resumo é separado das mensagens originais.";
+    "The summary is separate from the original messages.";
   elements.sessionSummaryDialog.showModal();
 
   try {
@@ -4868,11 +5372,11 @@ async function refreshSessionSummaryEstimate() {
   const model = elements.sessionSummaryModel.value;
 
   if (!session || !model) {
-    elements.sessionSummaryEstimate.textContent = "Selecione um modelo.";
+    elements.sessionSummaryEstimate.textContent = "Select a model.";
     return;
   }
 
-  elements.sessionSummaryEstimate.textContent = "Calculando fatos limitados…";
+  elements.sessionSummaryEstimate.textContent = "Calculating bounded facts…";
 
   try {
     state.summaryEstimate = await fetchJson(
@@ -4882,10 +5386,10 @@ async function refreshSessionSummaryEstimate() {
     const estimate = state.summaryEstimate;
     elements.sessionSummaryEstimate.textContent =
       `${providerLabel(estimate.provider)} · ${estimate.model} · `
-      + `até ${formatInteger(estimate.estimatedInputTokens)} tokens estimados · `
-      + `${estimate.includedMessages} mensagens incluídas`
+      + `up to ${formatInteger(estimate.estimatedInputTokens)} estimated tokens · `
+      + `${estimate.includedMessages} messages included`
       + `${estimate.omittedMessages
-        ? ` · ${estimate.omittedMessages} omitidas`
+        ? ` · ${estimate.omittedMessages} omitted`
         : ""}`;
   } catch (error) {
     state.summaryEstimate = null;
@@ -4902,16 +5406,16 @@ async function generateSessionSummary() {
   }
 
   if (!await showAppConfirm(
-    `Gerar resumo com ${providerLabel(estimate.provider)} · ${estimate.model}? `
-      + `A chamada pode usar GPU ou quota real e estima até `
-      + `${formatInteger(estimate.estimatedInputTokens)} tokens de entrada.`,
-    { title: "Gerar resumo com modelo?", confirmLabel: "Gerar resumo" }
+    `Generate a summary with ${providerLabel(estimate.provider)} · ${estimate.model}? `
+      + `The call may use GPU or real quota and is estimated at up to `
+      + `${formatInteger(estimate.estimatedInputTokens)} input tokens.`,
+    { title: "Generate summary with a model?", confirmLabel: "Generate summary" }
   )) {
     return;
   }
 
   elements.generateSessionSummary.disabled = true;
-  elements.sessionSummaryStatus.textContent = "Gerando resumo explícito…";
+  elements.sessionSummaryStatus.textContent = "Generating explicit summary…";
 
   try {
     const summary = await fetchJson(
@@ -4931,7 +5435,7 @@ async function generateSessionSummary() {
     fillSessionSummary(summary.content);
     elements.deleteSessionSummary.disabled = false;
     elements.sessionSummaryStatus.textContent =
-      "Resumo gerado e persistido separadamente.";
+      "Summary generated and persisted separately.";
     await refreshSessions();
   } catch (error) {
     elements.sessionSummaryStatus.textContent = error.message;
@@ -4964,7 +5468,7 @@ async function saveSessionSummary(event) {
     fillSessionSummary(summary.content);
     elements.deleteSessionSummary.disabled = false;
     elements.sessionSummaryStatus.textContent =
-      "Edição do resumo salva sem chamar modelo.";
+      "Summary edit saved without calling a model.";
     await refreshSessions();
   } catch (error) {
     elements.sessionSummaryStatus.textContent = error.message;
@@ -4975,8 +5479,8 @@ async function deleteSessionSummary() {
   const session = state.summarySession;
 
   if (!session || !await showAppConfirm(
-    "Excluir somente o resumo desta conversa?",
-    { title: "Excluir resumo?", confirmLabel: "Excluir", danger: true }
+    "Delete only this conversation summary?",
+    { title: "Delete summary?", confirmLabel: "Delete", danger: true }
   )) {
     return;
   }
@@ -4990,7 +5494,7 @@ async function deleteSessionSummary() {
     );
     fillSessionSummary(null);
     elements.deleteSessionSummary.disabled = true;
-    elements.sessionSummaryStatus.textContent = "Resumo excluído.";
+    elements.sessionSummaryStatus.textContent = "Summary deleted.";
     await refreshSessions();
   } catch (error) {
     elements.sessionSummaryStatus.textContent = error.message;
@@ -5031,8 +5535,8 @@ function summaryLines(value) {
 
 async function deleteSession(session) {
   if (!await showAppConfirm(
-    `Excluir somente o registro local "${session.title}"? Os arquivos do projeto serão preservados.`,
-    { title: "Excluir conversa?", confirmLabel: "Excluir", danger: true }
+    `Delete only the local record "${session.title}"? Project files will be preserved.`,
+    { title: "Delete conversation?", confirmLabel: "Delete", danger: true }
   )) {
     return false;
   }
@@ -5054,8 +5558,8 @@ async function deleteSession(session) {
 
 async function deleteArchivedSessions() {
   if (!await showAppConfirm(
-    "Excluir todas as conversas arquivadas deste workspace?",
-    { title: "Excluir conversas arquivadas?", confirmLabel: "Excluir", danger: true }
+    "Delete all archived conversations from this workspace?",
+    { title: "Delete archived conversations?", confirmLabel: "Delete", danger: true }
   )) {
     return;
   }
@@ -5071,8 +5575,8 @@ async function deleteArchivedSessions() {
 
 async function deleteAllSessions() {
   if (!await showAppConfirm(
-    "Excluir todo o histórico local deste workspace? Os arquivos do projeto serão preservados.",
-    { title: "Excluir todo o histórico?", confirmLabel: "Excluir tudo", danger: true }
+    "Delete all local history from this workspace? Project files will be preserved.",
+    { title: "Delete all history?", confirmLabel: "Delete all", danger: true }
   )) {
     return;
   }
@@ -5089,13 +5593,13 @@ async function deleteAllSessions() {
 
 async function purgeUsageHistory() {
   if (!await showAppConfirm(
-    "Excluir todo o histórico local de uso de tokens? Esta ação não altera conversas nem arquivos do projeto.",
-    { title: "Excluir histórico de uso?", confirmLabel: "Excluir", danger: true }
+    "Delete all local token-usage history? This action does not change conversations or project files.",
+    { title: "Delete usage history?", confirmLabel: "Delete", danger: true }
   )) {
     return;
   }
 
-  elements.usagePurgeStatus.textContent = "Excluindo histórico de uso…";
+  elements.usagePurgeStatus.textContent = "Deleting usage history…";
 
   try {
     const result = await fetchJson(
@@ -5105,7 +5609,7 @@ async function purgeUsageHistory() {
       }
     );
     elements.usagePurgeStatus.textContent =
-      `${result.deletedEvents} evento(s) de uso excluído(s).`;
+      `${result.deletedEvents} usage event(s) deleted.`;
     await refreshUsage();
   } catch (error) {
     elements.usagePurgeStatus.textContent = error.message;
@@ -5114,7 +5618,7 @@ async function purgeUsageHistory() {
 
 async function reconcileUsage() {
   elements.reconcileUsage.disabled = true;
-  elements.usagePurgeStatus.textContent = "Validando eventos e reconstruindo agregados…";
+  elements.usagePurgeStatus.textContent = "Validating events and rebuilding aggregates…";
 
   try {
     const result = await fetchJson(
@@ -5125,10 +5629,10 @@ async function reconcileUsage() {
     );
     elements.usagePurgeStatus.textContent =
       `${formatInteger(result.accepted)} aceitos · `
-      + `${formatInteger(result.warned)} com aviso · `
-      + `${formatInteger(result.estimated)} estimados · `
-      + `${formatInteger(result.rejected)} rejeitados · `
-      + `${formatInteger(result.duplicates)} duplicados`;
+      + `${formatInteger(result.warned)} with warnings · `
+      + `${formatInteger(result.estimated)} estimated · `
+      + `${formatInteger(result.rejected)} rejected · `
+      + `${formatInteger(result.duplicates)} duplicates`;
     await refreshUsage();
   } catch (error) {
     elements.usagePurgeStatus.textContent = error.message;
@@ -5145,7 +5649,7 @@ function renderProviderHealth() {
   if (degraded.length > 0) {
     elements.cloudUsageCard.dataset.healthWarning = "";
     elements.cloudUsageDetail.textContent =
-      `${degraded.length} provedor(es) ativo(s) degradado(s) ou indisponível(is).`;
+      `${degraded.length} active provider(s) are degraded or unavailable.`;
   } else {
     delete elements.cloudUsageCard.dataset.healthWarning;
   }
@@ -5193,18 +5697,18 @@ async function handleProviderHealthAction(event) {
 
 function providerHealthStateLabel(value) {
   return {
-    healthy: "Saudável",
-    degraded: "Degradado",
-    unavailable: "Indisponível",
-    "not-configured": "Não configurado",
-    unknown: "Desconhecido"
+    healthy: "Healthy",
+    degraded: "Degraded",
+    unavailable: "Unavailable",
+    "not-configured": "Not configured",
+    unknown: "Unknown"
   }[value] ?? value;
 }
 
 function formatProviderHealthDate(value) {
   return value
-    ? new Date(value).toLocaleString()
-    : "ainda não observado";
+    ? new Date(value).toLocaleString(window.AgenticRouterI18n.locale)
+    : "not observed yet";
 }
 
 async function refreshRuntimeStatus() {
@@ -5217,8 +5721,10 @@ async function refreshRuntimeStatus() {
       await fetchJson("/api/runtime/status")
     );
   } catch (error) {
-    elements.runtimeSummary.textContent = "Memória indisponível";
-    elements.residentModelStatus.textContent = error.message;
+    elements.runtimeCompactMeters.textContent = "Resources unavailable";
+    elements.runtimeModelList.replaceChildren(
+      diagnosticRow("Memory telemetry", error.message)
+    );
   }
 
   await refreshUsage();
@@ -5240,14 +5746,11 @@ async function refreshUsage() {
     renderUsageSummary();
     renderCloudUsage();
   } catch (error) {
-    elements.runtimeUsageAccuracy.textContent = "indisponível";
-    elements.settingsUsageAccuracy.textContent = "indisponível";
-    elements.runtimeUsageDetails.textContent =
-      `Uso indisponível · ${error.message}`;
+    elements.settingsUsageAccuracy.textContent = "unavailable";
     elements.settingsUsageDetails.textContent =
-      `Uso indisponível · ${error.message}`;
-    elements.cloudUsageBadge.textContent = "indisponível";
-    elements.cloudUsageSummary.textContent = "Uso cloud indisponível";
+      `Usage unavailable · ${error.message}`;
+    elements.cloudUsageBadge.textContent = "unavailable";
+    elements.cloudUsageSummary.textContent = "Cloud usage unavailable";
     elements.cloudUsageDetail.textContent = error.message;
   }
 }
@@ -5256,39 +5759,37 @@ function renderUsageSummary() {
   const overview = state.usageOverview;
 
   if (!overview) {
-    elements.runtimeUsageAccuracy.textContent = "sem dados";
-    elements.settingsUsageAccuracy.textContent = "sem dados";
-    elements.runtimeUsageDetails.textContent = "Uso ainda não disponível.";
-    elements.settingsUsageDetails.textContent = "Uso ainda não disponível.";
+    elements.settingsUsageAccuracy.textContent = "no data";
+    elements.settingsUsageDetails.textContent = "Usage is not available yet.";
     return;
   }
 
   const usage = overview.selected;
   const accuracy = usage.accuracy === "exact"
-    ? "exato"
+    ? "exact"
     : usage.accuracy === "mixed"
-      ? "misto"
+      ? "mixed"
       : usage.accuracy === "estimated"
-        ? "estimado"
-        : "sem dados";
+        ? "estimated"
+        : "no data";
   const lastUpdate = usage.lastUpdatedAt
-    ? new Date(usage.lastUpdatedAt).toLocaleString()
-    : "nenhuma chamada registrada";
+    ? new Date(usage.lastUpdatedAt).toLocaleString(window.AgenticRouterI18n.locale)
+    : "no recorded calls";
   const topModels = usage.topModels.length
     ? usage.topModels.map(
       item => `${item.key}: ${formatInteger(item.totalTokens)}`
     ).join("\n")
-    : "Nenhum modelo no período.";
+    : "No model in this period.";
   const topRoles = usage.topRoles.length
     ? usage.topRoles.map(
       item => `${item.key}: ${formatInteger(item.totalTokens)}`
     ).join("\n")
-    : "Nenhum papel no período.";
+    : "No role in this period.";
   const pinnedWindows = overview.pinned.length
     ? overview.pinned.map(
       item => `${item.window.id}: ${formatInteger(item.totalTokens)} tokens`
     ).join("\n")
-    : "Nenhuma janela fixada.";
+    : "No pinned window.";
   const local = usage.providerBreakdown
     .filter(item => item.key === "ollama-local")
     .reduce((total, item) => total + item.totalTokens, 0);
@@ -5305,48 +5806,41 @@ function renderUsageSummary() {
     item => item.plan === state.settings?.usage.ollamaPlanReference
   );
   const comparisonDetails = comparisonPrice
-    ? `${formatCurrency(comparisonPrice.inputPricePerMillion)}/M entrada · `
-      + `${formatCurrency(comparisonPrice.outputPricePerMillion)}/M saída · `
-      + `catálogo ${comparisonPrice.catalogVersion} · `
-      + `atualizado ${new Date(comparisonPrice.updatedAt).toLocaleDateString()} · `
-      + `${comparisonPrice.stale ? "desatualizado" : "atual"}\n`
-      + `Fonte da comparação: ${comparisonPrice.officialSourceUrl}`
-    : "preço de comparação indisponível";
+    ? `${formatCurrency(comparisonPrice.inputPricePerMillion)}/M input · `
+      + `${formatCurrency(comparisonPrice.outputPricePerMillion)}/M output · `
+      + `catalog ${comparisonPrice.catalogVersion} · `
+      + `updated ${new Date(comparisonPrice.updatedAt).toLocaleDateString(window.AgenticRouterI18n.locale)} · `
+      + `${comparisonPrice.stale ? "stale" : "current"}\n`
+      + `Comparison source: ${comparisonPrice.officialSourceUrl}`
+    : "comparison price unavailable";
   const planDetails = plan
-    ? `${formatCurrency(plan.monthlyPrice)}/mês · ${plan.usageDescription}\n`
+    ? `${formatCurrency(plan.monthlyPrice)}/month · ${plan.usageDescription}\n`
       + `${plan.tokenEquivalent}\n`
       + `${plan.availability ? `${plan.availability}\n` : ""}`
-      + `Vigência: ${plan.effectiveDate} · `
-      + `${plan.stale ? "referência desatualizada" : "referência atual"}\n`
-      + `Fonte oficial: ${plan.officialSourceUrl}`
-    : "referência indisponível";
-  elements.runtimeUsageAccuracy.textContent = accuracy;
+      + `Effective date: ${plan.effectiveDate} · `
+      + `${plan.stale ? "stale reference" : "current reference"}\n`
+      + `Official source: ${plan.officialSourceUrl}`
+    : "reference unavailable";
   elements.settingsUsageAccuracy.textContent = accuracy;
-  elements.runtimeUsageDetails.textContent =
-    `${usage.window.id} · ${formatInteger(usage.totalTokens)} tokens\n`
-    + `Input ${formatInteger(usage.inputTokens)} · Output ${formatInteger(usage.outputTokens)}\n`
-    + `Equivalente ${formatCurrency(usage.equivalentCloudCost)} · ${comparison}\n`
-    + `Atualizado: ${lastUpdate}`;
-  elements.runtimeUsageSummary.dataset.accuracy = usage.accuracy;
   elements.settingsUsageSummary.dataset.accuracy = usage.accuracy;
   elements.settingsUsageDetails.textContent =
-    `Janela: ${usage.window.id}\n`
-    + `Entrada / saída / total: ${formatInteger(usage.inputTokens)} / `
+    `Window: ${usage.window.id}\n`
+    + `Input / output / total: ${formatInteger(usage.inputTokens)} / `
     + `${formatInteger(usage.outputTokens)} / ${formatInteger(usage.totalTokens)}\n`
-    + `Chamadas: ${usage.requests} · Sucesso: ${usage.successes} · `
-    + `Falha: ${usage.failures} · Cancelamento: ${usage.cancellations}\n`
+    + `Calls: ${usage.requests} · Success: ${usage.successes} · `
+    + `Failures: ${usage.failures} · Cancellations: ${usage.cancellations}\n`
     + `Local / cloud: ${formatInteger(local)} / ${formatInteger(cloud)} tokens\n`
-    + `Custo estimado do provedor: ${formatCurrency(usage.estimatedActualCost)}\n`
-    + `Estimativa cloud equivalente: ${formatCurrency(usage.equivalentCloudCost)} `
-    + `contra ${comparison}\n`
-    + `Tarifas de comparação: ${comparisonDetails}\n`
-    + `Esta é uma comparação equivalente, não uma economia exata no Ollama Cloud.\n`
-    + `Principais modelos:\n${topModels}\n`
-    + `Principais papéis:\n${topRoles}\n`
-    + `Janelas fixadas:\n${pinnedWindows}\n`
-    + `Referência de plano Ollama: ${plan?.plan ?? "indisponível"}\n`
+    + `Estimated provider cost: ${formatCurrency(usage.estimatedActualCost)}\n`
+    + `Equivalent cloud estimate: ${formatCurrency(usage.equivalentCloudCost)} `
+    + `against ${comparison}\n`
+    + `Comparison rates: ${comparisonDetails}\n`
+    + `This is an equivalent comparison, not an exact Ollama Cloud saving.\n`
+    + `Top models:\n${topModels}\n`
+    + `Top roles:\n${topRoles}\n`
+    + `Pinned windows:\n${pinnedWindows}\n`
+    + `Ollama plan reference: ${plan?.plan ?? "unavailable"}\n`
     + `${planDetails}\n`
-    + `Última atualização: ${lastUpdate}`;
+    + `Last update: ${lastUpdate}`;
 }
 
 function renderCloudUsage() {
@@ -5364,7 +5858,7 @@ function renderCloudUsage() {
   delete elements.cloudUsageCard.dataset.alert;
 
   if (!dashboard || dashboard.providers.length === 0) {
-    elements.cloudUsageBadge.textContent = "não configurado";
+    elements.cloudUsageBadge.textContent = "not configured";
     elements.cloudUsageSummary.textContent = "Cloud usage";
     elements.cloudUsageDetail.textContent = "Not configured";
   } else if (activeProvider) {
@@ -5382,23 +5876,23 @@ function renderCloudUsage() {
         String(activeProvider.alertThreshold);
     }
   } else if (dashboard.connectedProviderCount > 0) {
-    elements.cloudUsageBadge.textContent = "inativo";
+    elements.cloudUsageBadge.textContent = "inactive";
     elements.cloudUsageSummary.textContent =
-      `${dashboard.connectedProviderCount} provedor(es) conectado(s)`;
-    elements.cloudUsageDetail.textContent = "Nenhum modelo cloud ativo";
+      `${dashboard.connectedProviderCount} connected provider(s)`;
+    elements.cloudUsageDetail.textContent = "No active cloud model";
   } else {
-    elements.cloudUsageBadge.textContent = "desconectado";
+    elements.cloudUsageBadge.textContent = "disconnected";
     elements.cloudUsageSummary.textContent =
-      `${dashboard.providers.length} provedor(es) configurado(s)`;
-    elements.cloudUsageDetail.textContent = "Nenhum modelo cloud ativo";
+      `${dashboard.providers.length} configured provider(s)`;
+    elements.cloudUsageDetail.textContent = "No active cloud model";
   }
 
   elements.cloudUsageDashboardSummary.textContent = dashboard
-    ? `Janela selecionada: ${dashboard.selectedWindow}\n`
-      + `Provedores conectados: ${dashboard.connectedProviderCount}\n`
-      + `Alertas locais: ${dashboard.alertThresholds.join("%, ")}%\n`
-      + `Atualizado: ${new Date(dashboard.generatedAt).toLocaleString()}`
-    : "Dashboard ainda não disponível.";
+    ? `Selected window: ${dashboard.selectedWindow}\n`
+      + `Connected providers: ${dashboard.connectedProviderCount}\n`
+      + `Local alerts: ${dashboard.alertThresholds.join("%, ")}%\n`
+      + `Updated: ${new Date(dashboard.generatedAt).toLocaleString(window.AgenticRouterI18n.locale)}`
+    : "Dashboard is not available yet.";
   elements.cloudUsageProviderCards.replaceChildren();
 
   for (const provider of dashboard?.providers ?? []) {
@@ -5440,16 +5934,16 @@ function createCloudUsageProviderCard(provider) {
   metrics.className = "cloud-usage-metrics";
   metrics.append(
     cloudUsageMetric("Tokens", formatInteger(provider.totalTokens)),
-    cloudUsageMetric("Requisições", formatInteger(provider.requests)),
+    cloudUsageMetric("Requests", formatInteger(provider.requests)),
     cloudUsageMetric(
-      "Custo estimado",
+      "Estimated cost",
       formatCurrency(provider.estimatedActualCost)
     ),
     cloudUsageMetric(
-      "Última chamada",
+      "Last call",
       provider.latestRequestAt
-        ? new Date(provider.latestRequestAt).toLocaleString()
-        : "nenhuma"
+        ? new Date(provider.latestRequestAt).toLocaleString(window.AgenticRouterI18n.locale)
+        : "none"
     )
   );
 
@@ -5457,16 +5951,16 @@ function createCloudUsageProviderCard(provider) {
   quotaDetail.textContent =
     `Quota: ${provider.quotaSource} · ${provider.window}`
     + `${provider.resetAt
-      ? ` · reset ${new Date(provider.resetAt).toLocaleString()}`
+      ? ` · reset ${new Date(provider.resetAt).toLocaleString(window.AgenticRouterI18n.locale)}`
       : ""}`;
   const billingDetail = document.createElement("small");
   billingDetail.textContent =
-    `${billingModeLabel(provider.expectedBillingMode)} é apenas uma expectativa local; `
-    + "não garante faturamento ou gratuidade.";
+    `${billingModeLabel(provider.expectedBillingMode)} is only a local expectation; `
+    + "it does not guarantee billing or free usage.";
   const warning = document.createElement("small");
   warning.hidden = !provider.hasRateLimitWarning;
   warning.className = "cloud-provider-diagnostic";
-  warning.textContent = "Aviso: uma resposta 429 foi observada nesta janela.";
+  warning.textContent = "Warning: a 429 response was observed in this window.";
 
   const models = document.createElement("div");
   models.className = "cloud-usage-models";
@@ -5480,9 +5974,9 @@ function createCloudUsageProviderCard(provider) {
     details.textContent =
       `${formatInteger(model.inputTokens)} input · `
       + `${formatInteger(model.outputTokens)} output · `
-      + `${formatInteger(model.requests)} chamada(s) · `
+      + `${formatInteger(model.requests)} call(s) · `
       + `${formatCurrency(model.estimatedActualCost)} · `
-      + `${model.roles.join(", ") || "sem papel observado"}`;
+      + `${model.roles.join(", ") || "no observed role"}`;
     const capabilities = document.createElement("div");
     capabilities.className = "cloud-capability-list";
 
@@ -5499,7 +5993,7 @@ function createCloudUsageProviderCard(provider) {
 
   if (provider.models.length === 0) {
     const empty = document.createElement("small");
-    empty.textContent = "Nenhum modelo em cache ou uso observado.";
+    empty.textContent = "No cached model or observed usage.";
     models.append(empty);
   }
 
@@ -5526,6 +6020,7 @@ function cloudUsageMetric(label, value) {
 }
 
 async function openCloudUsage() {
+  elements.runtimeDetails.open = false;
   await refreshCloudUsage();
   elements.cloudUsageDialog.showModal();
   elements.dismissCloudUsage.focus();
@@ -5542,12 +6037,12 @@ function closeCloudUsage() {
 
 async function refreshCloudUsage() {
   elements.refreshCloudUsage.disabled = true;
-  elements.cloudUsageRefreshStatus.textContent = "Atualizando dados locais…";
+  elements.cloudUsageRefreshStatus.textContent = "Refreshing local data…";
 
   try {
     state.cloudUsageDashboard = await fetchJson("/api/usage/cloud-dashboard");
     renderCloudUsage();
-    elements.cloudUsageRefreshStatus.textContent = "Dashboard atualizado.";
+    elements.cloudUsageRefreshStatus.textContent = "Dashboard refreshed.";
   } catch (error) {
     elements.cloudUsageRefreshStatus.textContent = error.message;
   } finally {
@@ -5573,24 +6068,24 @@ function parseModelReference(value) {
 
 function usageAccuracyLabel(accuracy) {
   return {
-    exact: "exato",
-    estimated: "estimado",
-    mixed: "misto",
-    unavailable: "indisponível"
-  }[accuracy] ?? "indisponível";
+    exact: "exact",
+    estimated: "estimated",
+    mixed: "mixed",
+    unavailable: "unavailable"
+  }[accuracy] ?? "unavailable";
 }
 
 function billingModeLabel(mode) {
   return {
-    "free-tier": "Free tier esperado",
-    paid: "Pago esperado",
-    unknown: "Faturamento desconhecido"
-  }[mode] ?? "Faturamento desconhecido";
+    "free-tier": "Expected free tier",
+    paid: "Expected paid",
+    unknown: "Unknown billing"
+  }[mode] ?? "Unknown billing";
 }
 
 function formatPercentage(value) {
   return `${Number(value).toLocaleString(
-    undefined,
+    window.AgenticRouterI18n.locale,
     {
       maximumFractionDigits: 2
     }
@@ -5598,17 +6093,18 @@ function formatPercentage(value) {
 }
 
 function renderRuntimeStatus(runtime) {
-  const compact = [];
+  state.runtime = runtime;
   const memoryRows = [];
+  const compactMeters = [];
   const ram = runtime.systemMemory;
 
   if (ram.status === "available") {
-    compact.push(
-      `RAM ${formatGiB(ram.usedBytes)} / ${formatGiB(ram.totalBytes)} ${formatPercent(ram.usedPercent)}`
+    compactMeters.push(
+      compactRuntimeMeter("RAM", ram.usedPercent, "system")
     );
     memoryRows.push(
       memoryRow(
-        "RAM do sistema",
+        "System RAM",
         ram.usedBytes,
         ram.totalBytes,
         ram.usedPercent,
@@ -5617,27 +6113,28 @@ function renderRuntimeStatus(runtime) {
       )
     );
   } else {
-    compact.push("RAM n/d");
+    compactMeters.push(compactRuntimeMeter("RAM", null, "system"));
     memoryRows.push(
       diagnosticRow(
-        "RAM do sistema",
+        "System RAM",
         ram.diagnostic
       )
     );
   }
 
   for (const device of runtime.devices) {
-    compact.push(
-      device.usedDedicatedMemoryBytes == null
-        ? `${device.name} n/d`
-        : `${device.name} ${formatGiB(device.usedDedicatedMemoryBytes)} / `
-          + `${formatGiB(device.totalDedicatedMemoryBytes)} ${formatPercent(device.usedPercent)}`
+    compactMeters.push(
+      compactRuntimeMeter(
+        compactDeviceName(device.name),
+        device.usedDedicatedMemoryBytes == null ? null : device.usedPercent,
+        "gpu"
+      )
     );
     memoryRows.push(
       device.usedDedicatedMemoryBytes == null
         ? diagnosticRow(
           device.name,
-          device.diagnostic ?? `Total dedicado: ${formatGiB(device.totalDedicatedMemoryBytes)}`,
+          device.diagnostic ?? `Dedicated total: ${formatGiB(device.totalDedicatedMemoryBytes)}`,
           "partial"
         )
         : memoryRow(
@@ -5654,45 +6151,51 @@ function renderRuntimeStatus(runtime) {
   if (runtime.devicesStatus === "unavailable") {
     memoryRows.push(
       diagnosticRow(
-        "Dispositivos gráficos",
+        "Graphics devices",
         runtime.devicesDiagnostic
       )
     );
   }
 
-  compact.push(
-    `Modelos ${runtime.loadedModels.length} carregado${runtime.loadedModels.length === 1 ? "" : "s"}`
-  );
-  if (runtime.warning) {
-    compact.push(
-      `⚠ ${runtime.warnings.length} aviso${runtime.warnings.length === 1 ? "" : "s"}`
-    );
-  }
-  elements.runtimeSummary.textContent = compact.join(" · ");
+  elements.runtimeCompactMeters.replaceChildren(...compactMeters);
   elements.runtimeSummary.title = runtime.warnings.join("\n");
   elements.runtimeMemoryList.replaceChildren(...memoryRows);
-  elements.runtimeModelList.replaceChildren(
-    ...(runtime.loadedModels.length === 0
-      ? [
-        diagnosticRow(
-          runtime.loadedModelsStatus === "unavailable"
-            ? "Telemetria do Ollama"
-            : "Nenhum modelo reportado",
-          runtime.loadedModelsDiagnostic
-            ?? "O Ollama não informou modelos carregados em /api/ps."
-        )
-      ]
-      : runtime.loadedModels.map(model => loadedModelRow(model)))
+  renderLoadedModels(runtime);
+}
+
+function compactRuntimeMeter(label, percent, kind) {
+  const indicator = document.createElement("span");
+  indicator.className = `runtime-compact-indicator ${kind}`;
+  const name = document.createElement("span");
+  name.className = "runtime-compact-label";
+  name.textContent = label;
+  const meter = document.createElement("span");
+  meter.className = "runtime-compact-meter";
+  const fill = document.createElement("span");
+  const normalized = percent == null
+    ? 0
+    : Math.max(0, Math.min(100, percent));
+  fill.style.width = `${normalized}%`;
+  fill.className = normalized >= 90
+    ? "critical"
+    : normalized >= 75
+      ? "warning"
+      : "";
+  meter.append(fill);
+  const value = document.createElement("span");
+  value.className = "runtime-compact-value";
+  value.textContent = formatPercent(percent);
+  indicator.setAttribute(
+    "aria-label",
+    `${label}: ${formatPercent(percent)}`
   );
-  elements.residentModelStatus.textContent =
-    `${runtime.residentModel.configuredModel || "não configurado"} · `
-    + `${runtime.residentModel.state}`
-    + `${runtime.residentModel.loaded ? " · carregado" : ""}`
-    + `${runtime.residentModel.requestedContextTokens
-      ? ` · contexto ${formatInteger(runtime.residentModel.actualContextTokens)} / ${formatInteger(runtime.residentModel.requestedContextTokens)}`
-      : ""}`
-    + `${runtime.residentModel.diagnostic ? ` · ${runtime.residentModel.diagnostic}` : ""}`;
-  elements.residentModelStatus.dataset.state = runtime.residentModel.state;
+  indicator.append(name, meter, value);
+  return indicator;
+}
+
+function compactDeviceName(name) {
+  const match = name.match(/(?:RTX|GTX)\s*(\d{3,4})/i);
+  return match?.[1] ?? name.replace(/^NVIDIA\s+/i, "");
 }
 
 function memoryRow(name, used, total, percent, diagnostic, kind) {
@@ -5733,31 +6236,290 @@ function diagnosticRow(name, diagnostic, status = "unavailable") {
   const label = document.createElement("strong");
   label.textContent = name;
   const value = document.createElement("span");
-  value.textContent = diagnostic ?? "Indisponível";
+  value.textContent = diagnostic ?? "Unavailable";
   row.append(label, value);
   return row;
 }
 
-function loadedModelRow(model) {
+function renderLoadedModels(runtime) {
+  const availableDevices = runtime.devices.filter(
+    device => device.usedDedicatedMemoryBytes != null
+      && device.totalDedicatedMemoryBytes > 0
+  );
+  const usedGpuMemory = availableDevices.reduce(
+    (total, device) => total + device.usedDedicatedMemoryBytes,
+    0
+  );
+  const totalGpuMemory = availableDevices.reduce(
+    (total, device) => total + device.totalDedicatedMemoryBytes,
+    0
+  );
+  elements.runtimeModelSummary.textContent = totalGpuMemory > 0
+    ? `${formatGiB(usedGpuMemory)} / ${formatGiB(totalGpuMemory)} · `
+      + `${formatPercent(usedGpuMemory * 100 / totalGpuMemory)}`
+    : t("memory.gpu_memory_unavailable");
+
+  const groups = new Map();
+  for (const model of runtime.loadedModels) {
+    const identity = loadedModelGpuIdentity(model);
+    if (!groups.has(identity.key)) {
+      groups.set(identity.key, {
+        ...identity,
+        models: []
+      });
+    }
+    groups.get(identity.key).models.push(model);
+  }
+  for (const device of runtime.devices) {
+    if (device.ollamaIndex == null) {
+      continue;
+    }
+    const key = `gpu-${device.ollamaIndex}`;
+    const label = `GPU ${device.ollamaIndex} · ${device.name}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        gpuIndex: Number(device.ollamaIndex),
+        label,
+        order: Number(device.ollamaIndex),
+        models: []
+      });
+    } else {
+      groups.get(key).label = label;
+    }
+  }
+
+  if (groups.size === 0) {
+    elements.runtimeModelList.replaceChildren(
+      diagnosticRow(
+        runtime.loadedModelsStatus === "unavailable"
+          ? "Ollama telemetry"
+          : "No reported model",
+        runtime.loadedModelsDiagnostic
+          ?? "Ollama did not report loaded models in /api/ps."
+      )
+    );
+    return;
+  }
+
+  const orderedGroups = [...groups.values()].sort(
+    (left, right) => left.order - right.order
+  );
+  const grid = document.createElement("div");
+  grid.className = "loaded-model-gpu-grid";
+  grid.append(
+    ...orderedGroups.map(
+      group => loadedModelGpuCard(
+        group,
+        runtime.devices,
+        runtime.loadedModelsStatus
+      )
+    )
+  );
+  const summary = document.createElement("div");
+  summary.className = "loaded-model-summary";
+  summary.append(
+    loadedModelSummaryItem(
+      t("memory.system_ram_model"),
+      formatGiB(runtime.loadedModels.reduce(
+        (total, model) => total + Number(model.estimatedRamSizeBytes ?? 0),
+        0
+      ))
+    ),
+    loadedModelSummaryItem(
+      t("memory.total_context_window"),
+      `${formatInteger(runtime.loadedModels.reduce(
+        (total, model) => total + Number(model.actualContextTokens ?? 0),
+        0
+      ))} tokens`
+    )
+  );
+  elements.runtimeModelList.replaceChildren(grid, summary);
+}
+
+function loadedModelGpuIdentity(model) {
+  if (model.gpuIndex != null) {
+    return {
+      key: `gpu-${model.gpuIndex}`,
+      gpuIndex: Number(model.gpuIndex),
+      label: `GPU ${model.gpuIndex}${model.gpuName ? ` · ${model.gpuName}` : ""}`,
+      order: Number(model.gpuIndex)
+    };
+  }
+  if (model.processor === "cpu") {
+    return {
+      key: "cpu",
+      gpuIndex: null,
+      label: t("memory.cpu"),
+      order: Number.MAX_SAFE_INTEGER - 2
+    };
+  }
+  if (model.processor === "gpu" || model.processor === "hybrid") {
+    return {
+      key: "auto",
+      gpuIndex: null,
+      label: t("memory.gpu_auto"),
+      order: Number.MAX_SAFE_INTEGER - 1
+    };
+  }
+  return {
+    key: "unknown",
+    gpuIndex: null,
+    label: t("memory.gpu_unknown"),
+    order: Number.MAX_SAFE_INTEGER
+  };
+}
+
+function loadedModelGpuCard(group, devices, loadedModelsStatus) {
+  const card = document.createElement("article");
+  card.className = "loaded-model-gpu-card";
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = group.label;
+  const details = document.createElement("details");
+  details.className = "loaded-model-details";
+  const detailsSummary = document.createElement("summary");
+  detailsSummary.textContent = t("memory.details");
+  const detailsContent = document.createElement("div");
+  detailsContent.className = "loaded-model-details-content";
+  detailsContent.append(
+    ...(group.models.length > 0
+      ? group.models.map(model => loadedModelDetailRow(model))
+      : [loadedModelEmptyDetail()])
+  );
+  details.append(detailsSummary, detailsContent);
+  header.append(title, details);
+
+  const modelVramValues = group.models
+    .map(model => model.vramSizeBytes)
+    .filter(value => value != null);
+  const modelVram = modelVramValues.reduce(
+    (total, value) => total + Number(value),
+    0
+  );
+  const device = group.gpuIndex == null
+    ? null
+    : devices.find(item => item.ollamaIndex === group.gpuIndex);
+  const modelTelemetryAvailable = loadedModelsStatus === "available";
+  const modelVramKnown = modelTelemetryAvailable
+    && modelVramValues.length === group.models.length;
+  const systemDriverVram = device?.usedDedicatedMemoryBytes == null
+    || !modelVramKnown
+    ? null
+    : Math.max(0, device.usedDedicatedMemoryBytes - modelVram);
+  const contextRuntimeValues = group.models
+    .map(model => estimatedContextRuntimeBytes(model))
+    .filter(value => value != null);
+  const contextRuntimeBytes = group.models.length === 0 && modelTelemetryAvailable
+    ? 0
+    : contextRuntimeValues.length === group.models.length
+      ? contextRuntimeValues.reduce((total, value) => total + value, 0)
+      : null;
+  const contextTokens = group.models.reduce(
+    (total, model) => total + Number(model.actualContextTokens ?? 0),
+    0
+  );
+  const metrics = document.createElement("div");
+  metrics.className = "loaded-model-metrics";
+  metrics.append(
+    loadedModelMetric(
+      "model",
+      t("memory.model_vram_used"),
+      modelVramKnown ? formatGiB(modelVram) : "n/d"
+    ),
+    loadedModelMetric(
+      "system",
+      t("memory.system_driver_vram"),
+      systemDriverVram == null ? "n/d" : formatGiB(systemDriverVram)
+    ),
+    loadedModelMetric(
+      "context",
+      t("memory.context_share"),
+      `${formatInteger(contextTokens)} tokens`
+    ),
+    loadedModelMetric(
+      "memory",
+      t("memory.context_runtime"),
+      contextRuntimeBytes == null ? "n/d" : `~${formatGiB(contextRuntimeBytes)}`,
+      t("memory.context_runtime_note")
+    )
+  );
+  card.append(header, metrics);
+  return card;
+}
+
+function loadedModelMetric(kind, labelText, valueText, diagnostic = null) {
   const row = document.createElement("div");
-  row.className = "loaded-model-row";
-  const name = document.createElement("strong");
-  name.textContent = `${model.name}${model.isResidentModel ? " · residente" : ""}`;
-  const details = document.createElement("span");
-  details.textContent =
-    `${model.role ?? "papel não configurado"} · ${shortDigest(model.digest)} · `
-    + `contexto ${formatInteger(model.actualContextTokens)} / `
-    + `${formatInteger(model.requestedContextTokens)} · ${model.profileStatus}`
-    + `${model.sharedAcrossRoles ? " · compartilhado" : ""}\n`
-    + `Total ${formatGiB(model.totalSizeBytes)} · VRAM ${formatGiB(model.vramSizeBytes)} · `
-    + `RAM estimada ${formatGiB(model.estimatedRamSizeBytes)} · ${model.processor}`
-    + `${model.expiresAt ? ` · expira ${new Date(model.expiresAt).toLocaleTimeString()}` : ""}`;
-  row.append(name, details);
+  row.className = "loaded-model-metric";
+  if (diagnostic) {
+    row.title = diagnostic;
+  }
+  const label = document.createElement("span");
+  const icon = document.createElement("span");
+  icon.className = `loaded-model-metric-icon ${kind}`;
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = {
+    model: "▦",
+    system: "⚙",
+    context: "●",
+    memory: "◫"
+  }[kind];
+  label.append(icon, document.createTextNode(labelText));
+  const value = document.createElement("strong");
+  value.textContent = valueText;
+  row.append(label, value);
   return row;
 }
 
+function loadedModelDetailRow(model) {
+  const row = document.createElement("div");
+  row.className = "loaded-model-detail-row";
+  const name = document.createElement("strong");
+  name.textContent = model.name;
+  const allocation = document.createElement("span");
+  const contextRuntimeBytes = estimatedContextRuntimeBytes(model);
+  allocation.textContent = `${formatGiB(model.vramSizeBytes)} VRAM · `
+    + `${formatGiB(model.estimatedRamSizeBytes)} RAM · `
+    + `${formatInteger(model.actualContextTokens)} tokens · `
+    + `${contextRuntimeBytes == null ? "n/d" : `~${formatGiB(contextRuntimeBytes)}`} context/runtime`;
+  row.append(name, allocation);
+  return row;
+}
+
+function loadedModelEmptyDetail() {
+  const row = document.createElement("div");
+  row.className = "loaded-model-detail-row";
+  const message = document.createElement("span");
+  message.textContent = t("memory.no_loaded_model");
+  row.append(message);
+  return row;
+}
+
+function estimatedContextRuntimeBytes(model) {
+  if (model.totalSizeBytes == null) {
+    return null;
+  }
+  const installed = state.models.find(
+    candidate => candidate.provider === "ollama-local"
+      && candidate.name === model.name
+  );
+  return installed?.sizeBytes == null
+    ? null
+    : Math.max(0, Number(model.totalSizeBytes) - Number(installed.sizeBytes));
+}
+
+function loadedModelSummaryItem(labelText, valueText) {
+  const item = document.createElement("div");
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  const value = document.createElement("strong");
+  value.textContent = valueText;
+  item.append(label, value);
+  return item;
+}
+
 function formatInteger(value) {
-  return new Intl.NumberFormat().format(Number(value ?? 0));
+  return new Intl.NumberFormat(window.AgenticRouterI18n.locale).format(Number(value ?? 0));
 }
 
 function formatCurrency(value) {
@@ -5766,7 +6528,7 @@ function formatCurrency(value) {
     ? 6
     : 2;
   return new Intl.NumberFormat(
-    undefined,
+    window.AgenticRouterI18n.locale,
     {
       style: "currency",
       currency: "USD",
@@ -5807,14 +6569,14 @@ function handleVisibilityChange() {
 
 const runtimeRoleLabels = {
   router: "Router",
-  residentCoordinator: "Coordenador residente",
-  specialist: "Especialista",
-  primary: "Primário",
+  residentCoordinator: "Resident coordinator",
+  specialist: "Specialist",
+  primary: "Primary",
   fallback: "Fallback",
   benchmark: "Benchmark",
-  modelTest: "Teste de modelo",
-  webSearchSynthesis: "Síntese de busca web",
-  visionRequest: "Requisição com visão"
+  modelTest: "Model test",
+  webSearchSynthesis: "Web search synthesis",
+  visionRequest: "Vision request"
 };
 
 function renderRuntimeProfilesEditor() {
@@ -5836,10 +6598,10 @@ function renderRuntimeProfilesEditor() {
     fields.className = "runtime-profile-fields";
 
     for (const [label, field] of [
-      ["Mín.", "minimumContextTokens"],
-      ["Alvo", "targetContextTokens"],
-      ["Máx.", "maximumContextTokens"],
-      ["Saída", "outputTokenLimit"],
+      ["Min.", "minimumContextTokens"],
+      ["Target", "targetContextTokens"],
+      ["Max.", "maximumContextTokens"],
+      ["Output", "outputTokenLimit"],
       ["Keep-alive", "keepAlive"]
     ]) {
       const fieldLabel = document.createElement("label");
@@ -5879,7 +6641,7 @@ function renderRuntimeProfilesEditor() {
     .map(model => ({
       value: model.name,
       label: `${model.displayName ?? model.name} · ${shortDigest(model.digest)}`,
-      title: model.digest ?? "digest indisponível"
+      title: model.digest ?? "digest unavailable"
     }));
   replaceOptions(
     elements.runtimeOverrideModel,
@@ -5953,7 +6715,7 @@ function renderRuntimeDevicePolicies(memory) {
       };
       const percentLabel = document.createElement("label");
       const percentCaption = document.createElement("span");
-      percentCaption.textContent = "Uso máximo (%)";
+      percentCaption.textContent = "Maximum usage (%)";
       const percent = document.createElement("input");
       percent.type = "number";
       percent.min = "50";
@@ -5964,7 +6726,7 @@ function renderRuntimeDevicePolicies(memory) {
       percentLabel.append(percentCaption, percent);
       const freeLabel = document.createElement("label");
       const freeCaption = document.createElement("span");
-      freeCaption.textContent = "VRAM livre (GiB)";
+      freeCaption.textContent = "Free VRAM (GiB)";
       const free = document.createElement("input");
       free.type = "number";
       free.min = "0";
@@ -5981,7 +6743,7 @@ function renderRuntimeDevicePolicies(memory) {
   if (cards.length === 0) {
     const empty = document.createElement("p");
     empty.className = "runtime-note";
-    empty.textContent = "Nenhuma GPU específica foi detectada.";
+    empty.textContent = "No specific GPU was detected.";
     cards.push(empty);
   }
 
@@ -6014,7 +6776,7 @@ function saveRuntimeOverrideDraft() {
 
   if (!model?.digest) {
     elements.runtimeProfileResult.textContent =
-      "O modelo local precisa ter um digest exato para receber um override.";
+      "The local model must have an exact digest to receive an override.";
     return;
   }
 
@@ -6057,7 +6819,7 @@ function saveRuntimeOverrideDraft() {
   state.settingsDirty = true;
   updateSettingsDirtyState();
   elements.runtimeProfileResult.textContent =
-    `Override preparado para ${model.name}@${shortDigest(model.digest)} · ${runtimeRoleLabels[role]}. Salve as configurações para aplicar.`;
+    `Override prepared for ${model.name}@${shortDigest(model.digest)} · ${runtimeRoleLabels[role]}. Save settings to apply it.`;
   loadRuntimeOverrideEditor();
 }
 
@@ -6095,7 +6857,7 @@ function removeRuntimeOverrideDraft() {
   state.settingsDirty = true;
   updateSettingsDirtyState();
   elements.runtimeProfileResult.textContent =
-    "Override removido do rascunho. Salve as configurações para aplicar.";
+    "Override removed from the draft. Save settings to apply it.";
   loadRuntimeOverrideEditor();
 }
 
@@ -6167,7 +6929,7 @@ async function analyzeRuntimeProfile() {
   const role = elements.runtimeOverrideRole.value;
   elements.analyzeRuntimeProfile.disabled = true;
   elements.runtimeProfileResult.textContent =
-    `Analisando metadados de ${model}; o modelo não será carregado…`;
+    `Analyzing ${model} metadata; the model will not be loaded…`;
 
   try {
     const result = await fetchJson(
@@ -6186,14 +6948,14 @@ async function analyzeRuntimeProfile() {
     const recommendation = result.recommendation;
     elements.runtimeProfileResult.textContent =
       `${model} · ${runtimeRoleLabels[role] ?? role}\n`
-      + `Declarado: ${formatInteger(recommendation.declaredMaximumContext)} · `
-      + `configurado: ${formatInteger(recommendation.configuredContext)}\n`
-      + `Sugestão ${formatInteger(recommendation.suggestedMinimum)} / `
+      + `Declared: ${formatInteger(recommendation.declaredMaximumContext)} · `
+      + `configured: ${formatInteger(recommendation.configuredContext)}\n`
+      + `Suggestion ${formatInteger(recommendation.suggestedMinimum)} / `
       + `${formatInteger(recommendation.suggestedTarget)} / `
       + `${formatInteger(recommendation.suggestedMaximum)} · `
-      + `confiança ${recommendation.confidence}\n`
-      + `Origem: ${recommendation.source} · ${recommendation.reason}\n`
-      + `Carga alterada: ${result.loadedModelChanged ? "sim (inesperado)" : "não"}`;
+      + `confidence ${recommendation.confidence}\n`
+      + `Source: ${recommendation.source} · ${recommendation.reason}\n`
+      + `Load changed: ${result.loadedModelChanged ? "yes (unexpected)" : "no"}`;
   } catch (error) {
     elements.runtimeProfileResult.textContent =
       runtimeProfileErrorMessage(error);
@@ -6207,20 +6969,20 @@ async function measureRuntimeProfile() {
   const role = elements.runtimeOverrideRole.value;
   const context = Number(elements.runtimeOverrideTarget.value);
   const consent =
-    `Medir ${model} com ${formatInteger(context)} tokens de contexto?\n\n`
-    + "Esta ação carregará um modelo real no Ollama e poderá usar GPU, VRAM e RAM. "
-    + "O Host tentará restaurar o estado residente anterior.";
+    `Measure ${model} with ${formatInteger(context)} context tokens?\n\n`
+    + "This action will load a real model in Ollama and may use GPU, VRAM, and RAM. "
+    + "The Host will try to restore the previous resident state.";
 
   if (!await showAppConfirm(consent, {
-    title: "Executar medição real?",
-    confirmLabel: "Executar medição"
+    title: "Run real measurement?",
+    confirmLabel: "Run measurement"
   })) {
     return;
   }
 
   elements.measureRuntimeProfile.disabled = true;
   elements.runtimeProfileResult.textContent =
-    `Medindo ${model} em ${formatInteger(context)} tokens…`;
+    `Measuring ${model} at ${formatInteger(context)} tokens…`;
 
   try {
     const result = await fetchJson(
@@ -6244,10 +7006,10 @@ async function measureRuntimeProfile() {
       `${measurement.model}@${shortDigest(measurement.digest)} · `
       + `${formatInteger(measurement.actualContext)} tokens\n`
       + `VRAM ${formatGiB(measurement.vramSizeBytes)} · `
-      + `RAM estimada ${formatGiB(measurement.estimatedRamSizeBytes)} · `
+      + `estimated RAM ${formatGiB(measurement.estimatedRamSizeBytes)} · `
       + `${measurement.processor}\n`
-      + `Carga ${formatInteger(measurement.loadDurationMilliseconds)} ms · `
-      + `residente restaurado: ${result.priorResidentRestored ? "sim" : "não necessário"}`;
+      + `Load ${formatInteger(measurement.loadDurationMilliseconds)} ms · `
+      + `resident restored: ${result.priorResidentRestored ? "yes" : "not required"}`;
     state.runtimeProfiles = await fetchJson("/api/runtime/profiles");
     renderRuntimeProfileEvidence();
     await refreshRuntimeStatus();
@@ -6290,14 +7052,14 @@ function renderRuntimeProfileEvidence() {
 function runtimeProfileErrorMessage(error) {
   const payload = error.payload;
   return payload?.code
-    ? `${payload.message}\nCódigo: ${payload.code} · etapa: ${payload.stage} · trace: ${payload.traceId}`
+    ? `${payload.message}\nCode: ${payload.code} · stage: ${payload.stage} · trace: ${payload.traceId}`
     : error.message;
 }
 
 function shortDigest(value) {
   return value
     ? value.slice(0, 12)
-    : "sem digest";
+    : "no digest";
 }
 
 function bytesToGiB(value) {
@@ -6465,7 +7227,7 @@ function renderSettingsSummaries() {
 
 function modelOptions() {
   const groups = {
-    "ollama-local": "Modelos locais",
+    "ollama-local": "Local models",
     groq: "Groq",
     "google-ai-studio": "Google AI Studio",
     cerebras: "Cerebras"
@@ -6476,7 +7238,7 @@ function modelOptions() {
     const capabilities = model.capabilities;
     const badges = [
       capabilities?.nativeTools ? "tools" : null,
-      capabilities?.vision ? "visão" : null,
+      capabilities?.vision ? "vision" : null,
       capabilities?.streaming ? "stream" : null
     ].filter(Boolean);
 
@@ -6486,7 +7248,7 @@ function modelOptions() {
         + `${organized?.alias ? ` · ${model.name}` : ""}`
         + `${organized?.favorite ? " ★" : ""}`
         + `${badges.length ? ` · ${badges.join(" · ")}` : ""}`,
-      group: groups[model.provider] ?? model.provider ?? "Modelos locais",
+      group: groups[model.provider] ?? model.provider ?? "Local models",
       disabled: model.selectable === false,
       hidden: organized?.hidden === true,
       favorite: organized?.favorite === true,
@@ -6560,8 +7322,8 @@ function renderModelOrganization() {
     for (const label of [
       model.favorite ? "★ favorito" : null,
       model.hidden ? "oculto" : null,
-      model.available ? "disponível" : "indisponível",
-      model.conformanceApproved ? "conformidade aprovada" : null,
+      model.available ? "available" : "unavailable",
+      model.conformanceApproved ? "approved conformance" : null,
       model.capabilities?.nativeTools ? "tools" : null,
       model.capabilities?.webSearch ? "web" : null,
       model.capabilities?.vision ? "vision" : null,
@@ -6579,13 +7341,13 @@ function renderModelOrganization() {
     const alias = document.createElement("input");
     alias.type = "text";
     alias.maxLength = 80;
-    alias.placeholder = "Alias local";
+    alias.placeholder = "Local alias";
     alias.value = model.alias ?? "";
     alias.dataset.modelAlias = "";
     const note = document.createElement("input");
     note.type = "text";
     note.maxLength = 500;
-    note.placeholder = "Nota opcional";
+    note.placeholder = "Optional note";
     note.value = model.note ?? "";
     note.dataset.modelNote = "";
     fields.append(alias, note);
@@ -6603,7 +7365,7 @@ function renderModelOrganization() {
       },
       {
         value: "save",
-        label: "Salvar alias e nota"
+        label: "Save alias and note"
       }
     ]) {
       const button = document.createElement("button");
@@ -6623,7 +7385,7 @@ function renderModelOrganization() {
   if (models.length === 0) {
     const empty = document.createElement("p");
     empty.className = "runtime-note";
-    empty.textContent = "Nenhum modelo corresponde aos filtros.";
+    empty.textContent = "No model matches the filters.";
     elements.modelOrganizationList.append(empty);
   }
 }
@@ -6684,7 +7446,7 @@ function allProfileModelOptions(includeNone = false) {
       ? [
         {
           value: "none",
-          label: "Nenhum"
+          label: "None"
         }
       ]
       : []),
@@ -6693,7 +7455,7 @@ function allProfileModelOptions(includeNone = false) {
         value: model.qualifiedId,
         label: `${model.alias ?? model.modelId}`
           + `${model.alias ? ` · ${model.qualifiedId}` : ""}`
-          + `${model.available ? "" : " (indisponível)"}`,
+          + `${model.available ? "" : " (unavailable)"}`,
         group: providerLabel(model.providerId),
         disabled: !model.available
       })
@@ -6709,7 +7471,7 @@ function renderModelProfiles() {
     [
       {
         value: "",
-        label: "Novo perfil"
+        label: "New profile"
       },
       ...profiles.map(
         profile => ({
@@ -6747,7 +7509,7 @@ function renderModelProfiles() {
     [
       {
         value: "",
-        label: "Nenhum perfil preferido"
+        label: "No preferred profile"
       },
       ...profiles.map(
         profile => ({
@@ -6771,7 +7533,7 @@ function loadSelectedModelProfile() {
   if (!profile) {
     elements.modelProfileName.value = "";
     elements.modelProfilePreview.textContent =
-      "Preencha os campos e salve para gerar a visualização autoritativa.";
+      "Fill in the fields and save to generate the authoritative view.";
     renderModelProfiles();
     return;
   }
@@ -6805,7 +7567,7 @@ function loadSelectedModelProfile() {
 
 async function saveModelProfile() {
   elements.saveModelProfile.disabled = true;
-  elements.modelProfileStatus.textContent = "Validando e salvando perfil…";
+  elements.modelProfileStatus.textContent = "Validating and saving profile…";
 
   try {
     const preview = await fetchJson(
@@ -6833,7 +7595,7 @@ async function saveModelProfile() {
     elements.modelProfileSelector.value = preview.profileId;
     loadSelectedModelProfile();
     renderProfilePreview(preview);
-    elements.modelProfileStatus.textContent = "Perfil salvo sem iniciar modelo.";
+    elements.modelProfileStatus.textContent = "Profile saved without starting a model.";
   } catch (error) {
     elements.modelProfileStatus.textContent = error.message;
   } finally {
@@ -6860,14 +7622,14 @@ function renderProfilePreview(preview) {
         `${item.role.toUpperCase()}\n`
         + `${providerLabel(item.providerId)} · ${item.exactModelId}\n`
         + `${item.alias ? `Alias: ${item.alias}\n` : ""}`
-        + `Disponível: ${item.available ? "sim" : "não"} · `
-        + `Conformidade: ${item.conformanceApproved ? "aprovada" : "não aprovada"} · `
-        + `Tools: ${item.toolPath} · Web: ${item.web ? "sim" : "não"} · `
-        + `Vision: ${item.vision ? "sim" : "não"}`
+        + `Available: ${item.available ? "yes" : "no"} · `
+        + `Conformance: ${item.conformanceApproved ? "approved" : "not approved"} · `
+        + `Tools: ${item.toolPath} · Web: ${item.web ? "yes" : "no"} · `
+        + `Vision: ${item.vision ? "yes" : "no"}`
     ),
-    `Fallback local: ${preview.localFallbackValid ? "válido" : "inválido"}`,
-    `Workspaces afetados: ${preview.affectedWorkspaces.join(", ") || "nenhum"}`,
-    ...preview.errors.map(error => `ERRO: ${error}`)
+    `Local fallback: ${preview.localFallbackValid ? "valid" : "invalid"}`,
+    `Affected workspaces: ${preview.affectedWorkspaces.join(", ") || "none"}`,
+    ...preview.errors.map(error => `ERROR: ${error}`)
   ].join("\n\n");
 }
 
@@ -6875,8 +7637,8 @@ async function applyModelProfile() {
   const profileId = elements.modelProfileSelector.value;
 
   if (!profileId || !await showAppConfirm(
-    "Aplicar este perfil atomicamente às novas solicitações? A conversa atual não será reiniciada.",
-    { title: "Aplicar perfil?", confirmLabel: "Aplicar" }
+    "Apply this profile atomically to new requests? The current conversation will not restart.",
+    { title: "Apply profile?", confirmLabel: "Apply" }
   )) {
     return;
   }
@@ -6900,7 +7662,7 @@ async function applyModelProfile() {
     renderSettings();
     renderProfilePreview(preview);
     elements.modelProfileStatus.textContent =
-      "Perfil aplicado. A seleção atual da conversa foi preservada.";
+      "Profile applied. The current conversation selection was preserved.";
   } catch (error) {
     elements.modelProfileStatus.textContent = error.message;
   } finally {
@@ -6912,8 +7674,8 @@ async function deleteModelProfile() {
   const profileId = elements.modelProfileSelector.value;
 
   if (!profileId || !await showAppConfirm(
-    "Excluir este perfil salvo?",
-    { title: "Excluir perfil?", confirmLabel: "Excluir", danger: true }
+    "Delete this saved profile?",
+    { title: "Delete profile?", confirmLabel: "Delete", danger: true }
   )) {
     return;
   }
@@ -6927,7 +7689,7 @@ async function deleteModelProfile() {
     );
     elements.modelProfileSelector.value = "";
     loadSelectedModelProfile();
-    elements.modelProfileStatus.textContent = "Perfil excluído.";
+    elements.modelProfileStatus.textContent = "Profile deleted.";
   } catch (error) {
     elements.modelProfileStatus.textContent = error.message;
   }
@@ -6954,7 +7716,7 @@ async function saveWorkspaceModelProfile() {
       }
     );
     elements.modelProfileStatus.textContent =
-      "Preferência do workspace salva por referência.";
+      "Workspace preference saved by reference.";
   } catch (error) {
     elements.modelProfileStatus.textContent = error.message;
   }
@@ -6999,11 +7761,11 @@ function renderModelChainPreview() {
       return `${item.role}\n`
         + `${providerLabel(reference.provider)} · ${reference.model}\n`
         + `${model?.alias ? `Alias: ${model.alias} · ` : ""}`
-        + `${model?.available ? "disponível" : "indisponível"} · `
-        + `conformidade ${model?.conformanceApproved ? "aprovada" : "não aprovada"} · `
-        + `tools ${model?.capabilities?.nativeTools ? "sim" : "não"} · `
-        + `web ${model?.capabilities?.webSearch ? "sim" : "não"} · `
-        + `vision ${model?.capabilities?.vision ? "sim" : "não"}`;
+        + `${model?.available ? "available" : "unavailable"} · `
+        + `conformance ${model?.conformanceApproved ? "approved" : "not approved"} · `
+        + `tools ${model?.capabilities?.nativeTools ? "yes" : "no"} · `
+        + `web ${model?.capabilities?.webSearch ? "yes" : "no"} · `
+        + `vision ${model?.capabilities?.vision ? "yes" : "no"}`;
     }
   ).join("\n\n");
 }
@@ -7052,42 +7814,42 @@ function renderCloudProviders() {
     body.className = "cloud-provider-body";
     const metadata = document.createElement("dl");
     metadata.className = "cloud-provider-metadata";
-    appendDefinition(metadata, "Ativo", provider.enabled ? "Sim" : "Não");
-    appendDefinition(metadata, "Chave", provider.maskedKeyState);
-    appendDefinition(metadata, "Modelos", String(provider.modelCount));
+    appendDefinition(metadata, "Active", provider.enabled ? "Yes" : "No");
+    appendDefinition(metadata, "Key", provider.maskedKeyState);
+    appendDefinition(metadata, "Models", String(provider.modelCount));
     appendDefinition(
       metadata,
-      "Última atualização",
+      "Last update",
       provider.lastRefreshAt
-        ? new Date(provider.lastRefreshAt).toLocaleString()
-        : "Ainda não atualizada"
+        ? new Date(provider.lastRefreshAt).toLocaleString(window.AgenticRouterI18n.locale)
+        : "Not updated yet"
     );
     appendDefinition(metadata, "Quota", provider.quotaSource);
     if (health) {
       appendDefinition(
         metadata,
-        "Saúde",
+        "Health",
         providerHealthStateLabel(health.connectionState)
       );
       appendDefinition(
         metadata,
-        "Último sucesso",
+        "Last success",
         formatProviderHealthDate(health.lastSuccessfulRequest)
       );
       appendDefinition(
         metadata,
-        "Latência",
+        "Latency",
         health.totalLatencyMilliseconds == null
-          ? "indisponível"
+          ? "unavailable"
           : `${formatInteger(health.totalLatencyMilliseconds)} ms`
       );
-      appendDefinition(metadata, "Uso", usageAccuracyLabel(health.tokenUsageAccuracy));
+      appendDefinition(metadata, "Usage", usageAccuracyLabel(health.tokenUsageAccuracy));
     }
 
     const billingField = document.createElement("label");
     billingField.className = "cloud-billing-field";
     const billingLabel = document.createElement("span");
-    billingLabel.textContent = "Modo de faturamento esperado";
+    billingLabel.textContent = "Expected billing mode";
     const billingSelect = document.createElement("select");
     billingSelect.dataset.cloudBilling = provider.provider;
     replaceOptions(
@@ -7095,7 +7857,7 @@ function renderCloudProviders() {
       [
         {
           value: "unknown",
-          label: "Desconhecido"
+          label: "Unknown"
         },
         {
           value: "free-tier",
@@ -7103,7 +7865,7 @@ function renderCloudProviders() {
         },
         {
           value: "paid",
-          label: "Pago"
+          label: "Paid"
         }
       ],
       provider.expectedBillingMode ?? "unknown"
@@ -7112,15 +7874,15 @@ function renderCloudProviders() {
 
     const keyField = document.createElement("label");
     const keyLabel = document.createElement("span");
-    keyLabel.textContent = provider.hasKey ? "Substituir chave" : "API key";
+    keyLabel.textContent = provider.hasKey ? "Replace key" : "API key";
     const keyInput = document.createElement("input");
     keyInput.type = "password";
     keyInput.autocomplete = "new-password";
     keyInput.dataset.cloudKey = provider.provider;
     keyInput.dataset.ignoreSettingsDirty = "";
     keyInput.placeholder = provider.hasKey
-      ? "Digite uma nova chave"
-      : "Digite a chave";
+      ? "Enter a new key"
+      : "Enter the key";
     keyField.append(keyLabel, keyInput);
 
     const actions = document.createElement("div");
@@ -7129,14 +7891,14 @@ function renderCloudProviders() {
       cloudActionButton(
         provider.provider,
         "save-key",
-        provider.hasKey ? "Substituir" : "Salvar chave"
+        provider.hasKey ? "Replace" : "Save key"
       ),
-      cloudActionButton(provider.provider, "test", "Testar conexão"),
-      cloudActionButton(provider.provider, "refresh", "Atualizar modelos"),
+      cloudActionButton(provider.provider, "test", "Test connection"),
+      cloudActionButton(provider.provider, "refresh", "Refresh models"),
       cloudActionButton(
         provider.provider,
         "remove-key",
-        "Remover chave",
+        "Remove key",
         "danger-button"
       )
     );
@@ -7188,23 +7950,23 @@ function createProviderHealthCard(provider) {
   body.className = "cloud-provider-body";
   const metadata = document.createElement("dl");
   metadata.className = "cloud-provider-metadata";
-  appendDefinition(metadata, "Último sucesso", formatProviderHealthDate(provider.lastSuccessfulRequest));
+  appendDefinition(metadata, "Last success", formatProviderHealthDate(provider.lastSuccessfulRequest));
   appendDefinition(
     metadata,
-    "Latência",
+    "Latency",
     provider.totalLatencyMilliseconds == null
-      ? "indisponível"
+      ? "unavailable"
       : `${formatInteger(provider.totalLatencyMilliseconds)} ms`
   );
   appendDefinition(metadata, "Quota", provider.quotaState);
-  appendDefinition(metadata, "Uso", usageAccuracyLabel(provider.tokenUsageAccuracy));
+  appendDefinition(metadata, "Usage", usageAccuracyLabel(provider.tokenUsageAccuracy));
   const diagnostic = document.createElement("pre");
   diagnostic.className = "provider-health-diagnostic";
   diagnostic.textContent = [
-    `status: ${provider.diagnostic.lastStatusCode ?? "indisponível"}`,
+    `status: ${provider.diagnostic.lastStatusCode ?? "unavailable"}`,
     `retry: ${provider.diagnostic.retryDecision}`,
-    `fonte: ${provider.healthSource}`,
-    `stale: ${provider.stale ? "sim" : "não"}`
+    `source: ${provider.healthSource}`,
+    `stale: ${provider.stale ? "yes" : "no"}`
   ].join("\n");
   body.append(metadata, diagnostic);
   card.append(summary, body);
@@ -7238,8 +8000,8 @@ function renderOllamaWebSearchSettings() {
     ? "success"
     : "muted"}`;
   status.textContent = integration.state === "available"
-    ? "Disponível"
-    : "Não configurado";
+    ? "Available"
+    : "Not configured";
   summary.append(title, status);
 
   const body = document.createElement("div");
@@ -7247,20 +8009,20 @@ function renderOllamaWebSearchSettings() {
   const note = document.createElement("p");
   note.className = "runtime-note";
   note.textContent =
-    "Pesquisa somente leitura para modelos locais. É separada dos modelos Ollama Cloud "
-      + "e só é usada quando Web for habilitado explicitamente no composer.";
+    "Read-only search for local models. It is separate from Ollama Cloud models "
+      + "and is used only when Web is explicitly enabled in the Composer.";
   const keyField = document.createElement("label");
   const keyLabel = document.createElement("span");
   keyLabel.textContent = integration.hasKey
-    ? "Substituir chave"
-    : "API key separada";
+    ? "Replace key"
+    : "Separate API key";
   const keyInput = document.createElement("input");
   keyInput.type = "password";
   keyInput.autocomplete = "new-password";
   keyInput.dataset.webSearchKey = "";
   keyInput.dataset.ignoreSettingsDirty = "";
   keyInput.placeholder = integration.hasKey
-    ? "Digite uma nova chave"
+    ? "Enter a new key"
     : "OLLAMA_API_KEY";
   keyField.append(keyLabel, keyInput);
   const actions = document.createElement("div");
@@ -7269,12 +8031,12 @@ function renderOllamaWebSearchSettings() {
   save.type = "button";
   save.className = "secondary-button";
   save.dataset.webSearchAction = "save-key";
-  save.textContent = integration.hasKey ? "Substituir" : "Salvar chave";
+  save.textContent = integration.hasKey ? "Replace" : "Save key";
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "secondary-button danger-button";
   remove.dataset.webSearchAction = "remove-key";
-  remove.textContent = "Remover chave";
+  remove.textContent = "Remove key";
   remove.disabled = !integration.hasKey;
   actions.append(save, remove);
   const diagnostic = document.createElement("p");
@@ -7327,11 +8089,11 @@ function appendDefinition(list, term, description) {
 
 function cloudConnectionLabel(stateName) {
   return {
-    connected: "Conectado",
-    error: "Erro",
-    disabled: "Desativado",
-    "key-required": "Chave necessária",
-    "not-tested": "Não testado"
+    connected: "Connected",
+    error: "Error",
+    disabled: "Disabled",
+    "key-required": "Key required",
+    "not-tested": "Not tested"
   }[stateName] ?? stateName;
 }
 
@@ -7364,7 +8126,7 @@ async function handleCloudProviderAction(event) {
     const apiKey = input.value.trim();
 
     if (!apiKey) {
-      diagnostic.textContent = "Digite uma API key antes de salvar.";
+      diagnostic.textContent = "Enter an API key before saving.";
       input.classList.add("field-invalid");
       input.setAttribute("aria-invalid", "true");
       showToast(diagnostic.textContent);
@@ -7382,8 +8144,8 @@ async function handleCloudProviderAction(event) {
     };
   } else if (action === "remove-key") {
     if (!await showAppConfirm(
-      "Remover permanentemente a chave protegida deste provedor?",
-      { title: "Remover chave?", confirmLabel: "Remover", danger: true }
+      "Permanently remove this provider's protected key?",
+      { title: "Remove key?", confirmLabel: "Remove", danger: true }
     )) {
       return;
     }
@@ -7391,11 +8153,11 @@ async function handleCloudProviderAction(event) {
     path = `/api/cloud-providers/${encodeURIComponent(provider)}/key?confirmed=true`;
     options = { method: "DELETE" };
   } else {
-    const operation = action === "test" ? "testar a conexão" : "atualizar os modelos";
+    const operation = action === "test" ? "test the connection" : "refresh models";
 
     if (!await showAppConfirm(
-      `Permitir uma chamada real ao provedor para ${operation}? Essa ação pode consumir quota.`,
-      { title: "Autorizar chamada ao provedor?", confirmLabel: "Autorizar" }
+      `Allow a real provider call for ${operation}? This action may consume quota.`,
+      { title: "Authorize provider call?", confirmLabel: "Authorize" }
     )) {
       return;
     }
@@ -7407,12 +8169,12 @@ async function handleCloudProviderAction(event) {
   }
 
   button.disabled = true;
-  diagnostic.textContent = "Processando…";
+  diagnostic.textContent = "Processing…";
 
   try {
     await fetchJson(path, options);
     await refreshCloudProviderState();
-    showToast("Ação do provedor concluída.", "success");
+    showToast("Provider action completed.", "success");
   } catch (error) {
     diagnostic.textContent = error.message;
     showToast(error.message);
@@ -7436,7 +8198,7 @@ async function handleOllamaWebSearchAction(button) {
     const apiKey = input.value.trim();
 
     if (!apiKey) {
-      diagnostic.textContent = "Digite a chave separada antes de salvar.";
+      diagnostic.textContent = "Enter the separate key before saving.";
       input.classList.add("field-invalid");
       input.setAttribute("aria-invalid", "true");
       showToast(diagnostic.textContent);
@@ -7454,8 +8216,8 @@ async function handleOllamaWebSearchAction(button) {
     };
   } else {
     if (!await showAppConfirm(
-      "Remover permanentemente a chave protegida do Ollama Web Search?",
-      { title: "Remover chave?", confirmLabel: "Remover", danger: true }
+      "Permanently remove the protected Ollama Web Search key?",
+      { title: "Remove key?", confirmLabel: "Remove", danger: true }
     )) {
       return;
     }
@@ -7465,7 +8227,7 @@ async function handleOllamaWebSearchAction(button) {
   }
 
   button.disabled = true;
-  diagnostic.textContent = "Processando…";
+  diagnostic.textContent = "Processing…";
 
   try {
     state.webSearch = await fetchJson(path, options);
@@ -7536,7 +8298,7 @@ function gpuOptions(includeDefault, selected = null) {
   ) {
     options.push({
       value: selected,
-      label: `CUDA ${selected.slice("ollama:".length)} · configurada, indisponível`
+      label: `CUDA ${selected.slice("ollama:".length)} · configured, unavailable`
     });
   }
 
@@ -7553,7 +8315,7 @@ function createIntentionCard(name, intention) {
   selects.className = "intention-selects";
   selects.append(
     createSelectField(
-      "Modelo",
+      "Model",
       "intention-model",
       [
         {
@@ -7570,7 +8332,7 @@ function createIntentionCard(name, intention) {
       [
         {
           value: "none",
-          label: "Nenhum"
+          label: "None"
         },
         {
           value: "default",
@@ -7616,8 +8378,8 @@ function replaceOptions(select, options, selected) {
   if (selected && !normalized.some(option => option.value === selected)) {
     normalized.push({
       value: selected,
-      label: `${selected} (indisponível)`,
-      group: "Configuração atual"
+      label: `${selected} (unavailable)`,
+      group: "Current configuration"
     });
   }
 
@@ -7672,7 +8434,7 @@ function replaceOptions(select, options, selected) {
 function renderModelDiagnostics() {
   if (!state.modelDiagnostics) {
     elements.modelDiagnosticsList.replaceChildren();
-    elements.modelContextDiagnostic.textContent = "Carregando diagnóstico…";
+    elements.modelContextDiagnostic.textContent = "Loading diagnostic…";
     return;
   }
 
@@ -7702,7 +8464,7 @@ function renderModelDiagnostics() {
 async function testSelectedModel() {
   const model = elements.modelTestSelector.value;
   elements.testModel.disabled = true;
-  elements.modelTestResult.textContent = `Testando ${model}…`;
+  elements.modelTestResult.textContent = `Testing ${model}…`;
 
   try {
     const result = await fetchJson(
@@ -7718,10 +8480,10 @@ async function testSelectedModel() {
       }
     );
     elements.modelTestResult.textContent = result.connected
-      ? `${result.model} · Concluído · Time to first chunk: `
+      ? `${result.model} · Completed · Time to first chunk: `
         + `${result.timeToFirstChunkMilliseconds ?? "unavailable"} ms · `
         + `Total duration: ${result.totalDurationMilliseconds} ms`
-      : `${result.model} · Falhou · ${result.error} · Trace ID: ${result.traceId}`;
+      : `${result.model} · Failed · ${result.error} · Trace ID: ${result.traceId}`;
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
     renderModelDiagnostics();
   } catch (error) {
@@ -7732,6 +8494,7 @@ async function testSelectedModel() {
 }
 
 async function openSettings(section = "general") {
+  elements.runtimeDetails.open = false;
   elements.settingsErrors.hidden = true;
   elements.saveStatus.textContent = "";
   elements.modelTestResult.textContent = "";
@@ -7766,8 +8529,8 @@ async function closeSettings() {
   if (
     state.settingsDirty
     && !await showAppConfirm(
-      "Descartar as alterações de configuração ainda não salvas?",
-      { title: "Fechar sem salvar?", confirmLabel: "Descartar", danger: true }
+      "Discard the unsaved configuration changes?",
+      { title: "Close without saving?", confirmLabel: "Discard", danger: true }
     )
   ) {
     return;
@@ -7782,7 +8545,7 @@ async function saveSettings(event) {
   event.preventDefault();
   elements.settingsErrors.hidden = true;
   clearSettingsValidationMarkers();
-  elements.saveStatus.textContent = "Salvando…";
+  elements.saveStatus.textContent = "Saving…";
   const intentions = {};
 
   for (const card of elements.intentionsGrid.querySelectorAll(".intention-card")) {
@@ -7861,7 +8624,7 @@ async function saveSettings(event) {
         body: JSON.stringify(nextSettings)
       }
     );
-    elements.saveStatus.textContent = "Salvo";
+    elements.saveStatus.textContent = "Saved";
     state.settingsDirty = false;
     updateSettingsDirtyState();
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
@@ -7965,7 +8728,7 @@ function markSettingsValidationErrors(errors) {
 function updateSettingsDirtyState() {
   elements.settingsDirty.textContent = state.settingsDirty
     ? "Unsaved changes"
-    : "Sem alterações";
+    : "No changes";
   elements.settingsDirty.className =
     `badge ${state.settingsDirty ? "error" : "muted"}`;
   elements.saveSettings.disabled =
@@ -7973,12 +8736,12 @@ function updateSettingsDirtyState() {
 }
 
 async function loadPortableYaml() {
-  elements.settingsYamlStatus.textContent = "Carregando configuração…";
+  elements.settingsYamlStatus.textContent = "Loading configuration…";
   elements.settingsYamlStatus.className = "portable-yaml-status";
 
   try {
     elements.settingsYaml.value = await fetchText("/api/settings/yaml");
-    elements.settingsYamlStatus.textContent = "Configuração atual carregada.";
+    elements.settingsYamlStatus.textContent = "Current configuration loaded.";
   } catch (error) {
     elements.settingsYamlStatus.textContent = error.message;
     elements.settingsYamlStatus.className = "portable-yaml-status error";
@@ -7995,7 +8758,7 @@ async function loadPortableYamlFile(event) {
 
   try {
     elements.settingsYaml.value = await file.text();
-    elements.settingsYamlStatus.textContent = `${file.name} carregado. Revise e clique em Importar e aplicar.`;
+    elements.settingsYamlStatus.textContent = `${file.name} loaded. Review it and click Import and apply.`;
     elements.settingsYamlStatus.className = "portable-yaml-status";
   } catch (error) {
     elements.settingsYamlStatus.textContent = error.message;
@@ -8007,9 +8770,9 @@ async function copyPortableYaml() {
   await copyText(
     elements.settingsYaml.value,
     elements.copySettingsYaml,
-    "YAML copiado"
+    "YAML copied"
   );
-  elements.settingsYamlStatus.textContent = "YAML copiado.";
+  elements.settingsYamlStatus.textContent = "YAML copied.";
   elements.settingsYamlStatus.className = "portable-yaml-status success";
 }
 
@@ -8017,7 +8780,7 @@ function downloadPortableYaml() {
   const yaml = elements.settingsYaml.value;
 
   if (!yaml.trim()) {
-    elements.settingsYamlStatus.textContent = "Não há YAML para baixar.";
+    elements.settingsYamlStatus.textContent = "There is no YAML to download.";
     elements.settingsYamlStatus.className = "portable-yaml-status error";
     return;
   }
@@ -8037,12 +8800,12 @@ function downloadPortableYaml() {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  elements.settingsYamlStatus.textContent = "Arquivo agentic-router.yaml preparado.";
+  elements.settingsYamlStatus.textContent = "agentic-router.yaml prepared.";
   elements.settingsYamlStatus.className = "portable-yaml-status success";
 }
 
 async function createLocalBackup() {
-  elements.localBackupStatus.textContent = "Criando arquivo com manifesto e hashesâ€¦";
+  elements.localBackupStatus.textContent = "Creating file with manifest and hashes…";
 
   try {
     const response = await fetch("/api/recovery/backup", {
@@ -8070,7 +8833,7 @@ async function createLocalBackup() {
     anchor.click();
     URL.revokeObjectURL(href);
     elements.localBackupStatus.textContent =
-      "Backup criado sem chaves, aprovaÃ§Ãµes ou estado de processo.";
+      "Backup created without keys, approvals, or process state.";
   } catch (error) {
     elements.localBackupStatus.textContent = error.message;
   }
@@ -8083,7 +8846,7 @@ async function inspectLocalBackup() {
     return;
   }
 
-  elements.localBackupStatus.textContent = "Validando manifesto e hashesâ€¦";
+  elements.localBackupStatus.textContent = "Validating manifest and hashes…";
 
   try {
     const base64 = await fileToBase64(file);
@@ -8100,8 +8863,8 @@ async function inspectLocalBackup() {
     state.inspectedBackupBase64 = base64;
     elements.restoreLocalBackup.disabled = false;
     elements.localBackupStatus.textContent =
-      `${inspection.manifest.categories.join(", ")} Â· `
-      + `${inspection.manifest.entries.length} arquivos Â· hashes vÃ¡lidos Â· `
+      `${inspection.manifest.categories.join(", ")} · `
+      + `${inspection.manifest.entries.length} files · valid hashes · `
       + `${inspection.conflicts.length} conflitos atuais`;
   } catch (error) {
     state.inspectedBackup = null;
@@ -8123,9 +8886,9 @@ async function restoreLocalBackup() {
   const categories = inspection.manifest.categories;
 
   if (!await showAppConfirm(
-    `Restaurar as categorias ${categories.join(", ")}? `
-      + "O estado atual será salvo antes da aplicação atômica.",
-    { title: "Restaurar backup?", confirmLabel: "Restaurar" }
+    `Restore the categories ${categories.join(", ")}? `
+      + "The current state will be saved before atomic application.",
+    { title: "Restore backup?", confirmLabel: "Restore" }
   )) {
     return;
   }
@@ -8143,8 +8906,8 @@ async function restoreLocalBackup() {
       })
     });
     elements.localBackupStatus.textContent =
-      `Restaurado: ${result.restoredCategories.join(", ")}. `
-      + `Backup anterior: ${result.currentDataBackup}. Reinicie para recarregar.`;
+      `Restored: ${result.restoredCategories.join(", ")}. `
+      + `Previous backup: ${result.currentDataBackup}. Restart to reload.`;
   } catch (error) {
     elements.localBackupStatus.textContent = error.message;
   }
@@ -8166,7 +8929,7 @@ async function importPortableYaml() {
   const yaml = elements.settingsYaml.value;
 
   if (!yaml.trim()) {
-    elements.settingsYamlStatus.textContent = "Informe uma configuração YAML.";
+    elements.settingsYamlStatus.textContent = "Enter a YAML configuration.";
     elements.settingsYamlStatus.className = "portable-yaml-status error";
     return;
   }
@@ -8174,15 +8937,15 @@ async function importPortableYaml() {
   if (
     state.settingsDirty
     && !await showAppConfirm(
-      "A importação substituirá as alterações ainda não salvas deste formulário. Continuar?",
-      { title: "Importar configuração?", confirmLabel: "Importar" }
+      "Importing will replace this form's unsaved changes. Continue?",
+      { title: "Import configuration?", confirmLabel: "Import" }
     )
   ) {
     return;
   }
 
   elements.importSettingsYaml.disabled = true;
-  elements.settingsYamlStatus.textContent = "Validando e aplicando…";
+  elements.settingsYamlStatus.textContent = "Validating and applying…";
   elements.settingsYamlStatus.className = "portable-yaml-status";
 
   try {
@@ -8202,7 +8965,7 @@ async function importPortableYaml() {
     updateSettingsDirtyState();
     renderSettings();
     await loadPortableYaml();
-    elements.settingsYamlStatus.textContent = "Configuração YAML importada e aplicada.";
+    elements.settingsYamlStatus.textContent = "YAML configuration imported and applied.";
     elements.settingsYamlStatus.className = "portable-yaml-status success";
     await refreshRuntimeStatus();
     scheduleRuntimeRefresh();
@@ -8369,11 +9132,10 @@ function openRecentFromSettings() {
   state.settingsDirty = false;
   updateSettingsDirtyState();
   elements.settingsDialog.close();
-  elements.sessionHistory.open = true;
   elements.sessionHistory.scrollIntoView({
     block: "nearest"
   });
-  elements.historyNewConversation.focus();
+  elements.openSessionSearch.focus();
 }
 
 function openGitFromSettings() {
@@ -8399,6 +9161,7 @@ async function handleModelSelectionChange() {
   updateComposerStatus();
   state.activeAgentModel = null;
   state.activeAgentRole = null;
+  state.activeHarness = null;
   state.webEnabled = false;
   state.webControlState = "unavailable";
   await refreshSelectedModelCapabilities();
@@ -8422,7 +9185,7 @@ async function refreshSelectedModelCapabilities(
     return;
   }
 
-  elements.activeProviderModel.textContent = "Verificando capacidades…";
+  elements.activeProviderModel.textContent = "Checking capabilities…";
 
   try {
     const view = await fetchJson(
@@ -8472,7 +9235,7 @@ function renderCapabilityContext() {
 
   if (!view?.capabilities) {
     elements.activeProviderModel.textContent =
-      view?.webUnavailableReason ?? "Capacidades indisponíveis";
+      view?.webUnavailableReason ?? "Capabilities unavailable";
     renderWebControl();
     elements.fallbackIndicator.hidden = true;
     return;
@@ -8490,11 +9253,11 @@ function renderCapabilityContext() {
     {
       label: isLocal ? "Local" : "Cloud",
       kind: isLocal ? "local" : "cloud",
-      status: "Ativo nesta conversa",
+      status: "Active in this conversation",
       enabled: true,
       description: isLocal
-        ? `O modelo ${view.model} está sendo executado pelo provedor Ollama Local.`
-        : `O modelo ${view.model} está sendo executado pelo provedor ${view.providerDisplayName}.`,
+        ? `Model ${view.model} is running through Ollama Local.`
+        : `Model ${view.model} is running through provider ${view.providerDisplayName}.`,
       documentationUrl: isLocal
         ? "https://docs.ollama.com/api/introduction"
         : routerConfigurationDocumentation
@@ -8504,12 +9267,12 @@ function renderCapabilityContext() {
         label: "Tools",
         kind: "tools",
         status: capabilities.toolProtocolConfirmed
-          ? "Habilitado e confirmado"
-          : "Habilitado; confirmação comportamental pendente",
+          ? "Enabled and confirmed"
+          : "Enabled; behavioral confirmation pending",
         enabled: true,
         description: capabilities.toolProtocolConfirmed
-          ? "O modelo pode chamar ferramentas estruturadas e esse protocolo já foi confirmado pelo Router."
-          : `O modelo anuncia chamadas de ferramentas em ${capabilities.source}; a conformidade comportamental é verificada separadamente.`,
+          ? "The model can call structured tools and that protocol has been confirmed by the Router."
+          : `The model advertises tool calls in ${capabilities.source}; behavioral conformance is verified separately.`,
         documentationUrl: isLocal
           ? "https://docs.ollama.com/capabilities/tool-calling"
           : routerCapabilityDocumentation
@@ -8520,12 +9283,12 @@ function renderCapabilityContext() {
         label: "Web",
         kind: "web",
         status: state.webEnabled
-          ? "Habilitado nesta conversa"
-          : "Disponível, mas desabilitado nesta conversa",
+          ? "Enabled in this conversation"
+          : "Available, but disabled in this conversation",
         enabled: state.webEnabled,
         description: capabilities.providerNativeWebSearch
-          ? "Pesquisa web nativa do provedor. O usuário precisa habilitá-la explicitamente para a conversa."
-          : "Pesquisa Ollama separada e somente leitura. O usuário precisa habilitá-la explicitamente para a conversa.",
+          ? "Native provider web search. The user must explicitly enable it for the conversation."
+          : "Separate read-only Ollama search. The user must explicitly enable it for the conversation.",
         documentationUrl: isLocal
           ? "https://docs.ollama.com/capabilities/web-search"
           : routerCapabilityDocumentation
@@ -8535,9 +9298,9 @@ function renderCapabilityContext() {
       ? {
         label: "Vision",
         kind: "vision",
-        status: "Habilitado para este modelo",
+        status: "Enabled for this model",
         enabled: true,
-        description: `Aceita até ${capabilities.maximumImageCount} imagens, com ${formatBytes(capabilities.maximumImageBytes)} por imagem.`,
+        description: `Accepts up to ${capabilities.maximumImageCount} images, with ${formatBytes(capabilities.maximumImageBytes)} per image.`,
         documentationUrl: isLocal
           ? "https://docs.ollama.com/capabilities/vision"
           : routerCapabilityDocumentation
@@ -8547,9 +9310,9 @@ function renderCapabilityContext() {
       ? {
         label: "Structured",
         kind: "structured",
-        status: "Habilitado para este modelo",
+        status: "Enabled for this model",
         enabled: true,
-        description: `O modelo pode responder conforme um schema estruturado; evidência obtida de ${capabilities.source}.`,
+        description: `The model can respond using a structured schema; evidence from ${capabilities.source}.`,
         documentationUrl: isLocal
           ? "https://docs.ollama.com/capabilities/structured-outputs"
           : routerCapabilityDocumentation
@@ -8558,11 +9321,11 @@ function renderCapabilityContext() {
     {
       label: view.role === "fallback" ? "Fallback" : "Primary",
       kind: view.role === "fallback" ? "fallback" : "primary",
-      status: "Papel ativo nesta conversa",
+      status: "Active role in this conversation",
       enabled: true,
       description: view.role === "fallback"
-        ? "Este modelo está atendendo como fallback configurado após a indisponibilidade elegível do modelo principal."
-        : "Este modelo é o destino principal selecionado para esta conversa.",
+        ? "This model is serving as the configured fallback after eligible primary-model unavailability."
+        : "This model is the primary target selected for this conversation.",
       documentationUrl: routerConfigurationDocumentation
     }
   ].filter(Boolean);
@@ -8587,13 +9350,13 @@ function renderCapabilityContext() {
     trigger.setAttribute("aria-haspopup", "dialog");
     trigger.setAttribute(
       "aria-label",
-      `${tag.label}: ${tag.status}. Abrir detalhes.`
+      `${tag.label}: ${tag.status}. Open details.`
     );
 
     popover.id = popoverId;
     popover.className = "capability-popover";
     popover.setAttribute("role", "dialog");
-    popover.setAttribute("aria-label", `Detalhes de ${tag.label}`);
+    popover.setAttribute("aria-label", `Details for ${tag.label}`);
     heading.textContent = tag.label;
     status.className = "capability-popover-status";
     status.dataset.enabled = String(tag.enabled);
@@ -8604,7 +9367,7 @@ function renderCapabilityContext() {
     documentation.href = tag.documentationUrl;
     documentation.target = "_blank";
     documentation.rel = "noopener noreferrer";
-    documentation.textContent = "Saiba mais na documentação oficial ↗";
+    documentation.textContent = "Learn more in the official documentation ↗";
     popover.append(heading, status, description, documentation);
     container.append(trigger, popover);
     elements.capabilityTags.append(container);
@@ -8640,6 +9403,14 @@ function handleCapabilityDocumentClick(event) {
 
 function handleCapabilityKeyDown(event) {
   if (event.key !== "Escape") {
+    return;
+  }
+
+  if (!elements.projectMenuPopover.hidden) {
+    event.preventDefault();
+    const anchor = projectMenuAnchor;
+    closeProjectMenu();
+    anchor?.focus();
     return;
   }
 
@@ -8680,10 +9451,10 @@ function renderWebControl() {
   }
 
   const labels = {
-    unavailable: "Web indisponível",
-    available: "Web disponível",
-    enabled: "Web habilitada",
-    off: "Web desligada"
+    unavailable: "Web unavailable",
+    available: "Web available",
+    enabled: "Web enabled",
+    off: "Web off"
   };
   elements.webToggle.dataset.state = state.webControlState;
   elements.webToggleLabel.textContent = labels[state.webControlState];
@@ -8698,10 +9469,10 @@ function renderWebControl() {
   );
   elements.webToggle.title = available
     ? state.modelCapability.capabilities.providerNativeWebSearch
-      ? "Pesquisa oficial do provedor. Clique para habilitar explicitamente nesta conversa."
-      : "Pesquisa Ollama separada e somente leitura. Clique para habilitar explicitamente nesta conversa."
+      ? "Official provider search. Click to explicitly enable it in this conversation."
+      : "Separate read-only Ollama search. Click to explicitly enable it in this conversation."
     : state.modelCapability?.webUnavailableReason
-      ?? "Nenhuma integração de pesquisa autorizada está disponível.";
+      ?? "No authorized search integration is available.";
 }
 
 function toggleWebSearch() {
@@ -8793,20 +9564,20 @@ async function addImageFiles(fileList) {
   ]);
 
   if (state.attachments.length + files.length > 4) {
-    elements.composerStatus.textContent = "No máximo 4 imagens por solicitação.";
+    elements.composerStatus.textContent = "Up to 4 images per request.";
     return;
   }
 
   for (const file of files) {
     if (!acceptedTypes.has(file.type)) {
       elements.composerStatus.textContent =
-        "Somente JPEG, PNG, WebP e GIF são aceitos; SVG não é permitido.";
+        "Only JPEG, PNG, WebP, and GIF are accepted; SVG is not allowed.";
       continue;
     }
 
     if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
       elements.composerStatus.textContent =
-        "Cada imagem deve ter no máximo 10 MiB.";
+        "Each image must be no larger than 10 MiB.";
       continue;
     }
 
@@ -8817,7 +9588,7 @@ async function addImageFiles(fileList) {
 
     if (total > 20 * 1024 * 1024) {
       elements.composerStatus.textContent =
-        "As imagens combinadas devem ter no máximo 20 MiB.";
+        "Combined images must be no larger than 20 MiB.";
       break;
     }
 
@@ -8862,8 +9633,8 @@ function renderAttachmentPreviews() {
     remove.type = "button";
     remove.className = "attachment-remove";
     remove.dataset.attachmentRemove = attachment.id;
-    remove.setAttribute("aria-label", `Remover ${attachment.fileName}`);
-    remove.title = `Remover ${attachment.fileName}`;
+    remove.setAttribute("aria-label", `Remove ${attachment.fileName}`);
+    remove.title = `Remove ${attachment.fileName}`;
     remove.textContent = "×";
     preview.append(image, caption, remove);
     elements.attachmentPreviews.append(preview);
@@ -8905,7 +9676,7 @@ async function ensureCloudImageApproval(model) {
 
   if (!model || model === "auto") {
     elements.composerStatus.textContent =
-      "Selecione explicitamente um modelo com Vision antes de enviar imagens.";
+      "Explicitly select a Vision-capable model before sending images.";
     return false;
   }
 
@@ -8926,13 +9697,13 @@ async function ensureCloudImageApproval(model) {
     0
   );
   const approved = await showAppConfirm(
-    `${providerLabel(provider)} receberá ${formatBytes(bytes)} de imagens. `
-      + "Esses bytes sairão deste computador. Autorizar para este provedor nesta sessão?",
-    { title: "Autorizar envio de imagens?", confirmLabel: "Autorizar" }
+    `${providerLabel(provider)} will receive ${formatBytes(bytes)} of images. `
+      + "These bytes will leave this computer. Authorize this provider for this session?",
+    { title: "Authorize image submission?", confirmLabel: "Authorize" }
   );
 
   if (!approved) {
-    elements.composerStatus.textContent = "Envio cloud de imagens não autorizado.";
+    elements.composerStatus.textContent = "Cloud image submission was not authorized.";
     return false;
   }
 
@@ -9063,7 +9834,7 @@ function renderHarnesses() {
   options.unshift({
     value: "auto-model-harness",
     label: "Auto Model × Harness",
-    title: "Escolhe uma vez, antes do Execute, usando recomendação local e disponibilidade atual."
+    title: "Selects once before Execute using local recommendation and current availability."
   });
   if (!options.some(option => option.value === "native")) {
     options.unshift({ value: "native", label: "Native" });
@@ -9379,7 +10150,6 @@ function cancelConversationTransition() {
 function setConversationTransitioning(isTransitioning) {
   state.conversationTransitioning = isTransitioning;
   elements.newConversation.disabled = isTransitioning;
-  elements.historyNewConversation.disabled = isTransitioning;
   elements.messageInput.disabled = isTransitioning;
   elements.sendButton.disabled = isTransitioning;
   updateInteractionControls();
@@ -9420,6 +10190,7 @@ function renderPersistenceStatus() {
     element.textContent = status;
     element.className = `persistence-status ${className}`.trim();
   }
+  elements.conversationPersistenceSidebar.classList.add("sidebar-expanded-only");
 }
 
 function createEmptyState() {
@@ -9434,10 +10205,10 @@ function createEmptyState() {
   );
   icon.textContent = "✦";
   const heading = document.createElement("h2");
-  heading.textContent = "Pronto para conversar";
+  heading.textContent = "Ready to chat";
   const description = document.createElement("p");
   description.textContent =
-    "Use Auto para classificar a intenção e escolher o modelo configurado.";
+    "Use Auto to classify intent and choose the configured model.";
   container.append(icon, heading, description);
   return container;
 }
@@ -9550,6 +10321,7 @@ async function handleComposerSubmit(event) {
   clearAttachments();
   resizeComposer();
   state.requestController = controller;
+  state.activeHarness = state.harness;
   setStreamingState(true);
   requestAnimationFrame(scrollToBottom);
   await refreshRuntimeStatus();
@@ -9617,13 +10389,13 @@ async function handleComposerSubmit(event) {
         assistant,
         {
           type: "request.cancelled",
-          message: "Solicitação cancelada pelo usuário.",
+          message: "Request canceled by the user.",
           elapsedMilliseconds: elapsedSince(assistant)
         },
         false
       );
       assistant.answer.classList.remove("pending");
-      finishActivity(assistant, "Cancelado", false);
+      finishActivity(assistant, "Canceled", false);
       await refreshAssistantReviewAfterCancellation(
         assistant
       );
@@ -9638,10 +10410,10 @@ async function handleComposerSubmit(event) {
         },
         true
       );
-      assistant.answer.textContent ||= "Não foi possível concluir a resposta.";
+      assistant.answer.textContent ||= "Could not complete the response.";
       assistant.answer.classList.add("error");
       assistant.answer.classList.remove("pending");
-      finishActivity(assistant, "Falhou", true);
+      finishActivity(assistant, "Failed", true);
     }
   } finally {
     if (state.requestController === controller) {
@@ -9676,15 +10448,15 @@ function appendUserMessage(message, historyIndex, attachments = []) {
     const attachmentNote = document.createElement("small");
     attachmentNote.className = "message-attachment-note";
     attachmentNote.textContent =
-      `${attachments.length} imagem${attachments.length === 1 ? "" : "ns"} anexada`
-      + `${attachments.length === 1 ? "" : "s"} · bytes não persistidos`;
+      `${attachments.length} attached image${attachments.length === 1 ? "" : "s"}`
+      + `${attachments.length === 1 ? "" : "s"} · bytes not persisted`;
     content.append(document.createElement("br"), attachmentNote);
   }
   const actions = document.createElement("div");
   actions.className = "message-actions";
   const editButton = createMessageActionButton(
-    "Editar",
-    "Editar mensagem"
+    "Edit",
+    "Edit message"
   );
   editButton.classList.add("edit-message");
   editButton.addEventListener(
@@ -9711,14 +10483,14 @@ function appendAssistantMessage(options = {}) {
   const progress = document.createElement("p");
   progress.className = "assistant-progress";
   progress.setAttribute("role", "status");
-  progress.textContent = "Pensando… · 0 ms";
+  progress.textContent = "Thinking… · 0 ms";
 
   const details = document.createElement("details");
   details.className = "activity";
   details.open = false;
   const summary = document.createElement("summary");
-  summary.textContent = "Detalhes técnicos";
-  summary.setAttribute("aria-label", "Detalhes técnicos da solicitação");
+  summary.textContent = "Technical details";
+  summary.setAttribute("aria-label", "Request technical details");
   const activityList = document.createElement("div");
   activityList.className = "activity-list";
   const sessionHeader = document.createElement("div");
@@ -9743,21 +10515,21 @@ function appendAssistantMessage(options = {}) {
   sources.className = "assistant-sources";
   sources.hidden = true;
   const sourcesSummary = document.createElement("summary");
-  sourcesSummary.textContent = "Fontes";
+  sourcesSummary.textContent = "Sources";
   const sourcesList = document.createElement("ol");
   sourcesList.className = "assistant-source-list";
   sources.append(sourcesSummary, sourcesList);
   const actions = document.createElement("div");
   actions.className = "message-actions assistant-actions";
   const copyButton = createMessageActionButton(
-    "Copiar",
-    "Copiar resposta"
+    "Copy",
+    "Copy response"
   );
   copyButton.classList.add("copy-message");
   copyButton.disabled = true;
   const reviewButton = createMessageActionButton(
-    "Revisar alterações",
-    "Revisar alterações desta execução"
+    "Review changes",
+    "Review changes from this execution"
   );
   reviewButton.classList.add("review-changes");
   reviewButton.hidden = true;
@@ -9815,7 +10587,7 @@ function appendAssistantMessage(options = {}) {
     () => copyText(
       assistant.rawAnswer,
       copyButton,
-      "Resposta copiada"
+      "Response copied"
     )
   );
   reviewButton.addEventListener(
@@ -9848,7 +10620,7 @@ function renderAssistantSources(assistant, citations) {
   );
   assistant.sources.hidden = safeCitations.length === 0;
   assistant.sourcesSummary.textContent =
-    `Fontes (${safeCitations.length})`;
+    `Sources (${safeCitations.length})`;
 
   for (const citation of safeCitations) {
     const item = document.createElement("li");
@@ -9866,7 +10638,7 @@ function startElapsedClock(assistant) {
   const update = timestamp => {
     if (timestamp - assistant.lastClockUpdate >= 250) {
       assistant.progress.textContent =
-        `${assistant.activeReasoning ? "Thinking" : "Pensando…"} · `
+        `${assistant.activeReasoning ? "Thinking" : "Thinking…"} · `
         + formatElapsed(elapsedSince(assistant));
       assistant.lastClockUpdate = timestamp;
     }
@@ -9878,10 +10650,10 @@ function startElapsedClock(assistant) {
 
 function renderModelSelection(assistant, model, origin) {
   const message = origin === "user"
-    ? `Modelo ${model} selecionado pelo usuário.`
+    ? `Model ${model} selected by the user.`
     : origin === "fallback"
-      ? `Modelo ${model} selecionado como fallback pelo Host.`
-      : `Modelo ${model} roteado pelo agente.`;
+      ? `Model ${model} selected as fallback by the Host.`
+      : `Model ${model} routed by the agent.`;
   assistant.modelNotice.textContent = message;
   assistant.modelNotice.hidden = false;
 }
@@ -9912,7 +10684,7 @@ function appendAssistantReasoning(assistant, delta, contentBlockId = null) {
     details.open = true;
     const summary = document.createElement("summary");
     summary.textContent = "Thinking";
-    summary.setAttribute("aria-label", "Raciocínio fornecido pelo modelo");
+    summary.setAttribute("aria-label", "Reasoning provided by the model");
     const body = document.createElement("div");
     body.className = "assistant-reasoning-body";
     details.append(summary, body);
@@ -10072,13 +10844,13 @@ function isVisibleWorkAction(action) {
 
 function actionDisplayLabel(tool) {
   return {
-    create_file: "Criar",
-    create_files: "Criar arquivos",
+    create_file: "Create",
+    create_files: "Create files",
     write_file: "Escrever",
-    replace_text: "Editar",
-    apply_patch: "Aplicar patch",
-    delete_paths: "Excluir",
-    create_directory: "Criar pasta"
+    replace_text: "Edit",
+    apply_patch: "Apply patch",
+    delete_paths: "Delete",
+    create_directory: "Create folder"
   }[tool] ?? tool;
 }
 
@@ -10091,13 +10863,13 @@ function actionTarget(action) {
 
 function actionStateLabel(stateValue) {
   return {
-    proposed: "Preparando",
-    approved: "Aprovada",
-    executing: "Executando…",
-    completed: "Concluída",
-    failed: "Falhou",
-    rejected: "Rejeitada",
-    revised: "Revisada"
+    proposed: "Preparing",
+    approved: "Approved",
+    executing: "Executing…",
+    completed: "Completed",
+    failed: "Failed",
+    rejected: "Rejected",
+    revised: "Revised"
   }[stateValue] ?? stateValue;
 }
 
@@ -10111,7 +10883,7 @@ function summarizeActionPreview(value) {
   const omitted = lines.length - 12;
   return [
     ...lines.slice(0, 6),
-    `… ${omitted} linhas omitidas …`,
+    `… ${omitted} omitted lines …`,
     ...lines.slice(-6)
   ].join("\n");
 }
@@ -10165,11 +10937,11 @@ function upsertWorkAction(assistant, streamEvent) {
   assistant.workActivity.hidden = false;
   ensureWorkNarrative(
     assistant,
-    "Vou executar as alterações solicitadas e mostrar apenas os arquivos afetados."
+    "I will execute the requested changes and show only the affected files."
   );
   assistant.progress.hidden = false;
   assistant.progress.textContent =
-    `Executando… · ${formatElapsed(elapsedSince(assistant))}`;
+    `Executing… · ${formatElapsed(elapsedSince(assistant))}`;
   const relativePath = actionTarget(action);
   let item = assistant.actionItems.get(action.actionId);
 
@@ -10191,7 +10963,7 @@ function upsertWorkAction(assistant, streamEvent) {
     link.className = "work-action-file";
     link.href = "#";
     link.textContent = relativePath;
-    link.setAttribute("aria-label", `Abrir revisão de ${relativePath}`);
+    link.setAttribute("aria-label", `Open review for ${relativePath}`);
     const status = document.createElement("span");
     status.className = "work-action-status";
     const body = document.createElement("div");
@@ -10249,7 +11021,7 @@ function upsertWorkAction(assistant, streamEvent) {
       ? "!"
       : "⌁";
   item.preview.textContent = summarizeActionPreview(
-    action.preview || action.resultOutput || "Sem conteúdo textual para exibir."
+    action.preview || action.resultOutput || "No textual content to display."
   );
   item.details.open = action.state === "failed";
 }
@@ -10297,6 +11069,11 @@ async function consumeEventStream(stream, assistant) {
       const streamEvent = JSON.parse(data);
       state.conversationSessionId =
         streamEvent.conversationSessionId ?? state.conversationSessionId;
+
+      const selectedHarness = /^harness\.(.+)-selected$/.exec(streamEvent.type);
+      if (selectedHarness) {
+        state.activeHarness = selectedHarness[1];
+      }
 
       if (streamEvent.contextUsage) {
         state.contextUsage = streamEvent.contextUsage;
@@ -10421,7 +11198,7 @@ async function consumeEventStream(stream, assistant) {
         addActivity(assistant, streamEvent, false);
         finishActivity(
           assistant,
-          `${assistant.recovered ? "Recuperado" : "Concluído"} · `
+          `${assistant.recovered ? "Recovered" : "Completed"} · `
             + formatElapsed(streamEvent.elapsedMilliseconds),
           assistant.recovered
         );
@@ -10430,7 +11207,7 @@ async function consumeEventStream(stream, assistant) {
       } else if (streamEvent.type === "error") {
         closeAssistantContent(assistant);
         const errorText = `${streamEvent.error.message}\n`
-          + `Referência: ${streamEvent.error.traceId}`;
+          + `Reference: ${streamEvent.error.traceId}`;
         const response = ensureAssistantResponse(
           assistant,
           `error:${streamEvent.error.traceId}`
@@ -10455,7 +11232,7 @@ async function consumeEventStream(stream, assistant) {
         );
         finishActivity(
           assistant,
-          `Falhou · ${streamEvent.error.traceId}`,
+          `Failed · ${streamEvent.error.traceId}`,
           true
         );
         addTraceDiagnosticActions(assistant, streamEvent.error);
@@ -10463,7 +11240,7 @@ async function consumeEventStream(stream, assistant) {
         closeAssistantContent(assistant);
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
-        finishActivity(assistant, "Cancelado", false);
+        finishActivity(assistant, "Canceled", false);
       } else if (
         streamEvent.type === "action.awaiting-approval"
         && streamEvent.localAction
@@ -10547,13 +11324,13 @@ function addTraceDiagnosticActions(assistant, error) {
 
   const actions = document.createElement("div");
   actions.className = "trace-diagnostic-actions";
-  const copy = createMessageActionButton("Copiar trace", "Copiar identificador de trace");
-  const view = createMessageActionButton("Ver diagnostico", "Abrir diagnostico local sanitizado");
+  const copy = createMessageActionButton("Copy trace", "Copy trace identifier");
+  const view = createMessageActionButton("View diagnostic", "Open sanitized local diagnostic");
   view.disabled = error.diagnosticsPersisted !== true;
   if (view.disabled) {
-    view.title = "O journal local nao confirmou a persistencia deste diagnostico.";
+    view.title = "The local journal did not confirm persistence of this diagnostic.";
   }
-  copy.addEventListener("click", () => copyText(error.traceId, copy, "Trace ID copiado"));
+  copy.addEventListener("click", () => copyText(error.traceId, copy, "Trace ID copied"));
   view.addEventListener("click", () => openTraceDiagnostic(error.traceId));
   actions.append(copy, view);
   assistant.answer.insertAdjacentElement("afterend", actions);
@@ -10562,7 +11339,7 @@ function addTraceDiagnosticActions(assistant, error) {
 async function openTraceDiagnostic(traceId) {
   elements.traceDiagnosticDialog.dataset.traceId = traceId;
   elements.traceDiagnosticId.textContent = traceId;
-  elements.traceDiagnosticStatus.textContent = "Carregando diagnostico local...";
+  elements.traceDiagnosticStatus.textContent = "Loading local diagnostic...";
   elements.traceDiagnosticFacts.replaceChildren();
   elements.traceDiagnosticTimeline.replaceChildren();
   elements.traceDiagnosticDialog.showModal();
@@ -10583,22 +11360,22 @@ function closeTraceDiagnostic() {
 
 function renderTraceDiagnostic(report) {
   elements.traceDiagnosticStatus.textContent = report.truncated
-    ? `Diagnostico limitado a ${report.totalEvents} eventos seguros.`
-    : `${report.totalEvents} eventos seguros correlacionados.`;
+    ? `Diagnostic bounded to ${report.totalEvents} safe events.`
+    : `${report.totalEvents} correlated safe events.`;
   const facts = [
-    ["Estado", report.status],
-    ["Codigo", report.failureCode ?? "nenhum"],
-    ["Etapa", report.failureStage ?? "nenhuma"],
-    ["Provedor / modelo", [report.provider, report.model].filter(Boolean).join(" / ") || "indisponivel"],
-    ["Coordenador", report.coordinator ?? "indisponivel"],
-    ["Caminho", report.executionPath ?? "indisponivel"],
-    ["Resultado revisavel", report.reviewAvailable ? "sim" : "nao"],
-    ["Recomendacao", report.recommendation]
+    ["Status", report.status],
+    ["Code", report.failureCode ?? "none"],
+    ["Stage", report.failureStage ?? "none"],
+    ["Provider / model", [report.provider, report.model].filter(Boolean).join(" / ") || "unavailable"],
+    ["Coordinator", report.coordinator ?? "unavailable"],
+    ["Path", report.executionPath ?? "unavailable"],
+    ["Reviewable result", report.reviewAvailable ? "yes" : "no"],
+    ["Recommendation", report.recommendation]
   ];
   if (report.contextFit) {
     facts.push([
       "Contexto",
-      `entrada ${report.contextFit.estimatedInputTokens ?? "?"} + reserva ${report.contextFit.reservedOutputTokens ?? "?"} = requerido ${report.contextFit.requiredContextTokens ?? "?"}; maximo ${report.contextFit.maximumContextTokens ?? "?"}`
+      `input ${report.contextFit.estimatedInputTokens ?? "?"} + reserve ${report.contextFit.reservedOutputTokens ?? "?"} = required ${report.contextFit.requiredContextTokens ?? "?"}; maximum ${report.contextFit.maximumContextTokens ?? "?"}`
     ]);
   }
 
@@ -10658,10 +11435,10 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   group.count++;
   assistant.technicalEventCount++;
   group.countLabel.textContent =
-    `${group.count} ${group.count === 1 ? "evento" : "eventos"}`;
+    `${group.count} ${group.count === 1 ? "event" : "events"}`;
   assistant.summary.textContent =
-    `Detalhes técnicos · ${assistant.technicalEventCount} `
-    + `${assistant.technicalEventCount === 1 ? "evento" : "eventos"}`;
+    `Technical details · ${assistant.technicalEventCount} `
+    + `${assistant.technicalEventCount === 1 ? "event" : "events"}`;
 }
 
 function ensureActivityGroup(assistant, streamEvent, isWarningOrError) {
@@ -10734,14 +11511,14 @@ function activityGroupFor(streamEvent) {
   ) {
     return {
       key: "planning",
-      title: "Planejamento"
+      title: "Planning"
     };
   }
 
   if (type.includes("recovery")) {
     return {
       key: "recovery",
-      title: "Recuperação"
+      title: "Recovery"
     };
   }
 
@@ -10754,7 +11531,7 @@ function activityGroupFor(streamEvent) {
   ) {
     return {
       key: "agents",
-      title: "Agentes e roteamento"
+      title: "Agents and routing"
     };
   }
 
@@ -10767,14 +11544,14 @@ function activityGroupFor(streamEvent) {
   ) {
     return {
       key: "workspace",
-      title: "Workspace e projeto"
+      title: "Workspace and project"
     };
   }
 
   if (type.startsWith("validation-")) {
     return {
       key: "validation",
-      title: "Validação"
+      title: "Validation"
     };
   }
 
@@ -10785,13 +11562,13 @@ function activityGroupFor(streamEvent) {
   ) {
     return {
       key: "response",
-      title: "Resposta"
+      title: "Response"
     };
   }
 
   return {
     key: "execution",
-    title: "Execução"
+    title: "Execution"
   };
 }
 
@@ -10839,8 +11616,8 @@ function updateExecutionSession(assistant, session) {
     ensureWorkNarrative(
       assistant,
       session.state === "running"
-        ? `Estou trabalhando em: ${session.plan.objective}`
-        : `Objetivo: ${session.plan.objective}`,
+        ? `Working on: ${session.plan.objective}`
+        : `Objective: ${session.plan.objective}`,
       true
     );
   }
@@ -10850,16 +11627,16 @@ function updateExecutionSession(assistant, session) {
   stateLabel.textContent = session.state;
   const coordinator = document.createElement("span");
   coordinator.textContent =
-    `Alvo: ${session.selectedModel || "indisponível"} · `
-    + `Especialista: ${session.coordinatorModel} · `
-    + `Roteador residente: ${session.residentModel || "indisponível"} · `
+    `Target: ${session.selectedModel || "unavailable"} · `
+    + `Specialist: ${session.coordinatorModel} · `
+    + `Resident router: ${session.residentModel || "unavailable"} · `
     + session.executionPath;
   coordinator.title = [
     session.routingEvidence
       ? `Auto Model × Harness: ${session.routingEvidence.selectedModel} × ${benchmarkHarnessLabel(session.routingEvidence.selectedHarness)} · ${session.routingEvidence.confidence} · recommendation ${session.routingEvidence.recommendationId.slice(0, 12)}`
       : null,
     session.conformanceIdentity
-      ? `Conformidade: ${session.conformanceIdentity}`
+      ? `Conformance: ${session.conformanceIdentity}`
       : null,
     session.handoffReason
       ? `Handoff: ${session.handoffReason}`
@@ -10867,7 +11644,7 @@ function updateExecutionSession(assistant, session) {
   ].filter(Boolean).join("\n");
   const counts = document.createElement("span");
   counts.textContent =
-    `${session.actionCount} ações · ${session.changedFileCount} arquivos · `
+    `${session.actionCount} actions · ${session.changedFileCount} files · `
     + `planning ${session.planningFailureCount} · `
     + `tool failures ${session.consecutiveToolFailureCount} · `
     + formatElapsed(session.elapsedMilliseconds);
@@ -10896,7 +11673,7 @@ function renderExecutionPlan(assistant, session) {
 
   assistant.planPanel.hidden = false;
   assistant.planSummary.textContent =
-    `Plano · ${plan.objective}`;
+    `Plan · ${plan.objective}`;
   assistant.planBody.replaceChildren();
   const list = document.createElement("ol");
 
@@ -10918,7 +11695,7 @@ function renderExecutionPlan(assistant, session) {
     const status = document.createElement("small");
     status.textContent = step.status;
     if (step.dependencies?.length) {
-      status.title = `Depende de: ${step.dependencies.join(", ")}`;
+      status.title = `Depends on: ${step.dependencies.join(", ")}`;
     }
     item.append(marker, title, status);
     list.append(item);
@@ -10933,8 +11710,8 @@ function renderExecutionPlan(assistant, session) {
   const footer = document.createElement("p");
   footer.className = "execution-plan-progress";
   footer.textContent = plan.completedStepCount === plan.steps.length
-    ? `Etapas ${plan.steps.length}/${plan.steps.length} · ${session.changedFileCount} arquivos alterados`
-    : `Etapa ${displayedStep}/${plan.steps.length} · ${session.changedFileCount} arquivos alterados`;
+    ? `Steps ${plan.steps.length}/${plan.steps.length} · ${session.changedFileCount} changed files`
+    : `Step ${displayedStep}/${plan.steps.length} · ${session.changedFileCount} changed files`;
   assistant.planBody.append(list, footer);
 }
 
@@ -10943,7 +11720,7 @@ async function openChangeReview(executionSessionId, focusRelativePath = null) {
     return;
   }
 
-  elements.changeReviewBody.textContent = "Carregando revisão…";
+  elements.changeReviewBody.textContent = "Loading review…";
   elements.undoStatus.textContent = "";
   elements.undoExecution.disabled = true;
   if (!elements.changeReviewDialog.open) {
@@ -11009,13 +11786,13 @@ function renderChangeReview(review, focusRelativePath = null) {
   summary.className = "change-review-summary";
   const heading = document.createElement("h3");
   heading.textContent =
-    `${review.summary.state} · Alvo: ${review.summary.selectedModel || "indisponível"}`;
+    `${review.summary.state} · Target: ${review.summary.selectedModel || "unavailable"}`;
   const metadata = document.createElement("p");
   metadata.textContent =
-    `Especialista: ${review.summary.coordinatorModel} · `
-    + `Roteador residente: ${review.summary.residentModel || "indisponível"} · `
-    + `${review.summary.executionPath} · ${review.summary.actionCount} ações · `
-    + `${review.summary.changedFileCount} arquivos · `
+    `Specialist: ${review.summary.coordinatorModel} · `
+    + `Resident router: ${review.summary.residentModel || "unavailable"} · `
+    + `${review.summary.executionPath} · ${review.summary.actionCount} actions · `
+    + `${review.summary.changedFileCount} files · `
     + `${formatElapsed(review.summary.elapsedMilliseconds)} · `
     + `${review.summary.completionStatus}`;
   const objective = document.createElement("p");
@@ -11033,7 +11810,7 @@ function renderChangeReview(review, focusRelativePath = null) {
     selection.textContent =
       `${route.selectedModel} × ${benchmarkHarnessLabel(route.selectedHarness)} · `
       + `${route.confidence} · ${route.taskCategory}`
-      + (route.fallback ? " · fallback de disponibilidade" : "");
+      + (route.fallback ? " · availability fallback" : "");
     const reason = document.createElement("p");
     reason.textContent = route.reason;
     const trace = document.createElement("p");
@@ -11046,7 +11823,7 @@ function renderChangeReview(review, focusRelativePath = null) {
     if (route.supportingRunIds.length > 0) {
       const evidence = document.createElement("details");
       const evidenceSummary = document.createElement("summary");
-      evidenceSummary.textContent = `Abrir evidência de suporte (${route.supportingRunIds.length})`;
+      evidenceSummary.textContent = `Open supporting evidence (${route.supportingRunIds.length})`;
       const links = document.createElement("div");
       links.className = "benchmark-recommendation-evidence-links";
       for (const runId of route.supportingRunIds) {
@@ -11067,22 +11844,22 @@ function renderChangeReview(review, focusRelativePath = null) {
     const project = document.createElement("section");
     project.className = "change-review-context";
     const title = document.createElement("h3");
-    title.textContent = "Projeto e baseline";
+    title.textContent = "Project and baseline";
     const profile = document.createElement("p");
     profile.textContent =
       `${review.project.displayName} · `
-      + `${review.project.projectTypes.join(", ") || "sem tipo detectado"} · `
+      + `${review.project.projectTypes.join(", ") || "no detected type"} · `
       + `${review.baseline?.gitAvailable
         ? `Git ${review.baseline.branch ?? "detached"}`
-        : "sem Git"}`;
+        : "no Git"}`;
     const dirty = document.createElement("p");
     dirty.textContent = review.baseline?.preExistingDirtyPaths.length
-      ? `Alterações pré-existentes: ${review.baseline.preExistingDirtyPaths.join(", ")}`
-      : "Nenhuma alteração pré-existente detectada.";
+      ? `Pre-existing changes: ${review.baseline.preExistingDirtyPaths.join(", ")}`
+      : "No pre-existing changes detected.";
     const instructions = document.createElement("p");
     instructions.textContent = review.appliedInstructionFiles?.length
-      ? `Instruções aplicadas: ${review.appliedInstructionFiles.join(", ")}`
-      : "Nenhum AGENTS.md aplicado.";
+      ? `Applied instructions: ${review.appliedInstructionFiles.join(", ")}`
+      : "No AGENTS.md applied.";
     project.append(title, profile, dirty, instructions);
     elements.changeReviewBody.append(project);
   }
@@ -11092,7 +11869,7 @@ function renderChangeReview(review, focusRelativePath = null) {
     plan.className = "change-review-context";
     const title = document.createElement("h3");
     title.textContent =
-      `Plano · ${review.summary.plan.completedStepCount}/${review.summary.plan.steps.length}`;
+      `Plan · ${review.summary.plan.completedStepCount}/${review.summary.plan.steps.length}`;
     const list = document.createElement("ol");
     for (const step of review.summary.plan.steps) {
       const item = document.createElement("li");
@@ -11117,21 +11894,21 @@ function renderChangeReview(review, focusRelativePath = null) {
     }
     const title = document.createElement("summary");
     title.textContent =
-      `${file.operation === "created" ? "Criado" : "Modificado"} · ${file.relativePath}`;
+      `${file.operation === "created" ? "Created" : "Modified"} · ${file.relativePath}`;
     const status = document.createElement("p");
     status.className = file.verified
       ? "verification-ok"
       : "verification-warning";
     status.textContent = file.verified
-      ? `Verificado · ${file.finalSizeBytes} bytes`
-      : "A verificação de leitura falhou";
+      ? `Verified · ${file.finalSizeBytes} bytes`
+      : "Read verification failed";
     section.append(title, status);
 
     if (file.preExistingChange) {
       const existing = document.createElement("p");
       existing.className = "preexisting-change";
       existing.textContent =
-        "Este arquivo já possuía alterações antes da sessão e também foi alterado por ela.";
+        "This file already had changes before the session and was also changed by it.";
       section.append(existing);
     }
 
@@ -11164,7 +11941,7 @@ function renderChangeReview(review, focusRelativePath = null) {
     const processes = document.createElement("section");
     processes.className = "process-review";
     const heading = document.createElement("h3");
-    heading.textContent = "Processos";
+    heading.textContent = "Processes";
     processes.append(heading);
 
     for (const process of review.processes) {
@@ -11192,8 +11969,8 @@ function renderChangeReview(review, focusRelativePath = null) {
     validation.className = "change-review-context validation-results";
     const heading = document.createElement("h3");
     heading.textContent =
-      `Validação · ${review.validation.state} · `
-      + `${review.validation.profileName ?? "não configurada"}`;
+      `Validation · ${review.validation.state} · `
+      + `${review.validation.profileName ?? "not configured"}`;
     validation.append(heading);
 
     for (const step of review.validation.steps) {
@@ -11214,8 +11991,8 @@ function renderChangeReview(review, focusRelativePath = null) {
     const warning = document.createElement("p");
     warning.className = "verification-warning";
     warning.textContent =
-      `Conflito em ${conflict.relativePath}: esperado ${conflict.expectedHash}, `
-      + `atual ${conflict.currentHash}.`;
+      `Conflict in ${conflict.relativePath}: expected ${conflict.expectedHash}, `
+      + `current ${conflict.currentHash}.`;
     elements.changeReviewBody.append(warning);
   }
 
@@ -11241,7 +12018,7 @@ async function openRoutingEvidence(runId) {
   const option = [...elements.benchmarkHistory.options].some(item => item.value === runId);
   if (!option) {
     elements.benchmarkStatus.textContent =
-      "A evidência de suporte não está disponível no histórico filtrado atual.";
+      "Supporting evidence is unavailable in the current filtered history.";
     return;
   }
   elements.benchmarkHistory.value = runId;
@@ -11757,14 +12534,14 @@ async function undoExecution() {
   }
 
   if (!await showAppConfirm(
-    "Desfazer integralmente as alterações desta sessão? O estado atual será validado antes de qualquer mudança.",
-    { title: "Desfazer alterações?", confirmLabel: "Desfazer", danger: true }
+    "Fully undo this session's changes? The current state will be validated before any change.",
+    { title: "Undo changes?", confirmLabel: "Undo", danger: true }
   )) {
     return;
   }
 
   elements.undoExecution.disabled = true;
-  elements.undoStatus.textContent = "Validando e desfazendo…";
+  elements.undoStatus.textContent = "Validating and undoing…";
 
   try {
     const response = await fetchJson(
@@ -11810,8 +12587,8 @@ async function validateChanges() {
 
   const confirmed = state.approvalPolicy !== "ask"
     || await showAppConfirm(
-      "Executar agora todas as etapas estruturadas do perfil de validação salvo?",
-      { title: "Executar validação?", confirmLabel: "Executar" }
+      "Run every structured step in the saved validation profile now?",
+      { title: "Run validation?", confirmLabel: "Run" }
     );
 
   if (!confirmed) {
@@ -11819,7 +12596,7 @@ async function validateChanges() {
   }
 
   elements.validateChanges.disabled = true;
-  elements.undoStatus.textContent = "Executando validação…";
+  elements.undoStatus.textContent = "Running validation…";
 
   try {
     const result = await fetchJson(
@@ -11839,7 +12616,7 @@ async function validateChanges() {
       review.summary.id
     );
     elements.undoStatus.textContent =
-      `Validação ${result.state}.`;
+      `Validation ${result.state}.`;
   } catch (error) {
     elements.undoStatus.textContent = error.message;
     elements.validateChanges.disabled = false;
@@ -11876,7 +12653,7 @@ function addApprovalActivity(assistant, streamEvent) {
   title.textContent = action.summary;
   const status = document.createElement("span");
   status.className = "approval-status";
-  status.textContent = "Aguardando decisão";
+  status.textContent = "Waiting for decision";
   summaryContent.append(title, status);
   summary.append(time, toggle, summaryContent);
   const content = document.createElement("div");
@@ -11896,18 +12673,18 @@ function addApprovalActivity(assistant, streamEvent) {
   const reject = document.createElement("button");
   reject.className = "secondary-button";
   reject.type = "button";
-  reject.textContent = "Rejeitar";
+  reject.textContent = "Reject";
   const approve = document.createElement("button");
   approve.className = "primary-button";
   approve.type = "button";
-  approve.textContent = "Aprovar";
+  approve.textContent = "Approve";
   controls.append(reject, approve);
   content.append(controls);
   row.append(summary, content);
   assistant.workActivity.hidden = false;
   ensureWorkNarrative(
     assistant,
-    "Preciso da sua decisão para continuar esta alteração."
+    "I need your decision to continue this change."
   );
   assistant.workActivity.append(row);
 
@@ -11919,8 +12696,8 @@ function addApprovalActivity(assistant, streamEvent) {
         command.input.removeAttribute("aria-invalid");
         status.textContent = command.input.value
           === (row.dataset.editableText ?? "")
-          ? "Aguardando decisão"
-          : "Alteração será validada ao aprovar";
+          ? "Waiting for decision"
+          : "Change will be validated upon approval";
       }
     );
   }
@@ -11985,7 +12762,7 @@ function createTerminalCommand(action, title) {
     input.spellcheck = false;
     input.setAttribute(
       "aria-label",
-      `Editar comando de ${action.tool}`
+      `Edit ${action.tool} command`
     );
     host.append(prompt);
 
@@ -12043,21 +12820,21 @@ function updateApprovalActivity(assistant, streamEvent) {
   }
 
   if (action.state === "revised") {
-    status.textContent = "Alteração validada";
+    status.textContent = "Change validated";
   } else if (action.state === "approved") {
-    status.textContent = "Aprovada";
+    status.textContent = "Approved";
   } else if (action.state === "executing") {
-    status.textContent = "Executando…";
+    status.textContent = "Executing…";
   } else if (action.state === "completed") {
-    status.textContent = "Concluída";
+    status.textContent = "Completed";
     approval.dataset.decision = "completed";
     renderApprovalResponse(approval, action, false);
   } else if (action.state === "failed") {
-    status.textContent = "Falhou";
+    status.textContent = "Failed";
     approval.dataset.decision = "failed";
     renderApprovalResponse(approval, action, true);
   } else if (action.state === "rejected") {
-    status.textContent = "Rejeitada";
+    status.textContent = "Rejected";
     approval.dataset.decision = "rejected";
   }
 
@@ -12100,10 +12877,10 @@ function renderApprovalResponse(approval, action, failed) {
   response.dataset.state = failed ? "failed" : "completed";
   response.open = false;
   response.querySelector("summary").textContent = failed
-    ? "Execução · falhou"
-    : "Execução · concluída";
+    ? "Execution · failed"
+    : "Execution · completed";
   response.querySelector(".action-response-output").textContent =
-    action.resultOutput || "Concluída sem saída textual.";
+    action.resultOutput || "Completed without textual output.";
 }
 
 async function decideAction(
@@ -12121,7 +12898,7 @@ async function decideAction(
   if (input) {
     input.disabled = true;
   }
-  status.textContent = approved ? "Aprovando…" : "Rejeitando…";
+  status.textContent = approved ? "Approving…" : "Rejecting…";
 
   try {
     await fetchJson(
@@ -12151,7 +12928,7 @@ async function decideAction(
       return;
     }
 
-    status.textContent = approved ? "Aprovada" : "Rejeitada";
+    status.textContent = approved ? "Approved" : "Rejected";
     approval.dataset.decision = approved
       ? "approved"
       : "rejected";
@@ -12165,7 +12942,7 @@ async function decideAction(
     approval.open = approved;
   } catch (error) {
     status.textContent = approved && input
-      ? "Alteração inválida"
+      ? "Invalid change"
       : error.message;
     if (input) {
       input.disabled = false;
@@ -12204,10 +12981,10 @@ function addRecoveryDecisionActivity(assistant, streamEvent) {
   const summaryContent = document.createElement("span");
   summaryContent.className = "action-approval-summary-content";
   const title = document.createElement("strong");
-  title.textContent = "Recuperação automática esgotada";
+  title.textContent = "Automatic recovery exhausted";
   const status = document.createElement("span");
   status.className = "approval-status";
-  status.textContent = "Escolha uma alternativa";
+  status.textContent = "Choose an alternative";
   summaryContent.append(title, status);
   summary.append(time, toggle, summaryContent);
   const content = document.createElement("div");
@@ -12259,7 +13036,7 @@ function addRecoveryDecisionActivity(assistant, streamEvent) {
   assistant.workActivity.hidden = false;
   ensureWorkNarrative(
     assistant,
-    "A recuperação automática terminou; escolha como a tarefa deve continuar."
+    "Automatic recovery has ended; choose how the task should continue."
   );
   assistant.workActivity.append(row);
 }
@@ -12276,7 +13053,7 @@ async function decideRecovery(
       button.disabled = true;
     }
   );
-  status.textContent = "Aplicando decisão…";
+  status.textContent = "Applying decision…";
 
   try {
     await fetchJson(
@@ -12424,7 +13201,7 @@ function enhanceCodeBlocks(container, markdown) {
       copyButton.className = "code-copy-button";
       copyButton.setAttribute(
         "aria-label",
-        `Copiar código ${label.textContent}`
+        `Copy code ${label.textContent}`
       );
       copyButton.dataset.originalLabel = copyButton.getAttribute("aria-label");
       const icon = document.createElement("span");
@@ -12439,7 +13216,7 @@ function enhanceCodeBlocks(container, markdown) {
         () => copyText(
           pre.textContent.replace(/\n$/, ""),
           copyButton,
-          "Código copiado"
+          "Code copied"
         )
       );
       header.append(label, copyButton);
@@ -12577,20 +13354,20 @@ function setStreamingState(isStreaming) {
   }
 
   elements.sendButtonLabel.textContent = isStreaming
-    ? "Cancelar"
+    ? "Cancel"
     : state.editingTurn
-      ? "Enviar edição"
-      : "Enviar";
+      ? "Send edit"
+      : "Send";
   elements.sendButton.querySelector(".send-icon").textContent = isStreaming
     ? "\u25a0"
     : "\u2191";
   elements.sendButton.setAttribute(
     "aria-label",
     isStreaming
-      ? "Cancelar solicitação"
+      ? "Cancel request"
       : state.editingTurn
-        ? "Enviar mensagem editada"
-        : "Enviar mensagem"
+        ? "Send edited message"
+        : "Send message"
   );
   elements.sendButton.title = elements.sendButton.getAttribute("aria-label");
   elements.sendButton.classList.toggle("cancel", isStreaming);
@@ -12620,9 +13397,13 @@ function renderContextUsage() {
   const usage = state.contextUsage;
 
   if (!usage) {
-    elements.contextUsageSummary.textContent = "Contexto será calculado ao enviar";
+    elements.contextUsageSummaryText.textContent =
+      "Context will be calculated when sending";
     elements.contextUsage.dataset.accuracy = "pending";
     elements.contextUsage.dataset.warning = "";
+    elements.contextUsageEstimateWarning.hidden = true;
+    elements.contextUsageEstimateWarning.removeAttribute("title");
+    elements.contextUsageEstimateWarning.removeAttribute("aria-label");
     elements.contextUsageWarning.hidden = true;
     elements.contextUsageDetails.replaceChildren();
     elements.compactContext.hidden = true;
@@ -12634,10 +13415,26 @@ function renderContextUsage() {
       usage.applicationLimit,
       usage.providerMaximumTokens ?? usage.configuredProviderLimit
     );
-  elements.contextUsageSummary.textContent =
-    `Contexto ${formatCompactTokens(usage.inputTokens)} / `
+  const activeContextTokens = usage.activeContextTokens || usage.inputTokens;
+  const liveContext = usage.activeContextTokens > 0;
+  elements.contextUsageSummaryText.textContent =
+    `Context ${formatCompactTokens(activeContextTokens)} / `
     + `${formatCompactTokens(effectiveLimit)} · `
-    + `${usage.accuracy === "exact" ? "exato" : "estimado"}`;
+    + `${liveContext ? `${window.AgenticRouterI18n.t("context.live")} ` : ""}`
+    + `${usage.accuracy === "exact" ? "exact" : "estimated"}`;
+  const estimatedLiveUsage = liveContext && usage.accuracy !== "exact";
+  const estimateWarning = t(
+    "context.live_estimate_warning",
+    { harness: activeContextHarnessLabel() }
+  );
+  elements.contextUsageEstimateWarning.hidden = !estimatedLiveUsage;
+  elements.contextUsageEstimateWarning.title = estimatedLiveUsage
+    ? estimateWarning
+    : "";
+  elements.contextUsageEstimateWarning.setAttribute(
+    "aria-label",
+    estimatedLiveUsage ? estimateWarning : ""
+  );
   elements.contextUsage.dataset.accuracy = usage.accuracy;
   elements.contextUsage.dataset.warning =
     usage.warningThreshold ? String(usage.warningThreshold) : "";
@@ -12645,88 +13442,112 @@ function renderContextUsage() {
     !usage.warningThreshold && !usage.trimmed;
   elements.contextUsageWarning.textContent = [
     usage.warningThreshold
-      ? `Atenção: contexto acima de ${usage.warningThreshold}% da capacidade útil.`
+      ? `Warning: context is above ${usage.warningThreshold}% of usable capacity.`
       : null,
     usage.trimmed
-      ? "Blocos elegíveis foram omitidos somente do payload enviado."
+      ? "Eligible blocks were omitted only from the submitted payload."
       : null
   ].filter(Boolean).join(" ");
   elements.contextUsageDetails.replaceChildren(
-    contextDetail("Inferência do especialista", usage.inferenceSequence || 1),
-    contextDetail("Mensagens visíveis", usage.visibleMessages),
-    contextDetail("Mensagens incluídas", usage.includedMessages),
-    contextDetail("Mensagens omitidas", usage.omittedMessages),
+    contextDetail("Specialist inference", usage.inferenceSequence || 1),
+    contextDetail("Visible messages", usage.visibleMessages),
+    contextDetail("Included messages", usage.includedMessages),
+    contextDetail("Omitted messages", usage.omittedMessages),
     contextDetail(
-      "Conversa e mensagem atual",
-      `${formatInteger(usage.conversationTokens)} tokens estimados`
+      "Current conversation and message",
+      `${formatInteger(usage.conversationTokens)} estimated tokens`
     ),
     contextDetail(
-      "Sistema e instruções",
-      `${formatInteger(usage.systemInstructionTokens)} tokens estimados`
+      "System and instructions",
+      `${formatInteger(usage.systemInstructionTokens)} estimated tokens`
     ),
     contextDetail(
-      "Contexto do projeto",
-      `${formatInteger(usage.projectContextTokens)} tokens estimados`
+      "Project context",
+      `${formatInteger(usage.projectContextTokens)} estimated tokens`
     ),
     contextDetail(
       "Toolset discovery",
-      `${formatInteger(usage.toolDiscoveryTokens)} tokens estimados`
+      `${formatInteger(usage.toolDiscoveryTokens)} estimated tokens`
     ),
     contextDetail(
-      "Schemas concedidos",
-      `${formatInteger(usage.grantedToolSchemaTokens)} tokens estimados`
+      "Granted schemas",
+      `${formatInteger(usage.grantedToolSchemaTokens)} estimated tokens`
     ),
     contextDetail(
-      "Estado/resultados do Host",
-      `${formatInteger(usage.hostStateTokens)} tokens estimados`
+      "Host state/results",
+      `${formatInteger(usage.hostStateTokens)} estimated tokens`
     ),
     contextDetail(
-      "Overhead estrutural",
-      `${formatInteger(usage.structuralOverheadTokens)} tokens estimados`
+      "Structural overhead",
+      `${formatInteger(usage.structuralOverheadTokens)} estimated tokens`
     ),
     contextDetail(
-      "Entrada total",
-      `${formatInteger(usage.inputTokens)} tokens · ${usage.accuracy === "exact" ? "reportado" : "estimado"}`
+      "Total input",
+      `${formatInteger(usage.inputTokens)} tokens · ${usage.accuracy === "exact" ? "reported" : "estimated"}`
     ),
+    ...(liveContext
+      ? [
+        contextDetail(
+          window.AgenticRouterI18n.t("context.generated_output"),
+          `${formatInteger(usage.outputTokens)} tokens`
+        ),
+        contextDetail(
+          window.AgenticRouterI18n.t("context.active"),
+          `${formatInteger(activeContextTokens)} tokens`
+        )
+      ]
+      : []),
     contextDetail(
-      "Reserva de saída",
+      "Output reserve",
       `${formatInteger(usage.reservedResponseTokens)} tokens`
     ),
     contextDetail(
-      "Contexto requerido",
+      "Required context",
       `${formatInteger(usage.requiredContextTokens)} tokens`
     ),
     contextDetail(
-      "Limite efetivo",
+      "Effective limit",
       `${formatInteger(effectiveLimit)} tokens`
     ),
     contextDetail(
-      "Origem da contagem",
+      "Count source",
       usage.accuracy === "exact"
-        ? "usage reportado pelo provedor"
+        ? "provider-reported usage"
         : usage.estimator
     ),
     contextDetail(
-      "Máximo do provedor",
+      "Provider maximum",
       usage.providerMaximumTokens == null
-        ? "não reportado"
+        ? "not reported"
         : `${formatInteger(usage.providerMaximumTokens)} tokens`
     ),
     contextDetail(
-      "Limite de provedor configurado",
+      "Configured provider limit",
       `${formatInteger(usage.configuredProviderLimit)} tokens`
     ),
     contextDetail(
-      "Limite da aplicação",
+      "Application limit",
       `${formatInteger(usage.applicationLimit)} tokens`
     ),
-    contextDetail("Blocos omitidos", usage.omittedBlocks || 0)
+    contextDetail("Omitted blocks", usage.omittedBlocks || 0)
   );
   elements.compactContext.hidden = !usage.compactionEligible;
   elements.compactContext.disabled = Boolean(state.requestController);
   elements.compactContext.textContent = state.compactContextNextRequest
-    ? "Compactação preparada"
-    : "Compactar contexto";
+    ? "Compaction prepared"
+    : "Compact context";
+}
+
+function activeContextHarnessLabel() {
+  const harnessId = state.activeHarness ?? state.harness;
+  const status = state.harnesses.find(
+    item => item.definition.id === harnessId
+  );
+  return status
+    ? harnessDisplayLabel(status.definition)
+    : harnessId === "auto-model-harness"
+      ? "the selected harness"
+      : harnessId || "the selected provider";
 }
 
 async function requestManualContextCompaction() {
@@ -12737,14 +13558,14 @@ async function requestManualContextCompaction() {
   const before = usage.beforeCompactionTokens ?? usage.inputTokens;
   const after = usage.afterCompactionTokens ?? usage.inputTokens;
   const confirmed = await showAppConfirm(
-    "A compactação não apagará mensagens salvas nem alterará o chat visível. "
-      + "Ela omitirá somente blocos elegíveis dos payloads das próximas inferências.\n\n"
-      + `Estimativa atual: ${formatInteger(before)} tokens\n`
-      + `Estimativa compactada: ${formatInteger(after)} tokens\n`
-      + `Blocos elegíveis/omitidos: ${usage.omittedBlocks || 0}`,
+    "Compaction will not delete saved messages or change the visible chat. "
+      + "It will omit only eligible blocks from subsequent inference payloads.\n\n"
+      + `Current estimate: ${formatInteger(before)} tokens\n`
+      + `Compacted estimate: ${formatInteger(after)} tokens\n`
+      + `Eligible/omitted blocks: ${usage.omittedBlocks || 0}`,
     {
-      title: "Compactar contexto enviado?",
-      confirmLabel: "Compactar próxima solicitação"
+      title: "Compact submitted context?",
+      confirmLabel: "Compact next request"
     }
   );
   if (!confirmed) {
@@ -12772,7 +13593,7 @@ function formatCompactTokens(value) {
   }
 
   return `${(numeric / 1000).toLocaleString(
-    "pt-BR",
+    window.AgenticRouterI18n.locale,
     {
       minimumFractionDigits: 1,
       maximumFractionDigits: 1
@@ -12782,15 +13603,15 @@ function formatCompactTokens(value) {
 
 function updateComposerStatus() {
   if (state.requestController) {
-    elements.composerStatus.textContent = "Resposta em andamento";
+    elements.composerStatus.textContent = "Response in progress";
   } else if (state.conversationTransitioning) {
     elements.composerStatus.textContent = "Switching conversation safely";
   } else if (state.editingTurn) {
-    elements.composerStatus.textContent = "Editando mensagem · Esc para cancelar";
+    elements.composerStatus.textContent = "Editing message · Esc to cancel";
   } else if (state.interactionMode === "execute") {
     if (state.harness === "auto-model-harness") {
       elements.composerStatus.textContent =
-        `Execute · Auto Model × Harness · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
+        `Execute · Auto Model × Harness · ${state.approvalPolicy === "ask" ? "ask for approval" : "automatic approval"}`;
       updateActiveAgentLabel();
       renderCapabilityContext();
       return;
@@ -12802,17 +13623,17 @@ function updateComposerStatus() {
       ? harnessDisplayLabel(status.definition)
       : state.harness;
     elements.composerStatus.textContent =
-      `Execute · ${harness} · ${state.approvalPolicy === "ask" ? "pedir aprovação" : "aprovação automática"}`;
+      `Execute · ${harness} · ${state.approvalPolicy === "ask" ? "ask for approval" : "automatic approval"}`;
   } else if (state.attachments.length > 0 || state.webEnabled) {
     elements.composerStatus.textContent = [
       state.attachments.length > 0
-        ? `${state.attachments.length} imagem${state.attachments.length === 1 ? "" : "ns"}`
+        ? `${state.attachments.length} image${state.attachments.length === 1 ? "" : "s"}`
         : null,
-      state.webEnabled ? "Web habilitada" : null,
-      "Enter para enviar"
+      state.webEnabled ? "Web enabled" : null,
+      "Press Enter to send"
     ].filter(Boolean).join(" · ");
   } else {
-    elements.composerStatus.textContent = "Enter para enviar";
+    elements.composerStatus.textContent = "Press Enter to send";
   }
 
   updateActiveAgentLabel();
@@ -12829,7 +13650,7 @@ function updateActiveAgentLabel() {
   elements.activeAgentLabel.textContent =
     selectedModel && selectedModel !== "auto"
       ? selectedModel
-      : "Auto (Roteador)";
+      : "Auto (Router)";
   elements.activeAgentLabel.title = elements.activeAgentLabel.textContent;
   renderCloudUsage();
 }

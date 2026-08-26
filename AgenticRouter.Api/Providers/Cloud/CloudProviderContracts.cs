@@ -58,6 +58,7 @@ public interface ICloudProviderAdapter
     IReadOnlyList<ChatMessage> messages,
     JsonElement? schema,
     string stage,
+    ProviderChatOptions? options,
     CancellationToken cancellationToken
   );
 

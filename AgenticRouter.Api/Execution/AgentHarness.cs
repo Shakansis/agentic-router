@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
+using AgenticRouter.Api.Configuration;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -18,6 +19,7 @@ public sealed record CodexHarnessOptions(
 
 public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAsyncDisposable
 {
+  private const int AutoCompactPercentage = 98;
   private const int MaximumActivityText = 8_192;
   private const string PermissionProfileId = ":workspace";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
@@ -45,6 +47,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   );
 
   private readonly CodexHarnessOptions _options;
+  private readonly ISettingsStore _settingsStore;
   private readonly ILogger<CodexHarnessAdapter> _logger;
   private readonly SemaphoreSlim _availabilityGate = new(1, 1);
   private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
@@ -56,6 +59,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   private readonly ConcurrentDictionary<string, byte> _attachedThreads = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, PendingServerApproval> _approvals = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, PendingDynamicToolCall> _toolCalls = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, CodexLocalModelMetadata> _knownModelMetadata = new(StringComparer.Ordinal);
   private Process? _process;
   private StreamWriter? _input;
   private CancellationTokenSource? _processLifetime;
@@ -68,10 +72,12 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   public CodexHarnessAdapter(
     CodexHarnessOptions options,
+    ISettingsStore settingsStore,
     ILogger<CodexHarnessAdapter> logger
   )
   {
     _options = options;
+    _settingsStore = settingsStore;
     _logger = logger;
   }
 
@@ -200,6 +206,9 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   )
   {
     ValidateTurn(request);
+    var eventIdleTimeout = TimeSpan.FromSeconds(
+      (await _settingsStore.GetAsync(cancellationToken)).Runtime.GenerationTimeoutSeconds
+    );
     await _turnGate.WaitAsync(cancellationToken);
     ActiveHarnessTurn? active = null;
 
@@ -220,7 +229,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         "ProviderEndpoint was null.",
         false
       );
-      await EnsureStartedAsync(providerEndpoint, cancellationToken);
+      await EnsureStartedAsync(request, providerEndpoint, cancellationToken);
       var harnessSession = await GetOrStartThreadAsync(request, cancellationToken);
       var threadId = harnessSession.NativeSessionId;
       var turnPrompt = HarnessConversationPromptBuilder.Create(
@@ -257,14 +266,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         new
         {
           threadId,
-          input = new[]
-          {
-            new
-            {
-              type = "text",
-              text = turnPrompt.Text
-            }
-          },
+          input = CreateTurnInput(turnPrompt.Text, request.Images),
           cwd = request.WorkingDirectory,
           approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
           permissions = PermissionProfileId,
@@ -289,7 +291,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         turnResult
       );
 
-      await foreach (var harnessEvent in active.Events.Reader.ReadAllAsync(cancellationToken))
+      await foreach (var harnessEvent in ReadTurnEventsAsync(
+        active,
+        eventIdleTimeout,
+        cancellationToken
+      ))
       {
         if (
           harnessEvent.TerminalState is HarnessTerminalState.Completed
@@ -334,6 +340,86 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
       _turnGate.Release();
     }
+  }
+
+  private async IAsyncEnumerable<HarnessEvent> ReadTurnEventsAsync(
+    ActiveHarnessTurn active,
+    TimeSpan eventIdleTimeout,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    while (true)
+    {
+      var timedOut = false;
+      var canRead = false;
+      using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+      {
+        timeout.CancelAfter(eventIdleTimeout);
+        try
+        {
+          canRead = await active.Events.Reader.WaitToReadAsync(timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+          timedOut = true;
+        }
+      }
+
+      if (timedOut)
+      {
+        await CancelTurnAsync(active.SessionId, CancellationToken.None);
+        yield return CreateEvent(
+          active,
+          new HarnessEvent(
+            "turn.timed-out",
+            $"Codex produced no event within the configured {eventIdleTimeout.TotalSeconds:0}-second generation timeout.",
+            errorCode: "codex-event-idle-timeout",
+            terminalState: HarnessTerminalState.TimedOut
+          )
+        );
+        yield break;
+      }
+
+      if (!canRead)
+      {
+        yield break;
+      }
+
+      while (active.Events.Reader.TryRead(out var harnessEvent))
+      {
+        yield return harnessEvent;
+      }
+    }
+  }
+
+  private static IReadOnlyList<object> CreateTurnInput(
+    string text,
+    IReadOnlyList<HarnessImageInput>? images
+  )
+  {
+    var input = new List<object>
+    {
+      new
+      {
+        type = "text",
+        text
+      }
+    };
+    if (images is null)
+    {
+      return input;
+    }
+    input.AddRange(
+      images.Select(
+        image => (object)new
+        {
+          type = "image",
+          url = $"data:{image.MimeType};base64,{Convert.ToBase64String(image.Bytes)}",
+          detail = "auto"
+        }
+      )
+    );
+    return input;
   }
 
   public async Task ResolveApprovalAsync(
@@ -451,6 +537,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   }
 
   private async Task EnsureStartedAsync(
+    HarnessTurnRequest request,
     Uri ollamaUrl,
     CancellationToken cancellationToken
   )
@@ -459,9 +546,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
     try
     {
+      var catalogChanged = RegisterModelMetadata(request);
       if (
         _process is { HasExited: false }
         && string.Equals(_activeOllamaUrl, ollamaUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
+        && !catalogChanged
       )
       {
         return;
@@ -473,8 +562,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         {
           throw new HarnessException(
             "codex-runtime-configuration-busy",
-            "The Codex runtime cannot change Ollama endpoints while a turn is active.",
-            $"Active endpoint {_activeOllamaUrl}; requested {ollamaUrl}.",
+            "The Codex runtime configuration cannot change while a turn is active.",
+            $"Active endpoint {_activeOllamaUrl}; requested {ollamaUrl}; model catalog changed: {catalogChanged}.",
             true
           );
         }
@@ -590,12 +679,14 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     CancellationToken cancellationToken
   )
   {
+    var contextConfiguration = ResolveContextConfiguration(request);
     if (_threadsByConversation.TryGetValue(request.SessionId, out var existing)
       && string.Equals(
         existing.CapabilitySignature,
         request.HostCapabilities?.Signature,
         StringComparison.Ordinal
-      ))
+      )
+      && existing.ContextConfiguration == contextConfiguration)
     {
       if (_attachedThreads.ContainsKey(existing.NativeSessionId))
       {
@@ -615,7 +706,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
             cwd = request.WorkingDirectory,
             approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
             permissions = PermissionProfileId,
-            runtimeWorkspaceRoots = new[] { request.WorkingDirectory }
+            runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
+            config = CreateThreadConfig(contextConfiguration)
           },
           _options.StartupTimeout,
           cancellationToken
@@ -647,7 +739,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         permissions = PermissionProfileId,
         runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
         serviceName = "agentic_router",
-        dynamicTools = CreateDynamicTools(request.HostCapabilities)
+        dynamicTools = CreateDynamicTools(request.HostCapabilities),
+        config = CreateThreadConfig(contextConfiguration)
       },
       _options.StartupTimeout,
       cancellationToken
@@ -656,7 +749,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     VerifyThreadSelection(result, request);
     var harnessSession = new HarnessSessionState(
       threadId,
-      request.HostCapabilities?.Signature
+      request.HostCapabilities?.Signature,
+      contextConfiguration
     );
     _threadsByConversation[request.SessionId] = harnessSession;
     _attachedThreads[threadId] = 0;
@@ -1143,6 +1237,40 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           root
         ));
         break;
+      case "thread/tokenUsage/updated":
+        {
+          var contextInputTokens = GetInt64(
+            parameters,
+            "tokenUsage",
+            "last",
+            "inputTokens"
+          );
+          var contextTotalTokens = GetInt64(
+            parameters,
+            "tokenUsage",
+            "last",
+            "totalTokens"
+          );
+          if (contextInputTokens is > 0 || contextTotalTokens is > 0)
+          {
+            active.Events.Writer.TryWrite(CreateEvent(
+              active,
+              new HarnessEvent(
+                "usage.updated",
+                "Codex reported live active-context usage.",
+                contextInputTokens: contextInputTokens,
+                contextTotalTokens: contextTotalTokens,
+                contextWindowTokens: GetInt64(
+                  parameters,
+                  "tokenUsage",
+                  "modelContextWindow"
+                )
+              ),
+              root
+            ));
+          }
+          break;
+        }
       case "error":
         active.Events.Writer.TryWrite(CreateEvent(
           active,
@@ -1238,6 +1366,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   )
   {
     var status = GetString(parameters, "turn", "status") ?? "failed";
+    var failure = ReadCodexFailure(parameters);
     var result = status switch
     {
       "completed" => new HarnessEvent(
@@ -1251,10 +1380,13 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         terminalState: HarnessTerminalState.Cancelled
       ),
       _ => new HarnessEvent(
-        "turn.failed",
-        "Codex turn failed.",
-        errorCode: ReadCodexErrorCode(parameters),
-        terminalState: HarnessTerminalState.Failed
+        failure.TimedOut ? "turn.timed-out" : "turn.failed",
+        failure.Message,
+        output: failure.TechnicalMessage,
+        errorCode: failure.Code,
+        terminalState: failure.TimedOut
+          ? HarnessTerminalState.TimedOut
+          : HarnessTerminalState.Failed
       )
     };
     active.TryComplete(CreateEvent(active, result, root));
@@ -1354,9 +1486,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private async Task WriteIsolatedConfigurationAsync(CancellationToken cancellationToken)
   {
+    var catalogPath = await WriteModelCatalogAsync(cancellationToken);
     var path = Path.Combine(_options.RuntimeDirectory, "config.toml");
     var content = "model_provider = \"ollama\"\n"
       + "oss_provider = \"ollama\"\n"
+      + $"model_catalog_json = \"{TomlPath(catalogPath)}\"\n"
       + "approval_policy = \"on-request\"\n"
       + $"default_permissions = \"{PermissionProfileId}\"\n"
       + "check_for_update_on_startup = false\n"
@@ -1385,6 +1519,94 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     var temporary = path + ".tmp";
     await File.WriteAllTextAsync(temporary, content, new UTF8Encoding(false), cancellationToken);
     File.Move(temporary, path, true);
+  }
+
+  private bool RegisterModelMetadata(HarnessTurnRequest request)
+  {
+    var supportsImages = request.Images is { Count: > 0 };
+    var metadata = new CodexLocalModelMetadata(
+      request.Model,
+      request.ContextWindowTokens!.Value,
+      supportsImages
+    );
+    if (_knownModelMetadata.TryGetValue(request.Model, out var current))
+    {
+      metadata = metadata with
+      {
+        SupportsImages = current.SupportsImages || metadata.SupportsImages
+      };
+      if (metadata == current)
+      {
+        return false;
+      }
+    }
+    _knownModelMetadata[request.Model] = metadata;
+    return true;
+  }
+
+  private async Task<string> WriteModelCatalogAsync(CancellationToken cancellationToken)
+  {
+    var path = Path.Combine(_options.RuntimeDirectory, "model-catalog.json");
+    var models = _knownModelMetadata.Values
+      .OrderBy(model => model.Slug, StringComparer.Ordinal)
+      .Select((model, index) => new
+      {
+        slug = model.Slug,
+        display_name = model.Slug,
+        description = "Agentic Router local Ollama model.",
+        supported_reasoning_levels = Array.Empty<object>(),
+        shell_type = "shell_command",
+        visibility = "list",
+        supported_in_api = true,
+        priority = index + 1,
+        support_verbosity = false,
+        truncation_policy = new
+        {
+          mode = "tokens",
+          limit = 10_000
+        },
+        experimental_supported_tools = Array.Empty<string>(),
+        context_window = model.ContextWindowTokens,
+        max_context_window = model.ContextWindowTokens,
+        effective_context_window_percent = 100,
+        input_modalities = model.SupportsImages
+          ? new[] { "text", "image" }
+          : new[] { "text" },
+        base_instructions = "You are a coding agent. Follow the supplied developer and user instructions, use the available tools to complete the request, and report only actions and results that actually occurred."
+      })
+      .ToArray();
+    var content = JsonSerializer.Serialize(
+      new { models },
+      new JsonSerializerOptions
+      {
+        WriteIndented = true
+      }
+    ) + "\n";
+    if (
+      File.Exists(path)
+      && string.Equals(
+        await File.ReadAllTextAsync(path, cancellationToken),
+        content,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      return path;
+    }
+    var temporary = path + ".tmp";
+    await File.WriteAllTextAsync(
+      temporary,
+      content,
+      new UTF8Encoding(false),
+      cancellationToken
+    );
+    File.Move(temporary, path, true);
+    return path;
+  }
+
+  private static string TomlPath(string path)
+  {
+    return Path.GetFullPath(path).Replace('\\', '/');
   }
 
   private string ResolveExecutable()
@@ -1483,11 +1705,46 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         false
       );
     }
+    if (request.ContextWindowTokens is not > 0)
+    {
+      throw new HarnessException(
+        "codex-context-window-missing",
+        "Codex requires the Host-resolved context window.",
+        $"ContextWindowTokens was {request.ContextWindowTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}.",
+        false
+      );
+    }
     var root = Path.GetFullPath(request.WorkingDirectory);
     if (!Directory.Exists(root))
     {
       throw new HarnessException("codex-workspace-invalid", "The trusted workspace is unavailable.", root, true);
     }
+  }
+
+  private static CodexContextConfiguration ResolveContextConfiguration(
+    HarnessTurnRequest request
+  )
+  {
+    var contextWindowTokens = request.ContextWindowTokens!.Value;
+    var autoCompactTokenLimit = checked(
+      (int)((long)contextWindowTokens * AutoCompactPercentage / 100)
+    );
+    return new CodexContextConfiguration(
+      contextWindowTokens,
+      autoCompactTokenLimit
+    );
+  }
+
+  private static object CreateThreadConfig(
+    CodexContextConfiguration configuration
+  )
+  {
+    return new
+    {
+      model_context_window = configuration.ContextWindowTokens,
+      model_auto_compact_token_limit = configuration.AutoCompactTokenLimit,
+      model_auto_compact_token_limit_scope = "total"
+    };
   }
 
   private static object[] CreateDynamicTools(HostCapabilityProfile? profile)
@@ -1584,6 +1841,25 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       }
     }
     return current.ValueKind == JsonValueKind.String ? current.GetString() : null;
+  }
+
+  private static long? GetInt64(JsonElement? element, params string[] path)
+  {
+    if (element is null)
+    {
+      return null;
+    }
+    var current = element.Value;
+    foreach (var segment in path)
+    {
+      if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(segment, out current))
+      {
+        return null;
+      }
+    }
+    return current.ValueKind == JsonValueKind.Number && current.TryGetInt64(out var value)
+      ? value
+      : null;
   }
 
   private static bool FileChangeDeletes(JsonElement item)
@@ -1740,9 +2016,53 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private static string? ReadCodexErrorCode(JsonElement parameters)
   {
-    return GetString(parameters, "error", "codexErrorInfo", "type")
-      ?? GetString(parameters, "turn", "error", "codexErrorInfo", "type")
-      ?? "codex-turn-failed";
+    return ReadCodexFailure(parameters).Code;
+  }
+
+  private static CodexTurnFailure ReadCodexFailure(JsonElement parameters)
+  {
+    var technicalMessage = GetString(parameters, "turn", "error", "message")
+      ?? GetString(parameters, "error", "message")
+      ?? GetString(parameters, "message");
+    var nativeCode = GetString(parameters, "turn", "error", "codexErrorInfo", "type")
+      ?? GetString(parameters, "error", "codexErrorInfo", "type")
+      ?? GetString(parameters, "codexErrorInfo", "type");
+    if (
+      technicalMessage?.Contains(
+        "idle timeout waiting for SSE",
+        StringComparison.OrdinalIgnoreCase
+      ) == true
+    )
+    {
+      return new CodexTurnFailure(
+        "codex-provider-stream-idle-timeout",
+        "The local model stream became idle before Codex could finish the turn.",
+        technicalMessage,
+        true
+      );
+    }
+    if (
+      technicalMessage?.Contains(
+        "stream disconnected before completion",
+        StringComparison.OrdinalIgnoreCase
+      ) == true
+    )
+    {
+      return new CodexTurnFailure(
+        "codex-provider-stream-disconnected",
+        "The local model stream disconnected before Codex could finish the turn.",
+        technicalMessage,
+        false
+      );
+    }
+    return new CodexTurnFailure(
+      string.IsNullOrWhiteSpace(nativeCode) || nativeCode == "other"
+        ? "codex-turn-failed"
+        : nativeCode,
+      "Codex turn failed.",
+      technicalMessage,
+      false
+    );
   }
 
   private static HarnessEvent CreateEvent(
@@ -1784,15 +2104,36 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private sealed class HarnessSessionState(
     string nativeSessionId,
-    string? capabilitySignature = null
+    string? capabilitySignature,
+    CodexContextConfiguration contextConfiguration
   )
   {
     public string NativeSessionId { get; } = nativeSessionId;
 
     public string? CapabilitySignature { get; } = capabilitySignature;
 
+    public CodexContextConfiguration ContextConfiguration { get; } = contextConfiguration;
+
     public long? SynchronizedThroughVersion { get; set; }
   }
+
+  private sealed record CodexContextConfiguration(
+    int ContextWindowTokens,
+    int AutoCompactTokenLimit
+  );
+
+  private sealed record CodexLocalModelMetadata(
+    string Slug,
+    int ContextWindowTokens,
+    bool SupportsImages
+  );
+
+  private sealed record CodexTurnFailure(
+    string Code,
+    string Message,
+    string? TechnicalMessage,
+    bool TimedOut
+  );
 
   private sealed class ActiveHarnessTurn
   {

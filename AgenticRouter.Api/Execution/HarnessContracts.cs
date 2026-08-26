@@ -98,6 +98,13 @@ public sealed record HarnessConversationContext(
   IReadOnlyList<HarnessConversationMessage> Messages
 );
 
+public sealed record HarnessImageInput(
+  string Id,
+  string FileName,
+  string MimeType,
+  byte[] Bytes
+);
+
 public sealed record HarnessTurnRequest(
   string HarnessId,
   string SessionId,
@@ -113,7 +120,8 @@ public sealed record HarnessTurnRequest(
   HostCapabilityProfile? HostCapabilities = null,
   bool UseMinimalToolInventory = false,
   bool ReleaseWorkspaceAfterTurn = false,
-  bool ReleaseWorkspaceOnCancellation = false
+  bool ReleaseWorkspaceOnCancellation = false,
+  IReadOnlyList<HarnessImageInput>? Images = null
 );
 
 public sealed record HarnessEvent
@@ -140,6 +148,8 @@ public sealed record HarnessEvent
     HarnessTerminalState? terminalState = null,
     JsonElement? nativePayload = null,
     long? contextInputTokens = null,
+    long? contextTotalTokens = null,
+    long? contextWindowTokens = null,
     bool recoveryExhausted = false,
     bool readOnlyPermission = false
   )
@@ -167,6 +177,8 @@ public sealed record HarnessEvent
     TerminalState = terminalState;
     NativePayload = nativePayload;
     ContextInputTokens = contextInputTokens;
+    ContextTotalTokens = contextTotalTokens;
+    ContextWindowTokens = contextWindowTokens;
   }
 
   public string Type { get; init; }
@@ -214,6 +226,10 @@ public sealed record HarnessEvent
   public JsonElement? NativePayload { get; init; }
 
   public long? ContextInputTokens { get; init; }
+
+  public long? ContextTotalTokens { get; init; }
+
+  public long? ContextWindowTokens { get; init; }
 
   public bool IsTerminal => TerminalState.HasValue;
 }

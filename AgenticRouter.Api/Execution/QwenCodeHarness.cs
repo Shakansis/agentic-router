@@ -717,7 +717,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         return Event(
           "usage.updated",
           active,
-          contextInputTokens: Long(updateData, "used"),
+          contextTotalTokens: Long(updateData, "used"),
           native: payload
         );
       case "user_message_chunk":
@@ -1611,6 +1611,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     HarnessTerminalState? terminal = null,
     JsonElement? native = null,
     long? contextInputTokens = null,
+    long? contextTotalTokens = null,
     bool readOnlyPermission = false
   )
   {
@@ -1633,6 +1634,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       terminalState: terminal,
       nativePayload: native?.Clone(),
       contextInputTokens: contextInputTokens,
+      contextTotalTokens: contextTotalTokens,
       readOnlyPermission: readOnlyPermission
     );
   }

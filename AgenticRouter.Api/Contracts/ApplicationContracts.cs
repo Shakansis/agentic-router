@@ -355,7 +355,9 @@ public sealed record ContextUsageView(
   bool CompactionEligible = false,
   long? BeforeCompactionTokens = null,
   long? AfterCompactionTokens = null,
-  int OmittedBlocks = 0
+  int OmittedBlocks = 0,
+  long ActiveContextTokens = 0,
+  long OutputTokens = 0
 );
 
 public sealed record TrustedWorkspaceRequest(
@@ -374,6 +376,11 @@ public sealed record FolderPickerResult(
   bool Selected,
   bool Cancelled,
   string? Path,
+  string? Error
+);
+
+public sealed record FolderOpenResult(
+  bool Opened,
   string? Error
 );
 

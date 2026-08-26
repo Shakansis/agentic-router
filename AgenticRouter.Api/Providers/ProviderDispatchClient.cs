@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
@@ -185,7 +186,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     string stage,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Action<ProviderTokenUsage?>? usageObserver = null
+    Action<ProviderTokenUsage?>? usageObserver = null,
+    ProviderChatOptions? options = null
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -201,7 +203,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         stage,
         usageContext,
         cancellationToken,
-        usageObserver
+        usageObserver,
+        options
       )
       : GenerateCloudStructuredAsync(
         reference,
@@ -210,7 +213,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         stage,
         usageContext,
         cancellationToken,
-        usageObserver
+        usageObserver,
+        options
       );
   }
 
@@ -222,7 +226,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
     string stage,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
+    Func<string, CancellationToken, ValueTask>? onContentDelta = null,
+    bool toolOutput = true
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -239,7 +245,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
         stage,
         usageContext,
         cancellationToken,
-        onThinkingDelta
+        onThinkingDelta,
+        onContentDelta,
+        toolOutput
       );
     }
 
@@ -256,6 +264,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
       )
     );
     CloudProviderSession? session = null;
+    string? retryActivity = null;
 
     for (var attempt = 1; ; attempt++)
     {
@@ -298,10 +307,25 @@ public sealed class ProviderDispatchClient : IOllamaClient
           session.Adapter.ProtocolVersion,
           "provider-request"
         );
-        return result.Value with
+        var response = result.Value with
         {
-          Usage = result.Usage
+          Usage = result.Usage,
+          RetryActivity = retryActivity
         };
+        if (
+          onContentDelta is not null
+          && response.ToolCalls.Count == 0
+          && !string.IsNullOrEmpty(
+            response.Content
+          )
+        )
+        {
+          await onContentDelta(
+            response.Content,
+            cancellationToken
+          );
+        }
+        return response;
       }
       catch (CloudProviderException exception)
       {
@@ -335,7 +359,16 @@ public sealed class ProviderDispatchClient : IOllamaClient
           "provider-request"
         );
 
-        if (!decision.Retry)
+        if (
+          !decision.Retry
+          || string.Equals(
+            stage,
+            "chat-read-only-tools",
+            StringComparison.Ordinal
+          )
+            && exception.HttpStatus == (int)HttpStatusCode.TooManyRequests
+            && exception.RetryAfter is null
+        )
         {
           throw new RoutedProviderException(
             exception
@@ -346,6 +379,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
           decision.Delay,
           cancellationToken
         );
+        retryActivity =
+          $"Provider retry {decision.Attempt + 1} of {decision.MaximumAttempts}: "
+          + $"{decision.Category}; waited {Math.Ceiling(decision.Delay.TotalMilliseconds)} ms.";
       }
       catch (OperationCanceledException)
       {
@@ -717,6 +753,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
+    ) + options.Images.Sum(
+      image => Math.Max(1_024L, (long)Math.Ceiling(image.Bytes.LongLength / 512d))
     );
     CloudProviderSession? session = null;
 
@@ -923,9 +961,11 @@ public sealed class ProviderDispatchClient : IOllamaClient
     string stage,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Action<ProviderTokenUsage?>? usageObserver = null
+    Action<ProviderTokenUsage?>? usageObserver = null,
+    ProviderChatOptions? options = null
   )
   {
+    options ??= ProviderChatOptions.Empty;
     var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
@@ -949,6 +989,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
           messages,
           schema,
           stage,
+          options,
           cancellationToken
         );
         await RecordAsync(

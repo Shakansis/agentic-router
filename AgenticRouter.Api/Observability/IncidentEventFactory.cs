@@ -5,7 +5,7 @@ namespace AgenticRouter.Api.Observability;
 public static class IncidentEventFactory
 {
   private static readonly IReadOnlySet<string> IgnoredTypes = new HashSet<string>(
-    ["response.delta", "request.heartbeat"],
+    ["reasoning.delta", "response.delta", "request.heartbeat"],
     StringComparer.Ordinal
   );
 
@@ -41,7 +41,13 @@ public static class IncidentEventFactory
       Category = CategoryFor(source.Type),
       Stage = error?.Stage ?? source.Type,
       Code = Detail(details, "code") ?? source.Type,
-      Status = source.Type == "error" ? "failed" : source.Type == "response.completed" ? "completed" : "observed",
+      Status = source.Type switch
+      {
+        "error" => "failed",
+        "response.completed" => "completed",
+        "request.cancelled" => "cancelled",
+        _ => "observed"
+      },
       Summary = summary,
       RequestId = source.RequestId,
       ConversationId = source.ConversationSessionId,

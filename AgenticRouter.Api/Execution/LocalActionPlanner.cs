@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
@@ -1094,27 +1095,27 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     return new
     {
       objective = PlanStringProperty(
-        240,
+        ProjectAwarenessSettings.MaximumPlanObjectiveCharacters,
         "Short textual objective."
       ),
       steps = new
       {
         type = "array",
         minItems = 1,
-        maxItems = 8,
+        maxItems = ProjectAwarenessSettings.MaximumPlanSteps,
         items = new
         {
           type = "object",
           properties = new
           {
             title = PlanStringProperty(
-              100,
+              ProjectAwarenessSettings.MaximumPlanStepTitleCharacters,
               "Short single-line description only; do not include commands, code, or executable content."
             ),
             dependsOn = new
             {
               type = "array",
-              maxItems = 8,
+              maxItems = ProjectAwarenessSettings.MaximumPlanSteps,
               uniqueItems = true,
               items = new
               {

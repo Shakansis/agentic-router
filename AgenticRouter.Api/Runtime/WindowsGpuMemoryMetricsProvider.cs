@@ -121,7 +121,15 @@ public sealed class WindowsGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
               100
             ),
             "available",
-            "Adapter-wide dedicated-memory usage reported by NVIDIA SMI."
+            "Adapter-wide dedicated-memory usage reported by NVIDIA SMI.",
+            int.TryParse(
+              values[0],
+              NumberStyles.Integer,
+              CultureInfo.InvariantCulture,
+              out var ollamaIndex
+            )
+              ? ollamaIndex
+              : null
           )
         );
       }

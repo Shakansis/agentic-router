@@ -285,6 +285,17 @@ public sealed class GitRepositoryService : IGitRepositoryService
         workspace,
         status.Head
           ?? "unborn"
+      ),
+      CreateStatusActionId(
+        "commit-project",
+        workspaceId,
+        workspace,
+        status
+      ),
+      CreatePushActionId(
+        workspaceId,
+        workspace,
+        status
       )
     );
   }
@@ -1982,6 +1993,68 @@ public sealed class GitRepositoryService : IGitRepositoryService
         )
       )
     ).ToLowerInvariant();
+  }
+
+  private static string CreateStatusActionId(
+    string operation,
+    string workspaceId,
+    string workspacePath,
+    GitRepositoryStatusView status
+  )
+  {
+    var pathState = status.Paths.Select(
+      path => string.Join(
+        ":",
+        path.Path,
+        path.IndexStatus,
+        path.WorkingTreeStatus
+      )
+    ).Order(
+      StringComparer.Ordinal
+    );
+    return CreateActionId(
+      [
+      operation,
+      workspaceId,
+      workspacePath,
+      status.Head ?? "unborn",
+      status.Upstream ?? string.Empty,
+      status.Ahead.ToString(
+        System.Globalization.CultureInfo.InvariantCulture
+      ),
+      status.Behind.ToString(
+        System.Globalization.CultureInfo.InvariantCulture
+      ),
+      .. pathState
+      ]
+    );
+  }
+
+  private static string CreatePushActionId(
+    string workspaceId,
+    string workspacePath,
+    GitRepositoryStatusView status
+  )
+  {
+    return CreateActionId(
+      "push-project",
+      workspaceId,
+      workspacePath,
+      status.Head ?? "unborn",
+      status.Branch ?? string.Empty,
+      status.Upstream ?? string.Empty,
+      status.UpstreamCommit ?? string.Empty,
+      status.Ahead.ToString(
+        System.Globalization.CultureInfo.InvariantCulture
+      ),
+      status.Behind.ToString(
+        System.Globalization.CultureInfo.InvariantCulture
+      ),
+      status.DetachedHead.ToString(
+        System.Globalization.CultureInfo.InvariantCulture
+      ),
+      status.OperationInProgress ?? string.Empty
+    );
   }
 
   private static string ValidateIdentity(

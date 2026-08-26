@@ -30,7 +30,8 @@ public sealed record GpuMemoryStatus(
   long? UsedDedicatedMemoryBytes,
   double? UsedPercent,
   string Status,
-  string? Diagnostic
+  string? Diagnostic,
+  int? OllamaIndex = null
 );
 
 public sealed record LoadedModelStatus(
@@ -46,7 +47,9 @@ public sealed record LoadedModelStatus(
   DateTimeOffset? ExpiresAt,
   bool IsResidentModel,
   string ProfileStatus,
-  bool SharedAcrossRoles
+  bool SharedAcrossRoles,
+  int? GpuIndex = null,
+  string? GpuName = null
 );
 
 public sealed record ResidentModelStatus(

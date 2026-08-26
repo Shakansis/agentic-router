@@ -427,10 +427,24 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
         new
         {
           objective = "Prove Qwen Code plan bridging",
-          steps = new[] { new { title = "Confirm the Host accepted the plan", dependsOn = Array.Empty<int>() } }
+          steps = new[]
+          {
+            new { title = "Run the first Host process", dependsOn = Array.Empty<int>() },
+            new { title = "Run the second Host process", dependsOn = new[] { 1 } }
+          }
         }
       );
-      var action = await InvokeHostToolAsync(
+      var unboundAction = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "--version" },
+          workingDirectory = ".",
+          timeoutSeconds = 30
+        }
+      );
+      var firstAction = await InvokeHostToolAsync(
         "run_process",
         new
         {
@@ -438,16 +452,30 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
           arguments = new[] { "--version" },
           workingDirectory = ".",
           timeoutSeconds = 30,
-          stepId = AcceptedPlanStepId(plan)
+          stepId = ActionablePlanStepId(unboundAction)
+        }
+      );
+      var secondAction = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "--version" },
+          workingDirectory = ".",
+          timeoutSeconds = 30,
+          stepId = ActionablePlanStepId(firstAction)
         }
       );
       await WriteMarkerAsync(
         "fake-qwen-host-plan.json",
         new
         {
-          succeeded = plan.Succeeded && action.Succeeded,
+          succeeded = plan.Succeeded && !unboundAction.Succeeded
+            && firstAction.Succeeded && secondAction.Succeeded,
           plan = new { succeeded = plan.Succeeded, output = plan.Output },
-          action = new { succeeded = action.Succeeded, output = action.Output }
+          unboundAction = new { succeeded = unboundAction.Succeeded, output = unboundAction.Output },
+          firstAction = new { succeeded = firstAction.Succeeded, output = firstAction.Output },
+          secondAction = new { succeeded = secondAction.Succeeded, output = secondAction.Output }
         }
       );
       await CompleteAsync(session, promptId);
@@ -927,24 +955,20 @@ async Task WriteMarkerAsync(string name, object value)
   );
 }
 
-string AcceptedPlanStepId(McpToolResult plan)
+string ActionablePlanStepId(McpToolResult result)
 {
-  if (!plan.Succeeded)
+  var lines = result.Output.Split('\n');
+  var marker = Array.FindIndex(lines, line => line.Trim() == "HOST_OWNED_PLAN_STATE");
+  if (marker < 0 || marker + 1 >= lines.Length)
   {
-    throw new InvalidOperationException(plan.Output);
+    throw new InvalidOperationException("The Host action result omitted authoritative plan state.");
   }
-  var jsonStart = plan.Output.IndexOf('{');
-  if (jsonStart < 0)
-  {
-    throw new InvalidOperationException("The accepted Host plan omitted its JSON payload.");
-  }
-  using var document = JsonDocument.Parse(plan.Output[jsonStart..]);
-  var steps = document.RootElement.TryGetProperty("steps", out var camelSteps)
-    ? camelSteps
-    : document.RootElement.GetProperty("Steps");
-  var first = steps[0];
-  return (first.TryGetProperty("id", out var camelId) ? camelId : first.GetProperty("Id")).GetString()
-    ?? throw new InvalidOperationException("The accepted Host plan omitted its first step ID.");
+  using var document = JsonDocument.Parse(lines[marker + 1]);
+  var ids = document.RootElement.TryGetProperty("actionableStepIds", out var camelIds)
+    ? camelIds
+    : document.RootElement.GetProperty("ActionableStepIds");
+  return ids[0].GetString()
+    ?? throw new InvalidOperationException("The Host action result omitted its next actionable step ID.");
 }
 
 async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)

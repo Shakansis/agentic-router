@@ -165,14 +165,6 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
         );
       }
 
-      using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
-        cancellationToken
-      );
-      timeout.CancelAfter(
-        TimeSpan.FromSeconds(
-          15
-        )
-      );
       long? firstChunk = null;
 
       await foreach (var update in _ollamaClient.StreamChatAsync(
@@ -193,7 +185,7 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
           "model-connectivity-test"
         ),
         null,
-        timeout.Token
+        cancellationToken
       ))
       {
         if (
@@ -217,18 +209,22 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
         null
       );
     }
-    catch (Exception exception) when (
-      exception is OllamaProviderException
-      or OperationCanceledException
-    )
+    catch (OllamaProviderException exception)
     {
       return Failure(
         model,
         stopwatch,
         traceId,
-        exception is OperationCanceledException
-          ? "The model test timed out or was cancelled."
-          : exception.Message
+        exception.Message
+      );
+    }
+    catch (OperationCanceledException)
+    {
+      return Failure(
+        model,
+        stopwatch,
+        traceId,
+        "The model test was cancelled."
       );
     }
   }

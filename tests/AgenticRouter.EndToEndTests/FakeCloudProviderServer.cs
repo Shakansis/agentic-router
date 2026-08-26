@@ -617,6 +617,93 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       && tools.ValueKind == JsonValueKind.Array
     )
     {
+      var chatWorkspaceRead = body.Contains(
+        "CHAT_READ_ONLY_WORKSPACE_V1",
+        StringComparison.Ordinal
+      );
+      if (chatWorkspaceRead)
+      {
+        var requestedWorkspaceRead = body.Contains(
+          "chat workspace read request",
+          StringComparison.OrdinalIgnoreCase
+        );
+        var hasToolResult = root.GetProperty(
+          "messages"
+        ).EnumerateArray().Any(
+          message => message.TryGetProperty(
+              "role",
+              out var role
+            )
+            && role.GetString() == "tool"
+        );
+
+        if (requestedWorkspaceRead && !hasToolResult)
+        {
+          await WriteJsonAsync(
+            context.Response,
+            new
+            {
+              choices = new[]
+              {
+                new
+                {
+                  message = new
+                  {
+                    role = "assistant",
+                    content = (string?)null,
+                    tool_calls = new[]
+                    {
+                      new
+                      {
+                        id = "chat-read-test",
+                        type = "function",
+                        function = new
+                        {
+                          name = "read_file",
+                          arguments = "{\"path\":\"chat-readable.txt\"}"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              usage = new
+              {
+                prompt_tokens = 20,
+                completion_tokens = 4
+              }
+            },
+            cancellationToken
+          );
+          return;
+        }
+
+        await WriteJsonAsync(
+          context.Response,
+          new
+          {
+            choices = new[]
+            {
+              new
+              {
+                message = new
+                {
+                  role = "assistant",
+                  content = "cloud answer"
+                }
+              }
+            },
+            usage = new
+            {
+              prompt_tokens = 12,
+              completion_tokens = 3
+            }
+          },
+          cancellationToken
+        );
+        return;
+      }
+
       var plannerRequest = body.Contains(
         "SPECIALIST_TOOL_LOOP_V2",
         StringComparison.Ordinal
@@ -905,6 +992,24 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
           "name"
         ).GetString()
       : null;
+    var chatWorkspaceRead = body.Contains(
+      "CHAT_READ_ONLY_WORKSPACE_V1",
+      StringComparison.Ordinal
+    );
+    if (chatWorkspaceRead)
+    {
+      var requestedWorkspaceRead = body.Contains(
+        "chat workspace read request",
+        StringComparison.OrdinalIgnoreCase
+      );
+      var hasToolResult = body.Contains(
+        "functionResponse",
+        StringComparison.Ordinal
+      );
+      functionName = requestedWorkspaceRead && !hasToolResult
+        ? "read_file"
+        : null;
+    }
     var webEnabled = body.Contains(
       "\"googleSearch\"",
       StringComparison.Ordinal
@@ -923,7 +1028,9 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
               {
                 new
                 {
-                  text = path.Contains(
+                  text = chatWorkspaceRead
+                    ? "gemini cloud answer"
+                    : path.Contains(
                     "streamGenerateContent",
                     StringComparison.Ordinal
                   )

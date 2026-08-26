@@ -26,6 +26,16 @@ public sealed class ChatStreamService : IChatStreamService
   private const string GeneralChat = "general-chat";
   private const int MaximumIdenticalStrategyAttempts = 5;
   private const int MaximumToolsetRequestsPerTurn = 4;
+  private const int MaximumChatReadToolCalls = 8;
+  private const string ChatReadOnlyWorkspaceMarker =
+    "CHAT_READ_ONLY_WORKSPACE_V1";
+  private static readonly string[] ChatReadOnlyTools =
+  [
+    "list_files",
+    "read_file",
+    "get_file_info",
+    "search_text"
+  ];
 
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
@@ -1131,6 +1141,7 @@ public sealed class ChatStreamService : IChatStreamService
             intention,
             baseUri,
             messages,
+            chatOptions,
             models,
             capabilities,
             settings,
@@ -1153,6 +1164,7 @@ public sealed class ChatStreamService : IChatStreamService
               transport,
               harnessDefinition,
               request,
+              images,
               requestId,
               selectedModel,
               intention,
@@ -1186,34 +1198,53 @@ public sealed class ChatStreamService : IChatStreamService
         yield return Event(
           requestId,
           "interaction.chat",
-          "Chat mode active; local tools are disabled.",
+          "Chat mode active; trusted-workspace reads are available without approval and mutations remain disabled.",
           stopwatch,
           selectedModel,
           intention
         );
       }
 
-      var progress = new GenerationProgress();
+      var progress = new GenerationProgress(contextUsage);
 
       if (recoveryActive)
       {
         recoveryTarget = selectedModel;
       }
 
-      await foreach (var streamEvent in StreamAttemptAsync(
-        baseUri,
-        selectedModel,
-        messages,
-        requestId,
-        isAuto
-          ? intention
-          : null,
-        stopwatch,
-        progress,
-        selectedModelRole,
-        chatOptions,
-        cancellationToken
-      ))
+      var useWorkspaceReadTools = !request.WebSearchEnabled
+        && images.Count == 0;
+      await foreach (var streamEvent in useWorkspaceReadTools
+        ? StreamChatWithWorkspaceReadsAsync(
+          baseUri,
+          selectedModel,
+          messages,
+          models,
+          capabilities,
+          requestId,
+          isAuto
+            ? intention
+            : null,
+          stopwatch,
+          progress,
+          selectedModelRole,
+          chatOptions,
+          cancellationToken
+        )
+        : StreamAttemptAsync(
+          baseUri,
+          selectedModel,
+          messages,
+          requestId,
+          isAuto
+            ? intention
+            : null,
+          stopwatch,
+          progress,
+          selectedModelRole,
+          chatOptions,
+          cancellationToken
+        ))
       {
         yield return streamEvent;
       }
@@ -1280,7 +1311,7 @@ public sealed class ChatStreamService : IChatStreamService
               requestId,
               "cloud.local-fallback-started",
               $"{ModelProviderIds.DisplayName(cloudFailure.Provider)} could not complete the request "
-                + $"({cloudFailure.Code}); switching once to Ollama Local Â· {localFallback}.",
+                + $"({cloudFailure.Code}); switching once to Ollama Local · {localFallback}.",
               stopwatch,
               localFallback,
               intention
@@ -1310,7 +1341,7 @@ public sealed class ChatStreamService : IChatStreamService
               yield return Event(
                 requestId,
                 "cloud.local-fallback-completed",
-                $"Ollama Local Â· {localFallback} completed the cloud fallback.",
+                $"Ollama Local · {localFallback} completed the cloud fallback.",
                 stopwatch,
                 localFallback,
                 intention
@@ -1587,6 +1618,7 @@ public sealed class ChatStreamService : IChatStreamService
     IAgentHarnessTransport harness,
     HarnessDefinition harnessDefinition,
     ChatRequest request,
+    IReadOnlyList<ProviderImagePayload> images,
     string requestId,
     string selectedModel,
     string intention,
@@ -1602,6 +1634,18 @@ public sealed class ChatStreamService : IChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    if (images.Count > 0 && harnessDefinition.Id != HarnessIds.Codex)
+    {
+      throw new ChatStageException(
+        "harness-vision-unsupported",
+        $"{harnessDefinition.DisplayName} cannot receive image input through its current adapter.",
+        "The validated image was not sent because this harness has no reviewed multimodal protocol mapping.",
+        selectedModel,
+        intention,
+        400,
+        false
+      );
+    }
     var harnessSelectedReference = ProviderModelReference.Parse(selectedModel);
     if (
       harnessDefinition.SupportedProviders is { Count: > 0 }
@@ -1708,6 +1752,7 @@ public sealed class ChatStreamService : IChatStreamService
       context,
       contextUsage,
       hostCapabilities,
+      images,
       stopwatch,
       cancellationToken
     ))
@@ -1723,6 +1768,7 @@ public sealed class ChatStreamService : IChatStreamService
     string intention,
     Uri baseUri,
     IReadOnlyList<ChatMessage> messages,
+    ProviderChatOptions providerOptions,
     IReadOnlyList<InstalledModel> models,
     ProviderModelCapabilities capabilities,
     ApplicationSettings settings,
@@ -1873,7 +1919,8 @@ public sealed class ChatStreamService : IChatStreamService
       executionToolScope,
       visibleMessages: context.VisibleMessages,
       omittedMessages: context.OmittedMessages,
-      manualCompactionRequested: request.CompactContext
+      manualCompactionRequested: request.CompactContext,
+      providerOptions: providerOptions
     );
 
     await foreach (var streamEvent in ExecuteActionsAsync(
@@ -2008,6 +2055,7 @@ public sealed class ChatStreamService : IChatStreamService
     ConversationContextResult context,
     ContextUsageView initialContextUsage,
     HostCapabilityProfile hostCapabilities,
+    IReadOnlyList<ProviderImagePayload> images,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -2039,6 +2087,10 @@ public sealed class ChatStreamService : IChatStreamService
     var approvedNativeMutation = false;
     HarnessEvent? terminalFailure = null;
     var latestContextUsage = initialContextUsage;
+    var liveContextBase = initialContextUsage;
+    long liveOutputCharacters = 0;
+    long lastPublishedLiveOutputTokens = 0;
+    long lastLiveContextUpdateMilliseconds = -1_000;
     session.ResolveCoordinator(
       model,
       harnessDefinition.Experimental
@@ -2098,7 +2150,15 @@ public sealed class ChatStreamService : IChatStreamService
         ollamaUrl,
         CreateHarnessConversationContext(context),
         ContextWindowTokens: initialContextUsage.EffectiveLimitTokens,
-        HostCapabilities: hostCapabilities
+        HostCapabilities: hostCapabilities,
+        Images: images.Select(
+          image => new HarnessImageInput(
+            image.Id,
+            image.FileName,
+            image.MimeType,
+            image.Bytes
+          )
+        ).ToArray()
       ),
       cancellationToken
     ))
@@ -2116,6 +2176,37 @@ public sealed class ChatStreamService : IChatStreamService
           false,
           harnessId: harnessDefinition.Id
         );
+      }
+      if (harnessEvent.Type is "reasoning.delta" or "assistant.delta"
+        && !string.IsNullOrEmpty(harnessEvent.Delta))
+      {
+        liveOutputCharacters += harnessEvent.Delta.Length;
+        var liveOutputTokens = (liveOutputCharacters + 2) / 3;
+        var shouldPublish = lastPublishedLiveOutputTokens == 0
+          || liveOutputTokens - lastPublishedLiveOutputTokens >= 64
+          || stopwatch.ElapsedMilliseconds - lastLiveContextUpdateMilliseconds >= 500;
+        if (shouldPublish)
+        {
+          latestContextUsage = WithEstimatedLiveContextUsage(
+            liveContextBase,
+            liveOutputTokens
+          );
+          lastPublishedLiveOutputTokens = liveOutputTokens;
+          lastLiveContextUpdateMilliseconds = stopwatch.ElapsedMilliseconds;
+          yield return new ChatStreamEvent(
+            requestId,
+            "context.usage",
+            DateTimeOffset.UtcNow,
+            null,
+            null,
+            model,
+            intention,
+            stopwatch.ElapsedMilliseconds,
+            null,
+            null,
+            ContextUsage: latestContextUsage
+          );
+        }
       }
       switch (harnessEvent.Type)
       {
@@ -2187,11 +2278,19 @@ public sealed class ChatStreamService : IChatStreamService
             session.Id
           );
           break;
-        case "usage.updated" when harnessEvent.ContextInputTokens is > 0:
+        case "usage.updated" when harnessEvent.ContextInputTokens is > 0
+          || harnessEvent.ContextTotalTokens is > 0:
           latestContextUsage = WithExactContextUsage(
             latestContextUsage,
-            harnessEvent.ContextInputTokens.Value
+            harnessEvent.ContextInputTokens
+              ?? harnessEvent.ContextTotalTokens!.Value,
+            harnessEvent.ContextTotalTokens,
+            harnessEvent.ContextWindowTokens
           );
+          liveContextBase = latestContextUsage;
+          liveOutputCharacters = 0;
+          lastPublishedLiveOutputTokens = 0;
+          lastLiveContextUpdateMilliseconds = stopwatch.ElapsedMilliseconds;
           yield return new ChatStreamEvent(
             requestId,
             "context.usage",
@@ -2559,7 +2658,8 @@ public sealed class ChatStreamService : IChatStreamService
         new LocalActionProposal(
           "run_validation_profile",
           validationArguments.RootElement.Clone(),
-          $"Automatically run the Host validation profile after {harnessDefinition.DisplayName} workspace changes."
+          $"Automatically run the Host validation profile after {harnessDefinition.DisplayName} workspace changes.",
+          HostInitiated: true
         ),
         session,
         cancellationToken
@@ -2764,10 +2864,11 @@ public sealed class ChatStreamService : IChatStreamService
       if (failure is not null)
       {
         var output = FormatExecutionFailure(failure);
+        var harnessOutput = WithAuthoritativePlanState(output, session);
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
-          output,
+          harnessOutput,
           cancellationToken
         );
         session.RecordToolFailure();
@@ -2783,10 +2884,14 @@ public sealed class ChatStreamService : IChatStreamService
         yield break;
       }
       var accepted = JsonSerializer.Serialize(plan);
+      var acceptedOutput = WithAuthoritativePlanState(
+        $"Accepted Host plan:\n{accepted}",
+        session
+      );
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         true,
-        $"Accepted Host plan:\n{accepted}",
+        acceptedOutput,
         cancellationToken
       );
       session.RecordToolSuccess();
@@ -2824,10 +2929,11 @@ public sealed class ChatStreamService : IChatStreamService
         $"The Host rejected the {harnessDefinition.DisplayName} tool arguments."
       );
       var output = FormatExecutionFailure(failure);
+      var harnessOutput = WithAuthoritativePlanState(output, session);
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         false,
-        output,
+        harnessOutput,
         cancellationToken
       );
       session.RecordToolFailure();
@@ -2933,10 +3039,14 @@ public sealed class ChatStreamService : IChatStreamService
           action.Tool,
           "blocked"
         );
+        var harnessRejection = WithAuthoritativePlanState(
+          rejection,
+          session
+        );
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
-          rejection,
+          harnessRejection,
           cancellationToken
         );
         if (planStepBlocked)
@@ -3037,10 +3147,14 @@ public sealed class ChatStreamService : IChatStreamService
           "completed"
         );
       }
+      var harnessResult = WithAuthoritativePlanState(
+        result.Output,
+        session
+      );
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         true,
-        result.Output,
+        harnessResult,
         cancellationToken
       );
       if (planStepCompleted is bool completed)
@@ -3081,10 +3195,14 @@ public sealed class ChatStreamService : IChatStreamService
     session.RecordAction(action, "failed", failureOutput);
     session.RecordToolFailure();
     session.AddWarning($"{action.Tool} failed: {failureOutput}");
+    var harnessFailure = WithAuthoritativePlanState(
+      failureOutput,
+      session
+    );
     await harness.ResolveToolCallAsync(
       harnessEvent.ToolCallId,
       false,
-      failureOutput,
+      harnessFailure,
       cancellationToken
     );
     yield return ActionEvent(
@@ -3569,12 +3687,47 @@ public sealed class ChatStreamService : IChatStreamService
           }
 
           var planningTask = RunPlanningAsync();
+          long liveOutputCharacters = 0;
+          long lastLiveOutputTokens = 0;
+          var lastLiveContextUpdate = TimeSpan.MinValue;
           await foreach (
             var delta in reasoning.Reader.ReadAllAsync(
               cancellationToken
             )
           )
           {
+            liveOutputCharacters += delta.Length;
+            var liveOutputTokens = Math.Max(
+              1,
+              (liveOutputCharacters + 2) / 3
+            );
+            if (
+              lastLiveOutputTokens == 0
+              || liveOutputTokens - lastLiveOutputTokens >= 64
+              || stopwatch.Elapsed - lastLiveContextUpdate >= TimeSpan.FromMilliseconds(500)
+            )
+            {
+              var liveContext = WithEstimatedLiveContextUsage(
+                contextSnapshot,
+                liveOutputTokens
+              );
+              progress.LatestContextUsage = liveContext;
+              lastLiveOutputTokens = liveOutputTokens;
+              lastLiveContextUpdate = stopwatch.Elapsed;
+              yield return new ChatStreamEvent(
+                requestId,
+                "context.usage",
+                DateTimeOffset.UtcNow,
+                $"Specialist inference {progress.ContextInferenceSequence}: live estimated active context {liveContext.ActiveContextTokens} of {liveContext.EffectiveLimitTokens} tokens.",
+                null,
+                model,
+                intention,
+                stopwatch.ElapsedMilliseconds,
+                null,
+                null,
+                ContextUsage: liveContext
+              );
+            }
             yield return Event(
               requestId,
               "reasoning.delta",
@@ -4286,7 +4439,7 @@ public sealed class ChatStreamService : IChatStreamService
             yield return Event(
               requestId,
               "agent.toolset-request-rejected",
-              $"Solicitação de ferramentas rejeitada: {grant.Failure.Message}",
+              $"Tool request rejected: {grant.Failure.Message}",
               stopwatch,
               model,
               intention
@@ -4357,7 +4510,7 @@ public sealed class ChatStreamService : IChatStreamService
           yield return Event(
             requestId,
             "agent.toolset-requested",
-            $"Agente solicitou: {requestedNames}.",
+            $"Agent requested: {requestedNames}.",
             stopwatch,
             model,
             intention
@@ -5780,6 +5933,607 @@ public sealed class ChatStreamService : IChatStreamService
       );
   }
 
+  private async IAsyncEnumerable<ChatStreamEvent> StreamChatWithWorkspaceReadsAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    IReadOnlyList<InstalledModel> models,
+    ProviderModelCapabilities capabilities,
+    string requestId,
+    string? intention,
+    Stopwatch stopwatch,
+    GenerationProgress progress,
+    string modelRole,
+    ProviderChatOptions options,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    var workspace = await _workspace.GetStatusAsync(
+      cancellationToken
+    );
+
+    if (!workspace.Valid || workspace.Path is null)
+    {
+      yield return Event(
+        requestId,
+        "chat.workspace-read-tools-unavailable",
+        "No valid trusted workspace is active; continuing Chat without local reads.",
+        stopwatch,
+        model,
+        intention
+      );
+      await foreach (var streamEvent in StreamAttemptAsync(
+        baseUri,
+        model,
+        messages,
+        requestId,
+        intention,
+        stopwatch,
+        progress,
+        modelRole,
+        options,
+        cancellationToken
+      ))
+      {
+        yield return streamEvent;
+      }
+      yield break;
+    }
+
+    var selectedReference = ProviderModelReference.Parse(
+      model
+    );
+    var selectedIdentity = models.FirstOrDefault(
+      installed => string.Equals(
+        installed.Name,
+        model,
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    var toolingProfile = _toolingProfiles.Resolve(
+      new SpecialistToolingIdentity(
+        selectedReference.ProviderId,
+        model,
+        selectedIdentity?.Digest,
+        capabilities.NativeTools,
+        capabilities.StructuredOutput,
+        capabilities.ToolProtocolConfirmed
+      )
+    );
+    var toolDefinitions = _toolingProtocol.ToOllamaDefinitions(
+      toolingProfile,
+      LocalActionPlanner.GetToolDefinitions(
+        ChatReadOnlyTools
+      )
+    );
+    var chatReadInstructions = ChatReadOnlyWorkspaceMarker + "\n"
+      + "Chat may inspect the active trusted workspace through only the read-only tools supplied in this request. "
+      + "Use paths relative to the workspace root. Never request a mutation, process, shell, or path outside the workspace. "
+      + "Use a read tool only when workspace evidence materially improves the answer. After reading enough, return the final user-facing answer without a tool call.";
+    var toolMessages = new[]
+    {
+      new OllamaToolMessage(
+        "system",
+        string.Join(
+          "\n\n",
+          new[]
+          {
+            chatReadInstructions
+          }.Concat(
+            messages.Where(
+              message => string.Equals(
+                message.Role,
+                "system",
+                StringComparison.Ordinal
+              )
+            ).Select(
+              message => message.Content
+            )
+          )
+        )
+      )
+    }.Concat(
+      messages.Where(
+        message => !string.Equals(
+          message.Role,
+          "system",
+          StringComparison.Ordinal
+        )
+      ).Select(
+        ToToolMessage
+      )
+    ).ToList();
+
+    yield return Event(
+      requestId,
+      "chat.workspace-read-tools-enabled",
+      $"Chat read-only tools enabled without approval: {string.Join(", ", ChatReadOnlyTools)}.",
+      stopwatch,
+      model,
+      intention
+    );
+
+    for (var attempt = 1; attempt <= MaximumChatReadToolCalls + 1; attempt++)
+    {
+      var streamed = Channel.CreateUnbounded<ChatReadStreamDelta>(
+        new UnboundedChannelOptions
+        {
+          SingleReader = true,
+          SingleWriter = true
+        }
+      );
+
+      async Task<ChatReadGenerationAttempt> RunGenerationAsync()
+      {
+        try
+        {
+          return new ChatReadGenerationAttempt(
+            await _ollamaClient.GenerateToolCallAsync(
+              baseUri,
+              model,
+              toolMessages,
+              toolDefinitions,
+              "chat-read-only-tools",
+              UsageContext(
+                model,
+                modelRole,
+                "target-response"
+              ),
+              cancellationToken,
+              (
+                delta,
+                token
+              ) => streamed.Writer.WriteAsync(
+                new ChatReadStreamDelta(
+                  delta,
+                  true
+                ),
+                token
+              ),
+              (
+                delta,
+                token
+              ) => streamed.Writer.WriteAsync(
+                new ChatReadStreamDelta(
+                  delta,
+                  false
+                ),
+                token
+              ),
+              false
+            ),
+            null
+          );
+        }
+        catch (Exception exception) when (
+          exception is OllamaProviderException
+          or OllamaRuntimeProfileException
+        )
+        {
+          return new ChatReadGenerationAttempt(
+            null,
+            exception
+          );
+        }
+        finally
+        {
+          streamed.Writer.TryComplete();
+        }
+      }
+
+      var generationTask = RunGenerationAsync();
+      await foreach (var delta in streamed.Reader.ReadAllAsync(
+        cancellationToken
+      ))
+      {
+        if (delta.Reasoning)
+        {
+          yield return Event(
+            requestId,
+            "reasoning.delta",
+            null,
+            stopwatch,
+            model,
+            intention
+          ) with
+          {
+            ReasoningDelta = delta.Value
+          };
+          continue;
+        }
+
+        if (progress.Failure is not null)
+        {
+          continue;
+        }
+
+        if (!TryAcceptResponseDelta(
+          progress,
+          delta.Value,
+          out var safeDelta,
+          out var rejectedMarker
+        ))
+        {
+          if (rejectedMarker is not null)
+          {
+            progress.Failure = new LocalActionException(
+              "reserved-assistant-marker",
+              $"The model response was rejected because it began with reserved Host marker '{rejectedMarker}'."
+            );
+          }
+          continue;
+        }
+
+        if (!progress.ReceivedFirstChunk)
+        {
+          progress.ReceivedFirstChunk = true;
+          yield return Event(
+            requestId,
+            "response.first-chunk",
+            "First response chunk received.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
+        progress.Answer.Append(
+          safeDelta
+        );
+        if (!progress.ResponseSegmentActive)
+        {
+          progress.ResponseSegment.Clear();
+          progress.ResponseSegmentActive = true;
+        }
+        progress.ResponseSegment.Append(
+          safeDelta
+        );
+        yield return new ChatStreamEvent(
+          requestId,
+          "response.delta",
+          DateTimeOffset.UtcNow,
+          null,
+          safeDelta,
+          model,
+          intention,
+          stopwatch.ElapsedMilliseconds,
+          _markdownRenderer.Render(
+            progress.Answer.ToString()
+          ),
+          null,
+          null,
+          null,
+          ResponseSegmentHtml: _markdownRenderer.Render(
+            progress.ResponseSegment.ToString()
+          )
+        );
+      }
+
+      var generation = await generationTask;
+      if (generation.Failure is not null)
+      {
+        if (
+          attempt == 1
+          && generation.Failure is ToolProtocolException
+        )
+        {
+          yield return Event(
+            requestId,
+            "chat.workspace-read-tools-fallback",
+            "The selected model/provider could not use the read-only tool protocol; continuing with the existing text Chat path.",
+            stopwatch,
+            model,
+            intention
+          );
+          await foreach (var streamEvent in StreamAttemptAsync(
+            baseUri,
+            model,
+            messages,
+            requestId,
+            intention,
+            stopwatch,
+            progress,
+            modelRole,
+            options,
+            cancellationToken
+          ))
+          {
+            yield return streamEvent;
+          }
+        }
+        else
+        {
+          progress.Failure = generation.Failure;
+        }
+        yield break;
+      }
+
+      var response = generation.Response!;
+      progress.Usage = response.Usage;
+      if (!string.IsNullOrWhiteSpace(
+        response.RetryActivity
+      ))
+      {
+        yield return Event(
+          requestId,
+          "provider.retry",
+          response.RetryActivity,
+          stopwatch,
+          model,
+          intention
+        );
+      }
+      if (progress.Failure is not null)
+      {
+        yield break;
+      }
+      if (
+        !progress.RuntimeContextReported
+        && response.ContextResolution is not null
+      )
+      {
+        foreach (var contextEvent in RuntimeContextEvents(
+          requestId,
+          stopwatch,
+          model,
+          intention,
+          response.ContextResolution
+        ))
+        {
+          yield return contextEvent;
+        }
+        progress.RuntimeContextReported = true;
+      }
+
+      var turn = _toolingProtocol.Normalize(
+        toolingProfile,
+        response
+      );
+      if (
+        turn.ToolCalls.Count > 0
+        && (
+          progress.ReceivedFirstChunk
+          || progress.PrefixBuffer.Length > 0
+          || !string.IsNullOrWhiteSpace(
+            response.Content
+          )
+        )
+      )
+      {
+        progress.Failure = new LocalActionException(
+          "chat-read-tool-protocol",
+          "The selected model mixed visible response content with a workspace tool call; the tool was not executed."
+        );
+        yield break;
+      }
+      if (turn.ToolCalls.Count == 0)
+      {
+        if (progress.ReceivedFirstChunk)
+        {
+          yield break;
+        }
+
+        var completion = turn.Completion?.Content;
+        if (string.IsNullOrWhiteSpace(
+          completion
+        ))
+        {
+          progress.Failure = new LocalActionException(
+            "chat-read-completion",
+            "The selected model returned neither a read request nor a final Chat response."
+          );
+          yield break;
+        }
+
+        progress.PrefixBuffer.Clear();
+        progress.PrefixResolved = false;
+        var accepted = TryAcceptResponseDelta(
+          progress,
+          completion,
+          out var safeDelta,
+          out var rejectedMarker
+        );
+        if (!accepted && rejectedMarker is null)
+        {
+          safeDelta = progress.PrefixBuffer.ToString();
+          progress.PrefixBuffer.Clear();
+          progress.PrefixResolved = true;
+          accepted = safeDelta.Length > 0;
+        }
+        if (!accepted)
+        {
+          progress.Failure = new LocalActionException(
+            "reserved-assistant-marker",
+            rejectedMarker is null
+              ? "The final Chat response was empty after validation."
+              : $"The model response was rejected because it began with reserved Host marker '{rejectedMarker}'."
+          );
+          yield break;
+        }
+
+        progress.ReceivedFirstChunk = true;
+        progress.Answer.Append(
+          safeDelta
+        );
+        progress.ResponseSegment.Clear();
+        progress.ResponseSegment.Append(
+          safeDelta
+        );
+        progress.ResponseSegmentActive = true;
+        yield return Event(
+          requestId,
+          "response.first-chunk",
+          "First response chunk received.",
+          stopwatch,
+          model,
+          intention
+        );
+        yield return new ChatStreamEvent(
+          requestId,
+          "response.delta",
+          DateTimeOffset.UtcNow,
+          null,
+          safeDelta,
+          model,
+          intention,
+          stopwatch.ElapsedMilliseconds,
+          _markdownRenderer.Render(
+            progress.Answer.ToString()
+          ),
+          null,
+          null,
+          null,
+          ResponseSegmentHtml: _markdownRenderer.Render(
+            progress.ResponseSegment.ToString()
+          )
+        );
+        yield break;
+      }
+
+      var call = turn.ToolCalls[0];
+      toolMessages.Add(
+        _toolingProtocol.CreateAssistantMessage(
+          turn
+        )
+      );
+      var proposalAttempt = TryResolveChatReadProposal(
+        call
+      );
+      if (proposalAttempt.Failure is not null)
+      {
+        toolMessages.Add(
+          _toolingProtocol.CreateToolResultMessage(
+            toolingProfile,
+            new CanonicalToolResult(
+              call.CallId,
+              call.Name,
+              "rejected",
+              proposalAttempt.Failure.Message,
+              false,
+              false
+            )
+          )
+        );
+        yield return Event(
+          requestId,
+          "chat.workspace-read-rejected",
+          $"Chat read request rejected: {proposalAttempt.Failure.Message}",
+          stopwatch,
+          model,
+          intention
+        );
+        continue;
+      }
+
+      var validation = await TryValidateAsync(
+        () => _actionService.ValidateAsync(
+          proposalAttempt.Proposal!,
+          null,
+          cancellationToken
+        )
+      );
+      if (
+        validation.Failure is not null
+        || validation.Action is null
+        || !validation.Action.ReadOnly
+        || !ChatReadOnlyTools.Contains(
+          validation.Action.Tool,
+          StringComparer.OrdinalIgnoreCase
+        )
+      )
+      {
+        var failure = validation.Failure ?? new LocalActionException(
+          "chat-read-only-boundary",
+          "Chat mode rejected a local tool proposal because it was not validated as an offered read-only action."
+        );
+        toolMessages.Add(
+          _toolingProtocol.CreateToolResultMessage(
+            toolingProfile,
+            new CanonicalToolResult(
+              call.CallId,
+              call.Name,
+              "rejected",
+              failure.Message,
+              false,
+              false
+            )
+          )
+        );
+        yield return Event(
+          requestId,
+          "chat.workspace-read-rejected",
+          $"Chat read request rejected: {failure.Message}",
+          stopwatch,
+          model,
+          intention
+        );
+        continue;
+      }
+
+      if (attempt > MaximumChatReadToolCalls)
+      {
+        progress.Failure = new LocalActionException(
+          "chat-read-budget",
+          $"Chat exhausted the bounded read budget of {MaximumChatReadToolCalls} tool calls."
+        );
+        yield break;
+      }
+
+      var action = validation.Action;
+      yield return Event(
+        requestId,
+        "chat.workspace-read-started",
+        $"Reading from the trusted workspace: {action.Summary}.",
+        stopwatch,
+        model,
+        intention
+      );
+      var execution = await TryExecuteAsync(
+        () => _actionService.ExecuteAsync(
+          action,
+          null,
+          cancellationToken
+        )
+      );
+      var succeeded = execution.Failure is null
+        && execution.Result?.Succeeded == true;
+      var output = execution.Failure?.Message
+        ?? execution.Result?.Output
+        ?? "The workspace read returned no result.";
+      toolMessages.Add(
+        _toolingProtocol.CreateToolResultMessage(
+          toolingProfile,
+          new CanonicalToolResult(
+            call.CallId,
+            action.Tool,
+            succeeded
+              ? "completed"
+              : "failed",
+            output,
+            succeeded,
+            succeeded
+          )
+        )
+      );
+      yield return Event(
+        requestId,
+        succeeded
+          ? "chat.workspace-read-completed"
+          : "chat.workspace-read-failed",
+        succeeded
+          ? $"Trusted-workspace read completed: {action.Summary}."
+          : $"Trusted-workspace read failed: {output}",
+        stopwatch,
+        model,
+        intention
+      );
+    }
+
+    progress.Failure ??= new LocalActionException(
+      "chat-read-budget",
+      $"Chat exhausted the bounded read budget of {MaximumChatReadToolCalls} tool calls."
+    );
+  }
+
   private async IAsyncEnumerable<ChatStreamEvent> StreamAttemptAsync(
     Uri baseUri,
     string model,
@@ -5793,6 +6547,9 @@ public sealed class ChatStreamService : IChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    long liveOutputCharacters = 0;
+    long lastLiveOutputTokens = 0;
+    var lastLiveContextUpdate = TimeSpan.MinValue;
     await using var updates = _ollamaClient.StreamChatAsync(
       baseUri,
       model,
@@ -5884,6 +6641,43 @@ public sealed class ChatStreamService : IChatStreamService
           stopwatch,
           model,
           intention
+        );
+      }
+
+      liveOutputCharacters += (update.ThinkingDelta?.Length ?? 0)
+        + (update.Delta?.Length ?? 0);
+      var liveOutputTokens = Math.Max(
+        1,
+        (liveOutputCharacters + 2) / 3
+      );
+      if (
+        liveOutputCharacters > 0
+        && progress.ContextUsage is not null
+        && (
+          lastLiveOutputTokens == 0
+          || liveOutputTokens - lastLiveOutputTokens >= 64
+          || stopwatch.Elapsed - lastLiveContextUpdate >= TimeSpan.FromMilliseconds(500)
+        )
+      )
+      {
+        var liveContext = WithEstimatedLiveContextUsage(
+          progress.ContextUsage,
+          liveOutputTokens
+        );
+        lastLiveOutputTokens = liveOutputTokens;
+        lastLiveContextUpdate = stopwatch.Elapsed;
+        yield return new ChatStreamEvent(
+          requestId,
+          "context.usage",
+          DateTimeOffset.UtcNow,
+          $"Live estimated active context {liveContext.ActiveContextTokens} of {liveContext.EffectiveLimitTokens} tokens.",
+          null,
+          model,
+          intention,
+          stopwatch.ElapsedMilliseconds,
+          null,
+          null,
+          ContextUsage: liveContext
         );
       }
 
@@ -6307,11 +7101,14 @@ public sealed class ChatStreamService : IChatStreamService
     );
     var inputTokens = providerUsage?.InputTokens
       ?? context.EstimatedInputTokens;
-    var usable = Math.Max(
-      1,
-      effectiveLimit - settings.Context.ReservedResponseTokens
-    );
-    var percentage = inputTokens * 100d / usable;
+    var outputTokens = providerUsage?.OutputTokens ?? 0;
+    var activeTokens = providerUsage is null
+      ? 0
+      : inputTokens + outputTokens;
+    var required = activeTokens > 0
+      ? activeTokens
+      : inputTokens + settings.Context.ReservedResponseTokens;
+    var percentage = required * 100d / Math.Max(1, effectiveLimit);
     var warning = percentage >= 95
       ? 95
       : percentage >= 85
@@ -6335,7 +7132,14 @@ public sealed class ChatStreamService : IChatStreamService
       settings.Context.ReservedResponseTokens,
       context.OmittedMessages > 0,
       warning
-    );
+    ) with
+    {
+      ConversationTokens = context.EstimatedInputTokens,
+      RequiredContextTokens = required,
+      EffectiveLimitTokens = effectiveLimit,
+      ActiveContextTokens = activeTokens,
+      OutputTokens = outputTokens
+    };
   }
 
   private static ContextUsageView CreateExternalHarnessContextUsage(
@@ -6360,17 +7164,32 @@ public sealed class ChatStreamService : IChatStreamService
 
   private static ContextUsageView WithExactContextUsage(
     ContextUsageView usage,
-    long inputTokens
+    long inputTokens,
+    long? activeContextTokens = null,
+    long? reportedContextWindowTokens = null
   )
   {
-    var effectiveLimit = usage.EffectiveLimitTokens > 0
+    var configuredEffectiveLimit = usage.EffectiveLimitTokens > 0
       ? usage.EffectiveLimitTokens
       : Math.Min(
         usage.ApplicationLimit,
         usage.ProviderMaximumTokens ?? usage.ConfiguredProviderLimit
       );
-    var usable = Math.Max(1, effectiveLimit - usage.ReservedResponseTokens);
-    var percentage = inputTokens * 100d / usable;
+    var effectiveLimit = reportedContextWindowTokens is > 0
+      ? (int)Math.Min(
+        configuredEffectiveLimit,
+        reportedContextWindowTokens.Value
+      )
+      : configuredEffectiveLimit;
+    var activeTokens = activeContextTokens is > 0
+      ? activeContextTokens.Value
+      : inputTokens;
+    var percentage = activeContextTokens is > 0
+      ? activeTokens * 100d / Math.Max(1, effectiveLimit)
+      : inputTokens * 100d / Math.Max(
+        1,
+        effectiveLimit - usage.ReservedResponseTokens
+      );
     var warning = percentage >= 95
       ? 95
       : percentage >= 85
@@ -6381,8 +7200,48 @@ public sealed class ChatStreamService : IChatStreamService
     return usage with
     {
       InputTokens = inputTokens,
+      ActiveContextTokens = activeTokens,
+      OutputTokens = Math.Max(
+        0,
+        activeTokens - inputTokens
+      ),
       Accuracy = "exact",
-      RequiredContextTokens = inputTokens + usage.ReservedResponseTokens,
+      RequiredContextTokens = activeContextTokens is > 0
+        ? activeTokens
+        : inputTokens + usage.ReservedResponseTokens,
+      EffectiveLimitTokens = effectiveLimit,
+      WarningThreshold = warning
+    };
+  }
+
+  private static ContextUsageView WithEstimatedLiveContextUsage(
+    ContextUsageView usage,
+    long outputTokens
+  )
+  {
+    var effectiveLimit = usage.EffectiveLimitTokens > 0
+      ? usage.EffectiveLimitTokens
+      : Math.Min(
+        usage.ApplicationLimit,
+        usage.ProviderMaximumTokens ?? usage.ConfiguredProviderLimit
+      );
+    var totalOutputTokens = Math.Max(0, usage.OutputTokens)
+      + Math.Max(0, outputTokens);
+    var activeTokens = usage.InputTokens + totalOutputTokens;
+    var percentage = activeTokens * 100d / Math.Max(1, effectiveLimit);
+    var warning = percentage >= 95
+      ? 95
+      : percentage >= 85
+        ? 85
+        : percentage >= 70
+          ? 70
+          : 0;
+    return usage with
+    {
+      ActiveContextTokens = activeTokens,
+      OutputTokens = totalOutputTokens,
+      Accuracy = "estimated",
+      RequiredContextTokens = activeTokens,
       EffectiveLimitTokens = effectiveLimit,
       WarningThreshold = warning
     };
@@ -6404,7 +7263,13 @@ public sealed class ChatStreamService : IChatStreamService
   )
   {
     var inputTokens = providerUsage?.InputTokens ?? measurement.InputTokens;
-    var required = inputTokens + budget.ReservedOutputTokens;
+    var outputTokens = providerUsage?.OutputTokens ?? 0;
+    var activeTokens = providerUsage is null
+      ? 0
+      : inputTokens + outputTokens;
+    var required = activeTokens > 0
+      ? activeTokens
+      : inputTokens + budget.ReservedOutputTokens;
     var percentage = required * 100d / Math.Max(1, budget.MaximumContextTokens);
     var warning = percentage >= 95
       ? 95
@@ -6443,7 +7308,9 @@ public sealed class ChatStreamService : IChatStreamService
       measurement.CompactionEligible,
       beforeCompactionTokens,
       afterCompactionTokens,
-      omittedBlocks
+      omittedBlocks,
+      activeTokens,
+      outputTokens
     );
   }
 
@@ -6546,7 +7413,8 @@ public sealed class ChatStreamService : IChatStreamService
         "structured-action-coordination"
       ),
       cancellationToken,
-      usage => providerUsage = usage
+      usage => providerUsage = usage,
+      progress.ProviderOptions
     );
     progress.Guidance = guidance;
     var assistantMessage = new OllamaToolMessage(
@@ -6904,6 +7772,36 @@ public sealed class ChatStreamService : IChatStreamService
     catch (LocalActionException exception)
     {
       return new ValidationAttempt(
+        null,
+        exception
+      );
+    }
+  }
+
+  private ChatReadProposalAttempt TryResolveChatReadProposal(
+    CanonicalToolCall call
+  )
+  {
+    try
+    {
+      var resolution = _toolNames.Resolve(
+        call.Name,
+        ChatReadOnlyTools
+      );
+      return new ChatReadProposalAttempt(
+        new LocalActionProposal(
+          resolution.CanonicalName,
+          call.Arguments.Clone(),
+          "Chat read-only workspace inspection.",
+          resolution.OriginalName,
+          resolution.Source
+        ),
+        null
+      );
+    }
+    catch (LocalActionException exception)
+    {
+      return new ChatReadProposalAttempt(
         null,
         exception
       );
@@ -8505,8 +9403,8 @@ public sealed class ChatStreamService : IChatStreamService
     {
       new(
         "retry",
-        "Tentar novamente",
-        "Repassa o erro e o plano pendente ao agente ativo, com um novo limite de tentativas."
+        "Try again",
+        "Return the error and pending plan to the active agent with a new attempt limit."
       )
     };
 
@@ -8514,16 +9412,16 @@ public sealed class ChatStreamService : IChatStreamService
     options.Add(
       new RecoveryOptionView(
         "specialist",
-        "Pedir nova estratégia",
-        $"Solicita ao modelo {recoveryAdvisorModel} uma estratégia revisada antes de retomar."
+        "Request a new strategy",
+        $"Ask model {recoveryAdvisorModel} for a revised strategy before resuming."
       )
     );
 
     options.Add(
       new RecoveryOptionView(
         "stop",
-        "Encerrar e manter alterações",
-        "Interrompe novas ações, preserva os arquivos atuais e produz um resumo parcial."
+        "Stop and keep changes",
+        "Stop new actions, preserve the current files, and produce a partial summary."
       )
     );
     var allowedOptions = options.Select(
@@ -8937,7 +9835,7 @@ public sealed class ChatStreamService : IChatStreamService
         maximumVisibleFiles
       );
       var suffix = files.Length > maximumVisibleFiles
-        ? $"\nâ€¦ and {files.Length - maximumVisibleFiles} more."
+        ? $"\n… and {files.Length - maximumVisibleFiles} more."
         : string.Empty;
 
       return $"{action.Summary}\n{string.Join("\n", visibleFiles)}{suffix}";
@@ -8973,6 +9871,55 @@ public sealed class ChatStreamService : IChatStreamService
     )
       ? exception.Message
       : $"{exception.Message} Details: {technical}";
+  }
+
+  private static string WithAuthoritativePlanState(
+    string output,
+    ExecutionSession session
+  )
+  {
+    var plan = session.Plan;
+    if (plan is null)
+    {
+      return output;
+    }
+
+    var actionableStepIds = plan.Steps.Where(
+      step => step.Status is "pending" or "in-progress"
+        && (step.Dependencies ?? []).All(
+          dependency => plan.Steps.FirstOrDefault(
+            candidate => string.Equals(
+              candidate.Id,
+              dependency,
+              StringComparison.Ordinal
+            )
+          )?.Status == "completed"
+        )
+    ).Select(
+      step => step.Id
+    ).ToArray();
+    var state = JsonSerializer.Serialize(
+      new
+      {
+        plan.Objective,
+        plan.RevisionCount,
+        Steps = plan.Steps.Select(
+          step => new
+          {
+            step.Id,
+            step.Title,
+            step.Status,
+            Dependencies = step.Dependencies ?? []
+          }
+        ),
+        ActionableStepIds = actionableStepIds
+      }
+    );
+    var instruction = actionableStepIds.Length == 0
+      ? "The accepted Host plan has no actionable steps. If the objective is complete, return the final answer without another tool call. If more work is genuinely required, call revise_execution_plan; do not call create_execution_plan."
+      : $"The next executable action must include one exact stepId from actionableStepIds: {string.Join(", ", actionableStepIds)}.";
+
+    return $"{output}\n\nHOST_OWNED_PLAN_STATE\n{state}\n{instruction}";
   }
 
   private ProviderCallContext UsageContext(
@@ -9397,6 +10344,13 @@ public sealed class ChatStreamService : IChatStreamService
 
   private sealed class GenerationProgress
   {
+    public GenerationProgress(ContextUsageView? contextUsage)
+    {
+      ContextUsage = contextUsage;
+    }
+
+    public ContextUsageView? ContextUsage { get; }
+
     public StringBuilder Answer { get; } = new();
 
     public StringBuilder ResponseSegment { get; } = new();
@@ -9429,7 +10383,8 @@ public sealed class ChatStreamService : IChatStreamService
       List<OllamaToolMessage>? toolMessages = null,
       int visibleMessages = 0,
       int omittedMessages = 0,
-      bool manualCompactionRequested = false
+      bool manualCompactionRequested = false,
+      ProviderChatOptions? providerOptions = null
     )
     {
       Messages = messages;
@@ -9441,6 +10396,20 @@ public sealed class ChatStreamService : IChatStreamService
       ToolMessages = toolMessages ?? messages.Select(
         ToToolMessage
       ).ToList();
+      ProviderOptions = providerOptions ?? ProviderChatOptions.Empty;
+      if (ProviderOptions.Images.Count > 0)
+      {
+        var lastUserIndex = ToolMessages.FindLastIndex(
+          message => string.Equals(message.Role, "user", StringComparison.Ordinal)
+        );
+        if (lastUserIndex >= 0)
+        {
+          ToolMessages[lastUserIndex] = ToolMessages[lastUserIndex] with
+          {
+            Images = ProviderOptions.Images
+          };
+        }
+      }
       VisibleMessages = visibleMessages;
       OmittedMessages = omittedMessages;
       ManualCompactionPending = manualCompactionRequested;
@@ -9449,6 +10418,8 @@ public sealed class ChatStreamService : IChatStreamService
     public List<ChatMessage> Messages { get; }
 
     public List<OllamaToolMessage> ToolMessages { get; }
+
+    public ProviderChatOptions ProviderOptions { get; }
 
     public SpecialistToolingProfile ToolingProfile { get; }
 
@@ -9514,6 +10485,21 @@ public sealed class ChatStreamService : IChatStreamService
 
   private sealed record ValidationAttempt(
     ValidatedLocalAction? Action,
+    LocalActionException? Failure
+  );
+
+  private sealed record ChatReadGenerationAttempt(
+    OllamaToolResponse? Response,
+    Exception? Failure
+  );
+
+  private sealed record ChatReadStreamDelta(
+    string Value,
+    bool Reasoning
+  );
+
+  private sealed record ChatReadProposalAttempt(
+    LocalActionProposal? Proposal,
     LocalActionException? Failure
   );
 

@@ -111,6 +111,17 @@ public sealed class JsonSettingsStore : ISettingsStore
           "maxRecoveryAttemptsPerTurn",
           out _
         );
+      var projectAwarenessElement = document.RootElement.TryGetProperty(
+        "projectAwareness",
+        out var savedProjectAwareness
+      )
+        ? savedProjectAwareness
+        : default;
+      var hasPlanLimitsSchemaVersion = projectAwarenessElement.ValueKind == JsonValueKind.Object
+        && projectAwarenessElement.TryGetProperty(
+          "planLimitsSchemaVersion",
+          out _
+        );
 
       if (!hasCoordinatorModel)
       {
@@ -160,6 +171,23 @@ public sealed class JsonSettingsStore : ISettingsStore
               5,
               settings.Execution.MaxConsecutiveToolFailures
             )
+          }
+        };
+      }
+
+      if (!hasPlanLimitsSchemaVersion)
+      {
+        settings = settings with
+        {
+          ProjectAwareness = settings.ProjectAwareness with
+          {
+            PlanLimitsSchemaVersion = ProjectAwarenessSettings.CurrentPlanLimitsSchemaVersion,
+            MaxPlanSteps = settings.ProjectAwareness.MaxPlanSteps == 8
+              ? ProjectAwarenessSettings.MaximumPlanSteps
+              : settings.ProjectAwareness.MaxPlanSteps,
+            MaxPlanRevisions = settings.ProjectAwareness.MaxPlanRevisions == 3
+              ? ProjectAwarenessSettings.MaximumPlanRevisions
+              : settings.ProjectAwareness.MaxPlanRevisions
           }
         };
       }
@@ -227,6 +255,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         || !hasCoordinatorModel
         || !hasActionModel
         || !hasMaxRecoveryAttempts
+        || !hasPlanLimitsSchemaVersion
         || runtimeProfileUpgraded;
 
       if (

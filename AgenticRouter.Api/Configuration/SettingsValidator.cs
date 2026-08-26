@@ -803,17 +803,24 @@ public sealed class SettingsValidator : ISettingsValidator
     );
     ValidateRange(
       errors,
+      "projectAwareness.planLimitsSchemaVersion",
+      projectAwareness.PlanLimitsSchemaVersion,
+      ProjectAwarenessSettings.CurrentPlanLimitsSchemaVersion,
+      ProjectAwarenessSettings.CurrentPlanLimitsSchemaVersion
+    );
+    ValidateRange(
+      errors,
       "projectAwareness.maxPlanSteps",
       projectAwareness.MaxPlanSteps,
       1,
-      8
+      ProjectAwarenessSettings.MaximumPlanSteps
     );
     ValidateRange(
       errors,
       "projectAwareness.maxPlanRevisions",
       projectAwareness.MaxPlanRevisions,
       0,
-      3
+      ProjectAwarenessSettings.MaximumPlanRevisions
     );
   }
 

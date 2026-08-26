@@ -569,13 +569,21 @@ public sealed record ExecutionSettings
 
 public sealed record ProjectAwarenessSettings
 {
+  public const int CurrentPlanLimitsSchemaVersion = 2;
+  public const int MaximumPlanSteps = 20;
+  public const int MaximumPlanRevisions = 6;
+  public const int MaximumPlanObjectiveCharacters = 500;
+  public const int MaximumPlanStepTitleCharacters = 160;
+
   public int MaxProjectMarkers { get; init; } = 100;
 
   public int MaxInstructionBytes { get; init; } = 131_072;
 
-  public int MaxPlanSteps { get; init; } = 8;
+  public int PlanLimitsSchemaVersion { get; init; } = CurrentPlanLimitsSchemaVersion;
 
-  public int MaxPlanRevisions { get; init; } = 3;
+  public int MaxPlanSteps { get; init; } = MaximumPlanSteps;
+
+  public int MaxPlanRevisions { get; init; } = MaximumPlanRevisions;
 }
 
 public sealed record ValidationProfileSettings

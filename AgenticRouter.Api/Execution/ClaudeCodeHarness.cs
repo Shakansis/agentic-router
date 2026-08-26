@@ -826,12 +826,14 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
           var contextTokens = (Long(payload, "usage", "input_tokens") ?? 0)
             + (Long(payload, "usage", "cache_read_input_tokens") ?? 0)
             + (Long(payload, "usage", "cache_creation_input_tokens") ?? 0);
+          var outputTokens = Long(payload, "usage", "output_tokens") ?? 0;
           if (contextTokens > 0)
           {
             yield return Event(
               active,
               "usage.updated",
               contextInputTokens: contextTokens,
+              contextTotalTokens: contextTokens + Math.Max(0, outputTokens),
               native: payload
             );
           }
@@ -1542,6 +1544,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     HarnessTerminalState? terminalState = null,
     JsonElement? native = null,
     long? contextInputTokens = null,
+    long? contextTotalTokens = null,
     bool readOnlyPermission = false
   )
   {
@@ -1564,6 +1567,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       terminalState: terminalState,
       nativePayload: native?.Clone(),
       contextInputTokens: contextInputTokens,
+      contextTotalTokens: contextTotalTokens,
       readOnlyPermission: readOnlyPermission
     );
   }

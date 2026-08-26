@@ -142,9 +142,11 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     IReadOnlyList<ChatMessage> messages,
     JsonElement? schema,
     string stage,
+    ProviderChatOptions? options,
     CancellationToken cancellationToken
   )
   {
+    options ??= ProviderChatOptions.Empty;
     Dictionary<string, object?> responseFormat = schema is null
       ? new()
       {
@@ -166,7 +168,9 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       new
       {
         model = modelId,
-        messages,
+        messages = options.Images.Count == 0
+          ? messages
+          : ToMultimodalMessages(messages, options.Images),
         temperature = 0,
         stream = false,
         response_format = responseFormat
@@ -1105,11 +1109,35 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         )
           ? matchedId
           : message.ToolName);
+      object? content = message.Content;
+      if (
+        string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+        && message.Images is { Count: > 0 }
+      )
+      {
+        var parts = new List<object>
+        {
+          new { type = "text", text = message.Content ?? string.Empty }
+        };
+        parts.AddRange(
+          message.Images.Select(
+            image => (object)new
+            {
+              type = "image_url",
+              image_url = new
+              {
+                url = $"data:{image.MimeType};base64,{Convert.ToBase64String(image.Bytes)}"
+              }
+            }
+          )
+        );
+        content = parts;
+      }
       result.Add(
         new
         {
           role = message.Role,
-          content = message.Content,
+          content,
           tool_call_id = toolCallId,
           tool_calls = calls
         }

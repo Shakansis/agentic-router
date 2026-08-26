@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,12 +10,15 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class WorkspaceProfilesController : ControllerBase
 {
   private readonly IWorkspaceProfileService _profiles;
+  private readonly IFolderLauncherService _folderLauncher;
 
   public WorkspaceProfilesController(
-    IWorkspaceProfileService profiles
+    IWorkspaceProfileService profiles,
+    IFolderLauncherService folderLauncher
   )
   {
     _profiles = profiles;
+    _folderLauncher = folderLauncher;
   }
 
   [HttpGet]
@@ -72,6 +76,44 @@ public sealed class WorkspaceProfilesController : ControllerBase
         cancellationToken
       )
     );
+  }
+
+  [HttpPost("active/open-folder")]
+  public async Task<IActionResult> OpenActiveFolder(
+    CancellationToken cancellationToken
+  )
+  {
+    var active = await _profiles.GetActiveDataAsync(
+      cancellationToken
+    );
+    if (active is null)
+    {
+      return BadRequest(
+        Error(
+          "workspace-not-configured",
+          "workspace-folder-open",
+          "No active workspace is configured.",
+          false
+        )
+      );
+    }
+
+    var result = await _folderLauncher.OpenAsync(
+      active.Path,
+      cancellationToken
+    );
+    return result.Opened
+      ? Ok(
+        result
+      )
+      : BadRequest(
+        Error(
+          "workspace-folder-open-failed",
+          "workspace-folder-open",
+          result.Error ?? "The active workspace folder could not be opened.",
+          true
+        )
+      );
   }
 
   [HttpPut("{id}/history")]

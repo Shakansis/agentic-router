@@ -144,7 +144,15 @@ if (
   return;
 }
 
-await EmitStreamDeltaAsync("thinking_delta", "thinking", "Inspecting Claude Code workspace");
+await EmitStreamDeltaAsync(
+  "thinking_delta",
+  "thinking",
+  $"Inspecting Claude Code workspace {new string('x', 128)}"
+);
+if (prompt.Contains("claude live context usage", StringComparison.OrdinalIgnoreCase))
+{
+  await Task.Delay(1_500);
+}
 var finalText = "Claude Code streamed with " + model;
 
 if (prompt.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))

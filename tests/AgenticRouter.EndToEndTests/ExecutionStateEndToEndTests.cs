@@ -337,7 +337,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#app-modal"
       )
     ).ToContainTextAsync(
-      "modo Execute"
+      "Execute mode"
     );
     Assert.IsFalse(
       Directory.Exists(
@@ -439,7 +439,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#git-action-status"
       )
     ).ToContainTextAsync(
-      "Configuração local"
+      "Local repository configuration saved."
     );
     Assert.AreEqual(
       "Repository User",
@@ -649,14 +649,14 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".change-review-context"
       ).First
     ).ToContainTextAsync(
-      "Alterações pré-existentes: hello.txt"
+      "Pre-existing changes: hello.txt"
     );
     await Expect(
       Page.Locator(
         ".preexisting-change"
       )
     ).ToContainTextAsync(
-      "já possuía alterações"
+      "already had changes"
     );
   }
 
@@ -685,7 +685,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(createApproval).ToBeVisibleAsync();
     await createApproval.GetByRole(
       AriaRole.Button,
-      new() { Name = "Aprovar", Exact = true }
+      new() { Name = "Approve", Exact = true }
     ).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -1251,7 +1251,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(createApproval).ToBeVisibleAsync();
     await createApproval.GetByRole(
       AriaRole.Button,
-      new() { Name = "Aprovar", Exact = true }
+      new() { Name = "Approve", Exact = true }
     ).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -2016,7 +2016,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".execution-session-header"
       )
     ).ToContainTextAsync(
-      "1 arquivos"
+      "1 files"
     );
     await Page.Locator(
       ".review-changes"
@@ -2038,7 +2038,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".verification-ok"
       )
     ).ToContainTextAsync(
-      "Verificado"
+      "Verified"
     );
     await Page.Locator(
       "#undo-execution"
@@ -2256,7 +2256,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -2282,7 +2282,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         AriaRole.Button,
         new()
         {
-          Name = "Aprovar",
+          Name = "Approve",
           Exact = true
         }
       )
@@ -2306,7 +2306,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
   }
 
@@ -2356,7 +2356,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Rejeitar",
+        Name = "Reject",
         Exact = true
       }
     ).ClickAsync();
@@ -2377,7 +2377,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).Last;
     await Expect(
       activity.Locator(":scope > summary")
-    ).ToContainTextAsync("Conclu");
+    ).ToContainTextAsync("Completed");
     if (await activity.GetAttributeAsync("open") is null)
     {
       await activity.Locator(":scope > summary").ClickAsync();
@@ -2394,14 +2394,14 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(
       approval
     ).ToContainTextAsync(
-      "Rejeitada"
+      "Rejected"
     );
     await Expect(
       approval.GetByRole(
         AriaRole.Button,
         new()
         {
-          Name = "Rejeitar",
+          Name = "Reject",
           Exact = true
         }
       )
@@ -2421,7 +2421,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
   }
 
@@ -2630,7 +2630,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ":scope > summary"
       )
     ).ToContainTextAsync(
-      "Criar"
+      "Create"
     );
     await Expect(
       action.Locator(
@@ -2671,7 +2671,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#close-change-review"
     ).ClickAsync();
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancelar")
+    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
     {
       await Page.Locator(
         "#send-button"
@@ -2994,12 +2994,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await Expect(
       Page.Locator("#send-button-label")
-    ).ToHaveTextAsync("Enviar");
+    ).ToHaveTextAsync("Send");
     await Page.GetByRole(
       AriaRole.Button,
       new()
       {
-        Name = "Nova conversa",
+        Name = "New conversation",
         Exact = true
       }
     ).ClickAsync();
@@ -3270,7 +3270,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".model-selection-note"
       )
     ).ToHaveTextAsync(
-      "Modelo qwen3-coder:30b selecionado pelo usu\u00e1rio."
+      "Model qwen3-coder:30b selected by the user."
     );
     await Expect(
       Page.Locator(
@@ -3471,7 +3471,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       },
       firstPlannerRequest.AvailableTools.ToArray()
     );
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancelar")
+    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
     {
       await Page.Locator(
         "#send-button"
@@ -3550,7 +3550,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
     var plan = Page.Locator(".message.assistant > .execution-plan");
     await Expect(plan).ToHaveCountAsync(1);
-    await Expect(plan.Locator("summary")).ToContainTextAsync("Plano");
+    await Expect(plan.Locator("summary")).ToContainTextAsync("Plan");
     await Expect(plan.Locator(".plan-step")).ToHaveCountAsync(2);
     await Expect(plan.Locator(".plan-step").Nth(0)).ToContainTextAsync(
       "Create tracked fixture"
@@ -3562,7 +3562,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       new System.Text.RegularExpressions.Regex("completed")
     );
     await Expect(plan.Locator(".execution-plan-progress")).ToContainTextAsync(
-      "Etapas 2/2"
+      "Steps 2/2"
     );
     await Expect(
       Page.Locator(".activity .execution-plan")
@@ -3584,23 +3584,23 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SetExecuteModeAsync("auto");
     await SendMessageAsync("execute create file");
 
-    await Expect(Page.Locator("#context-usage-summary")).ToContainTextAsync("exato");
+    await Expect(Page.Locator("#context-usage-summary")).ToContainTextAsync("exact");
     await Page.Locator("#context-usage > summary").ClickAsync();
     var details = Page.Locator("#context-usage-details");
     foreach (var category in new[]
     {
-      "Conversa e mensagem atual",
-      "Sistema e instruções",
-      "Contexto do projeto",
+      "Current conversation and message",
+      "System and instructions",
+      "Project context",
       "Toolset discovery",
-      "Schemas concedidos",
-      "Estado/resultados do Host",
-      "Overhead estrutural",
-      "Entrada total",
-      "Reserva de saída",
-      "Contexto requerido",
-      "Limite efetivo",
-      "Origem"
+      "Granted schemas",
+      "Host state/results",
+      "Structural overhead",
+      "Total input",
+      "Output reserve",
+      "Required context",
+      "Effective limit",
+      "Count source"
     })
     {
       await Expect(details).ToContainTextAsync(category);
@@ -3628,15 +3628,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator("#compact-context").ClickAsync();
     await Expect(Page.Locator("#app-modal")).ToBeVisibleAsync();
     await Expect(Page.Locator("#app-modal-title")).ToHaveTextAsync(
-      "Compactar contexto enviado?"
+      "Compact submitted context?"
     );
     await Expect(Page.Locator("#app-modal-message")).ToContainTextAsync(
-      "não apagará mensagens salvas"
+      "will not delete saved messages"
     );
     await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(Page.Locator("#app-modal")).ToBeHiddenAsync();
     await Expect(Page.Locator("#compact-context")).ToHaveTextAsync(
-      "Compactação preparada"
+      "Compaction prepared"
     );
     Assert.AreEqual(
       visibleMessageCount,
@@ -3705,7 +3705,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
     Assert.IsTrue(
       File.Exists(
@@ -3739,7 +3739,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Textbox,
       new()
       {
-        Name = "Editar comando de run_process",
+        Name = "Edit run_process command",
         Exact = true
       }
     );
@@ -3756,7 +3756,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         AriaRole.Button,
         new()
         {
-          Name = "Atualizar",
+          Name = "Refresh",
           Exact = true
         }
       )
@@ -3765,7 +3765,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -3786,7 +3786,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).Last;
     await Expect(
       completedActivity.Locator(":scope > summary")
-    ).ToContainTextAsync("Conclu");
+    ).ToContainTextAsync("Completed");
     if (await completedActivity.GetAttributeAsync("open") is null)
     {
       await completedActivity.Locator(":scope > summary").ClickAsync();
@@ -3800,7 +3800,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ":scope > summary"
       )
     ).ToContainTextAsync(
-      "Execução"
+      "Execution"
     );
     await response.Locator(
       ":scope > summary"
@@ -3817,7 +3817,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         AriaRole.Button,
         new()
         {
-          Name = "Aprovar",
+          Name = "Approve",
           Exact = true
         }
       )
@@ -3872,7 +3872,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Textbox,
       new()
       {
-        Name = "Editar comando de create_file",
+        Name = "Edit create_file command",
         Exact = true
       }
     );
@@ -3889,7 +3889,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -3930,7 +3930,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Textbox,
       new()
       {
-        Name = "Editar comando de run_process",
+        Name = "Edit run_process command",
         Exact = true
       }
     );
@@ -3941,7 +3941,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -3956,7 +3956,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".approval-status"
       )
     ).ToHaveTextAsync(
-      "Alteração inválida"
+      "Invalid change"
     );
     await Expect(
       Page.Locator(
@@ -3968,7 +3968,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         AriaRole.Button,
         new()
         {
-          Name = "Aprovar",
+          Name = "Approve",
           Exact = true
         }
       )
@@ -3977,7 +3977,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Rejeitar",
+        Name = "Reject",
         Exact = true
       }
     ).ClickAsync();
@@ -3986,7 +3986,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
   }
 
@@ -4045,7 +4045,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Concluído"
+      "Completed"
     );
     await Expect(
       Page.Locator(
@@ -4084,7 +4084,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Workspace confiável"
+        Name = "Trusted workspace"
       }
     ).ClickAsync();
 
@@ -4100,7 +4100,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".workspace-profile-entry"
       )
     ).ToContainTextAsync(
-      "histórico desativado"
+      "history disabled"
     );
     Assert.IsTrue(
       File.Exists(
@@ -4178,7 +4178,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Salvar workspace"
+        Name = "Save workspace"
       }
     ).ClickAsync();
 
@@ -4216,7 +4216,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Renomear"
+        Name = "Rename"
       }
     ).ClickAsync();
     await Page.Locator("#app-modal-input").FillAsync("Renamed project");
@@ -4246,7 +4246,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       AriaRole.Button,
       new()
       {
-        Name = "Salvar workspace"
+        Name = "Save workspace"
       }
     ).ClickAsync();
     await Expect(
@@ -4299,7 +4299,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         AriaRole.Button,
         new()
         {
-          Name = "Aprovar",
+          Name = "Approve",
           Exact = true
         }
       )
@@ -4325,7 +4325,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
   }
 
@@ -4378,13 +4378,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await Page.Locator(
       "#recent-sessions .session-entry"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Retomar"
-      }
-    ).ClickAsync();
+    ).Locator(".session-entry-content").ClickAsync();
     await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
@@ -4512,22 +4506,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(
       Page.Locator("#pinned-session-section")
     ).ToBeHiddenAsync();
-    var sidebarAlignment = await Page.EvaluateAsync<double[]>(
-      """
-      () => [
-        document.querySelector('#conversation-persistence-sidebar').getBoundingClientRect().left,
-        document.querySelector('.session-history-actions').getBoundingClientRect().left
-      ]
-      """
-    );
-    Assert.IsLessThanOrEqualTo(
-      4,
-      Math.Abs(sidebarAlignment[0] - sidebarAlignment[1])
-    );
     var summaryFreeCard = Page.Locator(
       "#recent-sessions .session-entry[data-session-id=\"compact-card-without-summary-v0914\"]"
     );
-    await summaryFreeCard.Locator(".session-entry-content").ClickAsync();
+    await summaryFreeCard.Locator(".session-details-button").ClickAsync();
     await Expect(Page.Locator("#session-details-dialog")).ToBeVisibleAsync();
     var compactDetailsHeight = await Page.Locator(
       "#session-details-dialog .session-details-shell"
@@ -4543,13 +4525,16 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "#recent-sessions .session-entry[data-session-id=\"compact-card-v0913\"]"
     );
     await Expect(card).ToBeVisibleAsync();
-    await Expect(card.Locator("button")).ToHaveCountAsync(1);
-    await Expect(card.Locator("button")).ToHaveTextAsync("Retomar");
-    await Expect(card).Not.ToContainTextAsync("Renomear");
-    await Expect(card).Not.ToContainTextAsync("Resumo");
+    await Expect(card.Locator("button")).ToHaveCountAsync(2);
+    await Expect(card.Locator(".session-entry-content")).ToHaveAttributeAsync(
+      "aria-label",
+      "Resume Keep this compact conversation available."
+    );
+    await Expect(card).Not.ToContainTextAsync("Rename");
+    await Expect(card).Not.ToContainTextAsync("Summary");
     await Expect(card.Locator("small")).Not.ToBeEmptyAsync();
 
-    await card.Locator(".session-entry-content").ClickAsync();
+    await card.Locator(".session-details-button").ClickAsync();
     await Expect(Page.Locator("#session-details-dialog")).ToBeVisibleAsync();
     await Expect(Page.Locator("#session-details-title")).ToHaveTextAsync(
       "Keep this compact conversation available."
@@ -4625,7 +4610,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         AriaRole.Button,
         new()
         {
-          Name = "Aprovar",
+          Name = "Approve",
           Exact = true
         }
       )
@@ -4641,10 +4626,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "element => element.open = true"
     );
     await Page.Locator(
-      "#recent-sessions .session-entry .session-entry-content"
+      "#recent-sessions .session-entry .session-details-button"
     ).ClickAsync();
     await Expect(Page.Locator("#session-details-state")).ToContainTextAsync(
-      "Interrompida"
+      "Interrupted"
     );
     await Page.Locator("#resume-session-details").ClickAsync();
     await ConfirmAppModalAsync();
@@ -4653,7 +4638,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".message.assistant"
       ).Last
     ).ToContainTextAsync(
-      "Nenhum processo ou aprovação pendente foi retomado"
+      "No pending process or approval was resumed"
     );
     Assert.IsFalse(
       File.Exists(
@@ -4796,19 +4781,13 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await Page.Locator(
       "#recent-sessions .session-entry"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Retomar"
-      }
-    ).ClickAsync();
+    ).Locator(".session-entry-content").ClickAsync();
     await ConfirmAppModalAsync();
     await Page.GetByRole(
       AriaRole.Button,
       new()
       {
-        Name = "Revisar alterações concluídas"
+        Name = "Review completed changes"
       }
     ).ClickAsync();
     await Expect(
@@ -5563,7 +5542,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#context-usage-summary"
       )
     ).ToContainTextAsync(
-      "calculado ao enviar"
+      "calculated when sending"
     );
 
     using var response = await _environment.HttpClient.PostAsJsonAsync(
@@ -6761,7 +6740,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#model-profile-status"
       )
     ).ToContainTextAsync(
-      "seleção atual da conversa foi preservada"
+      "current conversation selection was preserved"
     );
     await Expect(
       Page.Locator(
@@ -6803,7 +6782,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#default-model option[value=\"docs:latest\"]"
       )
     ).ToContainTextAsync(
-      "indisponível"
+      "unavailable"
     );
 
     var routed = await PostChatStreamAsync(
@@ -7069,10 +7048,14 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     Assert.HasCount(
       1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.input-rejected")
+    );
+    Assert.HasCount(
+      2,
       events.Where(item => item["type"]!.GetValue<string>() == "execution-step-started")
     );
     Assert.HasCount(
-      1,
+      2,
       events.Where(item => item["type"]!.GetValue<string>() == "execution-step-completed")
     );
     Assert.IsTrue(
@@ -7084,9 +7067,25 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       markerName
     )));
     Assert.IsTrue(marker.RootElement.GetProperty("succeeded").GetBoolean());
-    Assert.IsTrue(
-      marker.RootElement.GetProperty("action").GetProperty("succeeded").GetBoolean()
+    var unboundAction = marker.RootElement.GetProperty("unboundAction");
+    Assert.IsFalse(unboundAction.GetProperty("succeeded").GetBoolean());
+    var unboundOutput = unboundAction.GetProperty("output").GetString()!;
+    StringAssert.Contains(unboundOutput, "must bind every action");
+    StringAssert.Contains(unboundOutput, "\"ActionableStepIds\":[\"step-1\"]");
+    var firstAction = marker.RootElement.GetProperty("firstAction");
+    Assert.IsTrue(firstAction.GetProperty("succeeded").GetBoolean());
+    var firstOutput = firstAction.GetProperty("output").GetString()!;
+    StringAssert.Contains(firstOutput, "HOST_OWNED_PLAN_STATE");
+    StringAssert.Contains(
+      firstOutput,
+      "\"Id\":\"step-1\",\"Title\":\"Run the first Host process\",\"Status\":\"completed\""
     );
+    StringAssert.Contains(firstOutput, "\"ActionableStepIds\":[\"step-2\"]");
+    var secondAction = marker.RootElement.GetProperty("secondAction");
+    Assert.IsTrue(secondAction.GetProperty("succeeded").GetBoolean());
+    var secondOutput = secondAction.GetProperty("output").GetString()!;
+    StringAssert.Contains(secondOutput, "\"ActionableStepIds\":[]");
+    StringAssert.Contains(secondOutput, "accepted Host plan has no actionable steps");
   }
 
   [TestMethod]
@@ -7231,5 +7230,107 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         Directory.Move(retainedDirectory, incidentDirectory);
       }
     }
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task CompactProjectGitCommitsExplicitAndGeneratedMessagesAndReportsMissingUpstream()
+  {
+    var workspace = _environment.CreateWorkspaceDirectory(
+      $"compact-project-git-{Guid.NewGuid():N}"
+    );
+    _ = await RunGitTextAsync(workspace, "init", "-b", "main");
+    _ = await RunGitTextAsync(workspace, "config", "user.name", "Project Git E2E");
+    _ = await RunGitTextAsync(
+      workspace,
+      "config",
+      "user.email",
+      "project-git@example.invalid"
+    );
+    await File.WriteAllTextAsync(
+      Path.Combine(workspace, "baseline.txt"),
+      "baseline"
+    );
+    _ = await RunGitTextAsync(workspace, "add", "--", "baseline.txt");
+    _ = await RunGitTextAsync(workspace, "commit", "-m", "baseline");
+    using var createdResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Compact project Git",
+        path = workspace
+      }
+    );
+    createdResponse.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(
+      await createdResponse.Content.ReadAsStringAsync()
+    );
+    var workspaceId = createdDocument.RootElement.GetProperty("id").GetString()!;
+    using (
+      var activateResponse = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{workspaceId}/activate",
+        null
+      )
+    )
+    {
+      activateResponse.EnsureSuccessStatusCode();
+    }
+    await File.WriteAllTextAsync(
+      Path.Combine(workspace, "explicit.txt"),
+      "explicit"
+    );
+
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await Expect(Page.Locator("#git-summary")).ToContainTextAsync("1 changes");
+    await Page.Locator("#git-commit-quick").ClickAsync();
+    await Page.Locator("#app-modal-input").FillAsync("feat: exact sidebar commit");
+    await Page.Locator("#app-modal-confirm").ClickAsync();
+    await Expect(Page.Locator("#git-quick-status")).ToContainTextAsync(
+      "feat: exact sidebar commit"
+    );
+    Assert.AreEqual(
+      "feat: exact sidebar commit",
+      await RunGitTextAsync(workspace, "log", "-1", "--pretty=%s")
+    );
+
+    await File.WriteAllTextAsync(
+      Path.Combine(workspace, "generated.txt"),
+      "generated"
+    );
+    await Page.Locator("#git-card").ClickAsync();
+    await Page.Locator("#dismiss-git").ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await Page.Locator("#git-commit-quick").ClickAsync();
+    await Page.Locator("#app-modal-confirm").ClickAsync();
+    await Expect(Page.Locator("#git-quick-status")).ToContainTextAsync(
+      "chore: update project changes"
+    );
+    Assert.AreEqual(
+      "chore: update project changes",
+      await RunGitTextAsync(workspace, "log", "-1", "--pretty=%s")
+    );
+    var generationRequest = _environment.FakeOllama.Requests.Last(
+      request => request.Messages.Any(
+        message => message.Content.Contains(
+          "GIT_COMMIT_SUBJECT_V1",
+          StringComparison.Ordinal
+        )
+      )
+    );
+    StringAssert.Contains(
+      generationRequest.Messages.Last().Content,
+      "generated.txt"
+    );
+    StringAssert.Contains(
+      generationRequest.Messages.Last().Content,
+      "+generated"
+    );
+
+    await Page.Locator("#git-push-quick").ClickAsync();
+    await Page.Locator("#app-modal-confirm").ClickAsync();
+    await Expect(Page.Locator("#git-quick-status")).ToContainTextAsync(
+      "no configured upstream"
+    );
   }
 }

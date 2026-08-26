@@ -100,6 +100,128 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexAutomaticHostValidationDoesNotRequireSpecialistPlanBinding()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex plan automatic validation",
+      "browser-codex-plan-automatic-validation"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(
+      events.Where(item => item["type"]!.GetValue<string>() == "error")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "action.input-rejected"
+      )
+    );
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "validation-completed"
+      )
+    );
+    var terminal = events.Single(
+      item => item["type"]!.GetValue<string>() == "response.completed"
+    );
+    var plan = terminal["executionSession"]!["plan"]!.AsObject();
+    Assert.AreEqual(1, plan["completedStepCount"]!.GetValue<int>());
+    Assert.HasCount(2, plan["steps"]!.AsArray());
+    Assert.AreEqual(
+      "pending",
+      plan["steps"]![1]!["status"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "created before automatic Host validation\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "codex-plan-validation.txt"
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexHostAcceptsExpandedPlanBoundaryValues()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex expanded plan limits",
+      "browser-codex-expanded-plan-limits"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    var terminal = events.Single(
+      item => item["type"]!.GetValue<string>() == "response.completed"
+    );
+    var plan = terminal["executionSession"]!["plan"]!.AsObject();
+    Assert.AreEqual(500, plan["objective"]!.GetValue<string>().Length);
+    Assert.HasCount(20, plan["steps"]!.AsArray());
+    Assert.AreEqual(
+      160,
+      plan["steps"]![0]!["title"]!.GetValue<string>().Length
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ReasoningDeltasDoNotExhaustIncidentTraceBeforeCompletion()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["incidents"]!["maximumEventsPerTrace"] = 100;
+    settings["incidents"]!["browserMaximumEvents"] = 100;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    var events = await ExecuteCodexStreamAsync(
+      "codex incident reasoning flood",
+      "browser-codex-incident-reasoning-flood"
+    );
+    var terminal = events.Single(IsTerminalStreamEvent);
+    Assert.AreEqual(
+      "response.completed",
+      terminal["type"]!.GetValue<string>()
+    );
+    var requestId = terminal["requestId"]!.GetValue<string>();
+    var records = Directory.GetFiles(
+      Path.Combine(_environment.DataDirectory, "incidents"),
+      "*.jsonl"
+    ).SelectMany(File.ReadLines)
+      .Select(line => JsonNode.Parse(line)!.AsObject())
+      .Where(
+        item => string.Equals(
+          item["requestId"]?.GetValue<string>(),
+          requestId,
+          StringComparison.Ordinal
+        )
+      )
+      .ToArray();
+
+    Assert.IsNotEmpty(records);
+    Assert.IsGreaterThanOrEqualTo(99, records.Length);
+    Assert.IsLessThanOrEqualTo(100, records.Length);
+    Assert.IsFalse(
+      records.Any(
+        item => item["stage"]?.GetValue<string>() == "reasoning.delta"
+      )
+    );
+    Assert.HasCount(
+      1,
+      records.Where(
+        item => item["code"]?.GetValue<string>() == "response.completed"
+          && item["completed"]?.GetValue<bool>() == true
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task NativeHarnessRemainsDefaultAndDoesNotStartCodex()
   {
     await Page.GotoAsync("/");
@@ -131,7 +253,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting");
     await Page.Locator("#send-button").ClickAsync();
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Enviar");
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(
       Page.Locator(".message.assistant .activity").Last
     ).ToHaveAttributeAsync("data-terminal", "true");
@@ -180,7 +302,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     var approval = Page.Locator(".action-approval").Last;
     await Expect(approval).ToBeVisibleAsync();
     Assert.IsTrue(File.Exists(target));
-    await approval.GetByRole(AriaRole.Button, new() { Name = "Aprovar" }).ClickAsync();
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     Assert.IsFalse(File.Exists(target));
@@ -205,13 +327,13 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Expect(approval).ToContainTextAsync("delete_paths");
     var editor = approval.GetByRole(
       AriaRole.Textbox,
-      new() { Name = "Editar comando de delete_paths" }
+      new() { Name = "Edit delete_paths command" }
     );
     await Expect(editor).ToHaveValueAsync("batch-delete-a.txt\nbatch-delete-b.txt");
     Assert.IsTrue(File.Exists(first));
     Assert.IsTrue(File.Exists(second));
 
-    await approval.GetByRole(AriaRole.Button, new() { Name = "Aprovar" }).ClickAsync();
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     Assert.IsFalse(File.Exists(first));
@@ -355,6 +477,55 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexIdleTurnUsesConfiguredGenerationTimeout()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["runtime"]!["generationTimeoutSeconds"] = 1;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    var events = await ExecuteCodexStreamAsync(
+      "codex host idle timeout",
+      "browser-codex-host-idle-timeout"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
+    Assert.AreEqual(
+      "codex-event-idle-timeout",
+      error["error"]!["code"]!.GetValue<string>()
+    );
+    StringAssert.Contains(
+      error["message"]!.GetValue<string>(),
+      "configured 1-second generation timeout"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexNativeSseIdleFailureReturnsActionableTypedDiagnostic()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex native idle failure",
+      "browser-codex-native-idle-failure"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
+    Assert.AreEqual(
+      "codex-provider-stream-idle-timeout",
+      error["error"]!["code"]!.GetValue<string>()
+    );
+    StringAssert.Contains(
+      error["message"]!.GetValue<string>(),
+      "local model stream became idle"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CodexPreservesAbsoluteNestedWindowsWorkspacePathWithSpaces()
   {
     var workspace = _environment.CreateWorkspaceDirectory(
@@ -493,7 +664,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         "#save-status"
       )
-    ).ToHaveTextAsync("Salvo");
+    ).ToHaveTextAsync("Saved");
     await Expect(
       Page.Locator(
         "#settings-dialog"
@@ -1234,7 +1405,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#settings-dirty"
       )
     ).ToHaveTextAsync(
-      "Sem alterações"
+      "No changes"
     );
 
     const string yaml = """
@@ -1258,7 +1429,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#settings-dirty"
       )
     ).ToHaveTextAsync(
-      "Sem alterações"
+      "No changes"
     );
     var download = await Page.RunAndWaitForDownloadAsync(
       () => Page.Locator(
@@ -1278,7 +1449,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#settings-yaml-status"
       )
     ).ToHaveTextAsync(
-      "Configuração YAML importada e aplicada."
+      "YAML configuration imported and applied."
     );
     await Expect(
       Page.Locator(
@@ -1306,7 +1477,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#settings-dirty"
       )
     ).ToHaveTextAsync(
-      "Sem alterações"
+      "No changes"
     );
   }
 
@@ -1411,7 +1582,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".model-selection-note"
       )
     ).ToHaveTextAsync(
-      "Modelo docs:latest roteado pelo agente."
+      "Model docs:latest routed by the agent."
     );
     await Expect(
       Page.Locator(
@@ -1487,7 +1658,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ":scope > summary"
       )
     ).ToContainTextAsync(
-      "Concluído"
+      "Completed"
     );
 
     var requests = _environment.FakeOllama.Requests;
@@ -1523,13 +1694,17 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         )
       ).ToArray()
     );
-    Assert.AreEqual(
+    StringAssert.Contains(
+      requests[1].Messages[0].Content,
+      "CHAT_READ_ONLY_WORKSPACE_V1"
+    );
+    StringAssert.Contains(
+      requests[1].Messages[0].Content,
       "The latest user instruction has priority over earlier conversational patterns. "
         + "Do not continue a previous task when the user explicitly changes the objective. "
         + "Do not claim that you executed, tested, opened, accessed, or verified something "
         + "unless the application actually performed that action.\n\n"
-        + "You write documentation.",
-      requests[1].Messages[0].Content
+        + "You write documentation."
     );
   }
 
@@ -1653,7 +1828,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       nativeToolRequest.Messages[0].Content,
       "APPLICATION_OWNED_PROJECT_CONTEXT"
     );
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancelar")
+    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
     {
       await Page.Locator(
         "#send-button"
@@ -1777,7 +1952,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToHaveTextAsync(
       "chrono-two.txt"
     );
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancelar")
+    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
     {
       await Page.Locator(
         "#send-button"
@@ -1854,7 +2029,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".model-selection-note"
       )
     ).ToHaveTextAsync(
-      "Modelo beta:code selecionado pelo usuário."
+      "Model beta:code selected by the user."
     );
   }
 
@@ -1877,7 +2052,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Nova conversa",
+        Name = "New conversation",
         Exact = true
       }
     ).ClickAsync();
@@ -2052,7 +2227,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Nova conversa",
+        Name = "New conversation",
         Exact = true
       }
     ).ClickAsync();
@@ -2069,7 +2244,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Cancelar"
+      "Cancel"
     );
     await Page.Locator(
       "#send-button"
@@ -2079,7 +2254,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
   }
 
@@ -2223,13 +2398,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Page.Locator(
       $"#recent-sessions [data-session-id=\"{firstId}\"]"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Retomar"
-      }
-    ).ClickAsync();
+    ).Locator(".session-entry-content").ClickAsync();
     await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
@@ -2492,8 +2661,18 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "rpg-storytelling"
     );
-    Assert.IsFalse(
-      _environment.FakeOllama.Requests.Any(request => request.HasTools)
+    var chatToolRequests = _environment.FakeOllama.Requests.Where(
+      request => request.HasTools
+    ).ToArray();
+    Assert.IsNotEmpty(
+      chatToolRequests
+    );
+    Assert.IsTrue(
+      chatToolRequests.All(
+        request => request.AvailableTools.All(
+          tool => tool is "list_files" or "read_file" or "get_file_info" or "search_text"
+        )
+      )
     );
   }
 
@@ -2719,7 +2898,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Editar mensagem",
+        Name = "Edit message",
         Exact = true
       }
     ).ClickAsync();
@@ -2740,7 +2919,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#composer-status"
       )
     ).ToContainTextAsync(
-      "Editando mensagem"
+      "Editing message"
     );
     await input.FillAsync(
       "First message edited"
@@ -2817,7 +2996,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Editar mensagem",
+        Name = "Edit message",
         Exact = true
       }
     );
@@ -2877,7 +3056,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
   }
 
@@ -3007,7 +3186,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Copiar resposta",
+        Name = "Copy response",
         Exact = true
       }
     ).ClickAsync();
@@ -3016,7 +3195,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         AriaRole.Button,
         new()
         {
-          Name = "Resposta copiada",
+          Name = "Response copied",
           Exact = true
         }
       )
@@ -3037,7 +3216,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Copiar código C#",
+        Name = "Copy code C#",
         Exact = true
       }
     ).ClickAsync();
@@ -3046,7 +3225,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         AriaRole.Button,
         new()
         {
-          Name = "Código copiado",
+          Name = "Code copied",
           Exact = true
         }
       )
@@ -3119,7 +3298,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         AriaRole.Button,
         new()
         {
-          Name = "Cancelar solicitação",
+          Name = "Cancel request",
           Exact = true
         }
       )
@@ -3259,7 +3438,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".assistant-answer"
       )
     ).ToContainTextAsync(
-      "Referência:"
+      "Reference:"
     );
     await Expect(
       Page.Locator(
@@ -3290,7 +3469,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Falhou"
+      "Failed"
     );
     await Expect(
       Page.Locator(
@@ -3321,7 +3500,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Falhou"
+      "Failed"
     );
     var failedText = await Page.Locator(
       ".assistant-answer"
@@ -3459,11 +3638,85 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ShowsRuntimeMemoryAndConfirmedResidentModel()
+  public async Task ModelTestAllowsColdStartWithinConfiguredGenerationTimeout()
   {
+    using var saveResponse = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        Runtime = _environment.BaselineSettings.Runtime with
+        {
+          GenerationTimeoutSeconds = 30
+        }
+      }
+    );
+    saveResponse.EnsureSuccessStatusCode();
+    _environment.FakeOllama.DelayNextModelTestResponse(
+      TimeSpan.FromSeconds(
+        16
+      )
+    );
+
     await Page.GotoAsync(
       "/"
     );
+    await OpenSettingsAsync();
+    await Page.Locator(
+      "#model-test-selector"
+    ).SelectOptionAsync(
+      "unused:latest"
+    );
+    await Page.Locator(
+      "#test-model"
+    ).ClickAsync();
+
+    await Expect(
+      Page.Locator(
+        "#model-test-result"
+      )
+    ).ToContainTextAsync(
+      "Completed",
+      new()
+      {
+        Timeout = 25_000
+      }
+    );
+    await Expect(
+      Page.Locator(
+        "#model-test-result"
+      )
+    ).Not.ToContainTextAsync(
+      "Failed"
+    );
+    Assert.HasCount(
+      1,
+      _environment.FakeOllama.Requests
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ShowsRuntimeMemoryAndConfirmedResidentModel()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["defaultGpu"] = "ollama:0";
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    await Page.GotoAsync(
+      "/"
+    );
+    using var runtimeResponse = await _environment.HttpClient.GetAsync(
+      "api/runtime/status"
+    );
+    runtimeResponse.EnsureSuccessStatusCode();
+    using var runtimeDocument = JsonDocument.Parse(
+      await runtimeResponse.Content.ReadAsStringAsync()
+    );
+    var detectedOllamaGpuCount = runtimeDocument.RootElement
+      .GetProperty("devices")
+      .EnumerateArray()
+      .Count(device => device.GetProperty("ollamaIndex").ValueKind != JsonValueKind.Null);
     await Expect(
       Page.Locator(
         "#runtime-summary"
@@ -3495,31 +3748,116 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       Page.Locator(
-        "#runtime-model-list"
+        "#runtime-model-summary"
       )
+    ).Not.ToBeEmptyAsync();
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-gpu-card"
+      ).First
+    ).ToBeVisibleAsync();
+    await Expect(
+      Page.Locator("#runtime-model-list .loaded-model-gpu-card")
+    ).ToHaveCountAsync(Math.Max(1, detectedOllamaGpuCount));
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-gpu-card"
+      ).First
     ).ToContainTextAsync(
-      "router:latest"
+      "GPU 0"
     );
     await Expect(
       Page.Locator(
-        "#runtime-model-list"
-      )
+        "#runtime-model-list .loaded-model-gpu-card"
+      ).First
     ).ToContainTextAsync(
-      "VRAM"
+      "Model VRAM Used"
     );
     await Expect(
       Page.Locator(
-        "#runtime-model-list"
-      )
+        "#runtime-model-list .loaded-model-gpu-card"
+      ).First
     ).ToContainTextAsync(
-      "RAM estimada"
+      "System/Driver VRAM"
     );
     await Expect(
       Page.Locator(
-        "#resident-model-status"
+        "#runtime-model-list .loaded-model-gpu-card"
+      ).First
+    ).ToContainTextAsync(
+      "Context Share"
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-gpu-card"
+      ).First
+    ).ToContainTextAsync(
+      "Context/Runtime Memory"
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-metric[title]"
+      ).First
+    ).ToHaveAttributeAsync(
+      "title",
+      new Regex("KV cache.*runtime buffers", RegexOptions.IgnoreCase)
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-summary"
       )
     ).ToContainTextAsync(
-      "ready"
+      "Sys RAM Used by Model"
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-summary"
+      )
+    ).ToContainTextAsync(
+      "Total Context Window"
+    );
+    await Page.Locator(
+      "#runtime-model-list .loaded-model-details > summary"
+    ).First.ClickAsync();
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-details-content"
+      ).First
+    ).ToContainTextAsync("router:latest");
+    if (detectedOllamaGpuCount > 1)
+    {
+      await Page.Locator(
+        "#runtime-model-list .loaded-model-details > summary"
+      ).Last.ClickAsync();
+      await Expect(
+        Page.Locator("#runtime-model-list .loaded-model-details-content").Last
+      ).ToContainTextAsync("No loaded model reported by Ollama.");
+    }
+    await Expect(
+      Page.Locator(
+        "#runtime-details #resident-model-status, "
+          + "#runtime-details #runtime-usage-summary, "
+          + "#runtime-details .runtime-diagnostic-summary"
+      )
+    ).ToHaveCountAsync(0);
+    await Page.Locator(
+      "#messages"
+    ).ClickAsync(
+      new()
+      {
+        Position = new()
+        {
+          X = 10,
+          Y = 10
+        }
+      }
+    );
+    Assert.IsFalse(
+      await Page.Locator(
+        "#runtime-details"
+      ).EvaluateAsync<bool>(
+        "element => element.open"
+      )
     );
 
     using var response = await _environment.HttpClient.GetAsync(
@@ -3939,14 +4277,14 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#runtime-role-profiles"
       )
     ).ToContainTextAsync(
-      "Coordenador residente"
+      "Resident coordinator"
     );
     var memoryPolicy = Page.Locator(
       ".runtime-profile-subsection",
       new()
       {
         Has = Page.GetByText(
-          "Política de memória",
+          "Memory policy",
           new()
           {
             Exact = true
@@ -3972,7 +4310,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#runtime-profile-result"
       )
     ).ToContainTextAsync(
-      "Nenhuma análise"
+      "No analysis"
     );
   }
 
@@ -4157,7 +4495,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Concluído"
+      "Completed"
     );
     var remainingWhilePaused = await RemainingScrollAsync();
     Assert.IsGreaterThan(
@@ -4238,7 +4576,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Cancelar solicitação",
+        Name = "Cancel request",
         Exact = true
       }
     ).ClickAsync();
@@ -4247,7 +4585,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToHaveTextAsync(
-      "Cancelado"
+      "Canceled"
     );
     await Expect(
       Page.Locator(
@@ -4300,7 +4638,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Recuperado"
+      "Recovered"
     );
     await Expect(
       Page.Locator(
@@ -4357,7 +4695,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Falhou"
+      "Failed"
     );
     Assert.HasCount(
       2,
@@ -4405,10 +4743,9 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       Page.Locator(
-        "#workspace-badge"
+        ".project-active-marker"
       )
-    ).ToHaveTextAsync(
-      "Ativo"
+    ).ToBeVisibleAsync(
     );
     await Expect(
       Page.Locator(
@@ -4511,14 +4848,14 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     var workspaceInformation = Page.Locator(
       ".information-button[data-tooltip="
-        + "'Somente um workspace fica ativo por vez.']"
+        + "'Only one workspace is active at a time.']"
     );
     await workspaceInformation.HoverAsync();
     await Page.WaitForFunctionAsync(
       """
       () => getComputedStyle(
         document.querySelector(
-          '.information-button[data-tooltip="Somente um workspace fica ativo por vez."]'
+          '.information-button[data-tooltip="Only one workspace is active at a time."]'
         ),
         '::after'
       ).opacity === '1'
@@ -4534,7 +4871,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       await workspaceInformation.EvaluateAsync<string>(
         "button => getComputedStyle(button, '::after').content"
       ),
-      "Somente um workspace"
+      "Only one workspace"
     );
     await Page.Locator(
       "#add-workspace"
@@ -4544,7 +4881,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         AriaRole.Button,
         new()
         {
-          Name = "Selecionar pasta",
+          Name = "Select folder",
           Exact = true
         }
       )
@@ -4563,7 +4900,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Salvar workspace",
+        Name = "Save workspace",
         Exact = true
       }
     ).ClickAsync();
@@ -4590,7 +4927,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Salvar workspace",
+        Name = "Save workspace",
         Exact = true
       }
     ).ClickAsync();
@@ -4621,10 +4958,9 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
-        "#workspace-badge"
+        ".workspace-profile-entry.active"
       )
-    ).ToHaveTextAsync(
-      "Ativo"
+    ).ToBeVisibleAsync(
     );
     Assert.IsTrue(
       Directory.Exists(
@@ -4635,13 +4971,88 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ChatModeNeverPlansOrExecutesLocalActions()
+  public async Task ChatReadsTrustedWorkspaceWithoutApprovalUnderAskPolicy()
+  {
+    var target = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "chat-readable.txt"
+    );
+    await File.WriteAllTextAsync(
+      target,
+      "chat workspace evidence"
+    );
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "chat workspace read request: read chat-readable.txt"
+    );
+
+    await Expect(
+      Page.Locator(
+        ".message.assistant .assistant-answer"
+      ).Last
+    ).ToContainTextAsync(
+      "chat workspace evidence"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"chat.workspace-read-completed\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.awaiting-approval\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        ".action-approval"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.AreEqual(
+      "chat workspace evidence",
+      await File.ReadAllTextAsync(
+        target
+      )
+    );
+    var toolRequest = _environment.FakeOllama.Requests.First(
+      request => request.HasTools
+        && request.Messages.Any(
+          message => message.Content.Contains(
+            "CHAT_READ_ONLY_WORKSPACE_V1",
+            StringComparison.Ordinal
+          )
+        )
+    );
+    CollectionAssert.AreEquivalent(
+      new[]
+      {
+        "list_files",
+        "read_file",
+        "get_file_info",
+        "search_text"
+      },
+      toolRequest.AvailableTools.ToArray()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ChatRejectsUnofferedMutationWithoutApproval()
   {
     await Page.GotoAsync(
       "/"
     );
     await SendMessageAsync(
-      "execute create file in chat mode"
+      "chat workspace mutation attempt: create a file"
     );
 
     Assert.IsFalse(
@@ -4661,7 +5072,14 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.planning-started\"]"
+        "[data-event-type=\"chat.workspace-read-rejected\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.awaiting-approval\"]"
       )
     ).ToHaveCountAsync(
       0
@@ -4711,7 +5129,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -4725,7 +5143,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Concluído"
+      "Completed"
     );
     Assert.AreEqual(
       "hello from agent",
@@ -4820,7 +5238,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Textbox,
       new()
       {
-        Name = "Editar comando de delete_paths",
+        Name = "Edit delete_paths command",
         Exact = true
       }
     );
@@ -4834,7 +5252,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         AriaRole.Button,
         new()
         {
-          Name = "Atualizar",
+          Name = "Refresh",
           Exact = true
         }
       )
@@ -4844,7 +5262,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -4853,7 +5271,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToBeAttachedAsync();
     await Expect(
       Page.Locator(".activity > summary")
-    ).ToContainTextAsync("Conclu");
+    ).ToContainTextAsync("Completed");
 
     Assert.IsTrue(File.Exists(first));
     Assert.IsFalse(File.Exists(second));
@@ -6113,7 +6531,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       ).Last
     ).ToHaveTextAsync(
-      "Cancelado"
+      "Canceled"
     );
   }
 
@@ -6196,7 +6614,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       ).Last
     ).ToHaveTextAsync(
-      "Cancelado"
+      "Canceled"
     );
   }
 
@@ -6280,7 +6698,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Rejeitar",
+        Name = "Reject",
         Exact = true
       }
     ).ClickAsync();
@@ -6294,7 +6712,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Concluído"
+      "Completed"
     );
     Assert.IsFalse(
       File.Exists(
@@ -6488,7 +6906,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#project-profile-details"
       )
     ).ToContainTextAsync(
-      "1 arquivo(s) AGENTS.md"
+      "1 AGENTS.md file(s)"
     );
     await Page.Locator(
       "#validation-profile-section"
@@ -6759,7 +7177,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       Page.Locator("#detected-validation-profile")
-    ).ToContainTextAsync("Sugestão detectada:");
+    ).ToContainTextAsync("Detected suggestion:");
     await Page.Locator(
       "#reset-validation-profile"
     ).ClickAsync();
@@ -6783,7 +7201,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#validation-profile-status"
       )
     ).ToContainTextAsync(
-      "Perfil salvo"
+      "Profile saved"
     );
     await Page.ReloadAsync();
     await Page.Locator(
@@ -6907,7 +7325,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Aprovar",
+        Name = "Approve",
         Exact = true
       }
     ).ClickAsync();
@@ -6937,7 +7355,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#change-review-body"
       )
     ).ToContainTextAsync(
-      "Conflito em hello.txt"
+      "Conflict in hello.txt"
     );
   }
 
@@ -7096,7 +7514,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Salvar workspace"
+        Name = "Save workspace"
       }
     ).ClickAsync();
     await Expect(
@@ -7150,7 +7568,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#send-button-label"
       )
     ).ToHaveTextAsync(
-      "Enviar"
+      "Send"
     );
     await Page.Locator(
       "#new-conversation"
@@ -7173,19 +7591,18 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "element => element.open = true"
     );
     await Page.Locator(
+      ".project-accordion.active"
+    ).EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator(
       "#recent-sessions .session-entry"
     ).Filter(
       new()
       {
         HasText = "Corrective smoke conversation."
       }
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Retomar"
-      }
-    ).ClickAsync();
+    ).Locator(".session-entry-content").ClickAsync();
     await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
@@ -7209,12 +7626,12 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Ativar"
+        Name = "Enable"
       }
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        $"[data-workspace-id=\"{plainWorkspaceId}\"].active"
+        $".workspace-profile-entry[data-workspace-id=\"{plainWorkspaceId}\"].active"
       )
     ).ToBeVisibleAsync();
     await Expect(

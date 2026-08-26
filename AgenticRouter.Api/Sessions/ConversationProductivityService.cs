@@ -1340,7 +1340,7 @@ public sealed class ConversationProductivityService
     string title
   )
   {
-    const string suffix = " (cópia)";
+    const string suffix = " (copy)";
     var bounded = title.Length + suffix.Length <= 100
       ? title
       : title[..(100 - suffix.Length)].TrimEnd();
