@@ -642,6 +642,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               StringComparison.OrdinalIgnoreCase
             )
             || message.Content.Contains(
+              "chat workspace read budget request",
+              StringComparison.OrdinalIgnoreCase
+            )
+            || message.Content.Contains(
               "chat workspace mutation attempt",
               StringComparison.OrdinalIgnoreCase
             )
@@ -4901,6 +4905,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "streaming markdown preview",
       StringComparison.OrdinalIgnoreCase
     );
+    var isBrowserBufferSource = current.Contains(
+      "browser message buffer source",
+      StringComparison.OrdinalIgnoreCase
+    );
     var parts = isStreamingMarkdownPreview
       ? new[]
       {
@@ -4961,7 +4969,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         await Task.Delay(
           isStreamingMarkdownPreview
             ? 1_000
-            : 120,
+            : isBrowserBufferSource
+              ? 700
+              : 120,
           cancellationToken
         );
       }
@@ -4985,6 +4995,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    var budgetAttempt = messages.Any(
+      message => message.Role == "user"
+        && message.Content.Contains(
+          "chat workspace read budget request",
+          StringComparison.OrdinalIgnoreCase
+        )
+    );
     var mutationAttempt = messages.Any(
       message => message.Role == "user"
         && message.Content.Contains(
@@ -4995,12 +5012,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var toolResult = messages.LastOrDefault(
       message => message.Role == "tool"
     );
-    var content = toolResult is null
-      ? string.Empty
-      : mutationAttempt
-        ? $"Chat mutation was rejected by the read-only boundary. {toolResult.Content}"
-        : $"Chat used trusted-workspace evidence without approval. {toolResult.Content}";
-    var toolCalls = toolResult is null
+    var toolResultCount = messages.Count(
+      message => message.Role == "tool"
+    );
+    var budgetFinalization = budgetAttempt && toolResultCount > 8;
+    var content = budgetFinalization
+      ? "Chat completed from the eight trusted-workspace reads already collected."
+      : toolResult is null
+        ? string.Empty
+        : mutationAttempt
+          ? $"Chat mutation was rejected by the read-only boundary. {toolResult.Content}"
+          : budgetAttempt
+            ? string.Empty
+            : $"Chat used trusted-workspace evidence without approval. {toolResult.Content}";
+    var toolCalls = budgetFinalization
+      ? null
+      : toolResult is null || budgetAttempt
       ? new[]
       {
         new
@@ -5022,7 +5049,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               : JsonSerializer.SerializeToElement(
                 new
                 {
-                  path = "chat-readable.txt"
+                  path = budgetAttempt
+                    ? $"chat-budget-{toolResultCount + 1}.txt"
+                    : "chat-readable.txt"
                 },
                 CompactJsonOptions
               )
@@ -5041,7 +5070,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           ? mutationAttempt
             ? "I will try a mutation that Chat must reject."
             : "I will inspect the requested workspace file."
-          : null,
+          : budgetAttempt
+            ? $"I will inspect workspace file {toolResultCount + 1}."
+            : null,
         toolCalls,
         0,
         cancellationToken

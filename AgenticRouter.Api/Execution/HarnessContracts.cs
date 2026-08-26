@@ -39,7 +39,22 @@ public sealed record HarnessCapabilities(
   bool SupportsSubagents,
   bool SupportsSandbox,
   bool SupportsSessionDiff,
-  bool SupportsNativePermissions
+  bool SupportsNativePermissions,
+  bool SupportsSteering
+);
+
+public sealed record HarnessSteerRequest(
+  string SessionId,
+  string Message,
+  string MessageId
+);
+
+public sealed record HarnessSteerResult(
+  string HarnessId,
+  string SessionId,
+  string TurnId,
+  string MessageId,
+  bool Accepted
 );
 
 public sealed record HarnessDefinition(
@@ -121,7 +136,8 @@ public sealed record HarnessTurnRequest(
   bool UseMinimalToolInventory = false,
   bool ReleaseWorkspaceAfterTurn = false,
   bool ReleaseWorkspaceOnCancellation = false,
-  IReadOnlyList<HarnessImageInput>? Images = null
+  IReadOnlyList<HarnessImageInput>? Images = null,
+  bool IsRecoveryContinuation = false
 );
 
 public sealed record HarnessEvent
@@ -277,6 +293,14 @@ public interface IAgentHarnessTransport
 
   Task CancelTurnAsync(
     string sessionId,
+    CancellationToken cancellationToken
+  );
+}
+
+public interface IAgentHarnessSteeringTransport
+{
+  Task<HarnessSteerResult> SteerTurnAsync(
+    HarnessSteerRequest request,
     CancellationToken cancellationToken
   );
 }

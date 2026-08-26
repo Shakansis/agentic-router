@@ -17,7 +17,7 @@ public sealed record CodexHarnessOptions(
   TimeSpan InterruptTimeout
 );
 
-public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAsyncDisposable
+public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAgentHarnessSteeringTransport, IAsyncDisposable
 {
   private const int AutoCompactPercentage = 98;
   private const int MaximumActivityText = 8_192;
@@ -41,7 +41,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       SupportsSubagents: false,
       SupportsSandbox: true,
       SupportsSessionDiff: true,
-      SupportsNativePermissions: true
+      SupportsNativePermissions: true,
+      SupportsSteering: true
     ),
     ["ollama-local"]
   );
@@ -229,8 +230,18 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         "ProviderEndpoint was null.",
         false
       );
-      await EnsureStartedAsync(request, providerEndpoint, cancellationToken);
-      var harnessSession = await GetOrStartThreadAsync(request, cancellationToken);
+      var contextConfiguration = ResolveContextConfiguration(request);
+      await EnsureStartedAsync(
+        request,
+        contextConfiguration,
+        providerEndpoint,
+        cancellationToken
+      );
+      var harnessSession = await GetOrStartThreadAsync(
+        request,
+        contextConfiguration,
+        cancellationToken
+      );
       var threadId = harnessSession.NativeSessionId;
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
@@ -297,10 +308,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         cancellationToken
       ))
       {
-        if (
-          harnessEvent.TerminalState is HarnessTerminalState.Completed
-            or HarnessTerminalState.Partial
-        )
+        if (harnessEvent.IsTerminal)
         {
           harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
         }
@@ -373,6 +381,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           new HarnessEvent(
             "turn.timed-out",
             $"Codex produced no event within the configured {eventIdleTimeout.TotalSeconds:0}-second generation timeout.",
+            output: $"No Codex App Server event arrived for {eventIdleTimeout.TotalSeconds:0} seconds while the turn remained active.",
             errorCode: "codex-event-idle-timeout",
             terminalState: HarnessTerminalState.TimedOut
           )
@@ -521,6 +530,56 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     }
   }
 
+  public async Task<HarnessSteerResult> SteerTurnAsync(
+    HarnessSteerRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      !_threadsByConversation.TryGetValue(request.SessionId, out var harnessSession)
+      || !_activeByThread.TryGetValue(harnessSession.NativeSessionId, out var active)
+      || string.IsNullOrWhiteSpace(active.TurnId)
+    )
+    {
+      throw new HarnessException(
+        "codex-steer-stale",
+        "The Codex turn is no longer available for steering.",
+        $"No active Codex turn exists for conversation {request.SessionId}.",
+        true
+      );
+    }
+
+    var result = await SendRequestAsync(
+      "turn/steer",
+      new
+      {
+        threadId = active.ThreadId,
+        input = CreateTurnInput(request.Message, null),
+        expectedTurnId = active.TurnId
+      },
+      _options.InterruptTimeout,
+      cancellationToken
+    );
+    var returnedTurnId = RequiredString(result, "turnId");
+    if (!string.Equals(returnedTurnId, active.TurnId, StringComparison.Ordinal))
+    {
+      throw new HarnessException(
+        "codex-steer-turn-mismatch",
+        "Codex accepted steering for a different turn.",
+        $"Expected turn {active.TurnId}, received {returnedTurnId}.",
+        false
+      );
+    }
+
+    return new HarnessSteerResult(
+      HarnessIds.Codex,
+      request.SessionId,
+      returnedTurnId,
+      request.MessageId,
+      true
+    );
+  }
+
   public async ValueTask DisposeAsync()
   {
     if (_disposed)
@@ -538,6 +597,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private async Task EnsureStartedAsync(
     HarnessTurnRequest request,
+    CodexContextConfiguration contextConfiguration,
     Uri ollamaUrl,
     CancellationToken cancellationToken
   )
@@ -546,7 +606,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
     try
     {
-      var catalogChanged = RegisterModelMetadata(request);
+      var catalogChanged = RegisterModelMetadata(request, contextConfiguration);
       if (
         _process is { HasExited: false }
         && string.Equals(_activeOllamaUrl, ollamaUrl.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
@@ -676,10 +736,10 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private async Task<HarnessSessionState> GetOrStartThreadAsync(
     HarnessTurnRequest request,
+    CodexContextConfiguration contextConfiguration,
     CancellationToken cancellationToken
   )
   {
-    var contextConfiguration = ResolveContextConfiguration(request);
     if (_threadsByConversation.TryGetValue(request.SessionId, out var existing)
       && string.Equals(
         existing.CapabilitySignature,
@@ -1446,6 +1506,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         new HarnessEvent(
           "turn.failed",
           exception.Message,
+          output: exception.TechnicalMessage,
           errorCode: exception.Code,
           terminalState: terminalState
         )
@@ -1521,12 +1582,15 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     File.Move(temporary, path, true);
   }
 
-  private bool RegisterModelMetadata(HarnessTurnRequest request)
+  private bool RegisterModelMetadata(
+    HarnessTurnRequest request,
+    CodexContextConfiguration contextConfiguration
+  )
   {
     var supportsImages = request.Images is { Count: > 0 };
     var metadata = new CodexLocalModelMetadata(
       request.Model,
-      request.ContextWindowTokens!.Value,
+      contextConfiguration.ContextWindowTokens,
       supportsImages
     );
     if (_knownModelMetadata.TryGetValue(request.Model, out var current))
@@ -1729,6 +1793,15 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     var autoCompactTokenLimit = checked(
       (int)((long)contextWindowTokens * AutoCompactPercentage / 100)
     );
+    if (autoCompactTokenLimit <= 0 || autoCompactTokenLimit >= contextWindowTokens)
+    {
+      throw new HarnessException(
+        "codex-context-configuration-invalid",
+        "Codex received an invalid Host context or compaction limit.",
+        $"Context window {contextWindowTokens}; {AutoCompactPercentage}-percent auto-compaction limit {autoCompactTokenLimit}.",
+        false
+      );
+    }
     return new CodexContextConfiguration(
       contextWindowTokens,
       autoCompactTokenLimit

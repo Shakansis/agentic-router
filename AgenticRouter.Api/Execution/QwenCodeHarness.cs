@@ -18,7 +18,7 @@ public sealed record QwenCodeHarnessOptions(
   TimeSpan RequestTimeout
 );
 
-public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport
+public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAgentHarnessSteeringTransport
 {
   private const int MaximumActivityText = 8_192;
   private const int MaximumNativeDiagnosticsPerTurn = 8;
@@ -33,6 +33,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     "typed_event_schema",
     "session_set_model",
     "session_permission_vote",
+    "session_mid_turn_message_mutation",
+    "session_mid_turn_message_query",
     "session_context",
     "session_close",
     "workspace_providers",
@@ -61,7 +63,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSubagents: false,
       SupportsSandbox: false,
       SupportsSessionDiff: false,
-      SupportsNativePermissions: true
+      SupportsNativePermissions: true,
+      SupportsSteering: true
     ),
     ["ollama-local"]
   );
@@ -610,6 +613,76 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       active.ClientId,
       cancellationToken,
       HttpStatusCode.NoContent
+    );
+  }
+
+  public async Task<HarnessSteerResult> SteerTurnAsync(
+    HarnessSteerRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      !_activeTurns.TryGetValue(request.SessionId, out var active)
+      || string.IsNullOrWhiteSpace(active.PromptId)
+    )
+    {
+      throw Failure(
+        "qwen-code-steer-stale",
+        "The Qwen Code turn is no longer available for steering."
+      );
+    }
+
+    var result = await SendAsync(
+      HttpMethod.Post,
+      $"session/{EncodePath(active.QwenSessionId)}/mid-turn-message",
+      new
+      {
+        message = request.Message,
+        messageId = request.MessageId
+      },
+      active.ClientId,
+      cancellationToken
+    );
+    if (
+      result.ValueKind != JsonValueKind.Object
+      || !result.TryGetProperty("accepted", out var accepted)
+      || accepted.ValueKind != JsonValueKind.True
+    )
+    {
+      throw Failure(
+        "qwen-code-steer-rejected",
+        "Qwen Code did not accept the steering message."
+      );
+    }
+
+    var returnedMessageId = String(result, "messageId") ?? request.MessageId;
+    var reconciliation = await SendAsync(
+      HttpMethod.Get,
+      $"session/{EncodePath(active.QwenSessionId)}/mid-turn-messages",
+      null,
+      active.ClientId,
+      cancellationToken
+    );
+    if (StringArrayContains(reconciliation, "promotedMessageIds", returnedMessageId))
+    {
+      await SendAsync(
+        HttpMethod.Delete,
+        $"session/{EncodePath(active.QwenSessionId)}/mid-turn-messages/{EncodePath(returnedMessageId)}",
+        null,
+        active.ClientId,
+        cancellationToken
+      );
+      throw Failure(
+        "qwen-code-steer-promoted",
+        "The Qwen Code turn ended before it could receive the steering message. The message remains in the composer so it can be queued explicitly."
+      );
+    }
+    return new HarnessSteerResult(
+      HarnessIds.QwenCode,
+      request.SessionId,
+      active.PromptId,
+      returnedMessageId,
+      true
     );
   }
 
@@ -1765,6 +1838,20 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private static string EncodePath(string value)
   {
     return Uri.EscapeDataString(value);
+  }
+
+  private static bool StringArrayContains(
+    JsonElement value,
+    string property,
+    string expected
+  )
+  {
+    return value.ValueKind == JsonValueKind.Object
+      && value.TryGetProperty(property, out var items)
+      && items.ValueKind == JsonValueKind.Array
+      && items.EnumerateArray().Any(
+        item => string.Equals(item.GetString(), expected, StringComparison.Ordinal)
+      );
   }
 
   private static HarnessException Failure(string code, string message)

@@ -63,6 +63,11 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - **Effect-Based Completion**: Actions count as completed only after the Host observes the required effect
 - **Boundary-Based Approval**: Trusted-workspace actions are automatic by default; real external or elevated-risk effects remain explicit
 - **Tool Effect Registry**: Post-resolution effect typing (inspection, file creation, modification, deletion, etc.)
+- **Codex Context Authority**: The Host-resolved effective context window is passed unchanged to the isolated Codex model catalog and thread; automatic compaction starts at 98% of that same total active-context limit
+- **Bounded Codex Continuation**: One visible continuation on the same model, provider, thread, workspace, and approval policy is allowed after an idle/disconnected stream or an unexpected App Server exit; the recovery prompt includes the exact cause and Host-confirmed plan/effect state
+- **Browser Message Buffer**: During an active response the ordinary Send button queues follow-up prompts locally in the current browser; a detached composer control cancels the response, queued items can be edited or removed inline, and the next ready item submits automatically after completion; drafts being edited never auto-submit and the queue is not persisted
+- **Same-turn Steering**: Queued items can steer the exact active Codex or Qwen Code turn; Claude Code and OpenCode remain queue-only and the disabled queued-item action explains that distinction
+- **Context Accounting**: Live context usage remains fixed directly above the composer as backgroundless text, outside the prompt panel, while retaining its detailed usage popover
 
 **Available Tools:**
 - `list_files` - List directory contents
@@ -400,9 +405,11 @@ Click the "Configurações" button to access the configuration interface:
 
 1. Type your message in the composer at the bottom
 2. Press **Enter** to send (Shift+Enter for line break)
-3. The router classifies your intent
-4. The appropriate expert model is selected based on configuration precedence
-5. Response streams in real-time with routing activity visible in collapsible details
+3. While a response is active, Send or Enter adds the draft to the browser-only queue; use the separate upper-right control to cancel the active response
+4. Edit, delete, or—on Codex and Qwen Code—steer a queued item with its inline icon actions
+5. The router classifies your intent
+6. The appropriate expert model is selected based on configuration precedence
+7. Response streams in real-time with routing activity visible in collapsible details
 
 ### Model Resolution Precedence
 
@@ -512,7 +519,7 @@ The following are explicitly out of scope unless a later approved specification 
 
 **For Chat Mode:**
 - Autonomous agents, recursive delegation, agent graphs, planning graphs, or approval gates
-- Workflow builders, queues, schedulers, or background job systems
+- Workflow builders, persistent/background job queues, schedulers, or background job systems
 - Hugging Face training pipelines, fine-tuning, LoRA, dataset preparation, or tokenizer management
 - RAG, embeddings, vector databases, document ingestion, or knowledge bases
 - Custom GPU schedulers or VRAM allocation engines (delegated to provider)

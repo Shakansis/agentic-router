@@ -40,7 +40,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       SupportsSubagents: false,
       SupportsSandbox: false,
       SupportsSessionDiff: false,
-      SupportsNativePermissions: true
+      SupportsNativePermissions: true,
+      SupportsSteering: false
     ),
     ["ollama-local"]
   );

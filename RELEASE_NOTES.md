@@ -1,3 +1,42 @@
+# Unreleased corrections
+
+- Adds a browser-only message buffer for every Chat/Execute route. During a
+  response, the ordinary Send button queues the draft while a detached circular
+  control cancels the active response. Queued prompts expose rounded Edit,
+  Delete, and supported Steer icon actions; an active edit blocks automatic
+  dispatch, cancellation pauses the remaining queue, and no queue state is
+  persisted.
+- Adds explicit same-turn steering for Codex `turn/steer` and Qwen Code
+  `mid-turn-message`, bound to the exact active Agentic Router conversation and
+  native turn/prompt identity. Steer is offered only on queued items. Codex now
+  consumes the App Server's direct `turnId` response field. Claude Code,
+  OpenCode, and Native do not receive
+  fabricated steering semantics; the disabled button explains the limitation.
+- Moves context accounting out of the prompt panel into a backgroundless,
+  right-aligned line immediately above it. Unsupported Steer actions now expose
+  a reliable wrapper-owned tooltip naming the current harness and directing the
+  user to Codex or Qwen Code, including keyboard focus support.
+- Converts the bounded Chat workspace-read limit into a visible finalization
+  boundary: an over-budget read is rejected as a tool result, read tools close,
+  and the model receives one final bounded turn to answer from collected
+  evidence instead of failing the entire request.
+- Makes the Host-resolved effective context window the single Codex authority:
+  model-catalog metadata, thread `model_context_window`, and the 98-percent
+  `model_auto_compact_token_limit` now derive from the same configuration, with
+  `total` active-context scope.
+- Adds exactly one visible Codex continuation attempt for
+  `codex-event-idle-timeout`, `codex-provider-stream-idle-timeout`,
+  `codex-provider-stream-disconnected`, and `codex-app-server-exited`.
+- Continues on the same selected model/provider/harness/workspace/approval
+  contract and includes the actual failure cause plus Host-confirmed objective,
+  changed paths, completed actions, and completed/pending plan steps.
+- Avoids duplicating canonical conversation hydration in the continuation turn;
+  repeated transient failure remains terminal after the single bounded attempt.
+- Retries post-turn workspace observation exactly once after a transient local
+  I/O/access race. Persistent observation failures now return the typed
+  `<harness>-workspace-observation-failed` cause instead of a generic
+  application error, without weakening Host effect verification.
+
 # Agentic Router v0.9.14
 
 This version combines the Execute effect-authority correction with a focused UI

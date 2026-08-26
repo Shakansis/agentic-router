@@ -2138,28 +2138,32 @@ public sealed class ChatStreamService : IChatStreamService
       model,
       intention
     );
+    var harnessTurnRequest = new HarnessTurnRequest(
+      harnessDefinition.Id,
+      conversationId,
+      model,
+      ModelProviderIds.OllamaLocal,
+      workspacePath,
+      request.Message,
+      request.ApprovalPolicy,
+      ollamaUrl,
+      CreateHarnessConversationContext(context),
+      ContextWindowTokens: initialContextUsage.EffectiveLimitTokens,
+      HostCapabilities: hostCapabilities,
+      Images: images.Select(
+        image => new HarnessImageInput(
+          image.Id,
+          image.FileName,
+          image.MimeType,
+          image.Bytes
+        )
+      ).ToArray()
+    );
+    var automaticContinuationAttempts = 0;
+  StartHarnessTurn:
+    terminalFailure = null;
     await foreach (var harnessEvent in harness.StartTurnAsync(
-      new HarnessTurnRequest(
-        harnessDefinition.Id,
-        conversationId,
-        model,
-        ModelProviderIds.OllamaLocal,
-        workspacePath,
-        request.Message,
-        request.ApprovalPolicy,
-        ollamaUrl,
-        CreateHarnessConversationContext(context),
-        ContextWindowTokens: initialContextUsage.EffectiveLimitTokens,
-        HostCapabilities: hostCapabilities,
-        Images: images.Select(
-          image => new HarnessImageInput(
-            image.Id,
-            image.FileName,
-            image.MimeType,
-            image.Bytes
-          )
-        ).ToArray()
-      ),
+      harnessTurnRequest,
       cancellationToken
     ))
     {
@@ -2279,7 +2283,7 @@ public sealed class ChatStreamService : IChatStreamService
           );
           break;
         case "usage.updated" when harnessEvent.ContextInputTokens is > 0
-          || harnessEvent.ContextTotalTokens is > 0:
+        || harnessEvent.ContextTotalTokens is > 0:
           latestContextUsage = WithExactContextUsage(
             latestContextUsage,
             harnessEvent.ContextInputTokens
@@ -2634,7 +2638,58 @@ public sealed class ChatStreamService : IChatStreamService
       }
     }
 
-    var observed = await observer.ObserveAsync(
+    if (terminalFailure is not null && CanAutomaticallyContinueCodex(
+        harnessDefinition,
+        terminalFailure,
+        automaticContinuationAttempts
+      ))
+    {
+      var recoveryObserved = await ObserveHarnessWorkspaceAsync(
+        observer,
+        harnessDefinition,
+        approvedDeletionPaths,
+        !hostCapabilities.MutationRequiresApproval || approvedNativeMutation,
+        cancellationToken
+      );
+      automaticContinuationAttempts++;
+      var recoveryPrompt = CreateCodexAutomaticContinuationPrompt(
+        terminalFailure,
+        session,
+        recoveryObserved,
+        automaticContinuationAttempts
+      );
+      session.AddWarning(
+        $"Codex automatic continuation {automaticContinuationAttempts}/1 started after {terminalFailure.ErrorCode}."
+      );
+      yield return Event(
+        requestId,
+        "harness.codex-automatic-continuation-started",
+        $"Codex transient recovery {automaticContinuationAttempts}/1 started after {terminalFailure.ErrorCode}: {terminalFailure.Output ?? terminalFailure.Message}",
+        stopwatch,
+        model,
+        intention
+      );
+
+      answer.Clear();
+      responseSegment.Clear();
+      activeResponseItemId = null;
+      liveContextBase = latestContextUsage;
+      liveOutputCharacters = 0;
+      lastPublishedLiveOutputTokens = 0;
+      lastLiveContextUpdateMilliseconds = stopwatch.ElapsedMilliseconds;
+      harnessTurnRequest = harnessTurnRequest with
+      {
+        Prompt = recoveryPrompt,
+        Conversation = null,
+        Images = null,
+        IsRecoveryContinuation = true
+      };
+      goto StartHarnessTurn;
+    }
+
+    var observed = await ObserveHarnessWorkspaceAsync(
+      observer,
+      harnessDefinition,
       approvedDeletionPaths,
       !hostCapabilities.MutationRequiresApproval || approvedNativeMutation,
       cancellationToken
@@ -2765,6 +2820,118 @@ public sealed class ChatStreamService : IChatStreamService
       ResponseTail: responseTail,
       ResponseTailHtml: _markdownRenderer.Render(responseTail)
     );
+  }
+
+  private static bool CanAutomaticallyContinueCodex(
+    HarnessDefinition harnessDefinition,
+    HarnessEvent failure,
+    int attempts
+  )
+  {
+    return attempts == 0
+      && string.Equals(
+        harnessDefinition.Id,
+        HarnessIds.Codex,
+        StringComparison.OrdinalIgnoreCase
+      )
+      && failure.ErrorCode is
+        "codex-event-idle-timeout"
+        or "codex-provider-stream-idle-timeout"
+        or "codex-provider-stream-disconnected"
+        or "codex-app-server-exited";
+  }
+
+  private async Task<IReadOnlyList<ExecutionFileChange>> ObserveHarnessWorkspaceAsync(
+    HarnessWorkspaceObserver observer,
+    HarnessDefinition harnessDefinition,
+    IReadOnlySet<string> approvedDeletionPaths,
+    bool policyAuthorizesDeletion,
+    CancellationToken cancellationToken
+  )
+  {
+    const int maximumAttempts = 2;
+    for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+    {
+      try
+      {
+        return await observer.ObserveAsync(
+          approvedDeletionPaths,
+          policyAuthorizesDeletion,
+          cancellationToken
+        );
+      }
+      catch (HarnessException)
+      {
+        throw;
+      }
+      catch (Exception exception) when (
+        exception is IOException or UnauthorizedAccessException
+        && attempt < maximumAttempts
+      )
+      {
+        _logger.LogWarning(
+          exception,
+          "Workspace observation attempt {Attempt}/{MaximumAttempts} failed transiently after {HarnessId} completed; retrying once.",
+          attempt,
+          maximumAttempts,
+          harnessDefinition.Id
+        );
+        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        throw new HarnessException(
+          $"{harnessDefinition.Id}-workspace-observation-failed",
+          $"Agentic Router could not verify the complete workspace state after {harnessDefinition.DisplayName} finished.",
+          $"{exception.GetType().Name}: {exception.Message}",
+          true,
+          exception,
+          harnessDefinition.Id
+        );
+      }
+    }
+
+    throw new UnreachableException();
+  }
+
+  private static string CreateCodexAutomaticContinuationPrompt(
+    HarnessEvent failure,
+    ExecutionSession session,
+    IReadOnlyList<ExecutionFileChange> observed,
+    int attempt
+  )
+  {
+    var summary = session.CreateSummary();
+    var completedSteps = summary.Plan?.Steps
+      .Where(step => string.Equals(step.Status, "completed", StringComparison.Ordinal))
+      .Select(step => $"{step.Id}: {step.Title}")
+      .ToArray() ?? [];
+    var pendingSteps = summary.Plan?.Steps
+      .Where(step => step.Status is not ("completed" or "failed" or "blocked"))
+      .Select(step => $"{step.Id}: {step.Title} [{step.Status}]")
+      .ToArray() ?? [];
+    var changedPaths = observed.Select(change => $"{change.RelativePath} [{change.Operation}]")
+      .ToArray();
+    var actualCause = failure.Output ?? failure.Message ?? "No additional cause was provided.";
+
+    return TruncateRecoveryContext(
+      $"A recoverable Codex transport failure interrupted the previous turn.\n"
+        + $"Automatic continuation attempt: {attempt}/1.\n"
+        + $"Failure code: {failure.ErrorCode ?? "codex-turn-failed"}.\n"
+        + $"Actual cause: {actualCause}\n\n"
+        + $"Original user objective:\n{session.Objective}\n\n"
+        + "Authoritative Host state after the interruption:\n"
+        + $"- Completed Host actions: {session.CompletedActionCount}.\n"
+        + $"- Host-observed changed paths: {FormatRecoveryFacts(changedPaths)}.\n"
+        + $"- Completed plan steps: {FormatRecoveryFacts(completedSteps)}.\n"
+        + $"- Pending plan steps: {FormatRecoveryFacts(pendingSteps)}.\n\n"
+        + "Continue the same objective from the current Codex thread. Reinspect the workspace and the Host state above before acting. Do not repeat completed actions or recreate completed plan steps. Bind every new action to the exact pending Host-owned stepId while an accepted plan exists. If the objective is already complete, verify that from current facts and report it."
+    );
+  }
+
+  private static string FormatRecoveryFacts(IReadOnlyList<string> values)
+  {
+    return values.Count == 0 ? "none" : string.Join("; ", values);
   }
 
   private async Task<IReadOnlyList<string>> ResolveHarnessApprovalPathsAsync(
@@ -6053,7 +6220,8 @@ public sealed class ChatStreamService : IChatStreamService
       intention
     );
 
-    for (var attempt = 1; attempt <= MaximumChatReadToolCalls + 1; attempt++)
+    var completionRequired = false;
+    for (var attempt = 1; attempt <= MaximumChatReadToolCalls + 2; attempt++)
     {
       var streamed = Channel.CreateUnbounded<ChatReadStreamDelta>(
         new UnboundedChannelOptions
@@ -6072,7 +6240,9 @@ public sealed class ChatStreamService : IChatStreamService
               baseUri,
               model,
               toolMessages,
-              toolDefinitions,
+              completionRequired
+                ? []
+                : toolDefinitions,
               "chat-read-only-tools",
               UsageContext(
                 model,
@@ -6289,6 +6459,17 @@ public sealed class ChatStreamService : IChatStreamService
         response
       );
       if (
+        completionRequired
+        && turn.ToolCalls.Count > 0
+      )
+      {
+        progress.Failure = new LocalActionException(
+          "chat-read-finalization",
+          "The selected model requested another workspace tool after the Host closed the bounded Chat read phase."
+        );
+        yield break;
+      }
+      if (
         turn.ToolCalls.Count > 0
         && (
           progress.ReceivedFirstChunk
@@ -6471,11 +6652,31 @@ public sealed class ChatStreamService : IChatStreamService
 
       if (attempt > MaximumChatReadToolCalls)
       {
-        progress.Failure = new LocalActionException(
-          "chat-read-budget",
-          $"Chat exhausted the bounded read budget of {MaximumChatReadToolCalls} tool calls."
+        var budgetMessage = $"The Host read limit of {MaximumChatReadToolCalls} workspace tool calls was reached. "
+          + "No more workspace tools are available in this turn. Complete the user-facing answer now using only the evidence already returned, and state any remaining evidence limitation.";
+        toolMessages.Add(
+          _toolingProtocol.CreateToolResultMessage(
+            toolingProfile,
+            new CanonicalToolResult(
+              call.CallId,
+              call.Name,
+              "rejected",
+              budgetMessage,
+              false,
+              false
+            )
+          )
         );
-        yield break;
+        completionRequired = true;
+        yield return Event(
+          requestId,
+          "chat.workspace-read-budget-reached",
+          $"Chat reached the bounded read limit of {MaximumChatReadToolCalls}; read tools were closed and final response synthesis was requested.",
+          stopwatch,
+          model,
+          intention
+        );
+        continue;
       }
 
       var action = validation.Action;
@@ -6529,8 +6730,12 @@ public sealed class ChatStreamService : IChatStreamService
     }
 
     progress.Failure ??= new LocalActionException(
-      "chat-read-budget",
-      $"Chat exhausted the bounded read budget of {MaximumChatReadToolCalls} tool calls."
+      completionRequired
+        ? "chat-read-finalization"
+        : "chat-read-budget",
+      completionRequired
+        ? "The selected model did not return a final Chat response after the bounded workspace read phase closed."
+        : $"Chat exhausted the bounded read budget of {MaximumChatReadToolCalls} tool calls."
     );
   }
 

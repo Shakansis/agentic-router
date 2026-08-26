@@ -19,7 +19,8 @@ public sealed class NativeHarnessAdapter : IAgentHarness
       SupportsSubagents: false,
       SupportsSandbox: false,
       SupportsSessionDiff: true,
-      SupportsNativePermissions: false
+      SupportsNativePermissions: false,
+      SupportsSteering: false
     )
   );
 

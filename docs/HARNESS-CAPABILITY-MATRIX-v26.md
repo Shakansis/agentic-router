@@ -77,6 +77,7 @@ to normalize tool lists.
 | Effect verification and truthful terminal result | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Streaming/tool activity/cancellation | NATIVE | NATIVE | NATIVE | NATIVE |
 | Same-harness session resume | NATIVE | NATIVE | NATIVE | NATIVE |
+| Same-turn supplemental user steering | UNSUPPORTED | NATIVE | UNSUPPORTED | NATIVE |
 | Cross-harness canonical conversation hydration | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Typed rejection returned for materially different recovery | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 
@@ -140,6 +141,27 @@ the bearer token is not persisted.
 
 No capability was disabled merely to make the harness lists identical.
 
+## Browser message sequencing and steering update
+
+The browser now owns a non-persistent editable follow-up queue for every
+model/harness route, including Native and Claude Code. This is UI sequencing,
+not a harness capability: after a turn ends, the next ready item is submitted
+through the ordinary `/api/chat/stream` path. Editing any queued item blocks
+automatic submission until the user saves or cancels the edit; cancelling the
+active response pauses the queue.
+
+Same-turn steering remains a separate, capability-gated operation:
+
+- Codex maps to App Server `turn/steer` with the exact expected active turn ID.
+- Qwen Code maps to the owned daemon session's `mid-turn-message` endpoint with
+  an idempotent browser-generated message ID.
+- OpenCode and Claude Code remain queue-only because their reviewed public
+  contracts do not expose equivalent same-turn injection semantics.
+- Native remains outside the steering contract.
+
+The Host never converts steering into cancellation plus a new turn and never
+silently falls back from `Steer` to `Queue`.
+
 ## Concise manual test plan
 
 Use a disposable trusted Git workspace containing one pre-existing inspected
@@ -168,6 +190,9 @@ approve.
    recover without the AR request terminating.
 4. Switch away and back; verify thread resume or canonical hydration preserves
    the earlier task marker and Host-observed file state.
+5. Verify the model catalog and thread report the same Host-resolved context,
+   compact at 98% of that total window, and perform at most one cause-aware
+   continuation after an allowlisted transient stream/App Server failure.
 
 ### OpenCode 1.18.18
 

@@ -1457,7 +1457,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       )
     );
     await Page.Locator(
-      "#send-button"
+      "#cancel-request"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -1891,6 +1891,91 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#send-button"
       )
     ).ToBeVisibleAsync();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ContextUsageFloatsAboveAndOutsideTheComposerPanel()
+  {
+    await Page.GotoAsync("/");
+
+    var placement = await Page.EvaluateAsync<JsonElement>(
+      """
+      () => {
+        const shell = document.querySelector(".composer-shell");
+        const wrapper = document.querySelector(".composer-context-usage");
+        const context = document.querySelector("#context-usage");
+        const composer = document.querySelector("#composer");
+        const wrapperRect = wrapper.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        return {
+          insideShell: shell.contains(wrapper),
+          outsideComposer: !composer.contains(context),
+          aboveComposer: wrapperRect.bottom <= composerRect.top + 1,
+          alignedRight: Math.abs(wrapperRect.right - composerRect.right) <= 1,
+          background: getComputedStyle(wrapper).backgroundColor
+        };
+      }
+      """
+    );
+    Assert.IsTrue(placement.GetProperty("insideShell").GetBoolean());
+    Assert.IsTrue(placement.GetProperty("outsideComposer").GetBoolean());
+    Assert.IsTrue(placement.GetProperty("aboveComposer").GetBoolean());
+    Assert.IsTrue(placement.GetProperty("alignedRight").GetBoolean());
+    Assert.AreEqual(
+      "rgba(0, 0, 0, 0)",
+      placement.GetProperty("background").GetString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BrowserMessageBufferWaitsForInlineEditingThenDispatchesTheEditedPrompt()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+
+    await StartMessageAsync("browser message buffer source");
+    await Expect(Page.Locator("#cancel-request")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
+    await Page.Locator("#message-input").FillAsync("queued original prompt");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator("#message-buffer")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".message-buffer-item")).ToContainTextAsync(
+      "queued original prompt"
+    );
+    var queuedActions = Page.Locator(".message-buffer-item").First
+      .Locator(".message-buffer-action");
+    await Expect(queuedActions).ToHaveCountAsync(3);
+    await Expect(queuedActions.Nth(0)).ToHaveAttributeAsync("data-action", "edit");
+    await Expect(queuedActions.Nth(1)).ToHaveAttributeAsync("data-action", "delete");
+    await Expect(queuedActions.Nth(2)).ToHaveAttributeAsync("data-action", "steer");
+
+    await Page.Locator("#message-input").FillAsync("queued prompt to delete");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator(".message-buffer-item")).ToHaveCountAsync(2);
+    await Page.Locator(".message-buffer-item").Last
+      .Locator(".message-buffer-action[data-action=\"delete\"]")
+      .ClickAsync();
+    await Expect(Page.Locator(".message-buffer-item")).ToHaveCountAsync(1);
+
+    await Page.Locator(".message-buffer-action[data-action=\"edit\"]").ClickAsync();
+    var editor = Page.Locator(".message-buffer-editor");
+    await Expect(editor).ToBeVisibleAsync();
+    await editor.FillAsync("queued edited prompt");
+
+    await Expect(Page.Locator(".message.assistant .activity").First)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Expect(editor).ToHaveValueAsync("queued edited prompt");
+
+    await Page.Locator(".message-buffer-action[data-action=\"save\"]").ClickAsync();
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
+    await Expect(Page.Locator(".message.user .message-content").Last)
+      .ToContainTextAsync("queued edited prompt");
+    await Expect(Page.Locator("#message-buffer")).ToBeHiddenAsync();
   }
 
   [TestMethod]

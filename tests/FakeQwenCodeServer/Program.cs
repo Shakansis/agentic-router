@@ -72,6 +72,8 @@ app.MapGet("/capabilities", () => Results.Json(new
     "typed_event_schema",
     "session_set_model",
     "session_permission_vote",
+    "session_mid_turn_message_mutation",
+    "session_mid_turn_message_query",
     "session_context",
     "session_close",
     "workspace_providers",
@@ -621,6 +623,68 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   return Results.Empty;
 });
 
+app.MapPost("/session/{sessionId}/mid-turn-message", async (string sessionId, HttpContext context) =>
+{
+  if (!sessions.TryGetValue(sessionId, out var session))
+  {
+    return Results.NotFound();
+  }
+  if (!HasRegisteredClient(context, session))
+  {
+    return InvalidClient(session, context);
+  }
+  using var body = await JsonDocument.ParseAsync(context.Request.Body);
+  var message = body.RootElement.GetProperty("message").GetString()?.Trim() ?? string.Empty;
+  var messageId = body.RootElement.GetProperty("messageId").GetString() ?? string.Empty;
+  if (
+    string.IsNullOrWhiteSpace(message)
+    || string.IsNullOrWhiteSpace(messageId)
+    || string.IsNullOrWhiteSpace(session.ActivePromptId)
+  )
+  {
+    return Results.BadRequest(new { error = "An active prompt, message, and messageId are required." });
+  }
+  await WriteMarkerAsync("fake-qwen-steer.json", new
+  {
+    sessionId,
+    promptId = session.ActivePromptId,
+    clientId = context.Request.Headers["X-Qwen-Client-Id"].ToString(),
+    messageId,
+    message
+  });
+  session.SettledSteerIds[messageId] = 0;
+  var promptId = session.ActivePromptId;
+  _ = Task.Run(async () =>
+  {
+    await EmitAsync(session, "mid_turn_message_injected", new
+    {
+      sessionId,
+      promptId,
+      messageId
+    });
+    await CompleteAsync(session, promptId);
+  });
+  return Results.Json(new { accepted = true, messageId });
+});
+
+app.MapGet("/session/{sessionId}/mid-turn-messages", (string sessionId, HttpContext context) =>
+{
+  if (!sessions.TryGetValue(sessionId, out var session))
+  {
+    return Results.NotFound();
+  }
+  if (!HasRegisteredClient(context, session))
+  {
+    return InvalidClient(session, context);
+  }
+  return Results.Json(new
+  {
+    messages = Array.Empty<object>(),
+    settledMessageIds = session.SettledSteerIds.Keys.ToArray(),
+    promotedMessageIds = Array.Empty<string>()
+  });
+});
+
 app.MapPost("/permission/{requestId}", async (string requestId, HttpContext context) =>
 {
   using var body = await JsonDocument.ParseAsync(context.Request.Body);
@@ -1116,6 +1180,8 @@ sealed class FakeSession
   public int PromptNumber;
 
   public long EventId;
+
+  public ConcurrentDictionary<string, byte> SettledSteerIds { get; } = new(StringComparer.Ordinal);
 
   public ConcurrentDictionary<Guid, Channel<string>> Subscribers { get; } = new();
 }

@@ -223,16 +223,18 @@ public sealed class OllamaClient : IOllamaClient
           policy.MainGpu
         ),
         null,
-        tools.Select(
-          tool => new OllamaApiTool(
-            "function",
-            new OllamaFunctionDefinition(
-              tool.Name,
-              tool.Description,
-              tool.Parameters
+        tools.Count == 0
+          ? null
+          : tools.Select(
+            tool => new OllamaApiTool(
+              "function",
+              new OllamaFunctionDefinition(
+                tool.Name,
+                tool.Description,
+                tool.Parameters
+              )
             )
-          )
-        ).ToArray()
+          ).ToArray()
       );
       using var response = await SendChatAsync(
         baseUri,

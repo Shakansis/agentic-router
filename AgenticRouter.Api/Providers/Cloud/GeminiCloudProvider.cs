@@ -271,10 +271,18 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     CancellationToken cancellationToken
   )
   {
-    using var request = CreateJsonRequest(
-      $"models/{Uri.EscapeDataString(modelId)}:generateContent",
-      apiKey,
-      new
+    object payload = tools.Count == 0
+      ? new
+      {
+        contents = ToGeminiToolContents(
+          messages
+        ),
+        generationConfig = new
+        {
+          temperature = 0
+        }
+      }
+      : new
       {
         contents = ToGeminiToolContents(
           messages
@@ -304,7 +312,11 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
         {
           temperature = 0
         }
-      }
+      };
+    using var request = CreateJsonRequest(
+      $"models/{Uri.EscapeDataString(modelId)}:generateContent",
+      apiKey,
+      payload
     );
     using var response = await SendAsync(
       request,

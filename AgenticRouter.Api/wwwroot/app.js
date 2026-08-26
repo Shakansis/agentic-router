@@ -54,6 +54,11 @@ const state = {
   webControlState: "unavailable",
   webSearch: null,
   attachments: [],
+  messageQueue: [],
+  queueEditingId: null,
+  queuedDispatchMessage: null,
+  messageQueuePaused: false,
+  steeringMessage: false,
   cloudImageApprovals: new Set(),
   sessionSearchController: null,
   detailsSession: null,
@@ -168,6 +173,7 @@ function bindElements() {
     "harness-selector",
     "send-button",
     "send-button-label",
+    "cancel-request",
     "cancel-message-edit",
     "active-agent-label",
     "active-provider-model",
@@ -185,6 +191,10 @@ function bindElements() {
     "attach-image",
     "image-input",
     "attachment-previews",
+    "message-buffer",
+    "message-buffer-count",
+    "message-buffer-list",
+    "message-buffer-run",
     "composer-status",
     "provider-badge",
     "conversation-view",
@@ -580,8 +590,11 @@ function bindEvents() {
   });
   elements.composer.addEventListener("click", handleComposerClick);
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
+  elements.cancelRequest.addEventListener("click", cancelActiveRequest);
+  elements.messageBufferRun.addEventListener("click", resumeMessageQueue);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
   elements.messageInput.addEventListener("input", resizeComposer);
+  elements.messageInput.addEventListener("input", updateStreamingComposerActions);
   elements.messageInput.addEventListener("input", renderPendingContextUsage);
   elements.compactContext.addEventListener("click", requestManualContextCompaction);
   elements.settingsForm.addEventListener("submit", saveSettings);
@@ -10041,6 +10054,11 @@ function clearConversationUi() {
   state.activeAgentRole = null;
   state.modelCapability = null;
   state.contextUsage = null;
+  state.messageQueue = [];
+  state.queueEditingId = null;
+  state.queuedDispatchMessage = null;
+  state.messageQueuePaused = false;
+  state.steeringMessage = false;
   state.webEnabled = false;
   state.webControlState = "unavailable";
   state.cloudImageApprovals.clear();
@@ -10052,6 +10070,7 @@ function clearConversationUi() {
   resizeComposer();
   elements.composer.classList.remove("editing");
   elements.cancelMessageEdit.hidden = true;
+  renderMessageQueue();
 
   for (const message of elements.messages.children) {
     resizeObserver.unobserve(message);
@@ -10222,12 +10241,16 @@ function handleComposerKeyDown(event) {
 
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    elements.composer.requestSubmit();
+    if (state.requestController) {
+      queueCurrentMessage();
+    } else {
+      elements.composer.requestSubmit();
+    }
   }
 }
 
 function handleComposerClick(event) {
-  if (event.target.closest("button, select, option, label")) {
+  if (event.target.closest("button, select, option, label, .message-buffer")) {
     return;
   }
 
@@ -10239,15 +10262,357 @@ function resizeComposer() {
   elements.messageInput.style.height = `${elements.messageInput.scrollHeight}px`;
 }
 
+function queueCurrentMessage() {
+  if (!state.requestController) {
+    return;
+  }
+  const message = elements.messageInput.value.trim();
+  if (!message) {
+    return;
+  }
+  state.messageQueue.push({
+    id: `queued-${createSessionId()}`,
+    message
+  });
+  state.messageQueuePaused = false;
+  elements.messageInput.value = "";
+  resizeComposer();
+  renderMessageQueue();
+  updateStreamingComposerActions();
+  updateComposerStatus();
+  elements.messageInput.focus();
+}
+
+function renderMessageQueue() {
+  elements.messageBufferList.replaceChildren();
+  elements.messageBuffer.hidden = state.messageQueue.length === 0;
+  elements.messageBufferCount.textContent = t(
+    "buffer.count",
+    { count: state.messageQueue.length }
+  );
+  elements.messageBufferRun.hidden = Boolean(state.requestController)
+    || state.messageQueue.length === 0
+    || Boolean(state.queueEditingId);
+
+  for (const item of state.messageQueue) {
+    const row = document.createElement("article");
+    row.className = `message-buffer-item${item.steering ? " steering" : ""}`;
+    row.dataset.queueId = item.id;
+    const actions = document.createElement("div");
+    actions.className = "message-buffer-item-actions";
+
+    if (state.queueEditingId === item.id) {
+      const editor = document.createElement("textarea");
+      editor.className = "message-buffer-editor";
+      editor.value = item.draft ?? item.message;
+      editor.setAttribute("aria-label", t("buffer.edit_label"));
+      const save = createMessageBufferButton(t("action.save"), "save");
+      const cancel = createMessageBufferButton(t("action.cancel"), "cancel");
+      const remove = createMessageBufferButton(t("action.remove"), "delete");
+      save.addEventListener("click", () => saveBufferedMessage(item.id, editor.value));
+      cancel.addEventListener("click", cancelBufferedMessageEdit);
+      remove.addEventListener("click", () => removeBufferedMessage(item.id));
+      editor.addEventListener("input", () => {
+        item.draft = editor.value;
+      });
+      editor.addEventListener("keydown", event => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancelBufferedMessageEdit();
+        }
+      });
+      actions.append(save, cancel, remove);
+      row.append(editor, actions);
+      queueMicrotask(() => {
+        editor.focus();
+        editor.setSelectionRange(editor.value.length, editor.value.length);
+      });
+    } else {
+      const body = document.createElement("div");
+      body.className = "message-buffer-item-body";
+      const content = document.createElement("p");
+      content.textContent = item.message;
+      body.append(content);
+      if (item.error) {
+        const error = document.createElement("small");
+        error.className = "message-buffer-item-error";
+        error.textContent = item.error;
+        body.append(error);
+      }
+      const edit = createMessageBufferButton(t("action.edit"), "edit");
+      const remove = createMessageBufferButton(t("action.remove"), "delete");
+      const steer = createMessageBufferButton(t("steer.action"), "steer");
+      const steeringSupported = activeHarnessSupportsSteering();
+      const activeHarnessId = state.activeHarness ?? state.harness;
+      const steerExplanation = !state.requestController
+        ? t("steer.no_active")
+        : !steeringSupported
+          ? t(
+            "steer.unavailable_harness",
+            { harness: benchmarkHarnessLabel(activeHarnessId) }
+          )
+          : t("steer.available");
+      steer.disabled = !state.requestController
+        || !steeringSupported
+        || state.steeringMessage;
+      steer.title = steerExplanation;
+      steer.setAttribute("aria-label", steerExplanation);
+      const steerTooltip = document.createElement("span");
+      steerTooltip.className = "message-buffer-action-tooltip";
+      steerTooltip.dataset.tooltip = steerExplanation;
+      steerTooltip.append(steer);
+      if (steer.disabled) {
+        steerTooltip.tabIndex = 0;
+        steerTooltip.setAttribute("aria-label", steerExplanation);
+      }
+      edit.disabled = state.steeringMessage;
+      remove.disabled = state.steeringMessage;
+      edit.addEventListener("click", () => editBufferedMessage(item.id));
+      remove.addEventListener("click", () => removeBufferedMessage(item.id));
+      steer.addEventListener("click", () => steerBufferedMessage(item.id));
+      actions.append(edit, remove, steerTooltip);
+      row.append(body, actions);
+    }
+
+    elements.messageBufferList.append(row);
+  }
+}
+
+function createMessageBufferButton(label, icon) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-buffer-action";
+  button.dataset.action = icon;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.append(createMessageBufferIcon(icon));
+  return button;
+}
+
+function createMessageBufferIcon(icon) {
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(namespace, "path");
+  const paths = {
+    edit: "M13.9 2.9a1.5 1.5 0 0 1 2.2 0l1 1a1.5 1.5 0 0 1 0 2.2L7.2 16H3v-4.2l10.9-8.9ZM5 12.6V14h1.4l7.7-7.7-1.4-1.4L5 12.6Z",
+    delete: "M7 3h6l1 2h3v2H3V5h3l1-2Zm-2 5h10l-1 9H6L5 8Zm3 2v5h1v-5H8Zm3 0v5h1v-5h-1Z",
+    steer: "M3 5h7a5 5 0 0 1 5 5v1.2l2-2V14h-4.8l2-2V10a3 3 0 0 0-3-3H3V5Z",
+    save: "M3.8 10.2 8 14.4 16.4 6l-1.5-1.5L8 11.4 5.3 8.7l-1.5 1.5Z",
+    cancel: "m5.7 4.3 4.3 4.3 4.3-4.3 1.4 1.4-4.3 4.3 4.3 4.3-1.4 1.4-4.3-4.3-4.3 4.3-1.4-1.4 4.3-4.3-4.3-4.3 1.4-1.4Z"
+  };
+  path.setAttribute("d", paths[icon] ?? paths.edit);
+  svg.append(path);
+  return svg;
+}
+
+function editBufferedMessage(id) {
+  state.queueEditingId = id;
+  renderMessageQueue();
+  updateComposerStatus();
+}
+
+function saveBufferedMessage(id, value) {
+  const message = value.trim();
+  if (!message) {
+    showToast(t("buffer.empty_error"));
+    return;
+  }
+  const item = state.messageQueue.find(candidate => candidate.id === id);
+  if (!item) {
+    return;
+  }
+  item.message = message;
+  delete item.draft;
+  state.queueEditingId = null;
+  state.messageQueuePaused = false;
+  renderMessageQueue();
+  updateComposerStatus();
+  scheduleMessageQueueDispatch();
+}
+
+function cancelBufferedMessageEdit() {
+  const item = state.messageQueue.find(
+    candidate => candidate.id === state.queueEditingId
+  );
+  if (item) {
+    delete item.draft;
+  }
+  state.queueEditingId = null;
+  renderMessageQueue();
+  updateComposerStatus();
+  scheduleMessageQueueDispatch();
+}
+
+function removeBufferedMessage(id) {
+  state.messageQueue = state.messageQueue.filter(item => item.id !== id);
+  if (state.queueEditingId === id) {
+    state.queueEditingId = null;
+  }
+  renderMessageQueue();
+  updateComposerStatus();
+  scheduleMessageQueueDispatch();
+}
+
+function resumeMessageQueue() {
+  state.messageQueuePaused = false;
+  scheduleMessageQueueDispatch();
+}
+
+function scheduleMessageQueueDispatch() {
+  if (
+    state.requestController
+    || state.conversationTransitioning
+    || state.queueEditingId
+    || state.queuedDispatchMessage
+    || state.messageQueuePaused
+    || state.steeringMessage
+    || state.messageQueue.length === 0
+  ) {
+    renderMessageQueue();
+    return;
+  }
+
+  state.queuedDispatchMessage = state.messageQueue.shift();
+  renderMessageQueue();
+  queueMicrotask(() => elements.composer.requestSubmit(elements.sendButton));
+}
+
+function activeHarnessSupportsSteering() {
+  if (state.interactionMode !== "execute") {
+    return false;
+  }
+  const harnessId = state.activeHarness ?? state.harness;
+  return harnessId === "codex" || harnessId === "qwen-code";
+}
+
+async function steerBufferedMessage(id) {
+  const item = state.messageQueue.find(candidate => candidate.id === id);
+  if (
+    !item
+    || !state.requestController
+    || !activeHarnessSupportsSteering()
+    || !item.message
+    || item.message.length > 16_384
+    || state.steeringMessage
+  ) {
+    return;
+  }
+
+  const message = item.message;
+  const harnessId = state.activeHarness ?? state.harness;
+  const assistant = state.activeAssistant;
+  const messageId = `steer-${createSessionId()}`;
+  state.steeringMessage = true;
+  item.steering = true;
+  item.error = null;
+  renderMessageQueue();
+  updateStreamingComposerActions();
+  updateComposerStatus();
+
+  let accepted = false;
+  try {
+    const result = await fetchJson(
+      `/api/harnesses/${encodeURIComponent(harnessId)}/steer`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          sessionId: state.browserSessionId,
+          message,
+          messageId
+        })
+      }
+    );
+    if (!result?.accepted) {
+      throw new Error("The harness did not accept the steering message.");
+    }
+    accepted = true;
+
+    const lastHistory = state.history.at(-1);
+    const historyMessage = { role: "user", content: message };
+    if (lastHistory?.role === "assistant") {
+      state.history.splice(state.history.length - 1, 0, historyMessage);
+    } else {
+      state.history.push(historyMessage);
+    }
+    appendSteeredMessage(message, assistant, harnessId);
+    state.messageQueue = state.messageQueue.filter(candidate => candidate.id !== id);
+    if (assistant) {
+      addActivity(
+        assistant,
+        {
+          type: "harness.steer.accepted",
+          message: t(
+            "steer.accepted",
+            { harness: benchmarkHarnessLabel(harnessId) }
+          ),
+          elapsedMilliseconds: elapsedSince(assistant)
+        },
+        false
+      );
+    }
+  } catch (error) {
+    item.error = error.message;
+    state.messageQueuePaused = true;
+    showToast(error.message);
+  } finally {
+    item.steering = false;
+    state.steeringMessage = false;
+    renderMessageQueue();
+    updateStreamingComposerActions();
+    updateComposerStatus();
+    if (accepted) {
+      scheduleMessageQueueDispatch();
+    }
+  }
+}
+
+function cancelActiveRequest() {
+  if (!state.requestController) {
+    return;
+  }
+  state.messageQueuePaused = true;
+  state.requestController.abort();
+}
+
+function appendSteeredMessage(message, assistant, harnessId) {
+  const element = document.createElement("article");
+  element.className = "message user steered-message";
+  element.dataset.harness = harnessId;
+  const content = document.createElement("div");
+  content.className = "message-content";
+  content.textContent = message;
+  const note = document.createElement("small");
+  note.className = "message-attachment-note";
+  note.textContent = t(
+    "steer.accepted",
+    { harness: benchmarkHarnessLabel(harnessId) }
+  );
+  content.append(document.createElement("br"), note);
+  element.append(content);
+  if (assistant?.container?.parentNode === elements.messages) {
+    elements.messages.insertBefore(element, assistant.container);
+  } else {
+    elements.messages.append(element);
+  }
+  resizeObserver.observe(element);
+}
+
 async function handleComposerSubmit(event) {
   event.preventDefault();
 
   if (state.requestController) {
-    state.requestController.abort();
+    queueCurrentMessage();
     return;
   }
 
-  const message = elements.messageInput.value.trim();
+  const queuedMessage = state.queuedDispatchMessage;
+  state.queuedDispatchMessage = null;
+  const message = queuedMessage?.message ?? elements.messageInput.value.trim();
 
   if (!message) {
     return;
@@ -10260,6 +10625,10 @@ async function handleComposerSubmit(event) {
     : elements.modelSelector.value;
 
   if (!await ensureCloudImageApproval(selectedModel)) {
+    if (queuedMessage) {
+      state.messageQueue.unshift(queuedMessage);
+      renderMessageQueue();
+    }
     return;
   }
 
@@ -10317,7 +10686,9 @@ async function handleComposerSubmit(event) {
       : "user"
   });
   state.activeAssistant = assistant;
-  elements.messageInput.value = "";
+  if (!queuedMessage) {
+    elements.messageInput.value = "";
+  }
   clearAttachments();
   resizeComposer();
   state.requestController = controller;
@@ -10329,6 +10700,7 @@ async function handleComposerSubmit(event) {
   const compactContext = state.compactContextNextRequest;
   state.compactContextNextRequest = false;
 
+  let continueBufferedMessages = true;
   try {
     const response = await fetch(
       "/api/chat/stream",
@@ -10384,6 +10756,8 @@ async function handleComposerSubmit(event) {
     }
   } catch (error) {
     if (error.name === "AbortError") {
+      continueBufferedMessages = false;
+      state.messageQueuePaused = true;
       state.conversationState = "cancelled";
       addActivity(
         assistant,
@@ -10434,6 +10808,11 @@ async function handleComposerSubmit(event) {
     }
 
     elements.messageInput.focus();
+    if (continueBufferedMessages) {
+      state.messageQueuePaused = false;
+    }
+    renderMessageQueue();
+    scheduleMessageQueueDispatch();
   }
 }
 
@@ -11073,6 +11452,7 @@ async function consumeEventStream(stream, assistant) {
       const selectedHarness = /^harness\.(.+)-selected$/.exec(streamEvent.type);
       if (selectedHarness) {
         state.activeHarness = selectedHarness[1];
+        updateStreamingComposerActions();
       }
 
       if (streamEvent.contextUsage) {
@@ -13353,24 +13733,18 @@ function setStreamingState(isStreaming) {
     state.activeAgentRole = null;
   }
 
-  elements.sendButtonLabel.textContent = isStreaming
-    ? "Cancel"
-    : state.editingTurn
-      ? "Send edit"
-      : "Send";
-  elements.sendButton.querySelector(".send-icon").textContent = isStreaming
-    ? "\u25a0"
-    : "\u2191";
+  elements.sendButtonLabel.textContent = "Send";
+  elements.sendButton.querySelector(".send-icon").textContent = "\u2191";
   elements.sendButton.setAttribute(
     "aria-label",
-    isStreaming
-      ? "Cancel request"
-      : state.editingTurn
-        ? "Send edited message"
-        : "Send message"
+    state.editingTurn && !isStreaming
+      ? "Send edited message"
+      : "Send message"
   );
   elements.sendButton.title = elements.sendButton.getAttribute("aria-label");
-  elements.sendButton.classList.toggle("cancel", isStreaming);
+  elements.sendButton.classList.remove("cancel");
+  elements.cancelRequest.hidden = !isStreaming;
+  elements.composer.classList.toggle("streaming", isStreaming);
   elements.attachImage.disabled = isStreaming;
   elements.imageInput.disabled = isStreaming;
   elements.compactContext.disabled = isStreaming;
@@ -13381,8 +13755,14 @@ function setStreamingState(isStreaming) {
     }
   );
   updateHarnessControls();
+  updateStreamingComposerActions();
   updateComposerStatus();
   renderWebControl();
+}
+
+function updateStreamingComposerActions() {
+  elements.cancelRequest.hidden = !state.requestController;
+  renderMessageQueue();
 }
 
 function renderPendingContextUsage() {
@@ -13603,7 +13983,13 @@ function formatCompactTokens(value) {
 
 function updateComposerStatus() {
   if (state.requestController) {
-    elements.composerStatus.textContent = "Response in progress";
+    elements.composerStatus.textContent = state.steeringMessage
+      ? t("steer.sending")
+      : state.queueEditingId
+        ? `${t("buffer.editing")} · response in progress`
+        : state.messageQueue.length > 0
+          ? `Response in progress · ${t("buffer.count", { count: state.messageQueue.length })}`
+          : "Response in progress";
   } else if (state.conversationTransitioning) {
     elements.composerStatus.textContent = "Switching conversation safely";
   } else if (state.editingTurn) {
@@ -13727,7 +14113,11 @@ async function fetchJson(url, options) {
     : await response.json();
 
   if (!response.ok) {
-    const error = new Error(payload?.message ?? `HTTP ${response.status}`);
+    const error = new Error(
+      payload?.message
+      ?? payload?.detail
+      ?? `HTTP ${response.status}`
+    );
     error.payload = payload;
     throw error;
   }

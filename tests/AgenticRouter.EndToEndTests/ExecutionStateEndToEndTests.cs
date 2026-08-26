@@ -2671,10 +2671,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#close-change-review"
     ).ClickAsync();
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
+    if (await Page.Locator("#cancel-request").IsVisibleAsync())
     {
       await Page.Locator(
-        "#send-button"
+        "#cancel-request"
       ).ClickAsync();
     }
   }
@@ -3471,10 +3471,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       },
       firstPlannerRequest.AvailableTools.ToArray()
     );
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
+    if (await Page.Locator("#cancel-request").IsVisibleAsync())
     {
       await Page.Locator(
-        "#send-button"
+        "#cancel-request"
       ).ClickAsync();
     }
   }

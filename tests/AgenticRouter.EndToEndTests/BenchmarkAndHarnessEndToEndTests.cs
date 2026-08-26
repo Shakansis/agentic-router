@@ -256,6 +256,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsFalse(
       codex["definition"]!["capabilities"]!["supportsSubagents"]!.GetValue<bool>()
     );
+    Assert.IsTrue(
+      codex["definition"]!["capabilities"]!["supportsSteering"]!.GetValue<bool>()
+    );
 
     var openCode = statuses.Single(
       item => item!["definition"]!["id"]!.GetValue<string>() == "opencode"
@@ -268,6 +271,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     );
     Assert.IsTrue(
       openCode["definition"]!["capabilities"]!["supportsSessionDiff"]!.GetValue<bool>()
+    );
+    Assert.IsFalse(
+      openCode["definition"]!["capabilities"]!["supportsSteering"]!.GetValue<bool>()
     );
 
     var qwenCode = statuses.Single(
@@ -288,6 +294,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsFalse(
       qwenCode["definition"]!["capabilities"]!["supportsSubagents"]!.GetValue<bool>()
     );
+    Assert.IsTrue(
+      qwenCode["definition"]!["capabilities"]!["supportsSteering"]!.GetValue<bool>()
+    );
 
     var claudeCode = statuses.Single(
       item => item!["definition"]!["id"]!.GetValue<string>() == "claude-code"
@@ -303,6 +312,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     );
     Assert.IsFalse(
       claudeCode["definition"]!["capabilities"]!["supportsSandbox"]!.GetValue<bool>()
+    );
+    Assert.IsFalse(
+      claudeCode["definition"]!["capabilities"]!["supportsSteering"]!.GetValue<bool>()
     );
   }
 
@@ -3442,7 +3454,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "fake-claude-invocation.json"
     );
     await WaitUntilAsync(() => File.Exists(invocationPath), TimeSpan.FromSeconds(15));
-    await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -3886,7 +3898,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting long OpenCode task");
-    await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -4538,7 +4550,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting long Qwen Code task");
-    await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
@@ -4838,6 +4850,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       await File.ReadAllTextAsync(Path.Combine(codexRuntime, "fake-app-server-thread-request.json"))
     );
     var resolvedContext = threadRequest.RootElement.GetProperty("contextWindowTokens").GetInt32();
+    var autoCompactLimit = threadRequest.RootElement.GetProperty("autoCompactTokenLimit").GetInt32();
+    Assert.AreEqual((int)((long)resolvedContext * 98 / 100), autoCompactLimit);
+    Assert.IsLessThan(resolvedContext, autoCompactLimit);
+    Assert.AreEqual(
+      "total",
+      threadRequest.RootElement.GetProperty("autoCompactTokenLimitScope").GetString()
+    );
     using var catalog = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(codexRuntime, "model-catalog.json"))
     );
@@ -4846,6 +4865,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .Single(model => model.GetProperty("slug").GetString() == "qwen3.8:27b-gpu0");
     Assert.AreEqual(resolvedContext, metadata.GetProperty("context_window").GetInt32());
     Assert.AreEqual(resolvedContext, metadata.GetProperty("max_context_window").GetInt32());
+    Assert.AreEqual(100, metadata.GetProperty("effective_context_window_percent").GetInt32());
     Assert.IsTrue(metadata.GetProperty("supported_in_api").GetBoolean());
     CollectionAssert.Contains(
       metadata.GetProperty("input_modalities").EnumerateArray()
@@ -4853,6 +4873,133 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         .ToArray(),
       "text"
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexSteerTargetsTheExactActiveTurnAndRemainsVisibleInTheConversation()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.Codex);
+
+    await StartMessageAsync("long codex turn");
+    await Expect(Page.Locator(".message.assistant .assistant-reasoning-body").Last)
+      .ToContainTextAsync("Inspecting", new() { Timeout = 10_000 });
+    await Page.Locator("#message-input").FillAsync("Focus on the requested validation first.");
+    await Page.Locator("#send-button").ClickAsync();
+    var codexSteer = Page.Locator(".message-buffer-action[data-action=\"steer\"]");
+    await Expect(codexSteer).ToBeEnabledAsync();
+    await codexSteer.ClickAsync();
+
+    await Expect(Page.Locator(".steered-message")).ToContainTextAsync(
+      "Focus on the requested validation first."
+    );
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 15_000 });
+    using var evidence = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(
+        _environment.DataDirectory,
+        "codex-runtime",
+        "fake-app-server-steer.json"
+      ))
+    );
+    Assert.AreEqual(
+      "Focus on the requested validation first.",
+      evidence.RootElement.GetProperty("message").GetString()
+    );
+    StringAssert.StartsWith(
+      evidence.RootElement.GetProperty("turnId").GetString(),
+      "fake-turn-"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeSteerUsesTheOwnedMidTurnMessageEndpoint()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.QwenCode);
+
+    await StartMessageAsync("long qwen code");
+    await Expect(Page.Locator(".message.assistant .assistant-reasoning-body").Last)
+      .ToContainTextAsync("Inspecting long Qwen Code task", new() { Timeout = 10_000 });
+    await Page.Locator("#message-input").FillAsync("Use the supplemental Qwen instruction.");
+    await Page.Locator("#send-button").ClickAsync();
+    var qwenSteer = Page.Locator(".message-buffer-action[data-action=\"steer\"]");
+    await Expect(qwenSteer).ToBeEnabledAsync();
+    await qwenSteer.ClickAsync();
+
+    await Expect(Page.Locator(".steered-message")).ToContainTextAsync(
+      "Use the supplemental Qwen instruction."
+    );
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 15_000 });
+    using var evidence = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(
+        _environment.DataDirectory,
+        "qwen-code-runtime",
+        "fake-qwen-steer.json"
+      ))
+    );
+    Assert.AreEqual(
+      "Use the supplemental Qwen instruction.",
+      evidence.RootElement.GetProperty("message").GetString()
+    );
+    StringAssert.StartsWith(
+      evidence.RootElement.GetProperty("promptId").GetString(),
+      "qwen-session-"
+    );
+  }
+
+  [TestMethod]
+  [DataRow(HarnessIds.OpenCode, "long opencode", "OpenCode")]
+  [DataRow(HarnessIds.ClaudeCode, "long claude task", "Claude Code")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SteerExplainsWhyItIsDisabledForQueueOnlyHarnesses(
+    string harness,
+    string prompt,
+    string harnessLabel
+  )
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+
+    await StartMessageAsync(prompt);
+    await Expect(Page.Locator("#cancel-request")).ToBeVisibleAsync();
+    await Page.Locator("#message-input").FillAsync("supplemental message");
+    await Page.Locator("#send-button").ClickAsync();
+    var steer = Page.Locator(".message-buffer-action[data-action=\"steer\"]");
+    var steerTooltip = Page.Locator(".message-buffer-action-tooltip");
+    var explanation =
+      $"Steer is unavailable for {harnessLabel}. Use Codex or Qwen Code.";
+    await Expect(steer).ToBeDisabledAsync();
+    await Expect(steer).ToHaveAttributeAsync(
+      "title",
+      explanation
+    );
+    await Expect(steerTooltip).ToHaveAttributeAsync("data-tooltip", explanation);
+    await Expect(steerTooltip).ToHaveAttributeAsync("tabindex", "0");
+    await steerTooltip.HoverAsync();
+    await Page.WaitForTimeoutAsync(200);
+    var tooltipOpacity = await steerTooltip.EvaluateAsync<string>(
+      "element => getComputedStyle(element, '::after').opacity"
+    );
+    Assert.IsGreaterThan(
+      0.1f,
+      float.Parse(
+        tooltipOpacity,
+        System.Globalization.CultureInfo.InvariantCulture
+      ),
+      "The unsupported-steering tooltip must become visible on hover."
+    );
+    await Page.Locator("#cancel-request").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
   }
 
   [TestMethod]
@@ -4875,7 +5022,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToContainTextAsync("30.0k / 32.8k · live exact", new() { Timeout = 10_000 });
     await Expect(Page.Locator("#context-usage-estimate-warning"))
       .ToBeHiddenAsync();
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Cancel");
+    await Expect(Page.Locator("#cancel-request")).ToBeVisibleAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 20_000 });
 
@@ -4930,8 +5077,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         "title",
         new Regex("Native.*does not report exact", RegexOptions.IgnoreCase)
       );
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Cancel");
-    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator("#cancel-request")).ToBeVisibleAsync();
+    await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
   }
@@ -4955,7 +5102,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         "title",
         new Regex("Claude Code.*does not report exact", RegexOptions.IgnoreCase)
       );
-    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Cancel");
+    await Expect(Page.Locator("#cancel-request")).ToBeVisibleAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 20_000 });
     await Expect(Page.Locator("#context-usage-summary"))

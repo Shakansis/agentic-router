@@ -225,10 +225,17 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     CancellationToken cancellationToken
   )
   {
-    using var request = CreateJsonRequest(
-      "chat/completions",
-      apiKey,
-      new
+    object payload = tools.Count == 0
+      ? new
+      {
+        model = modelId,
+        messages = ToOpenAiMessages(
+          messages
+        ),
+        temperature = 0,
+        stream = false
+      }
+      : new
       {
         model = modelId,
         messages = ToOpenAiMessages(
@@ -249,7 +256,11 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         tool_choice = "auto",
         temperature = 0,
         stream = false
-      }
+      };
+    using var request = CreateJsonRequest(
+      "chat/completions",
+      apiKey,
+      payload
     );
     using var response = await SendAsync(
       request,

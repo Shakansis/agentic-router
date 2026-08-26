@@ -41,7 +41,11 @@ internal static class HarnessConversationPromptBuilder
 
     var conversation = request.Conversation;
     var synchronizedThrough = synchronizedThroughVersion ?? 0;
-    if (conversation is not null && conversation.Messages.Count > 0)
+    if (
+      !request.IsRecoveryContinuation
+      && conversation is not null
+      && conversation.Messages.Count > 0
+    )
     {
       var firstAvailableSequence = conversation.Messages[0].Sequence;
       var requiresCompactedHydration = synchronizedThroughVersion is null
@@ -81,12 +85,18 @@ internal static class HarnessConversationPromptBuilder
       }
     }
 
-    builder.Append("\nCurrent user request:\n")
+    builder.Append(
+      request.IsRecoveryContinuation
+        ? "\nHost recovery continuation:\n"
+        : "\nCurrent user request:\n"
+    )
       .Append(request.Prompt);
 
     return new HarnessConversationPrompt(
       builder.ToString(),
-      checked((conversation?.Version ?? 0) + 2)
+      request.IsRecoveryContinuation
+        ? synchronizedThroughVersion ?? checked((conversation?.Version ?? 0) + 2)
+        : checked((conversation?.Version ?? 0) + 2)
     );
   }
 }

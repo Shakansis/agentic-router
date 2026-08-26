@@ -91,6 +91,12 @@ public sealed record ChatRequest(
   bool AutoModelHarness = false
 );
 
+public sealed record HarnessSteerInput(
+  string SessionId,
+  string Message,
+  string MessageId
+);
+
 public sealed record ModelCapabilityView(
   string Model,
   string Provider,

@@ -39,7 +39,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSubagents: false,
       SupportsSandbox: false,
       SupportsSessionDiff: true,
-      SupportsNativePermissions: true
+      SupportsNativePermissions: true,
+      SupportsSteering: false
     ),
     ["ollama-local"]
   );

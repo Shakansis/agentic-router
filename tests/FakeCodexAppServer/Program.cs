@@ -31,6 +31,7 @@ if (!args.SequenceEqual(expectedArguments, StringComparer.Ordinal))
 
 var outputGate = new SemaphoreSlim(1, 1);
 var turns = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
+var steerMessages = new ConcurrentDictionary<string, TaskCompletionSource<string>>(StringComparer.Ordinal);
 var approvals = new ConcurrentDictionary<long, TaskCompletionSource<bool>>();
 var toolResponses = new ConcurrentDictionary<long, TaskCompletionSource<(bool Success, string Text)>>();
 var threadNumber = 0;
@@ -356,6 +357,9 @@ while (await Console.In.ReadLineAsync() is { } line)
         }
         var source = new CancellationTokenSource();
         turns[turnId] = source;
+        steerMessages[turnId] = new TaskCompletionSource<string>(
+          TaskCreationOptions.RunContinuationsAsynchronously
+        );
         await SendAsync(new
         {
           id = id.GetInt64(),
@@ -373,11 +377,44 @@ while (await Console.In.ReadLineAsync() is { } line)
           source.Cancel();
           source.Dispose();
         }
+        steerMessages.TryRemove(turnId, out _);
         await SendAsync(new { id = id.GetInt64(), result = new { } });
         await SendAsync(new
         {
           method = "turn/completed",
           @params = new { threadId, turn = new { id = turnId, status = "interrupted", error = (object?)null } }
+        });
+        break;
+      }
+    case "turn/steer":
+      {
+        var threadId = parameters.GetProperty("threadId").GetString()!;
+        var turnId = parameters.GetProperty("expectedTurnId").GetString()!;
+        var message = parameters.GetProperty("input").EnumerateArray()
+          .First(item => item.GetProperty("type").GetString() == "text")
+          .GetProperty("text")
+          .GetString() ?? string.Empty;
+        if (
+          !turns.ContainsKey(turnId)
+          || !steerMessages.TryGetValue(turnId, out var pendingSteer)
+          || string.IsNullOrWhiteSpace(message)
+        )
+        {
+          await SendAsync(new { id = id.GetInt64(), error = new { code = -32602, message = "Expected an active turn and non-empty steering input." } });
+          break;
+        }
+        if (!string.IsNullOrWhiteSpace(codexHome))
+        {
+          await File.WriteAllTextAsync(
+            Path.Combine(codexHome, "fake-app-server-steer.json"),
+            JsonSerializer.Serialize(new { threadId, turnId, message })
+          );
+        }
+        pendingSteer.TrySetResult(message);
+        await SendAsync(new
+        {
+          id = id.GetInt64(),
+          result = new { turnId }
         });
         break;
       }
@@ -511,9 +548,14 @@ async Task RunTurnAsync(
   CancellationToken cancellationToken
 )
 {
+  FileStream? observationLock = null;
   try
   {
     var currentRequest = CurrentUserRequest(input);
+    var recoveryContinuation = input.Contains(
+      "\nHost recovery continuation:\n",
+      StringComparison.Ordinal
+    );
     await SendAsync(new { method = "turn/started", @params = new { threadId, turn = new { id = turnId, status = "inProgress" } } });
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "Inspecting — revisão " } });
 
@@ -608,33 +650,107 @@ async Task RunTurnAsync(
     await Task.Delay(200, cancellationToken);
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "the trusted workspace." } });
 
-    if (currentRequest.Contains("codex host idle timeout", StringComparison.OrdinalIgnoreCase))
+    if (
+      currentRequest.Contains("codex host idle timeout", StringComparison.OrdinalIgnoreCase)
+      && !recoveryContinuation
+    )
     {
       await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
       return;
     }
 
-    if (currentRequest.Contains("codex native idle failure", StringComparison.OrdinalIgnoreCase))
+    if (
+      currentRequest.Contains("codex persistent idle failure", StringComparison.OrdinalIgnoreCase)
+    )
     {
-      turns.TryRemove(turnId, out _);
-      await SendAsync(new
-      {
-        method = "turn/completed",
-        @params = new
+      await CompleteFailedTurnAsync(
+        threadId,
+        turnId,
+        "stream disconnected before completion: idle timeout waiting for SSE"
+      );
+      return;
+    }
+
+    if (
+      currentRequest.Contains("codex provider disconnected", StringComparison.OrdinalIgnoreCase)
+      && !recoveryContinuation
+    )
+    {
+      await CompleteFailedTurnAsync(
+        threadId,
+        turnId,
+        "stream disconnected before completion: connection reset by peer"
+      );
+      return;
+    }
+
+    if (
+      currentRequest.Contains("codex app server exit recovery", StringComparison.OrdinalIgnoreCase)
+      && !recoveryContinuation
+    )
+    {
+      Environment.Exit(23);
+    }
+
+    if (
+      currentRequest.Contains("codex native idle failure", StringComparison.OrdinalIgnoreCase)
+      && !recoveryContinuation
+    )
+    {
+      var turnIndex = int.Parse(
+        turnId["fake-turn-".Length..],
+        System.Globalization.CultureInfo.InvariantCulture
+      );
+      var acceptedPlan = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "create_execution_plan",
+        new
         {
-          threadId,
-          turn = new
+          objective = "Resume a partially completed Codex plan after a transient failure",
+          steps = new[]
           {
-            id = turnId,
-            status = "failed",
-            error = new
-            {
-              message = "stream disconnected before completion: idle timeout waiting for SSE",
-              codexErrorInfo = new { type = "other" }
-            }
+            new { title = "Create the first recovery fixture" },
+            new { title = "Create the second recovery fixture" }
           }
-        }
-      });
+        },
+        70_000L + turnIndex,
+        cancellationToken
+      );
+      if (!acceptedPlan.Success)
+      {
+        await CompleteFailedTurnAsync(threadId, turnId, acceptedPlan.Text);
+        return;
+      }
+      var firstStep = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "create_files",
+        new
+        {
+          files = new[]
+          {
+            new
+            {
+              path = "codex-transient-step-1.txt",
+              content = "completed before the transient failure\n"
+            }
+          },
+          stepId = "step-1"
+        },
+        71_000L + turnIndex,
+        cancellationToken
+      );
+      if (!firstStep.Success)
+      {
+        await CompleteFailedTurnAsync(threadId, turnId, firstStep.Text);
+        return;
+      }
+      await CompleteFailedTurnAsync(
+        threadId,
+        turnId,
+        "stream disconnected before completion: idle timeout waiting for SSE"
+      );
       return;
     }
 
@@ -679,7 +795,18 @@ async Task RunTurnAsync(
 
     if (currentRequest.Contains("long codex turn", StringComparison.OrdinalIgnoreCase))
     {
-      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+      var steering = await steerMessages[turnId].Task.WaitAsync(cancellationToken);
+      await SendAsync(new
+      {
+        method = "item/reasoning/summaryTextDelta",
+        @params = new
+        {
+          threadId,
+          turnId,
+          itemId = $"reason-steer-{turnId}",
+          delta = $"Steering accepted: {steering}"
+        }
+      });
     }
 
     var itemId = $"command-{turnId}";
@@ -695,6 +822,74 @@ async Task RunTurnAsync(
       }
     });
     await SendAsync(new { method = "item/commandExecution/outputDelta", @params = new { threadId, turnId, itemId, delta = "fake output\n" } });
+
+    if (
+      recoveryContinuation
+      && currentRequest.Contains("codex native idle failure", StringComparison.OrdinalIgnoreCase)
+    )
+    {
+      var validRecoveryPrompt = currentRequest.Contains(
+        "Failure code: codex-provider-stream-idle-timeout.",
+        StringComparison.Ordinal
+      )
+        && currentRequest.Contains(
+          "Actual cause: stream disconnected before completion: idle timeout waiting for SSE",
+          StringComparison.Ordinal
+        )
+        && currentRequest.Contains(
+          "codex-transient-step-1.txt [created]",
+          StringComparison.Ordinal
+        )
+        && currentRequest.Contains(
+          "step-1: Create the first recovery fixture",
+          StringComparison.Ordinal
+        )
+        && currentRequest.Contains(
+          "step-2: Create the second recovery fixture [pending]",
+          StringComparison.Ordinal
+        )
+        && currentRequest.Contains(
+          "Do not repeat completed actions",
+          StringComparison.Ordinal
+        );
+      if (!validRecoveryPrompt)
+      {
+        await CompleteFailedTurnAsync(
+          threadId,
+          turnId,
+          "The automatic continuation prompt omitted the actual cause or authoritative Host state."
+        );
+        return;
+      }
+      var turnIndex = int.Parse(
+        turnId["fake-turn-".Length..],
+        System.Globalization.CultureInfo.InvariantCulture
+      );
+      var secondStep = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "create_files",
+        new
+        {
+          files = new[]
+          {
+            new
+            {
+              path = "codex-transient-step-2.txt",
+              content = "completed by the automatic continuation\n"
+            }
+          },
+          stepId = "step-2"
+        },
+        72_000L + turnIndex,
+        cancellationToken
+      );
+      if (!secondStep.Success)
+      {
+        await CompleteFailedTurnAsync(threadId, turnId, secondStep.Text);
+        return;
+      }
+    }
 
     if (currentRequest.Contains("codex plan automatic validation", StringComparison.OrdinalIgnoreCase))
     {
@@ -1054,6 +1249,22 @@ async Task RunTurnAsync(
       await File.WriteAllTextAsync(Path.Combine(cwd, "codex-created.txt"), "edited on the reused Codex thread\n", cancellationToken);
       await SendAsync(new { method = "turn/diff/updated", @params = new { threadId, turnId, diff = "--- codex-created.txt\n+++ codex-created.txt" } });
     }
+    else if (currentRequest.Contains("codex transient observation lock", StringComparison.OrdinalIgnoreCase))
+    {
+      var lockedPath = Path.Combine(cwd, "codex-transient-observation.txt");
+      await File.WriteAllTextAsync(
+        lockedPath,
+        "completed before the transient observation lock\n",
+        cancellationToken
+      );
+      observationLock = new FileStream(
+        lockedPath,
+        FileMode.Open,
+        FileAccess.ReadWrite,
+        FileShare.None
+      );
+      await SendAsync(new { method = "turn/diff/updated", @params = new { threadId, turnId, diff = "+++ codex-transient-observation.txt" } });
+    }
 
     await SendAsync(new
     {
@@ -1080,11 +1291,17 @@ async Task RunTurnAsync(
     await Task.Delay(200, cancellationToken);
     await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = finalReport[Math.Min(finalReport.Length, 20)..] } });
     turns.TryRemove(turnId, out _);
+    steerMessages.TryRemove(turnId, out _);
     await SendAsync(new
     {
       method = "turn/completed",
       @params = new { threadId, turn = new { id = turnId, status = "completed", error = (object?)null } }
     });
+    if (observationLock is not null)
+    {
+      _ = ReleaseObservationLockAsync(observationLock);
+      observationLock = null;
+    }
     if (currentRequest.Contains("restart codex after completion", StringComparison.OrdinalIgnoreCase))
     {
       if (!string.IsNullOrWhiteSpace(codexHome))
@@ -1099,7 +1316,45 @@ async Task RunTurnAsync(
   }
   catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
   {
+    steerMessages.TryRemove(turnId, out _);
+    if (observationLock is not null)
+    {
+      await observationLock.DisposeAsync();
+    }
   }
+}
+
+async Task ReleaseObservationLockAsync(FileStream stream)
+{
+  await Task.Delay(60);
+  await stream.DisposeAsync();
+}
+
+async Task CompleteFailedTurnAsync(
+  string threadId,
+  string turnId,
+  string message
+)
+{
+  turns.TryRemove(turnId, out _);
+  await SendAsync(new
+  {
+    method = "turn/completed",
+    @params = new
+    {
+      threadId,
+      turn = new
+      {
+        id = turnId,
+        status = "failed",
+        error = new
+        {
+          message,
+          codexErrorInfo = new { type = "other" }
+        }
+      }
+    }
+  });
 }
 
 string CurrentUserRequest(string input)

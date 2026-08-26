@@ -252,7 +252,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Expect(
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting");
-    await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
     await Expect(
       Page.Locator(".message.assistant .activity").Last
@@ -401,6 +401,13 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
 
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.codex-automatic-continuation-started"
+      )
+    );
     var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
     Assert.AreEqual(
       "codex-app-server-exited",
@@ -477,7 +484,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CodexIdleTurnUsesConfiguredGenerationTimeout()
+  public async Task CodexIdleTurnUsesConfiguredGenerationTimeoutThenContinuesOnce()
   {
     var settings = await GetSettingsJsonAsync();
     settings["runtime"]!["generationTimeoutSeconds"] = 1;
@@ -492,20 +499,41 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
 
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
-    var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
-    Assert.AreEqual(
-      "codex-event-idle-timeout",
-      error["error"]!["code"]!.GetValue<string>()
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.codex-automatic-continuation-started"
+      )
+    );
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    var recovery = events.Single(
+      item => item["type"]!.GetValue<string>()
+        == "harness.codex-automatic-continuation-started"
     );
     StringAssert.Contains(
-      error["message"]!.GetValue<string>(),
-      "configured 1-second generation timeout"
+      recovery["message"]!.GetValue<string>(),
+      "codex-event-idle-timeout"
     );
+    var recoveryInput = await File.ReadAllTextAsync(
+      Path.Combine(
+        _environment.DataDirectory,
+        "codex-runtime",
+        "fake-app-server-turn-input.txt"
+      )
+    );
+    StringAssert.Contains(recoveryInput, "Failure code: codex-event-idle-timeout.");
+    StringAssert.Contains(recoveryInput, "No Codex App Server event arrived for 1 seconds");
+    Assert.DoesNotContain("Canonical Agentic Router conversation hydration:", recoveryInput);
   }
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CodexNativeSseIdleFailureReturnsActionableTypedDiagnostic()
+  public async Task CodexNativeSseIdleFailureContinuesWithActualCauseAndHostState()
   {
     var events = await ExecuteCodexStreamAsync(
       "codex native idle failure",
@@ -513,14 +541,131 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
 
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.codex-automatic-continuation-started"
+      )
+    );
+    var terminal = events.Single(
+      item => item["type"]!.GetValue<string>() == "response.completed"
+    );
+    var plan = terminal["executionSession"]!["plan"]!.AsObject();
+    Assert.AreEqual(2, plan["completedStepCount"]!.GetValue<int>());
+    Assert.HasCount(2, plan["steps"]!.AsArray());
+    Assert.IsTrue(
+      File.Exists(
+        Path.Combine(_environment.WorkspaceDirectory, "codex-transient-step-1.txt")
+      )
+    );
+    Assert.IsTrue(
+      File.Exists(
+        Path.Combine(_environment.WorkspaceDirectory, "codex-transient-step-2.txt")
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexProviderDisconnectContinuesOnceWithTypedCause()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex provider disconnected",
+      "browser-codex-provider-disconnected"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    var recovery = events.Single(
+      item => item["type"]!.GetValue<string>()
+        == "harness.codex-automatic-continuation-started"
+    );
+    StringAssert.Contains(
+      recovery["message"]!.GetValue<string>(),
+      "codex-provider-stream-disconnected"
+    );
+    StringAssert.Contains(
+      recovery["message"]!.GetValue<string>(),
+      "connection reset by peer"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexAppServerExitRestartsAndContinuesTheExistingThread()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex app server exit recovery",
+      "browser-codex-app-server-exit-recovery"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    var recovery = events.Single(
+      item => item["type"]!.GetValue<string>()
+        == "harness.codex-automatic-continuation-started"
+    );
+    StringAssert.Contains(
+      recovery["message"]!.GetValue<string>(),
+      "codex-app-server-exited"
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexAutomaticContinuationIsBoundedToOneAttempt()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex persistent idle failure",
+      "browser-codex-persistent-idle-failure"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>()
+          == "harness.codex-automatic-continuation-started"
+      )
+    );
     var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
     Assert.AreEqual(
       "codex-provider-stream-idle-timeout",
       error["error"]!["code"]!.GetValue<string>()
     );
-    StringAssert.Contains(
-      error["message"]!.GetValue<string>(),
-      "local model stream became idle"
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexPostTurnObservationRetriesOneTransientFileLock()
+  {
+    var events = await ExecuteCodexStreamAsync(
+      "codex transient observation lock",
+      "browser-codex-transient-observation-lock"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.HasCount(
+      1,
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "harness.codex-effects-observed"
+      )
+    );
+    Assert.AreEqual(
+      "completed before the transient observation lock\n",
+      await File.ReadAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          "codex-transient-observation.txt"
+        )
+      )
     );
   }
 
@@ -1828,10 +1973,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       nativeToolRequest.Messages[0].Content,
       "APPLICATION_OWNED_PROJECT_CONTEXT"
     );
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
+    if (await Page.Locator("#cancel-request").IsVisibleAsync())
     {
       await Page.Locator(
-        "#send-button"
+        "#cancel-request"
       ).ClickAsync();
     }
   }
@@ -1952,10 +2097,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToHaveTextAsync(
       "chrono-two.txt"
     );
-    if (await Page.Locator("#send-button-label").TextContentAsync() == "Cancel")
+    if (await Page.Locator("#cancel-request").IsVisibleAsync())
     {
       await Page.Locator(
-        "#send-button"
+        "#cancel-request"
       ).ClickAsync();
     }
   }
@@ -2241,13 +2386,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       Page.Locator(
-        "#send-button-label"
+        "#cancel-request"
       )
-    ).ToHaveTextAsync(
-      "Cancel"
-    );
+    ).ToBeVisibleAsync();
     await Page.Locator(
-      "#send-button"
+      "#cancel-request"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -5041,6 +5184,65 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "search_text"
       },
       toolRequest.AvailableTools.ToArray()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ChatFinalizesFromCollectedEvidenceWhenReadBudgetIsReached()
+  {
+    foreach (var index in Enumerable.Range(1, 9))
+    {
+      await File.WriteAllTextAsync(
+        Path.Combine(
+          _environment.WorkspaceDirectory,
+          $"chat-budget-{index}.txt"
+        ),
+        $"chat budget evidence {index}"
+      );
+    }
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await SendMessageAsync(
+      "chat workspace read budget request"
+    );
+
+    await Expect(
+      Page.Locator(
+        ".message.assistant .assistant-answer"
+      ).Last
+    ).ToContainTextAsync(
+      "completed from the eight trusted-workspace reads"
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"chat.workspace-read-completed\"]"
+      )
+    ).ToHaveCountAsync(
+      8
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"chat.workspace-read-budget-reached\"]"
+      )
+    ).ToHaveCountAsync(
+      1
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.awaiting-approval\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
     );
   }
 

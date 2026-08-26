@@ -185,7 +185,46 @@
     </button>
 
     <footer class="composer-shell">
+      <div class="composer-context-usage">
+        <details id="context-usage" class="context-usage">
+          <summary id="context-usage-summary">
+            <span id="context-usage-summary-text">Estimated context</span>
+            <span
+              id="context-usage-estimate-warning"
+              class="context-usage-estimate-warning"
+              role="img"
+              tabindex="0"
+              hidden
+            >⚠</span>
+          </summary>
+          <div class="context-usage-popover">
+            <strong id="context-usage-warning" hidden></strong>
+            <dl id="context-usage-details"></dl>
+            <small>Visible history may be larger than the submitted context.</small>
+            <button
+              id="compact-context"
+              class="secondary-button compact-context-button"
+              type="button"
+              hidden
+            >Compact context</button>
+          </div>
+        </details>
+      </div>
       <form id="composer" class="composer">
+        <button
+          id="cancel-request"
+          class="composer-cancel-request"
+          type="button"
+          aria-label="Cancel active response"
+          title="Cancel active response"
+          data-i18n-aria-label="action.cancel_response"
+          data-i18n-title="action.cancel_response"
+          hidden
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20">
+            <rect x="6" y="6" width="8" height="8" rx="1.5"></rect>
+          </svg>
+        </button>
         <div class="composer-context">
           <span class="active-agent-pill">
             <span class="agent-icon" aria-hidden="true">⚡</span>
@@ -203,29 +242,6 @@
           <span id="fallback-indicator" class="fallback-indicator" hidden>
             Local fallback available
           </span>
-          <details id="context-usage" class="context-usage">
-            <summary id="context-usage-summary">
-              <span id="context-usage-summary-text">Estimated context</span>
-              <span
-                id="context-usage-estimate-warning"
-                class="context-usage-estimate-warning"
-                role="img"
-                tabindex="0"
-                hidden
-              >⚠</span>
-            </summary>
-            <div class="context-usage-popover">
-              <strong id="context-usage-warning" hidden></strong>
-              <dl id="context-usage-details"></dl>
-              <small>Visible history may be larger than the submitted context.</small>
-              <button
-                id="compact-context"
-                class="secondary-button compact-context-button"
-                type="button"
-                hidden
-              >Compact context</button>
-            </div>
-          </details>
         </div>
         <div
           id="attachment-previews"
@@ -233,6 +249,27 @@
           aria-label="Attached images"
           hidden
         ></div>
+        <section id="message-buffer" class="message-buffer" aria-labelledby="message-buffer-title" hidden>
+          <header class="message-buffer-header">
+            <strong id="message-buffer-title" data-i18n="buffer.title">Queued messages</strong>
+            <span id="message-buffer-count" aria-live="polite"></span>
+            <button
+              id="message-buffer-run"
+              class="message-buffer-action message-buffer-run"
+              type="button"
+              aria-label="Run next queued message"
+              title="Run next queued message"
+              data-i18n-aria-label="buffer.run_next"
+              data-i18n-title="buffer.run_next"
+              hidden
+            >
+              <svg aria-hidden="true" viewBox="0 0 20 20">
+                <path d="M7 5.5L14 10L7 14.5V5.5Z"></path>
+              </svg>
+            </button>
+          </header>
+          <div id="message-buffer-list" class="message-buffer-list"></div>
+        </section>
         <textarea
           id="message-input"
           rows="1"
