@@ -3718,6 +3718,7 @@ async function saveGitConfiguration() {
     )) {
       return;
     }
+    elements.gitActionStatus.textContent = "Saving local repository configuration…";
     for (const change of changes) {
       const currentPreview = change.kind === "identity"
         ? await fetchJson("/api/git/identity/preview", {

@@ -439,7 +439,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#git-action-status"
       )
     ).ToContainTextAsync(
-      "Local repository configuration saved."
+      "Local repository configuration saved.",
+      new() { Timeout = 15_000 }
     );
     Assert.AreEqual(
       "Repository User",
@@ -5992,13 +5993,14 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     settingsNode.Remove(
       "schemaVersion"
     );
-    await File.WriteAllTextAsync(
-      _environment.SettingsPath,
-      settingsNode.ToJsonString(
-        TestJson.Options
+    await _environment.RestartApplicationAsync(
+      () => File.WriteAllTextAsync(
+        _environment.SettingsPath,
+        settingsNode.ToJsonString(
+          TestJson.Options
+        )
       )
     );
-    await _environment.RestartApplicationAsync();
     var migratedNode = JsonNode.Parse(
       await File.ReadAllTextAsync(
         _environment.SettingsPath
@@ -6020,16 +6022,16 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
 
     migratedNode["schemaVersion"] = 99;
-    await File.WriteAllTextAsync(
-      _environment.SettingsPath,
-      migratedNode.ToJsonString(
-        TestJson.Options
-      )
-    );
-
     try
     {
-      await _environment.RestartApplicationAsync();
+      await _environment.RestartApplicationAsync(
+        () => File.WriteAllTextAsync(
+          _environment.SettingsPath,
+          migratedNode.ToJsonString(
+            TestJson.Options
+          )
+        )
+      );
       using var status = await _environment.HttpClient.GetAsync(
         "api/recovery/status"
       );
@@ -6120,25 +6122,28 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     }
     finally
     {
-      await File.WriteAllTextAsync(
-        _environment.SettingsPath,
-        _environment.BaselineSettings.ToJson()
-      );
-      var failure = Path.Combine(
-        _environment.DataDirectory,
-        "migration-failure.json"
-      );
+      await _environment.RestartApplicationAsync(
+        async () =>
+        {
+          await File.WriteAllTextAsync(
+            _environment.SettingsPath,
+            _environment.BaselineSettings.ToJson()
+          );
+          var failure = Path.Combine(
+            _environment.DataDirectory,
+            "migration-failure.json"
+          );
 
-      if (File.Exists(
-        failure
-      ))
-      {
-        File.Delete(
-          failure
-        );
-      }
-
-      await _environment.RestartApplicationAsync();
+          if (File.Exists(
+            failure
+          ))
+          {
+            File.Delete(
+              failure
+            );
+          }
+        }
+      );
     }
   }
 

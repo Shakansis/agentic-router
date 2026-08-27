@@ -4935,10 +4935,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Page.Locator("#messages > .message.assistant").Nth(0)
         .Locator(".assistant-reasoning-body")
     ).ToContainTextAsync("Inspecting");
-    await Expect(
-      Page.Locator("#messages > .message.assistant").Nth(1)
-        .Locator(".assistant-reasoning-body")
-    ).ToContainTextAsync("Steering accepted");
+    var acceptedSteering = Page.Locator(
+      "#messages > .message.assistant"
+    ).Nth(1).Locator(
+      ".assistant-reasoning-body",
+      new() { HasText = "Steering accepted" }
+    );
+    await Expect(acceptedSteering).ToHaveCountAsync(1);
+    await Expect(acceptedSteering).ToContainTextAsync("Steering accepted");
     await Expect(Page.Locator(".assistant-running-indicator:visible"))
       .ToHaveCountAsync(0);
     using var evidence = JsonDocument.Parse(

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 
@@ -499,7 +500,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
     return path;
   }
 
-  public async Task RestartApplicationAsync()
+  public async Task RestartApplicationAsync(
+    Func<Task>? whileStopped = null
+  )
   {
     var startInfo = _apiProcess.StartInfo;
 
@@ -522,6 +525,20 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
     _apiProcess.Dispose();
     _apiOutput.Clear();
+    ExceptionDispatchInfo? stoppedActionFailure = null;
+    if (whileStopped is not null)
+    {
+      try
+      {
+        await whileStopped();
+      }
+      catch (Exception exception)
+      {
+        stoppedActionFailure = ExceptionDispatchInfo.Capture(
+          exception
+        );
+      }
+    }
     _apiProcess = new Process
     {
       StartInfo = startInfo,
@@ -562,6 +579,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     _apiProcess.BeginOutputReadLine();
     _apiProcess.BeginErrorReadLine();
     await WaitUntilReadyAsync();
+    stoppedActionFailure?.Throw();
   }
 
   public async Task SetCodexExecutableAndRestartAsync(
