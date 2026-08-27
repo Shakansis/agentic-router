@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Configuration;
@@ -37,6 +39,23 @@ var builder = WebApplication.CreateBuilder(
     ContentRootPath = contentRootPath
   }
 );
+
+if (string.IsNullOrWhiteSpace(builder.Configuration["urls"]))
+{
+  const int preferredPort = 5000;
+  var selectedPort = CanBindLoopbackPort(preferredPort)
+    ? preferredPort
+    : 0;
+  builder.WebHost.UseUrls(
+    $"http://127.0.0.1:{selectedPort}"
+  );
+  if (selectedPort == 0)
+  {
+    Console.WriteLine(
+      "Port 5000 is already in use. Agentic Router will select an available loopback port."
+    );
+  }
+}
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
@@ -471,3 +490,26 @@ await app.Services
   );
 
 await app.RunAsync();
+
+static bool CanBindLoopbackPort(
+  int port
+)
+{
+  var listener = new TcpListener(
+    IPAddress.Loopback,
+    port
+  );
+  try
+  {
+    listener.Start();
+    return true;
+  }
+  catch (SocketException)
+  {
+    return false;
+  }
+  finally
+  {
+    listener.Stop();
+  }
+}

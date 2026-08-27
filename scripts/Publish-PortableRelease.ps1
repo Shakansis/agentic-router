@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$VersionLabel = '0.9.16_alpha',
+  [string]$VersionLabel = '0.9.17_alpha',
   [ValidateSet('win-x64', 'linux-x64')]
   [string]$RuntimeIdentifier = 'win-x64',
   [string]$OutputDirectory,
@@ -102,7 +102,7 @@ function New-PosixTarGzip {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.9.16_alpha.'
+  throw 'VersionLabel must use the form 0.9.17_alpha.'
 }
 
 $packageVersion = $VersionLabel.Replace('_', '-')
@@ -257,7 +257,8 @@ Agentic Router $VersionLabel ($RuntimeIdentifier)
 3. Start the application:
    ./run-agentic-router.sh
 4. Wait for the console to show "Now listening on".
-5. Open the displayed local address in your browser (normally http://localhost:5000).
+5. Open the displayed local address in your browser. It normally uses port 5000
+   and automatically selects another loopback port when 5000 is occupied.
 
 The package includes the .NET runtime. Ollama and local models remain separate.
 For AMD hardware, setup asks you to choose explicitly between Vulkan (base package
@@ -279,7 +280,8 @@ Agentic Router $VersionLabel ($RuntimeIdentifier)
 
 1. Double-click AgenticRouter.exe.
 2. Wait for the console to show "Now listening on".
-3. Open the displayed local address in your browser (normally http://localhost:5000).
+3. Open the displayed local address in your browser. It normally uses port 5000
+   and automatically selects another loopback port when 5000 is occupied.
 
 The package includes the .NET runtime. Ollama, models, and optional harnesses can
 be installed from Agentic Router's onboarding or Settings > Local resources.

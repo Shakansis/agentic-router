@@ -1,8 +1,11 @@
-# Agentic Router v0.9.16 alpha
+# Agentic Router v0.9.17 alpha
 
 This alpha adds a Linux x64 portable release alongside Windows x64 from the same
 core codebase. It retains the durable local supervised Execute acceptance from
 v0.9.15 while adding explicit, observable Linux Ollama acceleration profiles.
+
+- Preserves explicit URL configuration, uses loopback port 5000 when available,
+  and automatically selects another loopback port when 5000 is occupied.
 
 ## Linux x64 support
 

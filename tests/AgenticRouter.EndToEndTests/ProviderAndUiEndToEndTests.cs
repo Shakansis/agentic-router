@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -3413,7 +3414,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.16_alpha"
+      "v0.9.17_alpha"
     );
     await Expect(
       Page.Locator(
@@ -3473,6 +3474,206 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         )
       )
     );
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task StartsOnAvailableLoopbackPortWhenDefaultPortIsOccupied()
+  {
+    TcpListener? portBlocker = null;
+    try
+    {
+      portBlocker = new TcpListener(
+        IPAddress.Loopback,
+        5000
+      );
+      portBlocker.Start();
+    }
+    catch (SocketException)
+    {
+      portBlocker?.Stop();
+      portBlocker = null;
+    }
+
+    var temporaryRoot = Path.Combine(
+      Path.GetTempPath(),
+      "agentic-router-port-fallback-e2e",
+      Guid.NewGuid().ToString("N")
+    );
+    Directory.CreateDirectory(temporaryRoot);
+    var dataDirectory = Path.Combine(
+      temporaryRoot,
+      "data"
+    );
+    Directory.CreateDirectory(dataDirectory);
+    await File.WriteAllTextAsync(
+      Path.Combine(
+        dataDirectory,
+        "settings.json"
+      ),
+      _environment.BaselineSettings.ToJson()
+    );
+    var configuration = new DirectoryInfo(
+      AppContext.BaseDirectory
+    ).Parent?.Name ?? "Debug";
+    var executablePath = Path.Combine(
+      _environment.RepositoryRoot,
+      "AgenticRouter.Api",
+      "bin",
+      configuration,
+      "net10.0",
+      OperatingSystem.IsWindows()
+        ? "AgenticRouter.Api.exe"
+        : "AgenticRouter.Api"
+    );
+    var output = new StringBuilder();
+    var processStartInfo = new ProcessStartInfo
+    {
+      FileName = executablePath,
+      WorkingDirectory = Path.Combine(
+        _environment.RepositoryRoot,
+        "AgenticRouter.Api"
+      ),
+      UseShellExecute = false,
+      CreateNoWindow = true,
+      RedirectStandardOutput = true,
+      RedirectStandardError = true
+    };
+    processStartInfo.Environment["AgenticRouter__DataDirectory"] = dataDirectory;
+
+    using var process = new Process
+    {
+      StartInfo = processStartInfo
+    };
+    process.OutputDataReceived += (_, args) =>
+    {
+      if (args.Data is not null)
+      {
+        lock (output)
+        {
+          output.AppendLine(args.Data);
+        }
+      }
+    };
+    process.ErrorDataReceived += (_, args) =>
+    {
+      if (args.Data is not null)
+      {
+        lock (output)
+        {
+          output.AppendLine(args.Data);
+        }
+      }
+    };
+
+    try
+    {
+      Assert.IsTrue(process.Start());
+      process.BeginOutputReadLine();
+      process.BeginErrorReadLine();
+
+      Uri? fallbackUri = null;
+      var timeoutAt = DateTimeOffset.UtcNow.AddSeconds(20);
+      while (DateTimeOffset.UtcNow < timeoutAt)
+      {
+        string currentOutput;
+        lock (output)
+        {
+          currentOutput = output.ToString();
+        }
+        var match = Regex.Match(
+          currentOutput,
+          @"Now listening on:\s+(http://127\.0\.0\.1:(?<port>\d+))"
+        );
+        if (match.Success)
+        {
+          fallbackUri = new Uri(
+            match.Groups[1].Value,
+            UriKind.Absolute
+          );
+          break;
+        }
+        if (process.HasExited)
+        {
+          Assert.Fail(
+            $"Fallback instance exited with code {process.ExitCode}.{Environment.NewLine}{currentOutput}"
+          );
+        }
+        await Task.Delay(100);
+      }
+
+      string finalOutput;
+      lock (output)
+      {
+        finalOutput = output.ToString();
+      }
+      Assert.IsNotNull(
+        fallbackUri,
+        $"Fallback instance did not report a listening address.{Environment.NewLine}{finalOutput}"
+      );
+      Assert.AreNotEqual(5000, fallbackUri.Port);
+
+      using var fallbackClient = new HttpClient
+      {
+        BaseAddress = fallbackUri,
+        Timeout = TimeSpan.FromSeconds(5)
+      };
+      HttpResponseMessage? rootResponse = null;
+      string rootContent = string.Empty;
+      timeoutAt = DateTimeOffset.UtcNow.AddSeconds(10);
+      while (DateTimeOffset.UtcNow < timeoutAt)
+      {
+        rootResponse?.Dispose();
+        rootResponse = await fallbackClient.GetAsync("/");
+        rootContent = await rootResponse.Content.ReadAsStringAsync();
+        if (rootResponse.IsSuccessStatusCode)
+        {
+          break;
+        }
+        await Task.Delay(100);
+      }
+      using (rootResponse)
+      {
+        lock (output)
+        {
+          finalOutput = output.ToString();
+        }
+        Assert.IsNotNull(rootResponse);
+        Assert.IsTrue(
+          rootResponse.IsSuccessStatusCode,
+          $"Fallback root returned {(int)rootResponse.StatusCode}.{Environment.NewLine}{rootContent}{Environment.NewLine}{finalOutput}"
+        );
+      }
+
+      await Page.GotoAsync(fallbackUri.ToString());
+      await Expect(
+        Page.GetByRole(
+          AriaRole.Heading,
+          new()
+          {
+            Name = "Conversation",
+            Exact = true
+          }
+        )
+      ).ToBeVisibleAsync();
+    }
+    finally
+    {
+      if (!process.HasExited)
+      {
+        process.Kill(entireProcessTree: true);
+        await process.WaitForExitAsync();
+      }
+      portBlocker?.Stop();
+      if (Directory.Exists(temporaryRoot))
+      {
+        Directory.Delete(
+          temporaryRoot,
+          recursive: true
+        );
+      }
+    }
   }
 
   [TestMethod]

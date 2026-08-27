@@ -27,8 +27,18 @@ done
 smoke_dir="$(mktemp -d /tmp/agentic-router-linux-smoke.XXXXXX)"
 app_pid=""
 probe_pid=""
+port_blocker_pid=""
+fallback_app_pid=""
 cleanup() {
   local result=$?
+  if [[ -n "$fallback_app_pid" ]] && kill -0 "$fallback_app_pid" 2>/dev/null; then
+    kill -TERM "$fallback_app_pid" 2>/dev/null || true
+    wait "$fallback_app_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$port_blocker_pid" ]] && kill -0 "$port_blocker_pid" 2>/dev/null; then
+    kill -TERM "$port_blocker_pid" 2>/dev/null || true
+    wait "$port_blocker_pid" 2>/dev/null || true
+  fi
   if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
     kill -TERM "$app_pid" 2>/dev/null || true
     wait "$app_pid" 2>/dev/null || true
@@ -136,4 +146,42 @@ unsafe_status="$(curl --silent --max-time 5 -o "$smoke_dir/unsafe-plan.json" -w 
   "http://127.0.0.1:$port/api/setup/ollama/profile-switch/plan")"
 test "$unsafe_status" = "409"
 grep -q '"code":"profile-switch-manifest-unsafe"' "$smoke_dir/unsafe-plan.json"
+
+python3 -m http.server 5000 \
+  --bind 127.0.0.1 \
+  --directory "$smoke_dir" \
+  >"$smoke_dir/port-blocker.log" 2>&1 &
+port_blocker_pid=$!
+sleep 0.5
+if ! kill -0 "$port_blocker_pid" 2>/dev/null \
+  && ! grep -q 'Address already in use' "$smoke_dir/port-blocker.log"; then
+  printf 'Could not occupy or confirm occupied loopback port 5000.\n' >&2
+  exit 1
+fi
+
+mkdir -p "$smoke_dir/fallback-data"
+AgenticRouter__DataDirectory="$smoke_dir/fallback-data" \
+  "$app" >"$smoke_dir/fallback-app.log" 2>&1 &
+fallback_app_pid=$!
+fallback_url=""
+for _ in $(seq 1 100); do
+  fallback_url="$(
+    grep -oE 'http://127\.0\.0\.1:[0-9]+' "$smoke_dir/fallback-app.log" \
+      | tail -n 1 \
+      || true
+  )"
+  if [[ -n "$fallback_url" ]] \
+    && curl --fail --silent --max-time 2 "$fallback_url/" >/dev/null; then
+    break
+  fi
+  if ! kill -0 "$fallback_app_pid" 2>/dev/null; then
+    printf 'Fallback Linux host exited before becoming ready.\n' >&2
+    exit 1
+  fi
+  sleep 0.2
+done
+test -n "$fallback_url"
+test "$fallback_url" != 'http://127.0.0.1:5000'
+grep -q 'Port 5000 is already in use' "$smoke_dir/fallback-app.log"
+printf 'LINUX_PORT_FALLBACK_SMOKE_OK %s\n' "$fallback_url"
 printf 'LINUX_SETUP_SMOKE_OK\n'

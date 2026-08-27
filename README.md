@@ -2,7 +2,7 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.9.16_alpha - Windows x64 and Linux x64 portable releases from one shared core, with explicit Linux Ollama acceleration profiles. This remains evaluation software.
+**Current Status**: v0.9.17_alpha - Windows x64 and Linux x64 portable releases from one shared core, with explicit Linux Ollama acceleration profiles. This remains evaluation software.
 
 ## Download
 
@@ -13,7 +13,7 @@ the ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.9.16_alpha` is a pre-release intended for evaluation. The package is
+`0.9.17_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources.

@@ -7,8 +7,8 @@ macOS, and it does not coordinate heterogeneous AMD + NVIDIA workloads.
 ## Start the portable package
 
 ```bash
-tar -xzf AgenticRouter-0.9.16_alpha-linux-x64.tar.gz
-cd AgenticRouter-0.9.16_alpha-linux-x64
+tar -xzf AgenticRouter-0.9.17_alpha-linux-x64.tar.gz
+cd AgenticRouter-0.9.17_alpha-linux-x64
 chmod +x AgenticRouter run-agentic-router.sh
 ./run-agentic-router.sh
 ```
