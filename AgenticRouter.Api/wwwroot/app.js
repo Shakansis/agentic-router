@@ -10599,6 +10599,43 @@ function createSetupOllamaRows(setup) {
     backendRow.append(title, state, evidence);
     rows.push(backendRow);
   }
+  const currentProfile = installation?.backend?.manifestProfile;
+  const switchProfiles = installation?.profiles?.filter(
+    profile => profile.id !== currentProfile
+  ) ?? [];
+  if (setup.ollama.available && currentProfile && switchProfiles.length > 0) {
+    const switchRow = document.createElement("div");
+    switchRow.className = "setup-profile-row";
+    const label = document.createElement("label");
+    label.htmlFor = `setup-profile-switch-${installation.platform}`;
+    label.textContent = t("setup.change_profile");
+    const select = document.createElement("select");
+    select.id = label.htmlFor;
+    select.className = "setup-profile-select";
+    select.dataset.setupProfileSwitch = "ollama";
+    switchProfiles.forEach(profile => {
+      const option = document.createElement("option");
+      option.value = profile.id;
+      option.textContent = profile.displayName;
+      select.append(option);
+    });
+    const detail = document.createElement("small");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button compact setup-action";
+    button.dataset.setupAction = "switch-profile";
+    button.disabled = setup.readOnly;
+    button.textContent = t("setup.review_change");
+    const renderSwitchDetail = () => {
+      detail.textContent = switchProfiles.find(
+        profile => profile.id === select.value
+      )?.description ?? "";
+    };
+    select.addEventListener("change", renderSwitchDetail);
+    switchRow.append(label, select, detail, button);
+    renderSwitchDetail();
+    rows.push(switchRow);
+  }
   if (!installation?.profiles?.length || setup.ollama.available) {
     rows.push(resourceRow);
     return rows;
@@ -10841,6 +10878,43 @@ async function handleSetupAction(event) {
         t("setup.model_started", { resource: model }),
         "success",
         7000
+      );
+    } else if (action === "switch-profile") {
+      const targetProfile = document.querySelector(
+        "[data-setup-profile-switch=\"ollama\"]"
+      )?.value;
+      if (!targetProfile) {
+        throw new Error(t("setup.profile_required"));
+      }
+      const plan = await fetchJson("/api/setup/ollama/profile-switch/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetProfile })
+      });
+      const approved = await showAppConfirm(
+        `${t("setup.change_summary", {
+          current: plan.currentProfile,
+          target: plan.targetProfile
+        })}\n\n${plan.actions.map(item => `• ${item}`).join("\n")}`,
+        {
+          title: t("setup.change_profile"),
+          confirmLabel: t("setup.apply_change"),
+          danger: true
+        }
+      );
+      if (!approved) {
+        button.disabled = false;
+        return;
+      }
+      await fetchJson("/api/setup/ollama/profile-switch/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: plan.planId })
+      });
+      showToast(
+        t("setup.change_started"),
+        "success",
+        9000
       );
     }
     await refreshSetupStatus({ quiet: true });

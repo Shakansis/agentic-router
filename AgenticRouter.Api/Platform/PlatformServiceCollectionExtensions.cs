@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers.Cloud;
+using AgenticRouter.Api.Recovery;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Setup;
 
@@ -16,6 +17,15 @@ internal static class PlatformServiceCollectionExtensions
     services.AddSingleton<IOllamaInstallationProfileStore>(
       new OllamaInstallationProfileStore(
         dataDirectory
+      )
+    );
+    services.AddSingleton<IOllamaProfileSwitchService>(
+      provider => new OllamaProfileSwitchService(
+        dataDirectory,
+        provider.GetRequiredService<IGpuDiscoveryService>(),
+        provider.GetRequiredService<IOllamaInstallationProfileStore>(),
+        provider.GetRequiredService<SafeModeState>(),
+        provider.GetRequiredService<ILogger<OllamaProfileSwitchService>>()
       )
     );
 

@@ -26,6 +26,10 @@
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest"
           TargetPath="scripts\install-ollama-linux.sh" />
+    <None Update="Setup\Scripts\switch-ollama-linux-profile.sh"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          TargetPath="scripts\switch-ollama-linux-profile.sh" />
   </ItemGroup>
 
 </Project>

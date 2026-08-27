@@ -51,6 +51,18 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       null
     );
     Assert.AreEqual(HttpStatusCode.NotFound, unknownInstaller.StatusCode);
+    using var linuxProfileSwitch = await _environment.HttpClient.PostAsJsonAsync(
+      "api/setup/ollama/profile-switch/plan",
+      new { targetProfile = "rocm" }
+    );
+    Assert.AreEqual(HttpStatusCode.Conflict, linuxProfileSwitch.StatusCode);
+    var linuxProfileProblem = await linuxProfileSwitch.Content.ReadFromJsonAsync<JsonElement>(
+      TestJson.Options
+    );
+    Assert.AreEqual(
+      "installer-platform-unsupported",
+      linuxProfileProblem.GetProperty("code").GetString()
+    );
     using var availableHarness = await _environment.HttpClient.PostAsync(
       "api/setup/install/codex",
       null

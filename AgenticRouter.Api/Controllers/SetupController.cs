@@ -8,10 +8,53 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class SetupController : ControllerBase
 {
   private readonly ILocalSetupService _setup;
+  private readonly IOllamaProfileSwitchService _profileSwitch;
 
-  public SetupController(ILocalSetupService setup)
+  public SetupController(
+    ILocalSetupService setup,
+    IOllamaProfileSwitchService profileSwitch
+  )
   {
     _setup = setup;
+    _profileSwitch = profileSwitch;
+  }
+
+  [HttpPost("ollama/profile-switch/plan")]
+  public async Task<ActionResult<OllamaProfileSwitchPlan>> PlanProfileSwitch(
+    [FromBody] OllamaProfileSwitchPlanRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return Ok(await _profileSwitch.PrepareAsync(
+        request.TargetProfile,
+        cancellationToken
+      ));
+    }
+    catch (SetupException exception)
+    {
+      return SetupProblem(exception);
+    }
+  }
+
+  [HttpPost("ollama/profile-switch/apply")]
+  public async Task<ActionResult<SetupActionResult>> ApplyProfileSwitch(
+    [FromBody] OllamaProfileSwitchApplyRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return Ok(await _profileSwitch.StartAsync(
+        request.PlanId,
+        cancellationToken
+      ));
+    }
+    catch (SetupException exception)
+    {
+      return SetupProblem(exception);
+    }
   }
 
   [HttpGet("status")]
@@ -93,3 +136,7 @@ public sealed class SetupController : ControllerBase
 }
 
 public sealed record PullSetupModelRequest(string Model);
+
+public sealed record OllamaProfileSwitchPlanRequest(string TargetProfile);
+
+public sealed record OllamaProfileSwitchApplyRequest(string PlanId);

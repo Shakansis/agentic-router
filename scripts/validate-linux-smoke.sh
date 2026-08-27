@@ -44,6 +44,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+mkdir -p "$smoke_dir/data/installation-manifests/ollama"
+cat > "$smoke_dir/data/installation-manifests/ollama/install.properties" <<'MANIFEST'
+schemaVersion=1
+requestedProfile=rocm
+MANIFEST
+cat > "$smoke_dir/data/installation-manifests/ollama/base.files" <<'MANIFEST'
+usr/bin/ollama
+usr/lib/ollama/libbase.so
+usr/lib/ollama/shared.so
+MANIFEST
+cat > "$smoke_dir/data/installation-manifests/ollama/rocm.files" <<'MANIFEST'
+usr/lib/ollama/shared.so
+usr/lib/ollama/rocm/libhip.so
+MANIFEST
+
 python3 -c '
 import mmap
 import pathlib
@@ -55,7 +70,7 @@ path.write_bytes(bytes(4096))
 with path.open("r+b") as stream:
     with mmap.mmap(stream.fileno(), 0):
         time.sleep(30)
-' "$smoke_dir/libggml-vulkan.so" "ollama runner" &
+' "$smoke_dir/libggml-hip.so" "ollama runner" &
 probe_pid=$!
 
 chmod +x "$app"
@@ -81,6 +96,40 @@ test -s "$smoke_dir/status.json"
 grep -q '"platform":"linux-x64"' "$smoke_dir/status.json"
 grep -q '"profiles":\[' "$smoke_dir/status.json"
 grep -Eq '"id":"(standard|vulkan|rocm)"' "$smoke_dir/status.json"
-grep -q '"observedBackend":"vulkan"' "$smoke_dir/status.json"
-grep -q '"state":"observed"' "$smoke_dir/status.json"
+grep -q '"manifestProfile":"rocm"' "$smoke_dir/status.json"
+grep -q '"observedBackend":"rocm"' "$smoke_dir/status.json"
+grep -q '"state":"verified"' "$smoke_dir/status.json"
+
+curl --fail --silent --max-time 5 \
+  -H 'Content-Type: application/json' \
+  -d '{"targetProfile":"standard"}' \
+  "http://127.0.0.1:$port/api/setup/ollama/profile-switch/plan" \
+  > "$smoke_dir/plan.json"
+grep -q '"currentProfile":"rocm"' "$smoke_dir/plan.json"
+grep -q '"targetProfile":"standard"' "$smoke_dir/plan.json"
+grep -q '"rocmOnlyFilesToRemove":1' "$smoke_dir/plan.json"
+grep -q '"preservesModelsAndData":true' "$smoke_dir/plan.json"
+
+apply_status="$(curl --silent --max-time 5 -o "$smoke_dir/apply.json" -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"planId":"not-a-reviewed-plan"}' \
+  "http://127.0.0.1:$port/api/setup/ollama/profile-switch/apply")"
+test "$apply_status" = "409"
+
+manifest_before="$(sha256sum "$smoke_dir/data/installation-manifests/ollama/install.properties")"
+printf 'n\n\n' | bash "$publish_dir/scripts/switch-ollama-linux-profile.sh" \
+  rocm standard "$smoke_dir/data/installation-manifests/ollama" \
+  > "$smoke_dir/switch-cancel.log"
+grep -q 'Profile change cancelled.' "$smoke_dir/switch-cancel.log"
+manifest_after="$(sha256sum "$smoke_dir/data/installation-manifests/ollama/install.properties")"
+test "$manifest_before" = "$manifest_after"
+
+printf 'etc/agentic-router-unsafe\n' \
+  >> "$smoke_dir/data/installation-manifests/ollama/rocm.files"
+unsafe_status="$(curl --silent --max-time 5 -o "$smoke_dir/unsafe-plan.json" -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"targetProfile":"standard"}' \
+  "http://127.0.0.1:$port/api/setup/ollama/profile-switch/plan")"
+test "$unsafe_status" = "409"
+grep -q '"code":"profile-switch-manifest-unsafe"' "$smoke_dir/unsafe-plan.json"
 printf 'LINUX_SETUP_SMOKE_OK\n'
