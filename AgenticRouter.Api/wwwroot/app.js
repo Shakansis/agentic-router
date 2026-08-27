@@ -78,7 +78,9 @@ const state = {
   projectSessions: [],
   expandedProjectIds: new Set(),
   sidebarCollapsed: false,
-  runtime: null
+  runtime: null,
+  setup: null,
+  setupTimer: null
 };
 
 let benchmarkTooltip = null;
@@ -92,7 +94,7 @@ const settingsSectionGroups = {
   general: ["settings-general", "settings-ollama"],
   "models-routing": ["settings-models", "settings-coordinator"],
   providers: ["settings-cloud-providers"],
-  harnesses: ["settings-runtime"],
+  harnesses: ["settings-setup", "settings-runtime"],
   execution: ["settings-execution"],
   workspaces: ["settings-workspaces", "settings-git", "settings-validation"],
   advanced: ["settings-advanced"]
@@ -599,6 +601,8 @@ function bindEvents() {
   elements.compactContext.addEventListener("click", requestManualContextCompaction);
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
+  elements.messages.addEventListener("click", handleSetupAction);
+  elements.settingsContent.addEventListener("click", handleSetupAction);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
   elements.newConversation.addEventListener("click", requestNewConversation);
   elements.toggleSidebar.addEventListener("click", toggleSidebar);
@@ -1204,9 +1208,8 @@ function initializeScrollFollowing() {
 async function loadApplicationState() {
   const [
     settings,
-    harnesses,
+    setup,
     modelsResponse,
-    devicesResponse,
     workspace,
     projectProfile,
     validationProfiles,
@@ -1220,9 +1223,8 @@ async function loadApplicationState() {
     runtimeProfiles
   ] = await Promise.all([
     fetchJson("/api/settings"),
-    fetchJson("/api/harnesses"),
+    fetchJson("/api/setup/status"),
     fetchJson("/api/models"),
-    fetchJson("/api/devices"),
     fetchJson("/api/workspace"),
     fetchJson("/api/workspace/project-profile"),
     fetchJson("/api/workspace/validation-profile"),
@@ -1236,9 +1238,16 @@ async function loadApplicationState() {
     fetchJson("/api/runtime/profiles")
   ]);
   const providerHealth = await fetchJson("/api/provider-health");
+  const devicesResponse = {
+    devices: setup.devices,
+    diagnostic: setup.deviceDiagnostic
+  };
 
   state.settings = settings;
-  state.harnesses = harnesses;
+  state.harnesses = setup.harnesses.map(harness => ({
+    definition: harness.definition,
+    availability: harness.availability
+  }));
   state.models = modelsResponse.models;
   state.devices = devicesResponse.devices;
   state.workspace = workspace;
@@ -1253,6 +1262,7 @@ async function loadApplicationState() {
   state.providerHealth = providerHealth;
   state.modelOrganization = modelOrganization;
   state.runtimeProfiles = runtimeProfiles;
+  state.setup = setup;
   updateProviderStatus(modelsResponse);
   updateDeviceStatus(devicesResponse);
   renderHarnesses();
@@ -1267,6 +1277,7 @@ async function loadApplicationState() {
   updateInteractionControls();
   await refreshSelectedModelCapabilities();
   renderPendingContextUsage();
+  renderSetupOnboarding();
   if (!state.recovery?.historyAutoLoadDisabled) {
     await refreshSessions();
   }
@@ -8519,6 +8530,7 @@ async function openSettings(section = "general") {
   document.querySelector(
     `[data-settings-target="${normalizeSettingsSection(section)}"]`
   )?.focus();
+  await refreshSetupStatus({ quiet: true });
 
   try {
     [
@@ -9868,8 +9880,13 @@ function updateHarnessControls() {
   const automaticRoute = state.interactionMode === "execute"
     && state.harness === "auto-model-harness";
   elements.modelSelector.disabled = disabled || automaticRoute;
-  elements.harnessSelector.disabled = disabled
-    || state.interactionMode !== "execute";
+  elements.harnessSelector.disabled = disabled;
+  const automaticOption = elements.harnessSelector.querySelector(
+    'option[value="auto-model-harness"]'
+  );
+  if (automaticOption) {
+    automaticOption.disabled = state.interactionMode !== "execute";
+  }
   elements.harnessSelector.value = state.harness;
 }
 
@@ -10212,6 +10229,312 @@ function renderPersistenceStatus() {
   elements.conversationPersistenceSidebar.classList.add("sidebar-expanded-only");
 }
 
+async function refreshSetupStatus({ quiet = false } = {}) {
+  try {
+    const [setup, modelsResponse] = await Promise.all([
+      fetchJson("/api/setup/status"),
+      fetchJson("/api/models")
+    ]);
+    state.setup = setup;
+    state.harnesses = setup.harnesses.map(harness => ({
+      definition: harness.definition,
+      availability: harness.availability
+    }));
+    state.devices = setup.devices;
+    state.models = modelsResponse.models;
+    updateProviderStatus(modelsResponse);
+    updateDeviceStatus({
+      devices: setup.devices,
+      diagnostic: setup.deviceDiagnostic
+    });
+    renderHarnesses();
+    renderComposerModels();
+    updateHarnessControls();
+    updateInteractionControls();
+    renderSetupOnboarding();
+  } catch (error) {
+    if (!quiet) {
+      showToast(error.message || t("setup.refresh_failed"));
+    }
+  }
+}
+
+function renderSetupOnboarding() {
+  const emptyState = document.querySelector("#empty-state");
+  const containers = document.querySelectorAll("[data-setup-surface]");
+  if (containers.length === 0 || !state.setup) {
+    return;
+  }
+
+  const setup = state.setup;
+  if (emptyState) {
+    emptyState.hidden = setup.coreReady;
+    emptyState.classList.toggle("has-setup", !setup.coreReady);
+  }
+  containers.forEach(container => {
+    const onboarding = container.dataset.setupSurface === "onboarding";
+    if (onboarding && setup.coreReady) {
+      container.replaceChildren();
+      container.hidden = true;
+      return;
+    }
+    renderSetupSurface(container, setup);
+  });
+  scheduleSetupRefresh(setup);
+}
+
+function renderSetupSurface(container, setup) {
+  container.replaceChildren();
+  container.hidden = false;
+
+  const header = document.createElement("header");
+  header.className = "setup-header";
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = t("setup.title");
+  const summary = document.createElement("span");
+  summary.textContent = setup.coreReady
+    ? t("setup.ready")
+    : t("setup.missing");
+  heading.append(title, summary);
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "icon-button setup-refresh";
+  refresh.dataset.setupAction = "refresh";
+  refresh.title = t("setup.refresh");
+  refresh.setAttribute("aria-label", t("setup.refresh"));
+  refresh.textContent = "↻";
+  header.append(heading, refresh);
+  container.append(header);
+
+  const description = document.createElement("p");
+  description.className = "setup-description";
+  description.textContent = t("setup.description");
+  container.append(description);
+
+  const grid = document.createElement("div");
+  grid.className = "setup-grid";
+  grid.append(
+    createSetupGroup(
+      t("setup.ollama"),
+      [createSetupResourceRow(setup.ollama, "install")]
+    ),
+    createSetupGroup(
+      t("setup.models"),
+      createSetupModelRows(setup)
+    ),
+    createSetupGroup(
+      t("setup.harnesses"),
+      setup.harnesses.map(harness => createSetupResourceRow(harness, "install"))
+    )
+  );
+  container.append(grid);
+
+  const gpu = document.createElement("small");
+  gpu.className = "setup-hardware-note";
+  gpu.textContent = setup.largestGpuMemoryBytes
+    ? t("setup.gpu", { memory: formatSetupBytes(setup.largestGpuMemoryBytes) })
+    : t("setup.gpu_unknown");
+  container.append(gpu);
+  if (setup.readOnly) {
+    const readOnly = document.createElement("small");
+    readOnly.className = "setup-read-only";
+    readOnly.textContent = t("setup.read_only");
+    container.append(readOnly);
+  }
+}
+
+function createSetupGroup(label, rows) {
+  const group = document.createElement("section");
+  group.className = "setup-group";
+  const heading = document.createElement("h3");
+  heading.textContent = label;
+  const list = document.createElement("div");
+  list.className = "setup-list";
+  list.append(...rows);
+  group.append(heading, list);
+  return group;
+}
+
+function createSetupResourceRow(resource, action) {
+  const row = document.createElement("div");
+  row.className = "setup-row";
+  const status = document.createElement("span");
+  status.className = `setup-state ${resource.available ? "ready" : "missing"}`;
+  status.textContent = resource.available ? "✓" : "!";
+  status.setAttribute("aria-hidden", "true");
+  const content = document.createElement("div");
+  content.className = "setup-row-content";
+  const name = document.createElement("strong");
+  name.textContent = resource.displayName;
+  if (resource.recommended) {
+    const tag = document.createElement("span");
+    tag.className = "setup-tag";
+    tag.textContent = t("setup.harness_recommended");
+    name.append(" ", tag);
+  }
+  const detail = document.createElement("small");
+  detail.textContent = setupResourceDetail(resource);
+  content.append(name, detail);
+  row.append(status, content);
+
+  if (!resource.available && resource.installSupported) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button compact setup-action";
+    button.dataset.setupAction = action;
+    button.dataset.resourceId = resource.id;
+    const recentlyStarted = resource.job?.state === "started"
+      && Date.now() - new Date(resource.job.updatedAt).getTime() < 10 * 60 * 1000;
+    button.disabled = state.setup?.readOnly || recentlyStarted;
+    button.textContent = resource.job?.state === "failed" || (
+      !recentlyStarted && resource.job
+    )
+      ? t("setup.retry")
+      : t("setup.install");
+    row.append(button);
+  }
+  return row;
+}
+
+function createSetupModelRows(setup) {
+  return setup.recommendedModels.map(model => {
+    const row = document.createElement("div");
+    row.className = "setup-row setup-model-row";
+    row.dataset.model = model.model;
+    const status = document.createElement("span");
+    const downloading = model.job?.state === "downloading";
+    status.className = `setup-state ${model.installed ? "ready" : "missing"}`;
+    status.textContent = model.installed ? "✓" : downloading ? "↓" : "!";
+    status.setAttribute("aria-hidden", "true");
+    const content = document.createElement("div");
+    content.className = "setup-row-content";
+    const name = document.createElement("strong");
+    name.textContent = model.model;
+    if (model.recommended) {
+      const tag = document.createElement("span");
+      tag.className = "setup-tag";
+      tag.textContent = t("setup.recommended");
+      name.append(" ", tag);
+    }
+    const detail = document.createElement("small");
+    detail.textContent = model.installed
+      ? t("setup.installed")
+      : `${formatSetupBytes(model.downloadBytes)} · ${model.reason}`;
+    content.append(name, detail);
+    if (downloading && model.job?.totalBytes > 0) {
+      const progress = document.createElement("progress");
+      progress.max = model.job.totalBytes;
+      progress.value = model.job.completedBytes ?? 0;
+      progress.setAttribute("aria-label", `${model.model} ${t("setup.downloading")}`);
+      content.append(progress);
+    }
+    row.append(status, content);
+    if (!model.installed) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-button compact setup-action";
+      button.dataset.setupAction = "pull";
+      button.dataset.model = model.model;
+      button.disabled = setup.readOnly || !setup.ollama.available || downloading;
+      button.textContent = downloading ? t("setup.downloading") : t("setup.pull");
+      row.append(button);
+    }
+    return row;
+  });
+}
+
+function setupResourceDetail(resource) {
+  if (resource.available) {
+    if (resource.required && resource.id === "native") {
+      return t("setup.native");
+    }
+    const status = resource.definition
+      ? t("setup.installed")
+      : t("setup.available");
+    return resource.version
+      ? `${status} · ${resource.version}`
+      : status;
+  }
+  if (
+    resource.job?.state === "started"
+    && Date.now() - new Date(resource.job.updatedAt).getTime() < 10 * 60 * 1000
+  ) {
+    return t("setup.started");
+  }
+  return resource.diagnostic || (resource.required
+    ? t("setup.missing_status")
+    : t("setup.optional"));
+}
+
+function scheduleSetupRefresh(setup) {
+  clearTimeout(state.setupTimer);
+  const installerPending = [setup.ollama, ...setup.harnesses].some(
+    resource => !resource.available
+      && resource.job?.state === "started"
+      && Date.now() - new Date(resource.job.updatedAt).getTime() < 10 * 60 * 1000
+  );
+  const modelPending = setup.recommendedModels.some(
+    model => model.job?.state === "downloading"
+  );
+  if (installerPending || modelPending) {
+    state.setupTimer = window.setTimeout(
+      () => refreshSetupStatus({ quiet: true }),
+      5000
+    );
+  }
+}
+
+async function handleSetupAction(event) {
+  const button = event.target.closest("[data-setup-action]");
+  if (!button) {
+    return;
+  }
+  const action = button.dataset.setupAction;
+  button.disabled = true;
+  try {
+    if (action === "refresh") {
+      await refreshSetupStatus();
+      return;
+    }
+    if (action === "install") {
+      const resourceId = button.dataset.resourceId;
+      const result = await fetchJson(
+        `/api/setup/install/${encodeURIComponent(resourceId)}`,
+        { method: "POST" }
+      );
+      showToast(
+        t("setup.action_started", { resource: result.resourceId }),
+        "success",
+        7000
+      );
+    } else if (action === "pull") {
+      const model = button.dataset.model;
+      await fetchJson("/api/setup/models/pull", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model })
+      });
+      showToast(
+        t("setup.model_started", { resource: model }),
+        "success",
+        7000
+      );
+    }
+    await refreshSetupStatus({ quiet: true });
+  } catch (error) {
+    showToast(error.message);
+    button.disabled = false;
+  }
+}
+
+function formatSetupBytes(bytes) {
+  const gib = bytes / (1024 ** 3);
+  return gib >= 1
+    ? `${gib.toFixed(gib >= 10 ? 0 : 1)} GB`
+    : `${(bytes / (1024 ** 2)).toFixed(0)} MB`;
+}
+
 function createEmptyState() {
   const container = document.createElement("div");
   container.id = "empty-state";
@@ -10224,11 +10547,17 @@ function createEmptyState() {
   );
   icon.textContent = "✦";
   const heading = document.createElement("h2");
-  heading.textContent = "Ready to chat";
+  heading.textContent = t("empty.ready_title");
   const description = document.createElement("p");
-  description.textContent =
-    "Use Auto to classify intent and choose the configured model.";
-  container.append(icon, heading, description);
+  description.textContent = t("empty.ready_description");
+  const setup = document.createElement("section");
+  setup.id = "setup-onboarding";
+  setup.className = "setup-onboarding";
+  setup.dataset.setupSurface = "onboarding";
+  setup.setAttribute("aria-live", "polite");
+  setup.hidden = true;
+  container.append(icon, heading, description, setup);
+  queueMicrotask(renderSetupOnboarding);
   return container;
 }
 
@@ -13719,6 +14048,13 @@ function updateJumpControl() {
 }
 
 function scrollToBottom() {
+  if (elements.messages.querySelector("#empty-state")) {
+    elements.messages.scrollTo({
+      top: 0,
+      behavior: "instant"
+    });
+    return;
+  }
   elements.messages.scrollTo(
     {
       top: elements.messages.scrollHeight,

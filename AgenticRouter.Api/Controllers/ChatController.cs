@@ -7,6 +7,7 @@ using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Sessions;
+using AgenticRouter.Api.Supervision;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
@@ -82,6 +83,61 @@ public sealed class ChatController : ControllerBase
           null,
           400,
           true
+        ),
+        cancellationToken
+      );
+      return;
+    }
+
+    SupervisionRequestResolution supervision;
+    try
+    {
+      supervision = SupervisionRequestPolicy.Resolve(
+        request
+      );
+    }
+    catch (SupervisionException exception)
+    {
+      await WriteErrorAsync(
+        requestId,
+        new ChatStageException(
+          exception.Stage,
+          exception.Message,
+          exception.Code,
+          request.Model,
+          null,
+          exception.StatusCode,
+          exception.Retryable,
+          exception,
+          new Dictionary<string, string?>
+          {
+            ["code"] = exception.Code
+          }
+        ),
+        cancellationToken
+      );
+      return;
+    }
+
+    if (supervision.Supervised)
+    {
+      await WriteErrorAsync(
+        requestId,
+        new ChatStageException(
+          "supervision-foundation",
+          "Durable Supervised Execute is not executable until Milestone 2 is approved.",
+          "Milestone 0 provides local-only durable state, attach/detach, and recovery contracts without invoking a model or harness.",
+          request.Model,
+          null,
+          409,
+          true,
+          details: new Dictionary<string, string?>
+          {
+            ["code"] = "supervision-execution-not-enabled",
+            ["executionStrategy"] = supervision.Strategy,
+            ["resumePolicy"] = supervision.ResumePolicy,
+            ["providerPolicy"] = "ollama-local-only"
+          }
         ),
         cancellationToken
       );

@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Supervision;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Sessions;
@@ -92,6 +93,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
   private readonly IWorkspaceProfileService _profiles;
   private readonly ISettingsStore _settings;
   private readonly IExecutionSessionStore _executionSessions;
+  private readonly IDurableSupervisionRunCoordinator _supervisionRuns;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
@@ -101,13 +103,15 @@ public sealed class PersistentSessionService : IPersistentSessionService
     IPersistentSessionStore store,
     IWorkspaceProfileService profiles,
     ISettingsStore settings,
-    IExecutionSessionStore executionSessions
+    IExecutionSessionStore executionSessions,
+    IDurableSupervisionRunCoordinator supervisionRuns
   )
   {
     _store = store;
     _profiles = profiles;
     _settings = settings;
     _executionSessions = executionSessions;
+    _supervisionRuns = supervisionRuns;
   }
 
   public async Task RecoverInterruptedAsync(
@@ -909,6 +913,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
       sessionId,
       cancellationToken
     );
+    await DeleteSupervisionAsync(
+      active.Id,
+      sessionId,
+      cancellationToken
+    );
   }
 
   public async Task DeleteArchivedAsync(
@@ -932,6 +941,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
         session.Id,
         cancellationToken
       );
+      await DeleteSupervisionAsync(
+        active.Id,
+        session.Id,
+        cancellationToken
+      );
     }
   }
 
@@ -950,6 +964,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
     foreach (var session in sessions)
     {
       await _store.DeleteAsync(
+        active.Id,
+        session.Id,
+        cancellationToken
+      );
+      await DeleteSupervisionAsync(
         active.Id,
         session.Id,
         cancellationToken
@@ -1152,6 +1171,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
         removable.Id,
         cancellationToken
       );
+      await DeleteSupervisionAsync(
+        active.Id,
+        removable.Id,
+        cancellationToken
+      );
       existing = existing.Where(
         session => !string.Equals(
           session.Id,
@@ -1159,6 +1183,32 @@ public sealed class PersistentSessionService : IPersistentSessionService
           StringComparison.Ordinal
         )
       ).ToArray();
+    }
+  }
+
+  private async Task DeleteSupervisionAsync(
+    string workspaceId,
+    string sessionId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      await _supervisionRuns.DiscardConversationAsync(
+        workspaceId,
+        sessionId,
+        cancellationToken
+      );
+    }
+    catch (SupervisionException exception)
+    {
+      throw new WorkspaceProfileException(
+        exception.Code,
+        "session-deletion",
+        exception.Message,
+        exception.Retryable,
+        exception
+      );
     }
   }
 

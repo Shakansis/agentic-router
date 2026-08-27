@@ -3194,7 +3194,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#model-lock")).ToHaveCountAsync(0);
     var harness = Page.Locator("#harness-selector");
     await Expect(harness).ToHaveValueAsync("native");
-    await Expect(harness).ToBeDisabledAsync();
+    await Expect(harness).ToBeEnabledAsync();
+    await Expect(harness.Locator("option[value=\"auto-model-harness\"]"))
+      .ToHaveAttributeAsync("disabled", "");
     await Expect(harness.Locator("option")).ToHaveTextAsync(
       new[]
       {

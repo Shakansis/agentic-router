@@ -80,11 +80,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private readonly ConcurrentDictionary<string, int> _generationAttempts = new(
     StringComparer.Ordinal
   );
+  private readonly ConcurrentDictionary<string, ModelDefinition> _pulledModels = new(
+    StringComparer.OrdinalIgnoreCase
+  );
   private readonly object _residencyGate = new();
   private string _protocolVersion = "0.13.5-test";
   private string? _adaptiveConformanceModel;
   private string? _evictOnNextLoadedModel;
   private string? _evictOnNextRemovedModel;
+  private bool _hideInstalledModels;
   private int _nextModelTestDelayMilliseconds;
   private Task? _listenTask;
 
@@ -128,10 +132,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     _capabilityQueries.Clear();
     _errors.Clear();
     _generationAttempts.Clear();
+    _pulledModels.Clear();
     _protocolVersion = "0.13.5-test";
     _adaptiveConformanceModel = null;
     _evictOnNextLoadedModel = null;
     _evictOnNextRemovedModel = null;
+    _hideInstalledModels = false;
     Interlocked.Exchange(
       ref _nextModelTestDelayMilliseconds,
       0
@@ -172,6 +178,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   )
   {
     _protocolVersion = version;
+  }
+
+  public void HideInstalledModels()
+  {
+    _hideInstalledModels = true;
   }
 
   public void RemoveLoadedModel(
@@ -274,7 +285,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           HttpStatusCode.OK,
           new
           {
-            models = Models.Select(
+            models = (
+              _hideInstalledModels
+                ? Enumerable.Empty<ModelDefinition>()
+                : Models
+            ).Concat(_pulledModels.Values).Select(
               model => new
               {
                 name = model.Name,
@@ -313,6 +328,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           },
           cancellationToken
         );
+        return;
+      }
+
+      if (
+        context.Request.HttpMethod == HttpMethod.Post.Method
+        && path == "/api/pull"
+      )
+      {
+        await HandlePullAsync(context, cancellationToken);
         return;
       }
 
@@ -367,6 +391,52 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
   }
 
+  private async Task HandlePullAsync(
+    HttpListenerContext context,
+    CancellationToken cancellationToken
+  )
+  {
+    using var document = await JsonDocument.ParseAsync(
+      context.Request.InputStream,
+      cancellationToken: cancellationToken
+    );
+    var model = document.RootElement.GetProperty("model").GetString()
+      ?? throw new InvalidOperationException("A model is required.");
+    const long total = 1_000_000L;
+    context.Response.StatusCode = (int)HttpStatusCode.OK;
+    context.Response.ContentType = "application/x-ndjson";
+    context.Response.SendChunked = true;
+    await WritePullUpdateAsync(
+      context.Response,
+      new { status = "pulling manifest" },
+      cancellationToken
+    );
+    await WritePullUpdateAsync(
+      context.Response,
+      new { status = "downloading", total, completed = total / 2 },
+      cancellationToken
+    );
+    _pulledModels[model] = new ModelDefinition(model, total);
+    await WritePullUpdateAsync(
+      context.Response,
+      new { status = "success", total, completed = total },
+      cancellationToken
+    );
+    context.Response.Close();
+  }
+
+  private static async Task WritePullUpdateAsync(
+    HttpListenerResponse response,
+    object payload,
+    CancellationToken cancellationToken
+  )
+  {
+    var json = JsonSerializer.Serialize(payload, TestJson.Options) + "\n";
+    var bytes = Encoding.UTF8.GetBytes(json);
+    await response.OutputStream.WriteAsync(bytes, cancellationToken);
+    await response.OutputStream.FlushAsync(cancellationToken);
+  }
+
   private async Task HandleShowAsync(
     HttpListenerContext context,
     CancellationToken cancellationToken
@@ -383,7 +453,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       model
     );
 
-    if (!Models.Any(
+    if (!Models.Concat(_pulledModels.Values).Any(
       candidate => candidate.Name == model
     ))
     {
@@ -4968,7 +5038,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       {
         await Task.Delay(
           isStreamingMarkdownPreview
-            ? 1_000
+            ? 3_000
             : isBrowserBufferSource
               ? 700
               : 120,

@@ -18,6 +18,108 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 {
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task LocalSetupReportsActiveResourcesAndPullsOnlyRecommendedModels()
+  {
+    _environment.FakeOllama.HideInstalledModels();
+    using var statusResponse = await _environment.HttpClient.GetAsync(
+      "api/setup/status"
+    );
+    statusResponse.EnsureSuccessStatusCode();
+    using var status = JsonDocument.Parse(
+      await statusResponse.Content.ReadAsStringAsync()
+    );
+    var root = status.RootElement;
+    Assert.IsTrue(root.GetProperty("ollama").GetProperty("available").GetBoolean());
+    Assert.IsFalse(root.GetProperty("compatibleModelInstalled").GetBoolean());
+    Assert.IsFalse(root.GetProperty("coreReady").GetBoolean());
+    Assert.IsGreaterThanOrEqualTo(
+      5,
+      root.GetProperty("harnesses").GetArrayLength()
+    );
+    var codex = root.GetProperty("harnesses")
+      .EnumerateArray()
+      .Single(harness => harness.GetProperty("id").GetString() == "codex");
+    Assert.IsTrue(codex.GetProperty("recommended").GetBoolean());
+    using var unknownInstaller = await _environment.HttpClient.PostAsync(
+      "api/setup/install/not-registered",
+      null
+    );
+    Assert.AreEqual(HttpStatusCode.NotFound, unknownInstaller.StatusCode);
+    using var availableHarness = await _environment.HttpClient.PostAsync(
+      "api/setup/install/codex",
+      null
+    );
+    availableHarness.EnsureSuccessStatusCode();
+    using var availableHarnessResult = JsonDocument.Parse(
+      await availableHarness.Content.ReadAsStringAsync()
+    );
+    Assert.IsFalse(
+      availableHarnessResult.RootElement.GetProperty("started").GetBoolean()
+    );
+    var model = root.GetProperty("recommendedModels")[0]
+      .GetProperty("model")
+      .GetString()!;
+
+    using var rejected = await _environment.HttpClient.PostAsJsonAsync(
+      "api/setup/models/pull",
+      new { model = "unreviewed:latest" }
+    );
+    Assert.AreEqual(HttpStatusCode.Conflict, rejected.StatusCode);
+
+    await Page.GotoAsync("/");
+    await Expect(Page.Locator("#setup-onboarding")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#setup-onboarding")).ToContainTextAsync(
+      "Ollama runtime"
+    );
+    await Expect(Page.Locator("#setup-onboarding")).ToContainTextAsync(
+      "Optional harnesses"
+    );
+
+    await Expect(Page.Locator("#setup-onboarding")).ToContainTextAsync(
+      "Codex Recommended for Execute"
+    );
+    var modelRow = Page.Locator(
+      $"#setup-onboarding .setup-model-row[data-model=\"{model}\"]"
+    );
+    await modelRow.Locator("button[data-setup-action=\"pull\"]").ClickAsync();
+    await Expect(Page.Locator("#empty-state")).ToBeHiddenAsync(
+      new LocatorAssertionsToBeHiddenOptions { Timeout = 15_000 }
+    );
+    await Expect(Page.Locator("#model-selector option").Filter(
+      new() { HasText = model }
+    )).ToHaveCountAsync(1);
+
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"harnesses\"]").ClickAsync();
+    var settingsSetup = Page.Locator("#settings-setup-surface");
+    await Expect(settingsSetup).ToBeVisibleAsync();
+    await Expect(settingsSetup).ToContainTextAsync("Codex Recommended for Execute");
+    await Expect(settingsSetup.Locator(
+      $".setup-model-row[data-model=\"{model}\"]"
+    )).ToContainTextAsync("Installed");
+
+    using var refreshedResponse = await _environment.HttpClient.GetAsync(
+      "api/setup/status"
+    );
+    refreshedResponse.EnsureSuccessStatusCode();
+    using var refreshed = JsonDocument.Parse(
+      await refreshedResponse.Content.ReadAsStringAsync()
+    );
+    var installed = refreshed.RootElement
+      .GetProperty("recommendedModels")
+      .EnumerateArray()
+      .Single(candidate => string.Equals(
+        candidate.GetProperty("model").GetString(),
+        model,
+        StringComparison.OrdinalIgnoreCase
+      ))
+      .GetProperty("installed")
+      .GetBoolean();
+    Assert.IsTrue(installed);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task StartupResolvesRecoveryAndWorkspaceServices()
   {
     using var workspacesResponse = await _environment.HttpClient.GetAsync(
@@ -1895,6 +1997,27 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ChatAllowsHarnessPreselectionAndKeepsItAcrossModeChanges()
+  {
+    await Page.GotoAsync("/");
+
+    await Expect(Page.Locator("[data-mode=\"chat\"]"))
+      .ToHaveAttributeAsync("aria-pressed", "true");
+    await Expect(Page.Locator("#harness-selector")).ToBeEnabledAsync();
+    await Expect(Page.Locator(
+      "#harness-selector option[value=\"auto-model-harness\"]"
+    )).ToHaveAttributeAsync("disabled", "");
+
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("qwen-code");
+    await Page.Locator("[data-mode=\"execute\"]").ClickAsync();
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("qwen-code");
+    await Page.Locator("[data-mode=\"chat\"]").ClickAsync();
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("qwen-code");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ContextUsageFloatsAboveAndOutsideTheComposerPanel()
   {
     await Page.GotoAsync("/");
@@ -3272,7 +3395,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.14"
+      "v0.9.14_alpha"
     );
     await Expect(
       Page.Locator(
@@ -3907,7 +4030,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       )
     );
     await Page.Locator(
-      "#send-button"
+      "#cancel-request"
     ).ClickAsync();
     await Expect(
       Page.Locator(

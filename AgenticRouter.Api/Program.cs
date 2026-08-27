@@ -15,11 +15,26 @@ using AgenticRouter.Api.Recovery;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Sessions;
+using AgenticRouter.Api.Setup;
+using AgenticRouter.Api.Supervision;
 using AgenticRouter.Api.Usage;
 using AgenticRouter.Api.WorkspaceProfiles;
 
+var executableContentRoot = AppContext.BaseDirectory;
+var contentRootPath = Directory.Exists(
+  Path.Combine(
+    executableContentRoot,
+    "wwwroot"
+  )
+)
+  ? executableContentRoot
+  : Directory.GetCurrentDirectory();
 var builder = WebApplication.CreateBuilder(
-  args
+  new WebApplicationOptions
+  {
+    Args = args,
+    ContentRootPath = contentRootPath
+  }
 );
 
 builder.Logging.ClearProviders();
@@ -158,6 +173,7 @@ builder.Services.AddSingleton<IWorkspaceProfileStore>(
 builder.Services.AddSingleton<IWorkspaceProfileService, WorkspaceProfileService>();
 builder.Services.AddSingleton<IPersistentSessionStore, PersistentSessionStore>();
 builder.Services.AddSingleton<IPersistentSessionService, PersistentSessionService>();
+builder.Services.AddSingleton<ISupervisionCheckpointStore, SupervisionCheckpointStore>();
 builder.Services.AddSingleton<IGpuDiscoveryService, WindowsGpuDiscoveryService>();
 builder.Services.AddSingleton<IMarkdownRenderer, SafeMarkdownRenderer>();
 builder.Services.AddSingleton<IRouterResponseParser, RouterResponseParser>();
@@ -291,6 +307,12 @@ builder.Services.AddSingleton<IAgentHarness>(
   services => services.GetRequiredService<ClaudeCodeHarnessAdapter>()
 );
 builder.Services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
+builder.Services.AddScoped<ISupervisionRouteResolver, SupervisionRouteResolver>();
+builder.Services.AddSingleton<
+  IDurableSupervisionRunCoordinator,
+  DurableSupervisionRunCoordinator
+>();
+builder.Services.AddSingleton<ILocalSetupService, LocalSetupService>();
 var configuredBenchmarkDirectory = builder.Configuration[
   "AgenticRouter:Benchmarking:RootDirectory"
 ];
@@ -428,6 +450,11 @@ if (!safeModeState.Enabled)
   await app.Services
     .GetRequiredService<IPersistentSessionService>()
     .RecoverInterruptedAsync(
+      CancellationToken.None
+    );
+  await app.Services
+    .GetRequiredService<IDurableSupervisionRunCoordinator>()
+    .InitializeAsync(
       CancellationToken.None
     );
 }

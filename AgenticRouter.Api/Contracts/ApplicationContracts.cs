@@ -88,7 +88,9 @@ public sealed record ChatRequest(
   bool WebSearchEnabled = false,
   IReadOnlyList<ChatImageAttachment>? Images = null,
   bool CompactContext = false,
-  bool AutoModelHarness = false
+  bool AutoModelHarness = false,
+  string ExecutionStrategy = "direct",
+  string SupervisionResumePolicy = "manual"
 );
 
 public sealed record HarnessSteerInput(

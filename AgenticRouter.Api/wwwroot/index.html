@@ -81,7 +81,7 @@
       <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
     </section>
 
-    <span class="app-version sidebar-expanded-only">v0.9.14</span>
+    <span class="app-version sidebar-expanded-only">v0.9.14_alpha</span>
   </aside>
 
   <div
@@ -175,8 +175,9 @@
     <section id="messages" class="messages" aria-live="polite">
       <div id="empty-state" class="empty-state">
         <div class="empty-icon" aria-hidden="true">✦</div>
-        <h2>Ready to chat</h2>
-        <p>Use Auto to classify intent and choose the configured model.</p>
+        <h2 data-i18n="empty.ready_title">Ready to chat</h2>
+        <p data-i18n="empty.ready_description">Use Auto to classify intent and choose the configured model.</p>
+        <section id="setup-onboarding" class="setup-onboarding" data-setup-surface="onboarding" aria-live="polite" hidden></section>
       </div>
     </section>
 
@@ -342,10 +343,10 @@
                 class="information-button compact-information-button"
                 type="button"
                 aria-label="Information about Harness and Auto Model by Harness"
-                data-tooltip="A harness is the runtime that drives the model during Execute. Auto Model × Harness selects one combination before execution using local evidence."
+                data-tooltip="Choose a harness at any time. The selection is applied when using Execute. Auto Model × Harness remains available only in Execute mode."
               >i</button>
             </span>
-            <select id="harness-selector" aria-label="Execution harness" disabled>
+            <select id="harness-selector" aria-label="Execution harness">
               <option value="native" selected>Native</option>
             </select>
           </label>
@@ -968,6 +969,19 @@
             </div>
             <div id="settings-validation-summary" class="settings-summary-card"></div>
             <button id="settings-open-validation" class="secondary-button" type="button">Edit validation profile</button>
+          </section>
+
+          <section id="settings-setup" class="settings-section" data-settings-section="setup" tabindex="-1">
+            <div class="section-heading">
+              <h3>Local resources</h3>
+              <p>Validate or install Ollama, GPU-compatible models, and optional harnesses.</p>
+            </div>
+            <div
+              id="settings-setup-surface"
+              class="setup-onboarding settings-setup-surface"
+              data-setup-surface="settings"
+              aria-live="polite"
+            ></div>
           </section>
 
           <section id="settings-runtime" class="settings-section" data-settings-section="runtime" tabindex="-1">

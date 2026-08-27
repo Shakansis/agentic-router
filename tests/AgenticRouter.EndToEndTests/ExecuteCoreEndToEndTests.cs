@@ -1162,7 +1162,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       ("general", new[] {"settings-general", "settings-ollama"}),
       ("models-routing", new[] {"settings-models", "settings-coordinator"}),
       ("providers", new[] {"settings-cloud-providers"}),
-      ("harnesses", new[] {"settings-runtime"}),
+      ("harnesses", new[] {"settings-runtime", "settings-setup"}),
       ("execution", new[] {"settings-execution"}),
       ("workspaces", new[] {"settings-workspaces", "settings-git", "settings-validation"}),
       ("advanced", new[] {"settings-advanced"})
@@ -2221,7 +2221,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         "#empty-state"
       )
-    ).ToBeVisibleAsync();
+    ).ToBeHiddenAsync();
     await Expect(
       Page.Locator(
         "[data-mode=\"chat\"]"
@@ -3441,7 +3441,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         AriaRole.Button,
         new()
         {
-          Name = "Cancel request",
+          Name = "Cancel active response",
           Exact = true
         }
       )
@@ -4719,7 +4719,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Cancel request",
+        Name = "Cancel active response",
         Exact = true
       }
     ).ClickAsync();
@@ -6726,7 +6726,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       0
     );
     await Page.Locator(
-      "#send-button"
+      "#cancel-request"
     ).ClickAsync();
     await Expect(
       Page.Locator(
@@ -6809,7 +6809,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       );
     }
     await Page.Locator(
-      "#send-button"
+      "#cancel-request"
     ).ClickAsync();
     await Expect(
       Page.Locator(

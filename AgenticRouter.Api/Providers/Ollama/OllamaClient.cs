@@ -89,6 +89,93 @@ public sealed class OllamaClient : IOllamaClient
       .ToArray();
   }
 
+  public async IAsyncEnumerable<OllamaPullProgress> PullModelAsync(
+    Uri baseUri,
+    string model,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    var payload = JsonSerializer.Serialize(
+      new
+      {
+        model,
+        stream = true
+      },
+      JsonOptions
+    );
+    using var request = new HttpRequestMessage(
+      HttpMethod.Post,
+      new Uri(
+        baseUri,
+        "/api/pull"
+      )
+    )
+    {
+      Content = new StringContent(
+        payload,
+        Encoding.UTF8,
+        "application/json"
+      )
+    };
+    using var response = await SendAsync(
+      request,
+      "model-pull",
+      cancellationToken,
+      HttpCompletionOption.ResponseHeadersRead,
+      Timeout.InfiniteTimeSpan
+    );
+    await using var stream = await response.Content.ReadAsStreamAsync(
+      cancellationToken
+    );
+    using var reader = new StreamReader(stream);
+
+    while (await reader.ReadLineAsync(cancellationToken) is { } line)
+    {
+      if (string.IsNullOrWhiteSpace(line))
+      {
+        continue;
+      }
+
+      OllamaPullResponse update;
+      try
+      {
+        update = JsonSerializer.Deserialize<OllamaPullResponse>(
+          line,
+          JsonOptions
+        ) ?? throw new JsonException("The pull update was empty.");
+      }
+      catch (JsonException exception)
+      {
+        throw new OllamaProviderException(
+          "model-pull",
+          "Ollama returned an invalid model download update.",
+          exception.Message,
+          (int)response.StatusCode,
+          false,
+          exception
+        );
+      }
+
+      if (!string.IsNullOrWhiteSpace(update.Error))
+      {
+        throw new OllamaProviderException(
+          "model-pull",
+          "Ollama could not download the selected model.",
+          update.Error,
+          (int)response.StatusCode,
+          true
+        );
+      }
+
+      yield return new OllamaPullProgress(
+        update.Status ?? "Downloading",
+        update.Digest,
+        update.Total,
+        update.Completed
+      );
+    }
+  }
+
   public async Task<string> ClassifyAsync(
     Uri baseUri,
     string model,
@@ -1909,6 +1996,14 @@ public sealed class OllamaClient : IOllamaClient
     string? Version
   );
 
+  private sealed record OllamaPullResponse(
+    string? Status,
+    string? Digest,
+    long? Total,
+    long? Completed,
+    string? Error
+  );
+
   private sealed record OllamaPsResponse(
     IReadOnlyList<OllamaPsModel> Models
   );
@@ -2010,3 +2105,10 @@ public sealed class OllamaClient : IOllamaClient
     [property: JsonPropertyName("eval_count")] long? EvalCount
   );
 }
+
+public sealed record OllamaPullProgress(
+  string Status,
+  string? Digest,
+  long? TotalBytes,
+  long? CompletedBytes
+);

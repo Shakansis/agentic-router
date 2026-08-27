@@ -2,7 +2,23 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.9.14 - Execute effect authority and conversation UI reliability correction. File creation is manually acceptable; editing and deletion still require corrective real-model validation.
+**Current Status**: v0.9.14_alpha - Execute effect authority and conversation UI reliability correction. File creation is manually acceptable; editing and deletion still require corrective real-model validation.
+
+## Download
+
+Portable Windows builds are published in the
+[Agentic Router Releases](https://github.com/Shakansis/agentic-router-releases/releases)
+repository. Download the ZIP and its `.sha256` file, extract the ZIP to a
+writable directory, and run `AgenticRouter.exe`.
+
+`0.9.14_alpha` is a pre-release intended for evaluation. The package is
+self-contained and does not require a separate .NET installation. Ollama,
+models, and optional harnesses can be installed from the onboarding experience
+or Settings > Local resources.
+
+The public distribution repository contains only this README, the evaluation
+license, its referenced screenshots, and downloadable release assets. Source code, development
+documentation, diagnostics, tests, and local application data are not included.
 
 ## 🎯 Project Mission
 
@@ -210,10 +226,21 @@ cd agentic-router
 dotnet restore
 ```
 
-3. Configure Ollama:
-- **Local**: Ensure Ollama is running: `ollama serve`
-- **Remote**: Configure the Ollama URL in settings (e.g., `http://remote-server:11434`)
-- Pull required models: `ollama pull <model-name>`
+3. Configure local resources:
+- On Windows, the empty conversation screen reports whether Ollama, compatible
+  local models, and each optional harness are available.
+- Missing tools can be installed on demand from that screen. Ollama, Codex, and
+  Claude Code use fixed WinGet package identifiers; OpenCode and Qwen Code use
+  their fixed official npm packages.
+- After core readiness is reached, the welcome checklist disappears. The same
+  validator and actions remain available under **Settings > Harnesses**, where
+  Codex is marked as the recommended (but never mandatory) Execute harness.
+- Model recommendations use the largest detected GPU's dedicated memory and
+  keep headroom for context/runtime allocation. Downloads run through Ollama's
+  `/api/pull` endpoint and expose provider progress.
+- **Remote Ollama**: configure the Ollama URL in settings (for example,
+  `http://remote-server:11434`). Guided Ollama installation applies only to the
+  local Windows machine.
 
 4. Run the application:
 ```bash
@@ -221,6 +248,10 @@ dotnet run --project AgenticRouter.Api
 ```
 
 5. Open browser at `http://localhost:5000`
+
+The Host never accepts an executable or package command from the browser. Setup
+actions select a reviewed resource identifier, and availability is reported only
+after the normal Ollama or harness discovery path observes the resource.
 
 ### Hardware Requirements
 
@@ -632,7 +663,10 @@ See `tools/diagnostics/README.md` and
 
 ## 📄 License
 
-[Specify your license here]
+Agentic Router alpha binary releases are proprietary and provided only for
+personal or internal evaluation, testing, and feedback. Redistribution,
+commercial use, modification, and derivative works are not permitted. See the
+[Agentic Router Alpha Evaluation License](LICENSE.md) for the complete terms.
 
 ## 🤝 Contributing
 
