@@ -6,10 +6,12 @@ A **GPU-agnostic** local-first chat application that routes each user message to
 
 ## Download
 
-Portable Windows builds are published in the
+Portable Windows and Linux x64 builds are published in the
 [Agentic Router Releases](https://github.com/Shakansis/agentic-router-releases/releases)
-repository. Download the ZIP and its `.sha256` file, extract the ZIP to a
-writable directory, and run `AgenticRouter.exe`.
+repository. Download the archive and its `.sha256` file. On Windows, extract
+the ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
+`./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
+when required by the filesystem).
 
 `0.9.15_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
@@ -42,16 +44,13 @@ The system follows a **Mixture of Experts (MoE)** approach and is **completely G
 - **No GPU**: Runs on CPU-only systems
 - **Remote Providers**: Connects to Ollama, Groq, Google AI Studio, or Cerebras through provider-specific HTTP contracts
 
-### Optional Multi-GPU Distribution
+### Multiple-GPU scope
 
-For users with multiple GPUs, the system can distribute workloads strategically:
-
-| Hardware | Role | Models Allocated | Strategic Advantage |
-|----------|------|------------------|---------------------|
-| **AMD Radeon RX 7900 XT** (24GB VRAM) | Continuous Hosting & Routing | Router Model (2B/8B) + Context Storage | Large memory capacity to keep the routing model always ready without interrupting the main GPU |
-| **NVIDIA GeForce RTX 4090** (24GB VRAM) | High-Performance Inference | RPG Expert (8B Optimized) / Programming Expert | Ultra-fast tensor processing (Tensor Cores), ideal for fast generation of long texts and complex code |
-
-**Note**: Multi-GPU is optional. The application automatically detects available GPUs and works with whatever hardware is present.
+The application detects multiple adapters and preserves provider-managed device
+selection. NVIDIA indices are exposed only when `nvidia-smi` provides an
+authoritative Ollama/CUDA order; AMD and Intel identities are not coerced into
+that index space. Coordinated heterogeneous AMD + NVIDIA scheduling is a
+separate future feature and is not claimed by this release.
 
 ### Execution Pipeline
 
@@ -66,7 +65,7 @@ The application follows a flexible pipeline that adapts to available hardware:
 7. **Inference**: Provider processes the request and streams the response
 8. **Response Streaming**: Response streams in real-time to the UI with routing activity visible
 
-**Key Point**: Local GPU selection is an Ollama preference. Cloud providers own their remote hardware allocation and require an explicitly saved, Windows-protected API key.
+**Key Point**: Local GPU selection is an Ollama preference. Cloud providers own their remote hardware allocation and require an explicitly saved protected API key (Windows DPAPI or Linux Secret Service).
 
 ### Execute Mode
 
@@ -147,10 +146,10 @@ Execute mode includes a safe Git workflow for committing changes:
 - **.NET 10** - Latest .NET platform
 - **ASP.NET Core Web API** - Minimal hosting model with controllers
 - **Provider registry** - Ollama Local, Groq, Google AI Studio, and Cerebras
-- **Protected secrets** - Windows DPAPI with opaque references in ordinary settings
+- **Protected secrets** - Windows DPAPI or Linux Secret Service with opaque references in ordinary settings
 - **Server-Sent Events (SSE)** - Streaming mechanism for real-time updates
 - **CancellationToken** - Proper async cancellation throughout the pipeline
-- **GPU Discovery Service** - Automatic detection of available graphics devices (Windows)
+- **GPU Discovery Service** - Windows SetupAPI/DXGI/NVIDIA SMI or Linux NVIDIA SMI/DRM sysfs
 
 ### Frontend
 - **Vanilla HTML, CSS, JavaScript** - No frameworks, no build pipeline
@@ -250,11 +249,16 @@ dotnet restore
 ```
 
 3. Configure local resources:
-- On Windows, the empty conversation screen reports whether Ollama, compatible
+- On Windows and Linux x64, the empty conversation screen reports whether Ollama, compatible
   local models, and each optional harness are available.
-- Missing tools can be installed on demand from that screen. Ollama, Codex, and
+- On Windows, missing tools can be installed on demand from that screen. Ollama, Codex, and
   Claude Code use fixed WinGet package identifiers; OpenCode and Qwen Code use
   their fixed official npm packages.
+- On Linux, guided Ollama setup uses only official packages. AMD users choose
+  Vulkan (base package plus `OLLAMA_VULKAN=1`) or ROCm (base plus the official
+  ROCm supplemental package). GPU drivers and models are never installed
+  automatically. Optional harnesses are discovered from Linux paths/PATH and
+  remain manual installs in this release.
 - After core readiness is reached, the welcome checklist disappears. The same
   validator and actions remain available under **Settings > Harnesses**, where
   Codex is marked as the recommended (but never mandatory) Execute harness.
@@ -263,7 +267,7 @@ dotnet restore
   `/api/pull` endpoint and expose provider progress.
 - **Remote Ollama**: configure the Ollama URL in settings (for example,
   `http://remote-server:11434`). Guided Ollama installation applies only to the
-  local Windows machine.
+  local machine.
 
 4. Run the application:
 ```bash

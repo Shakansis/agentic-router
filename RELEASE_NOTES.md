@@ -4,6 +4,26 @@ This alpha adds durable local supervised Execute and closes its authorized real-
 acceptance matrix on Native and Codex while preserving Host authority and direct
 Execute as the default.
 
+## Linux x64 preview
+
+- Adds a self-contained Linux x64 release from the same core codebase; Linux
+  ARM64 and macOS remain out of scope.
+- Routes GPU discovery, memory telemetry, folder integration, installer launch,
+  path comparison, and protected-secret storage through OS-specific services
+  while preserving the existing Windows implementations.
+- Adds explicit Linux Ollama setup profiles: Standard/CUDA, Vulkan using
+  `OLLAMA_VULKAN=1`, and ROCm using the official supplemental package. Hardware
+  detection controls which choices are offered; GPU drivers and models are not
+  installed automatically.
+- Reports requested profile, managed package manifest, observed backend library,
+  and CPU fallback separately instead of claiming acceleration from configuration.
+- Adds an approval-gated profile-change workflow that revalidates expiring plans,
+  reinstalls the official base package, removes only manifest-proven ROCm-only
+  files, preserves model/data directories, and restarts Ollama only after visible
+  confirmation.
+- Adds reproducible Linux publish/runtime smoke validation under WSL while leaving
+  final physical-Linux acceptance open for the packaged tar.gz.
+
 ## Durable supervised Execute
 
 - Adds opt-in `/supervisor` execution with one serial focused supervisor context and

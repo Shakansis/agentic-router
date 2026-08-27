@@ -3,7 +3,11 @@ set -Eeuo pipefail
 
 publish_dir="${1:?Usage: validate-linux-smoke.sh PUBLISH_DIRECTORY [PORT]}"
 port="${2:-58741}"
-app="$publish_dir/AgenticRouter.Api"
+if [[ -f "$publish_dir/AgenticRouter" ]]; then
+  app="$publish_dir/AgenticRouter"
+else
+  app="$publish_dir/AgenticRouter.Api"
+fi
 
 if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
   printf 'This smoke test requires Linux x86_64.\n' >&2

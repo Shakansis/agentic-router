@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$VersionLabel = '0.9.15_alpha',
-  [ValidateSet('win-x64', 'win-arm64')]
+  [ValidateSet('win-x64', 'win-arm64', 'linux-x64')]
   [string]$RuntimeIdentifier = 'win-x64',
   [string]$OutputDirectory,
   [switch]$NoRestore,
@@ -44,6 +44,63 @@ function Assert-ChildPath {
   }
 }
 
+function New-PosixTarGzip {
+  param(
+    [Parameter(Mandatory)]
+    [string]$SourceDirectory,
+    [Parameter(Mandatory)]
+    [string]$DestinationPath
+  )
+
+  $archiveStream = [System.IO.File]::Create($DestinationPath)
+  $gzipStream = [System.IO.Compression.GZipStream]::new(
+    $archiveStream,
+    [System.IO.Compression.CompressionLevel]::Optimal,
+    $true
+  )
+  $tarWriter = [System.Formats.Tar.TarWriter]::new(
+    $gzipStream,
+    [System.Formats.Tar.TarEntryFormat]::Pax,
+    $true
+  )
+
+  try {
+    foreach ($file in Get-ChildItem -LiteralPath $SourceDirectory -File -Recurse | Sort-Object FullName) {
+      $relativePath = [System.IO.Path]::GetRelativePath(
+        $SourceDirectory,
+        $file.FullName
+      ).Replace('\', '/')
+      $entry = [System.Formats.Tar.PaxTarEntry]::new(
+        [System.Formats.Tar.TarEntryType]::RegularFile,
+        $relativePath
+      )
+      $entry.Mode = if (
+        $relativePath -eq 'AgenticRouter' `
+          -or $relativePath.EndsWith('.sh', [System.StringComparison]::Ordinal)
+      ) {
+        [System.IO.UnixFileMode]493
+      }
+      else {
+        [System.IO.UnixFileMode]420
+      }
+      $entry.ModificationTime = [System.DateTimeOffset]$file.LastWriteTimeUtc
+      $dataStream = [System.IO.File]::OpenRead($file.FullName)
+      try {
+        $entry.DataStream = $dataStream
+        $tarWriter.WriteEntry($entry)
+      }
+      finally {
+        $dataStream.Dispose()
+      }
+    }
+  }
+  finally {
+    $tarWriter.Dispose()
+    $gzipStream.Dispose()
+    $archiveStream.Dispose()
+  }
+}
+
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
   throw 'VersionLabel must use the form 0.9.15_alpha.'
 }
@@ -76,7 +133,9 @@ else {
 
 $packageName = "AgenticRouter-$VersionLabel-$RuntimeIdentifier"
 $packageDirectory = Join-Path $releaseRoot $packageName
-$archivePath = Join-Path $releaseRoot "$packageName.zip"
+$isLinuxPackage = $RuntimeIdentifier -eq 'linux-x64'
+$archiveExtension = if ($isLinuxPackage) { '.tar.gz' } else { '.zip' }
+$archivePath = Join-Path $releaseRoot "$packageName$archiveExtension"
 $checksumPath = "$archivePath.sha256"
 $stagingDirectory = Join-Path $releaseRoot ".staging-$packageName-$PID"
 
@@ -144,23 +203,78 @@ try {
       Remove-Item -LiteralPath $unneededPath -Force
     }
   }
+  if (-not $isLinuxPackage) {
+    $linuxScripts = Join-Path $stagingDirectory 'scripts'
+    if (Test-Path -LiteralPath $linuxScripts) {
+      Remove-Item -LiteralPath $linuxScripts -Recurse -Force
+    }
+  }
   Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE.md') `
     -Destination (Join-Path $stagingDirectory 'LICENSE.txt')
 
+  if ($isLinuxPackage) {
+    $launcher = @'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "$root/AgenticRouter" "$@"
+'@
+    [System.IO.File]::WriteAllText(
+      (Join-Path $stagingDirectory 'run-agentic-router.sh'),
+      $launcher.Replace("`r`n", "`n"),
+      [System.Text.UTF8Encoding]::new($false)
+    )
+  }
+
+  $executableName = if ($isLinuxPackage) { 'AgenticRouter' } else { 'AgenticRouter.exe' }
   $requiredPaths = @(
-    (Join-Path $stagingDirectory 'AgenticRouter.exe'),
+    (Join-Path $stagingDirectory $executableName),
     (Join-Path $stagingDirectory 'AgenticRouter.staticwebassets.endpoints.json'),
     (Join-Path $stagingDirectory 'appsettings.json'),
     (Join-Path $stagingDirectory 'LICENSE.txt'),
     (Join-Path $stagingDirectory 'wwwroot\index.html')
   )
+  if ($isLinuxPackage) {
+    $requiredPaths += @(
+      (Join-Path $stagingDirectory 'run-agentic-router.sh'),
+      (Join-Path $stagingDirectory 'scripts\install-ollama-linux.sh'),
+      (Join-Path $stagingDirectory 'scripts\switch-ollama-linux-profile.sh')
+    )
+  }
   foreach ($requiredPath in $requiredPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
       throw "Required portable artifact is missing: $requiredPath"
     }
   }
 
-  $readme = @"
+  $readme = if ($isLinuxPackage) {
+    @"
+Agentic Router $VersionLabel ($RuntimeIdentifier)
+
+1. Extract the archive to a writable directory.
+2. If required by the filesystem, run:
+   chmod +x AgenticRouter run-agentic-router.sh
+3. Start the application:
+   ./run-agentic-router.sh
+4. Wait for the console to show "Now listening on".
+5. Open the displayed local address in your browser (normally http://localhost:5000).
+
+The package includes the .NET runtime. Ollama and local models remain separate.
+For AMD hardware, setup asks you to choose explicitly between Vulkan (base package
+plus OLLAMA_VULKAN=1) and ROCm (base plus the official ROCm supplemental package).
+No GPU driver or model is installed automatically.
+
+Cloud API keys require secret-tool/libsecret and an active desktop keyring. A native
+folder picker uses zenity or kdialog when available; paths can still be entered manually.
+
+Application data is stored in the data directory beside the executable. Keep that
+directory when upgrading if you want to preserve local settings and history.
+
+To stop Agentic Router, press Ctrl+C in its terminal.
+"@
+  }
+  else {
+    @"
 Agentic Router $VersionLabel ($RuntimeIdentifier)
 
 1. Double-click AgenticRouter.exe.
@@ -178,6 +292,7 @@ directory when upgrading if you want to preserve local settings and history.
 
 To stop Agentic Router, close its console window or press Ctrl+C in that window.
 "@
+  }
   [System.IO.File]::WriteAllText(
     (Join-Path $stagingDirectory 'README.txt'),
     $readme,
@@ -194,9 +309,27 @@ To stop Agentic Router, close its console window or press Ctrl+C in that window.
   if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
   }
-  $archiveItems = Get-ChildItem -LiteralPath $packageDirectory -Force |
-    Select-Object -ExpandProperty FullName
-  Compress-Archive -LiteralPath $archiveItems -DestinationPath $archivePath -CompressionLevel Optimal
+  if ($isLinuxPackage) {
+    New-PosixTarGzip `
+      -SourceDirectory $packageDirectory `
+      -DestinationPath $archivePath
+    $tarCommand = Get-Command tar -ErrorAction SilentlyContinue
+    if (-not $tarCommand) {
+      throw 'tar is required to inspect the linux-x64 package.'
+    }
+    $archiveEntries = @(& $tarCommand.Source -tzf $archivePath)
+    Assert-SuccessfulExitCode -Operation 'Linux tar.gz inspection'
+    foreach ($requiredEntry in @('AgenticRouter', 'run-agentic-router.sh', 'README.txt')) {
+      if ($archiveEntries -notcontains $requiredEntry) {
+        throw "Required Linux archive entry is missing: $requiredEntry"
+      }
+    }
+  }
+  else {
+    $archiveItems = Get-ChildItem -LiteralPath $packageDirectory -Force |
+      Select-Object -ExpandProperty FullName
+    Compress-Archive -LiteralPath $archiveItems -DestinationPath $archivePath -CompressionLevel Optimal
+  }
 
   $checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
   [System.IO.File]::WriteAllText(
@@ -224,7 +357,8 @@ To stop Agentic Router, close its console window or press Ctrl+C in that window.
     Version = $VersionLabel
     Runtime = $RuntimeIdentifier
     PackageDirectory = $packageDirectory
-    Zip = $archivePath
+    Archive = $archivePath
+    Zip = if ($isLinuxPackage) { $null } else { $archivePath }
     Sha256 = $checksum
     SizeBytes = (Get-Item -LiteralPath $archivePath).Length
     GitHubRepository = $githubRelease.Repository

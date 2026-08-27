@@ -258,7 +258,28 @@ try {
   }
 
   $releaseNotesPath = Join-Path $temporaryRoot 'release-notes.md'
-  $releaseNotes = @"
+  $linuxRelease = $RuntimeIdentifier -eq 'linux-x64'
+  $releaseNotes = if ($linuxRelease) {
+    @"
+# Agentic Router $VersionLabel
+
+Portable Linux x64 release.
+
+## Install
+
+1. Download the `.tar.gz` archive attached to this release.
+2. Verify it with the matching `.sha256` file.
+3. Extract it to a writable directory.
+4. Run `chmod +x AgenticRouter run-agentic-router.sh` if required.
+5. Start `./run-agentic-router.sh` and open the local address displayed.
+
+Ollama and models are installed separately. AMD setup offers an explicit Vulkan
+or ROCm profile and never installs GPU drivers automatically. This is an alpha
+release and is not yet recommended for unattended or production use.
+"@
+  }
+  else {
+    @"
 # Agentic Router $VersionLabel
 
 Portable Windows release for $RuntimeIdentifier.
@@ -275,6 +296,7 @@ is not yet recommended for unattended or production use. Use is governed by
 the Agentic Router Alpha Evaluation License included in the package and public
 release repository.
 "@
+  }
   [System.IO.File]::WriteAllText(
     $releaseNotesPath,
     $releaseNotes,
