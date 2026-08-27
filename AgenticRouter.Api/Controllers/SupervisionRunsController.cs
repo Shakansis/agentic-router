@@ -51,6 +51,24 @@ public sealed class SupervisionRunsController : ControllerBase
     );
   }
 
+  [HttpPost("{runId}/start")]
+  public async Task<IActionResult> Start(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      async () => await _runs.StartAsync(
+        runId,
+        cancellationToken
+      ) is { } view
+        ? view.State == DurableSupervisionRunStates.AwaitingUser
+          ? Conflict(view)
+          : Accepted(view)
+        : NotFound()
+    );
+  }
+
   [HttpGet("{runId}")]
   public IActionResult Get(string runId)
   {
@@ -178,7 +196,7 @@ public sealed class SupervisionRunsController : ControllerBase
     return await ExecuteAsync(
       async () => await _runs.ResumeAsync(
         runId,
-        request.BrowserSessionId,
+        request,
         cancellationToken
       ) is { } view
         ? view.State == DurableSupervisionRunStates.AwaitingUser

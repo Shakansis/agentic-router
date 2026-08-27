@@ -2,9 +2,11 @@
 
 ## Status
 
-Architecture approved on 2026-08-26. Milestone 0 implementation and focused
-deterministic validation are complete; manual approval is pending. Later milestones
-remain behind their explicit validation gates.
+Architecture and Milestone 0 were approved on 2026-08-26. Milestone 1 was accepted by
+the user's explicit authorization to proceed to Milestone 2. Milestone 2 was accepted by
+the user's explicit authorization to proceed to Milestone 3 on 2026-08-27. Milestone 3
+was accepted by the user's explicit authorization to continue through Milestone 4.
+Milestone 4 implementation and authorized real-local acceptance are complete.
 
 ## Outcome
 
@@ -729,9 +731,14 @@ No cloud request is permitted in any milestone.
 
 ## Approval gates
 
-- Architecture: approved on 2026-08-26. Milestone 0 manual acceptance: pending.
-- Milestones 1-3: each requires prior milestone deterministic/manual approval.
-- Milestone 4: requires explicit permission for the exact real local model and harness.
+- Architecture and Milestone 0: approved on 2026-08-26.
+- Milestone 1 deterministic validation and manual acceptance: approved by the user's
+  explicit authorization to implement Milestone 2 on 2026-08-26.
+- Milestone 2 deterministic validation and manual acceptance: approved by the user's
+  explicit authorization to implement Milestone 3 on 2026-08-27.
+- Milestone 3 deterministic validation and manual acceptance: approved by the user's
+  explicit authorization to continue through Milestone 4 on 2026-08-27.
+- Milestone 4 authorized local real acceptance: complete on 2026-08-27.
 
 ## Milestone 0 evidence — 2026-08-26
 
@@ -756,3 +763,139 @@ No cloud request is permitted in any milestone.
   test passed when rerun alone. No Durable Supervised Execute test failed.
 - Process cleanup verification found no retained test API, fake provider, harness, or
   browser process. The pre-existing AgenticRouter.Api process was left running.
+
+## Milestone 1 evidence — 2026-08-26
+
+- Added the typed `IExecutionContextTurnRunner` boundary over the existing
+  `IAgentHarness` seam. Its request carries the logical context identity, role,
+  prepared provider/model/harness/endpoint/workspace route, prompt projection, Host
+  capability profile, and authoritative execution session.
+- The runner rejects route/session divergence for provider, local endpoint, model,
+  harness, workspace, direct-context identity, and approval policy before dispatch.
+- Unchanged direct Native, Codex, OpenCode, Qwen Code, and Claude Code Execute paths now
+  enter through the same runner. Their existing specialist loops still own streaming,
+  approvals, capability projection, effect proof, context usage, completion, and
+  harness-specific translation.
+- No new public stream event, API field, browser behavior, retry, fallback, or product
+  policy was introduced.
+- Focused deterministic browser/API parity plus the Milestone 0 regression matrix:
+  11 passed, 0 failed. The parity selection covered every registered harness through
+  its existing fake external boundary.
+- Complete retained E2E: 336 passed, 1 failed, 0 skipped. The sole failure is the same
+  pre-existing Git UI status mismatch recorded in Milestone 0 and reproduced alone;
+  no context-turn or supervision test failed.
+- Isolated Release solution build: 0 warnings, 0 errors. The normal Release apphost
+  remains locked by the pre-existing AgenticRouter.Api process and was not stopped.
+- `dotnet format AgenticRouter.slnx --no-restore --verify-no-changes`: passed.
+- `git diff --check`: passed.
+- No Ollama generation, real harness execution, GPU work, download, or cloud request
+  was performed.
+- Process cleanup verification found no retained test API, fake provider, harness, or
+  browser process. The pre-existing AgenticRouter.Api process was left running.
+
+## Milestone 2 evidence — 2026-08-26
+
+- Added a Host-owned serial state machine over `IExecutionContextTurnRunner` with one
+  focused supervisor context, worker contexts created only on dispatch, an ordered
+  bounded queue, typed canonical decisions, bounded retries/transitions, no-progress
+  evidence, queue replacement, and exactly one terminal state.
+- Every supervisor and worker turn revalidates the prepared local model digest,
+  Ollama endpoint, harness/version, workspace identity, and fixed route. Cloud-qualified
+  input is rejected even when an Auto Model × Harness flag is also present; no fallback
+  or route switch is permitted.
+- The supervisor receives a minimal read/inspection/validation capability projection.
+  It cannot mutate files, run arbitrary processes, or perform Git mutations. Worker
+  actions retain the existing Host approval, trusted-workspace, effect-proof, and
+  recovery loop.
+- Worker prose is treated only as a claim. The Host captures bounded current file bytes,
+  hashes, changed-file/review facts, conflicts, and validation state; the supervisor can
+  accept or reject only the current evidence revision and must cover every criterion.
+- The `/supervisor` Execute path starts the Host-owned run, exposes the exact resolved
+  local route in activity, streams progress without intermediate answer prose, and emits
+  only the accepted final answer plus one `response.completed` event.
+- Focused M2 E2E: 4 passed, 0 failed. The full M0-M2 supervision class: 10 passed,
+  0 failed. Coverage includes the requested `hello world` -> rejection -> focused
+  correction to `hello world today` -> reread -> acceptance cycle, malformed canonical
+  decision without identical retry, material no-progress detection and budget stop,
+  local-only rejection, lifecycle replay, terminality, and restart-foundation
+  compatibility.
+- Final complete retained E2E: 340 passed, 1 failed, 0 skipped. The sole failure is the
+  persistent unrelated Git UI status mismatch already recorded in Milestones 0 and 1.
+  No M2 supervision test failed.
+- Isolated Release solution build: 0 warnings, 0 errors. The normal Release apphost
+  remained locked by the pre-existing AgenticRouter.Api process and was not stopped.
+- `dotnet format AgenticRouter.slnx --no-restore --verify-no-changes`: passed.
+  Changed-file whitespace verification and `git diff --check` also passed. A separate
+  exploratory run at analyzer severity `info` reported repository-wide pre-existing
+  suggestions and was not treated as the formatting gate.
+- No Ollama generation, real harness execution, GPU work, download, or cloud request
+  was performed.
+
+## Milestone 3 evidence — 2026-08-27
+
+- Checkpoint schema v2 now persists the ordered queue, logical contexts, fixed recovery
+  budgets, repository-instruction identity, tracked file facts, turn ownership, and a
+  bounded sanitized Host action ledger. Legacy v1 checkpoints are integrity-verified
+  against their original shape and migrated in memory without inventing executable
+  recovery state.
+- Native and external-harness Host actions cross a write-ahead journal before effects:
+  `prepared`, optional `awaiting-approval`, `in-flight`, and independently observed
+  `committed`, `failed`, or `rejected`. Persisted action evidence contains canonical
+  IDs, hashes, effect classes, and relative paths rather than raw arguments, outputs,
+  file contents, hidden prompts, or provider payloads.
+- Startup validates the exact local route, workspace, history, repository instructions,
+  tracked artifacts, approvals, action effects, and remaining budgets before any
+  inference. A failure while loading one recovery record is isolated to that run and
+  becomes an exact awaiting-user reason rather than preventing API startup.
+- `manual` restart reconstructs fresh logical contexts only after explicit Resume.
+  `auto-safe` resumes only from a proven committed boundary. Pending approval,
+  instruction drift, workspace drift, an unproven worker turn, or an ambiguous action
+  remains user-visible and is never replayed blindly. Manual acknowledgement does not
+  erase an unresolved ambiguous action from future `auto-safe` evaluation.
+- The sidebar exposes a bounded recovery card with objective, fixed local
+  `model × harness`, completed/total progress, policy, and exact wait reason. Resume
+  calls Host reconciliation; Discard uses the styled application modal and preserves
+  workspace files.
+- Deterministic M0-M3 supervision E2E: 15 passed, 0 failed. Coverage includes process
+  restart during an active goal, committed-boundary continuation, manual reconstruction,
+  pending approval without new inference, workspace and instruction drift, schema/privacy,
+  invalid-checkpoint startup isolation, browser Resume/Discard presentation, replay,
+  cancellation, and exactly-once terminal state.
+- Final complete retained E2E: 345 passed, 1 failed, 0 skipped. The sole failure is the
+  same pre-existing Git UI status mismatch recorded in prior milestones; no supervision,
+  checkpoint, recovery, or action-journal test failed.
+- Isolated Release solution build: 0 warnings, 0 errors. The normal Release apphost
+  remained locked by the pre-existing AgenticRouter.Api process and was not stopped.
+- `dotnet format AgenticRouter.slnx --no-restore --verify-no-changes` and
+  `git diff --check` passed.
+- No real Ollama generation, real harness execution, GPU work, download, or cloud
+  request was performed.
+
+## Milestone 4 evidence — 2026-08-27
+
+- The authorized real-local matrix used Ollama 0.33.0 and
+  `qwen3.8:27b-q4_K_M` at digest
+  `25b843619e944cd0ae6069f94ff4e5e26a16e109ccbc0a66a0f05979ed70098e`.
+  Cloud providers remained disabled and no cloud request or fallback was permitted.
+- A large Native goal completed four independently verified work items and produced a
+  three-file responsive application whose button behavior passed a real browser check.
+- The exact local Codex route completed normally and again after its owned app-server
+  was terminated during a worker turn; continuation preserved model, provider,
+  harness, workspace, and approval policy.
+- A controlled workspace mutation during supervisor inference was rejected by a new
+  Host-side fresh-evidence check. The worker reinspected, restored the exact bytes, and
+  completed on attempt 2.
+- Browser close/reload exposed and drove correction of a missing reattachment path.
+  The saved conversation now attaches to retained run events, renders the accepted
+  answer, and clears its interrupted flag after persistence.
+- Real Host restarts verified explicit idle `manual` recovery and eligible
+  `auto-safe` continuation. Route drift, workspace drift, and an action awaiting
+  approval each remained `awaiting-user` with an exact typed reason and no blind replay.
+- Exact run IDs, artifacts, hashes, failure injections, and accepted outcomes are
+  recorded in `docs/v0.9.15-real-acceptance.md`.
+- Final deterministic supervision E2E: 17 passed, 0 failed. Final complete retained
+  E2E: 347 passed, 1 failed, 0 skipped. The sole failure is the unchanged pre-existing
+  Git UI status race documented since Milestone 0; no supervision, reconnect,
+  persistence, recovery, or harness test failed.
+- Final Release build completed with 0 warnings and 0 errors. Formatting and intended
+  diff checks completed before packaging.

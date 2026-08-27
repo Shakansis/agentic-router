@@ -1,5 +1,10 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
+using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -11,6 +16,11 @@ public interface IDurableSupervisionRunCoordinator
 
   Task<SupervisionRunStartView> PrepareAsync(
     PrepareSupervisionRunRequest request,
+    CancellationToken cancellationToken
+  );
+
+  Task<DurableSupervisionRunView?> StartAsync(
+    string runId,
     CancellationToken cancellationToken
   );
 
@@ -37,7 +47,7 @@ public interface IDurableSupervisionRunCoordinator
 
   Task<DurableSupervisionRunView?> ResumeAsync(
     string runId,
-    string browserSessionId,
+    ResumeSupervisionRunRequest request,
     CancellationToken cancellationToken
   );
 
@@ -98,9 +108,17 @@ public sealed class DurableSupervisionRunCoordinator
     ))
     {
       cancellationToken.ThrowIfCancellationRequested();
+      var restoredRuntime = (checkpoint.Runtime
+        ?? SupervisionRuntimeView.Empty(recoverableInCurrentProcess: false)) with
+      {
+        RecoverableInCurrentProcess = false
+      };
       var state = new LiveRunState(
         checkpoint,
-        MaximumEventsPerRun
+        MaximumEventsPerRun,
+        restoredRuntime,
+        [],
+        []
       );
       if (!_runs.TryAdd(
         checkpoint.RunId,
@@ -123,24 +141,77 @@ public sealed class DurableSupervisionRunCoordinator
 
       using var scope = _scopeFactory.CreateScope();
       var routes = scope.ServiceProvider.GetRequiredService<ISupervisionRouteResolver>();
-      var eligibility = await routes.EvaluateResumeAsync(
-        checkpoint,
-        cancellationToken
-      );
+      var recoveryService = scope.ServiceProvider.GetRequiredService<ISupervisionRecoveryService>();
+      SupervisionResumeEligibility eligibility;
+      SupervisionReconciliationResult? reconciliation = null;
+      string? recoveryFailureCode = null;
+      try
+      {
+        eligibility = await routes.EvaluateResumeAsync(
+          checkpoint,
+          cancellationToken
+        );
+        if (eligibility.Eligible)
+        {
+          reconciliation = await recoveryService.ReconcileAsync(
+            checkpoint,
+            manualContinuation: false,
+            cancellationToken
+          );
+        }
+      }
+      catch (SupervisionException exception)
+      {
+        recoveryFailureCode = exception.Code;
+        eligibility = new SupervisionResumeEligibility(
+          false,
+          exception.Message
+        );
+        _logger.LogWarning(
+          exception,
+          "Supervision run {RunId} requires user reconciliation after startup recovery failed with {Code}.",
+          checkpoint.RunId,
+          exception.Code
+        );
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        recoveryFailureCode = "supervision-recovery-unavailable";
+        eligibility = new SupervisionResumeEligibility(
+          false,
+          "The Host could not reconcile this durable run during startup."
+        );
+        _logger.LogError(
+          exception,
+          "Unexpected startup recovery failure for supervision run {RunId}.",
+          checkpoint.RunId
+        );
+      }
       var autoSafe = string.Equals(
         checkpoint.ResumePolicy,
         SupervisionResumePolicies.AutoSafe,
         StringComparison.Ordinal
       );
-      var stateId = autoSafe && eligibility.Eligible
+      var autoSafeEligible = autoSafe
+        && eligibility.Eligible
+        && reconciliation?.Eligible == true;
+      var stateId = autoSafeEligible
         ? DurableSupervisionRunStates.Prepared
-        : DurableSupervisionRunStates.InterruptedRecoverable;
-      var eventType = autoSafe && eligibility.Eligible
-        ? SupervisionEventTypeIds.AutoResumeEligible
-        : SupervisionEventTypeIds.InterruptedRecoverable;
-      var message = autoSafe && eligibility.Eligible
-        ? "The durable run passed Milestone 0 auto-safe recovery predicates; no model was invoked."
+        : autoSafe
+          ? DurableSupervisionRunStates.AwaitingUser
+          : DurableSupervisionRunStates.InterruptedRecoverable;
+      var eventType = autoSafeEligible
+        ? SupervisionEventTypeIds.RecoveryEligible
+        : autoSafe
+          ? SupervisionEventTypeIds.ReconciliationRequired
+          : SupervisionEventTypeIds.InterruptedRecoverable;
+      var waitCode = eligibility.Eligible
+        ? reconciliation?.WaitCode
+        : recoveryFailureCode ?? "supervision-recovery-route-ineligible";
+      var message = autoSafeEligible
+        ? "The durable run passed every auto-safe route, workspace, instruction, action, approval, and budget predicate."
         : eligibility.Reason
+          ?? reconciliation?.Reason
           ?? "The prior Host process stopped; explicit resume is required.";
       await TransitionAsync(
         state,
@@ -149,13 +220,25 @@ public sealed class DurableSupervisionRunCoordinator
         eventType,
         message,
         terminal: false,
-        autoResumeEligible: autoSafe && eligibility.Eligible,
-        waitReason: autoSafe && eligibility.Eligible
+        autoResumeEligible: autoSafeEligible,
+        waitReason: autoSafeEligible
           ? null
           : message,
         browserSessionId: null,
-        cancellationToken
+        cancellationToken,
+        runtime: autoSafeEligible ? reconciliation!.Runtime : restoredRuntime,
+        recovery: autoSafeEligible ? reconciliation!.Recovery : checkpoint.Recovery,
+        waitCode: autoSafeEligible
+          ? null
+          : autoSafe
+            ? waitCode
+            : "supervision-recovery-manual-required",
+        captureRecovery: false
       );
+      if (autoSafeEligible)
+      {
+        _ = await StartAsync(checkpoint.RunId, cancellationToken);
+      }
     }
 
     EvictTerminalRuns();
@@ -183,10 +266,14 @@ public sealed class DurableSupervisionRunCoordinator
 
     using var scope = _scopeFactory.CreateScope();
     var routes = scope.ServiceProvider.GetRequiredService<ISupervisionRouteResolver>();
+    request = request with { ClientRunId = runId };
     var resolution = await routes.ResolveAsync(
       request,
       cancellationToken
     );
+    ValidateLiveInput(request);
+    _ = scope.ServiceProvider.GetRequiredService<IImageAttachmentValidator>()
+      .Validate(request.Images);
     var approvalPolicy = SupervisionRequestPolicy.NormalizeApprovalPolicy(
       request.ApprovalPolicy
     );
@@ -194,6 +281,7 @@ public sealed class DurableSupervisionRunCoordinator
       request.ResumePolicy
     );
     var now = DateTimeOffset.UtcNow;
+    var initialRuntime = SupervisionRuntimeView.Empty();
     var initialEvent = new SupervisionRunEvent(
       runId,
       1,
@@ -201,7 +289,7 @@ public sealed class DurableSupervisionRunCoordinator
       now,
       DurableSupervisionRunStates.Prepared,
       resolution.HistoryEnabled
-        ? "Durable supervised run prepared and checkpointed; the Milestone 0 execution engine remains inactive."
+        ? "Durable supervised run prepared and checkpointed with one fixed local route."
         : "Volatile supervised run prepared; local history is disabled and restart recovery is unavailable."
     );
     var checkpoint = new DurableSupervisionCheckpoint(
@@ -226,11 +314,25 @@ public sealed class DurableSupervisionRunCoordinator
       [initialEvent],
       now,
       now,
-      string.Empty
+      string.Empty,
+      initialRuntime
     );
 
     if (checkpoint.Durable)
     {
+      var recovery = scope.ServiceProvider.GetRequiredService<ISupervisionRecoveryService>();
+      checkpoint = checkpoint with
+      {
+        Recovery = (await recovery.CaptureAsync(
+          checkpoint,
+          initialRuntime,
+          [],
+          cancellationToken
+        )) with
+        {
+          ImagesPending = request.Images?.Count > 0
+        }
+      };
       checkpoint = await _checkpoints.WriteAsync(
         checkpoint,
         null,
@@ -240,7 +342,10 @@ public sealed class DurableSupervisionRunCoordinator
 
     var state = new LiveRunState(
       checkpoint,
-      MaximumEventsPerRun
+      MaximumEventsPerRun,
+      initialRuntime,
+      request.History?.ToArray() ?? [],
+      request.Images?.ToArray() ?? []
     );
     if (!_runs.TryAdd(
       runId,
@@ -271,6 +376,84 @@ public sealed class DurableSupervisionRunCoordinator
       checkpoint.Durable,
       $"/api/supervision/runs/{runId}/events"
     );
+  }
+
+  public async Task<DurableSupervisionRunView?> StartAsync(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!_runs.TryGetValue(
+      NormalizeExistingRunId(runId),
+      out var state
+    ))
+    {
+      return null;
+    }
+    if (state.CreateView().Terminal || !state.TryReserveExecution())
+    {
+      return state.CreateView();
+    }
+
+    try
+    {
+      if (!state.Runtime.RecoverableInCurrentProcess)
+      {
+        state.ReleaseExecutionReservation();
+        return await TransitionAsync(
+          state,
+          DurableSupervisionRunStates.AwaitingUser,
+          SupervisionRunPhases.Recovery,
+          SupervisionEventTypeIds.AwaitingUser,
+          "The process-recovered checkpoint has not passed Host reconciliation.",
+          terminal: false,
+          autoResumeEligible: false,
+          waitReason: "Reconcile the checkpoint before starting execution.",
+          browserSessionId: null,
+          cancellationToken,
+          waitCode: "supervision-recovery-not-reconciled"
+        );
+      }
+      if (HasWorkspaceExecutionOwner(state))
+      {
+        state.ReleaseExecutionReservation();
+        return await TransitionAsync(
+          state,
+          DurableSupervisionRunStates.AwaitingUser,
+          SupervisionRunPhases.Recovery,
+          SupervisionEventTypeIds.ReconciliationRequired,
+          "Another supervised run currently owns this workspace execution slot.",
+          terminal: false,
+          autoResumeEligible: false,
+          waitReason: "Wait for the active workspace run to finish, then resume this run.",
+          browserSessionId: null,
+          cancellationToken,
+          waitCode: "supervision-recovery-workspace-busy"
+        );
+      }
+
+      var started = await TransitionAsync(
+        state,
+        DurableSupervisionRunStates.Running,
+        SupervisionRunPhases.Decomposing,
+        SupervisionEventTypeIds.Started,
+        "The Host-owned supervised execution loop started on its fixed local route.",
+        terminal: false,
+        autoResumeEligible: false,
+        waitReason: null,
+        browserSessionId: null,
+        cancellationToken
+      );
+      state.AttachExecution(
+        ExecuteOwnedAsync(state)
+      );
+      return started;
+    }
+    catch
+    {
+      state.ReleaseExecutionReservation();
+      throw;
+    }
   }
 
   public async Task<SupervisionRunListView> ListAsync(
@@ -404,6 +587,7 @@ public sealed class DurableSupervisionRunCoordinator
       browserSessionId: null,
       cancellationToken
     );
+    state.Cancel();
     return await TransitionAsync(
       state,
       DurableSupervisionRunStates.Cancelled,
@@ -414,16 +598,17 @@ public sealed class DurableSupervisionRunCoordinator
       autoResumeEligible: false,
       waitReason: null,
       browserSessionId: null,
-      cancellationToken
+      CancellationToken.None
     );
   }
 
   public async Task<DurableSupervisionRunView?> ResumeAsync(
     string runId,
-    string browserSessionId,
+    ResumeSupervisionRunRequest request,
     CancellationToken cancellationToken
   )
   {
+    var browserSessionId = request.BrowserSessionId;
     if (
       string.IsNullOrWhiteSpace(
         browserSessionId
@@ -463,6 +648,33 @@ public sealed class DurableSupervisionRunCoordinator
     }
 
     using var scope = _scopeFactory.CreateScope();
+    ValidateHistoryInput(
+      request.History,
+      "supervision-resume"
+    );
+    _ = scope.ServiceProvider.GetRequiredService<IImageAttachmentValidator>()
+      .Validate(request.Images);
+    if (
+      state.Checkpoint.Recovery?.ImagesPending == true
+      && request.Images is not { Count: > 0 }
+    )
+    {
+      return await TransitionAsync(
+        state,
+        DurableSupervisionRunStates.AwaitingUser,
+        SupervisionRunPhases.Recovery,
+        SupervisionEventTypeIds.ReconciliationRequired,
+        "The first worker turn requires image attachments that were not persisted.",
+        terminal: false,
+        autoResumeEligible: false,
+        waitReason: "Attach the original images to Resume or discard this recovery state.",
+        browserSessionId,
+        cancellationToken,
+        waitCode: "supervision-recovery-images-required",
+        captureRecovery: false
+      );
+    }
+    state.ReplaceInputs(request.History ?? [], request.Images ?? []);
     var routes = scope.ServiceProvider.GetRequiredService<ISupervisionRouteResolver>();
     var eligibility = await routes.EvaluateResumeAsync(
       state.Checkpoint,
@@ -481,16 +693,52 @@ public sealed class DurableSupervisionRunCoordinator
         autoResumeEligible: false,
         waitReason: eligibility.Reason,
         browserSessionId,
-        cancellationToken
+        cancellationToken,
+        waitCode: "supervision-recovery-route-ineligible",
+        captureRecovery: false
       );
     }
 
-    return await TransitionAsync(
+    var checkpoint = state.Checkpoint;
+    if (request.Images is { Count: > 0 } && checkpoint.Recovery is not null)
+    {
+      checkpoint = checkpoint with
+      {
+        Recovery = checkpoint.Recovery with { ImagesPending = false }
+      };
+    }
+    var recoveryService = scope.ServiceProvider.GetRequiredService<ISupervisionRecoveryService>();
+    var reconciliation = await recoveryService.ReconcileAsync(
+      checkpoint,
+      manualContinuation: true,
+      cancellationToken
+    );
+    if (!reconciliation.Eligible)
+    {
+      return await TransitionAsync(
+        state,
+        DurableSupervisionRunStates.AwaitingUser,
+        SupervisionRunPhases.Recovery,
+        SupervisionEventTypeIds.ReconciliationRequired,
+        reconciliation.Reason,
+        terminal: false,
+        autoResumeEligible: false,
+        waitReason: reconciliation.Reason,
+        browserSessionId,
+        cancellationToken,
+        runtime: reconciliation.Runtime,
+        recovery: reconciliation.Recovery,
+        waitCode: reconciliation.WaitCode,
+        captureRecovery: false
+      );
+    }
+
+    var resumed = await TransitionAsync(
       state,
       DurableSupervisionRunStates.Prepared,
       SupervisionRunPhases.Recovery,
       SupervisionEventTypeIds.Resumed,
-      "The durable supervision run was reconciled and prepared; no model was invoked in Milestone 0.",
+      "The durable checkpoint was reconciled and reconstructed from current Host facts.",
       terminal: false,
       autoResumeEligible: string.Equals(
         state.Checkpoint.ResumePolicy,
@@ -499,8 +747,14 @@ public sealed class DurableSupervisionRunCoordinator
       ),
       waitReason: null,
       browserSessionId,
-      cancellationToken
+      cancellationToken,
+      runtime: reconciliation.Runtime,
+      recovery: reconciliation.Recovery,
+      waitCode: null,
+      captureRecovery: false
     );
+    _ = resumed;
+    return await StartAsync(runId, cancellationToken);
   }
 
   public async Task<bool> DiscardAsync(
@@ -571,6 +825,119 @@ public sealed class DurableSupervisionRunCoordinator
     );
   }
 
+  private async Task ExecuteOwnedAsync(LiveRunState state)
+  {
+    try
+    {
+      using var scope = _scopeFactory.CreateScope();
+      var engine = scope.ServiceProvider.GetRequiredService<
+        ISupervisionExecutionEngine
+      >();
+      var input = new SupervisionExecutionInput(
+        state.Checkpoint,
+        state.Runtime,
+        state.History,
+        state.Images,
+        new DurableExecutionActionJournal(this, state)
+      );
+      await foreach (var update in engine.ExecuteAsync(
+        input,
+        state.ExecutionToken
+      ))
+      {
+        await TransitionAsync(
+          state,
+          update.State,
+          update.Phase,
+          update.EventType,
+          update.Message,
+          update.Terminal,
+          autoResumeEligible: false,
+          waitReason: update.WaitReason,
+          browserSessionId: null,
+          cancellationToken: CancellationToken.None,
+          runtime: update.Runtime,
+          role: update.Role,
+          contextId: update.ContextId,
+          workItemId: update.WorkItemId
+        );
+      }
+    }
+    catch (OperationCanceledException) when (state.ExecutionToken.IsCancellationRequested)
+    {
+      await TransitionAsync(
+        state,
+        DurableSupervisionRunStates.Cancelled,
+        state.Checkpoint.Phase,
+        SupervisionEventTypeIds.Cancelled,
+        "The Host-owned supervision run was cancelled.",
+        terminal: true,
+        autoResumeEligible: false,
+        waitReason: null,
+        browserSessionId: null,
+        cancellationToken: CancellationToken.None
+      );
+    }
+    catch (Exception exception)
+    {
+      _logger.LogError(
+        exception,
+        "Supervision run {RunId} failed in the Host-owned execution loop.",
+        state.Checkpoint.RunId
+      );
+      await TransitionAsync(
+        state,
+        DurableSupervisionRunStates.Blocked,
+        state.Checkpoint.Phase,
+        SupervisionEventTypeIds.Blocked,
+        "The supervised execution loop stopped after an unrecoverable Host failure.",
+        terminal: true,
+        autoResumeEligible: false,
+        waitReason: exception.Message,
+        browserSessionId: null,
+        cancellationToken: CancellationToken.None,
+        runtime: state.Runtime with
+        {
+          ActiveRole = null,
+          LastFailure = exception.Message
+        }
+      );
+    }
+    finally
+    {
+      state.CompleteExecution();
+    }
+  }
+
+  private static void ValidateLiveInput(PrepareSupervisionRunRequest request)
+  {
+    ValidateHistoryInput(
+      request.History,
+      "supervision-prepare"
+    );
+  }
+
+  private static void ValidateHistoryInput(
+    IReadOnlyList<ChatMessage>? input,
+    string stage
+  )
+  {
+    var history = input ?? [];
+    if (
+      history.Count > 100
+      || history.Sum(message => message.Content?.Length ?? 0) > 262_144
+    )
+    {
+      throw new SupervisionException(
+        "supervision-history-too-large",
+        stage,
+        "The live supervision conversation context exceeds its bounded input limit.",
+        true,
+        413
+      );
+    }
+  }
+
   private async Task<DurableSupervisionRunView> TransitionAsync(
     LiveRunState state,
     string runState,
@@ -581,7 +948,14 @@ public sealed class DurableSupervisionRunCoordinator
     bool autoResumeEligible,
     string? waitReason,
     string? browserSessionId,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    SupervisionRuntimeView? runtime = null,
+    string? role = null,
+    string? contextId = null,
+    string? workItemId = null,
+    SupervisionRecoverySnapshot? recovery = null,
+    string? waitCode = null,
+    bool captureRecovery = true
   )
   {
     await state.TransitionGate.WaitAsync(
@@ -596,12 +970,14 @@ public sealed class DurableSupervisionRunCoordinator
       ))
       {
         return SupervisionViewFactory.Create(
-          current
+          current,
+          state.Runtime
         );
       }
 
       var nextSequence = current.Events.LastOrDefault()?.Sequence + 1 ?? 1;
       var now = DateTimeOffset.UtcNow;
+      var effectiveRuntime = runtime ?? state.Runtime;
       var progressEvent = new SupervisionRunEvent(
         current.RunId,
         nextSequence,
@@ -609,7 +985,12 @@ public sealed class DurableSupervisionRunCoordinator
         now,
         runState,
         message,
-        terminal
+        terminal,
+        role,
+        contextId,
+        workItemId,
+        effectiveRuntime.CompletedItems,
+        effectiveRuntime.TotalItems
       );
       var next = current with
       {
@@ -625,11 +1006,38 @@ public sealed class DurableSupervisionRunCoordinator
           MaximumEventsPerRun
         ).ToArray(),
         UpdatedAt = now,
-        IntegritySha256 = string.Empty
+        IntegritySha256 = string.Empty,
+        Runtime = effectiveRuntime,
+        Recovery = recovery ?? current.Recovery,
+        WaitCode = waitCode
       };
 
       if (next.Durable)
       {
+        if (captureRecovery && recovery is null)
+        {
+          using var scope = _scopeFactory.CreateScope();
+          var recoveryService = scope.ServiceProvider.GetRequiredService<ISupervisionRecoveryService>();
+          next = next with
+          {
+            Recovery = await recoveryService.CaptureAsync(
+              next,
+              effectiveRuntime,
+              current.Recovery?.Actions,
+              cancellationToken
+            )
+          };
+        }
+        if (
+          next.Recovery is not null
+          && eventType == SupervisionEventTypeIds.WorkerClaimed
+        )
+        {
+          next = next with
+          {
+            Recovery = next.Recovery with { ImagesPending = false }
+          };
+        }
         next = await _checkpoints.WriteAsync(
           next,
           current.Revision,
@@ -637,15 +1045,14 @@ public sealed class DurableSupervisionRunCoordinator
         );
       }
 
-      state.Commit(
-        next
-      );
+      state.Commit(next, effectiveRuntime);
       if (terminal)
       {
         state.Cancel();
       }
       return SupervisionViewFactory.Create(
-        next
+        next,
+        state.Runtime
       );
     }
     finally
@@ -677,6 +1084,20 @@ public sealed class DurableSupervisionRunCoordinator
         out _
       );
     }
+  }
+
+  private bool HasWorkspaceExecutionOwner(LiveRunState candidate)
+  {
+    return _runs.Values.Any(state =>
+      !ReferenceEquals(state, candidate)
+      && string.Equals(
+        state.Checkpoint.WorkspaceId,
+        candidate.Checkpoint.WorkspaceId,
+        StringComparison.Ordinal
+      )
+      && state.CreateView().State is DurableSupervisionRunStates.Running
+        or DurableSupervisionRunStates.Cancelling
+    );
   }
 
   private static string NormalizeRunId(string? clientRunId)
@@ -728,27 +1149,156 @@ public sealed class DurableSupervisionRunCoordinator
     );
   }
 
+  private async Task RecordActionAsync(
+    LiveRunState state,
+    ValidatedLocalAction action,
+    string phase,
+    bool requiresApproval,
+    string? result,
+    CancellationToken cancellationToken
+  )
+  {
+    var checkpoint = state.Checkpoint;
+    var runtime = state.Runtime;
+    var existing = checkpoint.Recovery?.Actions.FirstOrDefault(candidate => string.Equals(
+      candidate.ActionId,
+      action.ActionId,
+      StringComparison.Ordinal
+    ));
+    var now = DateTimeOffset.UtcNow;
+    var entry = new SupervisionActionCheckpoint(
+      action.ActionId,
+      runtime.Contexts.FirstOrDefault(context => context.State == SupervisionContextStates.Active)?.Id
+        ?? runtime.Contexts.LastOrDefault(context => context.Role == "worker")?.Id
+        ?? "worker-reconstructed",
+      runtime.ActiveWorkItemId,
+      action.Tool,
+      phase,
+      action.ReadOnly,
+      requiresApproval,
+      Hash(action.Arguments.GetRawText()),
+      (action.PendingFileChanges
+        ?? (action.PendingFileChange is null ? [] : [action.PendingFileChange])).Select(change => new SupervisionActionFileEffect(
+        change.RelativePath.Replace('\\', '/'),
+        change.Operation,
+        change.ExistedBefore,
+        change.OriginalHash,
+        change.ExpectedFinalHash
+      )).ToArray(),
+      existing?.PreparedAt ?? now,
+      now,
+      string.IsNullOrEmpty(result) ? null : Hash(result),
+      existing?.Reconciliation
+    );
+    var actions = (checkpoint.Recovery?.Actions ?? [])
+      .Where(candidate => !string.Equals(candidate.ActionId, action.ActionId, StringComparison.Ordinal))
+      .Append(entry)
+      .TakeLast(64)
+      .ToArray();
+    using var scope = _scopeFactory.CreateScope();
+    var recoveryService = scope.ServiceProvider.GetRequiredService<ISupervisionRecoveryService>();
+    var recovery = await recoveryService.CaptureAsync(
+      checkpoint,
+      runtime,
+      actions,
+      cancellationToken
+    );
+    var eventType = phase switch
+    {
+      ExecutionActionJournalPhases.Prepared => SupervisionEventTypeIds.ActionPrepared,
+      ExecutionActionJournalPhases.AwaitingApproval => SupervisionEventTypeIds.ActionAwaitingApproval,
+      ExecutionActionJournalPhases.InFlight => SupervisionEventTypeIds.ActionInFlight,
+      ExecutionActionJournalPhases.Committed => SupervisionEventTypeIds.ActionCommitted,
+      ExecutionActionJournalPhases.Rejected => SupervisionEventTypeIds.ActionRejected,
+      _ => SupervisionEventTypeIds.ActionFailed
+    };
+    await TransitionAsync(
+      state,
+      checkpoint.State,
+      checkpoint.Phase,
+      eventType,
+      $"Host action {action.ActionId} ({action.Tool}) entered durable phase {phase}.",
+      terminal: false,
+      autoResumeEligible: false,
+      waitReason: null,
+      browserSessionId: null,
+      cancellationToken,
+      runtime,
+      role: "worker",
+      contextId: entry.ContextId,
+      workItemId: entry.WorkItemId,
+      recovery,
+      captureRecovery: false
+    );
+  }
+
+  private static string Hash(string value)
+  {
+    return Convert.ToHexString(
+      SHA256.HashData(Encoding.UTF8.GetBytes(value))
+    ).ToLowerInvariant();
+  }
+
+  private sealed class DurableExecutionActionJournal(
+    DurableSupervisionRunCoordinator owner,
+    LiveRunState state
+  ) : IExecutionActionJournal
+  {
+    public Task RecordAsync(
+      ValidatedLocalAction action,
+      string phase,
+      bool requiresApproval,
+      string? result,
+      CancellationToken cancellationToken
+    )
+    {
+      return owner.RecordActionAsync(
+        state,
+        action,
+        phase,
+        requiresApproval,
+        result,
+        cancellationToken
+      );
+    }
+  }
+
   private sealed class LiveRunState
   {
     private readonly object _gate = new();
     private readonly int _maximumEvents;
     private DurableSupervisionCheckpoint _checkpoint;
+    private SupervisionRuntimeView _runtime;
     private TaskCompletionSource _changed = NewSignal();
     private readonly CancellationTokenSource _cancellation = new();
+    private bool _executionReserved;
+    private Task? _execution;
 
     public LiveRunState(
       DurableSupervisionCheckpoint checkpoint,
-      int maximumEvents
+      int maximumEvents,
+      SupervisionRuntimeView runtime,
+      IReadOnlyList<ChatMessage> history,
+      IReadOnlyList<ChatImageAttachment> images
     )
     {
       _checkpoint = checkpoint;
       _maximumEvents = maximumEvents;
+      _runtime = runtime;
+      History = history;
+      Images = images;
     }
 
     public SemaphoreSlim TransitionGate { get; } = new(
       1,
       1
     );
+
+    public IReadOnlyList<ChatMessage> History { get; private set; }
+
+    public IReadOnlyList<ChatImageAttachment> Images { get; private set; }
+
+    public CancellationToken ExecutionToken => _cancellation.Token;
 
     public DurableSupervisionCheckpoint Checkpoint
     {
@@ -761,12 +1311,24 @@ public sealed class DurableSupervisionRunCoordinator
       }
     }
 
+    public SupervisionRuntimeView Runtime
+    {
+      get
+      {
+        lock (_gate)
+        {
+          return _runtime;
+        }
+      }
+    }
+
     public DurableSupervisionRunView CreateView()
     {
       lock (_gate)
       {
         return SupervisionViewFactory.Create(
-          _checkpoint
+          _checkpoint,
+          _runtime
         );
       }
     }
@@ -789,12 +1351,16 @@ public sealed class DurableSupervisionRunCoordinator
       }
     }
 
-    public void Commit(DurableSupervisionCheckpoint checkpoint)
+    public void Commit(
+      DurableSupervisionCheckpoint checkpoint,
+      SupervisionRuntimeView? runtime = null
+    )
     {
       TaskCompletionSource signal;
       lock (_gate)
       {
         _checkpoint = checkpoint;
+        _runtime = runtime ?? _runtime;
         signal = _changed;
         _changed = NewSignal();
       }
@@ -804,6 +1370,65 @@ public sealed class DurableSupervisionRunCoordinator
     public void Cancel()
     {
       _cancellation.Cancel();
+    }
+
+    public void ReplaceInputs(
+      IReadOnlyList<ChatMessage> history,
+      IReadOnlyList<ChatImageAttachment> images
+    )
+    {
+      lock (_gate)
+      {
+        History = history.ToArray();
+        Images = images.ToArray();
+      }
+    }
+
+    public bool TryReserveExecution()
+    {
+      lock (_gate)
+      {
+        if (
+          _executionReserved
+          || _execution is { IsCompleted: false }
+          || DurableSupervisionRunStates.IsTerminal(_checkpoint.State)
+          || !string.Equals(
+            _checkpoint.State,
+            DurableSupervisionRunStates.Prepared,
+            StringComparison.Ordinal
+          )
+        )
+        {
+          return false;
+        }
+        _executionReserved = true;
+        return true;
+      }
+    }
+
+    public void AttachExecution(Task execution)
+    {
+      lock (_gate)
+      {
+        _execution = execution;
+        _executionReserved = false;
+      }
+    }
+
+    public void ReleaseExecutionReservation()
+    {
+      lock (_gate)
+      {
+        _executionReserved = false;
+      }
+    }
+
+    public void CompleteExecution()
+    {
+      lock (_gate)
+      {
+        _executionReserved = false;
+      }
     }
 
     private static TaskCompletionSource NewSignal()

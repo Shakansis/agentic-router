@@ -708,7 +708,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           {
             name = "agentic_router",
             title = "Agentic Router",
-            version = "0.9.14"
+            version = "0.9.15"
           },
           capabilities = new
           {

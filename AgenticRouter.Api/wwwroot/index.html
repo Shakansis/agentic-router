@@ -57,6 +57,20 @@
       <p id="conversation-persistence-sidebar" class="persistence-status sidebar-expanded-only">Unsaved</p>
     </section>
 
+    <section
+      id="supervision-recovery"
+      class="supervision-recovery sidebar-expanded-only"
+      aria-labelledby="supervision-recovery-title"
+      hidden
+    >
+      <div class="sidebar-git-heading">
+        <span class="sidebar-section-icon" aria-hidden="true">↻</span>
+        <h2 id="supervision-recovery-title">Supervised recovery</h2>
+      </div>
+      <div id="supervision-recovery-list" class="supervision-recovery-list"></div>
+      <output id="supervision-recovery-status" class="inline-status" role="status"></output>
+    </section>
+
     <section class="sidebar-git" aria-labelledby="sidebar-git-title">
       <div class="sidebar-git-heading">
         <span class="sidebar-section-icon git-section-icon" aria-hidden="true">⑂</span>
@@ -81,7 +95,7 @@
       <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
     </section>
 
-    <span class="app-version sidebar-expanded-only">v0.9.14_alpha</span>
+    <span class="app-version sidebar-expanded-only">v0.9.15_alpha</span>
   </aside>
 
   <div
@@ -934,8 +948,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.9.14."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.9.14."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.9.15."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.9.15."
                 >i</button>
               </div>
             </div>
@@ -1379,8 +1393,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.9.14."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.9.14. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.9.15."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.9.15. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>

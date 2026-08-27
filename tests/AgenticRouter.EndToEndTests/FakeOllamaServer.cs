@@ -2256,6 +2256,36 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       entry => IsExecuteObjective(entry.message)
     ).Last();
     var current = currentEntry.message.Content;
+    if (
+      current.Contains("supervision restart boundary", StringComparison.OrdinalIgnoreCase)
+      && current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+      && _generationAttempts.TryAdd("supervision:restart-boundary-delay", 1)
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(8), cancellationToken);
+    }
+    if (
+      current.Contains("supervision stale boundary", StringComparison.OrdinalIgnoreCase)
+      && current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+      && current.Contains("\"content\":\"hello world today\"", StringComparison.Ordinal)
+      && _generationAttempts.TryAdd("supervision:stale-boundary-delay", 1)
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+    }
+    if (TryCreateSupervisionDecision(current, out var supervisionDecision))
+    {
+      await WriteStreamingToolResponseAsync(
+        response,
+        model,
+        supervisionDecision,
+        null,
+        null,
+        0,
+        cancellationToken
+      );
+      return;
+    }
     var activeMessages = messages.Skip(
       currentEntry.index + 1
     ).ToArray();
@@ -3089,6 +3119,118 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           path = "workspace/hello.txt"
         },
         explanation = "Retry inspection while still repeating the workspace root alias."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains("SUPERVISION_RECOVERY_V1", StringComparison.Ordinal)
+      && !actionResults.Any(result => result.ToolName == "write_file"
+        || result.Content.Contains("Tool: write_file", StringComparison.Ordinal))
+    )
+    {
+      plan = new
+      {
+        tool = "write_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = "hello world today"
+        },
+        explanation = "Correct the inspected artifact after crash reconciliation established its current bytes."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains("SUPERVISION_RECOVERY_V1", StringComparison.Ordinal)
+      && Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "read_file"
+          || result.Content.Contains("Tool: read_file", StringComparison.Ordinal)
+      ) < Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "write_file"
+          || result.Content.Contains("Tool: write_file", StringComparison.Ordinal)
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Read the reconciled correction so the Host can prove its effect."
+      };
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "SUPERVISION_CORRECTION_V1",
+        StringComparison.Ordinal
+      )
+      && actionResults.Any(result => result.ToolName == "write_file"
+        || result.Content.Contains("Tool: write_file", StringComparison.Ordinal))
+      && Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "read_file"
+          || result.Content.Contains(
+            "Tool: read_file",
+            StringComparison.Ordinal
+          )
+      ) > Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "write_file"
+          || result.Content.Contains(
+            "Tool: write_file",
+            StringComparison.Ordinal
+          )
+      )
+      && actionResults.Last(result => result.ToolName == "write_file"
+        || result.Content.Contains("Tool: write_file", StringComparison.Ordinal))
+        .Content.Contains("\"status\":\"rejected\"", StringComparison.Ordinal)
+    )
+    {
+      plan = CreateLocalActionPlan(current);
+    }
+    else if (
+      hasResult
+      && current.Contains(
+        "SUPERVISION_CORRECTION_V1",
+        StringComparison.Ordinal
+      )
+      && actionResults.Any(
+        result => result.ToolName == "write_file"
+          || result.Content.Contains(
+            "Tool: write_file",
+            StringComparison.Ordinal
+          )
+      )
+      && Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "read_file"
+          || result.Content.Contains(
+            "Tool: read_file",
+            StringComparison.Ordinal
+          )
+      ) < Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "write_file"
+          || result.Content.Contains(
+            "Tool: write_file",
+            StringComparison.Ordinal
+          )
+      )
+    )
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Read the corrected file so the Host can verify the required effect."
       };
     }
     else if (
@@ -4308,6 +4450,58 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (current.Contains("SUPERVISION_RECOVERY_V1", StringComparison.Ordinal))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Inspect the reconciled artifact before proposing any mutation."
+      };
+    }
+
+    if (current.Contains(
+      "SUPERVISION_CORRECTION_V1",
+      StringComparison.Ordinal
+    ))
+    {
+      return new
+      {
+        tool = "write_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = current.Contains(
+            "no progress supervision",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? "hello world"
+            : "hello world today"
+        },
+        explanation = "Apply the exact focused supervisor correction."
+      };
+    }
+
+    if (current.Contains(
+      "SUPERVISION_WORKER_V1",
+      StringComparison.Ordinal
+    ))
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "hello.txt",
+          content = "hello world"
+        },
+        explanation = "Create the initial worker artifact for focused verification."
+      };
+    }
+
     if (current.Contains(
       "specialist tracked plan",
       StringComparison.OrdinalIgnoreCase
@@ -4877,6 +5071,132 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       arguments = new { },
       explanation = "No local action is needed."
     };
+  }
+
+  private static bool TryCreateSupervisionDecision(
+    string current,
+    out string decision
+  )
+  {
+    const string criterion =
+      "hello.txt must contain the exact text hello world today.";
+    if (current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
+    {
+      if (current.Contains(
+        "malformed supervision decision",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = "not-json";
+        return true;
+      }
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = current.Contains(
+                "no progress supervision",
+                StringComparison.OrdinalIgnoreCase
+              )
+                ? "no progress supervision create file hello.txt with content hello world today"
+                : current.Contains(
+                  "supervision restart boundary",
+                  StringComparison.OrdinalIgnoreCase
+                )
+                  ? "supervision restart boundary create file hello.txt with content hello world today"
+                  : current.Contains(
+                    "supervision stale boundary",
+                    StringComparison.OrdinalIgnoreCase
+                  )
+                    ? "supervision stale boundary create file hello.txt with content hello world today"
+                  : "create file hello.txt with content hello world today",
+              acceptanceCriteria = new[] { criterion },
+              evidencePaths = new[] { "hello.txt" }
+            }
+          }
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+
+    if (
+      current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+      || current.Contains(
+        "SUPERVISION_VERIFY_WITH_VALIDATION_V1",
+        StringComparison.Ordinal
+      )
+    )
+    {
+      var evidenceRevision = ExtractSupervisionEvidenceRevision(current);
+      var accepted = current.Contains(
+        "\"content\":\"hello world today\"",
+        StringComparison.Ordinal
+      );
+      decision = accepted
+        ? JsonSerializer.Serialize(
+          new
+          {
+            decision = "accept_work",
+            evidenceRevision,
+            coveredCriteria = new[] { criterion },
+            summary = "The current Host evidence contains the exact required text."
+          },
+          CompactJsonOptions
+        )
+        : JsonSerializer.Serialize(
+          new
+          {
+            decision = "reject_work",
+            evidenceRevision,
+            discrepancy = "hello.txt does not contain the required word today.",
+            correctiveBrief = "write file hello.txt with content hello world today"
+          },
+          CompactJsonOptions
+        );
+      return true;
+    }
+
+    if (current.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "complete_goal",
+          finalAnswer = "Created hello.txt with the exact text hello world today and verified the current file contents."
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+
+    decision = string.Empty;
+    return false;
+  }
+
+  private static long ExtractSupervisionEvidenceRevision(string current)
+  {
+    const string marker = "Host evidence revision ";
+    var start = current.IndexOf(marker, StringComparison.Ordinal);
+    if (start < 0)
+    {
+      return 0;
+    }
+    start += marker.Length;
+    var end = current.IndexOf(':', start);
+    return end > start
+      && long.TryParse(
+        current[start..end],
+        System.Globalization.NumberStyles.None,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out var revision
+      )
+        ? revision
+        : 0;
   }
 
   private async Task StreamTargetAsync(

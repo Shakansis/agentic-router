@@ -20,6 +20,7 @@ public static class SupervisionResumePolicies
 public static class DurableSupervisionRunStates
 {
   public const string Prepared = "prepared";
+  public const string Running = "running";
   public const string InterruptedRecoverable = "interrupted-recoverable";
   public const string AwaitingUser = "awaiting-user";
   public const string Cancelling = "cancelling";
@@ -37,6 +38,10 @@ public static class SupervisionRunPhases
 {
   public const string Foundation = "foundation";
   public const string Recovery = "recovery";
+  public const string Decomposing = "decomposing";
+  public const string Working = "working";
+  public const string Verifying = "verifying";
+  public const string Completing = "completing";
 }
 
 public static class SupervisionEventTypeIds
@@ -46,6 +51,27 @@ public static class SupervisionEventTypeIds
   public const string InterruptedRecoverable = "supervision.interrupted-recoverable";
   public const string AutoResumeEligible = "supervision.auto-resume-eligible";
   public const string Resumed = "supervision.resumed";
+  public const string Started = "supervision.started";
+  public const string SupervisorStarted = "supervision.supervisor-started";
+  public const string WorkQueued = "supervision.work-queued";
+  public const string WorkerStarted = "supervision.worker-started";
+  public const string WorkerClaimed = "supervision.worker-claimed";
+  public const string VerificationStarted = "supervision.verification-started";
+  public const string WorkRejected = "supervision.work-rejected";
+  public const string WorkAccepted = "supervision.work-accepted";
+  public const string RetryStarted = "supervision.retry-started";
+  public const string NoProgress = "supervision.no-progress";
+  public const string RecoveryEligible = "supervision.recovery-eligible";
+  public const string ReconciliationRequired = "supervision.reconciliation-required";
+  public const string ActionPrepared = "supervision.action-prepared";
+  public const string ActionAwaitingApproval = "supervision.action-awaiting-approval";
+  public const string ActionInFlight = "supervision.action-in-flight";
+  public const string ActionCommitted = "supervision.action-committed";
+  public const string ActionFailed = "supervision.action-failed";
+  public const string ActionRejected = "supervision.action-rejected";
+  public const string AwaitingUser = "supervision.awaiting-user";
+  public const string Completed = "supervision.completed";
+  public const string Blocked = "supervision.blocked";
   public const string Cancelling = "supervision.cancelling";
   public const string Cancelled = "supervision.cancelled";
 }
@@ -58,11 +84,16 @@ public sealed record PrepareSupervisionRunRequest(
   string? ConversationSessionId = null,
   string ApprovalPolicy = "auto",
   string ResumePolicy = SupervisionResumePolicies.Manual,
-  string? ClientRunId = null
+  string? ClientRunId = null,
+  bool AutoModelHarness = false,
+  IReadOnlyList<ChatMessage>? History = null,
+  IReadOnlyList<ChatImageAttachment>? Images = null
 );
 
 public sealed record ResumeSupervisionRunRequest(
-  string BrowserSessionId
+  string BrowserSessionId,
+  IReadOnlyList<ChatMessage>? History = null,
+  IReadOnlyList<ChatImageAttachment>? Images = null
 );
 
 public sealed record SupervisionRunStartView(
@@ -79,8 +110,89 @@ public sealed record SupervisionRunEvent(
   DateTimeOffset Timestamp,
   string State,
   string? Message = null,
-  bool Terminal = false
+  bool Terminal = false,
+  string? Role = null,
+  string? ContextId = null,
+  string? WorkItemId = null,
+  int? CompletedItems = null,
+  int? TotalItems = null
 );
+
+public static class SupervisionWorkItemStates
+{
+  public const string Pending = "pending";
+  public const string Active = "active";
+  public const string Verifying = "verifying";
+  public const string Completed = "completed";
+  public const string Blocked = "blocked";
+}
+
+public static class SupervisionContextStates
+{
+  public const string Active = "active";
+  public const string Suspended = "suspended";
+  public const string Completed = "completed";
+  public const string Abandoned = "abandoned";
+}
+
+public sealed record SupervisionWorkItemView(
+  string Id,
+  string Objective,
+  IReadOnlyList<string> AcceptanceCriteria,
+  IReadOnlyList<string> EvidencePaths,
+  string Status,
+  int AttemptCount,
+  string? WorkerContextId,
+  long EvidenceRevision,
+  string? LastDiscrepancy,
+  string? EvidenceSha256
+);
+
+public sealed record SupervisionContextView(
+  string Id,
+  string Role,
+  string? WorkItemId,
+  string State,
+  long Revision,
+  long LastSynchronizedRunRevision,
+  string? LastOutcome,
+  DateTimeOffset CreatedAt,
+  DateTimeOffset UpdatedAt
+);
+
+public sealed record SupervisionRuntimeView(
+  IReadOnlyList<SupervisionWorkItemView> WorkItems,
+  IReadOnlyList<SupervisionContextView> Contexts,
+  string? ActiveRole,
+  string? ActiveWorkItemId,
+  int CompletedItems,
+  int TotalItems,
+  int SupervisorTransitionCount,
+  int NoProgressCount,
+  long EvidenceRevision,
+  string? FinalAnswer,
+  string? LastFailure,
+  bool RecoverableInCurrentProcess
+)
+{
+  public static SupervisionRuntimeView Empty(bool recoverableInCurrentProcess = true)
+  {
+    return new SupervisionRuntimeView(
+      [],
+      [],
+      null,
+      null,
+      0,
+      0,
+      0,
+      0,
+      0,
+      null,
+      null,
+      recoverableInCurrentProcess
+    );
+  }
+}
 
 public sealed record SupervisionRouteSnapshot(
   string Provider,
@@ -90,6 +202,66 @@ public sealed record SupervisionRouteSnapshot(
   string HarnessVersion,
   string OllamaEndpoint,
   string WorkspacePathSha256
+);
+
+public static class SupervisionActionPhases
+{
+  public const string Prepared = "prepared";
+  public const string AwaitingApproval = "awaiting-approval";
+  public const string InFlight = "in-flight";
+  public const string Committed = "committed";
+  public const string Failed = "failed";
+  public const string Rejected = "rejected";
+  public const string Abandoned = "abandoned";
+  public const string Ambiguous = "ambiguous";
+}
+
+public sealed record SupervisionActionFileEffect(
+  string RelativePath,
+  string Operation,
+  bool ExistedBefore,
+  string OriginalSha256,
+  string ExpectedFinalSha256
+);
+
+public sealed record SupervisionActionCheckpoint(
+  string ActionId,
+  string ContextId,
+  string? WorkItemId,
+  string Tool,
+  string Phase,
+  bool ReadOnly,
+  bool RequiresApproval,
+  string ArgumentsSha256,
+  IReadOnlyList<SupervisionActionFileEffect> FileEffects,
+  DateTimeOffset PreparedAt,
+  DateTimeOffset UpdatedAt,
+  string? ResultSha256 = null,
+  string? Reconciliation = null
+);
+
+public sealed record SupervisionTrackedFileSnapshot(
+  string RelativePath,
+  string State,
+  string? Sha256,
+  long? Bytes
+);
+
+public sealed record SupervisionBudgetSnapshot(
+  int MaximumWorkItems,
+  int MaximumSupervisorTransitions,
+  int MaximumWorkerAttempts
+);
+
+public sealed record SupervisionRecoverySnapshot(
+  string InstructionSha256,
+  IReadOnlyList<string> InstructionFiles,
+  IReadOnlyList<SupervisionTrackedFileSnapshot> TrackedFiles,
+  IReadOnlyList<SupervisionActionCheckpoint> Actions,
+  SupervisionBudgetSnapshot Budgets,
+  bool TurnInFlight,
+  DateTimeOffset CapturedAt,
+  bool ImagesPending = false
 );
 
 public sealed record DurableSupervisionCheckpoint(
@@ -112,10 +284,13 @@ public sealed record DurableSupervisionCheckpoint(
   IReadOnlyList<SupervisionRunEvent> Events,
   DateTimeOffset CreatedAt,
   DateTimeOffset UpdatedAt,
-  string IntegritySha256
+  string IntegritySha256,
+  SupervisionRuntimeView? Runtime = null,
+  SupervisionRecoverySnapshot? Recovery = null,
+  string? WaitCode = null
 )
 {
-  public const int CurrentSchemaVersion = 1;
+  public const int CurrentSchemaVersion = 2;
 }
 
 public sealed record DurableSupervisionRunView(
@@ -135,7 +310,10 @@ public sealed record DurableSupervisionRunView(
   long LastSequence,
   bool Terminal,
   DateTimeOffset CreatedAt,
-  DateTimeOffset UpdatedAt
+  DateTimeOffset UpdatedAt,
+  SupervisionRuntimeView? Runtime = null,
+  SupervisionRecoverySnapshot? Recovery = null,
+  string? WaitCode = null
 );
 
 public sealed record SupervisionRunListView(
@@ -386,7 +564,8 @@ public static class SupervisionRequestPolicy
 internal static class SupervisionViewFactory
 {
   public static DurableSupervisionRunView Create(
-    DurableSupervisionCheckpoint checkpoint
+    DurableSupervisionCheckpoint checkpoint,
+    SupervisionRuntimeView? runtime = null
   )
   {
     return new DurableSupervisionRunView(
@@ -408,7 +587,10 @@ internal static class SupervisionViewFactory
         checkpoint.State
       ),
       checkpoint.CreatedAt,
-      checkpoint.UpdatedAt
+      checkpoint.UpdatedAt,
+      runtime ?? checkpoint.Runtime,
+      checkpoint.Recovery,
+      checkpoint.WaitCode
     );
   }
 }

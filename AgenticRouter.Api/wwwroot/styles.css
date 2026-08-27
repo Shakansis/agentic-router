@@ -3426,6 +3426,77 @@ p {
   border-top: 1px solid var(--border);
 }
 
+.supervision-recovery {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 7px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.supervision-recovery[hidden] {
+  display: none;
+}
+
+.supervision-recovery-list {
+  display: grid;
+  max-height: 230px;
+  gap: 7px;
+  overflow-y: auto;
+}
+
+.supervision-recovery-card {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.supervision-recovery-card strong,
+.supervision-recovery-card small,
+.supervision-recovery-card p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.supervision-recovery-card strong,
+.supervision-recovery-card small {
+  white-space: nowrap;
+}
+
+.supervision-recovery-card strong {
+  font-size: 12px;
+}
+
+.supervision-recovery-card small,
+.supervision-recovery-card p {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.supervision-recovery-card p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.supervision-recovery-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.supervision-recovery-actions .secondary-button {
+  min-width: 0;
+  flex: 1 1 50%;
+  padding: 5px 6px;
+  font-size: 11px;
+}
+
 .git-status-button {
   display: flex;
   min-width: 0;

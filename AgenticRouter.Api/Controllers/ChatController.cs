@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Text.Json;
 using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
@@ -29,8 +31,11 @@ public sealed class ChatController : ControllerBase
   private readonly IIncidentJournal _incidents;
   private readonly ITraceContext _trace;
   private readonly IPersistentSessionService _persistentSessions;
+  private readonly IDurableSupervisionRunCoordinator _supervisionRuns;
+  private readonly IMarkdownRenderer _markdown;
   private string? _executionSessionId;
   private string? _conversationSessionId;
+  private string? _durableSupervisionRunId;
   private string? _lastExecutionCheckpoint;
   private readonly List<Task<IncidentAppendResult>> _incidentWrites = [];
 
@@ -39,6 +44,8 @@ public sealed class ChatController : ControllerBase
     IExecutionSessionStore executionSessions,
     IPersistentSessionService persistentSessions,
     IImageAttachmentValidator imageValidator,
+    IDurableSupervisionRunCoordinator supervisionRuns,
+    IMarkdownRenderer markdown,
     IIncidentJournal incidents,
     ITraceContext trace,
     ILogger<ChatController> logger
@@ -48,6 +55,8 @@ public sealed class ChatController : ControllerBase
     _executionSessions = executionSessions;
     _persistentSessions = persistentSessions;
     _imageValidator = imageValidator;
+    _supervisionRuns = supervisionRuns;
+    _markdown = markdown;
     _incidents = incidents;
     _trace = trace;
     _logger = logger;
@@ -119,31 +128,6 @@ public sealed class ChatController : ControllerBase
       return;
     }
 
-    if (supervision.Supervised)
-    {
-      await WriteErrorAsync(
-        requestId,
-        new ChatStageException(
-          "supervision-foundation",
-          "Durable Supervised Execute is not executable until Milestone 2 is approved.",
-          "Milestone 0 provides local-only durable state, attach/detach, and recovery contracts without invoking a model or harness.",
-          request.Model,
-          null,
-          409,
-          true,
-          details: new Dictionary<string, string?>
-          {
-            ["code"] = "supervision-execution-not-enabled",
-            ["executionStrategy"] = supervision.Strategy,
-            ["resumePolicy"] = supervision.ResumePolicy,
-            ["providerPolicy"] = "ollama-local-only"
-          }
-        ),
-        cancellationToken
-      );
-      return;
-    }
-
     try
     {
       try
@@ -195,14 +179,23 @@ public sealed class ChatController : ControllerBase
       }
 
       var answer = new System.Text.StringBuilder();
-      await foreach (var streamEvent in _chatStreamService.StreamAsync(
-        request with
-        {
-          ConversationSessionId = _conversationSessionId
-        },
-        requestId,
-        cancellationToken
-      ))
+      var normalizedRequest = request with
+      {
+        ConversationSessionId = _conversationSessionId
+      };
+      var stream = supervision.Supervised
+        ? StreamSupervisedAsync(
+          normalizedRequest,
+          supervision,
+          requestId,
+          cancellationToken
+        )
+        : _chatStreamService.StreamAsync(
+          normalizedRequest,
+          requestId,
+          cancellationToken
+        );
+      await foreach (var streamEvent in stream)
       {
         _executionSessionId = streamEvent.ExecutionSession?.Id
           ?? _executionSessionId;
@@ -271,6 +264,14 @@ public sealed class ChatController : ControllerBase
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
+      if (_durableSupervisionRunId is not null)
+      {
+        _logger.LogInformation(
+          "Browser detached from durable supervision run {RunId}; Host execution continues.",
+          _durableSupervisionRunId
+        );
+        return;
+      }
       _logger.LogInformation(
         "Chat request {RequestId} was cancelled.",
         requestId
@@ -477,6 +478,350 @@ public sealed class ChatController : ControllerBase
         ),
         cancellationToken
       );
+    }
+  }
+
+  [HttpGet("supervision/{runId}/stream")]
+  public async Task AttachSupervision(
+    string runId,
+    [FromQuery] long afterSequence = 0,
+    CancellationToken cancellationToken = default
+  )
+  {
+    Response.StatusCode = StatusCodes.Status200OK;
+    Response.ContentType = "text/event-stream";
+    Response.Headers.CacheControl = "no-cache";
+    Response.Headers.Connection = "keep-alive";
+
+    var requestId = Guid.NewGuid().ToString("N");
+    _trace.Link("requestId", requestId);
+    _trace.Link("supervisionRunId", runId);
+    if (!_supervisionRuns.TryGetView(runId, out var view))
+    {
+      await WriteErrorAsync(
+        requestId,
+        new ChatStageException(
+          "supervision-attach",
+          "The durable supervised run is unavailable.",
+          "No Host-owned run matches the requested identifier.",
+          null,
+          null,
+          404,
+          false
+        ),
+        cancellationToken
+      );
+      return;
+    }
+
+    _conversationSessionId = view.ConversationSessionId;
+    _durableSupervisionRunId = runId;
+    _trace.Link("conversationId", _conversationSessionId);
+    var answer = new System.Text.StringBuilder();
+    try
+    {
+      await WriteEventAsync(
+        new ChatStreamEvent(
+          requestId,
+          "supervision.attached",
+          DateTimeOffset.UtcNow,
+          $"Attached to durable supervised run {runId} at sequence {afterSequence}.",
+          null,
+          view.Route.Model,
+          null,
+          0,
+          null,
+          null,
+          ConversationSessionId: _conversationSessionId
+        ),
+        cancellationToken
+      );
+
+      await foreach (var streamEvent in StreamExistingSupervisedAsync(
+        runId,
+        requestId,
+        view,
+        Math.Max(0, afterSequence),
+        cancellationToken
+      ))
+      {
+        if (streamEvent.Type == "response.delta")
+        {
+          answer.Append(streamEvent.Delta);
+        }
+        if (streamEvent.Type == "response.completed")
+        {
+          try
+          {
+            var persisted = await _persistentSessions.CompleteTurnAsync(
+              _conversationSessionId,
+              answer.ToString(),
+              "execute",
+              streamEvent.SelectedModel,
+              null,
+              cancellationToken
+            );
+            if (persisted is not null)
+            {
+              await WriteEventAsync(
+                SessionEvent(
+                  requestId,
+                  "session-persisted",
+                  "Reattached supervised turn persisted locally."
+                ),
+                cancellationToken
+              );
+            }
+          }
+          catch (WorkspaceProfileException exception)
+          {
+            await WriteEventAsync(
+              PersistenceEvent(requestId, exception),
+              cancellationToken
+            );
+          }
+        }
+
+        await WriteEventAsync(
+          streamEvent with { ConversationSessionId = _conversationSessionId },
+          cancellationToken
+        );
+      }
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      _logger.LogInformation(
+        "Browser detached again from durable supervision run {RunId}; Host execution continues.",
+        runId
+      );
+    }
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> StreamSupervisedAsync(
+    ChatRequest request,
+    SupervisionRequestResolution supervision,
+    string requestId,
+    [System.Runtime.CompilerServices.EnumeratorCancellation]
+    CancellationToken cancellationToken
+  )
+  {
+    SupervisionRunStartView prepared;
+    DurableSupervisionRunView startedView;
+    try
+    {
+      prepared = await _supervisionRuns.PrepareAsync(
+        new PrepareSupervisionRunRequest(
+          supervision.Objective,
+          request.Model,
+          request.Harness,
+          request.BrowserSessionId ?? string.Empty,
+          request.ConversationSessionId,
+          request.ApprovalPolicy,
+          supervision.ResumePolicy,
+          AutoModelHarness: request.AutoModelHarness,
+          History: request.History,
+          Images: request.Images
+        ),
+        cancellationToken
+      );
+      _durableSupervisionRunId = prepared.RunId;
+      _trace.Link("supervisionRunId", prepared.RunId);
+      _ = await _supervisionRuns.StartAsync(
+        prepared.RunId,
+        cancellationToken
+      );
+      if (!_supervisionRuns.TryGetView(prepared.RunId, out startedView))
+      {
+        throw new SupervisionException(
+          "supervision-run-missing",
+          "supervision-start",
+          "The Host-owned run disappeared immediately after it was started.",
+          false,
+          500
+        );
+      }
+    }
+    catch (SupervisionException exception)
+    {
+      throw new ChatStageException(
+        exception.Stage,
+        exception.Message,
+        exception.Code,
+        request.Model,
+        null,
+        exception.StatusCode,
+        exception.Retryable,
+        exception,
+        new Dictionary<string, string?>
+        {
+          ["code"] = exception.Code,
+          ["providerPolicy"] = "ollama-local-only"
+        }
+      );
+    }
+
+    var stopwatch = Stopwatch.StartNew();
+    yield return new ChatStreamEvent(
+      requestId,
+      "supervision.run-started",
+      DateTimeOffset.UtcNow,
+      $"Durable supervised run {prepared.RunId} started on fixed local route {startedView.Route.Model} × {startedView.Route.Harness}.",
+      null,
+      startedView.Route.Model,
+      null,
+      stopwatch.ElapsedMilliseconds,
+      null,
+      null
+    );
+
+    await foreach (var streamEvent in StreamExistingSupervisedAsync(
+      prepared.RunId,
+      requestId,
+      startedView,
+      0,
+      cancellationToken
+    ))
+    {
+      yield return streamEvent;
+    }
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> StreamExistingSupervisedAsync(
+    string runId,
+    string requestId,
+    DurableSupervisionRunView startedView,
+    long afterSequence,
+    [System.Runtime.CompilerServices.EnumeratorCancellation]
+    CancellationToken cancellationToken
+  )
+  {
+    var stopwatch = Stopwatch.StartNew();
+    await foreach (var progressEvent in _supervisionRuns.SubscribeAsync(
+      runId,
+      afterSequence,
+      follow: true,
+      cancellationToken
+    ))
+    {
+      yield return new ChatStreamEvent(
+        requestId,
+        progressEvent.Type,
+        progressEvent.Timestamp,
+        progressEvent.Message,
+        null,
+        startedView.Route.Model,
+        null,
+        stopwatch.ElapsedMilliseconds,
+        null,
+        null
+      );
+
+      if (!progressEvent.Terminal)
+      {
+        continue;
+      }
+      if (!_supervisionRuns.TryGetView(runId, out var view))
+      {
+        throw new ChatStageException(
+          "supervision-run-missing",
+          "The durable supervision result is unavailable.",
+          "The Host-owned run disappeared before its terminal view was read.",
+          startedView.Route.Model,
+          null,
+          500,
+          false
+        );
+      }
+
+      if (view.State == DurableSupervisionRunStates.Completed)
+      {
+        var finalAnswer = view.Runtime?.FinalAnswer;
+        if (string.IsNullOrWhiteSpace(finalAnswer))
+        {
+          throw new ChatStageException(
+            "supervision-final-answer-missing",
+            "The supervisor completed without a final answer.",
+            "The terminal Host view did not contain the accepted final answer.",
+            view.Route.Model,
+            null,
+            500,
+            false
+          );
+        }
+        yield return new ChatStreamEvent(
+          requestId,
+          "response.delta",
+          DateTimeOffset.UtcNow,
+          null,
+          finalAnswer,
+          view.Route.Model,
+          null,
+          stopwatch.ElapsedMilliseconds,
+          _markdown.Render(finalAnswer),
+          null
+        );
+        yield return new ChatStreamEvent(
+          requestId,
+          "response.completed",
+          DateTimeOffset.UtcNow,
+          "Durable supervised execution completed.",
+          null,
+          view.Route.Model,
+          null,
+          stopwatch.ElapsedMilliseconds,
+          _markdown.Render(finalAnswer),
+          null
+        );
+        yield break;
+      }
+
+      if (view.State == DurableSupervisionRunStates.Cancelled)
+      {
+        yield return new ChatStreamEvent(
+          requestId,
+          "request.cancelled",
+          DateTimeOffset.UtcNow,
+          "Durable supervised execution was cancelled.",
+          null,
+          view.Route.Model,
+          null,
+          stopwatch.ElapsedMilliseconds,
+          null,
+          null
+        );
+        yield break;
+      }
+
+      yield return new ChatStreamEvent(
+        requestId,
+        "error",
+        DateTimeOffset.UtcNow,
+        view.Runtime?.LastFailure ?? view.WaitReason ?? "Durable supervised execution stopped.",
+        null,
+        view.Route.Model,
+        null,
+        stopwatch.ElapsedMilliseconds,
+        null,
+        new ProviderError(
+          "supervision",
+          view.Runtime?.LastFailure ?? "Durable supervised execution stopped.",
+          view.WaitReason,
+          HttpContext.TraceIdentifier,
+          view.Route.Provider,
+          view.Route.Model,
+          null,
+          409,
+          false,
+          new Dictionary<string, string?>
+          {
+            ["code"] = "supervision-blocked",
+            ["runId"] = view.RunId,
+            ["workItemId"] = view.Runtime?.ActiveWorkItemId
+          },
+          "supervision-blocked"
+        )
+      );
+      yield break;
     }
   }
 

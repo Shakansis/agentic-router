@@ -307,7 +307,13 @@ builder.Services.AddSingleton<IAgentHarness>(
   services => services.GetRequiredService<ClaudeCodeHarnessAdapter>()
 );
 builder.Services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
+builder.Services.AddScoped<
+  IExecutionContextTurnRunner,
+  ExecutionContextTurnRunner
+>();
 builder.Services.AddScoped<ISupervisionRouteResolver, SupervisionRouteResolver>();
+builder.Services.AddScoped<ISupervisionExecutionEngine, SupervisionExecutionEngine>();
+builder.Services.AddScoped<ISupervisionRecoveryService, SupervisionRecoveryService>();
 builder.Services.AddSingleton<
   IDurableSupervisionRunCoordinator,
   DurableSupervisionRunCoordinator
@@ -416,7 +422,13 @@ builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
 );
 builder.Services.AddHostedService<SafeResidentModelHostedService>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
-builder.Services.AddScoped<IChatStreamService, ChatStreamService>();
+builder.Services.AddScoped<ChatStreamService>();
+builder.Services.AddScoped<IChatStreamService>(
+  services => services.GetRequiredService<ChatStreamService>()
+);
+builder.Services.AddScoped<IExecutionSpecialistTurnService>(
+  services => services.GetRequiredService<ChatStreamService>()
+);
 
 var app = builder.Build();
 

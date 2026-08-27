@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$VersionLabel = '0.9.14_alpha',
+  [string]$VersionLabel = '0.9.15_alpha',
   [ValidateSet('win-x64', 'win-arm64')]
   [string]$RuntimeIdentifier = 'win-x64',
   [string]$OutputDirectory,
@@ -45,7 +45,7 @@ function Assert-ChildPath {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.9.14_alpha.'
+  throw 'VersionLabel must use the form 0.9.15_alpha.'
 }
 
 $packageVersion = $VersionLabel.Replace('_', '-')

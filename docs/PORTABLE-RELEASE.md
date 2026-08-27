@@ -12,11 +12,11 @@ From the repository root:
 .\scripts\Publish-PortableRelease.ps1
 ```
 
-The default command creates `0.9.14_alpha` for `win-x64` under
+The default command creates `0.9.15_alpha` for `win-x64` under
 `artifacts\releases`:
 
 - an unpacked directory for inspection;
-- `AgenticRouter-0.9.14_alpha-win-x64.zip`;
+- `AgenticRouter-0.9.15_alpha-win-x64.zip`;
 - a SHA-256 checksum file beside the ZIP.
 
 The first publish for a runtime identifier may download the corresponding .NET
@@ -27,7 +27,7 @@ Optional parameters:
 
 ```powershell
 .\scripts\Publish-PortableRelease.ps1 `
-  -VersionLabel 0.9.14_alpha `
+  -VersionLabel 0.9.15_alpha `
   -RuntimeIdentifier win-x64 `
   -OutputDirectory artifacts\releases
 ```
@@ -73,7 +73,7 @@ release or its immutable assets:
 
 ```powershell
 .\scripts\Publish-GitHubRelease.ps1 `
-  -VersionLabel 0.9.14_alpha `
+  -VersionLabel 0.9.15_alpha `
   -RuntimeIdentifier win-x64 `
   -DocumentationOnly
 ```

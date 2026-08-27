@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 
 namespace AgenticRouter.Api.Chat;
 
@@ -7,6 +8,31 @@ public interface IChatStreamService
   IAsyncEnumerable<ChatStreamEvent> StreamAsync(
     ChatRequest request,
     string requestId,
+    CancellationToken cancellationToken
+  );
+}
+
+public sealed record ExecutionSpecialistTurnInvocation(
+  string? ContextId,
+  ExecutionContextRole Role,
+  ExecutionTurnToolScope? ToolScopeOverride = null,
+  bool UseMinimalToolInventory = false,
+  Action<string>? CaptureRoleResult = null,
+  IExecutionActionJournal? ActionJournal = null
+)
+{
+  public static ExecutionSpecialistTurnInvocation Direct { get; } = new(
+    null,
+    ExecutionContextRole.Direct
+  );
+}
+
+public interface IExecutionSpecialistTurnService
+{
+  IAsyncEnumerable<ChatStreamEvent> RunAsync(
+    ChatRequest request,
+    string requestId,
+    ExecutionSpecialistTurnInvocation invocation,
     CancellationToken cancellationToken
   );
 }

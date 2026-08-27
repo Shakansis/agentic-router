@@ -2,7 +2,7 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.9.14_alpha - Execute effect authority and conversation UI reliability correction. File creation is manually acceptable; editing and deletion still require corrective real-model validation.
+**Current Status**: v0.9.15_alpha - durable local supervised Execute, focused verification/correction, restart recovery, and browser reattachment. This remains evaluation software.
 
 ## Download
 
@@ -11,7 +11,7 @@ Portable Windows builds are published in the
 repository. Download the ZIP and its `.sha256` file, extract the ZIP to a
 writable directory, and run `AgenticRouter.exe`.
 
-`0.9.14_alpha` is a pre-release intended for evaluation. The package is
+`0.9.15_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources.
@@ -84,6 +84,29 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - **Browser Message Buffer**: During an active response the ordinary Send button queues follow-up prompts locally in the current browser; a detached composer control cancels the response, queued items can be edited or removed inline, and the next ready item submits automatically after completion; drafts being edited never auto-submit and the queue is not persisted
 - **Same-turn Steering**: Queued items can steer the exact active Codex or Qwen Code turn; Claude Code and OpenCode remain queue-only and the disabled queued-item action explains that distinction
 - **Context Accounting**: Live context usage remains fixed directly above the composer as backgroundless text, outside the prompt panel, while retaining its detailed usage popover
+
+### Durable Supervised Execute
+
+For a larger local task, start the Execute prompt with `/supervisor`. Agentic Router
+then keeps one Host-owned durable run while the selected local `model × harness`
+alternates serially between a focused supervisor context and recoverable worker
+contexts. It does not create concurrent agents or delegate recursively.
+
+- The supervisor decomposes a bounded queue, verifies current Host evidence against
+  explicit criteria, rejects discrepancies, and sends a focused correction back to
+  the active worker.
+- The model, digest, Ollama endpoint, harness/version, workspace, and approval policy
+  are fixed for the run. Supervision rejects cloud routes and never falls back or
+  switches route silently.
+- The Host persists sanitized checkpoints and a write-ahead action ledger when local
+  history is enabled. Hidden reasoning, raw provider payloads, secrets, and full file
+  contents are not checkpointed.
+- Closing or reloading the browser does not cancel the run. Reopening the saved
+  conversation replays retained activity and reattaches to the same Host run.
+- Restart policy is explicit: `manual` waits for Resume; `auto-safe` continues only
+  from a proven committed boundary. Route drift, workspace drift, pending approval,
+  or ambiguous action state waits for the user instead of replaying blindly.
+- Direct Execute remains the default and has no supervision/checkpoint overhead.
 
 **Available Tools:**
 - `list_files` - List directory contents

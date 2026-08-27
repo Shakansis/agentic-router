@@ -595,6 +595,15 @@ public sealed class PersistentSessionService : IPersistentSessionService
       sessionId,
       cancellationToken
     );
+    if (
+      session.State == "completed"
+      && !session.Interrupted
+      && session.Messages.LastOrDefault() is { Role: "assistant" } last
+      && string.Equals(last.Content, answer, StringComparison.Ordinal)
+    )
+    {
+      return session;
+    }
     var limits = (
       await _settings.GetAsync(
         cancellationToken
@@ -630,6 +639,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     var completed = session with
     {
       State = "completed",
+      Interrupted = false,
       UpdatedAt = DateTimeOffset.UtcNow,
       LastInteractionMode = interactionMode,
       SelectedModel = NormalizeModel(

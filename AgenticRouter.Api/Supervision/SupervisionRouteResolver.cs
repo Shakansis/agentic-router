@@ -1,3 +1,4 @@
+using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
@@ -18,6 +19,11 @@ public interface ISupervisionRouteResolver
     DurableSupervisionCheckpoint checkpoint,
     CancellationToken cancellationToken
   );
+
+  Task<SupervisionResumeEligibility> EvaluateExecutionAsync(
+    DurableSupervisionCheckpoint checkpoint,
+    CancellationToken cancellationToken
+  );
 }
 
 public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
@@ -26,18 +32,21 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
   private readonly ISettingsStore _settings;
   private readonly OllamaClient _ollama;
   private readonly IHarnessRegistry _harnesses;
+  private readonly IAutoModelHarnessRoutingService _autoRoutes;
 
   public SupervisionRouteResolver(
     IWorkspaceProfileService workspaces,
     ISettingsStore settings,
     OllamaClient ollama,
-    IHarnessRegistry harnesses
+    IHarnessRegistry harnesses,
+    IAutoModelHarnessRoutingService autoRoutes
   )
   {
     _workspaces = workspaces;
     _settings = settings;
     _ollama = ollama;
     _harnesses = harnesses;
+    _autoRoutes = autoRoutes;
   }
 
   public async Task<SupervisionRouteResolution> ResolveAsync(
@@ -71,18 +80,19 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       );
     }
 
-    var modelReference = ProviderModelReference.Parse(
-      request.Model.Trim()
-    );
+    var requestedModel = request.Model?.Trim() ?? string.Empty;
+    var useAutoRoute = request.AutoModelHarness
+      || string.IsNullOrWhiteSpace(requestedModel)
+      || string.Equals(requestedModel, "auto", StringComparison.OrdinalIgnoreCase);
+    var modelReference = ProviderModelReference.Parse(requestedModel);
     if (
-      !modelReference.IsLocal
-      || string.IsNullOrWhiteSpace(
-        modelReference.ModelId
+      (
+        !string.IsNullOrWhiteSpace(requestedModel)
+        && !modelReference.IsLocal
       )
-      || string.Equals(
-        modelReference.ModelId,
-        "auto",
-        StringComparison.OrdinalIgnoreCase
+      || (
+        !useAutoRoute
+        && string.IsNullOrWhiteSpace(modelReference.ModelId)
       )
     )
     {
@@ -174,10 +184,37 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       );
     }
 
+    var selectedModel = modelReference.ModelId;
+    var selectedHarness = request.Harness;
+    if (useAutoRoute)
+    {
+      var autoRoute = await _autoRoutes.RouteAsync(
+        request.ClientRunId ?? request.BrowserSessionId,
+        objective,
+        installed,
+        cancellationToken
+      );
+      if (
+        autoRoute.Status != AutoModelHarnessRoutingStatusIds.Selected
+        || autoRoute.SelectedCandidate is null
+      )
+      {
+        throw new SupervisionException(
+          "supervision-auto-route-unavailable",
+          "supervision-route",
+          autoRoute.Reason,
+          true,
+          409
+        );
+      }
+      selectedModel = autoRoute.SelectedCandidate.Model;
+      selectedHarness = autoRoute.SelectedCandidate.Harness;
+    }
+
     var model = installed.SingleOrDefault(
       item => string.Equals(
         item.Name,
-        modelReference.ModelId,
+        selectedModel,
         StringComparison.OrdinalIgnoreCase
       ) && string.Equals(
         item.Provider,
@@ -187,7 +224,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     ) ?? throw new SupervisionException(
       "supervision-local-model-unavailable",
       "supervision-route",
-      $"The exact local model '{modelReference.ModelId}' is not installed.",
+      $"The exact local model '{selectedModel}' is not installed.",
       true,
       409
     );
@@ -205,7 +242,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     }
 
     var harness = await ResolveHarnessAsync(
-      request.Harness,
+      selectedHarness,
       cancellationToken
     );
     if (string.IsNullOrWhiteSpace(
@@ -260,8 +297,33 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     );
   }
 
-  public async Task<SupervisionResumeEligibility> EvaluateResumeAsync(
+  public Task<SupervisionResumeEligibility> EvaluateResumeAsync(
     DurableSupervisionCheckpoint checkpoint,
+    CancellationToken cancellationToken
+  )
+  {
+    return EvaluateRouteAsync(
+      checkpoint,
+      requireDurableHistory: true,
+      cancellationToken
+    );
+  }
+
+  public Task<SupervisionResumeEligibility> EvaluateExecutionAsync(
+    DurableSupervisionCheckpoint checkpoint,
+    CancellationToken cancellationToken
+  )
+  {
+    return EvaluateRouteAsync(
+      checkpoint,
+      requireDurableHistory: false,
+      cancellationToken
+    );
+  }
+
+  private async Task<SupervisionResumeEligibility> EvaluateRouteAsync(
+    DurableSupervisionCheckpoint checkpoint,
+    bool requireDurableHistory,
     CancellationToken cancellationToken
   )
   {
@@ -284,7 +346,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         );
       }
 
-      if (!active.HistoryEnabled)
+      if (requireDurableHistory && !active.HistoryEnabled)
       {
         return Ineligible(
           "Local history is disabled for the checkpoint workspace."

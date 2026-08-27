@@ -21,7 +21,9 @@ using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Chat;
 
-public sealed class ChatStreamService : IChatStreamService
+public sealed class ChatStreamService
+  : IChatStreamService,
+    IExecutionSpecialistTurnService
 {
   private const string GeneralChat = "general-chat";
   private const int MaximumIdenticalStrategyAttempts = 5;
@@ -66,6 +68,7 @@ public sealed class ChatStreamService : IChatStreamService
   private readonly IImageAttachmentValidator _imageValidator;
   private readonly ICloudImageApprovalStore _cloudImageApprovals;
   private readonly IHarnessRegistry _harnesses;
+  private readonly IExecutionContextTurnRunner _contextTurns;
   private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
@@ -109,6 +112,7 @@ public sealed class ChatStreamService : IChatStreamService
     IImageAttachmentValidator imageValidator,
     ICloudImageApprovalStore cloudImageApprovals,
     IHarnessRegistry harnesses,
+    IExecutionContextTurnRunner contextTurns,
     IAutoModelHarnessRoutingService autoModelHarnessRouter,
     ITraceContext trace,
     ILogger<ChatStreamService> logger
@@ -143,14 +147,46 @@ public sealed class ChatStreamService : IChatStreamService
     _imageValidator = imageValidator;
     _cloudImageApprovals = cloudImageApprovals;
     _harnesses = harnesses;
+    _contextTurns = contextTurns;
     _autoModelHarnessRouter = autoModelHarnessRouter;
     _trace = trace;
     _logger = logger;
   }
 
-  public async IAsyncEnumerable<ChatStreamEvent> StreamAsync(
+  public IAsyncEnumerable<ChatStreamEvent> StreamAsync(
     ChatRequest request,
     string requestId,
+    CancellationToken cancellationToken
+  )
+  {
+    return StreamCoreAsync(
+      request,
+      requestId,
+      ExecutionSpecialistTurnInvocation.Direct,
+      cancellationToken
+    );
+  }
+
+  public IAsyncEnumerable<ChatStreamEvent> RunAsync(
+    ChatRequest request,
+    string requestId,
+    ExecutionSpecialistTurnInvocation invocation,
+    CancellationToken cancellationToken
+  )
+  {
+    ArgumentNullException.ThrowIfNull(invocation);
+    return StreamCoreAsync(
+      request,
+      requestId,
+      invocation,
+      cancellationToken
+    );
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> StreamCoreAsync(
+    ChatRequest request,
+    string requestId,
+    ExecutionSpecialistTurnInvocation invocation,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -1038,10 +1074,11 @@ public sealed class ChatStreamService : IChatStreamService
         _executionSession.SelectValidationProfile(
           activeValidationProfile
         );
-        var executionToolScope = ExecutionTurnToolPolicy.Resolve(
-          request.Message,
-          activeValidationProfile is not null
-        );
+        var executionToolScope = invocation.ToolScopeOverride
+          ?? ExecutionTurnToolPolicy.Resolve(
+            request.Message,
+            activeValidationProfile is not null
+          );
         var hostCapabilities = HostCapabilityProfile.Create(
           executionToolScope,
           request.ApprovalPolicy
@@ -1151,6 +1188,9 @@ public sealed class ChatStreamService : IChatStreamService
             executionToolScope,
             contextUsage,
             isAuto,
+            invocation.Role == ExecutionContextRole.Supervisor,
+            invocation.CaptureRoleResult,
+            invocation.ActionJournal,
             stopwatch,
             (active, target) =>
             {
@@ -1175,6 +1215,9 @@ public sealed class ChatStreamService : IChatStreamService
               context,
               models,
               hostCapabilities,
+              invocation.UseMinimalToolInventory,
+              invocation.CaptureRoleResult,
+              invocation.ActionJournal,
               stopwatch,
               (active, target) =>
               {
@@ -1184,8 +1227,31 @@ public sealed class ChatStreamService : IChatStreamService
               externalCancellationToken
             )
         );
-        await foreach (var streamEvent in harness.ExecuteAsync(
-          execution,
+        var selectedReference = ProviderModelReference.Parse(selectedModel);
+        var contextTurn = new ExecutionContextTurnRequest<ChatStreamEvent>(
+          invocation.ContextId ?? _executionSession.Id,
+          invocation.Role,
+          new ExecutionContextTurnRoute(
+            selectedReference.ProviderId,
+            selectedModel,
+            harnessDefinition.Id,
+            string.Equals(
+              selectedReference.ProviderId,
+              ModelProviderIds.OllamaLocal,
+              StringComparison.OrdinalIgnoreCase
+            )
+              ? baseUri
+              : null,
+            workspace.Path
+          ),
+          request.Message,
+          hostCapabilities,
+          _executionSession,
+          harness,
+          execution
+        );
+        await foreach (var streamEvent in _contextTurns.RunAsync(
+          contextTurn,
           cancellationToken
         ))
         {
@@ -1629,6 +1695,9 @@ public sealed class ChatStreamService : IChatStreamService
     ConversationContextResult context,
     IReadOnlyList<InstalledModel> models,
     HostCapabilityProfile hostCapabilities,
+    bool useMinimalToolInventory,
+    Action<string>? captureRoleResult,
+    IExecutionActionJournal? actionJournal,
     Stopwatch stopwatch,
     Action<bool, string> setRecovery,
     [EnumeratorCancellation] CancellationToken cancellationToken
@@ -1753,6 +1822,9 @@ public sealed class ChatStreamService : IChatStreamService
       contextUsage,
       hostCapabilities,
       images,
+      useMinimalToolInventory,
+      captureRoleResult,
+      actionJournal,
       stopwatch,
       cancellationToken
     ))
@@ -1778,6 +1850,9 @@ public sealed class ChatStreamService : IChatStreamService
     ExecutionTurnToolScope executionToolScope,
     ContextUsageView? contextUsage,
     bool isAuto,
+    bool allowReadOnlyCompletion,
+    Action<string>? captureRoleResult,
+    IExecutionActionJournal? actionJournal,
     Stopwatch stopwatch,
     Action<bool, string> setRecovery,
     [EnumeratorCancellation] CancellationToken cancellationToken
@@ -1939,6 +2014,9 @@ public sealed class ChatStreamService : IChatStreamService
       settings.Execution,
       settings.ProjectAwareness,
       capabilities.ContextTokens,
+      allowReadOnlyCompletion,
+      captureRoleResult,
+      actionJournal,
       cancellationToken
     ))
     {
@@ -2056,6 +2134,9 @@ public sealed class ChatStreamService : IChatStreamService
     ContextUsageView initialContextUsage,
     HostCapabilityProfile hostCapabilities,
     IReadOnlyList<ProviderImagePayload> images,
+    bool useMinimalToolInventory,
+    Action<string>? captureRoleResult,
+    IExecutionActionJournal? actionJournal,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -2150,6 +2231,7 @@ public sealed class ChatStreamService : IChatStreamService
       CreateHarnessConversationContext(context),
       ContextWindowTokens: initialContextUsage.EffectiveLimitTokens,
       HostCapabilities: hostCapabilities,
+      UseMinimalToolInventory: useMinimalToolInventory,
       Images: images.Select(
         image => new HarnessImageInput(
           image.Id,
@@ -2325,6 +2407,7 @@ public sealed class ChatStreamService : IChatStreamService
             approvedDeletionPaths,
             projectAwareness,
             observer,
+            actionJournal,
             cancellationToken
           ))
           {
@@ -2387,6 +2470,25 @@ public sealed class ChatStreamService : IChatStreamService
                 requestId,
                 $"harness.{harnessDefinition.Id}-readonly-authorized",
                 $"Agentic Router authorized read-only native capability {harnessEvent.Tool ?? "<unknown>"} without a mutation approval prompt.",
+                stopwatch,
+                model,
+                intention
+              );
+              break;
+            }
+            if (!HasMutationCapability(hostCapabilities))
+            {
+              await harness.ResolveApprovalAsync(
+                harnessEvent.ApprovalId,
+                false,
+                cancellationToken
+              );
+              var correction = "Agentic Router declined a native mutation because this context has a read-only Host capability profile.";
+              session.AddWarning(correction);
+              yield return Event(
+                requestId,
+                $"harness.{harnessDefinition.Id}-mutation-not-offered",
+                correction,
                 stopwatch,
                 model,
                 intention
@@ -2799,6 +2901,7 @@ public sealed class ChatStreamService : IChatStreamService
     );
     session.RefreshCompletionGate();
     session.Complete("completed-with-warnings");
+    captureRoleResult?.Invoke(answer.ToString());
     var summary = session.CreateSummary();
     var responseTail = CreateAuthoritativeStatus(summary.CompletionStatus);
     var visibleAnswer = string.IsNullOrWhiteSpace(answer.ToString())
@@ -2996,6 +3099,7 @@ public sealed class ChatStreamService : IChatStreamService
     ISet<string> approvedDeletionPaths,
     ProjectAwarenessSettings projectAwareness,
     HarnessWorkspaceObserver observer,
+    IExecutionActionJournal? actionJournal,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -3151,6 +3255,16 @@ public sealed class ChatStreamService : IChatStreamService
       action,
       request.ApprovalPolicy
     );
+    if (actionJournal is not null)
+    {
+      await actionJournal.RecordAsync(
+        action,
+        ExecutionActionJournalPhases.Prepared,
+        requiresApproval,
+        null,
+        cancellationToken
+      );
+    }
     if (requiresApproval)
     {
       var decisionTask = _approvalCoordinator.WaitAsync(
@@ -3169,6 +3283,16 @@ public sealed class ChatStreamService : IChatStreamService
         ),
         cancellationToken
       );
+      if (actionJournal is not null)
+      {
+        await actionJournal.RecordAsync(
+          action,
+          ExecutionActionJournalPhases.AwaitingApproval,
+          true,
+          null,
+          cancellationToken
+        );
+      }
       yield return ActionEvent(
         requestId,
         "action.awaiting-approval",
@@ -3185,6 +3309,16 @@ public sealed class ChatStreamService : IChatStreamService
       if (decision.Revised)
       {
         session.RecordAction(action, "revised", "The pending batch was edited and revalidated by the Host.");
+        if (actionJournal is not null)
+        {
+          await actionJournal.RecordAsync(
+            action,
+            ExecutionActionJournalPhases.Prepared,
+            true,
+            null,
+            cancellationToken
+          );
+        }
         yield return ActionEvent(
           requestId,
           "action.revised",
@@ -3201,6 +3335,16 @@ public sealed class ChatStreamService : IChatStreamService
       {
         const string rejection = "The user rejected this Host batch action. It was not executed.";
         session.RecordAction(action, "rejected", rejection);
+        if (actionJournal is not null)
+        {
+          await actionJournal.RecordAsync(
+            action,
+            ExecutionActionJournalPhases.Rejected,
+            true,
+            rejection,
+            cancellationToken
+          );
+        }
         var planStepBlocked = session.RecordPlanActionResult(
           action.ActionId,
           action.Tool,
@@ -3286,6 +3430,16 @@ public sealed class ChatStreamService : IChatStreamService
     {
       await observer.VerifyProtectedGitUnchangedAsync(cancellationToken);
     }
+    if (actionJournal is not null)
+    {
+      await actionJournal.RecordAsync(
+        action,
+        ExecutionActionJournalPhases.InFlight,
+        requiresApproval,
+        null,
+        cancellationToken
+      );
+    }
     var execution = await TryExecuteAsync(
       () => _actionService.ExecuteAsync(action, session, cancellationToken)
     );
@@ -3297,6 +3451,16 @@ public sealed class ChatStreamService : IChatStreamService
     {
       var result = execution.Result;
       session.RecordAction(action, "completed", result.Output);
+      if (actionJournal is not null)
+      {
+        await actionJournal.RecordAsync(
+          action,
+          ExecutionActionJournalPhases.Committed,
+          requiresApproval,
+          result.Output,
+          cancellationToken
+        );
+      }
       session.RecordToolSuccess();
       if (action.Tool == "delete_paths")
       {
@@ -3360,6 +3524,16 @@ public sealed class ChatStreamService : IChatStreamService
     );
     var failureOutput = execution.Result?.Output ?? FormatExecutionFailure(exception);
     session.RecordAction(action, "failed", failureOutput);
+    if (actionJournal is not null)
+    {
+      await actionJournal.RecordAsync(
+        action,
+        ExecutionActionJournalPhases.Failed,
+        requiresApproval,
+        failureOutput,
+        cancellationToken
+      );
+    }
     session.RecordToolFailure();
     session.AddWarning($"{action.Tool} failed: {failureOutput}");
     var harnessFailure = WithAuthoritativePlanState(
@@ -3478,6 +3652,9 @@ public sealed class ChatStreamService : IChatStreamService
     ExecutionSettings settings,
     ProjectAwarenessSettings projectAwareness,
     int? providerMaximumTokens,
+    bool allowReadOnlyCompletion,
+    Action<string>? captureRoleResult,
+    IExecutionActionJournal? actionJournal,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -3569,7 +3746,8 @@ public sealed class ChatStreamService : IChatStreamService
         proposalCycles++;
         var attempt = planningFailures + 1;
         var completionAllowed = CanCompletePlanning(
-          progress
+          progress,
+          allowReadOnlyCompletion
         );
         CoordinatorContextFit? preflightFit = null;
         StructuredContextFit? structuredPreflightFit = null;
@@ -4572,6 +4750,9 @@ public sealed class ChatStreamService : IChatStreamService
           }
 
           _executionSession?.ResetPlanningFailures();
+          captureRoleResult?.Invoke(
+            planningResult.AssistantMessage.Content ?? string.Empty
+          );
           noActionRequired = true;
           break;
         }
@@ -5388,6 +5569,16 @@ public sealed class ChatStreamService : IChatStreamService
         action,
         request.ApprovalPolicy
       );
+      if (actionJournal is not null)
+      {
+        await actionJournal.RecordAsync(
+          action,
+          ExecutionActionJournalPhases.Prepared,
+          requiresApproval,
+          null,
+          cancellationToken
+        );
+      }
 
       if (requiresApproval)
       {
@@ -5407,6 +5598,16 @@ public sealed class ChatStreamService : IChatStreamService
           ),
           cancellationToken
         );
+        if (actionJournal is not null)
+        {
+          await actionJournal.RecordAsync(
+            action,
+            ExecutionActionJournalPhases.AwaitingApproval,
+            true,
+            null,
+            cancellationToken
+          );
+        }
         yield return ActionEvent(
           requestId,
           "action.awaiting-approval",
@@ -5439,6 +5640,16 @@ public sealed class ChatStreamService : IChatStreamService
             "revised",
             true
           );
+          if (actionJournal is not null)
+          {
+            await actionJournal.RecordAsync(
+              action,
+              ExecutionActionJournalPhases.Prepared,
+              true,
+              null,
+              cancellationToken
+            );
+          }
         }
 
         if (!approvalOutcome.Approved)
@@ -5479,6 +5690,16 @@ public sealed class ChatStreamService : IChatStreamService
             "rejected",
             "Rejected by the user."
           );
+          if (actionJournal is not null)
+          {
+            await actionJournal.RecordAsync(
+              action,
+              ExecutionActionJournalPhases.Rejected,
+              true,
+              "Rejected by the user.",
+              cancellationToken
+            );
+          }
           var planStepBlocked = _executionSession.RecordPlanActionResult(
             action.ActionId,
             action.Tool,
@@ -5536,6 +5757,16 @@ public sealed class ChatStreamService : IChatStreamService
         "executing",
         requiresApproval
       );
+      if (actionJournal is not null)
+      {
+        await actionJournal.RecordAsync(
+          action,
+          ExecutionActionJournalPhases.InFlight,
+          requiresApproval,
+          null,
+          cancellationToken
+        );
+      }
 
       if (action.Tool == "run_validation_profile")
       {
@@ -5636,6 +5867,16 @@ public sealed class ChatStreamService : IChatStreamService
           "completed",
           result.Output
         );
+        if (actionJournal is not null)
+        {
+          await actionJournal.RecordAsync(
+            action,
+            ExecutionActionJournalPhases.Committed,
+            requiresApproval,
+            result.Output,
+            cancellationToken
+          );
+        }
         _executionSession?.RecordToolSuccess();
         progress.RecoveryAttemptCount = 0;
         if (_executionSession?.Plan is not null)
@@ -5759,6 +6000,16 @@ public sealed class ChatStreamService : IChatStreamService
           "failed",
           failureOutput
         );
+        if (actionJournal is not null)
+        {
+          await actionJournal.RecordAsync(
+            action,
+            ExecutionActionJournalPhases.Failed,
+            requiresApproval,
+            failureOutput,
+            cancellationToken
+          );
+        }
         _executionSession?.RecordToolFailure();
         _executionSession?.AddWarning(
           $"{action.Tool} failed: {failureOutput}"
@@ -8581,6 +8832,28 @@ public sealed class ChatStreamService : IChatStreamService
     return $"{HarnessLabel(definition)} does not support the selected provider.";
   }
 
+  private static bool HasMutationCapability(
+    HostCapabilityProfile profile
+  )
+  {
+    return profile.ToolScope.AvailableTools.Any(
+      tool => tool is "create_file"
+        or "create_files"
+        or "write_file"
+        or "replace_text"
+        or "apply_patch"
+        or "delete_paths"
+        or "create_directory"
+        or "run_process"
+        or "git_stage_files"
+        or "git_unstage_files"
+        or "git_create_commit"
+        or "git_create_annotated_tag"
+        or "git_push_current_branch"
+        or "git_push_tag"
+    );
+  }
+
   private ChatStreamEvent ActionEvent(
     string requestId,
     string type,
@@ -9108,9 +9381,14 @@ public sealed class ChatStreamService : IChatStreamService
   }
 
   private bool CanCompletePlanning(
-    ExecutionProgress progress
+    ExecutionProgress progress,
+    bool allowReadOnlyCompletion = false
   )
   {
+    if (allowReadOnlyCompletion)
+    {
+      return true;
+    }
     var plan = _executionSession?.Plan;
 
     if (

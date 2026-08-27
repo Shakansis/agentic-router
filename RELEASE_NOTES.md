@@ -1,4 +1,26 @@
-# Unreleased corrections
+# Agentic Router v0.9.15 alpha
+
+This alpha adds durable local supervised Execute and closes its authorized real-local
+acceptance matrix on Native and Codex while preserving Host authority and direct
+Execute as the default.
+
+## Durable supervised Execute
+
+- Adds opt-in `/supervisor` execution with one serial focused supervisor context and
+  recoverable worker contexts on one fixed local `model × harness` route.
+- Persists bounded integrity-checked checkpoints, logical contexts, work queue,
+  evidence revisions, recovery budgets, and a sanitized write-ahead Host action
+  ledger when local history is enabled.
+- Verifies worker claims against current artifacts, rejects stale evidence if a file
+  changes during supervisor evaluation, and retries with a focused correction.
+- Adds explicit `manual` and `auto-safe` restart policies. Auto-resume is denied for
+  route or workspace drift, pending approval, unproven turns, and ambiguous actions.
+- Keeps Host execution alive when SSE/browser disconnects and reattaches a resumed
+  conversation to retained events and the accepted final answer.
+- Keeps every supervised role local-only with no cloud route, fallback, concurrent
+  context execution, recursive delegation, or hidden background inference.
+
+## Execute and UI corrections
 
 - Adds a browser-only message buffer for every Chat/Execute route. During a
   response, the ordinary Send button queues the draft while a detached circular
