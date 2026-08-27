@@ -2,6 +2,7 @@ using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.Setup;
 
 namespace AgenticRouter.Api.Platform;
 
@@ -12,6 +13,12 @@ internal static class PlatformServiceCollectionExtensions
     string dataDirectory
   )
   {
+    services.AddSingleton<IOllamaInstallationProfileStore>(
+      new OllamaInstallationProfileStore(
+        dataDirectory
+      )
+    );
+
     if (OperatingSystem.IsWindows())
     {
       services.AddSingleton<IProtectedSecretStore>(
@@ -24,6 +31,7 @@ internal static class PlatformServiceCollectionExtensions
       services.AddSingleton<IFolderLauncherService, WindowsFolderLauncherService>();
       services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
       services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
+      services.AddSingleton<ISetupInstallerLauncher, WindowsSetupInstallerLauncher>();
       return services;
     }
 
@@ -35,6 +43,12 @@ internal static class PlatformServiceCollectionExtensions
       services.AddSingleton<IFolderLauncherService, LinuxFolderLauncherService>();
       services.AddSingleton<ISystemMemoryMetricsProvider, LinuxSystemMemoryMetricsProvider>();
       services.AddSingleton<IGpuMemoryMetricsProvider, LinuxGpuMemoryMetricsProvider>();
+      services.AddSingleton<ISetupInstallerLauncher>(
+        provider => new LinuxSetupInstallerLauncher(
+          dataDirectory,
+          provider.GetRequiredService<ILogger<LinuxSetupInstallerLauncher>>()
+        )
+      );
       return services;
     }
 

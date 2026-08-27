@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Devices;
@@ -15,6 +14,7 @@ public interface ILocalSetupService
 
   Task<SetupActionResult> StartInstallerAsync(
     string resourceId,
+    string? profile,
     CancellationToken cancellationToken
   );
 
@@ -27,38 +27,6 @@ public interface ILocalSetupService
 public sealed class LocalSetupService : ILocalSetupService
 {
   private const long Gibibyte = 1024L * 1024L * 1024L;
-
-  private static readonly IReadOnlyDictionary<string, InstallerDefinition>
-    Installers = new Dictionary<string, InstallerDefinition>(
-      StringComparer.OrdinalIgnoreCase
-    )
-    {
-      ["ollama"] = new(
-        "ollama",
-        "Ollama",
-        "winget install --id Ollama.Ollama --exact --source winget --accept-source-agreements --accept-package-agreements"
-      ),
-      [HarnessIds.Codex] = new(
-        HarnessIds.Codex,
-        "Codex",
-        "winget install --id OpenAI.Codex --exact --source winget --accept-source-agreements --accept-package-agreements"
-      ),
-      [HarnessIds.ClaudeCode] = new(
-        HarnessIds.ClaudeCode,
-        "Claude Code",
-        "winget install --id Anthropic.ClaudeCode --exact --source winget --accept-source-agreements --accept-package-agreements"
-      ),
-      [HarnessIds.OpenCode] = new(
-        HarnessIds.OpenCode,
-        "OpenCode",
-        "npm install --global opencode-ai@latest"
-      ),
-      [HarnessIds.QwenCode] = new(
-        HarnessIds.QwenCode,
-        "Qwen Code",
-        "npm install --global @qwen-code/qwen-code@latest"
-      )
-    };
 
   private static readonly ModelRecommendationDefinition[] ModelCatalog =
   [
@@ -99,6 +67,8 @@ public sealed class LocalSetupService : ILocalSetupService
   private readonly IGpuDiscoveryService _gpuDiscovery;
   private readonly IHarnessRegistry _harnesses;
   private readonly SafeModeState _safeMode;
+  private readonly ISetupInstallerLauncher _installerLauncher;
+  private readonly IOllamaInstallationProfileStore _installationProfiles;
   private readonly IHostApplicationLifetime _applicationLifetime;
   private readonly ILogger<LocalSetupService> _logger;
   private readonly ConcurrentDictionary<string, SetupJobState> _jobs = new(
@@ -111,6 +81,8 @@ public sealed class LocalSetupService : ILocalSetupService
     IGpuDiscoveryService gpuDiscovery,
     IHarnessRegistry harnesses,
     SafeModeState safeMode,
+    ISetupInstallerLauncher installerLauncher,
+    IOllamaInstallationProfileStore installationProfiles,
     IHostApplicationLifetime applicationLifetime,
     ILogger<LocalSetupService> logger
   )
@@ -120,6 +92,8 @@ public sealed class LocalSetupService : ILocalSetupService
     _gpuDiscovery = gpuDiscovery;
     _harnesses = harnesses;
     _safeMode = safeMode;
+    _installerLauncher = installerLauncher;
+    _installationProfiles = installationProfiles;
     _applicationLifetime = applicationLifetime;
     _logger = logger;
   }
@@ -145,6 +119,11 @@ public sealed class LocalSetupService : ILocalSetupService
     }
 
     var devices = await _gpuDiscovery.DiscoverAsync(cancellationToken);
+    var installationPreference = OperatingSystem.IsLinux()
+      ? await _installationProfiles.GetAsync(
+        cancellationToken
+      )
+      : null;
     var largestGpuBytes = devices.Devices
       .Where(device => device.Available && !device.IsAuto)
       .Select(device => device.MemoryBytes)
@@ -170,7 +149,10 @@ public sealed class LocalSetupService : ILocalSetupService
         status.Availability.Available,
         status.Availability.Version,
         status.Availability.Message,
-        Installers.ContainsKey(status.Definition.Id),
+        _installerLauncher.TryGetDefinition(
+          status.Definition.Id,
+          out _
+        ),
         GetJob(status.Definition.Id),
         status.Definition,
         status.Availability
@@ -196,7 +178,10 @@ public sealed class LocalSetupService : ILocalSetupService
         ollamaAvailable,
         ollamaVersion,
         ollamaDiagnostic,
-        OperatingSystem.IsWindows(),
+        _installerLauncher.TryGetDefinition(
+          "ollama",
+          out _
+        ),
         GetJob("ollama")
       ),
       harnesses,
@@ -205,24 +190,23 @@ public sealed class LocalSetupService : ILocalSetupService
       largestGpuBytes > 0 ? largestGpuBytes : null,
       compatibleModelInstalled,
       recommendations,
-      missing
+      missing,
+      BuildOllamaInstallationStatus(
+        devices,
+        installationPreference,
+        ollamaAvailable
+      )
     );
   }
 
   public async Task<SetupActionResult> StartInstallerAsync(
     string resourceId,
+    string? profile,
     CancellationToken cancellationToken
   )
   {
     ThrowIfMutationUnavailable();
-    if (!OperatingSystem.IsWindows())
-    {
-      throw new SetupException(
-        "installer-platform-unsupported",
-        "Guided installation is currently available on Windows only."
-      );
-    }
-    if (!Installers.TryGetValue(resourceId, out var installer))
+    if (!_installerLauncher.TryGetDefinition(resourceId, out var installer))
     {
       throw new SetupException(
         "installer-not-found",
@@ -255,55 +239,40 @@ public sealed class LocalSetupService : ILocalSetupService
       );
     }
 
-    var script =
-      "$Host.UI.RawUI.WindowTitle = 'Agentic Router - Install "
-      + installer.DisplayName.Replace("'", "''", StringComparison.Ordinal)
-      + "'; "
-      + installer.Command
-      + "; if ($LASTEXITCODE -ne 0) { Read-Host 'Installation failed. Press Enter to close' }";
-    var startInfo = new ProcessStartInfo
-    {
-      FileName = "powershell.exe",
-      UseShellExecute = true,
-      WindowStyle = ProcessWindowStyle.Normal
-    };
-    startInfo.ArgumentList.Add("-NoLogo");
-    startInfo.ArgumentList.Add("-NoProfile");
-    startInfo.ArgumentList.Add("-ExecutionPolicy");
-    startInfo.ArgumentList.Add("Bypass");
-    startInfo.ArgumentList.Add("-Command");
-    startInfo.ArgumentList.Add(script);
-
-    try
-    {
-      using var process = Process.Start(startInfo) ?? throw new InvalidOperationException(
-        "The installer process did not start."
-      );
-      var job = new SetupJobState(
-        "started",
-        $"{installer.DisplayName} installer started in a separate window.",
-        DateTimeOffset.UtcNow,
-        null,
-        null
-      );
-      _jobs[resourceId] = job;
-      return new SetupActionResult(resourceId, true, job.State, job.Message);
-    }
-    catch (Exception exception) when (
-      exception is InvalidOperationException or System.ComponentModel.Win32Exception
+    string? effectiveProfile = null;
+    if (
+      OperatingSystem.IsLinux()
+      && string.Equals(
+        resourceId,
+        "ollama",
+        StringComparison.OrdinalIgnoreCase
+      )
     )
     {
-      _logger.LogWarning(
-        exception,
-        "The guided installer for {ResourceId} could not be started.",
-        resourceId
+      effectiveProfile = ResolveLinuxOllamaProfile(
+        status.OllamaInstallation,
+        profile
       );
-      throw new SetupException(
-        "installer-start-failed",
-        $"The {installer.DisplayName} installer could not be started.",
-        exception
+      await _installationProfiles.SetRequestedProfileAsync(
+        effectiveProfile,
+        cancellationToken
       );
     }
+
+    var launched = await _installerLauncher.StartAsync(
+      installer,
+      effectiveProfile,
+      cancellationToken
+    );
+    var job = new SetupJobState(
+      "started",
+      launched.Message,
+      DateTimeOffset.UtcNow,
+      null,
+      null
+    );
+    _jobs[resourceId] = job;
+    return new SetupActionResult(resourceId, true, job.State, job.Message);
   }
 
   public async Task<SetupActionResult> StartModelPullAsync(
@@ -457,6 +426,139 @@ public sealed class LocalSetupService : ILocalSetupService
     );
   }
 
+  private static OllamaInstallationStatus? BuildOllamaInstallationStatus(
+    DevicesResponse devices,
+    OllamaInstallationPreference? preference,
+    bool ollamaAvailable
+  )
+  {
+    if (!OperatingSystem.IsLinux())
+    {
+      return null;
+    }
+
+    var physical = devices.Devices.Where(
+      device => !device.IsAuto && device.Available
+    ).ToArray();
+    var hasAmd = physical.Any(
+      device => string.Equals(
+        device.Manufacturer,
+        "AMD",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    var hasNvidia = physical.Any(
+      device => string.Equals(
+        device.Manufacturer,
+        "NVIDIA",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    var hasIntel = physical.Any(
+      device => string.Equals(
+        device.Manufacturer,
+        "Intel",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+
+    var options = new List<OllamaInstallationProfileOption>();
+    if (hasNvidia || physical.Length == 0)
+    {
+      options.Add(
+        new OllamaInstallationProfileOption(
+          "standard",
+          "Standard / CUDA",
+          "Official base package. Ollama selects CPU or NVIDIA CUDA automatically; no backend override is added."
+        )
+      );
+    }
+    if (hasAmd || hasIntel || physical.Length == 0)
+    {
+      options.Add(
+        new OllamaInstallationProfileOption(
+          "vulkan",
+          "Vulkan",
+          "Official base package with OLLAMA_VULKAN=1. Broader AMD/Intel support, currently documented by Ollama as experimental."
+        )
+      );
+    }
+    if (hasAmd || physical.Length == 0)
+    {
+      options.Add(
+        new OllamaInstallationProfileOption(
+          "rocm",
+          "ROCm",
+          "Official base plus ROCm supplemental package. Intended for supported AMD GPUs with a compatible ROCm v7 driver."
+        )
+      );
+    }
+    if (options.Count == 0)
+    {
+      options.Add(
+        new OllamaInstallationProfileOption(
+          "standard",
+          "Standard / CPU",
+          "Official base package with automatic CPU fallback and no forced GPU backend."
+        )
+      );
+    }
+
+    var requested = preference?.RequestedProfile;
+    if (!options.Any(option => option.Id == requested))
+    {
+      requested = null;
+    }
+    var mixedVendor = hasAmd && hasNvidia;
+    return new OllamaInstallationStatus(
+      "linux-x64",
+      requested,
+      !ollamaAvailable && options.Count > 1 && requested is null,
+      options,
+      mixedVendor
+        ? "AMD and NVIDIA adapters were detected. This setup selects one server-wide installation profile; heterogeneous multi-GPU coordination remains a separate feature."
+        : physical.Length == 0
+          ? "No supported GPU vendor was identified, so all profiles remain available for an explicit choice."
+          : null
+    );
+  }
+
+  private static string ResolveLinuxOllamaProfile(
+    OllamaInstallationStatus? installation,
+    string? requestedProfile
+  )
+  {
+    if (installation is null)
+    {
+      throw new SetupException(
+        "installer-profile-invalid",
+        "Linux Ollama installation metadata is unavailable."
+      );
+    }
+
+    var normalized = string.IsNullOrWhiteSpace(requestedProfile)
+      ? installation.RequestedProfile
+      : requestedProfile.Trim().ToLowerInvariant();
+    if (normalized is null && installation.Profiles.Count == 1)
+    {
+      normalized = installation.Profiles[0].Id;
+    }
+    if (
+      normalized is null
+      || !installation.Profiles.Any(
+        option => option.Id == normalized
+      )
+    )
+    {
+      throw new SetupException(
+        "installer-profile-required",
+        "Select one of the Ollama acceleration profiles available for the detected hardware."
+      );
+    }
+
+    return normalized;
+  }
+
   private SetupJobState? GetJob(string key)
   {
     return _jobs.TryGetValue(key, out var job) ? job : null;
@@ -474,12 +576,6 @@ public sealed class LocalSetupService : ILocalSetupService
   }
 
   private static string ModelJobKey(string model) => $"model:{model}";
-
-  private sealed record InstallerDefinition(
-    string Id,
-    string DisplayName,
-    string Command
-  );
 
   private sealed record ModelRecommendationDefinition(
     string Model,
@@ -499,7 +595,22 @@ public sealed record LocalSetupStatus(
   long? LargestGpuMemoryBytes,
   bool CompatibleModelInstalled,
   IReadOnlyList<SetupModelRecommendation> RecommendedModels,
-  IReadOnlyList<string> MissingCoreResources
+  IReadOnlyList<string> MissingCoreResources,
+  OllamaInstallationStatus? OllamaInstallation = null
+);
+
+public sealed record OllamaInstallationStatus(
+  string Platform,
+  string? RequestedProfile,
+  bool SelectionRequired,
+  IReadOnlyList<OllamaInstallationProfileOption> Profiles,
+  string? Diagnostic
+);
+
+public sealed record OllamaInstallationProfileOption(
+  string Id,
+  string DisplayName,
+  string Description
 );
 
 public sealed record SetupResourceStatus(

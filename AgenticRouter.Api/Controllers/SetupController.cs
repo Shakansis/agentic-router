@@ -25,12 +25,17 @@ public sealed class SetupController : ControllerBase
   [HttpPost("install/{resourceId}")]
   public async Task<ActionResult<SetupActionResult>> Install(
     string resourceId,
+    [FromQuery] string? profile,
     CancellationToken cancellationToken
   )
   {
     try
     {
-      return Ok(await _setup.StartInstallerAsync(resourceId, cancellationToken));
+      return Ok(await _setup.StartInstallerAsync(
+        resourceId,
+        profile,
+        cancellationToken
+      ));
     }
     catch (SetupException exception)
     {

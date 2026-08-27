@@ -990,6 +990,36 @@ p {
   background: color-mix(in srgb, var(--panel) 86%, transparent);
 }
 
+.setup-profile-row {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+}
+
+.setup-profile-row label {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.setup-profile-select {
+  width: 100%;
+  min-width: 0;
+}
+
+.setup-profile-row small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.setup-profile-diagnostic {
+  padding-top: 3px;
+  border-top: 1px solid var(--border);
+}
+
 .setup-state {
   display: grid;
   width: 20px;

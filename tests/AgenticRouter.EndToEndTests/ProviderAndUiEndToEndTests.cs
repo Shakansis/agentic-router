@@ -17,6 +17,7 @@ namespace AgenticRouter.EndToEndTests;
 public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAndUiEndToEndTests>
 {
   [TestMethod]
+  [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LocalSetupReportsActiveResourcesAndPullsOnlyRecommendedModels()
   {
@@ -30,6 +31,11 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     );
     var root = status.RootElement;
     Assert.IsTrue(root.GetProperty("ollama").GetProperty("available").GetBoolean());
+    Assert.IsTrue(root.GetProperty("ollama").GetProperty("installSupported").GetBoolean());
+    Assert.AreEqual(
+      JsonValueKind.Null,
+      root.GetProperty("ollamaInstallation").ValueKind
+    );
     Assert.IsFalse(root.GetProperty("compatibleModelInstalled").GetBoolean());
     Assert.IsFalse(root.GetProperty("coreReady").GetBoolean());
     Assert.IsGreaterThanOrEqualTo(

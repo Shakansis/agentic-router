@@ -21,4 +21,11 @@
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Setup\Scripts\install-ollama-linux.sh"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          TargetPath="scripts\install-ollama-linux.sh" />
+  </ItemGroup>
+
 </Project>

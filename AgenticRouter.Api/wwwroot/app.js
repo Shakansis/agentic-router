@@ -10554,7 +10554,7 @@ function renderSetupSurface(container, setup) {
   grid.append(
     createSetupGroup(
       t("setup.ollama"),
-      [createSetupResourceRow(setup.ollama, "install")]
+      createSetupOllamaRows(setup)
     ),
     createSetupGroup(
       t("setup.models"),
@@ -10579,6 +10579,65 @@ function renderSetupSurface(container, setup) {
     readOnly.textContent = t("setup.read_only");
     container.append(readOnly);
   }
+}
+
+function createSetupOllamaRows(setup) {
+  const resourceRow = createSetupResourceRow(setup.ollama, "install");
+  const installation = setup.ollamaInstallation;
+  if (!installation?.profiles?.length || setup.ollama.available) {
+    return [resourceRow];
+  }
+
+  const profileRow = document.createElement("div");
+  profileRow.className = "setup-profile-row";
+  const label = document.createElement("label");
+  label.htmlFor = `setup-profile-${installation.platform}`;
+  label.textContent = t("setup.acceleration_profile");
+  const select = document.createElement("select");
+  select.id = label.htmlFor;
+  select.className = "setup-profile-select";
+  select.dataset.setupProfile = "ollama";
+  if (installation.profiles.length > 1) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = t("setup.select_profile");
+    select.append(placeholder);
+  }
+  installation.profiles.forEach(profile => {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.displayName;
+    option.selected = profile.id === installation.requestedProfile
+      || installation.profiles.length === 1;
+    select.append(option);
+  });
+  const detail = document.createElement("small");
+  const renderDetail = () => {
+    const selected = installation.profiles.find(
+      profile => profile.id === select.value
+    );
+    detail.textContent = selected?.description
+      || installation.diagnostic
+      || t("setup.profile_required");
+    const installButton = resourceRow.querySelector(
+      "button[data-setup-action=\"install\"]"
+    );
+    if (installButton) {
+      const recentlyStarted = setup.ollama.job?.state === "started"
+        && Date.now() - new Date(setup.ollama.job.updatedAt).getTime() < 10 * 60 * 1000;
+      installButton.disabled = setup.readOnly || recentlyStarted || !select.value;
+    }
+  };
+  select.addEventListener("change", renderDetail);
+  profileRow.append(label, select, detail);
+  if (installation.diagnostic) {
+    const diagnostic = document.createElement("small");
+    diagnostic.className = "setup-profile-diagnostic";
+    diagnostic.textContent = installation.diagnostic;
+    profileRow.append(diagnostic);
+  }
+  renderDetail();
+  return [profileRow, resourceRow];
 }
 
 function createSetupGroup(label, rows) {
@@ -10736,8 +10795,17 @@ async function handleSetupAction(event) {
     }
     if (action === "install") {
       const resourceId = button.dataset.resourceId;
+      const profile = resourceId === "ollama"
+        ? document.querySelector("[data-setup-profile=\"ollama\"]")?.value
+        : null;
+      if (state.setup?.ollamaInstallation?.selectionRequired && !profile) {
+        throw new Error(t("setup.profile_required"));
+      }
+      const query = profile
+        ? `?profile=${encodeURIComponent(profile)}`
+        : "";
       const result = await fetchJson(
-        `/api/setup/install/${encodeURIComponent(resourceId)}`,
+        `/api/setup/install/${encodeURIComponent(resourceId)}${query}`,
         { method: "POST" }
       );
       showToast(
