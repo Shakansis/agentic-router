@@ -10584,8 +10584,24 @@ function renderSetupSurface(container, setup) {
 function createSetupOllamaRows(setup) {
   const resourceRow = createSetupResourceRow(setup.ollama, "install");
   const installation = setup.ollamaInstallation;
+  const rows = [];
+  if (installation?.backend) {
+    const backendRow = document.createElement("div");
+    backendRow.className = "setup-profile-row setup-backend-row";
+    const title = document.createElement("strong");
+    title.textContent = t("setup.backend_evidence");
+    const state = document.createElement("span");
+    const observed = installation.backend.observedBackend
+      || t("setup.backend_not_observed");
+    state.textContent = `${installation.backend.state} · ${observed}`;
+    const evidence = document.createElement("small");
+    evidence.textContent = installation.backend.evidence;
+    backendRow.append(title, state, evidence);
+    rows.push(backendRow);
+  }
   if (!installation?.profiles?.length || setup.ollama.available) {
-    return [resourceRow];
+    rows.push(resourceRow);
+    return rows;
   }
 
   const profileRow = document.createElement("div");
@@ -10637,7 +10653,8 @@ function createSetupOllamaRows(setup) {
     profileRow.append(diagnostic);
   }
   renderDetail();
-  return [profileRow, resourceRow];
+  rows.push(profileRow, resourceRow);
+  return rows;
 }
 
 function createSetupGroup(label, rows) {

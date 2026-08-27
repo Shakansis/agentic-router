@@ -1004,6 +1004,15 @@ p {
   font-weight: 650;
 }
 
+.setup-backend-row strong,
+.setup-backend-row span {
+  font-size: 11px;
+}
+
+.setup-backend-row span {
+  color: var(--muted);
+}
+
 .setup-profile-select {
   width: 100%;
   min-width: 0;

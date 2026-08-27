@@ -69,6 +69,7 @@ public sealed class LocalSetupService : ILocalSetupService
   private readonly SafeModeState _safeMode;
   private readonly ISetupInstallerLauncher _installerLauncher;
   private readonly IOllamaInstallationProfileStore _installationProfiles;
+  private readonly IOllamaBackendEvidenceService _backendEvidence;
   private readonly IHostApplicationLifetime _applicationLifetime;
   private readonly ILogger<LocalSetupService> _logger;
   private readonly ConcurrentDictionary<string, SetupJobState> _jobs = new(
@@ -83,6 +84,7 @@ public sealed class LocalSetupService : ILocalSetupService
     SafeModeState safeMode,
     ISetupInstallerLauncher installerLauncher,
     IOllamaInstallationProfileStore installationProfiles,
+    IOllamaBackendEvidenceService backendEvidence,
     IHostApplicationLifetime applicationLifetime,
     ILogger<LocalSetupService> logger
   )
@@ -94,6 +96,7 @@ public sealed class LocalSetupService : ILocalSetupService
     _safeMode = safeMode;
     _installerLauncher = installerLauncher;
     _installationProfiles = installationProfiles;
+    _backendEvidence = backendEvidence;
     _applicationLifetime = applicationLifetime;
     _logger = logger;
   }
@@ -107,6 +110,8 @@ public sealed class LocalSetupService : ILocalSetupService
     string? ollamaVersion = null;
     string? ollamaDiagnostic = null;
     IReadOnlyList<InstalledModel> installedModels = [];
+    IReadOnlyList<OllamaRunningModel> runningModels = [];
+    string? runningModelsDiagnostic = null;
 
     try
     {
@@ -118,12 +123,34 @@ public sealed class LocalSetupService : ILocalSetupService
       ollamaDiagnostic = exception.Message;
     }
 
+    if (OperatingSystem.IsLinux() && ollamaVersion is not null)
+    {
+      try
+      {
+        runningModels = await _ollama.GetRunningModelsAsync(
+          baseUri,
+          cancellationToken
+        );
+      }
+      catch (OllamaProviderException exception)
+      {
+        runningModelsDiagnostic =
+          $"Ollama running-model evidence is unavailable: {exception.Message}";
+      }
+    }
+
     var devices = await _gpuDiscovery.DiscoverAsync(cancellationToken);
     var installationPreference = OperatingSystem.IsLinux()
       ? await _installationProfiles.GetAsync(
         cancellationToken
       )
       : null;
+    var backend = await _backendEvidence.InspectAsync(
+      installationPreference?.RequestedProfile,
+      runningModels,
+      runningModelsDiagnostic,
+      cancellationToken
+    );
     var largestGpuBytes = devices.Devices
       .Where(device => device.Available && !device.IsAuto)
       .Select(device => device.MemoryBytes)
@@ -194,7 +221,8 @@ public sealed class LocalSetupService : ILocalSetupService
       BuildOllamaInstallationStatus(
         devices,
         installationPreference,
-        ollamaAvailable
+        ollamaAvailable,
+        backend
       )
     );
   }
@@ -429,7 +457,8 @@ public sealed class LocalSetupService : ILocalSetupService
   private static OllamaInstallationStatus? BuildOllamaInstallationStatus(
     DevicesResponse devices,
     OllamaInstallationPreference? preference,
-    bool ollamaAvailable
+    bool ollamaAvailable,
+    OllamaBackendStatus? backend
   )
   {
     if (!OperatingSystem.IsLinux())
@@ -519,7 +548,8 @@ public sealed class LocalSetupService : ILocalSetupService
         ? "AMD and NVIDIA adapters were detected. This setup selects one server-wide installation profile; heterogeneous multi-GPU coordination remains a separate feature."
         : physical.Length == 0
           ? "No supported GPU vendor was identified, so all profiles remain available for an explicit choice."
-          : null
+          : null,
+      backend
     );
   }
 
@@ -604,7 +634,8 @@ public sealed record OllamaInstallationStatus(
   string? RequestedProfile,
   bool SelectionRequired,
   IReadOnlyList<OllamaInstallationProfileOption> Profiles,
-  string? Diagnostic
+  string? Diagnostic,
+  OllamaBackendStatus? Backend
 );
 
 public sealed record OllamaInstallationProfileOption(

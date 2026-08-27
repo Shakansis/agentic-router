@@ -54,6 +54,8 @@
       "setup.acceleration_profile": "Acceleration profile",
       "setup.select_profile": "Select Vulkan or ROCm",
       "setup.profile_required": "Choose an acceleration profile before installing Ollama.",
+      "setup.backend_evidence": "Observed Ollama backend",
+      "setup.backend_not_observed": "not observed",
       "setup.models": "GPU-compatible models",
       "setup.harnesses": "Optional harnesses",
       "setup.install": "Install",

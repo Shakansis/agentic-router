@@ -32,6 +32,7 @@ internal static class PlatformServiceCollectionExtensions
       services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
       services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
       services.AddSingleton<ISetupInstallerLauncher, WindowsSetupInstallerLauncher>();
+      services.AddSingleton<IOllamaBackendEvidenceService, NoOpOllamaBackendEvidenceService>();
       return services;
     }
 
@@ -47,6 +48,11 @@ internal static class PlatformServiceCollectionExtensions
         provider => new LinuxSetupInstallerLauncher(
           dataDirectory,
           provider.GetRequiredService<ILogger<LinuxSetupInstallerLauncher>>()
+        )
+      );
+      services.AddSingleton<IOllamaBackendEvidenceService>(
+        new LinuxOllamaBackendEvidenceService(
+          dataDirectory
         )
       );
       return services;
