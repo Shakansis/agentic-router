@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Platform;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Execution;
@@ -84,7 +85,7 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
           profile.Path
         ),
         status.Path,
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       )
     );
     WorkspaceProfileView profile;
@@ -266,7 +267,7 @@ public sealed class TrustedWorkspaceService : ITrustedWorkspaceService
     ).Any(segment => string.Equals(
       segment,
       ".git",
-      StringComparison.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparison
     ));
   }
 

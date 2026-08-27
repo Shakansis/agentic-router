@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.GitDelivery;
 
@@ -163,7 +164,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
         ? current.PreExistingFiles
         : []
     ).ToHashSet(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     var selected = NormalizePaths(
       request.SelectedFiles
@@ -183,7 +184,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
     if (selected.Any(
       path => current.Repository.ConflictedPaths.Contains(
         path,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       )
     ))
     {
@@ -306,7 +307,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
     var selectedStaged = record.SelectedFiles.Where(
       path => record.Repository.StagedPaths.Contains(
         path,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       )
     ).ToArray();
     if (selectedStaged.Length == 0)
@@ -379,14 +380,14 @@ public sealed class GitDeliveryService : IGitDeliveryService
       record.CommitMessage
     );
     var staged = record.Repository.StagedPaths.Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     var selected = record.SelectedFiles.Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     if (!staged.SequenceEqual(
       selected,
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ))
     {
       throw new GitDeliveryException(
@@ -781,19 +782,19 @@ public sealed class GitDeliveryService : IGitDeliveryService
           '/'
         )
       ).Distinct(
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       ).ToArray();
       var eligible = status.Paths.Where(
         path => !path.Conflicted
       ).Select(
         path => path.Path
       ).ToHashSet(
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       );
       var selected = sessionFiles.Where(
         eligible.Contains
       ).Order(
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       ).ToArray();
       var record = new DeliveryRecord(
         session.Id,
@@ -855,38 +856,38 @@ public sealed class GitDeliveryService : IGitDeliveryService
         '/'
       )
     ).Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     var dirty = status.Paths.Where(
       path => !path.Ignored
     ).Select(
       path => path.Path
     ).Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     record.PreExistingFiles = dirty.Where(
       path => !record.SessionChangedFiles.Contains(
         path,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       ) || review.Files.Any(
         file => file.PreExistingChange && string.Equals(
           file.RelativePath,
           path,
-          StringComparison.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparison
         )
       )
     ).Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     var eligible = dirty.Where(
       path => !status.ConflictedPaths.Contains(
         path,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       )
     ).ToHashSet(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     if (record.CommitHash is null)
     {
@@ -929,7 +930,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
       return;
     }
     var hashes = new Dictionary<string, string>(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     var stale = false;
     foreach (var path in record.SelectedFiles)
@@ -956,7 +957,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
         file => string.Equals(
           file.RelativePath,
           path,
-          StringComparison.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparison
         )
       );
       if (
@@ -1016,7 +1017,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
     foreach (var file in review.Files.Where(
       file => selected.Contains(
         file.RelativePath,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       )
     ))
     {
@@ -1115,7 +1116,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
     if (record.SelectedFiles.Any(
       path => record.Repository.ConflictedPaths.Contains(
         path,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       )
     ))
     {
@@ -1160,9 +1161,9 @@ public sealed class GitDeliveryService : IGitDeliveryService
         path
       )
     ).Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
   }
 
@@ -1218,7 +1219,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
       && record.SelectedFiles.All(
         path => record.Repository.StagedPaths.Contains(
           path,
-          StringComparer.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparer
         )
       );
     if (selectedStaged)
@@ -1326,7 +1327,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
         "\n",
         record.SelectedFileHashes.OrderBy(
           pair => pair.Key,
-          StringComparer.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparer
         ).Select(
           pair => $"{pair.Key}:{pair.Value}"
         )
@@ -1414,7 +1415,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
   )
   {
     var hashes = new Dictionary<string, string>(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     foreach (var path in record.SelectedFiles)
     {
@@ -1478,7 +1479,7 @@ public sealed class GitDeliveryService : IGitDeliveryService
 
     public IReadOnlyDictionary<string, string> SelectedFileHashes { get; set; } =
       new Dictionary<string, string>(
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       );
 
     public bool IncludePreExistingChanges { get; set; }

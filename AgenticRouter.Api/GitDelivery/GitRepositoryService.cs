@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.GitDelivery;
 
@@ -884,7 +885,7 @@ public sealed class GitRepositoryService : IGitRepositoryService
         !staged
         && status.UntrackedPaths.Contains(
           path,
-          StringComparer.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparer
         )
       )
       {
@@ -953,7 +954,7 @@ public sealed class GitRepositoryService : IGitRepositoryService
               item => string.Equals(
                 item.Path,
                 path,
-                StringComparison.OrdinalIgnoreCase
+                FileSystemPathSemantics.Comparison
               )
             ),
             staged
@@ -2575,9 +2576,9 @@ public sealed class GitRepositoryService : IGitRepositoryService
       );
     }
     return normalized.Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
   }
 
@@ -3124,7 +3125,7 @@ public sealed class GitRepositoryService : IGitRepositoryService
     var sanitized = diagnostic.Replace(
       root,
       "[repository]",
-      StringComparison.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparison
     ).Trim();
     return sanitized.Length <= 2_000
       ? sanitized

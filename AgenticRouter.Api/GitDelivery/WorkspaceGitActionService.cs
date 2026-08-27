@@ -1,6 +1,7 @@
 using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Platform;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Usage;
 using AgenticRouter.Api.WorkspaceProfiles;
@@ -77,9 +78,9 @@ public sealed class WorkspaceGitActionService : IWorkspaceGitActionService
     ).Concat(
       status.UntrackedPaths
     ).Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).Order(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     var message = string.IsNullOrWhiteSpace(
       request.Message
@@ -368,12 +369,12 @@ public sealed class WorkspaceGitActionService : IWorkspaceGitActionService
       );
     }
     var stagedPaths = status.StagedPaths.Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     var workingPaths = status.UnstagedPaths.Concat(
       status.UntrackedPaths
     ).Distinct(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
     if (stagedPaths.Length > 0)
     {
@@ -546,10 +547,10 @@ public sealed class WorkspaceGitActionService : IWorkspaceGitActionService
   )
   {
     var expectedSet = expected.ToHashSet(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     var stagedSet = status.StagedPaths.ToHashSet(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     if (
       !expectedSet.SetEquals(

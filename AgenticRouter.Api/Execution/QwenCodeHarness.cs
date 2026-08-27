@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -1006,7 +1007,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     if (!string.Equals(
       Path.GetFullPath(String(capabilities, "workspaceCwd") ?? string.Empty),
       Path.GetFullPath(workingDirectory),
-      StringComparison.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparison
     ))
     {
       throw Failure("qwen-code-workspace-mismatch", "Qwen Code registered a different workspace.");
@@ -1046,7 +1047,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     if (!string.Equals(
       Path.GetFullPath(returnedWorkspace),
       Path.GetFullPath(request.WorkingDirectory),
-      StringComparison.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparison
     ))
     {
       throw Failure("qwen-code-workspace-mismatch", "Qwen Code returned a different session workspace.");
@@ -1301,7 +1302,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       || !string.Equals(
         Path.GetFullPath(RequiredString(status, "workspaceCwd")),
         Path.GetFullPath(workingDirectory),
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       )
       || !string.Equals(String(status, "current", "authType"), "openai", StringComparison.Ordinal)
       || !string.Equals(

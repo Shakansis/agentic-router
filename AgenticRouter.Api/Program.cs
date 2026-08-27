@@ -7,6 +7,7 @@ using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Observability;
+using AgenticRouter.Api.Platform;
 using AgenticRouter.Api.ProjectAwareness;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Cloud;
@@ -61,6 +62,9 @@ var dataDirectory = string.IsNullOrWhiteSpace(
   : Path.GetFullPath(
     configuredDirectory
   );
+builder.Services.AddHostPlatformServices(
+  dataDirectory
+);
 var safeModeRequested = args.Any(
   argument => string.Equals(
     argument,
@@ -107,11 +111,6 @@ builder.Services.AddSingleton<ISettingsStore>(
   services => new SafeModeSettingsStore(
     services.GetRequiredService<JsonSettingsStore>(),
     safeModeState
-  )
-);
-builder.Services.AddSingleton<IProtectedSecretStore>(
-  new DpapiProtectedSecretStore(
-    dataDirectory
   )
 );
 builder.Services.AddSingleton<ICloudProviderAdapter, GroqCloudProvider>();
@@ -174,7 +173,6 @@ builder.Services.AddSingleton<IWorkspaceProfileService, WorkspaceProfileService>
 builder.Services.AddSingleton<IPersistentSessionStore, PersistentSessionStore>();
 builder.Services.AddSingleton<IPersistentSessionService, PersistentSessionService>();
 builder.Services.AddSingleton<ISupervisionCheckpointStore, SupervisionCheckpointStore>();
-builder.Services.AddSingleton<IGpuDiscoveryService, WindowsGpuDiscoveryService>();
 builder.Services.AddSingleton<IMarkdownRenderer, SafeMarkdownRenderer>();
 builder.Services.AddSingleton<IRouterResponseParser, RouterResponseParser>();
 builder.Services.AddScoped<IIntentionRouter, IntentionRouter>();
@@ -183,8 +181,6 @@ builder.Services.AddScoped<IConversationContextBuilder, ConversationContextBuild
 builder.Services.AddScoped<ITrustedWorkspaceService, TrustedWorkspaceService>();
 builder.Services.AddScoped<IProjectAwarenessService, ProjectAwarenessService>();
 builder.Services.AddScoped<IRepositoryInstructionService, RepositoryInstructionService>();
-builder.Services.AddSingleton<IFolderPickerService, WindowsFolderPickerService>();
-builder.Services.AddSingleton<IFolderLauncherService, WindowsFolderLauncherService>();
 builder.Services.AddSingleton<IToolNameResolver, ToolNameResolver>();
 builder.Services.AddSingleton<
   ISpecialistToolingProfileResolver,
@@ -396,8 +392,6 @@ builder.Services.AddSingleton<
   IConversationProductivityService,
   ConversationProductivityService
 >();
-builder.Services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
-builder.Services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
 builder.Services.AddSingleton<
   IBenchmarkEnvironmentSnapshotProvider,
   BenchmarkEnvironmentSnapshotProvider

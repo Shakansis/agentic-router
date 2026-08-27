@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -73,7 +74,9 @@ public sealed class HarnessWorkspaceObserver
       _maximumRollbackBytesPerSession,
       cancellationToken
     );
-    var paths = _files.Keys.Concat(current.Keys).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase);
+    var paths = _files.Keys.Concat(current.Keys)
+      .Distinct(FileSystemPathSemantics.Comparer)
+      .Order(FileSystemPathSemantics.Comparer);
     var changes = new List<ExecutionFileChange>();
     var rollbackBytes = 0L;
 
@@ -227,7 +230,7 @@ public sealed class HarnessWorkspaceObserver
     CancellationToken cancellationToken
   )
   {
-    var result = new Dictionary<string, FileSnapshot>(StringComparer.OrdinalIgnoreCase);
+    var result = new Dictionary<string, FileSnapshot>(FileSystemPathSemantics.Comparer);
     var capturedBytes = 0L;
     var directories = new Stack<string>();
     directories.Push(root);
@@ -247,7 +250,7 @@ public sealed class HarnessWorkspaceObserver
             false
           );
         }
-        if (!includeGit && string.Equals(info.Name, ".git", StringComparison.OrdinalIgnoreCase))
+        if (!includeGit && string.Equals(info.Name, ".git", FileSystemPathSemantics.Comparison))
         {
           continue;
         }
@@ -305,7 +308,7 @@ public sealed class HarnessWorkspaceObserver
   )
   {
     var git = Path.Combine(root, ".git");
-    var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    var result = new Dictionary<string, string>(FileSystemPathSemantics.Comparer);
     if (File.Exists(git))
     {
       EnsureNotReparsePoint(git);
@@ -343,7 +346,7 @@ public sealed class HarnessWorkspaceObserver
         true
       );
     }
-    foreach (var path in candidates.Order(StringComparer.OrdinalIgnoreCase))
+    foreach (var path in candidates.Order(FileSystemPathSemantics.Comparer))
     {
       cancellationToken.ThrowIfCancellationRequested();
       EnsureNotReparsePoint(path);
@@ -419,7 +422,7 @@ public sealed class HarnessWorkspaceObserver
   private static void EnsureConfined(string path, string root)
   {
     var prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-    if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+    if (!path.StartsWith(prefix, FileSystemPathSemantics.Comparison))
     {
       throw new HarnessException("codex-workspace-boundary", "An external-harness workspace path escaped the trusted root.", path, false);
     }

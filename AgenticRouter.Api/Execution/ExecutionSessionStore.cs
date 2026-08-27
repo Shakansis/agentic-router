@@ -4,6 +4,7 @@ using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -1864,7 +1865,7 @@ public sealed class ExecutionSession
         item => string.Equals(
           item.RelativePath,
           change.RelativePath,
-          StringComparison.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparison
         )
       );
 
@@ -1887,7 +1888,7 @@ public sealed class ExecutionSession
       {
         var preExisting = _baseline?.PreExistingDirtyPaths.Contains(
           change.RelativePath,
-          StringComparer.OrdinalIgnoreCase
+          FileSystemPathSemantics.Comparer
         ) == true;
         change = change with
         {
@@ -2473,7 +2474,7 @@ public sealed class ExecutionSession
       file => file.Verified
     ).GroupBy(
       file => file.RelativePath,
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).Select(
       group => group.Last()
     ).Where(
@@ -2493,14 +2494,14 @@ public sealed class ExecutionSession
           && string.Equals(
             SummaryTarget(action.Summary),
             change.RelativePath.Replace('\\', '/'),
-            StringComparison.OrdinalIgnoreCase
+            FileSystemPathSemantics.Comparison
           )
       )
     ).Select(
       change => change.RelativePath
     ).OrderBy(
       path => path,
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
   }
 
@@ -2514,7 +2515,7 @@ public sealed class ExecutionSession
       Path.AltDirectorySeparatorChar
     ) + Path.DirectorySeparatorChar;
     var unresolved = new HashSet<string>(
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     );
     var referencePattern = new System.Text.RegularExpressions.Regex(
       "\\b(?:src|href)\\s*=\\s*[\\\"'](?<path>[^\\\"']+)[\\\"']",
@@ -2570,8 +2571,8 @@ public sealed class ExecutionSession
             )
           );
           if (
-            !string.Equals(candidate, root, StringComparison.OrdinalIgnoreCase)
-            && !candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase)
+            !string.Equals(candidate, root, FileSystemPathSemantics.Comparison)
+            && !candidate.StartsWith(rootPrefix, FileSystemPathSemantics.Comparison)
           )
           {
             unresolved.Add(reference);
@@ -2601,7 +2602,7 @@ public sealed class ExecutionSession
 
     return unresolved.OrderBy(
       path => path,
-      StringComparer.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparer
     ).ToArray();
   }
 

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -654,7 +655,7 @@ public sealed class LocalActionService : ILocalActionService
               delivery.PreExistingFiles.Any(
                 path => delivery.SelectedFiles.Contains(
                   path,
-                  StringComparer.OrdinalIgnoreCase
+                  FileSystemPathSemantics.Comparer
                 )
               ),
               GetRequiredString(
@@ -708,7 +709,7 @@ public sealed class LocalActionService : ILocalActionService
               delivery.PreExistingFiles.Any(
                 path => delivery.SelectedFiles.Contains(
                   path,
-                  StringComparer.OrdinalIgnoreCase
+                  FileSystemPathSemantics.Comparer
                 )
               ),
               delivery.CommitMessage,
@@ -1050,7 +1051,7 @@ public sealed class LocalActionService : ILocalActionService
       && string.Equals(
         requestedPath.Trim().Replace('\\', '/').TrimStart('/', '.'),
         inferredPath.Replace('\\', '/').TrimStart('/', '.'),
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       );
   }
 
@@ -1150,7 +1151,7 @@ public sealed class LocalActionService : ILocalActionService
     var requestedPaths = GetStringArray(proposal.Arguments, "paths")
       .Select(path => path.Trim())
       .Where(path => path.Length > 0)
-      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .Distinct(FileSystemPathSemantics.Comparer)
       .ToArray();
 
     if (requestedPaths.Length is < 1 or > 50)
@@ -1326,7 +1327,7 @@ public sealed class LocalActionService : ILocalActionService
     var prepared = new List<PendingFileChange>(requestedFiles.Count);
     var normalized = new List<object>(requestedFiles.Count);
     var corrections = new List<LocalActionCorrection>();
-    var canonicalTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var canonicalTargets = new HashSet<string>(FileSystemPathSemantics.Comparer);
     var totalBytes = 0;
     var requiresExplicitApproval = false;
 
@@ -1549,9 +1550,9 @@ public sealed class LocalActionService : ILocalActionService
   {
     var normalizedLeft = Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
     var normalizedRight = Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
-    return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase)
-      || normalizedLeft.StartsWith(normalizedRight + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-      || normalizedRight.StartsWith(normalizedLeft + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    return string.Equals(normalizedLeft, normalizedRight, FileSystemPathSemantics.Comparison)
+      || normalizedLeft.StartsWith(normalizedRight + Path.DirectorySeparatorChar, FileSystemPathSemantics.Comparison)
+      || normalizedRight.StartsWith(normalizedLeft + Path.DirectorySeparatorChar, FileSystemPathSemantics.Comparison);
   }
 
   private static int PathDepth(string path)
@@ -2009,7 +2010,7 @@ public sealed class LocalActionService : ILocalActionService
         "create_files did not contain a validated explicit file set."
       );
     var createdFiles = new List<string>(pendingChanges.Count);
-    var createdDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var createdDirectories = new HashSet<string>(FileSystemPathSemantics.Comparer);
 
     try
     {
@@ -2271,7 +2272,7 @@ public sealed class LocalActionService : ILocalActionService
     var requestedPaths = GetStringArray(action.Arguments, "paths")
       .Select(path => path.Trim())
       .Where(path => path.Length > 0)
-      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .Distinct(FileSystemPathSemantics.Comparer)
       .ToArray();
     var recursive = GetOptionalBoolean(action.Arguments, "recursive");
 
@@ -2751,13 +2752,13 @@ public sealed class LocalActionService : ILocalActionService
         }
         var relative = await GetRelativePathAsync(target, cancellationToken);
         var expected = snapshot
-          .Where(change => !string.Equals(change.RelativePath, relative, StringComparison.OrdinalIgnoreCase)
+          .Where(change => !string.Equals(change.RelativePath, relative, FileSystemPathSemantics.Comparison)
             && IsRelativeDescendant(relative, change.RelativePath))
           .Select(change => change.RelativePath)
-          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+          .ToHashSet(FileSystemPathSemantics.Comparer);
         var current = EnumerateDeletionTree(target, relative)
           .Select(entry => entry.RelativePath)
-          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+          .ToHashSet(FileSystemPathSemantics.Comparer);
         if (!expected.SetEquals(current))
         {
           throw new LocalActionException(
@@ -2833,7 +2834,7 @@ public sealed class LocalActionService : ILocalActionService
   {
     var prefix = Path.TrimEndingDirectorySeparator(parent) + Path.DirectorySeparatorChar;
     var normalizedCandidate = candidate.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
-    return normalizedCandidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    return normalizedCandidate.StartsWith(prefix, FileSystemPathSemantics.Comparison);
   }
 
   private async Task VerifyAndRecordBatchFileChangesAsync(
@@ -2948,7 +2949,7 @@ public sealed class LocalActionService : ILocalActionService
     var preExisting = executionSession.CreateReview().Baseline
       ?.PreExistingDirtyPaths.Contains(
         relative,
-        StringComparer.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparer
       ) == true;
     executionSession.RecordObservedFile(
       new ObservedFileView(
@@ -3112,10 +3113,10 @@ public sealed class LocalActionService : ILocalActionService
     );
     return name.Equals(
       "AGENTS.md",
-      StringComparison.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparison
     ) || name.Equals(
       ".editorconfig",
-      StringComparison.OrdinalIgnoreCase
+      FileSystemPathSemantics.Comparison
     );
   }
 
@@ -3150,7 +3151,7 @@ public sealed class LocalActionService : ILocalActionService
       segments.Length < 2
       || !segments[0].Equals(
         workspaceName,
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       )
     )
     {
@@ -3225,7 +3226,7 @@ public sealed class LocalActionService : ILocalActionService
       segments.Length == 0
       || !segments[0].Equals(
         workspaceName,
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       )
     )
     {

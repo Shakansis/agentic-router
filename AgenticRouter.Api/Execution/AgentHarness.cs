@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -1975,14 +1976,14 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           return false;
         }
         var full = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(workspaceRoot, path));
-        if (!full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        if (!full.StartsWith(rootPrefix, FileSystemPathSemantics.Comparison))
         {
           return false;
         }
         var relative = Path.GetRelativePath(workspaceRoot, full).Replace('\\', '/');
         if (
-          string.Equals(relative, ".git", StringComparison.OrdinalIgnoreCase)
-          || relative.StartsWith(".git/", StringComparison.OrdinalIgnoreCase)
+          string.Equals(relative, ".git", FileSystemPathSemantics.Comparison)
+          || relative.StartsWith(".git/", FileSystemPathSemantics.Comparison)
         )
         {
           return false;
@@ -2013,7 +2014,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       );
     }
     paths.Add(GetString(parameters, "cwd") ?? workspacePath);
-    return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    return paths.Distinct(FileSystemPathSemantics.Comparer).ToArray();
   }
 
   private static bool CommandApprovalIsWorkspaceConfined(
@@ -2055,14 +2056,14 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
             ? path
             : Path.Combine(workspaceRoot, path)
         );
-        if (!string.Equals(full, workspaceRoot, StringComparison.OrdinalIgnoreCase)
-          && !full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(full, workspaceRoot, FileSystemPathSemantics.Comparison)
+          && !full.StartsWith(rootPrefix, FileSystemPathSemantics.Comparison))
         {
           return false;
         }
         var relative = Path.GetRelativePath(workspaceRoot, full).Replace('\\', '/');
         if (relative == ".git"
-          || relative.StartsWith(".git/", StringComparison.OrdinalIgnoreCase))
+          || relative.StartsWith(".git/", FileSystemPathSemantics.Comparison))
         {
           return false;
         }

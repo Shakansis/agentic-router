@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.WorkspaceProfiles;
 
@@ -653,7 +654,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
         NormalizeComparisonPath(
           canonicalPath
         ),
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       )
     ))
     {
@@ -809,7 +810,7 @@ public static class WorkspacePathValidator
       if (string.Equals(
         fullPath,
         root,
-        StringComparison.OrdinalIgnoreCase
+        FileSystemPathSemantics.Comparison
       ))
       {
         return Invalid(

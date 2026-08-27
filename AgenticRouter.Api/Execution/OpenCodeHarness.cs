@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -872,7 +873,11 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     var directory = String(result, "directory");
     if (
       directory is not null
-      && !string.Equals(Path.GetFullPath(directory), Path.GetFullPath(request.WorkingDirectory), StringComparison.OrdinalIgnoreCase)
+      && !string.Equals(
+        Path.GetFullPath(directory),
+        Path.GetFullPath(request.WorkingDirectory),
+        FileSystemPathSemantics.Comparison
+      )
     )
     {
       throw Failure("opencode-workspace-mismatch", "OpenCode returned a different working directory.");
