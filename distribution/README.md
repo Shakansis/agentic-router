@@ -11,8 +11,8 @@ Agentic Router runs local AI conversations and supervised workspace changes thro
 3. Verify a Windows download in PowerShell:
 
    ```powershell
-   (Get-FileHash .\AgenticRouter-0.9.15_alpha-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-   Get-Content .\AgenticRouter-0.9.15_alpha-win-x64.zip.sha256
+   (Get-FileHash .\AgenticRouter-0.9.16_alpha-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+   Get-Content .\AgenticRouter-0.9.16_alpha-win-x64.zip.sha256
    ```
 
    The two hashes must match.
@@ -20,7 +20,7 @@ Agentic Router runs local AI conversations and supervised workspace changes thro
    Verify a Linux download with:
 
    ```bash
-   sha256sum -c AgenticRouter-0.9.15_alpha-linux-x64.tar.gz.sha256
+   sha256sum -c AgenticRouter-0.9.16_alpha-linux-x64.tar.gz.sha256
    ```
 
 4. Extract the archive to a writable folder. Do not run the application from inside the archive.

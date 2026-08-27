@@ -2,10 +2,11 @@
 param(
   [Parameter(Mandatory)]
   [string]$VersionLabel,
-  [string]$ArchivePath,
-  [string]$ChecksumPath,
+  [string[]]$ArchivePath,
+  [string[]]$ChecksumPath,
   [Parameter(Mandatory)]
-  [string]$RuntimeIdentifier,
+  [ValidateSet('win-x64', 'linux-x64')]
+  [string[]]$RuntimeIdentifier,
   [string]$Repository = 'Shakansis/agentic-router-releases',
   [switch]$CreateRepository,
   [switch]$PreflightOnly,
@@ -41,17 +42,22 @@ function Invoke-GitHubCli {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.9.15_alpha.'
+  throw 'VersionLabel must use the form 0.9.16_alpha.'
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'Repository must use the OWNER/NAME form.'
 }
 if (-not $PreflightOnly -and -not $DocumentationOnly) {
-  if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
-    throw "Release archive was not found: $ArchivePath"
+  if ($ArchivePath.Count -eq 0) {
+    throw 'At least one release archive is required.'
   }
-  if (-not (Test-Path -LiteralPath $ChecksumPath -PathType Leaf)) {
-    throw "Release checksum was not found: $ChecksumPath"
+  if ($ArchivePath.Count -ne $ChecksumPath.Count) {
+    throw 'Each release archive must have one matching checksum file.'
+  }
+  foreach ($path in @($ArchivePath) + @($ChecksumPath)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Release asset was not found: $path"
+    }
   }
 }
 $githubCliCommand = Get-Command gh -ErrorAction SilentlyContinue
@@ -258,8 +264,29 @@ try {
   }
 
   $releaseNotesPath = Join-Path $temporaryRoot 'release-notes.md'
-  $linuxRelease = $RuntimeIdentifier -eq 'linux-x64'
-  $releaseNotes = if ($linuxRelease) {
+  $windowsRelease = $RuntimeIdentifier -contains 'win-x64'
+  $linuxRelease = $RuntimeIdentifier -contains 'linux-x64'
+  $releaseNotes = if ($windowsRelease -and $linuxRelease) {
+    @"
+# Agentic Router $VersionLabel
+
+Portable Windows x64 and Linux x64 release.
+
+## Install
+
+- Windows x64: download the `win-x64.zip` archive, verify it with the matching
+  `.sha256` file, extract it, and run `AgenticRouter.exe`.
+- Linux x64: download the `linux-x64.tar.gz` archive, verify it with the matching
+  `.sha256` file, extract it, and run `./run-agentic-router.sh`. Apply
+  `chmod +x AgenticRouter run-agentic-router.sh` if required.
+
+Ollama and models are installed separately. Linux AMD setup offers an explicit
+Vulkan or ROCm profile and never installs GPU drivers automatically. Linux ARM64,
+Windows ARM64, and macOS are not included in this release. This is alpha software
+and is not recommended for unattended or production use.
+"@
+  }
+  elseif ($linuxRelease) {
     @"
 # Agentic Router $VersionLabel
 
@@ -303,12 +330,17 @@ release repository.
     [System.Text.UTF8Encoding]::new($false)
   )
 
+  $assetPaths = @($ArchivePath) + @($ChecksumPath) |
+    ForEach-Object { [System.IO.Path]::GetFullPath($_) }
+  if (($assetPaths | Select-Object -Unique).Count -ne $assetPaths.Count) {
+    throw 'Release asset paths must be unique.'
+  }
+
   $releaseArguments = @(
     'release',
     'create',
-    $tag,
-    ([System.IO.Path]::GetFullPath($ArchivePath)),
-    ([System.IO.Path]::GetFullPath($ChecksumPath)),
+    $tag
+  ) + $assetPaths + @(
     '--repo',
     $Repository,
     '--target',

@@ -3413,7 +3413,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.15_alpha"
+      "v0.9.16_alpha"
     );
     await Expect(
       Page.Locator(

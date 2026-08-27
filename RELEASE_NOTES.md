@@ -1,10 +1,10 @@
-# Agentic Router v0.9.15 alpha
+# Agentic Router v0.9.16 alpha
 
-This alpha adds durable local supervised Execute and closes its authorized real-local
-acceptance matrix on Native and Codex while preserving Host authority and direct
-Execute as the default.
+This alpha adds a Linux x64 portable release alongside Windows x64 from the same
+core codebase. It retains the durable local supervised Execute acceptance from
+v0.9.15 while adding explicit, observable Linux Ollama acceleration profiles.
 
-## Linux x64 preview
+## Linux x64 support
 
 - Adds a self-contained Linux x64 release from the same core codebase; Linux
   ARM64 and macOS remain out of scope.

@@ -2,8 +2,8 @@
 
 Agentic Router can be distributed as a self-contained, single-file executable
 plus the ASP.NET static content and configuration that must remain external.
-The supported release targets are Windows x64, Windows ARM64, and Linux x64.
-Linux ARM64 and macOS are not release targets in this version.
+The supported release targets are Windows x64 and Linux x64. ARM64 and macOS
+are not release targets in this version.
 
 ## Build the package
 
@@ -13,24 +13,24 @@ From the repository root:
 .\scripts\Publish-PortableRelease.ps1
 ```
 
-The default command creates `0.9.15_alpha` for `win-x64` under
+The default command creates `0.9.16_alpha` for `win-x64` under
 `artifacts\releases`:
 
 - an unpacked directory for inspection;
-- `AgenticRouter-0.9.15_alpha-win-x64.zip`;
+- `AgenticRouter-0.9.16_alpha-win-x64.zip`;
 - a SHA-256 checksum file beside the ZIP.
 
 To create the Linux x64 package locally:
 
 ```powershell
 .\scripts\Publish-PortableRelease.ps1 `
-  -VersionLabel 0.9.15_alpha `
+  -VersionLabel 0.9.16_alpha `
   -RuntimeIdentifier linux-x64 `
   -OutputDirectory artifacts\releases
 ```
 
 This creates an unpacked inspection directory,
-`AgenticRouter-0.9.15_alpha-linux-x64.tar.gz`, and its matching `.sha256` file.
+`AgenticRouter-0.9.16_alpha-linux-x64.tar.gz`, and its matching `.sha256` file.
 
 The first publish for a runtime identifier may download the corresponding .NET
 runtime packs from NuGet. Later offline publishes can use `-NoRestore` after the
@@ -40,7 +40,7 @@ Optional parameters:
 
 ```powershell
 .\scripts\Publish-PortableRelease.ps1 `
-  -VersionLabel 0.9.15_alpha `
+  -VersionLabel 0.9.16_alpha `
   -RuntimeIdentifier win-x64 `
   -OutputDirectory artifacts\releases
 ```
@@ -55,19 +55,26 @@ write the target repository:
 gh auth login --web
 ```
 
-The first publication can create the dedicated public repository:
+The first publication can create the dedicated public repository. Generate both
+packages first, then publish their archives and checksums in one release:
 
 ```powershell
-.\scripts\Publish-PortableRelease.ps1 `
-  -PublishToGitHub `
-  -CreateGitHubRepository
+.\scripts\Publish-GitHubRelease.ps1 `
+  -VersionLabel 0.9.16_alpha `
+  -RuntimeIdentifier win-x64,linux-x64 `
+  -ArchivePath `
+    artifacts\releases\AgenticRouter-0.9.16_alpha-win-x64.zip, `
+    artifacts\releases\AgenticRouter-0.9.16_alpha-linux-x64.tar.gz `
+  -ChecksumPath `
+    artifacts\releases\AgenticRouter-0.9.16_alpha-win-x64.zip.sha256, `
+    artifacts\releases\AgenticRouter-0.9.16_alpha-linux-x64.tar.gz.sha256 `
+  -CreateRepository
 ```
 
-Later versions use the existing repository:
-
-```powershell
-.\scripts\Publish-PortableRelease.ps1 -PublishToGitHub
-```
+Omit `-CreateRepository` for later versions. The
+`Publish-PortableRelease.ps1 -PublishToGitHub` path remains available for an
+intentionally single-platform release, but it must not be invoked twice with
+the same version tag.
 
 The default target is `Shakansis/agentic-router-releases`. It can be changed
 with `-GitHubRepository OWNER/NAME`.
@@ -86,12 +93,12 @@ release or its immutable assets:
 
 ```powershell
 .\scripts\Publish-GitHubRelease.ps1 `
-  -VersionLabel 0.9.15_alpha `
-  -RuntimeIdentifier win-x64 `
+  -VersionLabel 0.9.16_alpha `
+  -RuntimeIdentifier win-x64,linux-x64 `
   -DocumentationOnly
 ```
 
-The release receives only the generated ZIP or tar.gz and its SHA-256 file. Publishing
+The release receives only the generated archives and their SHA-256 files. Publishing
 aborts if the repository contains any other tracked file, is not public, or
 already has the requested version tag. Existing release assets are never
 silently replaced.
