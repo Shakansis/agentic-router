@@ -516,11 +516,12 @@ public sealed class PersistentSessionService : IPersistentSessionService
         }
       }
 
+      var updatedAt = DateTimeOffset.UtcNow;
       session = session with
       {
         State = "running",
         Interrupted = false,
-        UpdatedAt = DateTimeOffset.UtcNow,
+        UpdatedAt = updatedAt,
         LastInteractionMode = interactionMode,
         SelectedModel = NormalizeModel(
           model
@@ -531,7 +532,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
             PersistedUserMessage(
               message,
               images
-            )
+            ),
+            updatedAt
           )
         ).ToArray()
       };
@@ -636,11 +638,12 @@ public sealed class PersistentSessionService : IPersistentSessionService
         "Undo metadata is unavailable because retained rollback content exceeded the session limit."
       );
     }
+    var updatedAt = DateTimeOffset.UtcNow;
     var completed = session with
     {
       State = "completed",
       Interrupted = false,
-      UpdatedAt = DateTimeOffset.UtcNow,
+      UpdatedAt = updatedAt,
       LastInteractionMode = interactionMode,
       SelectedModel = NormalizeModel(
         model
@@ -648,7 +651,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
       Messages = session.Messages.Append(
         new ChatMessage(
           "assistant",
-          answer
+          answer,
+          updatedAt
         )
       ).ToArray(),
       ExecutionReviews = bounded is null

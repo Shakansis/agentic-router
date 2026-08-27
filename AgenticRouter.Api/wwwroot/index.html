@@ -1813,6 +1813,29 @@
     </section>
   </dialog>
 
+  <dialog
+    id="image-review-dialog"
+    class="settings-dialog image-review-dialog"
+    aria-labelledby="image-review-title"
+  >
+    <section class="image-review-shell">
+      <header class="dialog-header">
+        <div>
+          <span class="eyebrow">Image attachment</span>
+          <h2 id="image-review-title">Image review</h2>
+        </div>
+        <button id="close-image-review" class="icon-button" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="dialog-body image-review-body">
+        <img id="image-review-content" class="image-review-content" alt="">
+      </div>
+      <footer class="dialog-footer">
+        <span id="image-review-metadata" class="image-review-metadata"></span>
+        <button id="dismiss-image-review" class="primary-button" type="button">Close</button>
+      </footer>
+    </section>
+  </dialog>
+
   <dialog id="trace-diagnostic-dialog" class="settings-dialog trace-diagnostic-dialog">
     <section class="trace-diagnostic-shell">
       <header class="dialog-header">

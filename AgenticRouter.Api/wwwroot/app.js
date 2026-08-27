@@ -479,6 +479,12 @@ function bindElements() {
     "undo-execution",
     "validate-changes",
     "undo-status",
+    "image-review-dialog",
+    "image-review-title",
+    "image-review-content",
+    "image-review-metadata",
+    "close-image-review",
+    "dismiss-image-review",
     "settings-workspace-summary",
     "settings-git-summary",
     "settings-validation-summary",
@@ -606,6 +612,7 @@ function bindEvents() {
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.messages.addEventListener("click", handleSetupAction);
+  elements.messages.addEventListener("click", handleMessageImageReviewClick);
   elements.settingsContent.addEventListener("click", handleSetupAction);
   elements.jumpLatest.addEventListener("click", resumeAutoFollow);
   elements.newConversation.addEventListener("click", requestNewConversation);
@@ -821,6 +828,23 @@ function bindEvents() {
   );
   elements.closeChangeReview.addEventListener("click", closeChangeReview);
   elements.dismissChangeReview.addEventListener("click", closeChangeReview);
+  elements.closeImageReview.addEventListener("click", closeImageReview);
+  elements.dismissImageReview.addEventListener("click", closeImageReview);
+  elements.imageReviewDialog.addEventListener(
+    "cancel",
+    event => {
+      event.preventDefault();
+      closeImageReview();
+    }
+  );
+  elements.imageReviewDialog.addEventListener(
+    "click",
+    event => {
+      if (event.target === elements.imageReviewDialog) {
+        closeImageReview();
+      }
+    }
+  );
   elements.undoExecution.addEventListener("click", undoExecution);
   elements.validateChanges.addEventListener("click", validateChanges);
   elements.gitCard.addEventListener("click", openGitPanel);
@@ -5157,7 +5181,8 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
         state.history = session.messages.map(
           message => ({
             role: message.role,
-            content: message.content
+            content: message.content,
+            createdAt: message.createdAt
           })
         );
         state.conversationState = supervisionRun
@@ -5214,12 +5239,15 @@ function renderRestoredConversation(session, options = {}) {
       if (message.role === "user") {
         appendUserMessage(
           message.content,
-          index
+          index,
+          [],
+          message.createdAt
         );
       } else if (message.role === "assistant") {
         const assistant = appendAssistantMessage();
         cancelAnimationFrame(assistant.clockFrame);
         assistant.progress.hidden = true;
+        assistant.runningIndicator.hidden = true;
         assistant.details.open = false;
         assistant.summary.textContent = "History restored";
         assistant.answer.classList.remove("pending");
@@ -5287,7 +5315,11 @@ async function attachSupervisionConversation(run) {
 
     const outcome = await consumeEventStream(response.body, assistant);
     if (outcome.completed && state.conversationVersion === conversationVersion) {
-      state.history.push({ role: "assistant", content: outcome.answer });
+      state.history.push({
+        role: "assistant",
+        content: outcome.answer,
+        createdAt: new Date().toISOString()
+      });
       state.conversationState = "completed";
       setPersistenceStatus("Saved locally");
       await refreshSessions();
@@ -11043,6 +11075,13 @@ async function steerBufferedMessage(id) {
   renderMessageQueue();
   updateStreamingComposerActions();
   updateComposerStatus();
+  const sentAt = new Date();
+  const steeredMessage = appendSteeredMessage(
+    message,
+    assistant,
+    harnessId,
+    sentAt
+  );
 
   let accepted = false;
   try {
@@ -11066,13 +11105,17 @@ async function steerBufferedMessage(id) {
     accepted = true;
 
     const lastHistory = state.history.at(-1);
-    const historyMessage = { role: "user", content: message };
+    const historyMessage = {
+      role: "user",
+      content: message,
+      createdAt: sentAt.toISOString()
+    };
     if (lastHistory?.role === "assistant") {
       state.history.splice(state.history.length - 1, 0, historyMessage);
     } else {
       state.history.push(historyMessage);
     }
-    appendSteeredMessage(message, assistant, harnessId);
+    settleSteeredMessage(steeredMessage, harnessId, true);
     state.messageQueue = state.messageQueue.filter(candidate => candidate.id !== id);
     if (assistant) {
       addActivity(
@@ -11089,6 +11132,12 @@ async function steerBufferedMessage(id) {
       );
     }
   } catch (error) {
+    settleSteeredMessage(
+      steeredMessage,
+      harnessId,
+      false,
+      error.message
+    );
     item.error = error.message;
     state.messageQueuePaused = true;
     showToast(error.message);
@@ -11112,27 +11161,71 @@ function cancelActiveRequest() {
   state.requestController.abort();
 }
 
-function appendSteeredMessage(message, assistant, harnessId) {
+function appendSteeredMessage(message, assistant, harnessId, sentAt) {
+  if (assistant?.container?.parentNode === elements.messages) {
+    finishAssistantSegmentForSteering(assistant);
+  }
+
   const element = document.createElement("article");
   element.className = "message user steered-message";
   element.dataset.harness = harnessId;
+  const timestamp = createMessageTimestamp(sentAt);
   const content = document.createElement("div");
   content.className = "message-content";
   content.textContent = message;
   const note = document.createElement("small");
   note.className = "message-attachment-note";
-  note.textContent = t(
-    "steer.accepted",
-    { harness: benchmarkHarnessLabel(harnessId) }
-  );
-  content.append(document.createElement("br"), note);
-  element.append(content);
-  if (assistant?.container?.parentNode === elements.messages) {
-    elements.messages.insertBefore(element, assistant.container);
-  } else {
-    elements.messages.append(element);
-  }
+  note.textContent = `Sending steering to ${benchmarkHarnessLabel(harnessId)}…`;
+  content.append(note);
+  element.append(timestamp, content);
+  elements.messages.append(element);
   resizeObserver.observe(element);
+
+  if (assistant) {
+    appendAssistantMessage(
+      {
+        modelSelectionOrigin: assistant.modelSelectionOrigin,
+        startedAt: assistant.startedAt,
+        rawAnswer: assistant.rawAnswer,
+        recovered: assistant.recovered,
+        executionSession: assistant.executionSession
+      },
+      assistant
+    );
+  }
+
+  return { element, note };
+}
+
+function settleSteeredMessage(
+  steeredMessage,
+  harnessId,
+  accepted,
+  error = null
+) {
+  steeredMessage.element.classList.toggle("failed", !accepted);
+  steeredMessage.note.textContent = accepted
+    ? t(
+      "steer.accepted",
+      { harness: benchmarkHarnessLabel(harnessId) }
+    )
+    : `Steering was not accepted · ${error}`;
+}
+
+function finishAssistantSegmentForSteering(assistant) {
+  closeAssistantContent(assistant);
+  cancelAnimationFrame(assistant.clockFrame);
+  assistant.progress.hidden = true;
+  assistant.runningIndicator.hidden = true;
+  assistant.answer.classList.remove("pending");
+  assistant.answer.hidden = !assistant.answer.textContent
+    && assistant.answer.childElementCount === 0;
+  assistant.details.open = false;
+  assistant.details.dataset.segmentComplete = "true";
+  assistant.summary.textContent = assistant.technicalEventCount > 0
+    ? `Technical details · ${assistant.technicalEventCount} `
+      + `${assistant.technicalEventCount === 1 ? "event" : "events"} · continued`
+    : "Technical details · continued";
 }
 
 async function handleComposerSubmit(event) {
@@ -11193,11 +11286,13 @@ async function handleComposerSubmit(event) {
     0,
     historyIndex
   );
+  const sentAt = new Date();
   state.history = [
     ...requestHistory,
     {
       role: "user",
-      content: message
+      content: message,
+      createdAt: sentAt.toISOString()
     }
   ];
   state.conversationState = "running";
@@ -11209,7 +11304,8 @@ async function handleComposerSubmit(event) {
   appendUserMessage(
     message,
     historyIndex,
-    requestAttachments
+    requestAttachments,
+    sentAt
   );
   const conversationVersion = state.conversationVersion;
   const controller = new AbortController();
@@ -11273,7 +11369,8 @@ async function handleComposerSubmit(event) {
       state.history.push(
         {
           role: "assistant",
-          content: outcome.answer
+          content: outcome.answer,
+          createdAt: new Date().toISOString()
         }
       );
       state.conversationState = "completed";
@@ -11349,20 +11446,27 @@ async function handleComposerSubmit(event) {
   }
 }
 
-function appendUserMessage(message, historyIndex, attachments = []) {
+function appendUserMessage(
+  message,
+  historyIndex,
+  attachments = [],
+  sentAt = null
+) {
   const element = document.createElement("article");
   element.className = "message user";
+  const timestamp = createMessageTimestamp(sentAt);
   const content = document.createElement("div");
   content.className = "message-content";
   content.textContent = message;
 
   if (attachments.length > 0) {
+    const gallery = createMessageImageGallery(attachments);
     const attachmentNote = document.createElement("small");
     attachmentNote.className = "message-attachment-note";
     attachmentNote.textContent =
       `${attachments.length} attached image${attachments.length === 1 ? "" : "s"}`
-      + `${attachments.length === 1 ? "" : "s"} · bytes not persisted`;
-    content.append(document.createElement("br"), attachmentNote);
+      + " · bytes not persisted";
+    content.append(gallery, attachmentNote);
   }
   const actions = document.createElement("div");
   actions.className = "message-actions";
@@ -11380,12 +11484,142 @@ function appendUserMessage(message, historyIndex, attachments = []) {
     )
   );
   actions.append(editButton);
-  element.append(content, actions);
+  element.append(timestamp, content, actions);
   elements.messages.append(element);
   resizeObserver.observe(element);
 }
 
-function appendAssistantMessage(options = {}) {
+function createMessageImageGallery(attachments) {
+  const gallery = document.createElement("div");
+  gallery.className = "message-image-gallery";
+  const acceptedTypes = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif"
+  ]);
+
+  for (const attachment of attachments) {
+    if (
+      !acceptedTypes.has(attachment.mimeType)
+      || !attachment.base64Data
+    ) {
+      continue;
+    }
+
+    const fileName = attachment.fileName || "image attachment";
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "message-image-preview";
+    preview.dataset.imageName = fileName;
+    preview.dataset.imageMimeType = attachment.mimeType;
+    preview.dataset.imageBytes = String(attachment.declaredBytes);
+    preview.setAttribute("aria-haspopup", "dialog");
+    preview.setAttribute("aria-label", `Review ${fileName}`);
+    preview.title = `Review ${fileName}`;
+    const image = document.createElement("img");
+    image.src = `data:${attachment.mimeType};base64,${attachment.base64Data}`;
+    image.alt = fileName;
+    preview.append(image);
+    gallery.append(preview);
+  }
+
+  return gallery;
+}
+
+function handleMessageImageReviewClick(event) {
+  const preview = event.target.closest(".message-image-preview");
+
+  if (!preview) {
+    return;
+  }
+
+  const image = preview.querySelector("img");
+  if (!image?.src) {
+    return;
+  }
+
+  const fileName = preview.dataset.imageName || image.alt || "Image attachment";
+  const mimeType = preview.dataset.imageMimeType || "image";
+  const declaredBytes = Number(preview.dataset.imageBytes);
+  elements.imageReviewTitle.textContent = fileName;
+  elements.imageReviewContent.src = image.src;
+  elements.imageReviewContent.alt = `Review of ${fileName}`;
+  elements.imageReviewMetadata.textContent = [
+    mimeType.replace("image/", "").toUpperCase(),
+    Number.isFinite(declaredBytes) ? formatBytes(declaredBytes) : null,
+    "available only in this open conversation"
+  ].filter(Boolean).join(" · ");
+  elements.imageReviewDialog.showModal();
+  elements.closeImageReview.focus();
+}
+
+function closeImageReview() {
+  if (elements.imageReviewDialog.open) {
+    elements.imageReviewDialog.close();
+  }
+  elements.imageReviewContent.removeAttribute("src");
+  elements.imageReviewContent.alt = "";
+  elements.imageReviewTitle.textContent = "Image review";
+  elements.imageReviewMetadata.textContent = "";
+}
+
+function createMessageTimestamp(value) {
+  const timestamp = document.createElement("time");
+  timestamp.className = "message-timestamp";
+  const parsed = value ? new Date(value) : null;
+
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    timestamp.hidden = true;
+    return timestamp;
+  }
+
+  timestamp.dateTime = parsed.toISOString();
+  timestamp.textContent = parsed.toLocaleString(
+    window.AgenticRouterI18n.locale,
+    {
+      dateStyle: "short",
+      timeStyle: "medium"
+    }
+  );
+  timestamp.title = parsed.toLocaleString(
+    window.AgenticRouterI18n.locale,
+    {
+      dateStyle: "full",
+      timeStyle: "long"
+    }
+  );
+  return timestamp;
+}
+
+function createRunningIndicator() {
+  const indicator = document.createElement("span");
+  indicator.className = "assistant-running-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("assistant-running-brain");
+  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+
+  const paths = [
+    "M15.8 8.4c-.5-2-2.3-3.4-4.4-3.4A4.4 4.4 0 0 0 7 9.4v.3a4.6 4.6 0 0 0-2 7.8 4.6 4.6 0 0 0 3.7 7.3 4.3 4.3 0 0 0 7.1-3.3V8.4Z",
+    "M16.2 8.4c.5-2 2.3-3.4 4.4-3.4A4.4 4.4 0 0 1 25 9.4v.3a4.6 4.6 0 0 1 2 7.8 4.6 4.6 0 0 1-3.7 7.3 4.3 4.3 0 0 1-7.1-3.3V8.4Z",
+    "M10.4 10.5c2.1.1 3.5 1.5 3.6 3.6m-5.3 4.3c1.7-1 3.6-.5 4.5 1m8.4-8.9c-2.1.1-3.5 1.5-3.6 3.6m5.3 4.3c-1.7-1-3.6-.5-4.5 1"
+  ];
+
+  for (const pathData of paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathData);
+    svg.append(path);
+  }
+
+  indicator.append(svg);
+  return indicator;
+}
+
+function appendAssistantMessage(options = {}, existingAssistant = null) {
   const container = document.createElement("article");
   container.className = "message assistant";
 
@@ -11420,6 +11654,7 @@ function appendAssistantMessage(options = {}) {
 
   const answer = document.createElement("div");
   answer.className = "assistant-response assistant-answer pending";
+  const runningIndicator = createRunningIndicator();
   const workActivity = document.createElement("section");
   workActivity.className = "assistant-work";
   workActivity.hidden = true;
@@ -11452,13 +11687,15 @@ function appendAssistantMessage(options = {}) {
     planPanel,
     workActivity,
     answer,
+    runningIndicator,
     sources,
     details,
     actions
   );
   elements.messages.append(container);
 
-  const assistant = {
+  const assistant = existingAssistant ?? {};
+  Object.assign(assistant, {
     container,
     answer,
     modelNotice,
@@ -11482,18 +11719,19 @@ function appendAssistantMessage(options = {}) {
     modelSelectionOrigin: options.modelSelectionOrigin ?? null,
     activityGroups: new Map(),
     technicalEventCount: 0,
-    startedAt: performance.now(),
+    startedAt: options.startedAt ?? performance.now(),
     clockFrame: null,
     lastClockUpdate: 0,
-    recovered: false,
-    rawAnswer: "",
+    recovered: options.recovered ?? false,
+    rawAnswer: options.rawAnswer ?? "",
     sources,
     sourcesSummary,
     sourcesList,
     copyButton,
     reviewButton,
-    executionSession: null
-  };
+    executionSession: options.executionSession ?? null,
+    runningIndicator
+  });
   copyButton.addEventListener(
     "click",
     () => copyText(
@@ -13999,6 +14237,7 @@ async function decideRecovery(
 function finishActivity(assistant, summary, keepOpen) {
   cancelAnimationFrame(assistant.clockFrame);
   assistant.progress.hidden = true;
+  assistant.runningIndicator.hidden = true;
   assistant.summary.textContent = summary;
   assistant.details.dataset.terminal = "true";
   assistant.details.open = keepOpen;

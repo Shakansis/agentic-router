@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
@@ -65,7 +66,9 @@ public sealed record DevicesResponse(
 
 public sealed record ChatMessage(
   string Role,
-  string Content
+  string Content,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  DateTimeOffset? CreatedAt = null
 );
 
 public sealed record ChatImageAttachment(

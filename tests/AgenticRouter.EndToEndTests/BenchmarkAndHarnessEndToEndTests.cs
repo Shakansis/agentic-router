@@ -4887,7 +4887,21 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.Codex);
 
     await StartMessageAsync("long codex turn");
-    await Expect(Page.Locator(".message.assistant .assistant-reasoning-body").Last)
+    var initialUserMessage = Page.Locator("#messages > .message.user").Last;
+    var initialTimestamp = initialUserMessage.Locator(".message-timestamp");
+    await Expect(initialTimestamp).ToBeVisibleAsync();
+    Assert.IsTrue(
+      DateTimeOffset.TryParse(
+        await initialTimestamp.GetAttributeAsync("datetime"),
+        out _
+      )
+    );
+    var initialAssistant = Page.Locator("#messages > .message.assistant").Last;
+    await Expect(initialAssistant.Locator(".assistant-running-indicator"))
+      .ToBeVisibleAsync();
+    await Expect(initialAssistant.Locator(".assistant-running-brain path"))
+      .ToHaveCountAsync(3);
+    await Expect(initialAssistant.Locator(".assistant-reasoning-body"))
       .ToContainTextAsync("Inspecting", new() { Timeout = 10_000 });
     await Page.Locator("#message-input").FillAsync("Focus on the requested validation first.");
     await Page.Locator("#send-button").ClickAsync();
@@ -4895,11 +4909,38 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(codexSteer).ToBeEnabledAsync();
     await codexSteer.ClickAsync();
 
-    await Expect(Page.Locator(".steered-message")).ToContainTextAsync(
+    var steeredMessage = Page.Locator(".steered-message");
+    await Expect(steeredMessage).ToContainTextAsync(
       "Focus on the requested validation first."
     );
+    await Expect(steeredMessage.Locator(".message-timestamp")).ToBeVisibleAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 15_000 });
+    var chronologicalMessages = await Page.Locator("#messages > .message")
+      .EvaluateAllAsync<string[]>(
+        """
+        nodes => nodes.map(node =>
+          node.classList.contains("steered-message")
+            ? "steer"
+            : node.classList.contains("user")
+              ? "user"
+              : "assistant")
+        """
+      );
+    CollectionAssert.AreEqual(
+      new[] { "user", "assistant", "steer", "assistant" },
+      chronologicalMessages
+    );
+    await Expect(
+      Page.Locator("#messages > .message.assistant").Nth(0)
+        .Locator(".assistant-reasoning-body")
+    ).ToContainTextAsync("Inspecting");
+    await Expect(
+      Page.Locator("#messages > .message.assistant").Nth(1)
+        .Locator(".assistant-reasoning-body")
+    ).ToContainTextAsync("Steering accepted");
+    await Expect(Page.Locator(".assistant-running-indicator:visible"))
+      .ToHaveCountAsync(0);
     using var evidence = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(
         _environment.DataDirectory,
@@ -5020,6 +5061,25 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#image-input").SetInputFilesAsync(imagePath);
 
     await StartMessageAsync("codex live context usage");
+    var messageImage = Page.Locator(".message.user .message-image-preview");
+    await Expect(messageImage).ToHaveCountAsync(1);
+    await Expect(messageImage.Locator("img")).ToHaveAttributeAsync(
+      "src",
+      new Regex("^data:image/png;base64,")
+    );
+    await messageImage.ClickAsync();
+    await Expect(Page.Locator("#image-review-dialog")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#image-review-title"))
+      .ToHaveTextAsync("codex-vision.png");
+    await Expect(Page.Locator("#image-review-content")).ToBeVisibleAsync();
+    Assert.IsGreaterThan(
+      0,
+      await Page.Locator("#image-review-content").EvaluateAsync<int>(
+        "image => image.naturalWidth"
+      )
+    );
+    await Page.Keyboard.PressAsync("Escape");
+    await Expect(Page.Locator("#image-review-dialog")).ToBeHiddenAsync();
     await Expect(Page.Locator("#context-usage-summary"))
       .ToContainTextAsync("30.0k / 32.8k · live exact", new() { Timeout = 10_000 });
     await Expect(Page.Locator("#context-usage-estimate-warning"))
