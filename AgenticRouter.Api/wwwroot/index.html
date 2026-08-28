@@ -95,7 +95,7 @@
       <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
     </section>
 
-    <span class="app-version sidebar-expanded-only">v0.9.17_alpha</span>
+    <span class="app-version sidebar-expanded-only">v0.9.18_alpha</span>
   </aside>
 
   <div
@@ -939,6 +939,13 @@
                 <input id="max-tool-output-tokens" type="number" min="256" max="16384" required>
               </label>
             </div>
+            <div class="workspace-process-permissions">
+              <div class="section-heading compact">
+                <h4>Persistent process permissions</h4>
+                <p>Exact commands approved for the active workspace. Shell permissions include every argument and can be revoked here.</p>
+              </div>
+              <div id="settings-process-permissions" class="settings-permission-list"></div>
+            </div>
           </section>
 
           <section id="settings-workspaces" class="settings-section" data-settings-section="workspaces" tabindex="-1">
@@ -948,8 +955,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.9.17."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.9.17."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.9.18."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.9.18."
                 >i</button>
               </div>
             </div>
@@ -1393,8 +1400,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.9.17."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.9.17. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.9.18."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.9.18. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>

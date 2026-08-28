@@ -55,7 +55,8 @@ public static class ExecutionTurnToolPolicy
 
   public static ExecutionTurnToolScope Resolve(
     string objective,
-    bool validationProfileAvailable
+    bool validationProfileAvailable,
+    bool webSearchAvailable = false
   )
   {
     var normalized = Normalize(objective);
@@ -109,6 +110,7 @@ public static class ExecutionTurnToolPolicy
       tools.Add("run_validation_profile");
     }
     if (gitToolsAvailable) tools.AddRange(GitTools);
+    if (webSearchAvailable) tools.Add(WebSearchCapability.ToolName);
 
     return new ExecutionTurnToolScope(
       tools,

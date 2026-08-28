@@ -132,6 +132,22 @@ public sealed class WorkspaceProfilesController : ControllerBase
     );
   }
 
+  [HttpDelete("{id}/process-permissions/{permissionId}")]
+  public async Task<IActionResult> RevokeProcessPermission(
+    string id,
+    string permissionId,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      () => _profiles.RevokeProcessPermissionAsync(
+        id,
+        permissionId,
+        cancellationToken
+      )
+    );
+  }
+
   [HttpDelete("{id}")]
   public async Task<IActionResult> Remove(
     string id,

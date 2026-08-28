@@ -1,8 +1,46 @@
-# Agentic Router v0.9.17 alpha
+# Agentic Router v0.9.18 alpha
 
-This alpha adds a Linux x64 portable release alongside Windows x64 from the same
-core codebase. It retains the durable local supervised Execute acceptance from
-v0.9.15 while adding explicit, observable Linux Ollama acceleration profiles.
+This alpha closes the automatic Web Search, persistent exact-command permission,
+and Linux x64 release package. Web availability now follows the effective route
+without a manual toggle, useful native harness capabilities remain available,
+and an explicitly approved process command can be remembered for one workspace.
+
+## Automatic Web Search
+
+- Makes the composer Web indicator automatic: it is enabled or disabled from the
+  effective model, provider, harness, and configured integration rather than a
+  user-managed search toggle. Availability alone never starts a search.
+- Adds the bounded Host `web_search` capability for eligible routes. Queries are
+  validated, returned content is untrusted, and only absolute HTTPS citations are
+  exposed to the visible answer.
+- Exposes the shared Host bridge to every external harness while preserving useful
+  native web paths: Codex receives live web-search configuration, Qwen Code keeps
+  its native search/fetch tools, Claude Code keeps WebSearch/WebFetch, and OpenCode
+  retains its native web tools.
+- Avoids the Codex native-name collision by advertising the Host bridge under the
+  exact `agentic_router_web_search` alias when both paths exist.
+- Reports whether Web comes from the provider, harness, Host, or a combination in
+  the route capability evidence. A harness-native path can therefore enable Web in
+  Execute even when the optional Ollama Web Search key is not configured.
+
+## Persistent exact process permissions
+
+- Adds **Always allow exact command** to eligible process approvals. The saved
+  identity contains the resolved executable, exact argument digest and count, and
+  workspace-relative working directory; it is scoped to the active workspace.
+- Resolves shell interpreters before matching and continues to validate the command
+  and working directory on every use. Remembering one command does not grant a
+  wildcard shell or executable permission.
+- Shows the Host-authority warning before approval and lists saved permissions under
+  **Settings > Execution and approvals**, where each permission can be revoked.
+- Caps saved permissions per workspace and preserves the existing hard process,
+  filesystem, Git, and trusted-workspace boundaries.
+
+## Windows and Linux x64 packages
+
+This release also integrates the Linux x64 portable build alongside Windows x64
+from the same core codebase, with explicit, observable Linux Ollama acceleration
+profiles and automatic loopback-port fallback.
 
 - Preserves explicit URL configuration, uses loopback port 5000 when available,
   and automatically selects another loopback port when 5000 is occupied.

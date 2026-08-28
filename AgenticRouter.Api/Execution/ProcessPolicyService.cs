@@ -1,3 +1,5 @@
+using AgenticRouter.Api.WorkspaceProfiles;
+
 namespace AgenticRouter.Api.Execution;
 
 public sealed record ValidatedProcessCommand(
@@ -73,12 +75,15 @@ public sealed class ProcessPolicyService : IProcessPolicyService
   );
 
   private readonly ITrustedWorkspaceService _workspace;
+  private readonly IWorkspaceProfileService _workspaceProfiles;
 
   public ProcessPolicyService(
-    ITrustedWorkspaceService workspace
+    ITrustedWorkspaceService workspace,
+    IWorkspaceProfileService workspaceProfiles
   )
   {
     _workspace = workspace;
+    _workspaceProfiles = workspaceProfiles;
   }
 
   public async Task<ValidatedProcessCommand> ValidateAsync(
@@ -109,15 +114,9 @@ public sealed class ProcessPolicyService : IProcessPolicyService
       executable
     );
 
-    if (ShellExecutables.Contains(
+    var shellInterpreter = ShellExecutables.Contains(
       executableName
-    ))
-    {
-      throw new LocalActionException(
-        "process-validation",
-        "Shell interpreters are not allowed. Use a structured executable and argument list."
-      );
-    }
+    );
 
     if (
       !Path.IsPathFullyQualified(
@@ -148,6 +147,12 @@ public sealed class ProcessPolicyService : IProcessPolicyService
         cancellationToken
       );
     }
+    else if (shellInterpreter)
+    {
+      executable = ResolveShellExecutable(
+        executable
+      ) ?? executable;
+    }
 
     if (arguments.Count > 100 || arguments.Any(
       argument => argument.Length > 2_048
@@ -159,7 +164,9 @@ public sealed class ProcessPolicyService : IProcessPolicyService
       );
     }
 
-    foreach (var argument in arguments)
+    foreach (var argument in shellInterpreter
+      ? []
+      : arguments)
     {
       EnsureContainsNoControlCharacters(
         argument,
@@ -228,12 +235,18 @@ public sealed class ProcessPolicyService : IProcessPolicyService
         command
       )
     );
+    var permissionGranted = !safe && await _workspaceProfiles.HasProcessPermissionAsync(
+      executable,
+      arguments,
+      resolvedWorkingDirectory,
+      cancellationToken
+    );
 
     return new ValidatedProcessCommand(
       executable,
       arguments,
       resolvedWorkingDirectory,
-      !safe
+      !safe && !permissionGranted
     );
   }
 
@@ -289,5 +302,87 @@ public sealed class ProcessPolicyService : IProcessPolicyService
       || candidate.Contains(Path.AltDirectorySeparatorChar)
         ? candidate
         : null;
+  }
+
+  private static string? ResolveShellExecutable(string executable)
+  {
+    var fileName = Path.GetFileName(
+      executable
+    );
+    var candidateNames = Path.HasExtension(
+      fileName
+    )
+      ? [fileName]
+      : OperatingSystem.IsWindows()
+        ? new[]
+        {
+          fileName + ".exe",
+          fileName + ".cmd",
+          fileName + ".bat",
+          fileName
+        }
+        : [fileName];
+    var directories = new List<string>();
+    if (OperatingSystem.IsWindows())
+    {
+      directories.Add(
+        Environment.SystemDirectory
+      );
+      var windowsDirectory = Environment.GetFolderPath(
+        Environment.SpecialFolder.Windows
+      );
+      if (!string.IsNullOrWhiteSpace(
+        windowsDirectory
+      ))
+      {
+        directories.Add(
+          Path.Combine(
+            windowsDirectory,
+            "System32",
+            "WindowsPowerShell",
+            "v1.0"
+          )
+        );
+      }
+    }
+    directories.AddRange(
+      (Environment.GetEnvironmentVariable(
+        "PATH"
+      ) ?? string.Empty).Split(
+        Path.PathSeparator,
+        StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+      ).Select(
+        directory => directory.Trim(
+          '"'
+        )
+      ).Where(
+        Path.IsPathFullyQualified
+      )
+    );
+
+    foreach (var directory in directories.Distinct(
+      OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal
+    ))
+    {
+      foreach (var candidateName in candidateNames)
+      {
+        var candidate = Path.Combine(
+          directory,
+          candidateName
+        );
+        if (File.Exists(
+          candidate
+        ))
+        {
+          return Path.GetFullPath(
+            candidate
+          );
+        }
+      }
+    }
+
+    return null;
   }
 }

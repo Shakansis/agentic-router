@@ -247,6 +247,18 @@ else if (prompt.Contains("claude workspace recovery", StringComparison.OrdinalIg
     ? "Recovered with a workspace-confined read."
     : "Workspace recovery failed.";
 }
+else if (prompt.Contains("web host bridge claude code", StringComparison.OrdinalIgnoreCase))
+{
+  var web = await InvokeHostToolAsync(
+    "web_search",
+    new { query = "generic Host web capability" }
+  );
+  await WriteMarkerAsync(
+    "fake-claude-host-web.json",
+    new { succeeded = true, output = web }
+  );
+  finalText = "Claude used the Agentic Router Host web_search tool.";
+}
 else if (prompt.Contains("claude run process", StringComparison.OrdinalIgnoreCase))
 {
   finalText = await InvokeHostToolAsync(

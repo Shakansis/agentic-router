@@ -41,6 +41,6 @@ public sealed class ApprovalPolicyService : IApprovalPolicyService
       );
     }
 
-    return false;
+    return action.RequiresExplicitApproval;
   }
 }

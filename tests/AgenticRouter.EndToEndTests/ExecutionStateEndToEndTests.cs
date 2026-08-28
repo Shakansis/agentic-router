@@ -3829,18 +3829,100 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task AutoPolicyExecutesPolicyValidatedCommandWithoutDuplicateApproval()
+  public async Task AutoPolicyRequiresExplicitApprovalForUntrustedCommand()
   {
     await Page.GotoAsync("/");
     await SetExecuteModeAsync("auto");
-    await SendMessageAsync("execute unknown process");
+    await StartMessageAsync("execute unknown process");
 
+    await Expect(
+      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
+    ).ToBeVisibleAsync();
+    await Page.Locator(".action-approval").Last.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Approve",
+        Exact = true
+      }
+    ).ClickAsync();
     await Expect(
       Page.Locator("[data-event-type=\"action.process-output\"]")
     ).ToContainTextAsync("Exit code: 0");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PowerShellExactPermissionCanBeRememberedAndRevokedPerWorkspace()
+  {
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await StartMessageAsync("execute powershell process");
+
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToContainTextAsync(
+      "may access files, processes, the registry, or the network outside the trusted workspace"
+    );
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Always allow exact command",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator("[data-event-type=\"action.process-output\"]").Last
+    ).ToContainTextAsync("AR-POWERSHELL-OK");
+    var approvalCount = await Page.Locator(
+      "[data-event-type=\"action.awaiting-approval\"]"
+    ).CountAsync();
+
+    await SendMessageAsync("execute powershell process");
+    Assert.AreEqual(
+      approvalCount,
+      await Page.Locator(
+        "[data-event-type=\"action.awaiting-approval\"]"
+      ).CountAsync()
+    );
+    await Expect(
+      Page.Locator("[data-event-type=\"action.process-output\"]").Last
+    ).ToContainTextAsync("AR-POWERSHELL-OK");
+
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator(
+      "#settings-navigation [data-settings-target=\"execution\"]"
+    ).ClickAsync();
+    var permission = Page.Locator("#settings-process-permissions .settings-permission-row");
+    await Expect(permission).ToHaveCountAsync(1);
+    await Expect(permission).ToContainTextAsync("powershell");
+    await Expect(permission).ToContainTextAsync("4 exact argument(s)");
+    await Expect(permission).ToContainTextAsync("SHA-256");
+    await permission.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Revoke",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator("#settings-process-permissions")
+    ).ToContainTextAsync("No persistent process permissions");
+    await Page.Locator("#close-settings").ClickAsync();
+
+    await StartMessageAsync("execute powershell process");
     await Expect(
       Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
-    ).ToHaveCountAsync(0);
+    ).ToHaveCountAsync(approvalCount + 1);
+    await Page.Locator(".action-approval").Last.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Reject",
+        Exact = true
+      }
+    ).ClickAsync();
   }
 
   [TestMethod]
@@ -4001,14 +4083,22 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SetExecuteModeAsync(
       "auto"
     );
-    await SendMessageAsync(
+    await StartMessageAsync(
       "execute recover failed process"
     );
     await Expect(
       Page.Locator(
         "[data-event-type=\"action.awaiting-approval\"]"
       )
-    ).ToHaveCountAsync(0);
+    ).ToBeVisibleAsync();
+    await Page.Locator(".action-approval").Last.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Approve",
+        Exact = true
+      }
+    ).ClickAsync();
 
     await Expect(
       Page.Locator(

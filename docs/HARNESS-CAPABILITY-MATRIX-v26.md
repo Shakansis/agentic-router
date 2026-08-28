@@ -1,6 +1,6 @@
 # Harness capability matrix v26
 
-Audit date: 2026-08-21
+Audit date: 2026-08-27
 
 ## Reviewed implementations and versions
 
@@ -63,7 +63,7 @@ to normalize tool lists.
 | Exact edit/replace/patch | HOST_BRIDGE | NATIVE | NATIVE | NATIVE |
 | Create directory | HOST_BRIDGE | NATIVE | HOST_BRIDGE | HOST_BRIDGE |
 | `delete_paths`, including recursive directory delete | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
-| Structured process execution without a shell | HOST_BRIDGE | NATIVE + HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
+| Structured process execution, including explicitly approved shell interpreters | HOST_BRIDGE | NATIVE + HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Saved validation profile | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Git status/diff/log/show | HOST_BRIDGE | NATIVE + HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Git stage/unstage/commit/tag | HOST_BRIDGE | NATIVE + HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
@@ -88,8 +88,8 @@ to normalize tool lists.
 | Capability | Native | Codex | OpenCode | Qwen Code | Reason |
 |---|---|---|---|---|---|
 | Canonical move/rename/copy action | UNSUPPORTED | NATIVE_EXTRA | SECURITY_CONFLICT | SECURITY_CONFLICT | AR has no canonical move/copy Host action. Codex retains sandboxed shell support. OpenCode/Qwen can do it only through their unrestricted native shell surfaces, which are not used as boundary bypasses. |
-| Arbitrary native shell | UNSUPPORTED | NATIVE_EXTRA | SECURITY_CONFLICT | SECURITY_CONFLICT | OpenCode documents raw shell authority as the host user's filesystem/process/network authority with only best-effort path warnings. Qwen's managed guard is pre-execution only and explicitly does not provide continuous authorization or process-completion audit. Both receive safe structured `run_process` through Host instead. |
-| Web fetch/search in Execute | UNSUPPORTED | SECURITY_CONFLICT | NATIVE_EXTRA | NATIVE_EXTRA | Codex web search is disabled for the exact local-provider route because it may introduce an external service call outside the selected provider contract. OpenCode/Qwen direct web tools remain enabled and observable as native extras. |
+| Unmediated native shell | UNSUPPORTED | NATIVE_EXTRA | SECURITY_CONFLICT | SECURITY_CONFLICT | Unmediated shell authority remains outside the AR common boundary. The common Host `run_process` path accepts shell interpreters, labels their host-user authority, requires explicit approval even under `auto`, and may persist only a resolved executable + exact argument fingerprint + workspace working-directory rule that the user can revoke. |
+| Web fetch/search in Execute | HOST_BRIDGE | HOST_BRIDGE + NATIVE_EXTRA | HOST_BRIDGE + NATIVE_EXTRA | HOST_BRIDGE + NATIVE_EXTRA | The canonical Host `web_search` is offered only when its configured integration is available. Codex/OpenCode/Qwen native web tools remain enabled, model-visible, and observable instead of being removed to normalize harnesses. |
 | Session diff | HOST_BRIDGE | NATIVE_EXTRA | NATIVE_EXTRA | UNSUPPORTED | Host observation supplies the common diff/effect evidence. Codex/OpenCode native diff evidence is retained; the audited Qwen daemon contract does not expose session diff. |
 | LSP diagnostics | UNSUPPORTED | UNSUPPORTED | NATIVE_EXTRA | SECURITY_CONFLICT | OpenCode's built-in LSP remains available. Qwen's experimental LSP loads workspace `.lsp.json` process definitions, which are ambient executable configuration outside the registered AR capability profile. |
 | Todo/task-list state | UNSUPPORTED | UNSUPPORTED | NATIVE_EXTRA | NATIVE_EXTRA | Retained as non-effectful harness-local assistance where available. |
@@ -129,8 +129,8 @@ the bearer token is not persisted.
 ## Preserved native functionality
 
 - Codex: workspace-write sandbox, shell/command execution, native filesystem
-  edits, streaming reasoning/tool events, approvals, cancellation, and
-  thread resume.
+  edits, native web search, streaming reasoning/tool events, approvals,
+  cancellation, and thread resume.
 - OpenCode: read/list/glob/grep/edit/write/patch, web fetch/search, LSP/session
   diff, streaming events, permissions, cancellation, and session reuse.
 - Qwen Code: list/read/glob/grep/edit/write, web fetch/search, todo state,

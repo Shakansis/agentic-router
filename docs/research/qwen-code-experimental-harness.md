@@ -38,13 +38,15 @@ sandbox, as already required by this repository's local-listener tests.
 The isolated `settings.json` defines only the exact selected model through the
 OpenAI-compatible provider surface, pointed at the selected Ollama endpoint
 plus `/v1`. Retries, telemetry, updates, managed memory, hooks, MCP servers,
-web access, shell execution, skills, subagents, workflows, and cron tools are
-disabled. The closed core-tool list contains only workspace listing, reading,
-glob, literal search, edit, and write operations.
+ambient shell execution, skills, subagents, workflows, and cron tools are
+disabled. Qwen-native `web_fetch`, `web_search`, and todo remain available as
+observable native extras; AR-owned capabilities use the isolated authenticated
+Host MCP bridge.
 
 The daemon starts with `--workspace` set to the exact trusted root,
-`--require-auth`, `--safe-mode`, `--no-web`, bounded sessions and prompt
-deadlines. AR verifies the workspace reported by capabilities and verifies the
+`--require-auth`, bounded sessions and prompt deadlines. AR does not pass
+`--no-web`; native web tools remain model-visible. AR verifies the workspace
+reported by capabilities and verifies the
 initial configured model read-only by joining session context with workspace
 provider metadata. It uses `sessionScope: thread`; one Qwen session is reused
 per AR conversation while the owned daemon remains alive.

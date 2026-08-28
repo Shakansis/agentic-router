@@ -2,7 +2,7 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.9.17_alpha - Windows x64 and Linux x64 portable releases from one shared core, with explicit Linux Ollama acceleration profiles. This remains evaluation software.
+**Current Status**: v0.9.18_alpha - automatic route-aware Web Search, persistent exact-command permissions, and Windows/Linux x64 portable releases from one shared core. This remains evaluation software.
 
 ## Download
 
@@ -13,7 +13,7 @@ the ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.9.17_alpha` is a pre-release intended for evaluation. The package is
+`0.9.18_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources.
@@ -77,6 +77,7 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - **Optional Progress**: A semantic plan is not required before ordinary workspace actions
 - **Effect-Based Completion**: Actions count as completed only after the Host observes the required effect
 - **Boundary-Based Approval**: Trusted-workspace actions are automatic by default; real external or elevated-risk effects remain explicit
+- **Exact Process Permission**: An eligible approved process can be remembered only as its resolved executable, exact arguments, and workspace-relative working directory; saved permissions are scoped to one workspace and revocable in Settings
 - **Tool Effect Registry**: Post-resolution effect typing (inspection, file creation, modification, deletion, etc.)
 - **Codex Context Authority**: The Host-resolved effective context window is passed unchanged to the isolated Codex model catalog and thread; automatic compaction starts at 98% of that same total active-context limit
 - **Bounded Codex Continuation**: One visible continuation on the same model, provider, thread, workspace, and approval policy is allowed after an idle/disconnected stream or an unexpected App Server exit; the recovery prompt includes the exact cause and Host-confirmed plan/effect state
@@ -121,12 +122,14 @@ contexts. It does not create concurrent agents or delegate recursively.
 - `run_process` - Execute allowed processes with policy validation
 - `delete_files` - Delete explicit bounded files with hash checks and undo evidence
 - `run_validation_profile` - Run configured validation profiles
+- `web_search` - Search current external sources when the effective route and configured Host integration support it
 
 **Security Boundaries:**
 - All file paths are canonicalized and confined to the trusted workspace
 - Direct filesystem access to `.git` metadata is rejected; structured Git services remain separate
 - Protected instruction files require explicit mention in the user objective
 - Process execution uses an allowlist policy
+- Remembered process approvals never create wildcard shell or executable permissions
 - File writes use observed hashes to detect stale or external changes
 - Batch creation validates every target before the first write, verifies every
   result, and rolls back files created by a failed batch
@@ -411,14 +414,19 @@ evidence comes from provider metadata, Ollama `/api/show`, explicit adapter
 contracts, and separate behavioral tool conformance; model names alone do not
 prove support.
 
-Web search is always off until the user enables it. Google AI Studio uses
-Google Search grounding on supported Gemini models, Groq search is limited to
-officially supported Compound systems, and Cerebras does not advertise search
-without authoritative metadata. Local models can use a separately configured,
-DPAPI-protected Ollama Web Search key as a bounded read-only integration. It
-does not restore Ollama Cloud model discovery. Search content is treated as
-untrusted data, only absolute HTTPS citations are rendered, and results cannot
-invoke local tools.
+Web search availability follows the effective model/provider/harness route
+automatically. Availability does not perform a search: the model or native
+provider decides when current external evidence is needed. Google AI Studio
+uses Google Search grounding on supported Gemini models, Groq search is limited
+to officially supported Compound systems, and Cerebras does not advertise
+search without authoritative metadata. Tool-capable local models can use a
+separately configured, DPAPI-protected Ollama Web Search key through the shared
+Host `web_search` capability. It does not restore Ollama Cloud model discovery.
+Search content is treated as untrusted data, only absolute HTTPS citations are
+rendered, and results cannot invoke local tools. Useful provider-native and
+harness-native web capabilities remain observable native extras and can make Web
+available for an Execute route even when the separate Host search key is not
+configured.
 
 JPEG, PNG, WebP, and GIF images can be selected, dropped, or pasted into the
 composer. The Host verifies signatures, count, decoded byte limits, dimensions

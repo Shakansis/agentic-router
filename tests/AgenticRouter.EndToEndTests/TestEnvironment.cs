@@ -464,6 +464,18 @@ internal sealed class TestEnvironment : IAsyncDisposable
         }
       );
       history.EnsureSuccessStatusCode();
+      foreach (var permission in profile.GetProperty(
+        "processPermissions"
+      ).EnumerateArray())
+      {
+        var permissionId = permission.GetProperty(
+          "id"
+        ).GetString()!;
+        using var revoked = await HttpClient.DeleteAsync(
+          $"api/workspaces/{id}/process-permissions/{permissionId}"
+        );
+        revoked.EnsureSuccessStatusCode();
+      }
       using var modelProfile = await HttpClient.PutAsJsonAsync(
         $"api/model-organization/workspaces/{id}/preferred-profile",
         new

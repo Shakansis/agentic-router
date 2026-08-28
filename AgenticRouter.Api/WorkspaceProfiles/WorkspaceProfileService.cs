@@ -61,6 +61,26 @@ public interface IWorkspaceProfileService
     string model,
     CancellationToken cancellationToken
   );
+
+  Task<bool> HasProcessPermissionAsync(
+    string executable,
+    IReadOnlyList<string> arguments,
+    string workingDirectory,
+    CancellationToken cancellationToken
+  );
+
+  Task<WorkspaceProfileView> GrantProcessPermissionAsync(
+    string executable,
+    IReadOnlyList<string> arguments,
+    string workingDirectory,
+    CancellationToken cancellationToken
+  );
+
+  Task<WorkspaceProfileView> RevokeProcessPermissionAsync(
+    string workspaceId,
+    string permissionId,
+    CancellationToken cancellationToken
+  );
 }
 
 public sealed class WorkspaceProfileService : IWorkspaceProfileService
@@ -570,6 +590,167 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
     }
   }
 
+  public async Task<bool> HasProcessPermissionAsync(
+    string executable,
+    IReadOnlyList<string> arguments,
+    string workingDirectory,
+    CancellationToken cancellationToken
+  )
+  {
+    var active = await GetActiveDataAsync(
+      cancellationToken
+    );
+    if (active is null)
+    {
+      return false;
+    }
+
+    var relativeWorkingDirectory = WorkspaceProcessPermissionIdentity.NormalizeWorkingDirectory(
+      active.Path,
+      workingDirectory
+    );
+    return active.ProcessPermissions.Any(
+      permission => WorkspaceProcessPermissionIdentity.Matches(
+        permission,
+        executable,
+        arguments,
+        relativeWorkingDirectory
+      )
+    );
+  }
+
+  public async Task<WorkspaceProfileView> GrantProcessPermissionAsync(
+    string executable,
+    IReadOnlyList<string> arguments,
+    string workingDirectory,
+    CancellationToken cancellationToken
+  )
+  {
+    var active = await GetActiveDataAsync(
+      cancellationToken
+    ) ?? throw new WorkspaceProfileException(
+      "workspace-not-configured",
+      "process-permission",
+      "No active workspace is configured.",
+      false
+    );
+    var normalizedExecutable = WorkspaceProcessPermissionIdentity.NormalizeExecutable(
+      executable
+    );
+    var relativeWorkingDirectory = WorkspaceProcessPermissionIdentity.NormalizeWorkingDirectory(
+      active.Path,
+      workingDirectory
+    );
+    if (
+      string.IsNullOrWhiteSpace(
+        normalizedExecutable
+      )
+      || arguments.Count > 100
+      || arguments.Any(
+        argument => argument.Length > 2_048
+          || argument.Any(
+            char.IsControl
+          )
+      )
+    )
+    {
+      throw new WorkspaceProfileException(
+        "process-permission-invalid",
+        "process-permission",
+        "The exact process permission is invalid.",
+        false
+      );
+    }
+
+    return await UpdateAsync(
+      active.Id,
+      profile =>
+      {
+        if (profile.ProcessPermissions.Any(
+          permission => WorkspaceProcessPermissionIdentity.Matches(
+            permission,
+            executable,
+            arguments,
+            relativeWorkingDirectory
+          )
+        ))
+        {
+          return profile;
+        }
+        if (profile.ProcessPermissions.Count >= 100)
+        {
+          throw new WorkspaceProfileException(
+            "process-permission-limit",
+            "process-permission",
+            "The workspace already has the maximum number of persistent process permissions.",
+            false
+          );
+        }
+
+        return profile with
+        {
+          ProcessPermissions = profile.ProcessPermissions.Append(
+            new WorkspaceProcessPermissionData
+            {
+              Id = Guid.NewGuid().ToString(
+                "N"
+              ),
+              Executable = normalizedExecutable,
+              ArgumentsDigest = WorkspaceProcessPermissionIdentity.ComputeArgumentsDigest(
+                arguments
+              ),
+              ArgumentCount = arguments.Count,
+              WorkingDirectory = relativeWorkingDirectory,
+              CreatedAt = DateTimeOffset.UtcNow
+            }
+          ).ToArray()
+        };
+      },
+      cancellationToken
+    );
+  }
+
+  public Task<WorkspaceProfileView> RevokeProcessPermissionAsync(
+    string workspaceId,
+    string permissionId,
+    CancellationToken cancellationToken
+  )
+  {
+    return UpdateAsync(
+      workspaceId,
+      profile =>
+      {
+        if (!profile.ProcessPermissions.Any(
+          permission => string.Equals(
+            permission.Id,
+            permissionId,
+            StringComparison.Ordinal
+          )
+        ))
+        {
+          throw new WorkspaceProfileException(
+            "process-permission-not-found",
+            "process-permission",
+            "The workspace process permission was not found.",
+            false
+          );
+        }
+
+        return profile with
+        {
+          ProcessPermissions = profile.ProcessPermissions.Where(
+            permission => !string.Equals(
+              permission.Id,
+              permissionId,
+              StringComparison.Ordinal
+            )
+          ).ToArray()
+        };
+      },
+      cancellationToken
+    );
+  }
+
   private async Task<WorkspaceProfileView> UpdateAsync(
     string id,
     Func<WorkspaceProfileData, WorkspaceProfileData> update,
@@ -741,7 +922,23 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
       profile.ValidationProfile,
       validation.Valid,
       validation.Diagnostic,
-      profile.PreferredModelProfileId
+      profile.PreferredModelProfileId,
+      profile.ProcessPermissions.Select(
+        permission => new WorkspaceProcessPermissionView(
+          permission.Id,
+          Path.IsPathFullyQualified(
+            permission.Executable
+          )
+            ? Path.GetFileName(
+              permission.Executable
+            )
+            : permission.Executable,
+          permission.ArgumentsDigest,
+          permission.ArgumentCount,
+          permission.WorkingDirectory,
+          permission.CreatedAt
+        )
+      ).ToArray()
     );
   }
 }

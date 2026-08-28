@@ -15,16 +15,22 @@ public sealed class CapabilitiesController : ControllerBase
   private readonly IOllamaClient _providers;
   private readonly ISettingsStore _settingsStore;
   private readonly IToolNameResolver _toolNames;
+  private readonly IOllamaWebSearchService _webSearch;
+  private readonly IHarnessRegistry _harnesses;
 
   public CapabilitiesController(
     IOllamaClient providers,
     ISettingsStore settingsStore,
-    IToolNameResolver toolNames
+    IToolNameResolver toolNames,
+    IOllamaWebSearchService webSearch,
+    IHarnessRegistry harnesses
   )
   {
     _providers = providers;
     _settingsStore = settingsStore;
     _toolNames = toolNames;
+    _webSearch = webSearch;
+    _harnesses = harnesses;
   }
 
   [HttpGet("tool-names")]
@@ -43,6 +49,8 @@ public sealed class CapabilitiesController : ControllerBase
   [HttpGet("model")]
   public async Task<IActionResult> GetModel(
     [FromQuery] string model,
+    [FromQuery] string? interactionMode,
+    [FromQuery] string? harness,
     CancellationToken cancellationToken
   )
   {
@@ -79,6 +87,43 @@ public sealed class CapabilitiesController : ControllerBase
         model,
         cancellationToken
       );
+      var externalHarnessRoute = string.Equals(
+          interactionMode,
+          "execute",
+          StringComparison.Ordinal
+        )
+        && !string.Equals(
+          harness,
+          HarnessIds.Native,
+          StringComparison.OrdinalIgnoreCase
+        );
+      IAgentHarness? selectedHarness = null;
+      if (externalHarnessRoute && harness is not null)
+      {
+        _harnesses.TryGetAdapter(harness, out selectedHarness!);
+      }
+      var harnessNativeWebSearch = selectedHarness?.Definition.Capabilities.SupportsNativeWebSearch
+        ?? false;
+      var hostWebSearch = selectedHarness?.Definition.Capabilities.SupportsToolEvents == true
+        && await _webSearch.IsAvailableAsync(cancellationToken);
+      if (harnessNativeWebSearch || hostWebSearch)
+      {
+        capabilities = capabilities with
+        {
+          WebSearch = true,
+          ApplicationWebSearch = capabilities.ApplicationWebSearch || hostWebSearch,
+          Citations = capabilities.Citations || hostWebSearch
+        };
+      }
+      var webSource = capabilities.ProviderNativeWebSearch
+        ? "provider-native"
+        : harnessNativeWebSearch && hostWebSearch
+          ? "host-and-harness-native"
+          : harnessNativeWebSearch
+            ? "harness-native"
+            : capabilities.ApplicationWebSearch
+              ? "host-mediated"
+              : null;
       var isFallback = settings.Intentions.Values.Any(
         intent => string.Equals(
           intent.FallbackModel,
@@ -101,7 +146,8 @@ public sealed class CapabilitiesController : ControllerBase
           capabilities.WebSearch,
           capabilities.WebSearch
             ? null
-            : "The selected model and configured integrations do not expose an authorized web-search path."
+            : "The effective model, provider, harness, and configured integrations do not expose an authorized web-search path.",
+          webSource
         )
       );
     }

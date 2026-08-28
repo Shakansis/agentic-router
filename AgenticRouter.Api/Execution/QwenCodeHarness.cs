@@ -65,7 +65,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSandbox: false,
       SupportsSessionDiff: false,
       SupportsNativePermissions: true,
-      SupportsSteering: true
+      SupportsSteering: true,
+      SupportsNativeWebSearch: true
     ),
     ["ollama-local"]
   );
@@ -204,19 +205,22 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
       var session = await GetOrCreateSessionAsync(request, cancellationToken);
       var nativeCapabilities = request.UseMinimalToolInventory
-        ? ActiveNativeTools(hostProfile)
-        : HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode);
-      var hostBridgeNames = HarnessCapabilityProjection.HostBridgeTools(
-        HarnessIds.QwenCode,
-        hostProfile
-      );
+        ? ActiveNativeTools(hostProfile).Concat(MinimalCoreTools(hostProfile))
+        : HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode)
+          .Concat(DefaultCoreTools);
+      nativeCapabilities = nativeCapabilities
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+      var hostBridgeNames = hostBridgeTools
+        .Select(tool => tool.Name)
+        .ToArray();
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
         session.SynchronizedThroughVersion,
         [
           $"Agentic Router common capabilities implemented by Qwen native tools for this turn: {string.Join(", ", nativeCapabilities)}.",
           $"Agentic Router common capabilities supplied through the Host bridge for this turn: {string.Join(", ", hostBridgeNames)}.",
-          hostBridgeNames.Count == 0
+          hostBridgeNames.Length == 0
             ? "No Host bridge tool is available for this turn."
             : $"Deferred Host tools use exact names mcp__agentic_router__<canonical-name>. Resolve only one permitted selector with tool_search when needed: {string.Join(", ", hostBridgeNames.Select(name => $"select:mcp__agentic_router__{name}"))}.",
           $"Host approval policy: {hostProfile.ApprovalPolicy}."
@@ -878,9 +882,14 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     await _lifecycleGate.WaitAsync(cancellationToken);
     try
     {
-      var toolInventoryKey = useMinimalToolInventory
-        ? hostProfile.Signature
-        : "full-native-inventory";
+      var toolInventoryKey = (useMinimalToolInventory
+          ? hostProfile.Signature
+          : "full-native-inventory")
+        + "|"
+        + string.Join(
+          ',',
+          hostBridgeTools.Select(tool => tool.Name).Order(StringComparer.Ordinal)
+        );
       var key = $"{ollamaEndpoint.GetLeftPart(UriPartial.Authority)}|{model}|{contextWindowTokens}|{Path.GetFullPath(workingDirectory)}|{toolInventoryKey}";
       if (_process is { HasExited: false } && string.Equals(key, _configurationKey, StringComparison.Ordinal))
       {
@@ -910,7 +919,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         "--port", port.ToString(System.Globalization.CultureInfo.InvariantCulture),
         "--hostname", "127.0.0.1",
         "--require-auth",
-        "--no-web",
         "--max-sessions", "4",
         "--max-pending-prompts-per-session", "1",
         "--workspace", Path.GetFullPath(workingDirectory),
@@ -1447,7 +1455,11 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   )
   {
     var maximum = HostCapabilityProfile.Create(
-      ExecutionTurnToolPolicy.Resolve(string.Empty, validationProfileAvailable: true),
+      ExecutionTurnToolPolicy.Resolve(
+        string.Empty,
+        validationProfileAvailable: true,
+        webSearchAvailable: true
+      ),
       "auto"
     );
     return LocalActionPlanner.GetToolDefinitions(
@@ -1475,7 +1487,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
   private static string[] MinimalCoreTools(HostCapabilityProfile profile)
   {
-    return [];
+    return ["web_fetch", "web_search"];
   }
 
   private async Task StopOwnedProcessAsync()

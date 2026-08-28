@@ -21,8 +21,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
   private const int MaximumActivityText = 8_192;
   private const int MinimumStreamChunkLength = 128;
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
-  private static readonly string[] NativeTools = ["Read", "Glob", "Grep", "Edit", "Write"];
-  private static readonly string[] ReadOnlyTools = ["Read", "Glob", "Grep"];
+  private static readonly string[] NativeTools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"];
+  private static readonly string[] ReadOnlyTools = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"];
   private static readonly HarnessDefinition AdapterDefinition = new(
     HarnessIds.ClaudeCode,
     "Claude Code",
@@ -41,7 +41,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       SupportsSandbox: false,
       SupportsSessionDiff: false,
       SupportsNativePermissions: true,
-      SupportsSteering: false
+      SupportsSteering: false,
+      SupportsNativeWebSearch: true
     ),
     ["ollama-local"]
   );
@@ -559,7 +560,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       "--strict-mcp-config",
       "--tools", string.Join(',', nativeToolNames),
       "--permission-mode", "manual",
-      "--append-system-prompt", "Use only the explicitly offered Claude native tools and Agentic Router Host bridge tools. Do not seek web, browser, shell, plugins, skills, subagents, or other MCP capabilities."
+      "--append-system-prompt", "Use only the explicitly offered Claude native tools and Agentic Router Host bridge tools. Native WebSearch/WebFetch and Host web_search are valid when present in the tool inventory. Do not seek unoffered shell, plugins, skills, subagents, or other MCP capabilities."
     })
     {
       info.ArgumentList.Add(argument);
@@ -1333,7 +1334,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     {
       return NativeTools;
     }
-    var tools = new List<string>();
+    var tools = new List<string> { "WebSearch", "WebFetch" };
     if (profile.Allows("read_file"))
     {
       tools.Add("Read");

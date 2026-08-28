@@ -486,6 +486,7 @@ function bindElements() {
     "close-image-review",
     "dismiss-image-review",
     "settings-workspace-summary",
+    "settings-process-permissions",
     "settings-git-summary",
     "settings-validation-summary",
     "settings-advanced-summary",
@@ -619,7 +620,6 @@ function bindEvents() {
   elements.toggleSidebar.addEventListener("click", toggleSidebar);
   elements.modelSelector.addEventListener("change", handleModelSelectionChange);
   elements.capabilityTags.addEventListener("click", handleCapabilityTagClick);
-  elements.webToggle.addEventListener("click", toggleWebSearch);
   elements.attachImage.addEventListener(
     "click",
     () => elements.imageInput.click()
@@ -7463,6 +7463,7 @@ function renderSettingsSummaries() {
       + `Retention: ${state.settings.sessionHistory.maxSessionsPerWorkspace} sessions, `
       + `${formatBytes(state.settings.sessionHistory.maxSessionBytes)} each`
     : "No active workspace.";
+  renderProcessPermissions();
   elements.settingsGitSummary.textContent = state.git?.state === "available"
     ? `Repository: ${state.git.repository?.repositoryRoot ?? "."}\n`
       + `Branch: ${state.git.repository?.detachedHead ? "detached HEAD" : state.git.repository?.branch ?? "unborn"}\n`
@@ -7484,6 +7485,80 @@ function renderSettingsSummaries() {
     + `Git log limit: ${state.settings.gitDelivery.maxLogEntries} entries\n`
     + `Process history output: ${formatBytes(state.settings.sessionHistory.maxStoredProcessOutputBytesPerTurn)} per turn\n`
     + `Execution tools: ${state.settings.execution.maxToolCallsPerTurn} per turn`;
+}
+
+function renderProcessPermissions() {
+  const host = elements.settingsProcessPermissions;
+
+  if (!host) {
+    return;
+  }
+
+  host.replaceChildren();
+  const workspace = activeWorkspaceProfile();
+  const permissions = workspace?.processPermissions ?? [];
+
+  if (!workspace || permissions.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "settings-empty-state";
+    empty.textContent = workspace
+      ? "No persistent process permissions for this workspace."
+      : "Select an active workspace to manage process permissions.";
+    host.append(empty);
+    return;
+  }
+
+  for (const permission of permissions) {
+    const row = document.createElement("div");
+    row.className = "settings-permission-row";
+    const details = document.createElement("div");
+    details.className = "settings-permission-details";
+    const command = document.createElement("code");
+    command.textContent = formatProcessPermission(permission);
+    const scope = document.createElement("small");
+    scope.textContent = `Working directory: ${permission.workingDirectory}`;
+    details.append(command, scope);
+    const revoke = document.createElement("button");
+    revoke.className = "secondary-button";
+    revoke.type = "button";
+    revoke.textContent = "Revoke";
+    revoke.addEventListener(
+      "click",
+      () => revokeProcessPermission(workspace.id, permission.id, revoke)
+    );
+    row.append(details, revoke);
+    host.append(row);
+  }
+}
+
+function formatProcessPermission(permission) {
+  return `${permission.executable} · ${permission.argumentCount} exact argument(s) · `
+    + `SHA-256 ${permission.argumentsDigest.slice(0, 12)}`;
+}
+
+async function revokeProcessPermission(workspaceId, permissionId, button) {
+  button.disabled = true;
+
+  try {
+    const updated = await fetchJson(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}`
+        + `/process-permissions/${encodeURIComponent(permissionId)}`,
+      {
+        method: "DELETE"
+      }
+    );
+    state.workspaceProfiles = {
+      ...state.workspaceProfiles,
+      profiles: (state.workspaceProfiles?.profiles ?? []).map(
+        profile => profile.id === updated.id ? updated : profile
+      )
+    };
+    renderSettingsSummaries();
+    showToast("Persistent process permission revoked.");
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message);
+  }
 }
 
 function modelOptions() {
@@ -8271,7 +8346,7 @@ function renderOllamaWebSearchSettings() {
   note.className = "runtime-note";
   note.textContent =
     "Read-only search for local models. It is separate from Ollama Cloud models "
-      + "and is used only when Web is explicitly enabled in the Composer.";
+      + "and becomes automatically available when the effective route can use it.";
   const keyField = document.createElement("label");
   const keyLabel = document.createElement("span");
   keyLabel.textContent = integration.hasKey
@@ -9452,6 +9527,8 @@ async function refreshSelectedModelCapabilities(
   try {
     const view = await fetchJson(
       `/api/capabilities/model?model=${encodeURIComponent(capabilityModel)}`
+        + `&interactionMode=${encodeURIComponent(state.interactionMode)}`
+        + `&harness=${encodeURIComponent(state.harness)}`
     );
 
     if (requestId !== state.capabilityRequestId) {
@@ -9463,12 +9540,8 @@ async function refreshSelectedModelCapabilities(
       role: role ?? state.activeAgentRole ?? view.role
     };
 
-    if (!view.webAvailable) {
-      state.webEnabled = false;
-      state.webControlState = "unavailable";
-    } else if (state.webControlState === "unavailable") {
-      state.webControlState = "available";
-    }
+    state.webEnabled = Boolean(view.webAvailable);
+    state.webControlState = state.webEnabled ? "enabled" : "unavailable";
   } catch (error) {
     if (requestId !== state.capabilityRequestId) {
       return;
@@ -9545,12 +9618,16 @@ function renderCapabilityContext() {
         label: "Web",
         kind: "web",
         status: state.webEnabled
-          ? "Enabled in this conversation"
-          : "Available, but disabled in this conversation",
+          ? "Automatically available for this route"
+          : "Unavailable for this route",
         enabled: state.webEnabled,
-        description: capabilities.providerNativeWebSearch
-          ? "Native provider web search. The user must explicitly enable it for the conversation."
-          : "Separate read-only Ollama search. The user must explicitly enable it for the conversation.",
+        description: state.modelCapability.webSource === "provider-native"
+          ? "Provider-native web search is automatically available; the provider decides when current web evidence is needed."
+          : state.modelCapability.webSource === "harness-native"
+            ? "The selected harness exposes its native web tools automatically; the model decides when current web evidence is needed."
+            : state.modelCapability.webSource === "host-and-harness-native"
+              ? "Both harness-native web tools and bounded Agentic Router Host web_search are automatically available."
+              : "The Agentic Router Host automatically offers bounded read-only web search; the model decides when current web evidence is needed.",
         documentationUrl: isLocal
           ? "https://docs.ollama.com/capabilities/web-search"
           : routerCapabilityDocumentation
@@ -9702,21 +9779,12 @@ function closeCapabilityPopovers() {
 
 function renderWebControl() {
   const available = Boolean(state.modelCapability?.webAvailable);
-
-  if (!available) {
-    state.webEnabled = false;
-    state.webControlState = "unavailable";
-  } else if (state.webEnabled) {
-    state.webControlState = "enabled";
-  } else if (!["available", "off"].includes(state.webControlState)) {
-    state.webControlState = "available";
-  }
+  state.webEnabled = available;
+  state.webControlState = available ? "enabled" : "unavailable";
 
   const labels = {
     unavailable: "Web unavailable",
-    available: "Web available",
-    enabled: "Web enabled",
-    off: "Web off"
+    enabled: "Web available automatically"
   };
   elements.webToggle.dataset.state = state.webControlState;
   elements.webToggleLabel.textContent = labels[state.webControlState];
@@ -9724,28 +9792,21 @@ function renderWebControl() {
     "aria-label",
     labels[state.webControlState]
   );
-  elements.webToggle.disabled = !available || Boolean(state.requestController);
+  elements.webToggle.disabled = true;
   elements.webToggle.setAttribute(
     "aria-pressed",
     String(state.webEnabled)
   );
-  elements.webToggle.title = available
-    ? state.modelCapability.capabilities.providerNativeWebSearch
-      ? "Official provider search. Click to explicitly enable it in this conversation."
-      : "Separate read-only Ollama search. Click to explicitly enable it in this conversation."
-    : state.modelCapability?.webUnavailableReason
+    elements.webToggle.title = available
+      ? state.modelCapability.webSource === "provider-native"
+        ? "Official provider search is automatically available for this route."
+        : state.modelCapability.webSource === "harness-native"
+          ? "Harness-native web search is automatically available; the model decides when to use it."
+          : state.modelCapability.webSource === "host-and-harness-native"
+            ? "Harness-native and bounded Host web search are automatically available."
+            : "Bounded Host web search is automatically available; the model decides when to use it."
+      : state.modelCapability?.webUnavailableReason
       ?? "No authorized search integration is available.";
-}
-
-function toggleWebSearch() {
-  if (!state.modelCapability?.webAvailable || state.requestController) {
-    return;
-  }
-
-  state.webEnabled = !state.webEnabled;
-  state.webControlState = state.webEnabled ? "enabled" : "off";
-  renderCapabilityContext();
-  updateComposerStatus();
 }
 
 function providerFromModel(model) {
@@ -9988,10 +10049,8 @@ async function ensureCloudImageApproval(model) {
 
 async function resetCloudImagePrivacy(browserSessionId) {
   state.cloudImageApprovals.clear();
-  state.webEnabled = false;
-  state.webControlState = state.modelCapability?.webAvailable
-    ? "available"
-    : "unavailable";
+  state.webEnabled = Boolean(state.modelCapability?.webAvailable);
+  state.webControlState = state.webEnabled ? "enabled" : "unavailable";
   clearAttachments();
 
   if (!browserSessionId) {
@@ -10030,6 +10089,7 @@ function setInteractionMode(mode) {
   updateInteractionControls();
   updateHarnessControls();
   updateComposerStatus();
+  refreshSelectedModelCapabilities();
 }
 
 function handleApprovalPolicyChange() {
@@ -10061,6 +10121,7 @@ function handleHarnessChange() {
   state.harness = elements.harnessSelector.value;
   updateHarnessControls();
   updateComposerStatus();
+  refreshSelectedModelCapabilities();
 }
 
 function harnessDisplayLabel(definition) {
@@ -13979,6 +14040,13 @@ function addApprovalActivity(assistant, streamEvent) {
     content.append(command.host);
   }
 
+  if (action.canRememberApproval) {
+    const warning = document.createElement("p");
+    warning.className = "approval-boundary-warning";
+    warning.textContent = "This process runs with the Host user's authority and may access files, processes, the registry, or the network outside the trusted workspace.";
+    content.append(warning);
+  }
+
   const controls = document.createElement("div");
   controls.className = "approval-controls";
   const reject = document.createElement("button");
@@ -13989,7 +14057,18 @@ function addApprovalActivity(assistant, streamEvent) {
   approve.className = "primary-button";
   approve.type = "button";
   approve.textContent = "Approve";
+  const remember = action.canRememberApproval
+    ? document.createElement("button")
+    : null;
+  if (remember) {
+    remember.className = "primary-button";
+    remember.type = "button";
+    remember.textContent = "Always allow exact command";
+  }
   controls.append(reject, approve);
+  if (remember) {
+    controls.append(remember);
+  }
   content.append(controls);
   row.append(summary, content);
   assistant.workActivity.hidden = false;
@@ -14023,7 +14102,24 @@ function addApprovalActivity(assistant, streamEvent) {
       reject,
       status,
       row,
-      command.input
+      command.input,
+      false,
+      remember
+    )
+  );
+  remember?.addEventListener(
+    "click",
+    () => decideAction(
+      action.actionId,
+      action.executionSessionId,
+      true,
+      approve,
+      reject,
+      status,
+      row,
+      command.input,
+      true,
+      remember
     )
   );
   reject.addEventListener(
@@ -14036,7 +14132,9 @@ function addApprovalActivity(assistant, streamEvent) {
       reject,
       status,
       row,
-      command.input
+      command.input,
+      false,
+      remember
     )
   );
 }
@@ -14202,17 +14300,26 @@ async function decideAction(
   rejectButton,
   status,
   approval,
-  input
+  input,
+  rememberForWorkspace = false,
+  rememberButton = null
 ) {
   approveButton.disabled = true;
   rejectButton.disabled = true;
+  if (rememberButton) {
+    rememberButton.disabled = true;
+  }
   if (input) {
     input.disabled = true;
   }
-  status.textContent = approved ? "Approving…" : "Rejecting…";
+  status.textContent = approved
+    ? rememberForWorkspace
+      ? "Approving and remembering…"
+      : "Approving…"
+    : "Rejecting…";
 
   try {
-    await fetchJson(
+    const decision = await fetchJson(
       `/api/actions/${encodeURIComponent(actionId)}/decision`,
       {
         method: "POST",
@@ -14223,6 +14330,7 @@ async function decideAction(
           approved,
           browserSessionId: state.browserSessionId,
           executionSessionId,
+          rememberForWorkspace,
           editedText: approved
             && input
             && input.value !== (approval.dataset.editableText ?? "")
@@ -14231,6 +14339,10 @@ async function decideAction(
         })
       }
     );
+    if (decision.rememberedForWorkspace) {
+      state.workspaceProfiles = await fetchJson("/api/workspaces");
+      renderSettingsSummaries();
+    }
     if (
       approval.dataset.decision === "completed"
       || approval.dataset.decision === "failed"
@@ -14262,6 +14374,9 @@ async function decideAction(
     showToast(error.message);
     approveButton.disabled = false;
     rejectButton.disabled = false;
+    if (rememberButton) {
+      rememberButton.disabled = false;
+    }
   }
 }
 
@@ -14954,7 +15069,7 @@ function updateComposerStatus() {
       state.attachments.length > 0
         ? `${state.attachments.length} image${state.attachments.length === 1 ? "" : "s"}`
         : null,
-      state.webEnabled ? "Web enabled" : null,
+      state.webEnabled ? "Web automatic" : null,
       "Press Enter to send"
     ].filter(Boolean).join(" · ");
   } else {

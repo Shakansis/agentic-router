@@ -719,6 +719,18 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               "chat workspace mutation attempt",
               StringComparison.OrdinalIgnoreCase
             )
+            || message.Content.Contains(
+              "chat web search request",
+              StringComparison.OrdinalIgnoreCase
+            )
+            || message.Content.Contains(
+              "trigger-unsafe-citation",
+              StringComparison.OrdinalIgnoreCase
+            )
+            || message.Content.Contains(
+              "trigger-search-cancel",
+              StringComparison.OrdinalIgnoreCase
+            )
           )
       )
     )
@@ -4999,6 +5011,31 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
 
     if (current.Contains(
+      "powershell process",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "run_process",
+        arguments = new
+        {
+          executable = "powershell",
+          arguments = new[]
+          {
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Write-Output AR-POWERSHELL-OK"
+          },
+          workingDirectory = ".",
+          timeoutSeconds = 10
+        },
+        explanation = "Run an explicitly approved PowerShell diagnostic fixture."
+      };
+    }
+
+    if (current.Contains(
       "unknown process",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -5385,6 +5422,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    var webSearchAttempt = messages.Any(
+      message => message.Role == "user"
+        && (
+          message.Content.Contains(
+            "chat web search request",
+            StringComparison.OrdinalIgnoreCase
+          )
+          || message.Content.Contains(
+            "trigger-unsafe-citation",
+            StringComparison.OrdinalIgnoreCase
+          )
+          || message.Content.Contains(
+            "trigger-search-cancel",
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+    );
     var budgetAttempt = messages.Any(
       message => message.Role == "user"
         && message.Content.Contains(
@@ -5410,6 +5464,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       ? "Chat completed from the eight trusted-workspace reads already collected."
       : toolResult is null
         ? string.Empty
+        : webSearchAttempt
+          ? $"Chat used bounded Host web evidence. {toolResult.Content}"
         : mutationAttempt
           ? $"Chat mutation was rejected by the read-only boundary. {toolResult.Content}"
           : budgetAttempt
@@ -5424,10 +5480,30 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         {
           function = new
           {
-            name = mutationAttempt
+            name = webSearchAttempt
+              ? "web_search"
+              : mutationAttempt
               ? "create_file"
               : "read_file",
-            arguments = mutationAttempt
+            arguments = webSearchAttempt
+              ? JsonSerializer.SerializeToElement(
+                new
+                {
+                  query = messages.Any(message => message.Content.Contains(
+                      "trigger-unsafe-citation",
+                      StringComparison.OrdinalIgnoreCase
+                    ))
+                    ? "trigger-unsafe-citation"
+                    : messages.Any(message => message.Content.Contains(
+                        "trigger-search-cancel",
+                        StringComparison.OrdinalIgnoreCase
+                      ))
+                      ? "trigger-search-cancel"
+                      : "deterministic Host web sources"
+                },
+                CompactJsonOptions
+              )
+              : mutationAttempt
               ? JsonSerializer.SerializeToElement(
                 new
                 {
@@ -5457,7 +5533,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         model,
         content,
         toolResult is null
-          ? mutationAttempt
+          ? webSearchAttempt
+            ? "I will ask the Host for current public web evidence."
+            : mutationAttempt
             ? "I will try a mutation that Chat must reject."
             : "I will inspect the requested workspace file."
           : budgetAttempt

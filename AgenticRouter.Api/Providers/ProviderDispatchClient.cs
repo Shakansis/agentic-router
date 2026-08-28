@@ -532,9 +532,10 @@ public sealed class ProviderDispatchClient : IOllamaClient
         model,
         cancellationToken
       );
-      var applicationWebSearch = await _webSearch.IsAvailableAsync(
-        cancellationToken
-      );
+      var applicationWebSearch = capabilities.NativeTools
+        && await _webSearch.IsAvailableAsync(
+          cancellationToken
+        );
       return capabilities with
       {
         WebSearch = applicationWebSearch,

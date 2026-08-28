@@ -20,7 +20,8 @@ public sealed class NativeHarnessAdapter : IAgentHarness
       SupportsSandbox: false,
       SupportsSessionDiff: true,
       SupportsNativePermissions: false,
-      SupportsSteering: false
+      SupportsSteering: false,
+      SupportsNativeWebSearch: false
     )
   );
 

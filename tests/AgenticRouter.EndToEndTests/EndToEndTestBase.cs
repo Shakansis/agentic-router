@@ -423,11 +423,29 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
 
     if (expectProcessExecuted)
     {
-      await SendMessageAsync(prompt);
-      await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
+      await StartMessageAsync(prompt);
+      await Expect(Page.Locator(".action-approval")).ToBeVisibleAsync();
+      await Page.Locator(".action-approval").Last.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Approve",
+          Exact = true
+        }
+      ).ClickAsync();
       await Expect(
         Page.Locator("[data-event-type=\"action.process-output\"]")
       ).ToContainTextAsync("hello");
+      await Expect(
+        Page.Locator(".message.assistant .activity").Last
+      ).ToHaveAttributeAsync(
+        "data-terminal",
+        "true",
+        new()
+        {
+          Timeout = 20_000
+        }
+      );
     }
     else
     {
@@ -687,6 +705,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       "read_file",
       "get_file_info",
       "search_text",
+      "web_search",
       "create_file",
       "create_files",
       "write_file",

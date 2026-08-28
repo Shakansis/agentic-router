@@ -67,6 +67,7 @@ public sealed class ChatStreamService
   private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly IImageAttachmentValidator _imageValidator;
   private readonly ICloudImageApprovalStore _cloudImageApprovals;
+  private readonly IOllamaWebSearchService _webSearch;
   private readonly IHarnessRegistry _harnesses;
   private readonly IExecutionContextTurnRunner _contextTurns;
   private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
@@ -111,6 +112,7 @@ public sealed class ChatStreamService
     IWorkspaceProfileService workspaceProfiles,
     IImageAttachmentValidator imageValidator,
     ICloudImageApprovalStore cloudImageApprovals,
+    IOllamaWebSearchService webSearch,
     IHarnessRegistry harnesses,
     IExecutionContextTurnRunner contextTurns,
     IAutoModelHarnessRoutingService autoModelHarnessRouter,
@@ -146,6 +148,7 @@ public sealed class ChatStreamService
     _workspaceProfiles = workspaceProfiles;
     _imageValidator = imageValidator;
     _cloudImageApprovals = cloudImageApprovals;
+    _webSearch = webSearch;
     _harnesses = harnesses;
     _contextTurns = contextTurns;
     _autoModelHarnessRouter = autoModelHarnessRouter;
@@ -813,10 +816,40 @@ public sealed class ChatStreamService
       var capabilityResolution = await ResolveTurnCapabilitiesAsync(
         baseUri,
         selectedModel,
-        request.WebSearchEnabled || images.Count > 0,
+        images.Count > 0,
         cancellationToken
       );
       var capabilities = capabilityResolution.Capabilities;
+      var externalHarness = string.Equals(
+          request.InteractionMode,
+          "execute",
+          StringComparison.Ordinal
+        )
+        && !string.Equals(
+          request.Harness,
+          HarnessIds.Native,
+          StringComparison.OrdinalIgnoreCase
+        );
+      var selectedHarnessDefinition = externalHarness
+        ? GetHarnessDefinition(request.Harness)
+        : null;
+      var harnessNativeWebSearch = selectedHarnessDefinition?.Capabilities.SupportsNativeWebSearch
+        ?? false;
+      var bridgedApplicationWebSearch = selectedHarnessDefinition?.Capabilities.SupportsToolEvents == true
+        && await _webSearch.IsAvailableAsync(cancellationToken);
+      if (harnessNativeWebSearch || bridgedApplicationWebSearch)
+      {
+        capabilities = capabilities with
+        {
+          WebSearch = true,
+          ApplicationWebSearch = capabilities.ApplicationWebSearch || bridgedApplicationWebSearch,
+          Citations = capabilities.Citations || bridgedApplicationWebSearch
+        };
+      }
+      request = request with
+      {
+        WebSearchEnabled = capabilities.WebSearch
+      };
 
       if (capabilityResolution.Warning is not null)
       {
@@ -839,7 +872,7 @@ public sealed class ChatStreamService
         images
       );
       var chatOptions = new ProviderChatOptions(
-        request.WebSearchEnabled,
+        request.WebSearchEnabled && capabilities.ProviderNativeWebSearch,
         images
       );
       yield return Event(
@@ -864,10 +897,14 @@ public sealed class ChatStreamService
       {
         yield return Event(
           requestId,
-          "web.search-enabled",
+          "web.search-available",
           capabilities.ProviderNativeWebSearch
-            ? "Provider-native web search explicitly enabled for this request."
-            : "Application-mediated Ollama Web Search explicitly enabled for this request.",
+            ? "Provider-native web search is automatically available for this model."
+            : harnessNativeWebSearch && bridgedApplicationWebSearch
+              ? $"{selectedHarnessDefinition!.DisplayName} native web search and Host-mediated web_search are automatically available; the model decides when to use them."
+              : harnessNativeWebSearch
+                ? $"{selectedHarnessDefinition!.DisplayName} native web search is automatically available; the model decides when to use it."
+            : "Host-mediated Ollama Web Search is automatically available for this model; the model decides when to call it.",
           stopwatch,
           selectedModel,
           isAuto
@@ -1077,8 +1114,24 @@ public sealed class ChatStreamService
         var executionToolScope = invocation.ToolScopeOverride
           ?? ExecutionTurnToolPolicy.Resolve(
             request.Message,
-            activeValidationProfile is not null
+            activeValidationProfile is not null,
+            request.WebSearchEnabled && capabilities.ApplicationWebSearch
           );
+        executionToolScope = executionToolScope with
+        {
+          AvailableTools = executionToolScope.AvailableTools
+            .Where(tool => !string.Equals(
+              tool,
+              WebSearchCapability.ToolName,
+              StringComparison.OrdinalIgnoreCase
+            ))
+            .Concat(
+              request.WebSearchEnabled && capabilities.ApplicationWebSearch
+                ? [WebSearchCapability.ToolName]
+                : []
+            )
+            .ToArray()
+        };
         var hostCapabilities = HostCapabilityProfile.Create(
           executionToolScope,
           request.ApprovalPolicy
@@ -1278,9 +1331,9 @@ public sealed class ChatStreamService
         recoveryTarget = selectedModel;
       }
 
-      var useWorkspaceReadTools = !request.WebSearchEnabled
-        && images.Count == 0;
-      await foreach (var streamEvent in useWorkspaceReadTools
+      var useHostReadOnlyTools = images.Count == 0
+        && !capabilities.ProviderNativeWebSearch;
+      await foreach (var streamEvent in useHostReadOnlyTools
         ? StreamChatWithWorkspaceReadsAsync(
           baseUri,
           selectedModel,
@@ -1295,6 +1348,7 @@ public sealed class ChatStreamService
           progress,
           selectedModelRole,
           chatOptions,
+          request.WebSearchEnabled && capabilities.ApplicationWebSearch,
           cancellationToken
         )
         : StreamAttemptAsync(
@@ -1335,7 +1389,7 @@ public sealed class ChatStreamService
           var fallbackCapabilityResolution = await ResolveTurnCapabilitiesAsync(
             baseUri,
             localFallback,
-            request.WebSearchEnabled || images.Count > 0,
+            images.Count > 0,
             cancellationToken
           );
           var fallbackCapabilities = fallbackCapabilityResolution.Capabilities;
@@ -1356,16 +1410,12 @@ public sealed class ChatStreamService
           if (
             images.Count > 0
             && !fallbackCapabilities.Vision
-            || request.WebSearchEnabled
-            && !fallbackCapabilities.WebSearch
           )
           {
             yield return Event(
               requestId,
               "cloud.local-fallback-incompatible",
-              images.Count > 0
-                ? $"Local fallback {localFallback} is text-only; image attachments were not stripped."
-                : $"Local fallback {localFallback} cannot perform the explicitly enabled web search.",
+              $"Local fallback {localFallback} is text-only; image attachments were not stripped.",
               stopwatch,
               localFallback,
               intention
@@ -1385,19 +1435,41 @@ public sealed class ChatStreamService
             selectedModel = localFallback;
             selectedModelRole = UsageModelRoles.Fallback;
             progress.Failure = null;
+            var fallbackChatOptions = new ProviderChatOptions(
+              fallbackCapabilities.ProviderNativeWebSearch,
+              images
+            );
+            var fallbackUsesHostReadOnlyTools = images.Count == 0
+              && !fallbackCapabilities.ProviderNativeWebSearch;
 
-            await foreach (var streamEvent in StreamAttemptAsync(
-              baseUri,
-              selectedModel,
-              messages,
-              requestId,
-              intention,
-              stopwatch,
-              progress,
-              selectedModelRole,
-              chatOptions,
-              cancellationToken
-            ))
+            await foreach (var streamEvent in fallbackUsesHostReadOnlyTools
+              ? StreamChatWithWorkspaceReadsAsync(
+                baseUri,
+                selectedModel,
+                messages,
+                models,
+                fallbackCapabilities,
+                requestId,
+                intention,
+                stopwatch,
+                progress,
+                selectedModelRole,
+                fallbackChatOptions,
+                fallbackCapabilities.ApplicationWebSearch,
+                cancellationToken
+              )
+              : StreamAttemptAsync(
+                baseUri,
+                selectedModel,
+                messages,
+                requestId,
+                intention,
+                stopwatch,
+                progress,
+                selectedModelRole,
+                fallbackChatOptions,
+                cancellationToken
+              ))
             {
               yield return streamEvent;
             }
@@ -2055,6 +2127,7 @@ public sealed class ChatStreamService
         null,
         null,
         partialSummary,
+        Citations: execution.Citations,
         ContextUsage: execution.LatestContextUsage,
         ResponseTail: partialResponse,
         ResponseTailHtml: _markdownRenderer.Render(partialResponse)
@@ -2091,6 +2164,7 @@ public sealed class ChatStreamService
       null,
       null,
       hostReview.Summary,
+      Citations: execution.Citations,
       ContextUsage: execution.LatestContextUsage ?? contextUsage,
       ResponseTail: hostResponse,
       ResponseTailHtml: _markdownRenderer.Render(hostResponse)
@@ -2167,6 +2241,7 @@ public sealed class ChatStreamService
     var approvedDeletionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var approvedNativeMutation = false;
     HarnessEvent? terminalFailure = null;
+    IReadOnlyList<ProviderCitation>? webCitations = null;
     var latestContextUsage = initialContextUsage;
     var liveContextBase = initialContextUsage;
     long liveOutputCharacters = 0;
@@ -2408,6 +2483,10 @@ public sealed class ChatStreamService
             projectAwareness,
             observer,
             actionJournal,
+            citations => webCitations = MergeCitations(
+              webCitations,
+              citations
+            ),
             cancellationToken
           ))
           {
@@ -2919,6 +2998,7 @@ public sealed class ChatStreamService
       _markdownRenderer.Render(visibleAnswer),
       null,
       ExecutionSession: summary,
+      Citations: webCitations,
       ContextUsage: latestContextUsage,
       ResponseTail: responseTail,
       ResponseTailHtml: _markdownRenderer.Render(responseTail)
@@ -3086,6 +3166,46 @@ public sealed class ChatStreamService
       or "read_file" or "list_directory" or "grep_search";
   }
 
+  private static IReadOnlyList<ProviderCitation> MergeCitations(
+    IReadOnlyList<ProviderCitation>? current,
+    IReadOnlyList<ProviderCitation> added
+  )
+  {
+    return (current ?? [])
+      .Concat(added)
+      .DistinctBy(citation => citation.Url, StringComparer.Ordinal)
+      .ToArray();
+  }
+
+  private async Task<WebSearchAttempt> TryWebSearchAsync(
+    JsonElement arguments,
+    string model,
+    string requestPurpose,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var query = WebSearchCapability.ReadQuery(arguments);
+      var context = await _webSearch.SearchAsync(
+        query,
+        UsageContext(
+          model,
+          UsageModelRoles.WebSearchSynthesis,
+          requestPurpose
+        ),
+        cancellationToken
+      );
+      return new WebSearchAttempt(query, context, null);
+    }
+    catch (Exception failure) when (
+      failure is CapabilityException or LocalActionException
+    )
+    {
+      return new WebSearchAttempt(null, null, failure);
+    }
+  }
+
   private async IAsyncEnumerable<ChatStreamEvent> ExecuteHarnessHostToolAsync(
     IAgentHarnessTransport harness,
     HarnessDefinition harnessDefinition,
@@ -3100,6 +3220,7 @@ public sealed class ChatStreamService
     ProjectAwarenessSettings projectAwareness,
     HarnessWorkspaceObserver observer,
     IExecutionActionJournal? actionJournal,
+    Action<IReadOnlyList<ProviderCitation>> captureCitations,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -3115,6 +3236,92 @@ public sealed class ChatStreamService
         harnessEvent.Message ?? "Dynamic tool request omitted its call id, tool, or arguments.",
         false
       );
+    }
+
+    if (string.Equals(
+      harnessEvent.Tool,
+      WebSearchCapability.ToolName,
+      StringComparison.Ordinal
+    ))
+    {
+      if (!request.WebSearchEnabled)
+      {
+        const string unavailable = "Host web_search is unavailable for this model and configured integration.";
+        await harness.ResolveToolCallAsync(
+          harnessEvent.ToolCallId,
+          false,
+          unavailable,
+          cancellationToken
+        );
+        session.RecordToolFailure();
+        yield return Event(
+          requestId,
+          "web.search-unavailable",
+          unavailable,
+          stopwatch,
+          model,
+          intention
+        );
+        yield break;
+      }
+
+      yield return Event(
+        requestId,
+        "web.search-started",
+        $"{harnessDefinition.DisplayName} requested Host web search.",
+        stopwatch,
+        model,
+        intention
+      );
+      var search = await TryWebSearchAsync(
+        arguments,
+        model,
+        "harness-host-web-search",
+        cancellationToken
+      );
+      if (search.Context is not null)
+      {
+        var web = search.Context;
+        captureCitations(web.Citations);
+        await harness.ResolveToolCallAsync(
+          harnessEvent.ToolCallId,
+          true,
+          web.UntrustedContext,
+          cancellationToken
+        );
+        session.RecordToolSuccess();
+        yield return Event(
+          requestId,
+          "web.search-completed",
+          $"Host web search returned {web.Citations.Count} bounded HTTPS source(s) to {harnessDefinition.DisplayName}.",
+          stopwatch,
+          model,
+          intention
+        );
+      }
+      else
+      {
+        var failure = search.Failure ?? new LocalActionException(
+          "web-search-failed",
+          "Host web search did not return a result."
+        );
+        await harness.ResolveToolCallAsync(
+          harnessEvent.ToolCallId,
+          false,
+          failure.Message,
+          cancellationToken
+        );
+        session.RecordToolFailure();
+        yield return Event(
+          requestId,
+          "web.search-failed",
+          failure.Message,
+          stopwatch,
+          model,
+          intention
+        );
+      }
+      yield break;
     }
 
     var planStepId = arguments.TryGetProperty(
@@ -4958,6 +5165,110 @@ public sealed class ChatStreamService
           );
         }
 
+        if (string.Equals(
+          proposal.Tool,
+          WebSearchCapability.ToolName,
+          StringComparison.Ordinal
+        ))
+        {
+          if (!progress.ToolScope.Allows(WebSearchCapability.ToolName))
+          {
+            const string unavailable = "Host web_search is unavailable for this model and configured integration.";
+            progress.ToolMessages.Add(
+              NativeToolResultMessage(
+                progress,
+                proposal.Tool,
+                "rejected",
+                unavailable
+              )
+            );
+            _executionSession?.RecordToolFailure();
+            yield return Event(
+              requestId,
+              "web.search-unavailable",
+              unavailable,
+              stopwatch,
+              model,
+              intention
+            );
+            continue;
+          }
+
+          yield return Event(
+            requestId,
+            "web.search-started",
+            "Native specialist requested Host web search.",
+            stopwatch,
+            model,
+            intention
+          );
+          var search = await TryWebSearchAsync(
+            proposal.Arguments,
+            model,
+            "native-host-web-search",
+            cancellationToken
+          );
+          if (search.Context is not null)
+          {
+            var web = search.Context;
+            progress.Citations = MergeCitations(
+              progress.Citations,
+              web.Citations
+            );
+            progress.Messages.Add(
+              new ChatMessage(
+                "user",
+                $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: completed\nOutput:\n{web.UntrustedContext}"
+              )
+            );
+            progress.ToolMessages.Add(
+              NativeToolResultMessage(
+                progress,
+                proposal.Tool,
+                "completed",
+                web.UntrustedContext,
+                false
+              )
+            );
+            _executionSession?.RecordToolSuccess();
+            _executionSession?.ResetPlanningFailures();
+            planningFailures = 0;
+            yield return Event(
+              requestId,
+              "web.search-completed",
+              $"Host web search returned {web.Citations.Count} bounded HTTPS source(s) to the native specialist.",
+              stopwatch,
+              model,
+              intention
+            );
+          }
+          else
+          {
+            var failure = search.Failure ?? new LocalActionException(
+              "web-search-failed",
+              "Host web search did not return a result."
+            );
+            progress.ToolMessages.Add(
+              NativeToolResultMessage(
+                progress,
+                proposal.Tool,
+                "failed",
+                failure.Message
+              )
+            );
+            _executionSession?.RecordToolFailure();
+            yield return Event(
+              requestId,
+              "web.search-failed",
+              failure.Message,
+              stopwatch,
+              model,
+              intention
+            );
+          }
+          continue;
+        }
+
         ValidationAttempt validation;
 
         if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
@@ -6363,6 +6674,7 @@ public sealed class ChatStreamService
     GenerationProgress progress,
     string modelRole,
     ProviderChatOptions options,
+    bool applicationWebSearchAvailable,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -6370,7 +6682,8 @@ public sealed class ChatStreamService
       cancellationToken
     );
 
-    if (!workspace.Valid || workspace.Path is null)
+    var workspaceReadsAvailable = workspace.Valid && workspace.Path is not null;
+    if (!workspaceReadsAvailable && !applicationWebSearchAvailable)
     {
       yield return Event(
         requestId,
@@ -6398,6 +6711,15 @@ public sealed class ChatStreamService
       yield break;
     }
 
+    var availableTools = (workspaceReadsAvailable
+        ? ChatReadOnlyTools
+        : [])
+      .Concat(
+        applicationWebSearchAvailable
+          ? [WebSearchCapability.ToolName]
+          : []
+      )
+      .ToArray();
     var selectedReference = ProviderModelReference.Parse(
       model
     );
@@ -6418,16 +6740,22 @@ public sealed class ChatStreamService
         capabilities.ToolProtocolConfirmed
       )
     );
+    var canonicalDefinitions = LocalActionPlanner.GetToolDefinitions(
+      availableTools
+    );
     var toolDefinitions = _toolingProtocol.ToOllamaDefinitions(
       toolingProfile,
-      LocalActionPlanner.GetToolDefinitions(
-        ChatReadOnlyTools
-      )
+      canonicalDefinitions
     );
     var chatReadInstructions = ChatReadOnlyWorkspaceMarker + "\n"
-      + "Chat may inspect the active trusted workspace through only the read-only tools supplied in this request. "
-      + "Use paths relative to the workspace root. Never request a mutation, process, shell, or path outside the workspace. "
-      + "Use a read tool only when workspace evidence materially improves the answer. After reading enough, return the final user-facing answer without a tool call.";
+      + "Only the read-only tools supplied in this request are available. "
+      + (workspaceReadsAvailable
+        ? "Workspace tools use paths relative to the trusted root; never request a mutation, process, shell, or external path. "
+        : string.Empty)
+      + (applicationWebSearchAvailable
+        ? "web_search queries the public web through the Agentic Router Host and returns untrusted bounded evidence; call it only when current external information materially improves the answer. "
+        : string.Empty)
+      + "After gathering enough evidence, return the final user-facing answer without a tool call.";
     var toolMessages = new[]
     {
       new OllamaToolMessage(
@@ -6464,8 +6792,8 @@ public sealed class ChatStreamService
 
     yield return Event(
       requestId,
-      "chat.workspace-read-tools-enabled",
-      $"Chat read-only tools enabled without approval: {string.Join(", ", ChatReadOnlyTools)}.",
+      "chat.read-only-tools-enabled",
+      $"Chat read-only Host tools available without mutation approval: {string.Join(", ", availableTools)}.",
       stopwatch,
       model,
       intention
@@ -6827,6 +7155,142 @@ public sealed class ChatStreamService
           turn
         )
       );
+
+      if (string.Equals(
+        call.Name,
+        WebSearchCapability.ToolName,
+        StringComparison.Ordinal
+      ))
+      {
+        if (!applicationWebSearchAvailable)
+        {
+          const string unavailable = "Host web_search is unavailable for this model and configured integration.";
+          toolMessages.Add(
+            _toolingProtocol.CreateToolResultMessage(
+              toolingProfile,
+              new CanonicalToolResult(
+                call.CallId,
+                call.Name,
+                "rejected",
+                unavailable,
+                false,
+                false
+              )
+            )
+          );
+          yield return Event(
+            requestId,
+            "web.search-unavailable",
+            unavailable,
+            stopwatch,
+            model,
+            intention
+          );
+          continue;
+        }
+
+        if (attempt > MaximumChatReadToolCalls)
+        {
+          const string budget = "The bounded Chat read/search tool budget was reached. Complete from the evidence already returned.";
+          toolMessages.Add(
+            _toolingProtocol.CreateToolResultMessage(
+              toolingProfile,
+              new CanonicalToolResult(
+                call.CallId,
+                call.Name,
+                "rejected",
+                budget,
+                false,
+                false
+              )
+            )
+          );
+          completionRequired = true;
+          yield return Event(
+            requestId,
+            "chat.read-only-budget-reached",
+            budget,
+            stopwatch,
+            model,
+            intention
+          );
+          continue;
+        }
+
+        yield return Event(
+          requestId,
+          "web.search-started",
+          "Chat specialist requested Host web search.",
+          stopwatch,
+          model,
+          intention
+        );
+        var search = await TryWebSearchAsync(
+          call.Arguments,
+          model,
+          "chat-host-web-search",
+          cancellationToken
+        );
+        if (search.Context is not null)
+        {
+          var web = search.Context;
+          progress.Citations = MergeCitations(
+            progress.Citations,
+            web.Citations
+          );
+          toolMessages.Add(
+            _toolingProtocol.CreateToolResultMessage(
+              toolingProfile,
+              new CanonicalToolResult(
+                call.CallId,
+                call.Name,
+                "completed",
+                web.UntrustedContext,
+                true,
+                true
+              )
+            )
+          );
+          yield return Event(
+            requestId,
+            "web.search-completed",
+            $"Host web search returned {web.Citations.Count} bounded HTTPS source(s) to Chat.",
+            stopwatch,
+            model,
+            intention
+          );
+        }
+        else
+        {
+          var failure = search.Failure ?? new LocalActionException(
+            "web-search-failed",
+            "Host web search did not return a result."
+          );
+          toolMessages.Add(
+            _toolingProtocol.CreateToolResultMessage(
+              toolingProfile,
+              new CanonicalToolResult(
+                call.CallId,
+                call.Name,
+                "failed",
+                failure.Message,
+                false,
+                false
+              )
+            )
+          );
+          yield return Event(
+            requestId,
+            "web.search-failed",
+            failure.Message,
+            stopwatch,
+            model,
+            intention
+          );
+        }
+        continue;
+      }
+
       var proposalAttempt = TryResolveChatReadProposal(
         call
       );
@@ -6867,7 +7331,8 @@ public sealed class ChatStreamService
         validation.Failure is not null
         || validation.Action is null
         || !validation.Action.ReadOnly
-        || !ChatReadOnlyTools.Contains(
+        || !workspaceReadsAvailable
+        || !availableTools.Contains(
           validation.Action.Tool,
           StringComparer.OrdinalIgnoreCase
         )
@@ -7377,50 +7842,6 @@ public sealed class ChatStreamService
     var reference = ProviderModelReference.Parse(
       model
     );
-
-    if (request.WebSearchEnabled && !capabilities.WebSearch)
-    {
-      throw new CapabilityException(
-        "unsupported-web",
-        "capability-validation",
-        "Web search is unavailable for the selected model.",
-        $"Capability source '{capabilities.Source}' did not authorize web search.",
-        reference.ProviderId,
-        reference.ModelId
-      );
-    }
-
-    if (
-      !request.WebSearchEnabled
-      && capabilities.ProviderNativeWebSearch
-      && string.Equals(
-        reference.ProviderId,
-        ModelProviderIds.Groq,
-        StringComparison.Ordinal
-      )
-      && (
-        string.Equals(
-          reference.ModelId,
-          "groq/compound",
-          StringComparison.Ordinal
-        )
-        || string.Equals(
-          reference.ModelId,
-          "groq/compound-mini",
-          StringComparison.Ordinal
-        )
-      )
-    )
-    {
-      throw new CapabilityException(
-        "web-explicit-enable-required",
-        "capability-validation",
-        "This Groq system requires Web to be explicitly enabled.",
-        "Groq Compound may invoke provider-native search automatically; the Host will not send the request while Web is off.",
-        reference.ProviderId,
-        reference.ModelId
-      );
-    }
 
     if (images.Count > 0 && !capabilities.Vision)
     {
@@ -8904,7 +9325,9 @@ public sealed class ChatStreamService
             action
           )
           : null,
-        resultOutput
+        resultOutput,
+        action.Tool == "run_process"
+          && action.RequiresExplicitApproval
       ),
       _executionSession?.CreateSummary()
     );
@@ -10930,6 +11353,8 @@ public sealed class ChatStreamService
 
     public ContextUsageView? LatestContextUsage { get; set; }
 
+    public IReadOnlyList<ProviderCitation>? Citations { get; set; }
+
     public bool ToolingValidated { get; set; }
 
     public ChatStageException? Failure { get; set; }
@@ -10969,6 +11394,12 @@ public sealed class ChatStreamService
   private sealed record ValidationAttempt(
     ValidatedLocalAction? Action,
     LocalActionException? Failure
+  );
+
+  private sealed record WebSearchAttempt(
+    string? Query,
+    WebSearchContext? Context,
+    Exception? Failure
   );
 
   private sealed record ChatReadGenerationAttempt(

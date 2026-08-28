@@ -23,6 +23,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   private const int AutoCompactPercentage = 98;
   private const int MaximumActivityText = 8_192;
   private const string PermissionProfileId = ":workspace";
+  private const string HostWebSearchAlias = "agentic_router_web_search";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
 
   private static readonly HarnessDefinition AdapterDefinition = new(
@@ -43,7 +44,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       SupportsSandbox: true,
       SupportsSessionDiff: true,
       SupportsNativePermissions: true,
-      SupportsSteering: true
+      SupportsSteering: true,
+      SupportsNativeWebSearch: true
     ),
     ["ollama-local"]
   );
@@ -244,23 +246,28 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         cancellationToken
       );
       var threadId = harnessSession.NativeSessionId;
+      var hostBridgeTools = request.HostCapabilities is null
+        ? []
+        : HarnessCapabilityProjection.HostBridgeTools(
+          HarnessIds.Codex,
+          request.HostCapabilities
+        );
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
         harnessSession.SynchronizedThroughVersion,
         [
           "Agentic Router common capabilities are additive to Codex built-ins. Use Codex native filesystem and sandboxed command tools when suitable, and use the offered Host tools for structured Host-owned operations.",
+          "Codex native web_search is enabled for this route. Use it when current public-web evidence materially improves the answer.",
           request.HostCapabilities is null
             ? "No Host capability profile was supplied."
-            : $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}. Host bridge tools: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.Codex, request.HostCapabilities))}."
+            : $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}. Host bridge tools: {string.Join(", ", hostBridgeTools.Select(CodexDynamicToolName))}."
         ]
       );
       active = new ActiveHarnessTurn(
         request.SessionId,
         threadId,
         request.WorkingDirectory,
-        request.HostCapabilities is null
-          ? []
-          : HarnessCapabilityProjection.HostBridgeTools(HarnessIds.Codex, request.HostCapabilities)
+        hostBridgeTools
       );
 
       if (!_activeByThread.TryAdd(threadId, active))
@@ -709,7 +716,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           {
             name = "agentic_router",
             title = "Agentic Router",
-            version = "0.9.17"
+            version = "0.9.18"
           },
           capabilities = new
           {
@@ -1171,6 +1178,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       return;
     }
 
+    tool = CanonicalCodexDynamicToolName(tool);
+
     if (!active.HostBridgeTools.Contains(tool))
     {
       _ = SendResponseAsync(
@@ -1556,7 +1565,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       + "approval_policy = \"on-request\"\n"
       + $"default_permissions = \"{PermissionProfileId}\"\n"
       + "check_for_update_on_startup = false\n"
-      + "web_search = \"disabled\"\n\n"
+      + "web_search = \"live\"\n\n"
       + "[agents]\n"
       + "enabled = false\n\n"
       + "[analytics]\n"
@@ -1571,7 +1580,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       + "remote_plugin = false\n"
       + "skill_mcp_dependency_install = false\n\n"
       + "[tools]\n"
-      + "web_search = false\n\n"
+      + "web_search = true\n\n"
       + "[windows]\n"
       + "sandbox = \"unelevated\"\n";
     if (File.Exists(path) && string.Equals(await File.ReadAllTextAsync(path, cancellationToken), content, StringComparison.Ordinal))
@@ -1835,11 +1844,33 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       .Select(definition => (object)new
       {
         type = "function",
-        name = definition.Name,
+        name = CodexDynamicToolName(definition.Name),
         description = definition.Description,
         inputSchema = definition.Parameters
       })
       .ToArray();
+  }
+
+  private static string CodexDynamicToolName(string canonicalTool)
+  {
+    return string.Equals(
+      canonicalTool,
+      WebSearchCapability.ToolName,
+      StringComparison.Ordinal
+    )
+      ? HostWebSearchAlias
+      : canonicalTool;
+  }
+
+  private static string CanonicalCodexDynamicToolName(string tool)
+  {
+    return string.Equals(
+      tool,
+      HostWebSearchAlias,
+      StringComparison.Ordinal
+    )
+      ? WebSearchCapability.ToolName
+      : tool;
   }
 
   private static HarnessException NotFound(string technicalMessage)

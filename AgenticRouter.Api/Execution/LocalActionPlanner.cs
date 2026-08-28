@@ -706,6 +706,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         },
         ["path", "query"]
       ),
+      WebSearchCapability.ToolDefinition,
       Tool(
         "create_file",
         "Create a new UTF-8 text file.",

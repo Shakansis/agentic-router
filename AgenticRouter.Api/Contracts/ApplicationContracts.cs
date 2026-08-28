@@ -109,7 +109,8 @@ public sealed record ModelCapabilityView(
   string Role,
   ProviderModelCapabilities Capabilities,
   bool WebAvailable,
-  string? WebUnavailableReason
+  string? WebUnavailableReason,
+  string? WebSource
 );
 
 public sealed record CloudImageApprovalRequest(
@@ -140,7 +141,17 @@ public sealed record WorkspaceProfileView(
   ValidationProfileSettings? ValidationProfile,
   bool Available,
   string? Diagnostic,
-  string? PreferredModelProfileId = null
+  string? PreferredModelProfileId = null,
+  IReadOnlyList<WorkspaceProcessPermissionView>? ProcessPermissions = null
+);
+
+public sealed record WorkspaceProcessPermissionView(
+  string Id,
+  string Executable,
+  string ArgumentsDigest,
+  int ArgumentCount,
+  string WorkingDirectory,
+  DateTimeOffset CreatedAt
 );
 
 public sealed record WorkspaceProfilesResponse(
@@ -513,7 +524,8 @@ public sealed record ApprovalDecisionRequest(
   bool Approved,
   string BrowserSessionId,
   string ExecutionSessionId,
-  string? EditedText = null
+  string? EditedText = null,
+  bool RememberForWorkspace = false
 );
 
 public sealed record ApprovalDecisionResponse(
@@ -522,7 +534,8 @@ public sealed record ApprovalDecisionResponse(
   bool Approved,
   string? Diagnostic = null,
   string? Summary = null,
-  string? Preview = null
+  string? Preview = null,
+  bool RememberedForWorkspace = false
 );
 
 public sealed record ApprovalRevisionRequest(
@@ -579,7 +592,8 @@ public sealed record LocalActionEvent(
   string ToolResolutionSource = ToolNameResolver.CanonicalSource,
   bool Editable = false,
   string? EditableText = null,
-  string? ResultOutput = null
+  string? ResultOutput = null,
+  bool CanRememberApproval = false
 );
 
 public sealed record ToolNameResolutionEvidence(

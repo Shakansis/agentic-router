@@ -41,7 +41,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSandbox: false,
       SupportsSessionDiff: true,
       SupportsNativePermissions: true,
-      SupportsSteering: false
+      SupportsSteering: false,
+      SupportsNativeWebSearch: true
     ),
     ["ollama-local"]
   );
@@ -165,9 +166,16 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     try
     {
       var endpoint = request.ProviderEndpoint!;
+      var hostProfile = request.HostCapabilities ?? throw Failure(
+        "opencode-host-profile-missing",
+        "OpenCode requires the Agentic Router Host capability profile."
+      );
+      var bridgeTools = LocalActionPlanner.GetToolDefinitions(
+        HarnessCapabilityProjection.HostBridgeTools(HarnessIds.OpenCode, hostProfile)
+      );
       var bridge = await _hostTools.ConfigureClientAsync(
         HarnessIds.OpenCode,
-        MaximumHostBridgeTools(HarnessIds.OpenCode),
+        bridgeTools,
         cancellationToken
       );
       await EnsureStartedAsync(endpoint, request.Model, bridge, cancellationToken);
@@ -176,14 +184,12 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
         harnessSession.SynchronizedThroughVersion,
-        request.HostCapabilities is null
-          ? []
-          :
-          [
-            $"Agentic Router common capabilities implemented by OpenCode native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.OpenCode))}.",
-            $"Agentic Router common capabilities supplied through the Host bridge: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.OpenCode, request.HostCapabilities))}.",
-            $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}."
-          ]
+        [
+          $"Agentic Router common capabilities implemented by OpenCode native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.OpenCode))}.",
+          "OpenCode native websearch/webfetch are enabled for this route. Use them when current public-web evidence materially improves the answer.",
+          $"Agentic Router common capabilities supplied through the Host bridge: {string.Join(", ", bridgeTools.Select(tool => tool.Name))}.",
+          $"Host approval policy: {hostProfile.ApprovalPolicy}."
+        ]
       );
       active = new ActiveTurn(request.SessionId, sessionId, request.WorkingDirectory, turnId);
       _activeTurns[request.SessionId] = active;
@@ -191,10 +197,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         HarnessIds.OpenCode,
         sessionId,
         turnId,
-        request.HostCapabilities ?? throw Failure(
-          "opencode-host-profile-missing",
-          "OpenCode requires the Agentic Router Host capability profile."
-        )
+        hostProfile
       );
 
       yield return Event(
@@ -1127,19 +1130,6 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       info.Environment["OPENCODE_SERVER_USERNAME"] = "opencode";
       info.Environment["OPENCODE_SERVER_PASSWORD"] = password;
     }
-  }
-
-  private static IReadOnlyList<CanonicalToolDefinition> MaximumHostBridgeTools(
-    string harnessId
-  )
-  {
-    var maximum = HostCapabilityProfile.Create(
-      ExecutionTurnToolPolicy.Resolve(string.Empty, validationProfileAvailable: true),
-      "auto"
-    );
-    return LocalActionPlanner.GetToolDefinitions(
-      HarnessCapabilityProjection.HostBridgeTools(harnessId, maximum)
-    );
   }
 
   private string ResolveExecutable()

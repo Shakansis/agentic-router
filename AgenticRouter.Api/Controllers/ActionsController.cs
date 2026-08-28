@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgenticRouter.Api.Controllers;
@@ -9,12 +10,15 @@ namespace AgenticRouter.Api.Controllers;
 public sealed class ActionsController : ControllerBase
 {
   private readonly IApprovalCoordinator _approvalCoordinator;
+  private readonly IWorkspaceProfileService _workspaceProfiles;
 
   public ActionsController(
-    IApprovalCoordinator approvalCoordinator
+    IApprovalCoordinator approvalCoordinator,
+    IWorkspaceProfileService workspaceProfiles
   )
   {
     _approvalCoordinator = approvalCoordinator;
+    _workspaceProfiles = workspaceProfiles;
   }
 
   [HttpPost("{actionId}/decision")]
@@ -30,6 +34,9 @@ public sealed class ActionsController : ControllerBase
       request.ExecutionSessionId,
       request.Approved,
       request.EditedText,
+      request.RememberForWorkspace
+        ? PersistProcessPermissionAsync
+        : null,
       cancellationToken
     );
     var response = new ApprovalDecisionResponse(
@@ -40,7 +47,10 @@ public sealed class ActionsController : ControllerBase
         ? null
         : result.Diagnostic,
       result.Action?.Summary,
-      result.Action?.Preview
+      result.Action?.Preview,
+      result.Accepted
+        && request.Approved
+        && request.RememberForWorkspace
     );
 
     if (!result.Pending)
@@ -53,6 +63,56 @@ public sealed class ActionsController : ControllerBase
     return result.Accepted
       ? Ok(response)
       : BadRequest(response);
+  }
+
+  private async Task<ApprovalPreparationResult> PersistProcessPermissionAsync(
+    ValidatedLocalAction action,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      action.Tool != "run_process"
+      || !action.RequiresExplicitApproval
+      || action.TargetPath is null
+      || !Path.IsPathFullyQualified(
+        action.TargetPath
+      )
+      || action.WorkingDirectory is null
+    )
+    {
+      return new ApprovalPreparationResult(
+        false,
+        "Only an exact high-risk process with a resolved executable awaiting explicit approval can be remembered."
+      );
+    }
+
+    try
+    {
+      var arguments = action.Arguments.TryGetProperty(
+        "arguments",
+        out var argumentElement
+      )
+        ? argumentElement.EnumerateArray().Select(
+          argument => argument.GetString() ?? string.Empty
+        ).ToArray()
+        : [];
+      await _workspaceProfiles.GrantProcessPermissionAsync(
+        action.TargetPath,
+        arguments,
+        action.WorkingDirectory,
+        cancellationToken
+      );
+      return new ApprovalPreparationResult(
+        true
+      );
+    }
+    catch (WorkspaceProfileException exception)
+    {
+      return new ApprovalPreparationResult(
+        false,
+        exception.Message
+      );
+    }
   }
 
   [HttpPost("{actionId}/revision")]

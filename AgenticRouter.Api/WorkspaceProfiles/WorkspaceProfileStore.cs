@@ -28,6 +28,8 @@ public sealed record WorkspaceProfileData
   public ValidationProfileSettings? ValidationProfile { get; init; }
 
   public string? PreferredModelProfileId { get; init; }
+
+  public IReadOnlyList<WorkspaceProcessPermissionData> ProcessPermissions { get; init; } = [];
 }
 
 public sealed record WorkspaceProfileDocument
@@ -217,6 +219,20 @@ public sealed class WorkspaceProfileStore : IWorkspaceProfileStore
             "A workspace profile entry is invalid."
           );
         }
+
+        if (
+          profile.ProcessPermissions.Count > 100
+          || profile.ProcessPermissions.Any(
+            permission => !IsValidProcessPermission(
+              permission
+            )
+          )
+        )
+        {
+          throw new InvalidDataException(
+            "A workspace process permission is invalid."
+          );
+        }
       }
 
       return document;
@@ -337,6 +353,39 @@ public sealed class WorkspaceProfileStore : IWorkspaceProfileStore
         character => char.IsAsciiLetterOrDigit(
           character
         ) || character is '-' or '_'
+      );
+  }
+
+  private static bool IsValidProcessPermission(
+    WorkspaceProcessPermissionData permission
+  )
+  {
+    return IsSafeId(
+      permission.Id
+    )
+      && permission.Executable.Length is > 0 and <= 1_024
+      && permission.Executable.All(
+        character => !char.IsControl(
+          character
+        )
+      )
+      && permission.ArgumentsDigest.Length == 64
+      && permission.ArgumentsDigest.All(
+        character => char.IsAsciiHexDigit(
+          character
+        )
+      )
+      && permission.ArgumentCount is >= 0 and <= 100
+      && permission.WorkingDirectory.Length is > 0 and <= 1_024
+      && !Path.IsPathRooted(
+        permission.WorkingDirectory
+      )
+      && !permission.WorkingDirectory.Split(
+        ['/', '\\'],
+        StringSplitOptions.RemoveEmptyEntries
+      ).Contains(
+        "..",
+        StringComparer.Ordinal
       );
   }
 }

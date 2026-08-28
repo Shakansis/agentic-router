@@ -2223,6 +2223,11 @@ p {
   opacity: 0.5;
 }
 
+.capability-control[data-state="enabled"]:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
 .capability-icon-button {
   width: 34px;
   height: 34px;
@@ -4332,6 +4337,51 @@ textarea.terminal-command-input {
 .approval-status {
   color: var(--muted);
   font-size: 10px;
+}
+
+.approval-boundary-warning {
+  margin: 0;
+  color: #f4c66a;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.workspace-process-permissions {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.settings-permission-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.settings-permission-details {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.settings-permission-details code {
+  overflow-wrap: anywhere;
+}
+
+.settings-permission-details small,
+.settings-empty-state {
+  margin: 0;
+  color: var(--muted);
 }
 
 .recovery-reason {

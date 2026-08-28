@@ -18,6 +18,7 @@ public interface IApprovalCoordinator
     string executionSessionId,
     bool approved,
     string? editedText,
+    Func<ValidatedLocalAction, CancellationToken, Task<ApprovalPreparationResult>>? approvalPreparation,
     CancellationToken cancellationToken
   );
 
@@ -56,6 +57,11 @@ public sealed record ApprovalDecisionResult(
   bool Accepted,
   bool Approved,
   ValidatedLocalAction? Action,
+  string? Diagnostic = null
+);
+
+public sealed record ApprovalPreparationResult(
+  bool Accepted,
   string? Diagnostic = null
 );
 
@@ -114,6 +120,7 @@ public sealed class ApprovalCoordinator : IApprovalCoordinator
     string executionSessionId,
     bool approved,
     string? editedText,
+    Func<ValidatedLocalAction, CancellationToken, Task<ApprovalPreparationResult>>? approvalPreparation,
     CancellationToken cancellationToken
   )
   {
@@ -140,6 +147,7 @@ public sealed class ApprovalCoordinator : IApprovalCoordinator
     return await pending.DecideAsync(
       approved,
       editedText,
+      approvalPreparation,
       cancellationToken
     );
   }
@@ -237,6 +245,7 @@ public sealed class ApprovalCoordinator : IApprovalCoordinator
     public async Task<ApprovalDecisionResult> DecideAsync(
       bool approved,
       string? editedText,
+      Func<ValidatedLocalAction, CancellationToken, Task<ApprovalPreparationResult>>? approvalPreparation,
       CancellationToken cancellationToken
     )
     {
@@ -281,6 +290,24 @@ public sealed class ApprovalCoordinator : IApprovalCoordinator
             ActionId = _action.ActionId
           };
           _revisionCount++;
+        }
+
+        if (approved && approvalPreparation is not null)
+        {
+          var preparation = await approvalPreparation(
+            _action,
+            cancellationToken
+          );
+          if (!preparation.Accepted)
+          {
+            return new ApprovalDecisionResult(
+              true,
+              false,
+              true,
+              null,
+              preparation.Diagnostic ?? "The approval could not be persisted."
+            );
+          }
         }
 
         var accepted = Source.TrySetResult(

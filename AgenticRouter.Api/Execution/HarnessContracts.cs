@@ -40,7 +40,8 @@ public sealed record HarnessCapabilities(
   bool SupportsSandbox,
   bool SupportsSessionDiff,
   bool SupportsNativePermissions,
-  bool SupportsSteering
+  bool SupportsSteering,
+  bool SupportsNativeWebSearch
 );
 
 public sealed record HarnessSteerRequest(

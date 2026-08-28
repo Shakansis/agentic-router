@@ -422,6 +422,20 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   }
   if (text.Contains("host bridge qwen code", StringComparison.Ordinal))
   {
+    if (text.Contains("web host bridge qwen code", StringComparison.Ordinal))
+    {
+      var web = await InvokeHostToolAsync(
+        "web_search",
+        new { query = "generic Host web capability" }
+      );
+      await WriteMarkerAsync("fake-qwen-host-web.json", new
+      {
+        succeeded = web.Succeeded,
+        output = web.Output
+      });
+      await CompleteAsync(session, promptId);
+      return Results.Empty;
+    }
     if (text.Contains("plan host bridge qwen code", StringComparison.Ordinal))
     {
       var plan = await InvokeHostToolAsync(

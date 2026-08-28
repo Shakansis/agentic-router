@@ -1027,6 +1027,26 @@ async Task RunTurnAsync(
       }
     }
 
+    if (currentRequest.Contains("web host bridge codex", StringComparison.OrdinalIgnoreCase))
+    {
+      var result = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "agentic_router_web_search",
+        new { query = "generic Host web capability" },
+        50_000L + int.Parse(turnId["fake-turn-".Length..], System.Globalization.CultureInfo.InvariantCulture),
+        cancellationToken
+      );
+      if (!string.IsNullOrWhiteSpace(codexHome))
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(codexHome, "fake-codex-host-web.json"),
+          JsonSerializer.Serialize(new { succeeded = result.Success, output = result.Text }),
+          cancellationToken
+        );
+      }
+    }
+
     if (currentRequest.Contains("create host batch files", StringComparison.OrdinalIgnoreCase))
     {
       var dynamicItemId = $"dynamic-{turnId}";

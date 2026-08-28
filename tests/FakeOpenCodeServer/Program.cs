@@ -251,6 +251,22 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
   if (text.Contains("host bridge opencode", StringComparison.Ordinal))
   {
     var directory = context.Request.Query["directory"].ToString();
+    if (text.Contains("web host bridge opencode", StringComparison.Ordinal))
+    {
+      var web = await InvokeHostToolAsync(
+        "web_search",
+        new { query = "generic Host web capability" }
+      );
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-web.json"),
+          JsonSerializer.Serialize(new { succeeded = web.Succeeded, output = web.Output })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
     if (text.Contains("plan host bridge opencode", StringComparison.Ordinal))
     {
       var plan = await InvokeHostToolAsync(
