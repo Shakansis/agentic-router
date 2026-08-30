@@ -2327,6 +2327,68 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       "rgba(0, 0, 0, 0)",
       placement.GetProperty("background").GetString()
     );
+
+    await Page.SetViewportSizeAsync(420, 720);
+    await Page.Locator("#context-usage-summary").ClickAsync();
+    var popover = Page.Locator(".context-usage-popover");
+    await Expect(popover).ToBeVisibleAsync();
+    await Expect(popover.Locator("h3")).ToHaveTextAsync(
+      ["Summary", "Current message details", "Limits & reserves"]
+    );
+    await Expect(Page.Locator("#context-usage-progress"))
+      .ToHaveAttributeAsync("role", "progressbar");
+    var contained = await popover.EvaluateAsync<bool>(
+      """
+      element => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= 0 && rect.right <= window.innerWidth;
+      }
+      """
+    );
+    Assert.IsTrue(
+      contained,
+      "The context popover must remain inside a compact viewport."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ContextUsagePopoverPrioritizesSummaryAndCollapsesAdvancedDetails()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SendMessageAsync("context popover visualization");
+
+    await Page.Locator("#context-usage-summary").ClickAsync();
+    await Expect(Page.Locator("#context-usage-active-value"))
+      .ToContainTextAsync("/");
+    await Expect(Page.Locator("#context-usage-progress"))
+      .ToHaveAttributeAsync("aria-valuemax", new Regex("^[1-9][0-9]*$"));
+    await Expect(Page.Locator("#context-usage-overview-details dt"))
+      .ToHaveTextAsync(
+        ["Visible messages", "Total input", "Generated output"]
+      );
+    await Expect(Page.Locator("#context-usage-message-details dt"))
+      .ToHaveTextAsync(
+        ["Current conversation", "System & instructions"]
+      );
+    await Expect(Page.Locator("#context-usage-limit-details dt"))
+      .ToHaveTextAsync(["Output reserve", "Effective limit"]);
+
+    var advanced = Page.Locator("#context-usage-advanced");
+    await Expect(advanced).ToBeVisibleAsync();
+    await Expect(Page.Locator("#context-usage-advanced-label"))
+      .ToHaveTextAsync("Show advanced details (13 hidden)");
+    await Expect(Page.Locator("#context-usage-details"))
+      .ToBeHiddenAsync();
+
+    await advanced.Locator(":scope > summary").ClickAsync();
+    await Expect(Page.Locator("#context-usage-advanced-label"))
+      .ToHaveTextAsync("Hide advanced details");
+    await Expect(Page.Locator("#context-usage-details"))
+      .ToBeVisibleAsync();
+    await Expect(Page.Locator("#context-usage-details dt"))
+      .ToHaveCountAsync(13);
   }
 
   [TestMethod]

@@ -3529,8 +3529,18 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
     var plan = Page.Locator(".message.assistant > .execution-plan");
     await Expect(plan).ToHaveCountAsync(1);
+    await Expect(plan).ToHaveClassAsync(
+      new System.Text.RegularExpressions.Regex("docked")
+    );
     await Expect(plan.Locator("summary")).ToContainTextAsync("Plan");
+    await Expect(plan.Locator(".execution-plan-step-count"))
+      .ToHaveTextAsync("2/2 steps");
+    await Expect(plan.Locator(".execution-plan-progress-track"))
+      .ToHaveAttributeAsync("aria-valuenow", "2");
     await Expect(plan.Locator(".plan-step")).ToHaveCountAsync(2);
+    await Expect(plan.Locator(".execution-plan-body")).ToBeHiddenAsync();
+    await plan.Locator(":scope > summary").ClickAsync();
+    await Expect(plan.Locator(".execution-plan-body")).ToBeVisibleAsync();
     await Expect(plan.Locator(".plan-step").Nth(0)).ToContainTextAsync(
       "Create tracked fixture"
     );
@@ -3540,8 +3550,36 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(plan.Locator(".plan-step").Nth(1)).ToHaveClassAsync(
       new System.Text.RegularExpressions.Regex("completed")
     );
-    await Expect(plan.Locator(".execution-plan-progress")).ToContainTextAsync(
-      "Steps 2/2"
+    await Expect(plan.Locator(".execution-plan-progress"))
+      .ToContainTextAsync("changed files");
+    var placement = await plan.EvaluateAsync<bool>(
+      """
+      element => {
+        const planRect = element.getBoundingClientRect();
+        const composerRect = document.querySelector("#composer")
+          .getBoundingClientRect();
+        const workspaceRect = document.querySelector("#conversation-view")
+          .getBoundingClientRect();
+        const planCenter = planRect.left + planRect.width / 2;
+        const workspaceCenter = workspaceRect.left + workspaceRect.width / 2;
+        return planRect.bottom <= composerRect.top
+          && Math.abs(planCenter - workspaceCenter) <= 1;
+      }
+      """
+    );
+    Assert.IsTrue(
+      placement,
+      "The latest plan must be centered immediately above the composer."
+    );
+    await Page.SetViewportSizeAsync(420, 720);
+    await Page.WaitForFunctionAsync(
+      """
+      () => {
+        const element = document.querySelector(".execution-plan.docked");
+        const rect = element.getBoundingClientRect();
+        return rect.left >= 0 && rect.right <= window.innerWidth;
+      }
+      """
     );
     await Expect(
       Page.Locator(".activity .execution-plan")
@@ -3565,11 +3603,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
     await Expect(Page.Locator("#context-usage-summary")).ToContainTextAsync("exact");
     await Page.Locator("#context-usage > summary").ClickAsync();
-    var details = Page.Locator("#context-usage-details");
+    var details = Page.Locator(".context-usage-popover");
     foreach (var category in new[]
     {
-      "Current conversation and message",
-      "System and instructions",
+      "Current conversation",
+      "System & instructions",
       "Project context",
       "Toolset discovery",
       "Granted schemas",
@@ -3584,6 +3622,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     {
       await Expect(details).ToContainTextAsync(category);
     }
+    await Page.Locator("#context-usage-advanced > summary").ClickAsync();
     var contextEvents = Page.Locator("[data-event-type=\"context.usage\"]");
     Assert.IsGreaterThanOrEqualTo(4, await contextEvents.CountAsync());
     await Expect(contextEvents.First).ToContainTextAsync("Specialist inference 1");

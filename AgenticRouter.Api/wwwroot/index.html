@@ -199,7 +199,7 @@
       Jump to latest
     </button>
 
-    <footer class="composer-shell">
+    <footer id="composer-shell" class="composer-shell">
       <div class="composer-context-usage">
         <details id="context-usage" class="context-usage">
           <summary id="context-usage-summary">
@@ -212,16 +212,62 @@
               hidden
             >⚠</span>
           </summary>
-          <div class="context-usage-popover">
-            <strong id="context-usage-warning" hidden></strong>
-            <dl id="context-usage-details"></dl>
-            <small>Visible history may be larger than the submitted context.</small>
-            <button
-              id="compact-context"
-              class="secondary-button compact-context-button"
-              type="button"
-              hidden
-            >Compact context</button>
+          <div class="context-usage-popover" role="region" aria-label="Context usage details">
+            <header class="context-usage-header">
+              <div class="context-usage-header-title">
+                <span>Active context</span>
+                <span id="context-usage-active-value">Not calculated</span>
+              </div>
+              <div
+                id="context-usage-progress"
+                class="context-usage-progress"
+                role="progressbar"
+                aria-label="Active context usage"
+                aria-valuemin="0"
+                aria-valuemax="1"
+                aria-valuenow="0"
+                aria-valuetext="Context not calculated"
+              >
+                <span id="context-usage-progress-fill" class="context-usage-progress-fill"></span>
+              </div>
+              <strong id="context-usage-warning" class="context-usage-warning" hidden></strong>
+            </header>
+
+            <section class="context-usage-section" aria-labelledby="context-usage-overview-title">
+              <h3 id="context-usage-overview-title">Summary</h3>
+              <dl id="context-usage-overview-details"></dl>
+            </section>
+
+            <section class="context-usage-section" aria-labelledby="context-usage-message-title">
+              <h3 id="context-usage-message-title">Current message details</h3>
+              <dl id="context-usage-message-details"></dl>
+            </section>
+
+            <section class="context-usage-section" aria-labelledby="context-usage-limit-title">
+              <h3 id="context-usage-limit-title">Limits &amp; reserves</h3>
+              <dl id="context-usage-limit-details"></dl>
+            </section>
+
+            <details id="context-usage-advanced" class="context-usage-advanced" hidden>
+              <summary>
+                <span id="context-usage-advanced-label">Show advanced details</span>
+                <span class="context-usage-advanced-chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="context-usage-advanced-content">
+                <dl id="context-usage-details"></dl>
+                <button
+                  id="compact-context"
+                  class="secondary-button compact-context-button"
+                  type="button"
+                  hidden
+                >Compact context</button>
+              </div>
+            </details>
+
+            <footer class="context-usage-footer">
+              <span aria-hidden="true">ⓘ</span>
+              <small>Visible history may be larger than the submitted context.</small>
+            </footer>
           </div>
         </details>
       </div>

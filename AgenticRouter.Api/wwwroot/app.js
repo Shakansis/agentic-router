@@ -84,7 +84,8 @@ const state = {
   setupTimer: null,
   setupOnboardingDismissed: false,
   pendingDiagnosticInvestigation: null,
-  readOnlyConversation: false
+  readOnlyConversation: false,
+  composerResizeObserver: null
 };
 
 let benchmarkTooltip = null;
@@ -148,6 +149,7 @@ async function initialize() {
   bindEvents();
   initializeSidebarResize();
   initializeScrollFollowing();
+  initializeComposerShellMetrics();
 
   try {
     state.recovery = await fetchJson("/api/recovery/status");
@@ -174,6 +176,7 @@ function bindElements() {
     "sidebar-resizer",
     "empty-state",
     "composer",
+    "composer-shell",
     "message-input",
     "model-selector",
     "harness-selector",
@@ -190,6 +193,14 @@ function bindElements() {
     "context-usage-summary-text",
     "context-usage-estimate-warning",
     "context-usage-warning",
+    "context-usage-active-value",
+    "context-usage-progress",
+    "context-usage-progress-fill",
+    "context-usage-overview-details",
+    "context-usage-message-details",
+    "context-usage-limit-details",
+    "context-usage-advanced",
+    "context-usage-advanced-label",
     "context-usage-details",
     "compact-context",
     "web-toggle",
@@ -614,6 +625,10 @@ function bindEvents() {
   elements.messageInput.addEventListener("input", updateStreamingComposerActions);
   elements.messageInput.addEventListener("input", renderPendingContextUsage);
   elements.compactContext.addEventListener("click", requestManualContextCompaction);
+  elements.contextUsageAdvanced.addEventListener(
+    "toggle",
+    updateContextUsageAdvancedLabel
+  );
   elements.settingsForm.addEventListener("submit", saveSettings);
   elements.messages.addEventListener("scroll", handleConversationScroll);
   elements.messages.addEventListener("click", handleSetupAction);
@@ -5491,6 +5506,7 @@ async function replayConversationTimeline(timeline, assistant) {
 async function attachSupervisionConversation(run) {
   const conversationVersion = state.conversationVersion;
   const controller = new AbortController();
+  undockExecutionPlans();
   const assistant = appendAssistantMessage({ modelSelectionOrigin: "user" });
   state.requestController = controller;
   state.activeAssistant = assistant;
@@ -11919,6 +11935,7 @@ async function handleComposerSubmit(event) {
   }
   const conversationVersion = state.conversationVersion;
   const controller = new AbortController();
+  undockExecutionPlans();
   const assistant = appendAssistantMessage({
     modelSelectionOrigin: selectedModel === "auto"
       ? "agent"
@@ -12287,7 +12304,7 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
   const planPanel = document.createElement("details");
   planPanel.className = "execution-plan";
   planPanel.hidden = true;
-  planPanel.open = true;
+  planPanel.open = false;
   const planSummary = document.createElement("summary");
   const planBody = document.createElement("div");
   planBody.className = "execution-plan-body";
@@ -13711,27 +13728,80 @@ function updateExecutionSession(assistant, session, updateVisibleState = true) {
     coordinator,
     counts
   );
-  renderExecutionPlan(
-    assistant,
-    session
-  );
+  renderExecutionPlan(assistant, session, updateVisibleState);
 
   if (session.reviewAvailable && session.state !== "running") {
     assistant.reviewButton.hidden = false;
   }
 }
 
-function renderExecutionPlan(assistant, session) {
+function renderExecutionPlan(assistant, session, dock = true) {
   const plan = session?.plan;
   if (!plan) {
     assistant.planPanel.hidden = true;
+    assistant.planPanel.classList.remove("docked");
     assistant.planBody.replaceChildren();
     return;
   }
 
+  if (dock) {
+    document.querySelectorAll(".execution-plan.docked").forEach(
+      panel => {
+        if (panel !== assistant.planPanel) {
+          panel.classList.remove("docked");
+        }
+      }
+    );
+    assistant.planPanel.classList.add("docked");
+  }
   assistant.planPanel.hidden = false;
-  assistant.planSummary.textContent =
-    `Plan · ${plan.objective}`;
+  assistant.planPanel.dataset.state = session.state;
+  const totalSteps = plan.steps.length;
+  const completedSteps = Math.min(plan.completedStepCount, totalSteps);
+  const complete = totalSteps > 0 && completedSteps === totalSteps;
+  const failed = plan.steps.some(
+    step => step.status === "failed" || step.status === "blocked"
+  );
+  const titleArea = document.createElement("span");
+  titleArea.className = "execution-plan-title-area";
+  const icon = document.createElement("span");
+  icon.className = "execution-plan-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = complete ? "✓" : failed ? "!" : "●";
+  const title = document.createElement("span");
+  title.className = "execution-plan-title";
+  title.textContent = `Plan · ${plan.objective}`;
+  titleArea.append(icon, title);
+
+  const meta = document.createElement("span");
+  meta.className = "execution-plan-meta";
+  const stepCount = document.createElement("span");
+  stepCount.className = "execution-plan-step-count";
+  stepCount.textContent = `${completedSteps}/${totalSteps} steps`;
+  const chevron = document.createElement("span");
+  chevron.className = "execution-plan-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "⌄";
+  meta.append(stepCount, chevron);
+
+  const progressTrack = document.createElement("span");
+  progressTrack.className = "execution-plan-progress-track";
+  progressTrack.setAttribute("role", "progressbar");
+  progressTrack.setAttribute("aria-label", "Plan progress");
+  progressTrack.setAttribute("aria-valuemin", "0");
+  progressTrack.setAttribute("aria-valuemax", String(totalSteps));
+  progressTrack.setAttribute("aria-valuenow", String(completedSteps));
+  const progressFill = document.createElement("span");
+  progressFill.className = "execution-plan-progress-fill";
+  progressFill.style.width = totalSteps > 0
+    ? `${completedSteps * 100 / totalSteps}%`
+    : "0%";
+  progressTrack.append(progressFill);
+  assistant.planSummary.replaceChildren(titleArea, meta, progressTrack);
+  assistant.planSummary.setAttribute(
+    "aria-label",
+    `Plan: ${plan.objective}. ${completedSteps} of ${totalSteps} steps complete.`
+  );
   assistant.planBody.replaceChildren();
   const list = document.createElement("ol");
 
@@ -13767,10 +13837,39 @@ function renderExecutionPlan(assistant, session) {
     : Math.min(plan.completedStepCount + 1, plan.steps.length);
   const footer = document.createElement("p");
   footer.className = "execution-plan-progress";
-  footer.textContent = plan.completedStepCount === plan.steps.length
-    ? `Steps ${plan.steps.length}/${plan.steps.length} · ${session.changedFileCount} changed files`
-    : `Step ${displayedStep}/${plan.steps.length} · ${session.changedFileCount} changed files`;
+  footer.textContent = `${session.changedFileCount} changed files`;
+  footer.title = plan.completedStepCount === plan.steps.length
+    ? `Steps ${plan.steps.length}/${plan.steps.length}`
+    : `Step ${displayedStep}/${plan.steps.length}`;
   assistant.planBody.append(list, footer);
+}
+
+function undockExecutionPlans() {
+  elements.messages.querySelectorAll(".execution-plan.docked").forEach(
+    panel => panel.classList.remove("docked")
+  );
+}
+
+function initializeComposerShellMetrics() {
+  const updateHeight = () => {
+    const height = Math.ceil(
+      elements.composerShell.getBoundingClientRect().height
+    );
+    const workspaceRect = elements.conversationView.getBoundingClientRect();
+    elements.conversationView.style.setProperty(
+      "--composer-shell-height",
+      `${height}px`
+    );
+    elements.conversationView.style.setProperty(
+      "--workspace-center-x",
+      `${workspaceRect.left + workspaceRect.width / 2}px`
+    );
+  };
+  state.composerResizeObserver?.disconnect();
+  state.composerResizeObserver = new ResizeObserver(updateHeight);
+  state.composerResizeObserver.observe(elements.composerShell);
+  state.composerResizeObserver.observe(elements.conversationView);
+  updateHeight();
 }
 
 async function openChangeReview(executionSessionId, focusRelativePath = null) {
@@ -15525,7 +15624,21 @@ function renderContextUsage() {
     elements.contextUsageEstimateWarning.removeAttribute("title");
     elements.contextUsageEstimateWarning.removeAttribute("aria-label");
     elements.contextUsageWarning.hidden = true;
+    elements.contextUsageActiveValue.textContent = "Not calculated";
+    elements.contextUsageProgress.setAttribute("aria-valuemax", "1");
+    elements.contextUsageProgress.setAttribute("aria-valuenow", "0");
+    elements.contextUsageProgress.setAttribute(
+      "aria-valuetext",
+      "Context not calculated"
+    );
+    elements.contextUsageProgressFill.style.width = "0%";
+    elements.contextUsageOverviewDetails.replaceChildren();
+    elements.contextUsageMessageDetails.replaceChildren();
+    elements.contextUsageLimitDetails.replaceChildren();
     elements.contextUsageDetails.replaceChildren();
+    elements.contextUsageAdvanced.hidden = true;
+    elements.contextUsageAdvanced.open = false;
+    elements.contextUsageAdvanced.dataset.detailCount = "0";
     elements.compactContext.hidden = true;
     return;
   }
@@ -15537,6 +15650,15 @@ function renderContextUsage() {
     );
   const activeContextTokens = usage.activeContextTokens || usage.inputTokens;
   const liveContext = usage.activeContextTokens > 0;
+  const contextPercentage = activeContextTokens * 100
+    / Math.max(1, effectiveLimit);
+  const boundedContextPercentage = Math.max(
+    0,
+    Math.min(100, contextPercentage)
+  );
+  const contextPercentageLabel = contextPercentage > 0 && contextPercentage < 1
+    ? "<1%"
+    : `${Math.round(contextPercentage)}%`;
   elements.contextUsageSummaryText.textContent =
     `Context ${formatCompactTokens(activeContextTokens)} / `
     + `${formatCompactTokens(effectiveLimit)} · `
@@ -15568,89 +15690,88 @@ function renderContextUsage() {
       ? "Eligible blocks were omitted only from the submitted payload."
       : null
   ].filter(Boolean).join(" ");
-  elements.contextUsageDetails.replaceChildren(
-    contextDetail("Specialist inference", usage.inferenceSequence || 1),
-    contextDetail("Visible messages", usage.visibleMessages),
-    contextDetail("Included messages", usage.includedMessages),
-    contextDetail("Omitted messages", usage.omittedMessages),
+  const activeContextLabel = `${formatCompactTokens(activeContextTokens)} / `
+    + `${formatCompactTokens(effectiveLimit)} (${contextPercentageLabel})`;
+  elements.contextUsageActiveValue.textContent = activeContextLabel;
+  elements.contextUsageProgress.setAttribute(
+    "aria-valuemax",
+    String(effectiveLimit)
+  );
+  elements.contextUsageProgress.setAttribute(
+    "aria-valuenow",
+    String(Math.min(activeContextTokens, effectiveLimit))
+  );
+  elements.contextUsageProgress.setAttribute(
+    "aria-valuetext",
+    `${activeContextLabel} active`
+  );
+  elements.contextUsageProgressFill.style.width =
+    `${boundedContextPercentage}%`;
+
+  elements.contextUsageOverviewDetails.replaceChildren(
     contextDetail(
-      "Current conversation and message",
-      `${formatInteger(usage.conversationTokens)} estimated tokens`
-    ),
-    contextDetail(
-      "System and instructions",
-      `${formatInteger(usage.systemInstructionTokens)} estimated tokens`
-    ),
-    contextDetail(
-      "Project context",
-      `${formatInteger(usage.projectContextTokens)} estimated tokens`
-    ),
-    contextDetail(
-      "Toolset discovery",
-      `${formatInteger(usage.toolDiscoveryTokens)} estimated tokens`
-    ),
-    contextDetail(
-      "Granted schemas",
-      `${formatInteger(usage.grantedToolSchemaTokens)} estimated tokens`
-    ),
-    contextDetail(
-      "Host state/results",
-      `${formatInteger(usage.hostStateTokens)} estimated tokens`
-    ),
-    contextDetail(
-      "Structural overhead",
-      `${formatInteger(usage.structuralOverheadTokens)} estimated tokens`
+      "Visible messages",
+      `${formatInteger(usage.visibleMessages)} (${formatInteger(usage.includedMessages)} included)`
     ),
     contextDetail(
       "Total input",
-      `${formatInteger(usage.inputTokens)} tokens · ${usage.accuracy === "exact" ? "reported" : "estimated"}`
+      `${usage.accuracy === "exact" ? "" : "~"}${formatInteger(usage.inputTokens)}`
     ),
-    ...(liveContext
-      ? [
-        contextDetail(
-          window.AgenticRouterI18n.t("context.generated_output"),
-          `${formatInteger(usage.outputTokens)} tokens`
-        ),
-        contextDetail(
-          window.AgenticRouterI18n.t("context.active"),
-          `${formatInteger(activeContextTokens)} tokens`
-        )
-      ]
-      : []),
+    contextDetail(
+      window.AgenticRouterI18n.t("context.generated_output"),
+      formatInteger(usage.outputTokens)
+    )
+  );
+  elements.contextUsageMessageDetails.replaceChildren(
+    contextDetail(
+      "Current conversation",
+      `~${formatInteger(usage.conversationTokens)}`
+    ),
+    contextDetail(
+      "System & instructions",
+      `~${formatInteger(usage.systemInstructionTokens)}`
+    )
+  );
+  elements.contextUsageLimitDetails.replaceChildren(
     contextDetail(
       "Output reserve",
-      `${formatInteger(usage.reservedResponseTokens)} tokens`
+      formatInteger(usage.reservedResponseTokens)
     ),
-    contextDetail(
-      "Required context",
-      `${formatInteger(usage.requiredContextTokens)} tokens`
-    ),
-    contextDetail(
-      "Effective limit",
-      `${formatInteger(effectiveLimit)} tokens`
-    ),
-    contextDetail(
+    contextDetail("Effective limit", formatInteger(effectiveLimit))
+  );
+
+  const advancedDetails = [
+    ["Specialist inference", usage.inferenceSequence || 1],
+    ["Omitted messages", usage.omittedMessages],
+    ["Project context", `~${formatInteger(usage.projectContextTokens)}`],
+    ["Toolset discovery", `~${formatInteger(usage.toolDiscoveryTokens)}`],
+    ["Granted schemas", `~${formatInteger(usage.grantedToolSchemaTokens)}`],
+    ["Host state/results", `~${formatInteger(usage.hostStateTokens)}`],
+    ["Structural overhead", `~${formatInteger(usage.structuralOverheadTokens)}`],
+    ["Required context", formatInteger(usage.requiredContextTokens)],
+    [
       "Count source",
       usage.accuracy === "exact"
         ? "provider-reported usage"
         : usage.estimator
-    ),
-    contextDetail(
+    ],
+    [
       "Provider maximum",
       usage.providerMaximumTokens == null
         ? "not reported"
-        : `${formatInteger(usage.providerMaximumTokens)} tokens`
-    ),
-    contextDetail(
-      "Configured provider limit",
-      `${formatInteger(usage.configuredProviderLimit)} tokens`
-    ),
-    contextDetail(
-      "Application limit",
-      `${formatInteger(usage.applicationLimit)} tokens`
-    ),
-    contextDetail("Omitted blocks", usage.omittedBlocks || 0)
+        : formatInteger(usage.providerMaximumTokens)
+    ],
+    ["Configured provider limit", formatInteger(usage.configuredProviderLimit)],
+    ["Application limit", formatInteger(usage.applicationLimit)],
+    ["Omitted blocks", usage.omittedBlocks || 0]
+  ];
+  elements.contextUsageDetails.replaceChildren(
+    ...advancedDetails.map(([label, value]) => contextDetail(label, value))
   );
+  elements.contextUsageAdvanced.hidden = false;
+  elements.contextUsageAdvanced.dataset.detailCount =
+    String(advancedDetails.length);
+  updateContextUsageAdvancedLabel();
   elements.compactContext.hidden = !usage.compactionEligible;
   elements.compactContext.disabled = Boolean(state.requestController);
   elements.compactContext.textContent = state.compactContextNextRequest
@@ -15693,6 +15814,16 @@ async function requestManualContextCompaction() {
   }
   state.compactContextNextRequest = true;
   renderContextUsage();
+}
+
+function updateContextUsageAdvancedLabel() {
+  const detailCount = Number(
+    elements.contextUsageAdvanced.dataset.detailCount
+  ) || 0;
+  elements.contextUsageAdvancedLabel.textContent =
+    elements.contextUsageAdvanced.open
+      ? "Hide advanced details"
+      : `Show advanced details (${detailCount} hidden)`;
 }
 
 function contextDetail(label, value) {
