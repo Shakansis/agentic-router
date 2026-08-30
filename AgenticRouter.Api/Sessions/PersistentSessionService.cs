@@ -31,6 +31,8 @@ public interface IPersistentSessionService
     string message,
     string interactionMode,
     string? model,
+    string approvalPolicy,
+    string harness,
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
     CancellationToken cancellationToken
@@ -43,7 +45,9 @@ public interface IPersistentSessionService
     string? model,
     ExecutionSessionReview? review,
     CancellationToken cancellationToken,
-    TraceDiagnosticReference? diagnostic = null
+    TraceDiagnosticReference? diagnostic = null,
+    IReadOnlyList<ChatMessageContentBlock>? contentBlocks = null,
+    IReadOnlyList<ChatStreamEvent>? timeline = null
   );
 
   Task MarkTerminalAsync(
@@ -54,9 +58,21 @@ public interface IPersistentSessionService
     ChatMessage? terminalMessage = null
   );
 
+  Task PersistTimelineAsync(
+    string sessionId,
+    IReadOnlyList<ChatStreamEvent> timeline,
+    CancellationToken cancellationToken
+  );
+
   Task<ConversationSessionRecord> ResumeAsync(
     string sessionId,
     string browserSessionId,
+    CancellationToken cancellationToken
+  );
+
+  Task<ConversationSessionRecord> OpenReadOnlyAsync(
+    string workspaceId,
+    string sessionId,
     CancellationToken cancellationToken
   );
 
@@ -361,7 +377,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
           0
         )
         {
-          PreferredModelProfileId = active.PreferredModelProfileId
+          PreferredModelProfileId = active.PreferredModelProfileId,
+          LastApprovalPolicy = request.ApprovalPolicy,
+          SelectedHarness = request.Harness
         };
       }
 
@@ -375,7 +393,12 @@ public sealed class PersistentSessionService : IPersistentSessionService
           SelectedModel = NormalizeModel(
             request.SelectedModel
           ) ?? existing.SelectedModel,
-          Messages = request.Messages.ToArray()
+          LastApprovalPolicy = request.ApprovalPolicy,
+          SelectedHarness = request.Harness,
+          Messages = SanitizeMessages(
+            request.Messages,
+            existing.Messages
+          )
         },
         limits.MaxSessionBytes,
         cancellationToken
@@ -401,6 +424,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string message,
     string interactionMode,
     string? model,
+    string approvalPolicy,
+    string harness,
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
     CancellationToken cancellationToken
@@ -464,7 +489,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
           0
         )
         {
-          PreferredModelProfileId = active.PreferredModelProfileId
+          PreferredModelProfileId = active.PreferredModelProfileId,
+          LastApprovalPolicy = approvalPolicy,
+          SelectedHarness = harness
         };
       }
       else
@@ -511,7 +538,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
             0
           )
           {
-            PreferredModelProfileId = active.PreferredModelProfileId
+            PreferredModelProfileId = active.PreferredModelProfileId,
+            LastApprovalPolicy = approvalPolicy,
+            SelectedHarness = harness
           };
         }
         else
@@ -530,6 +559,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
         SelectedModel = NormalizeModel(
           model
         ) ?? session.SelectedModel,
+        LastApprovalPolicy = approvalPolicy,
+        SelectedHarness = harness,
         Messages = session.Messages.Append(
           new ChatMessage(
             "user",
@@ -585,7 +616,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string? model,
     ExecutionSessionReview? review,
     CancellationToken cancellationToken,
-    TraceDiagnosticReference? diagnostic = null
+    TraceDiagnosticReference? diagnostic = null,
+    IReadOnlyList<ChatMessageContentBlock>? contentBlocks = null,
+    IReadOnlyList<ChatStreamEvent>? timeline = null
   )
   {
     if (string.IsNullOrWhiteSpace(
@@ -659,7 +692,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
           "assistant",
           answer,
           updatedAt,
-          diagnostic
+          diagnostic,
+          ContentBlocks: contentBlocks,
+          Timeline: timeline
         )
       ).ToArray(),
       ExecutionReviews = bounded is null
@@ -785,6 +820,71 @@ public sealed class PersistentSessionService : IPersistentSessionService
     return messages.Append(terminalMessage).ToArray();
   }
 
+  public async Task PersistTimelineAsync(
+    string sessionId,
+    IReadOnlyList<ChatStreamEvent> timeline,
+    CancellationToken cancellationToken
+  )
+  {
+    if (timeline.Count == 0)
+    {
+      return;
+    }
+
+    var active = await RequireActiveAsync(
+      cancellationToken
+    );
+    await _gate.WaitAsync(
+      cancellationToken
+    );
+
+    try
+    {
+      var session = await RequireSessionAsync(
+        active,
+        sessionId,
+        cancellationToken
+      );
+      var messages = session.Messages.ToArray();
+      var lastUserIndex = Array.FindLastIndex(
+        messages,
+        message => message.Role == "user"
+      );
+      var targetIndex = messages.Length - 1 > lastUserIndex
+        && messages[^1].Role == "assistant"
+          ? messages.Length - 1
+          : lastUserIndex;
+
+      if (targetIndex < 0)
+      {
+        return;
+      }
+
+      messages[targetIndex] = messages[targetIndex] with
+      {
+        Timeline = timeline.ToArray()
+      };
+      var limits = (
+        await _settings.GetAsync(
+          cancellationToken
+        )
+      ).SessionHistory;
+      await _store.WriteAsync(
+        session with
+        {
+          Messages = messages,
+          UpdatedAt = DateTimeOffset.UtcNow
+        },
+        limits.MaxSessionBytes,
+        cancellationToken
+      );
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
   public async Task<ConversationSessionRecord> ResumeAsync(
     string sessionId,
     string browserSessionId,
@@ -899,6 +999,44 @@ public sealed class PersistentSessionService : IPersistentSessionService
       ContextTruncated = session.Messages.Count > maximumMessages,
       ExecutionReviews = reviews
     };
+  }
+
+  public async Task<ConversationSessionRecord> OpenReadOnlyAsync(
+    string workspaceId,
+    string sessionId,
+    CancellationToken cancellationToken
+  )
+  {
+    var profiles = await _profiles.GetAllAsync(
+      cancellationToken
+    );
+
+    if (!profiles.Profiles.Any(
+      profile => string.Equals(
+        profile.Id,
+        workspaceId,
+        StringComparison.Ordinal
+      )
+    ))
+    {
+      throw new WorkspaceProfileException(
+        "workspace-profile-not-found",
+        "session-read-only",
+        "The requested workspace profile was not found.",
+        false
+      );
+    }
+
+    return await _store.ReadAsync(
+      workspaceId,
+      sessionId,
+      cancellationToken
+    ) ?? throw new WorkspaceProfileException(
+      "session-not-found",
+      "session-read-only",
+      "The requested session was not found in that workspace.",
+      false
+    );
   }
 
   public Task<ConversationSessionRecord> RenameAsync(
@@ -1281,6 +1419,16 @@ public sealed class PersistentSessionService : IPersistentSessionService
           || string.IsNullOrWhiteSpace(
             message.Content
           )
+          || message.ContentBlocks?.Any(
+            block => block.Kind is not "reasoning" and not "response"
+              || string.IsNullOrWhiteSpace(
+                block.Content
+              )
+          ) == true
+          || message.ContentBlocks is { Count: > 0 } && message.Role != "assistant"
+          || message.ContentBlocks?.Count > 4_000
+          || message.Timeline is { Count: > 0 } && message.Role != "assistant"
+          || message.Timeline?.Count > 10_000
           || (
             message.Hidden
             && (
@@ -1299,6 +1447,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
         )
       )
       || request.InteractionMode is not "chat" and not "execute"
+      || request.ApprovalPolicy is not "ask" and not "auto"
+      || string.IsNullOrWhiteSpace(
+        request.Harness
+      )
+      || request.Harness.Length > 80
       || request.State is not "completed"
         and not "failed"
         and not "cancelled"
@@ -1312,6 +1465,35 @@ public sealed class PersistentSessionService : IPersistentSessionService
         false
       );
     }
+  }
+
+  private static IReadOnlyList<ChatMessage> SanitizeMessages(
+    IReadOnlyList<ChatMessage> messages,
+    IReadOnlyList<ChatMessage> storedMessages
+  )
+  {
+    return messages.Select(
+      (message, index) =>
+      {
+        var stored = index < storedMessages.Count
+          && storedMessages[index].Role == message.Role
+          && storedMessages[index].Content == message.Content
+            ? storedMessages[index]
+            : null;
+        return message with
+        {
+          Diagnostic = stored?.Diagnostic ?? message.Diagnostic,
+          RenderedHtml = null,
+          ContentBlocks = (stored?.ContentBlocks ?? message.ContentBlocks)?.Select(
+          block => block with
+          {
+            RenderedHtml = null
+          }
+          ).ToArray(),
+          Timeline = stored?.Timeline
+        };
+      }
+    ).ToArray();
   }
 
   private static ConversationSessionSummary ToSummary(

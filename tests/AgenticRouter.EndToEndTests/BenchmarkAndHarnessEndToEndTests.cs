@@ -3379,6 +3379,93 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodePromotesOneNestedBatchStepBindingBeforeStrictValidation()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude nested batch step binding",
+      $"browser-claude-nested-binding-{Guid.NewGuid():N}"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "action.input-normalized"
+        && item["message"]!.GetValue<string>().Contains(
+          "'step-1'",
+          StringComparison.Ordinal
+        )
+      )
+    );
+    Assert.IsTrue(File.Exists(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "claude-nested-binding",
+      "index.html"
+    )));
+    Assert.IsTrue(File.Exists(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "claude-nested-binding",
+      "README.md"
+    )));
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "claude-code-runtime",
+      "fake-claude-nested-binding.json"
+    )));
+    Assert.IsTrue(marker.RootElement.GetProperty("htmlExists").GetBoolean());
+    Assert.IsTrue(marker.RootElement.GetProperty("readmeExists").GetBoolean());
+    StringAssert.Contains(
+      marker.RootElement.GetProperty("result").GetString(),
+      "Created 2 verified file(s)"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SlowWatchdogPreservesTAndTwoTWhileReportingRecentMeaningfulActivity()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["runtime"]!["generationTimeoutSeconds"] = 1;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.ClaudeCode,
+      "claude active slow watchdog",
+      $"browser-claude-active-watchdog-{Guid.NewGuid():N}"
+    );
+
+    var warning = events.Single(item =>
+      item["type"]!.GetValue<string>() == "request.slow-warning"
+    );
+    var critical = events.Single(item =>
+      item["type"]!.GetValue<string>() == "request.slow-critical"
+    );
+    Assert.IsLessThan(
+      1_000,
+      warning["slowRequest"]!["idleMilliseconds"]!.GetValue<long>()
+    );
+    Assert.IsLessThan(
+      1_000,
+      critical["slowRequest"]!["idleMilliseconds"]!.GetValue<long>()
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      2_000,
+      critical["slowRequest"]!["runningMilliseconds"]!.GetValue<long>()
+    );
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ClaudeCodeRecoversFromTypedHostGitFailureAndTerminatesOnce()
   {
     await RunGitAsync(

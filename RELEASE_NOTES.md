@@ -5,6 +5,19 @@ and Linux x64 release package. Web availability now follows the effective route
 without a manual toggle, useful native harness capabilities remain available,
 and an explicitly approved process command can be remembered for one workspace.
 
+## Trace self-investigation
+
+- Keeps the canonical sanitized Host trace ID visible in the terminal activity
+  summary for successful and failed turns.
+- Shows **Investigate error** only for a failed turn whose trace was persisted.
+  The action submits one hidden Chat request for that exact trace and returns the
+  analysis without filling the composer or retrying the failed objective.
+- Successful turns expose no investigation shortcut; the user can copy the trace
+  ID and request a later analysis explicitly.
+- Removes the final unreachable resident-recovery branch from direct Execute.
+  Recovery stays on the selected model + harness unless the user makes a new
+  routing decision; Host-owned recovery checkpoints and bounded retries remain.
+
 ## Automatic Web Search
 
 - Makes the composer Web indicator automatic: it is enabled or disabled from the

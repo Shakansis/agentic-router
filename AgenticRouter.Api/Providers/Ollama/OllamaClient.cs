@@ -334,9 +334,7 @@ public sealed class OllamaClient : IOllamaClient
         onThinkingDelta is null
           ? HttpCompletionOption.ResponseContentRead
           : HttpCompletionOption.ResponseHeadersRead,
-        requestTimeout: onThinkingDelta is null && onContentDelta is null
-          ? policy.Timeout
-          : Timeout.InfiniteTimeSpan
+        requestTimeout: Timeout.InfiniteTimeSpan
       );
       OllamaToolResponse toolResponse;
 
@@ -636,7 +634,7 @@ public sealed class OllamaClient : IOllamaClient
         payload,
         stage,
         cancellationToken,
-        requestTimeout: policy.Timeout
+        requestTimeout: Timeout.InfiniteTimeSpan
       );
       var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
         JsonOptions,
@@ -1178,16 +1176,14 @@ public sealed class OllamaClient : IOllamaClient
       throw;
     }
 
-    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-    timeout.CancelAfter(policy.Timeout);
     await using var enumerator = StreamChatCoreAsync(
       baseUri,
       model,
       messages,
       policy,
       options,
-      timeout.Token
-    ).GetAsyncEnumerator(timeout.Token);
+      cancellationToken
+    ).GetAsyncEnumerator(cancellationToken);
 
     try
     {
@@ -1197,22 +1193,7 @@ public sealed class OllamaClient : IOllamaClient
       {
         bool hasNext;
 
-        try
-        {
-          hasNext = await enumerator.MoveNextAsync();
-        }
-        catch (OperationCanceledException exception) when (
-          !cancellationToken.IsCancellationRequested
-          && timeout.IsCancellationRequested
-        )
-        {
-          throw ProviderTimeout(
-            "generation",
-            policy.Timeout,
-            exception
-          );
-        }
-
+        hasNext = await enumerator.MoveNextAsync();
         if (!hasNext)
         {
           break;
@@ -1618,9 +1599,6 @@ public sealed class OllamaClient : IOllamaClient
     return new GenerationPolicy(
       resolution,
       resolution.OutputTokenLimit,
-      TimeSpan.FromSeconds(
-        settings.Runtime.GenerationTimeoutSeconds
-      ),
       ResolveMainGpu(
         settings,
         usageContext
@@ -2059,7 +2037,6 @@ public sealed class OllamaClient : IOllamaClient
   private sealed record GenerationPolicy(
     OllamaContextResolution Resolution,
     int OutputTokens,
-    TimeSpan Timeout,
     int? MainGpu
   );
 

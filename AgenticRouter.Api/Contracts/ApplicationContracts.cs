@@ -72,13 +72,39 @@ public sealed record ChatMessage(
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   TraceDiagnosticReference? Diagnostic = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-  bool Hidden = false
+  bool Hidden = false,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  IReadOnlyList<ChatMessageContentBlock>? ContentBlocks = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? RenderedHtml = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  IReadOnlyList<ChatStreamEvent>? Timeline = null
+);
+
+public sealed record ChatMessageContentBlock(
+  string Kind,
+  string Content,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? Id = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? RenderedHtml = null
 );
 
 public sealed record TraceDiagnosticReference(
   string TraceId,
   string TerminalState,
   bool? Persisted = null
+);
+
+public sealed record SlowRequestStatusView(
+  string Level,
+  DateTimeOffset StartedAt,
+  DateTimeOffset LastActivityAt,
+  long RunningMilliseconds,
+  long IdleMilliseconds,
+  string Harness,
+  string Model,
+  string? Tool = null
 );
 
 public sealed record ChatImageAttachment(
@@ -251,7 +277,9 @@ public sealed record ConversationSessionRecord(
   bool Pinned = false,
   DateTimeOffset? PinnedAt = null,
   SessionSummaryRecord? SessionSummary = null,
-  string? PreferredModelProfileId = null
+  string? PreferredModelProfileId = null,
+  string LastApprovalPolicy = "auto",
+  string SelectedHarness = "native"
 );
 
 public sealed record RenameConversationSessionRequest(
@@ -271,7 +299,9 @@ public sealed record SaveConversationSessionRequest(
   IReadOnlyList<ChatMessage> Messages,
   string InteractionMode,
   string? SelectedModel,
-  string State
+  string State,
+  string ApprovalPolicy = "auto",
+  string Harness = "native"
 );
 
 public sealed record ConversationPersistenceView(
@@ -804,7 +834,8 @@ public sealed record ChatStreamEvent(
   string? ResponseSegmentHtml = null,
   string? ResponseTail = null,
   string? ResponseTailHtml = null,
-  TraceDiagnosticReference? Diagnostic = null
+  TraceDiagnosticReference? Diagnostic = null,
+  SlowRequestStatusView? SlowRequest = null
 );
 
 public sealed record ValidationErrorsResponse(

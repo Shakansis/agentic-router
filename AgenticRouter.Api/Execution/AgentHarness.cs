@@ -5,7 +5,6 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
-using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
@@ -51,7 +50,6 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   );
 
   private readonly CodexHarnessOptions _options;
-  private readonly ISettingsStore _settingsStore;
   private readonly ILogger<CodexHarnessAdapter> _logger;
   private readonly SemaphoreSlim _availabilityGate = new(1, 1);
   private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
@@ -76,12 +74,10 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   public CodexHarnessAdapter(
     CodexHarnessOptions options,
-    ISettingsStore settingsStore,
     ILogger<CodexHarnessAdapter> logger
   )
   {
     _options = options;
-    _settingsStore = settingsStore;
     _logger = logger;
   }
 
@@ -210,9 +206,6 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   )
   {
     ValidateTurn(request);
-    var eventIdleTimeout = TimeSpan.FromSeconds(
-      (await _settingsStore.GetAsync(cancellationToken)).Runtime.GenerationTimeoutSeconds
-    );
     await _turnGate.WaitAsync(cancellationToken);
     ActiveHarnessTurn? active = null;
 
@@ -312,7 +305,6 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
       await foreach (var harnessEvent in ReadTurnEventsAsync(
         active,
-        eventIdleTimeout,
         cancellationToken
       ))
       {
@@ -360,43 +352,12 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private async IAsyncEnumerable<HarnessEvent> ReadTurnEventsAsync(
     ActiveHarnessTurn active,
-    TimeSpan eventIdleTimeout,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
     while (true)
     {
-      var timedOut = false;
-      var canRead = false;
-      using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-      {
-        timeout.CancelAfter(eventIdleTimeout);
-        try
-        {
-          canRead = await active.Events.Reader.WaitToReadAsync(timeout.Token);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-          timedOut = true;
-        }
-      }
-
-      if (timedOut)
-      {
-        await CancelTurnAsync(active.SessionId, CancellationToken.None);
-        yield return CreateEvent(
-          active,
-          new HarnessEvent(
-            "turn.timed-out",
-            $"Codex produced no event within the configured {eventIdleTimeout.TotalSeconds:0}-second generation timeout.",
-            output: $"No Codex App Server event arrived for {eventIdleTimeout.TotalSeconds:0} seconds while the turn remained active.",
-            errorCode: "codex-event-idle-timeout",
-            terminalState: HarnessTerminalState.TimedOut
-          )
-        );
-        yield break;
-      }
-
+      var canRead = await active.Events.Reader.WaitToReadAsync(cancellationToken);
       if (!canRead)
       {
         yield break;

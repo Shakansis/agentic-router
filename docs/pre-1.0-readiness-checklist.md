@@ -14,8 +14,8 @@ required item is skipped.
   absent from publish and backup.
 - [ ] Provider adapters, tool conformance, workspace security, session storage,
   usage ledger, reconciliation, backup, restore, and rollback evidence pass.
-- [ ] Safe mode disables Execute, provider activity, resident startup, settings
-  writes, and automatic history loading while allowing backup.
+- [ ] Safe mode disables Execute, provider/model activity, settings writes, and
+  automatic history loading while allowing backup.
 - [ ] `AGENTS.md`, release notes, decisions, and maintainer documentation match
   implemented behavior.
 - [ ] Real Ollama/cloud checks are marked run or skipped with permission reason.

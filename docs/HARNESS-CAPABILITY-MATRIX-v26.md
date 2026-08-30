@@ -2,6 +2,11 @@
 
 Audit date: 2026-08-27
 
+> Historical v26 audit: this matrix predates the Claude Code adapter and is not
+> the current five-harness contract. See
+> [Current harness capability matrix](harness-capability-matrix.md). The detailed
+> v26 implementation and manual-test record below is preserved as evidence.
+
 ## Reviewed implementations and versions
 
 - Agentic Router Native: product `v0.9.14`, checkout `ea2addd76ed0` plus the

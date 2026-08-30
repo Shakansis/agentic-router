@@ -1,12 +1,12 @@
 # PLAN v29: Model × Harness Benchmark Roadmap
 
-Status date: 2026-08-23
+Status: historical roadmap record through M13; not the current product roadmap.
+Last reconciled: 2026-08-30.
 
-This document is the active roadmap for the Model × Harness benchmark work.
-The repository and accepted milestone evidence are authoritative. A milestone
-is marked completed only after its implementation and applicable manual gate
-have been accepted; implementation that exists before that gate is called out
-separately so it is not scheduled twice.
+The repository, current documentation, and accepted milestone evidence are
+authoritative. The sections below preserve what was implemented, deferred, or
+left at a manual gate; optional M14+ and deferred harness notes are not active
+commitments.
 
 ## Completed milestones
 

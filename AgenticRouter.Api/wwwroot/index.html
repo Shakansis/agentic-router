@@ -890,12 +890,12 @@
           <section id="settings-coordinator" class="settings-section" data-settings-section="coordinator" tabindex="-1">
             <div class="section-heading">
               <div class="heading-title-row">
-                <h3>Specialist recovery</h3>
+                <h3>Compatibility model profile</h3>
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: direct coordination depends on the behavioral benchmark of the installed model and digest. Deterministic protocol failures change strategy; identical retries remain disabled."
-                  data-tooltip="Direct coordination depends on the behavioral benchmark of the installed model and digest. Deterministic protocol failures change strategy; identical retries remain disabled."
+                  aria-label="Information: this version-one settings identity is retained for portable configuration and runtime-profile compatibility. It does not override the model selected for an Execute request."
+                  data-tooltip="Retained for version-one configuration compatibility. Execute uses the model and harness selected for the request."
                 >i</button>
               </div>
             </div>
@@ -908,14 +908,15 @@
             <label hidden>
               <span>Resident GPU</span>
               <select id="action-gpu" name="actionGpu"></select>
-              <small>Affinity is sent to preload and every resident call.</small>
+              <small>Retained only for backward-compatible settings reads.</small>
             </label>
             <label>
-              <span>On-demand coordinator fallback</span>
+              <span>Legacy specialist profile identity</span>
               <select id="coordinator-model" name="coordinatorModel" required></select>
+              <small>Does not replace the model explicitly selected for the current request.</small>
             </label>
             <label>
-              <span>Coordinator fallback GPU</span>
+              <span>Legacy specialist profile GPU</span>
               <select id="coordinator-gpu" name="coordinatorGpu"></select>
             </label>
             </div>
@@ -1002,11 +1003,6 @@
                 <input id="show-onboarding-before-conversation" type="checkbox">
                 <span>Show the initial setup screen before new conversations</span>
               </label>
-              <button
-                id="settings-show-onboarding-now"
-                class="secondary-button"
-                type="button"
-              >Show initial setup now</button>
             </div>
             <br />
             <div
@@ -1036,7 +1032,7 @@
               <input id="reserved-response-tokens" type="number" min="256" required>
             </label>
             <label>
-              <span>Generation timeout (seconds)</span>
+              <span>Slow request warning (seconds)</span>
               <input id="generation-timeout-seconds" type="number" min="1" max="1800" required>
             </label>
             <label>
@@ -1107,7 +1103,7 @@
                 >i</button>
               </div>
               <p class="runtime-note">
-                The resident coordinator uses 8,192 tokens by default. Larger contexts are selected only by profile or when request calculation requires them.
+                Specialist, primary, fallback, benchmark, model-test, web-search-synthesis, and vision roles use independent context profiles. Legacy router and resident role IDs remain readable but are not active request routes.
               </p>
               <div id="runtime-role-profiles" class="runtime-role-profiles"></div>
 
@@ -1139,7 +1135,7 @@
                     <input id="runtime-override-output" type="number" min="128" max="32768">
                   </label>
                   <label>
-                    <span>Keep-alive (seconds; -1 resident)</span>
+                    <span>Keep-alive (seconds; -1 keeps the selected role loaded)</span>
                     <input id="runtime-override-keep-alive" type="number" min="-1" max="86400">
                   </label>
                 </div>

@@ -247,6 +247,68 @@ else if (prompt.Contains("claude workspace recovery", StringComparison.OrdinalIg
     ? "Recovered with a workspace-confined read."
     : "Workspace recovery failed.";
 }
+else if (prompt.Contains("claude nested batch step binding", StringComparison.OrdinalIgnoreCase))
+{
+  var plan = await InvokeHostToolAsync(
+    "create_execution_plan",
+    new
+    {
+      objective = "Create a two-file batch",
+      steps = new[]
+      {
+        new
+        {
+          title = "Create both files",
+          dependsOn = Array.Empty<int>()
+        }
+      }
+    }
+  );
+  var result = await InvokeHostToolAsync(
+    "create_files",
+    new
+    {
+      files = new object[]
+      {
+        new
+        {
+          path = "claude-nested-binding/index.html",
+          content = "<!doctype html><title>Recovered binding</title>\n",
+          stepId = "step-1"
+        },
+        new
+        {
+          path = "claude-nested-binding/README.md",
+          content = "# Recovered binding\n"
+        }
+      }
+    }
+  );
+  await WriteMarkerAsync(
+    "fake-claude-nested-binding.json",
+    new
+    {
+      plan,
+      result,
+      htmlExists = File.Exists(Path.Combine(cwd, "claude-nested-binding", "index.html")),
+      readmeExists = File.Exists(Path.Combine(cwd, "claude-nested-binding", "README.md"))
+    }
+  );
+  finalText = result;
+}
+else if (prompt.Contains("claude active slow watchdog", StringComparison.OrdinalIgnoreCase))
+{
+  for (var index = 0; index < 6; index++)
+  {
+    await Task.Delay(450);
+    await EmitStreamDeltaAsync(
+      "thinking_delta",
+      "thinking",
+      $"meaningful-progress-{index} {new string('x', 160)}"
+    );
+  }
+  finalText = "Claude completed after sustained meaningful activity.";
+}
 else if (prompt.Contains("web host bridge claude code", StringComparison.OrdinalIgnoreCase))
 {
   var web = await InvokeHostToolAsync(

@@ -909,25 +909,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     CancellationToken cancellationToken
   )
   {
-    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-    timeout.CancelAfter(_options.RequestTimeout);
     try
     {
-      return await reader.ReadLineAsync(timeout.Token);
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      throw;
-    }
-    catch (OperationCanceledException)
-    {
-      throw new HarnessException(
-        "opencode-event-timeout",
-        "OpenCode produced no event before the configured turn timeout.",
-        $"The SSE stream was idle for {_options.RequestTimeout.TotalSeconds:0} seconds.",
-        true,
-        harnessId: HarnessIds.OpenCode
-      );
+      return await reader.ReadLineAsync(cancellationToken);
     }
     catch (Exception exception) when (exception is IOException or HttpRequestException)
     {
@@ -981,7 +965,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   {
     var client = _httpClients.CreateClient();
     client.BaseAddress = _serverUri ?? throw Failure("opencode-server-missing", "OpenCode server is unavailable.");
-    client.Timeout = _options.RequestTimeout;
+    client.Timeout = Timeout.InfiniteTimeSpan;
     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
       "Basic",
       Convert.ToBase64String(Encoding.UTF8.GetBytes($"opencode:{_password}"))

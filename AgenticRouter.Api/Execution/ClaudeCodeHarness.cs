@@ -12,8 +12,7 @@ public sealed record ClaudeCodeHarnessOptions(
   string? ExecutablePath,
   string? ManagedExecutablePath,
   string RuntimeDirectory,
-  TimeSpan StartupTimeout,
-  TimeSpan RequestTimeout
+  TimeSpan StartupTimeout
 );
 
 public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport
@@ -317,9 +316,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     HarnessMcpClientConfiguration bridge
   )
   {
-    using var timeout = new CancellationTokenSource(_options.RequestTimeout);
     using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-      timeout.Token,
       active.Lifetime.Token
     );
     var cancellationToken = linked.Token;
@@ -478,18 +475,9 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       WriteBufferedDeltas(active);
       active.TryComplete(Event(
         active,
-        timeout.IsCancellationRequested && !active.CancellationRequested
-          ? "turn.timed-out"
-          : "turn.cancelled",
-        message: timeout.IsCancellationRequested && !active.CancellationRequested
-          ? "Claude Code exceeded the configured turn timeout."
-          : "Claude Code turn was cancelled.",
-        errorCode: timeout.IsCancellationRequested && !active.CancellationRequested
-          ? "claude-code-timeout"
-          : null,
-        terminalState: timeout.IsCancellationRequested && !active.CancellationRequested
-          ? HarnessTerminalState.TimedOut
-          : HarnessTerminalState.Cancelled
+        "turn.cancelled",
+        message: "Claude Code turn was cancelled.",
+        terminalState: HarnessTerminalState.Cancelled
       ));
     }
     catch (HarnessException exception)

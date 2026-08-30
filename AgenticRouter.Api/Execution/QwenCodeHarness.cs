@@ -923,7 +923,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         "--max-pending-prompts-per-session", "1",
         "--workspace", Path.GetFullPath(workingDirectory),
         "--memory-project-scope", "workspace",
-        "--prompt-deadline-ms", ((long)_options.RequestTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture),
         "--permission-response-timeout-ms", ((long)_options.RequestTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture),
         "--channel-idle-timeout-ms", "60000"
       })
@@ -1186,8 +1185,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       ["$version"] = 4,
       ["model"] = new
       {
-        name = model,
-        maxWallTimeSeconds = Math.Max(1, (int)_options.RequestTimeout.TotalSeconds)
+        name = model
       },
       ["modelProviders"] = new Dictionary<string, object>
       {
@@ -1202,7 +1200,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             generationConfig = new
             {
               contextWindowSize = contextWindowTokens,
-              timeout = (long)_options.RequestTimeout.TotalMilliseconds,
               maxRetries = 0
             }
           }
@@ -1586,7 +1583,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   {
     var client = _httpClients.CreateClient();
     client.BaseAddress = _serverUri ?? throw Failure("qwen-code-daemon-missing", "Qwen Code daemon is unavailable.");
-    client.Timeout = _options.RequestTimeout;
+    client.Timeout = Timeout.InfiniteTimeSpan;
     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
       "Bearer",
       _token ?? throw Failure("qwen-code-auth-missing", "Qwen Code bearer token is unavailable.")

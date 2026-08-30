@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-30",
+  "model": {
+    "provider": "ollama-local",
+    "id": "qwen3.8:27b-gpu0",
+    "digest": "d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169"
+  },
+  "harnesses": [
+    { "id": "native", "version": "built-in", "traceId": "0HNO6KM17SOG4:00000001", "status": "passed" },
+    { "id": "codex", "version": "0.151.0-alpha.7.1", "traceId": "0HNO6KM17SOG5:00000001", "status": "passed" },
+    { "id": "claude-code", "version": "2.1.234", "traceId": "0HNO6KM17SOG6:00000001", "status": "passed" },
+    { "id": "opencode", "version": "1.18.18", "traceId": "0HNO6KRDTMVNE:00000001", "status": "passed" },
+    { "id": "qwen-code", "version": "0.21.13", "traceId": "0HNO6KRDTMVNF:00000001", "status": "passed" }
+  ],
+  "chat": { "status": "passed", "traceId": "0HNO6KOJ9MPM6:0000000F" },
+  "webSearch": { "status": "passed", "sourceCount": 5, "traceId": "0HNO6KOJ9MPM3:0000000E" },
+  "groq": {
+    "model": "groq::openai/gpt-oss-120b",
+    "initialStatus": "failed",
+    "initialTraceId": "0HNO6KOJ9MPM2:00000021",
+    "correctedStatus": "passed",
+    "correctedTraceId": "0HNO6KRDTMVNA:0000000B"
+  },
+  "deterministicSuite": {
+    "trx": "cleanup-final-after-groq.trx",
+    "passed": 360,
+    "failed": 0,
+    "skipped": 0,
+    "duration": "00:04:29"
+  }
+}

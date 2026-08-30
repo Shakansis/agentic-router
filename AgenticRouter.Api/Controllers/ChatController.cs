@@ -38,6 +38,7 @@ public sealed class ChatController : ControllerBase
   private string? _durableSupervisionRunId;
   private string? _lastExecutionCheckpoint;
   private readonly List<Task<IncidentAppendResult>> _incidentWrites = [];
+  private readonly List<ChatStreamEvent> _presentationTimeline = [];
 
   public ChatController(
     IChatStreamService chatStreamService,
@@ -141,6 +142,8 @@ public sealed class ChatController : ControllerBase
           request.Message,
           request.InteractionMode,
           request.Model,
+          request.ApprovalPolicy,
+          request.Harness,
           request.Images,
           request.HideUserMessage,
           cancellationToken
@@ -180,6 +183,7 @@ public sealed class ChatController : ControllerBase
       }
 
       var answer = new System.Text.StringBuilder();
+      var contentBlocks = new List<ChatMessageContentBlock>();
       var normalizedRequest = request with
       {
         ConversationSessionId = _conversationSessionId
@@ -198,6 +202,10 @@ public sealed class ChatController : ControllerBase
         );
       await foreach (var streamEvent in stream)
       {
+        CaptureContentBlock(
+          contentBlocks,
+          streamEvent
+        );
         _executionSessionId = streamEvent.ExecutionSession?.Id
           ?? _executionSessionId;
         _trace.Link("executionSessionId", _executionSessionId);
@@ -232,7 +240,9 @@ public sealed class ChatController : ControllerBase
               new TraceDiagnosticReference(
                 _trace.TraceId,
                 "completed"
-              )
+              ),
+              contentBlocks,
+              _presentationTimeline
             );
             if (persisted is not null)
             {
@@ -490,6 +500,12 @@ public sealed class ChatController : ControllerBase
         cancellationToken
       );
     }
+    finally
+    {
+      await PersistPresentationTimelineAsync(
+        requestId
+      );
+    }
   }
 
   [HttpGet("supervision/{runId}/stream")]
@@ -529,6 +545,7 @@ public sealed class ChatController : ControllerBase
     _durableSupervisionRunId = runId;
     _trace.Link("conversationId", _conversationSessionId);
     var answer = new System.Text.StringBuilder();
+    var contentBlocks = new List<ChatMessageContentBlock>();
     try
     {
       await WriteEventAsync(
@@ -556,6 +573,10 @@ public sealed class ChatController : ControllerBase
         cancellationToken
       ))
       {
+        CaptureContentBlock(
+          contentBlocks,
+          streamEvent
+        );
         if (streamEvent.Type == "response.delta")
         {
           answer.Append(streamEvent.Delta);
@@ -574,7 +595,9 @@ public sealed class ChatController : ControllerBase
               new TraceDiagnosticReference(
                 _trace.TraceId,
                 "completed"
-              )
+              ),
+              contentBlocks,
+              _presentationTimeline
             );
             if (persisted is not null)
             {
@@ -608,6 +631,12 @@ public sealed class ChatController : ControllerBase
       _logger.LogInformation(
         "Browser detached again from durable supervision run {RunId}; Host execution continues.",
         runId
+      );
+    }
+    finally
+    {
+      await PersistPresentationTimelineAsync(
+        requestId
       );
     }
   }
@@ -1074,6 +1103,116 @@ public sealed class ChatController : ControllerBase
       )?.CreateSummary();
   }
 
+  private static void CaptureContentBlock(
+    List<ChatMessageContentBlock> blocks,
+    ChatStreamEvent streamEvent
+  )
+  {
+    var kind = streamEvent.Type switch
+    {
+      "reasoning.delta" => "reasoning",
+      "response.delta" => "response",
+      "response.completed" when !string.IsNullOrEmpty(
+        streamEvent.ResponseTail
+      ) => "response",
+      _ => null
+    };
+    var content = streamEvent.Type switch
+    {
+      "reasoning.delta" => streamEvent.ReasoningDelta,
+      "response.delta" => streamEvent.Delta,
+      "response.completed" => streamEvent.ResponseTail,
+      _ => null
+    };
+
+    if (kind is null || string.IsNullOrEmpty(content))
+    {
+      return;
+    }
+
+    var id = streamEvent.Type == "response.completed"
+      ? $"terminal:{streamEvent.RequestId}"
+      : streamEvent.ContentBlockId;
+    var last = blocks.LastOrDefault();
+
+    if (
+      last is not null
+      && string.Equals(
+        last.Kind,
+        kind,
+        StringComparison.Ordinal
+      )
+      && string.Equals(
+        last.Id,
+        id,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      blocks[^1] = last with
+      {
+        Content = last.Content + content
+      };
+      return;
+    }
+
+    blocks.Add(
+      new ChatMessageContentBlock(
+        kind,
+        content,
+        id
+      )
+    );
+  }
+
+  private async Task PersistPresentationTimelineAsync(
+    string requestId
+  )
+  {
+    if (
+      string.IsNullOrWhiteSpace(
+        _conversationSessionId
+      )
+      || _presentationTimeline.Count == 0
+    )
+    {
+      return;
+    }
+
+    try
+    {
+      await _persistentSessions.PersistTimelineAsync(
+        _conversationSessionId,
+        _presentationTimeline,
+        CancellationToken.None
+      );
+    }
+    catch (WorkspaceProfileException exception)
+    {
+      _logger.LogWarning(
+        exception,
+        "The complete visible conversation timeline could not be persisted."
+      );
+      try
+      {
+        await WriteEventAsync(
+          PersistenceEvent(
+            requestId,
+            exception
+          ),
+          CancellationToken.None
+        );
+      }
+      catch (Exception writeException)
+      {
+        _logger.LogDebug(
+          writeException,
+          "The client could not receive the timeline persistence failure."
+        );
+      }
+    }
+  }
+
   private async Task<ChatStreamEvent> WriteEventAsync(
     ChatStreamEvent streamEvent,
     CancellationToken cancellationToken
@@ -1089,8 +1228,11 @@ public sealed class ChatController : ControllerBase
       var write = _incidents.AppendAsync(incident, CancellationToken.None);
       _incidentWrites.Add(write);
       var terminal = streamEvent.Type is "error" or "response.completed" or "request.cancelled";
+      var diagnosticCheckpoint = streamEvent.Type is
+        "request.slow-warning" or "request.slow-critical"
+        or "request.slow-activity-resumed";
       IncidentAppendResult result;
-      if (terminal)
+      if (terminal || diagnosticCheckpoint)
       {
         var results = await Task.WhenAll(_incidentWrites);
         result = results[^1];
@@ -1119,6 +1261,16 @@ public sealed class ChatController : ControllerBase
           }
         };
       }
+      if (diagnosticCheckpoint && streamEvent.Diagnostic is not null)
+      {
+        streamEvent = streamEvent with
+        {
+          Diagnostic = streamEvent.Diagnostic with
+          {
+            Persisted = result.Persisted
+          }
+        };
+      }
       if (terminal)
       {
         streamEvent = streamEvent with
@@ -1136,6 +1288,10 @@ public sealed class ChatController : ControllerBase
         };
       }
     }
+
+    _presentationTimeline.Add(
+      streamEvent
+    );
 
     var json = JsonSerializer.Serialize(
       streamEvent,

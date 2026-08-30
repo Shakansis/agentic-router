@@ -2,7 +2,7 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.9.18_alpha - automatic route-aware Web Search, persistent exact-command permissions, and Windows/Linux x64 portable releases from one shared core. This remains evaluation software.
+**Current Status**: v0.9.18_alpha - automatic route-aware Web Search, persistent exact-command permissions, trace self-investigation for failed turns, and Windows/Linux x64 portable releases from one shared core. This remains evaluation software.
 
 ## Download
 
@@ -30,9 +30,9 @@ Agentic Router is a local-first application that routes conversations and superv
 The product has two user-visible modes:
 
 - **Chat** routes a turn to a configured expert and streams one continuous answer. An expert is a configured combination of intent, model, optional device preference, and system prompt—not an autonomous process, agent graph, or tool-using worker.
-- **Execute** lets a coordinator inspect a trusted workspace, propose a host-owned plan, use a constrained set of local tools, request approvals when required, validate changes, and present a reviewable result.
+- **Execute** lets the selected model + harness work directly inside a trusted workspace through Host-governed tools, approvals, validation, recovery, and reviewable evidence. A model-authored plan is optional and does not gate ordinary actions.
 
-The host, not the model, owns security boundaries, plan identity, approval decisions, retries, recovery budgets, persistence, and tool execution.
+The Host, not the model, owns security boundaries, approval decisions, recovery budgets, persistence, tool execution, effect proof, and any plan identity used by an execution flow.
 
 ## 🏗️ Architecture Overview
 
@@ -298,14 +298,14 @@ The application is designed to work with any hardware configuration:
 Configuration is stored in a local JSON file in the `data/` directory. The application supports:
 
 - Ollama base URL
-- Coordinator model selection (on-demand fallback for Execute)
+- Compatibility specialist-profile identity (`coordinatorModel` on the version-1 wire contract); the selected request model + harness owns current Execute routing
 - Global default expert model
 - Global default device (or `auto`)
 - Configurable intent profiles
 - Model override per intent
 - Device override per intent or model
 - System prompt per intent
-- Request timeout values
+- Slow-request warning threshold (`T`, with a stronger warning at `2T`); warnings do not cancel an active turn
 - Heartbeat interval for long-running streams
 
 Default intents include:
@@ -317,15 +317,19 @@ Default intents include:
 - `review-and-testing`
 
 The **Advanced** settings section can export and atomically import a portable
-`agentic-router.yaml` backup. It includes the Ollama connection, coordinator,
-default and intent models, GPU choices, system prompts, context,
+`agentic-router.yaml` backup. It includes the Ollama connection, default and
+intent models, compatibility model fields, GPU choices, system prompts, context,
 runtime, execution, retention, project-awareness, and Git-delivery limits.
 Ollama runtime role profiles, memory headroom, and exact model/digest overrides
 are portable too. Workspace paths, conversations, validation commands,
 approvals, and measured hardware evidence remain local and are intentionally
 excluded.
 
-Model roles use only `primary` and `fallback`:
+Each model group uses only `primary` and optional `fallback` values. The
+version-1 portable schema still round-trips legacy `router`, `action`, and
+`coordinator` groups so existing backups remain readable; `router` and `action`
+do not participate in current routing, and `coordinator` does not override the
+model explicitly selected for an Execute request.
 
 ```yaml
 schema_version: 1
@@ -454,7 +458,7 @@ Click the "Configurações" button to access the configuration interface:
 
 **Configuration Options:**
 - **Section Navigation**: Uses a near-full-viewport desktop menu and a compact selector on narrow screens
-- **General Settings**: Ollama URL, router and coordinator models, default model, default GPU
+- **General Settings**: Ollama URL, default model, default GPU, runtime limits, and local-resource preferences
 - **Intent Configuration**: Per-intent model overrides, device preferences, and system prompts
 - **Model Selection**: Choose from installed Ollama models for each intent
 - **Workspace and Git Summaries**: Opens the trusted-workspace, history, validation, and read-only Git configuration surfaces
@@ -558,9 +562,9 @@ The application uses Server-Sent Events (SSE) to stream typed events:
 - `turn.failed` - Turn failed with error
 
 ### Execute Mode Events
-- `execution-plan-created` - Host-owned execution plan created
-- `execution-plan-revised` - Plan revised while preserving completed steps
-- `action.proposed` - Coordinator proposes a tool action
+- `execution-plan-created` - An optional Host-owned execution plan was created
+- `execution-plan-revised` - An optional plan was revised while preserving completed steps
+- `action.proposed` - The selected specialist proposes a tool action
 - `action.approved` - User approved the action
 - `action.rejected` - User rejected the action
 - `action.started` - Tool execution begins
@@ -640,7 +644,7 @@ Direct tool coordination is enabled only after the exact installed model passes 
 Before editing:
 1. Inspect repository structure and relevant files
 2. Review current build and test commands
-3. Read root layout example when changing UI behavior
+3. Inspect the production DOM, CSS, browser tests, and applicable UI plan when changing presentation
 4. State smallest implementation slice
 
 While editing:
@@ -669,6 +673,13 @@ or cloud provider:
 .\tools\diagnostics\Run-AgenticRouterDiagnostics.ps1
 ```
 
+Every terminal Chat/Execute activity summary keeps its trace ID visible. A
+failed turn with a persisted sanitized incident offers one **Investigate error**
+action: it submits a hidden Chat request for that exact trace and returns the
+analysis without visually filling the composer. Successful turns show the trace
+ID but no investigation button; users can copy the ID and ask for analysis in a
+later message.
+
 See `tools/diagnostics/README.md` and
 `docs/pre-1.0-readiness-checklist.md` for opt-in validation and release gates.
 
@@ -681,7 +692,9 @@ commercial use, modification, and derivative works are not permitted. See the
 
 ## 🤝 Contributing
 
-[Specify contribution guidelines here]
+This repository is maintained as evaluation software. Proposed changes must
+follow `AGENTS.md`, preserve public and persisted contracts unless explicitly
+versioned, and include applicable browser/API evidence.
 
 ## 📞 Support
 

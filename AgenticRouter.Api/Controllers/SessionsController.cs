@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Sessions;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
@@ -11,14 +12,17 @@ public sealed class SessionsController : ControllerBase
 {
   private readonly IPersistentSessionService _sessions;
   private readonly IConversationProductivityService _productivity;
+  private readonly IMarkdownRenderer _markdown;
 
   public SessionsController(
     IPersistentSessionService sessions,
-    IConversationProductivityService productivity
+    IConversationProductivityService productivity,
+    IMarkdownRenderer markdown
   )
   {
     _sessions = sessions;
     _productivity = productivity;
+    _markdown = markdown;
   }
 
   [HttpGet]
@@ -83,10 +87,30 @@ public sealed class SessionsController : ControllerBase
   )
   {
     return await ExecuteAsync(
-      () => _sessions.ResumeAsync(
-        id,
-        request.BrowserSessionId,
-        cancellationToken
+      async () => Present(
+        await _sessions.ResumeAsync(
+          id,
+          request.BrowserSessionId,
+          cancellationToken
+        )
+      )
+    );
+  }
+
+  [HttpGet("{id}")]
+  public async Task<IActionResult> OpenReadOnly(
+    string id,
+    [FromQuery] string workspaceId,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      async () => Present(
+        await _sessions.OpenReadOnlyAsync(
+          workspaceId,
+          id,
+          cancellationToken
+        )
       )
     );
   }
@@ -430,6 +454,35 @@ public sealed class SessionsController : ControllerBase
         )
       );
     }
+  }
+
+  private ConversationSessionRecord Present(
+    ConversationSessionRecord session
+  )
+  {
+    return session with
+    {
+      Messages = session.Messages.Select(
+        message => message.Role == "assistant"
+          ? message with
+          {
+            RenderedHtml = _markdown.Render(
+              message.Content
+            ),
+            ContentBlocks = message.ContentBlocks?.Select(
+              block => block.Kind == "response"
+                ? block with
+                {
+                  RenderedHtml = _markdown.Render(
+                    block.Content
+                  )
+                }
+                : block
+            ).ToArray()
+          }
+          : message
+      ).ToArray()
+    };
   }
 
   private object Error(

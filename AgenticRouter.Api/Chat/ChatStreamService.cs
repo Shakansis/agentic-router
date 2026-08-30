@@ -26,9 +26,9 @@ public sealed class ChatStreamService
     IExecutionSpecialistTurnService
 {
   private const string GeneralChat = "general-chat";
-  private const int MaximumIdenticalStrategyAttempts = 5;
   private const int MaximumToolsetRequestsPerTurn = 4;
   private const int MaximumChatReadToolCalls = 8;
+  private static readonly TimeSpan ExtremeInactivityCeiling = TimeSpan.FromHours(12);
   private const string ChatReadOnlyWorkspaceMarker =
     "CHAT_READ_ONLY_WORKSPACE_V1";
   private static readonly string[] ChatWorkspaceReadOnlyTools =
@@ -181,6 +181,38 @@ public sealed class ChatStreamService
   }
 
   private async IAsyncEnumerable<ChatStreamEvent> StreamCoreAsync(
+    ChatRequest request,
+    string requestId,
+    ExecutionSpecialistTurnInvocation invocation,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    var warningAfter = TimeSpan.FromSeconds(
+      settings.Runtime.GenerationTimeoutSeconds
+    );
+    using var requestLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+      cancellationToken
+    );
+    await foreach (var streamEvent in AddSlowRequestWarningsAsync(
+      StreamRequestAsync(
+        request,
+        requestId,
+        invocation,
+        requestLifetime.Token
+      ),
+      request,
+      requestId,
+      warningAfter,
+      requestLifetime,
+      cancellationToken
+    ))
+    {
+      yield return streamEvent;
+    }
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> StreamRequestAsync(
     ChatRequest request,
     string requestId,
     ExecutionSpecialistTurnInvocation invocation,
@@ -1466,9 +1498,7 @@ public sealed class ChatStreamService
       stopwatch,
       execution,
       structuredCoordination,
-      null,
       settings.Execution.DirectCoordinatorPlanningFailuresBeforeHandoff,
-      false,
       settings,
       settings.Execution,
       settings.ProjectAwareness,
@@ -2711,18 +2741,48 @@ public sealed class ChatStreamService
       yield break;
     }
 
-    var planStepId = arguments.TryGetProperty(
+    var hasTopLevelPlanStepId = arguments.TryGetProperty(
       "stepId",
       out var stepIdElement
-    ) && stepIdElement.ValueKind == JsonValueKind.String
+    );
+    var planStepId = hasTopLevelPlanStepId
+      && stepIdElement.ValueKind == JsonValueKind.String
       ? stepIdElement.GetString()
       : null;
+    var actionArguments = RemoveJsonProperty(arguments, "stepId");
+    var normalizedNestedPlanStepId = false;
+    if (
+      !hasTopLevelPlanStepId
+      && session.Plan is not null
+      && string.Equals(harnessEvent.Tool, "create_files", StringComparison.Ordinal)
+      && TryPromoteNestedCreateFilesPlanStepId(
+        arguments,
+        out var normalizedArguments,
+        out var promotedPlanStepId
+      )
+    )
+    {
+      actionArguments = normalizedArguments;
+      planStepId = promotedPlanStepId;
+      normalizedNestedPlanStepId = true;
+    }
     var proposal = new LocalActionProposal(
       harnessEvent.Tool,
-      RemoveJsonProperty(arguments, "stepId"),
+      actionArguments,
       $"Requested through {harnessDefinition.DisplayName} native tools.",
       PlanStepId: planStepId
     );
+    if (normalizedNestedPlanStepId)
+    {
+      yield return Event(
+        requestId,
+        "action.input-normalized",
+        $"Host promoted the exact nested create_files plan binding '{planStepId}' to the action envelope before validation.",
+        stopwatch,
+        model,
+        intention
+      );
+    }
     if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
     {
       var failure = TryApplyExecutionPlan(proposal, projectAwareness, out var plan);
@@ -3239,9 +3299,7 @@ public sealed class ChatStreamService
     Stopwatch stopwatch,
     ExecutionProgress progress,
     bool structuredCoordination,
-    string? recoverySpecialistModel,
     int maximumPlanningAttempts,
-    bool fallbackToResident,
     ApplicationSettings applicationSettings,
     ExecutionSettings settings,
     ProjectAwarenessSettings projectAwareness,
@@ -3284,7 +3342,6 @@ public sealed class ChatStreamService
           model,
           intention,
           $"The execution used its bounded allowance of {settings.MaxToolCallsPerTurn} local actions before all planned work was completed.",
-          recoverySpecialistModel,
           cancellationToken
         );
         yield return checkpoint.Event;
@@ -3296,7 +3353,6 @@ public sealed class ChatStreamService
           model,
           intention,
           progress,
-          recoverySpecialistModel,
           cancellationToken
         );
 
@@ -3851,14 +3907,6 @@ public sealed class ChatStreamService
             {
               progress.PartialContextExhausted = true;
             }
-            else if (contextFailure.Error.Code == "context-item-too-large")
-            {
-              progress.Failure = ToChatException(contextFailure, model, intention);
-            }
-            else if (fallbackToResident)
-            {
-              progress.PlanningFailure = contextFailure;
-            }
             else
             {
               progress.Failure = ToChatException(contextFailure, model, intention);
@@ -3884,21 +3932,6 @@ public sealed class ChatStreamService
               model,
               intention
             );
-
-            if (fallbackToResident)
-            {
-              yield return Event(
-                requestId,
-                "agent.tooling-fallback",
-                $"Native tool coordination for {model} is disabled for this turn after its first protocol failure; "
-                  + "the configured coordinator will take over with a different execution path.",
-                stopwatch,
-                model,
-                intention
-              );
-              progress.PlanningFailure = protocolFailure;
-              yield break;
-            }
 
             var protocolRecoveryLimitFailure = RecordRecoveryAttempt(
               progress,
@@ -3951,7 +3984,6 @@ public sealed class ChatStreamService
               intention,
               protocolRecoveryLimitFailure?.TechnicalMessage
                 ?? protocolFailure.TechnicalMessage,
-              recoverySpecialistModel,
               cancellationToken
             );
             yield return checkpoint.Event;
@@ -3963,7 +3995,6 @@ public sealed class ChatStreamService
               model,
               intention,
               progress,
-              recoverySpecialistModel,
               cancellationToken
             );
 
@@ -4051,7 +4082,6 @@ public sealed class ChatStreamService
               model,
               intention,
               recoveryLimitFailure.TechnicalMessage,
-              recoverySpecialistModel,
               cancellationToken
             );
             yield return checkpoint.Event;
@@ -4063,7 +4093,6 @@ public sealed class ChatStreamService
               model,
               intention,
               progress,
-              recoverySpecialistModel,
               cancellationToken
             );
 
@@ -4207,7 +4236,6 @@ public sealed class ChatStreamService
                 model,
                 intention,
                 recoveryLimitFailure.TechnicalMessage,
-                recoverySpecialistModel,
                 cancellationToken
               );
               yield return checkpoint.Event;
@@ -4219,7 +4247,6 @@ public sealed class ChatStreamService
                 model,
                 intention,
                 progress,
-                recoverySpecialistModel,
                 cancellationToken
               );
 
@@ -4770,7 +4797,6 @@ public sealed class ChatStreamService
               model,
               intention,
               repeatedDenial,
-              recoverySpecialistModel,
               cancellationToken
             );
             yield return checkpoint.Event;
@@ -4782,7 +4808,6 @@ public sealed class ChatStreamService
               model,
               intention,
               progress,
-              recoverySpecialistModel,
               cancellationToken
             );
 
@@ -4818,7 +4843,6 @@ public sealed class ChatStreamService
               model,
               intention,
               recoveryLimitFailure.TechnicalMessage,
-              recoverySpecialistModel,
               cancellationToken
             );
             yield return checkpoint.Event;
@@ -4830,7 +4854,6 @@ public sealed class ChatStreamService
               model,
               intention,
               progress,
-              recoverySpecialistModel,
               cancellationToken
             );
 
@@ -4937,12 +4960,6 @@ public sealed class ChatStreamService
             intention
           );
 
-          if (fallbackToResident)
-          {
-            progress.PlanningFailure = exception;
-            yield break;
-          }
-
           break;
         }
 
@@ -5005,22 +5022,6 @@ public sealed class ChatStreamService
           "Action planning ended without a result or failure."
         );
 
-        if (fallbackToResident)
-        {
-          yield return Event(
-            requestId,
-            "agent.tooling-fallback",
-            $"Planning attempt {maximumPlanningAttempts} of {maximumPlanningAttempts} failed: "
-              + $"{exception.Message} Tooling for {model} will be ignored for this turn; "
-              + "the resident agent will take over with a reset error counter.",
-            stopwatch,
-            model,
-            intention
-          );
-          progress.PlanningFailure = exception;
-          yield break;
-        }
-
         yield return Event(
           requestId,
           "action.planning-exhausted",
@@ -5035,7 +5036,6 @@ public sealed class ChatStreamService
           model,
           intention,
           exception.Message,
-          recoverySpecialistModel,
           cancellationToken
         );
         yield return checkpoint.Event;
@@ -5047,7 +5047,6 @@ public sealed class ChatStreamService
           model,
           intention,
           progress,
-          recoverySpecialistModel,
           cancellationToken
         );
 
@@ -5668,7 +5667,6 @@ public sealed class ChatStreamService
             model,
             intention,
             recoveryLimitFailure.TechnicalMessage,
-            recoverySpecialistModel,
             cancellationToken
           );
           yield return checkpoint.Event;
@@ -5680,7 +5678,6 @@ public sealed class ChatStreamService
             model,
             intention,
             progress,
-            recoverySpecialistModel,
             cancellationToken
           );
 
@@ -5716,109 +5713,6 @@ public sealed class ChatStreamService
           yield break;
         }
 
-        if (!string.IsNullOrWhiteSpace(
-          recoverySpecialistModel
-        ) && progress.AutomaticStrategyRevisionCount < settings.MaxRecoveryAttemptsPerTurn)
-        {
-          yield return Event(
-            requestId,
-            "agent.execution-recovery-started",
-            $"The resident coordinator asked specialist model {recoverySpecialistModel} for a materially different strategy.",
-            stopwatch,
-            recoverySpecialistModel,
-            intention
-          );
-          var guidance = await TryPrepareSupervisedGuidanceAsync(
-            baseUri,
-            recoverySpecialistModel,
-            action,
-            failureOutput,
-            progress,
-            cancellationToken
-          );
-
-          if (guidance.Guidance is not null)
-          {
-            progress.Messages.RemoveAll(
-              IsGuidanceMessage
-            );
-            progress.ToolMessages.RemoveAll(
-              message => message.Content?.StartsWith(
-                ExpertExecutionGuidanceService.GuidanceMarker,
-                StringComparison.Ordinal
-              ) == true
-            );
-            var guidanceMessage = GuidanceMessage(
-              recoverySpecialistModel,
-              guidance.Guidance
-            );
-            progress.Messages.Add(
-              guidanceMessage
-            );
-            progress.ToolMessages.Add(
-              ToToolMessage(
-                guidanceMessage
-              )
-            );
-            progress.Guidance = guidance.Guidance;
-            yield return Event(
-              requestId,
-              "agent.execution-recovery-guidance-prepared",
-              guidance.RejectedUnchangedCandidate
-                ? $"A materially different strategy was received from specialist model {recoverySpecialistModel} after rejecting an unchanged first response."
-                : $"A materially different strategy was received from specialist model {recoverySpecialistModel}.",
-              stopwatch,
-              recoverySpecialistModel,
-              intention
-            );
-          }
-          else if (guidance.RepeatedPreviousStrategy)
-          {
-            var correction = new ChatMessage(
-              "user",
-              "RESIDENT_STRATEGY_SUPERVISION_RESULT\n"
-                + $"The specialist repeated the previous strategy {MaximumIdenticalStrategyAttempts} times, so that strategy was rejected. "
-                + "Replan from the authoritative tool results. Preserve completed work, do not recreate "
-                + "the project, do not repeat failed paths or actions, and choose a materially different "
-                + "bounded next action."
-            );
-            progress.Messages.Add(
-              correction
-            );
-            progress.ToolMessages.Add(
-              ToToolMessage(
-                correction
-              )
-            );
-            yield return Event(
-              requestId,
-              "agent.execution-recovery-guidance-unchanged",
-              $"Specialist model {recoverySpecialistModel} repeated the previous strategy {MaximumIdenticalStrategyAttempts} times. "
-                + "The duplicate strategy was rejected and the active coordinator received a host-owned correction.",
-              stopwatch,
-              recoverySpecialistModel,
-              intention
-            );
-          }
-          else
-          {
-            _logger.LogWarning(
-              guidance.Failure,
-              "Execution recovery guidance was unavailable for model {Model}; the coordinator will replan directly.",
-              recoverySpecialistModel
-            );
-            yield return Event(
-              requestId,
-              "agent.execution-recovery-guidance-unavailable",
-              $"Revised specialist guidance was unavailable: {guidance.Failure!.Message} "
-                + "The active coordinator will replan directly from the failed tool result.",
-              stopwatch,
-              recoverySpecialistModel,
-              intention
-            );
-          }
-        }
-
         yield return Event(
           requestId,
           "action.recovery-planning",
@@ -5837,111 +5731,265 @@ public sealed class ChatStreamService
 
   }
 
-  private async Task<SupervisedGuidanceAttempt> TryPrepareSupervisedGuidanceAsync(
-    Uri baseUri,
-    string specialistModel,
-    ValidatedLocalAction failedAction,
-    string failureOutput,
-    ExecutionProgress progress,
-    CancellationToken cancellationToken
+  private async IAsyncEnumerable<ChatStreamEvent> AddSlowRequestWarningsAsync(
+    IAsyncEnumerable<ChatStreamEvent> source,
+    ChatRequest request,
+    string requestId,
+    TimeSpan warningAfter,
+    CancellationTokenSource requestLifetime,
+    [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    progress.AutomaticStrategyRevisionCount++;
-    var previousGuidance = progress.Guidance is null
-      ? null
-      : ExpertExecutionGuidanceService.Serialize(
-        progress.Guidance
-      );
-    var pendingSteps = _executionSession?.Plan?.Steps.Where(
-      step => step.Status != "completed"
-    ).Select(
-      step => $"{step.Id}: {step.Title} [{step.Status}]"
-    ).ToArray() ?? [];
-    var revisionMessages = progress.Messages.Where(
-      message => !IsGuidanceMessage(
-        message
-      )
-    ).ToList();
-    revisionMessages.Add(
-      new ChatMessage(
-        "user",
-        "RESIDENT_STRATEGY_SUPERVISION\n"
-          + "The resident coordinator detected execution without verified progress and is requesting "
-          + "a different specialist approach.\n"
-          + $"Failed action: {failedAction.Summary}\n"
-          + $"Authoritative failure: {TruncateRecoveryContext(failureOutput)}\n"
-          + $"Pending plan: {(pendingSteps.Length == 0 ? "none" : string.Join("; ", pendingSteps))}\n"
-          + "The trusted workspace is already the project root. Preserve completed work and existing "
-          + "files. Do not recreate the project, do not repeat the failed tool or path unchanged, and "
-          + "do not use create_file when an existing file should be inspected or edited. Return a "
-          + "materially different structured strategy focused on the smallest corrective action."
-      )
+    var stopwatch = Stopwatch.StartNew();
+    var criticalAfter = TimeSpan.FromTicks(
+      checked(warningAfter.Ticks * 2)
     );
-    var guidance = await TryPrepareGuidanceAsync(
-      baseUri,
-      specialistModel,
-      revisionMessages,
-      cancellationToken
+    var startedAt = DateTimeOffset.UtcNow;
+    var lastActivityAt = startedAt;
+    var warningDelay = Task.Delay(warningAfter, cancellationToken);
+    var criticalDelay = Task.Delay(criticalAfter, cancellationToken);
+    var warningSent = false;
+    var criticalSent = false;
+    var selectedModel = string.IsNullOrWhiteSpace(request.Model)
+      ? "auto"
+      : request.Model;
+    var selectedHarness = string.IsNullOrWhiteSpace(request.Harness)
+      ? HarnessIds.Native
+      : request.Harness;
+    string? activeTool = null;
+    long lastObservedOutputTokens = 0;
+    CancellationTokenSource idleLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+      requestLifetime.Token
     );
-    var rejectedUnchangedCandidate = false;
+    var safetyDelay = Task.Delay(ExtremeInactivityCeiling, idleLifetime.Token);
 
-    for (
-      var attempt = 2;
-      attempt <= MaximumIdenticalStrategyAttempts
-        && IsIdenticalGuidance(
-          guidance.Guidance,
-          previousGuidance
-        );
-      attempt++
-    )
+    try
     {
-      rejectedUnchangedCandidate = true;
-      revisionMessages.Add(
-        new ChatMessage(
-          "user",
-            "RESIDENT_STRATEGY_SUPERVISION_REJECTED\n"
-            + "The proposed strategy is identical to the strategy that already failed and was not accepted. "
-            + "Change the tool, path, sequence, or arguments to address the authoritative failure. "
-            + $"Do not return the same JSON again. Attempt {attempt} of {MaximumIdenticalStrategyAttempts}."
+      await using var enumerator = source.GetAsyncEnumerator(requestLifetime.Token);
+      var moveNext = enumerator.MoveNextAsync().AsTask();
+      while (true)
+      {
+        var candidates = new List<Task> { moveNext, safetyDelay };
+        if (!warningSent)
+        {
+          candidates.Add(warningDelay);
+        }
+        if (!criticalSent)
+        {
+          candidates.Add(criticalDelay);
+        }
+        var completed = await Task.WhenAny(candidates);
+        if (
+          completed == warningDelay
+          && warningDelay.Status == TaskStatus.RanToCompletion
         )
-      );
-      guidance = await TryPrepareGuidanceAsync(
-        baseUri,
-        specialistModel,
-        revisionMessages,
-        cancellationToken
-      );
+        {
+          warningSent = true;
+          yield return SlowRequestEvent(
+            requestId,
+            "request.slow-warning",
+            "warning",
+            selectedModel,
+            selectedHarness,
+            activeTool,
+            startedAt,
+            lastActivityAt,
+            stopwatch.ElapsedMilliseconds
+          );
+          continue;
+        }
+        if (
+          completed == criticalDelay
+          && criticalDelay.Status == TaskStatus.RanToCompletion
+        )
+        {
+          criticalSent = true;
+          warningSent = true;
+          yield return SlowRequestEvent(
+            requestId,
+            "request.slow-critical",
+            "critical",
+            selectedModel,
+            selectedHarness,
+            activeTool,
+            startedAt,
+            lastActivityAt,
+            stopwatch.ElapsedMilliseconds
+          );
+          continue;
+        }
+        if (
+          completed == safetyDelay
+          && safetyDelay.Status == TaskStatus.RanToCompletion
+        )
+        {
+          requestLifetime.Cancel();
+          throw new ChatStageException(
+            "extreme-inactivity-ceiling",
+            "The request was stopped after 12 hours without Host-observed activity.",
+            "The internal orphan-process ceiling was reached; no token, event, tool result, or observed effect crossed the Host boundary for 12 hours.",
+            selectedModel,
+            null,
+            504,
+            true,
+            details: new Dictionary<string, string?>
+            {
+              ["harness"] = selectedHarness,
+              ["tool"] = activeTool
+            }
+          );
+        }
+
+        if (!await moveNext)
+        {
+          yield break;
+        }
+        var streamEvent = enumerator.Current;
+        selectedModel = streamEvent.SelectedModel ?? selectedModel;
+        const string harnessPrefix = "harness.";
+        const string harnessSuffix = "-selected";
+        if (
+          streamEvent.Type.StartsWith(harnessPrefix, StringComparison.Ordinal)
+          && streamEvent.Type.EndsWith(harnessSuffix, StringComparison.Ordinal)
+        )
+        {
+          selectedHarness = streamEvent.Type[
+            harnessPrefix.Length..^harnessSuffix.Length
+          ];
+        }
+        if (streamEvent.LocalAction is { } action)
+        {
+          activeTool = action.State is "completed" or "failed" or "rejected" or "denied"
+            ? null
+            : action.Tool;
+        }
+        var outputAdvanced = streamEvent.ContextUsage?.OutputTokens
+          > lastObservedOutputTokens;
+        if (streamEvent.ContextUsage is not null)
+        {
+          lastObservedOutputTokens = Math.Max(
+            lastObservedOutputTokens,
+            streamEvent.ContextUsage.OutputTokens
+          );
+        }
+        if (outputAdvanced || IsMeaningfulExecutionActivity(streamEvent))
+        {
+          lastActivityAt = DateTimeOffset.UtcNow;
+          idleLifetime.Cancel();
+          idleLifetime.Dispose();
+          idleLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+            requestLifetime.Token
+          );
+          safetyDelay = Task.Delay(ExtremeInactivityCeiling, idleLifetime.Token);
+        }
+        yield return streamEvent;
+        moveNext = enumerator.MoveNextAsync().AsTask();
+      }
     }
+    finally
+    {
+      idleLifetime.Cancel();
+      idleLifetime.Dispose();
+    }
+  }
 
-    var repeatedPreviousStrategy = IsIdenticalGuidance(
-      guidance.Guidance,
-      previousGuidance
+  private ChatStreamEvent SlowRequestEvent(
+    string requestId,
+    string type,
+    string level,
+    string model,
+    string harness,
+    string? tool,
+    DateTimeOffset startedAt,
+    DateTimeOffset lastActivityAt,
+    long elapsedMilliseconds
+  )
+  {
+    var idleMilliseconds = Math.Max(
+      0,
+      (long)(DateTimeOffset.UtcNow - lastActivityAt).TotalMilliseconds
     );
-
-    return new SupervisedGuidanceAttempt(
-      repeatedPreviousStrategy
-        ? null
-        : guidance.Guidance,
-      guidance.Failure,
-      rejectedUnchangedCandidate,
-      repeatedPreviousStrategy
+    var subject = string.IsNullOrWhiteSpace(tool)
+      ? $"Harness {harness} with model {model}"
+      : $"Tool {tool} through harness {harness} with model {model}";
+    var message = level switch
+    {
+      "critical" => $"{subject} is taking much longer than usual. Last meaningful Host activity: {FormatSlowDuration(idleMilliseconds)} ago. Consider Stop; the trace will remain available for investigation.",
+      _ => $"{subject} is taking longer than usual. Last meaningful Host activity: {FormatSlowDuration(idleMilliseconds)} ago."
+    };
+    return new ChatStreamEvent(
+      requestId,
+      type,
+      DateTimeOffset.UtcNow,
+      message,
+      null,
+      model,
+      null,
+      elapsedMilliseconds,
+      null,
+      null,
+      ExecutionSession: _executionSession?.CreateSummary(),
+      Diagnostic: new TraceDiagnosticReference(
+        _trace.TraceId,
+        level == "critical" ? "slow-critical" : "slow-warning"
+      ),
+      SlowRequest: new SlowRequestStatusView(
+        level,
+        startedAt,
+        lastActivityAt,
+        elapsedMilliseconds,
+        idleMilliseconds,
+        harness,
+        model,
+        tool
+      )
     );
   }
 
-  private static bool IsIdenticalGuidance(
-    ExpertExecutionGuidance? guidance,
-    string? previousGuidance
-  )
+  private static string FormatSlowDuration(long milliseconds)
   {
-    return guidance is not null
-      && previousGuidance is not null
-      && string.Equals(
-        ExpertExecutionGuidanceService.Serialize(
-          guidance
-        ),
-        previousGuidance,
-        StringComparison.Ordinal
-      );
+    var duration = TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
+    if (duration.TotalMinutes >= 1)
+    {
+      return $"{Math.Floor(duration.TotalMinutes):0} min {duration.Seconds}s";
+    }
+    return $"{Math.Floor(duration.TotalSeconds):0}s";
+  }
+
+  private static bool IsMeaningfulExecutionActivity(ChatStreamEvent streamEvent)
+  {
+    if (
+      streamEvent.Type is "request.heartbeat" or "context.usage"
+      || streamEvent.Type.StartsWith("request.slow-", StringComparison.Ordinal)
+    )
+    {
+      return false;
+    }
+    if (
+      !string.IsNullOrEmpty(streamEvent.Delta)
+      || !string.IsNullOrEmpty(streamEvent.ReasoningDelta)
+      || streamEvent.LocalAction is not null
+    )
+    {
+      return true;
+    }
+    return streamEvent.Type.StartsWith("action.", StringComparison.Ordinal)
+      || streamEvent.Type.StartsWith("execution.", StringComparison.Ordinal)
+      || streamEvent.Type.StartsWith("execution-", StringComparison.Ordinal)
+      || IsMeaningfulHarnessStateChange(streamEvent.Type)
+      || streamEvent.Type.Contains("tool", StringComparison.OrdinalIgnoreCase)
+      || streamEvent.Type.Contains("stdout", StringComparison.OrdinalIgnoreCase)
+      || streamEvent.Type.Contains("stderr", StringComparison.OrdinalIgnoreCase)
+      || streamEvent.Type.Contains("files-changed", StringComparison.OrdinalIgnoreCase)
+      || streamEvent.Type.Contains("edit-applied", StringComparison.OrdinalIgnoreCase);
+  }
+
+  private static bool IsMeaningfulHarnessStateChange(string eventType)
+  {
+    return eventType.StartsWith("harness.", StringComparison.Ordinal)
+      && !eventType.EndsWith("-selected", StringComparison.Ordinal)
+      && !eventType.EndsWith("-warning", StringComparison.Ordinal)
+      && !eventType.EndsWith("-native-event-preserved", StringComparison.Ordinal);
   }
 
   private async IAsyncEnumerable<ChatStreamEvent> StreamDiagnosticInvestigationAsync(
@@ -7684,35 +7732,72 @@ public sealed class ChatStreamService
     );
   }
 
-  private async Task<ToolingInspection> InspectToolingAsync(
-    Uri baseUri,
-    string model,
-    CancellationToken cancellationToken
+  private static bool TryPromoteNestedCreateFilesPlanStepId(
+    JsonElement arguments,
+    out JsonElement normalizedArguments,
+    out string? planStepId
   )
   {
-    try
+    normalizedArguments = arguments.Clone();
+    planStepId = null;
+    if (
+      arguments.ValueKind != JsonValueKind.Object
+      || !arguments.TryGetProperty("files", out var files)
+      || files.ValueKind != JsonValueKind.Array
+    )
     {
-      return new ToolingInspection(
-        await _ollamaClient.GetModelCapabilitiesAsync(
-          baseUri,
-          model,
-          cancellationToken
-        ),
-        null
-      );
+      return false;
     }
-    catch (OllamaProviderException exception)
+
+    var root = JsonNode.Parse(arguments.GetRawText())?.AsObject();
+    var fileNodes = root?["files"] as JsonArray;
+    if (fileNodes is null)
     {
-      _logger.LogWarning(
-        exception,
-        "Could not inspect tooling capability for model {Model}; the resident bridge will be used.",
-        model
-      );
-      return new ToolingInspection(
-        null,
-        exception
-      );
+      return false;
     }
+
+    string? candidate = null;
+    var found = false;
+    foreach (var fileNode in fileNodes)
+    {
+      if (fileNode is not JsonObject file)
+      {
+        return false;
+      }
+      if (!file.TryGetPropertyValue("stepId", out var nestedValue))
+      {
+        continue;
+      }
+      if (
+        nestedValue is not JsonValue value
+        || !value.TryGetValue<string>(out var nestedStepId)
+        || string.IsNullOrWhiteSpace(nestedStepId)
+      )
+      {
+        return false;
+      }
+      if (
+        candidate is not null
+        && !string.Equals(candidate, nestedStepId, StringComparison.Ordinal)
+      )
+      {
+        return false;
+      }
+      candidate = nestedStepId;
+      found = true;
+    }
+    if (!found)
+    {
+      return false;
+    }
+
+    foreach (var fileNode in fileNodes)
+    {
+      fileNode!.AsObject().Remove("stepId");
+    }
+    normalizedArguments = JsonSerializer.SerializeToElement(root);
+    planStepId = candidate;
+    return true;
   }
 
   private static bool ContainsModel(
@@ -7773,15 +7858,6 @@ public sealed class ChatStreamService
       or "provider-unavailable"
       or "provider-disconnected"
       or "provider-request-failed";
-  }
-
-  private static string FormatConfidence(
-    double? confidence
-  )
-  {
-    return confidence is double value
-      ? $"{Math.Round(value * 100, MidpointRounding.AwayFromZero):0}%"
-      : "unavailable";
   }
 
   private async Task<PlanningAttempt> TryPlanAsync(
@@ -8892,111 +8968,6 @@ public sealed class ChatStreamService
     );
   }
 
-  private static List<ChatMessage> CompactCoordinatorMessages(
-    IReadOnlyList<ChatMessage> messages
-  )
-  {
-    var compact = new List<ChatMessage>();
-    var projectContext = messages.LastOrDefault(
-      message => message.Role == "system"
-        && message.Content.StartsWith(
-          "APPLICATION_OWNED_PROJECT_CONTEXT",
-          StringComparison.Ordinal
-        )
-    );
-    var objective = messages.LastOrDefault(
-      message => message.Role == "user"
-        && !IsGuidanceMessage(
-          message
-        )
-        && !IsCoordinatorControlMessage(
-          message.Content
-        )
-    );
-    var guidance = messages.LastOrDefault(
-      IsGuidanceMessage
-    );
-
-    if (projectContext is not null)
-    {
-      compact.Add(
-        projectContext
-      );
-    }
-
-    if (objective is not null)
-    {
-      compact.Add(
-        objective
-      );
-    }
-
-    if (guidance is not null)
-    {
-      compact.Add(
-        guidance
-      );
-    }
-
-    return compact.Count > 0
-      ? compact
-      : messages.TakeLast(
-        2
-      ).ToList();
-  }
-
-  private static List<OllamaToolMessage> CompactCoordinatorToolMessages(
-    IReadOnlyList<OllamaToolMessage> messages
-  )
-  {
-    var context = messages.Where(
-      message => message.Role == "system"
-        && message.Content?.StartsWith(
-          "APPLICATION_OWNED_PROJECT_CONTEXT",
-          StringComparison.Ordinal
-        ) == true
-    ).TakeLast(
-      1
-    );
-    var objective = messages.Where(
-      message => message.Role == "user"
-        && message.Content?.StartsWith(
-          ExpertExecutionGuidanceService.GuidanceMarker,
-          StringComparison.Ordinal
-        ) != true
-        && !IsCoordinatorControlMessage(
-          message.Content
-        )
-    ).TakeLast(
-      1
-    );
-    var guidance = messages.Where(
-      message => message.Content?.StartsWith(
-        ExpertExecutionGuidanceService.GuidanceMarker,
-        StringComparison.Ordinal
-      ) == true
-    ).TakeLast(
-      1
-    );
-    var actionState = messages.Where(
-      message => message.Role is "assistant" or "tool"
-    ).TakeLast(
-      12
-    );
-
-    return context
-      .Concat(
-        objective
-      )
-      .Concat(
-        guidance
-      )
-      .Concat(
-        actionState
-      )
-      .ToList();
-  }
-
   private CoordinatorInputBudget GetCoordinatorInputBudget(
     ApplicationSettings settings,
     string model,
@@ -9152,31 +9123,6 @@ public sealed class ChatStreamService
     }
 
     return events;
-  }
-
-  private static bool IsCoordinatorControlMessage(
-    string? content
-  )
-  {
-    return content is null
-      || new[]
-      {
-        "LOCAL_ACTION_RESULT",
-        "LOCAL_ACTION_PLANNING_CORRECTION",
-        "LOCAL_ACTION_CORRECTION",
-        "STRUCTURED_ACTION_CORRECTION",
-        "TOOL_PROTOCOL_CORRECTION",
-        "EXECUTION_COMPLETION_REJECTED",
-        "HOST_COMPLETION_FACTS",
-        "RECOVERY_",
-        "RESIDENT_",
-        "AUTHORITATIVE_EXECUTION_SESSION_FACTS"
-      }.Any(
-        marker => content.StartsWith(
-          marker,
-          StringComparison.Ordinal
-        )
-      );
   }
 
   private static OllamaToolMessage ToToolMessage(
@@ -9456,7 +9402,6 @@ public sealed class ChatStreamService
     string model,
     string intention,
     string reason,
-    string? recoverySpecialistModel,
     CancellationToken cancellationToken
   )
   {
@@ -9476,12 +9421,11 @@ public sealed class ChatStreamService
       )
     };
 
-    var recoveryAdvisorModel = recoverySpecialistModel ?? model;
     options.Add(
       new RecoveryOptionView(
         "specialist",
         "Request a new strategy",
-        $"Ask model {recoveryAdvisorModel} for a revised strategy before resuming."
+        $"Ask model {model} for a revised strategy before resuming."
       )
     );
 
@@ -9601,7 +9545,6 @@ public sealed class ChatStreamService
     string model,
     string intention,
     ExecutionProgress progress,
-    string? recoverySpecialistModel,
     CancellationToken cancellationToken
   )
   {
@@ -9656,7 +9599,7 @@ public sealed class ChatStreamService
 
     if (option == "specialist")
     {
-      var recoveryAdvisorModel = recoverySpecialistModel ?? model;
+      var recoveryAdvisorModel = model;
       events.Add(
         Event(
           requestId,
@@ -10040,58 +9983,6 @@ public sealed class ChatStreamService
       null,
       _executionSession?.CreateSummary()
     );
-  }
-
-  private static string CreateExecutionFacts(
-    ExecutionSession session
-  )
-  {
-    var review = session.CreateReview();
-    var changedFiles = review.Files.Count == 0
-      ? "none"
-      : string.Join(
-        ", ",
-        review.Files.Select(
-          file => $"{file.Operation}:{file.RelativePath}"
-        )
-      );
-    var failedProcesses = review.Processes.Count(
-      process => process.ExitCode != 0 || process.TimedOut || process.Cancelled
-    );
-    var commands = review.Processes.Count == 0
-      ? "none"
-      : string.Join(
-        "; ",
-        review.Processes.Select(
-          process => $"{process.Executable} {string.Join(" ", process.Arguments)}"
-        )
-      );
-    var instructions = review.AppliedInstructionFiles?.Count > 0
-      ? string.Join(
-        ", ",
-        review.AppliedInstructionFiles
-      )
-      : "none";
-    var preExisting = review.Files.Where(
-      file => file.PreExistingChange
-    ).Select(
-      file => file.RelativePath
-    ).ToArray();
-
-    return "AUTHORITATIVE_EXECUTION_SESSION_FACTS\n"
-      + $"Session: {review.Summary.Id}\n"
-      + $"Coordinator: {review.Summary.CoordinatorModel}\n"
-      + $"Execution path: {review.Summary.ExecutionPath}\n"
-      + $"Actions: {review.Summary.ActionCount}\n"
-      + $"Changed files: {changedFiles}\n"
-      + $"Pre-existing changed paths touched by this session: {string.Join(", ", preExisting.DefaultIfEmpty("none"))}\n"
-      + $"Commands actually run: {commands}\n"
-      + $"Applied instruction files: {instructions}\n"
-      + $"Validation: {review.Validation?.State ?? "not-run"}\n"
-      + $"Completion gate: {review.Summary.CompletionStatus}\n"
-      + $"Process failures: {failedProcesses}\n"
-      + "Base the final summary only on these session facts and tool results. "
-      + "Do not claim implemented and validated unless completion gate says implemented-and-validated.";
   }
 
   private async Task<LocalActionException?> ApplyInstructionsForProposalAsync(
@@ -10525,8 +10416,6 @@ public sealed class ChatStreamService
 
     public int RecoveryAttemptCount { get; set; }
 
-    public int AutomaticStrategyRevisionCount { get; set; }
-
     public bool RuntimeContextReported { get; set; }
 
     public bool ContextFailureCompactionAttempted { get; set; }
@@ -10595,21 +10484,9 @@ public sealed class ChatStreamService
     long DurationMilliseconds
   );
 
-  private sealed record ToolingInspection(
-    OllamaModelCapabilities? Capabilities,
-    OllamaProviderException? Failure
-  );
-
   private sealed record GuidanceAttempt(
     ExpertExecutionGuidance? Guidance,
     Exception? Failure
-  );
-
-  private sealed record SupervisedGuidanceAttempt(
-    ExpertExecutionGuidance? Guidance,
-    Exception? Failure,
-    bool RejectedUnchangedCandidate,
-    bool RepeatedPreviousStrategy
   );
 
 }

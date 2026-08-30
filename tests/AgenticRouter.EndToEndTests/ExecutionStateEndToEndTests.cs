@@ -4400,7 +4400,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task HistoryOptInPersistsButRestartRequiresExplicitResume()
+  public async Task HistoryOptInPersistsAndRestartReopensWithoutConfirmation()
   {
     var workspaceId = await ActiveWorkspaceIdAsync();
     using (
@@ -4428,6 +4428,44 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToHaveCountAsync(
       1
     );
+    using (var sessions = await _environment.HttpClient.GetAsync("api/sessions"))
+    {
+      sessions.EnsureSuccessStatusCode();
+      using var sessionsDocument = JsonDocument.Parse(
+        await sessions.Content.ReadAsStringAsync()
+      );
+      var sessionId = sessionsDocument.RootElement.GetProperty(
+        "recent"
+      )[0].GetProperty(
+        "id"
+      ).GetString()!;
+      using var stored = await _environment.HttpClient.GetAsync(
+        $"api/sessions/{sessionId}?workspaceId={workspaceId}"
+      );
+      stored.EnsureSuccessStatusCode();
+      using var storedDocument = JsonDocument.Parse(
+        await stored.Content.ReadAsStringAsync()
+      );
+      var assistant = storedDocument.RootElement.GetProperty(
+        "messages"
+      ).EnumerateArray().Last(
+        message => message.GetProperty(
+          "role"
+        ).GetString() == "assistant"
+      );
+      Assert.IsGreaterThan(
+        0,
+        assistant.GetProperty(
+          "contentBlocks"
+        ).GetArrayLength()
+      );
+      StringAssert.Contains(
+        assistant.GetProperty(
+          "renderedHtml"
+        ).GetString(),
+        "<p>"
+      );
+    }
 
     await _environment.RestartApplicationAsync();
     await Page.GotoAsync(
@@ -4448,7 +4486,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#recent-sessions .session-entry"
     ).Locator(".session-entry-content").ClickAsync();
-    await ConfirmAppModalAsync();
+    await Expect(Page.Locator("#app-modal")).Not.ToBeVisibleAsync();
     await Expect(
       Page.Locator(
         ".message.user"
@@ -4470,6 +4508,459 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToHaveAttributeAsync(
       "aria-pressed",
       "true"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ResumeRestoresPresentationAndOperationalState()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "presentation-restore-v0918",
+          messages = new object[]
+          {
+            new
+            {
+              role = "user",
+              content = "Restore the complete conversation presentation."
+            },
+            new
+            {
+              role = "assistant",
+              content = "First block with **bold**.\n\nSecond block with `code`.",
+              contentBlocks = new[]
+              {
+                new
+                {
+                  kind = "reasoning",
+                  content = "I inspected the saved state.",
+                  id = "reasoning-1"
+                },
+                new
+                {
+                  kind = "response",
+                  content = "First block with **bold**.",
+                  id = "response-1"
+                },
+                new
+                {
+                  kind = "response",
+                  content = "Second block with `code`.",
+                  id = "response-2"
+                }
+              }
+            }
+          },
+          interactionMode = "execute",
+          selectedModel = "command-r:latest",
+          state = "completed",
+          approvalPolicy = "ask",
+          harness = "codex"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator(
+      "#recent-sessions .session-entry[data-session-id=\"presentation-restore-v0918\"] .session-entry-content"
+    ).ClickAsync();
+
+    await Expect(Page.Locator("#app-modal")).Not.ToBeVisibleAsync();
+    await Expect(Page.Locator("[data-mode=\"execute\"]")).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+    await Expect(Page.Locator("#approval-policy")).ToHaveValueAsync("ask");
+    await Expect(Page.Locator("#model-selector")).ToHaveValueAsync(
+      "command-r:latest"
+    );
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("codex");
+    await Expect(Page.Locator(".assistant-reasoning")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".assistant-reasoning-body")).ToContainTextAsync(
+      "I inspected the saved state."
+    );
+    await Expect(Page.Locator(".assistant-response")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".assistant-response strong")).ToHaveTextAsync(
+      "bold"
+    );
+    await Expect(Page.Locator(".assistant-response code")).ToHaveTextAsync(
+      "code"
+    );
+    await Expect(Page.Locator(".activity > summary")).ToHaveTextAsync(
+      "Completed"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NewExecuteHistoryRestoresTheCompleteVisibleTimeline()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync(
+      "command-r:latest"
+    );
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute create file");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    var originalVisibleText = await assistant.InnerTextAsync();
+    var originalSummary = await assistant.Locator(
+      ".activity > summary"
+    ).InnerTextAsync();
+    var originalModelNotice = await assistant.Locator(
+      ".model-selection-note"
+    ).InnerTextAsync();
+    var originalWork = await assistant.Locator(
+      ".assistant-work"
+    ).InnerTextAsync();
+    var originalActivityTypes = await assistant.Locator(
+      "[data-event-type]"
+    ).EvaluateAllAsync<string[]>(
+      "elements => elements.map(element => element.dataset.eventType)"
+    );
+    var originalTimelineKinds = await assistant.Locator(
+      "[data-timeline-kind]"
+    ).EvaluateAllAsync<string[]>(
+      "elements => elements.map(element => element.dataset.timelineKind)"
+    );
+    var originalReasoningOpenState = await assistant.Locator(
+      ".assistant-reasoning"
+    ).EvaluateAllAsync<bool[]>(
+      "elements => elements.map(element => element.open)"
+    );
+    Assert.IsGreaterThan(0, originalWork.Length);
+    Assert.IsGreaterThan(0, originalActivityTypes.Length);
+    Assert.Contains("action", originalTimelineKinds);
+    using var sessions = await _environment.HttpClient.GetAsync("api/sessions");
+    sessions.EnsureSuccessStatusCode();
+    using var sessionsDocument = JsonDocument.Parse(
+      await sessions.Content.ReadAsStringAsync()
+    );
+    var sessionId = sessionsDocument.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+    using var stored = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{sessionId}?workspaceId={workspaceId}"
+    );
+    stored.EnsureSuccessStatusCode();
+    using var storedDocument = JsonDocument.Parse(
+      await stored.Content.ReadAsStringAsync()
+    );
+    var storedAssistant = storedDocument.RootElement.GetProperty(
+      "messages"
+    ).EnumerateArray().Last(
+      message => message.GetProperty("role").GetString() == "assistant"
+    );
+    var persistedEventTypes = storedAssistant.GetProperty(
+      "timeline"
+    ).EnumerateArray().Select(
+      streamEvent => streamEvent.GetProperty("type").GetString()
+    ).ToArray();
+    Assert.Contains("response.completed", persistedEventTypes);
+    Assert.IsTrue(
+      persistedEventTypes.Any(type => type?.StartsWith(
+        "action.",
+        StringComparison.Ordinal
+      ) == true)
+    );
+
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator(
+      $"#recent-sessions .session-entry[data-session-id=\"{sessionId}\"] .session-entry-content"
+    ).ClickAsync();
+    assistant = Page.Locator(".message.assistant").Last;
+    Assert.AreEqual(
+      originalVisibleText,
+      await assistant.InnerTextAsync()
+    );
+    Assert.AreEqual(
+      originalSummary,
+      await assistant.Locator(
+        ".activity > summary"
+      ).InnerTextAsync()
+    );
+    Assert.AreEqual(
+      originalModelNotice,
+      await assistant.Locator(
+        ".model-selection-note"
+      ).InnerTextAsync()
+    );
+    Assert.AreEqual(
+      originalWork,
+      await assistant.Locator(
+        ".assistant-work"
+      ).InnerTextAsync()
+    );
+    CollectionAssert.AreEqual(
+      originalActivityTypes,
+      await assistant.Locator(
+        "[data-event-type]"
+      ).EvaluateAllAsync<string[]>(
+        "elements => elements.map(element => element.dataset.eventType)"
+      )
+    );
+    CollectionAssert.AreEqual(
+      originalTimelineKinds,
+      await assistant.Locator(
+        "[data-timeline-kind]"
+      ).EvaluateAllAsync<string[]>(
+        "elements => elements.map(element => element.dataset.timelineKind)"
+      )
+    );
+    CollectionAssert.AreEqual(
+      originalReasoningOpenState,
+      await assistant.Locator(
+        ".assistant-reasoning"
+      ).EvaluateAllAsync<bool[]>(
+        "elements => elements.map(element => element.open)"
+      )
+    );
+    await Expect(assistant.Locator(".review-changes")).ToHaveCountAsync(1);
+    await Expect(
+      Page.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Review completed changes",
+          Exact = true
+        }
+      )
+    ).ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ActiveResponseAllowsCrossWorkspaceReadOnlyHistory()
+  {
+    var activeWorkspaceId = await ActiveWorkspaceIdAsync();
+    var otherPath = _environment.CreateWorkspaceDirectory(
+      $"read-only-history-{Guid.NewGuid():N}"
+    );
+    using var created = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Read-only history project",
+        path = otherPath
+      }
+    );
+    created.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(
+      await created.Content.ReadAsStringAsync()
+    );
+    var otherWorkspaceId = createdDocument.RootElement.GetProperty(
+      "id"
+    ).GetString()!;
+    using (
+      var activated = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{otherWorkspaceId}/activate",
+        null
+      )
+    )
+    {
+      activated.EnsureSuccessStatusCode();
+    }
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{otherWorkspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "cross-workspace-read-only-v0918",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = "Inspect this other workspace result."
+            },
+            new
+            {
+              role = "assistant",
+              content = "The preserved result remains available."
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "alpha:latest",
+          state = "completed",
+          approvalPolicy = "auto",
+          harness = "native"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    using (
+      var reactivated = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{activeWorkspaceId}/activate",
+        null
+      )
+    )
+    {
+      reactivated.EnsureSuccessStatusCode();
+    }
+    using (
+      var activeHistory = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{activeWorkspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      activeHistory.EnsureSuccessStatusCode();
+    }
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    var streamingRequestsBefore = _environment.FakeOllama.Requests.Count(
+      request => request.Stream
+    );
+    await StartMessageAsync("cancel stream");
+    await WaitUntilAsync(
+      () => _environment.FakeOllama.Requests.Count(
+        request => request.Stream
+      ) > streamingRequestsBefore,
+      TimeSpan.FromSeconds(10)
+    );
+    var cancel = Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Cancel active response",
+        Exact = true
+      }
+    );
+    await Expect(cancel).ToBeVisibleAsync();
+    var otherProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{otherWorkspaceId}\"]"
+    );
+    await otherProject.EvaluateAsync("element => element.open = true");
+    await otherProject.Locator(
+      ".session-entry[data-session-id=\"cross-workspace-read-only-v0918\"] .session-entry-content"
+    ).ClickAsync();
+
+    await Expect(Page.Locator(".message.user")).ToContainTextAsync(
+      "Inspect this other workspace result."
+    );
+    await Expect(Page.Locator(".assistant-answer")).ToContainTextAsync(
+      "The preserved result remains available."
+    );
+    await Expect(Page.Locator("#message-input")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
+      "Read-only"
+    );
+    await Expect(cancel).ToBeVisibleAsync();
+    using var workspaces = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    workspaces.EnsureSuccessStatusCode();
+    using var workspacesDocument = JsonDocument.Parse(
+      await workspaces.Content.ReadAsStringAsync()
+    );
+    Assert.AreEqual(
+      activeWorkspaceId,
+      workspacesDocument.RootElement.GetProperty(
+        "activeWorkspaceId"
+      ).GetString()
+    );
+
+    await cancel.ClickAsync();
+    await Expect(cancel).ToBeHiddenAsync();
+    await Page.ReloadAsync();
+    var activeProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{activeWorkspaceId}\"]"
+    );
+    await activeProject.EvaluateAsync("element => element.open = true");
+    var cancelledEntry = activeProject.Locator(
+      ".session-entry",
+      new()
+      {
+        HasText = "cancel stream"
+      }
+    );
+    await Expect(cancelledEntry).ToBeVisibleAsync();
+    var cancelledSessionId = await cancelledEntry.GetAttributeAsync(
+      "data-session-id"
+    ) ?? throw new AssertFailedException("Cancelled session id was not rendered.");
+    using var cancelledSession = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{cancelledSessionId}?workspaceId={activeWorkspaceId}"
+    );
+    cancelledSession.EnsureSuccessStatusCode();
+    using var cancelledDocument = JsonDocument.Parse(
+      await cancelledSession.Content.ReadAsStringAsync()
+    );
+    var cancelledUser = cancelledDocument.RootElement.GetProperty(
+      "messages"
+    ).EnumerateArray().Last(
+      message => message.GetProperty("role").GetString() == "user"
+    );
+    Assert.IsTrue(
+      cancelledUser.GetProperty("timeline").EnumerateArray().Any(
+        streamEvent => streamEvent.GetProperty("type").GetString()
+          == "request.cancelled"
+      )
+    );
+    await activeProject.Locator(
+      $".session-entry[data-session-id=\"{cancelledSessionId}\"] .session-entry-content"
+    ).ClickAsync();
+    await Expect(Page.Locator(".activity > summary")).ToContainTextAsync(
+      "Canceled"
     );
   }
 
@@ -4637,7 +5128,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
 
     await Page.Locator("#resume-session-details").ClickAsync();
-    await ConfirmAppModalAsync();
     await Expect(Page.Locator(".message.user")).ToContainTextAsync(
       "Keep this compact conversation available."
     );
@@ -4701,7 +5191,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "Interrupted"
     );
     await Page.Locator("#resume-session-details").ClickAsync();
-    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.assistant"
@@ -4851,14 +5340,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#recent-sessions .session-entry"
     ).Locator(".session-entry-content").ClickAsync();
-    await ConfirmAppModalAsync();
-    await Page.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Review completed changes"
-      }
-    ).ClickAsync();
+    await Page.Locator(
+      ".message.assistant .review-changes"
+    ).Last.ClickAsync();
     await Expect(
       Page.Locator(
         "#change-review-body"
@@ -7045,6 +7529,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var buttons = Page.Locator(".trace-diagnostic-actions button");
     await Expect(buttons).ToHaveCountAsync(1);
     await Expect(buttons).ToHaveTextAsync("Investigate error");
+    await Expect(buttons).ToHaveClassAsync(
+      new Regex("(^|\\s)trace-diagnostic-investigate(\\s|$)")
+    );
+    await Expect(buttons).ToBeEnabledAsync();
     await Expect(Page.Locator(".message.assistant .activity > summary").Last).ToContainTextAsync("Trace:");
     var visibleUserMessages = Page.Locator(".message.user");
     await Expect(visibleUserMessages).ToHaveCountAsync(1);

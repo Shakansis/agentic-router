@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 Evaluation plan: [`docs/PLAN-v2-deepseek-harness-gpt-oss20b-evaluation.md`](../PLAN-v2-deepseek-harness-gpt-oss20b-evaluation.md)
 
-Preserved Qwen baseline: [`deepseek-harness-evaluation_qwen3-code30b.md`](deepseek-harness-evaluation_qwen3-code30b.md)
+Preserved Qwen baseline: [`deepseek-harness-qwen3-code-30b-evaluation.md`](deepseek-harness-qwen3-code-30b-evaluation.md)
 
 DeepSeek Harness: `@deepseek-ai/dsh` `0.1.0-rc.6`
 

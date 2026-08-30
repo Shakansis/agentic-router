@@ -5418,6 +5418,43 @@ textarea[readonly] {
   margin: 8px 0;
 }
 
+.trace-diagnostic-actions .trace-diagnostic-investigate {
+  min-height: 32px;
+  padding-inline: 12px;
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-weight: 600;
+}
+
+.request-slow-alert {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.request-slow-alert.slow-warning {
+  border-color: color-mix(in srgb, var(--warning) 58%, var(--border));
+  color: color-mix(in srgb, var(--warning) 82%, var(--text));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.request-slow-alert.slow-critical {
+  border-color: color-mix(in srgb, var(--danger) 72%, var(--warning));
+  color: color-mix(in srgb, var(--danger) 88%, var(--text));
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.trace-diagnostic-actions .trace-diagnostic-investigate:hover:not(:disabled),
+.trace-diagnostic-actions .trace-diagnostic-investigate:focus-visible {
+  border-color: var(--danger);
+  color: var(--text);
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
 .trace-diagnostic-facts {
   display: grid;
   grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);

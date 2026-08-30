@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Usage;
@@ -14,7 +15,10 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
 {
   private static readonly JsonSerializerOptions JsonOptions = new(
     JsonSerializerDefaults.Web
-  );
+  )
+  {
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+  };
 
   private readonly IHttpClientFactory _httpClientFactory;
   private readonly Uri _baseUri;

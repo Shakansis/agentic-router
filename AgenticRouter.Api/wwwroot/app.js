@@ -83,8 +83,8 @@ const state = {
   setup: null,
   setupTimer: null,
   setupOnboardingDismissed: false,
-  setupOnboardingPreview: false,
-  pendingDiagnosticInvestigation: null
+  pendingDiagnosticInvestigation: null,
+  readOnlyConversation: false
 };
 
 let benchmarkTooltip = null;
@@ -517,7 +517,6 @@ function bindElements() {
     "settings-open-git",
     "settings-open-validation",
     "show-onboarding-before-conversation",
-    "settings-show-onboarding-now",
     "git-dialog",
     "close-git",
     "dismiss-git",
@@ -918,10 +917,6 @@ function bindEvents() {
   elements.settingsOpenRecent.addEventListener("click", openRecentFromSettings);
   elements.settingsOpenGit.addEventListener("click", openGitFromSettings);
   elements.settingsOpenValidation.addEventListener("click", openValidationFromSettings);
-  elements.settingsShowOnboardingNow.addEventListener(
-    "click",
-    openSetupOnboardingNow
-  );
   elements.refreshSettingsYaml.addEventListener("click", loadPortableYaml);
   elements.openSettingsYamlFile.addEventListener(
     "click",
@@ -5138,15 +5133,17 @@ async function editSelectedSessionSummary() {
 }
 
 async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
+  if (state.requestController) {
+    await openSessionReadOnly(
+      id,
+      workspaceId
+    );
+    return;
+  }
+
   await requestConversationTransition(
     async () =>
     {
-      if (!await showAppConfirm(
-        "Resume this conversation? Chat mode, manual approval, and an unlocked model will be restored.",
-        { title: "Resume conversation?", confirmLabel: "Resume" }
-      )) {
-        return;
-      }
       const nextBrowserSessionId = createSessionId();
 
       try {
@@ -5184,7 +5181,11 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
           message => ({
             role: message.role,
             content: message.content,
-            createdAt: message.createdAt
+            createdAt: message.createdAt,
+            diagnostic: message.diagnostic,
+            hidden: message.hidden,
+            contentBlocks: historyContentBlocks(message.contentBlocks),
+            timeline: message.timeline
           })
         );
         state.conversationState = supervisionRun
@@ -5192,15 +5193,27 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
           : session.interrupted
           ? "interrupted"
           : session.state;
-        state.interactionMode = supervisionRun ? "execute" : "chat";
-        state.approvalPolicy = supervisionRun?.approvalPolicy ?? "auto";
-        state.harness = supervisionRun?.route?.harness ?? "native";
+        state.interactionMode = supervisionRun
+          ? "execute"
+          : session.lastInteractionMode ?? "chat";
+        state.approvalPolicy = supervisionRun?.approvalPolicy
+          ?? session.lastApprovalPolicy
+          ?? "auto";
+        state.harness = supervisionRun?.route?.harness
+          ?? session.selectedHarness
+          ?? "native";
         const resumedModel = supervisionRun?.route?.model ?? session.selectedModel;
-        elements.modelSelector.value = resumedModel
-          && state.models.some(model => model.name === resumedModel)
-          ? resumedModel
-          : "auto";
-        renderRestoredConversation(
+        restoreSelectValue(
+          elements.modelSelector,
+          resumedModel ?? "auto",
+          "Saved model"
+        );
+        restoreSelectValue(
+          elements.harnessSelector,
+          state.harness,
+          "Saved harness"
+        );
+        await renderRestoredConversation(
           session,
           { suppressInterrupted: Boolean(supervisionRun) }
         );
@@ -5213,7 +5226,6 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
             : "Saved locally"
         );
         updateInteractionControls();
-        elements.harnessSelector.value = state.harness;
         updateHarnessControls();
         updateComposerStatus();
         elements.workspaceDialog.close();
@@ -5233,13 +5245,83 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
   );
 }
 
-function renderRestoredConversation(session, options = {}) {
+async function openSessionReadOnly(id, workspaceId) {
+  try {
+    const session = await fetchJson(
+      `/api/sessions/${encodeURIComponent(id)}`
+        + `?workspaceId=${encodeURIComponent(workspaceId)}`
+    );
+    clearConversationUi();
+    state.readOnlyConversation = true;
+    state.conversationSessionId = session.id;
+    state.history = session.messages.map(
+      message => ({
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        diagnostic: message.diagnostic,
+        hidden: message.hidden,
+        contentBlocks: historyContentBlocks(message.contentBlocks),
+        timeline: message.timeline
+      })
+    );
+    state.conversationState = session.state;
+    state.interactionMode = session.lastInteractionMode ?? "chat";
+    state.approvalPolicy = session.lastApprovalPolicy ?? "auto";
+    state.harness = session.selectedHarness ?? "native";
+    restoreSelectValue(
+      elements.modelSelector,
+      session.selectedModel ?? "auto",
+      "Saved model"
+    );
+    restoreSelectValue(
+      elements.harnessSelector,
+      state.harness,
+      "Saved harness"
+    );
+    await renderRestoredConversation(session);
+    setPersistenceStatus("Read-only");
+    updateInteractionControls();
+    updateHarnessControls();
+    updateComposerStatus();
+    await refreshSelectedModelCapabilities();
+    elements.workspaceDialog.close();
+    closeSessionDetails();
+    showToast(
+      "Conversation opened read-only while the active response continues.",
+      "success"
+    );
+  } catch (error) {
+    elements.composerStatus.textContent = error.message;
+  }
+}
+
+function restoreSelectValue(select, value, group) {
+  if (!Array.from(select.options).some(option => option.value === value)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = `${value} (unavailable · ${group})`;
+    select.append(option);
+  }
+  select.value = value;
+}
+
+function historyContentBlocks(blocks) {
+  return blocks?.map(
+    block => ({
+      kind: block.kind,
+      content: block.content,
+      id: block.id
+    })
+  );
+}
+
+async function renderRestoredConversation(session, options = {}) {
   elements.emptyState?.remove();
 
-  session.messages.forEach(
-    (message, index) => {
+  for (const [index, message] of session.messages.entries()) {
       if (message.hidden) {
-        return;
+        continue;
       }
       if (message.role === "user") {
         appendUserMessage(
@@ -5248,18 +5330,75 @@ function renderRestoredConversation(session, options = {}) {
           [],
           message.createdAt
         );
+        if ((message.timeline?.length ?? 0) > 0) {
+          const assistant = appendAssistantMessage({
+            modelSelectionOrigin: timelineModelSelectionOrigin(
+              message.timeline
+            )
+          });
+          const outcome = await replayConversationTimeline(
+            message.timeline,
+            assistant
+          );
+          assistant.rawAnswer = outcome.answer;
+          assistant.copyButton.disabled = !outcome.answer;
+        }
       } else if (message.role === "assistant") {
-        const assistant = appendAssistantMessage();
+        const timeline = message.timeline ?? [];
+        const assistant = appendAssistantMessage({
+          modelSelectionOrigin: timelineModelSelectionOrigin(timeline)
+        });
         cancelAnimationFrame(assistant.clockFrame);
         assistant.progress.hidden = true;
         assistant.runningIndicator.hidden = true;
         assistant.details.open = false;
-        assistant.summary.textContent = "History restored";
+        assistant.summary.textContent = message.diagnostic?.terminalState === "failed"
+          ? "Failed"
+          : "Completed";
+        const blocks = message.contentBlocks ?? [];
+        if (timeline.length > 0) {
+          await replayConversationTimeline(
+            timeline,
+            assistant
+          );
+        } else if (blocks.length > 0) {
+          for (const block of blocks) {
+            if (block.kind === "reasoning") {
+              appendAssistantReasoning(
+                assistant,
+                block.content,
+                block.id ?? null
+              );
+              closeAssistantReasoning(assistant);
+            } else if (block.kind === "response") {
+              appendAssistantResponse(
+                assistant,
+                block.content,
+                block.renderedHtml ?? "",
+                block.id ?? null,
+                message.content
+              );
+              closeAssistantResponse(assistant);
+            }
+          }
+        } else {
+          const response = ensureAssistantResponse(
+            assistant,
+            `history:${index}`
+          );
+          renderAssistantResponse(
+            assistant,
+            response,
+            message.renderedHtml ?? "",
+            message.content,
+            message.content
+          );
+          closeAssistantResponse(assistant);
+        }
         assistant.answer.classList.remove("pending");
-        assistant.answer.textContent = message.content;
         assistant.rawAnswer = message.content;
         assistant.copyButton.disabled = false;
-        if (message.diagnostic) {
+        if (message.diagnostic && timeline.length === 0) {
           const failed = message.diagnostic.terminalState === "failed";
           finishActivity(
             assistant,
@@ -5279,8 +5418,7 @@ function renderRestoredConversation(session, options = {}) {
           }
         }
       }
-    }
-  );
+  }
 
   if (session.interrupted && !options.suppressInterrupted) {
     const warning = document.createElement("article");
@@ -5302,20 +5440,52 @@ function renderRestoredConversation(session, options = {}) {
   if (session.executionReviews.length > 0) {
     const review = session.executionReviews.at(-1);
     state.latestExecutionSessionId = review.summary.id;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "secondary-button";
-    button.textContent = "Review completed changes";
-    button.addEventListener(
-      "click",
-      () => {
-        state.activeReview = review;
-        renderChangeReview(review);
-        elements.changeReviewDialog.showModal();
-      }
-    );
-    elements.messages.append(button);
+    if (!elements.messages.querySelector(".review-changes:not([hidden])")) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-button";
+      button.textContent = "Review completed changes";
+      button.addEventListener(
+        "click",
+        () => {
+          state.activeReview = review;
+          renderChangeReview(review);
+          elements.changeReviewDialog.showModal();
+        }
+      );
+      elements.messages.append(button);
+    }
   }
+}
+
+function timelineModelSelectionOrigin(timeline) {
+  return timeline.some(
+    streamEvent => streamEvent.type === "model.explicit-selected"
+  )
+    ? "user"
+    : "agent";
+}
+
+async function replayConversationTimeline(timeline, assistant) {
+  const body = timeline.map(
+    streamEvent => `data: ${JSON.stringify(streamEvent)}\n\n`
+  ).join("");
+  const outcome = await consumeEventStream(
+    new Blob(
+      [body],
+      { type: "text/event-stream" }
+    ).stream(),
+    assistant,
+    { historical: true }
+  );
+  assistant.container.querySelectorAll(
+    ".action-approval button, .recovery-decision button"
+  ).forEach(
+    button => {
+      button.disabled = true;
+    }
+  );
+  return outcome;
 }
 
 async function attachSupervisionConversation(run) {
@@ -5342,7 +5512,9 @@ async function attachSupervisionConversation(run) {
       state.history.push({
         role: "assistant",
         content: outcome.answer,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        contentBlocks: outcome.contentBlocks,
+        timeline: outcome.timeline
       });
       state.conversationState = "completed";
       setPersistenceStatus("Saved locally");
@@ -5351,7 +5523,9 @@ async function attachSupervisionConversation(run) {
     }
   } catch (error) {
     if (error.name !== "AbortError") {
-      state.conversationState = "failed";
+      if (state.conversationVersion === conversationVersion) {
+        state.conversationState = "failed";
+      }
       addActivity(
         assistant,
         {
@@ -8905,35 +9079,6 @@ async function closeSettings() {
   return true;
 }
 
-async function openSetupOnboardingNow() {
-  if (!await closeSettings()) {
-    return;
-  }
-
-  const showOnboarding = () => {
-    state.setupOnboardingDismissed = false;
-    state.setupOnboardingPreview = true;
-    renderSetupOnboarding();
-    const onboarding = document.querySelector("#setup-onboarding");
-    onboarding?.scrollIntoView({ block: "start" });
-    onboarding?.querySelector(
-      "[data-setup-action=\"continue\"]"
-    )?.focus();
-  };
-
-  if (!hasMeaningfulConversation()) {
-    showOnboarding();
-    return;
-  }
-
-  await requestConversationTransition(
-    async () => {
-      await beginEmptyConversation();
-      showOnboarding();
-    }
-  );
-}
-
 async function saveSettings(event) {
   event.preventDefault();
   elements.settingsErrors.hidden = true;
@@ -10159,7 +10304,9 @@ function handleApprovalPolicyChange() {
 
 function updateInteractionControls() {
   const isStreaming = Boolean(state.requestController);
-  const disabled = isStreaming || state.conversationTransitioning;
+  const disabled = isStreaming
+    || state.conversationTransitioning
+    || state.readOnlyConversation;
   const onboardingBlocked = setupOnboardingBlocksConversation();
   document.querySelectorAll(".mode-option").forEach(
     button => {
@@ -10173,9 +10320,13 @@ function updateInteractionControls() {
   elements.approvalPolicy.disabled =
     disabled || onboardingBlocked || state.interactionMode !== "execute";
   elements.messageInput.disabled =
-    state.conversationTransitioning || onboardingBlocked;
+    state.conversationTransitioning
+    || onboardingBlocked
+    || state.readOnlyConversation;
   elements.sendButton.disabled =
-    state.conversationTransitioning || onboardingBlocked;
+    state.conversationTransitioning
+    || onboardingBlocked
+    || state.readOnlyConversation;
   elements.attachImage.disabled = disabled || onboardingBlocked;
   elements.imageInput.disabled = disabled || onboardingBlocked;
   elements.composer.classList.toggle(
@@ -10241,7 +10392,7 @@ function renderHarnesses() {
 function updateHarnessControls() {
   const disabled = Boolean(
     state.requestController
-  ) || state.conversationTransitioning;
+  ) || state.conversationTransitioning || state.readOnlyConversation;
   const automaticRoute = state.interactionMode === "execute"
     && state.harness === "auto-model-harness";
   elements.modelSelector.disabled = disabled || automaticRoute;
@@ -10347,6 +10498,9 @@ function hasMeaningfulConversation() {
 }
 
 async function saveCurrentConversation() {
+  if (state.readOnlyConversation) {
+    return false;
+  }
   if (!state.conversationSessionId && !await ensureConversationIdentity()) {
     return false;
   }
@@ -10367,10 +10521,21 @@ async function saveCurrentConversation() {
         },
         body: JSON.stringify({
           sessionId: state.conversationSessionId,
-          messages: state.history,
+          messages: state.history.map(
+            message => ({
+              role: message.role,
+              content: message.content,
+              createdAt: message.createdAt,
+              diagnostic: message.diagnostic,
+              hidden: message.hidden,
+              contentBlocks: message.contentBlocks
+            })
+          ),
           interactionMode: state.interactionMode,
           selectedModel: elements.modelSelector.value,
-          state: state.conversationState
+          state: state.conversationState,
+          approvalPolicy: state.approvalPolicy,
+          harness: state.harness
         })
       }
     );
@@ -10427,6 +10592,7 @@ async function beginEmptyConversation() {
 
 function clearConversationUi() {
   state.conversationVersion++;
+  state.readOnlyConversation = false;
   state.history = [];
   state.editingTurn = null;
   state.harness = "native";
@@ -10442,7 +10608,6 @@ function clearConversationUi() {
   state.messageQueuePaused = false;
   state.steeringMessage = false;
   state.setupOnboardingDismissed = false;
-  state.setupOnboardingPreview = false;
   state.pendingDiagnosticInvestigation = null;
   state.webEnabled = false;
   state.webControlState = "unavailable";
@@ -10663,10 +10828,8 @@ function shouldDisplaySetupOnboarding() {
   if (hasMeaningfulConversation()) {
     return false;
   }
-  return state.setupOnboardingPreview || (
-    state.settings?.onboarding?.showBeforeNewConversation !== false
-    && !state.setupOnboardingDismissed
-  );
+  return state.settings?.onboarding?.showBeforeNewConversation !== false
+    && !state.setupOnboardingDismissed;
 }
 
 function setupOnboardingBlocksConversation() {
@@ -11043,7 +11206,6 @@ async function handleSetupAction(event) {
         renderSettings();
       }
       state.setupOnboardingDismissed = true;
-      state.setupOnboardingPreview = false;
       renderSetupOnboarding();
       elements.messageInput.focus();
       return;
@@ -11645,6 +11807,10 @@ function finishAssistantSegmentForSteering(assistant) {
 async function handleComposerSubmit(event) {
   event.preventDefault();
 
+  if (state.readOnlyConversation) {
+    return;
+  }
+
   if (setupOnboardingBlocksConversation()) {
     document.querySelector(
       "#setup-onboarding [data-setup-action=\"continue\"]"
@@ -11720,6 +11886,13 @@ async function handleComposerSubmit(event) {
       item => !item.hidden && item.content.length <= 8_000
     ).slice(-2)
     : retainedHistory;
+  const modelHistory = requestHistory.map(
+    item => ({
+      role: item.role,
+      content: item.content,
+      createdAt: item.createdAt
+    })
+  );
   const sentAt = new Date();
   state.history = [
     ...retainedHistory,
@@ -11778,7 +11951,7 @@ async function handleComposerSubmit(event) {
         body: JSON.stringify({
           message,
           model: selectedModel,
-          history: requestHistory,
+          history: modelHistory,
           interactionMode: requestInteractionMode,
           harness: state.harness,
           approvalPolicy: state.approvalPolicy,
@@ -11810,7 +11983,9 @@ async function handleComposerSubmit(event) {
           role: "assistant",
           content: outcome.answer,
           createdAt: new Date().toISOString(),
-          diagnostic: outcome.diagnostic
+          diagnostic: outcome.diagnostic,
+          contentBlocks: outcome.contentBlocks,
+          timeline: outcome.timeline
         }
       );
       state.conversationState = "completed";
@@ -11827,12 +12002,6 @@ async function handleComposerSubmit(event) {
       outcome.terminalState === "failed"
       && state.conversationVersion === conversationVersion
     ) {
-      state.history.push({
-        role: "assistant",
-        content: outcome.answer,
-        createdAt: new Date().toISOString(),
-        diagnostic: outcome.diagnostic
-      });
       state.conversationState = "failed";
       await refreshSessions();
     }
@@ -11840,7 +12009,9 @@ async function handleComposerSubmit(event) {
     if (error.name === "AbortError") {
       continueBufferedMessages = false;
       state.messageQueuePaused = true;
-      state.conversationState = "cancelled";
+      if (state.conversationVersion === conversationVersion) {
+        state.conversationState = "cancelled";
+      }
       addActivity(
         assistant,
         {
@@ -11851,12 +12022,30 @@ async function handleComposerSubmit(event) {
         false
       );
       assistant.answer.classList.remove("pending");
-      finishActivity(assistant, "Canceled", false);
+      const slowDiagnostic = assistant.slowDiagnostic?.persisted === true
+        ? {
+          ...assistant.slowDiagnostic,
+          terminalState: "cancelled-after-slow-warning"
+        }
+        : null;
+      finishActivity(
+        assistant,
+        terminalActivitySummary(
+          "Canceled",
+          elapsedSince(assistant),
+          slowDiagnostic
+        ),
+        Boolean(slowDiagnostic)
+      );
+      addTraceDiagnosticActions(assistant, slowDiagnostic);
+      stopSlowRequestTimer(assistant);
       await refreshAssistantReviewAfterCancellation(
         assistant
       );
     } else {
-      state.conversationState = "failed";
+      if (state.conversationVersion === conversationVersion) {
+        state.conversationState = "failed";
+      }
       addActivity(
         assistant,
         {
@@ -12640,7 +12829,7 @@ function addToolsetRequest(assistant, streamEvent) {
   assistant.workActivity.append(item);
 }
 
-async function consumeEventStream(stream, assistant) {
+async function consumeEventStream(stream, assistant, options = {}) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -12648,6 +12837,11 @@ async function consumeEventStream(stream, assistant) {
   let completed = false;
   let diagnostic = null;
   let terminalState = null;
+  let terminalSummary = null;
+  let terminalWarning = false;
+  const contentBlocks = [];
+  const timeline = [];
+  const historical = options.historical === true;
 
   while (true) {
     const result = await reader.read();
@@ -12672,16 +12866,34 @@ async function consumeEventStream(stream, assistant) {
       }
 
       const streamEvent = JSON.parse(data);
-      state.conversationSessionId =
-        streamEvent.conversationSessionId ?? state.conversationSessionId;
+      timeline.push(streamEvent);
+      const observedOutputTokens = assistant.lastObservedOutputTokens ?? 0;
+      if (isMeaningfulRequestActivity(streamEvent, observedOutputTokens)) {
+        assistant.lastHostActivityAt = Date.parse(streamEvent.timestamp)
+          || Date.now();
+        refreshSlowRequestAlert(assistant);
+      }
+      assistant.lastObservedOutputTokens = Math.max(
+        observedOutputTokens,
+        streamEvent.contextUsage?.outputTokens ?? 0
+      );
+      captureConversationContentBlock(
+        contentBlocks,
+        streamEvent
+      );
+      const updateVisibleState = !historical && !state.readOnlyConversation;
+      if (updateVisibleState) {
+        state.conversationSessionId =
+          streamEvent.conversationSessionId ?? state.conversationSessionId;
+      }
 
       const selectedHarness = /^harness\.(.+)-selected$/.exec(streamEvent.type);
-      if (selectedHarness) {
+      if (selectedHarness && updateVisibleState) {
         state.activeHarness = selectedHarness[1];
         updateStreamingComposerActions();
       }
 
-      if (streamEvent.contextUsage) {
+      if (streamEvent.contextUsage && updateVisibleState) {
         state.contextUsage = streamEvent.contextUsage;
         renderContextUsage();
       }
@@ -12690,13 +12902,15 @@ async function consumeEventStream(stream, assistant) {
         streamEvent.type === "target.model-resolved"
         && streamEvent.selectedModel
       ) {
-        state.activeAgentModel = streamEvent.selectedModel;
-        state.activeAgentRole = "primary";
-        updateActiveAgentLabel();
-        void refreshSelectedModelCapabilities(
-          streamEvent.selectedModel,
-          "primary"
-        );
+        if (updateVisibleState) {
+          state.activeAgentModel = streamEvent.selectedModel;
+          state.activeAgentRole = "primary";
+          updateActiveAgentLabel();
+          void refreshSelectedModelCapabilities(
+            streamEvent.selectedModel,
+            "primary"
+          );
+        }
         renderModelSelection(
           assistant,
           streamEvent.selectedModel,
@@ -12706,13 +12920,15 @@ async function consumeEventStream(stream, assistant) {
         streamEvent.type.startsWith("cloud.local-fallback")
         && streamEvent.selectedModel
       ) {
-        state.activeAgentModel = streamEvent.selectedModel;
-        state.activeAgentRole = "fallback";
-        updateActiveAgentLabel();
-        void refreshSelectedModelCapabilities(
-          streamEvent.selectedModel,
-          "fallback"
-        );
+        if (updateVisibleState) {
+          state.activeAgentModel = streamEvent.selectedModel;
+          state.activeAgentRole = "fallback";
+          updateActiveAgentLabel();
+          void refreshSelectedModelCapabilities(
+            streamEvent.selectedModel,
+            "fallback"
+          );
+        }
         renderModelSelection(
           assistant,
           streamEvent.selectedModel,
@@ -12722,12 +12938,16 @@ async function consumeEventStream(stream, assistant) {
 
       updateExecutionSession(
         assistant,
-        streamEvent.executionSession
+        streamEvent.executionSession,
+        updateVisibleState
       );
 
       if (
-        streamEvent.type === "session-created"
-        || streamEvent.type === "session-persisted"
+        (
+          streamEvent.type === "session-created"
+          || streamEvent.type === "session-persisted"
+        )
+        && updateVisibleState
       ) {
         setPersistenceStatus("Saved locally");
       } else if (
@@ -12737,6 +12957,7 @@ async function consumeEventStream(stream, assistant) {
           || streamEvent.type.includes("invalid")
           || streamEvent.type.includes("too-large")
         )
+        && updateVisibleState
       ) {
         setPersistenceStatus("Save failed");
       }
@@ -12804,17 +13025,16 @@ async function consumeEventStream(stream, assistant) {
         );
         assistant.answer.classList.remove("pending");
         addActivity(assistant, streamEvent, false);
-        finishActivity(
-          assistant,
-          terminalActivitySummary(
-            assistant.recovered ? "Recovered" : "Completed",
-            streamEvent.elapsedMilliseconds,
-            diagnostic
-          ),
-          assistant.recovered
+        terminalSummary = terminalActivitySummary(
+          assistant.recovered ? "Recovered" : "Completed",
+          streamEvent.elapsedMilliseconds,
+          diagnostic
         );
+        terminalWarning = assistant.recovered;
+        finishActivity(assistant, terminalSummary, terminalWarning);
         assistant.reviewButton.hidden =
           !assistant.executionSession?.reviewAvailable;
+        clearSlowRequestAlert(assistant);
       } else if (streamEvent.type === "error") {
         terminalState = "failed";
         diagnostic = streamEvent.diagnostic ?? {
@@ -12848,31 +13068,57 @@ async function consumeEventStream(stream, assistant) {
           },
           true
         );
-        finishActivity(
-          assistant,
-          terminalActivitySummary(
-            "Failed",
-            streamEvent.elapsedMilliseconds,
-            diagnostic
-          ),
-          true
+        terminalSummary = terminalActivitySummary(
+          "Failed",
+          streamEvent.elapsedMilliseconds,
+          diagnostic
         );
+        terminalWarning = true;
+        finishActivity(assistant, terminalSummary, terminalWarning);
         addTraceDiagnosticActions(assistant, diagnostic);
+        stopSlowRequestTimer(assistant);
+      } else if (streamEvent.type.startsWith("request.slow-")) {
+        renderSlowRequestAlert(
+          assistant,
+          streamEvent,
+          historical
+        );
+        addActivity(
+          assistant,
+          streamEvent,
+          streamEvent.type === "request.slow-critical"
+        );
       } else if (streamEvent.type === "request.cancelled") {
         terminalState = "cancelled";
         diagnostic = streamEvent.diagnostic ?? null;
         closeAssistantContent(assistant);
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
-        finishActivity(
-          assistant,
-          terminalActivitySummary(
+        terminalSummary = terminalActivitySummary(
+          "Canceled",
+          streamEvent.elapsedMilliseconds,
+          diagnostic
+        );
+        if (
+          assistant.slowDiagnostic?.persisted === true
+          && diagnostic?.traceId === assistant.slowDiagnostic.traceId
+        ) {
+          diagnostic = {
+            ...diagnostic,
+            terminalState: "cancelled-after-slow-warning",
+            persisted: true
+          };
+          terminalSummary = terminalActivitySummary(
             "Canceled",
             streamEvent.elapsedMilliseconds,
             diagnostic
-          ),
-          false
-        );
+          );
+        }
+        terminalWarning = Boolean(diagnostic?.terminalState
+          === "cancelled-after-slow-warning");
+        finishActivity(assistant, terminalSummary, terminalWarning);
+        addTraceDiagnosticActions(assistant, diagnostic);
+        stopSlowRequestTimer(assistant);
       } else if (
         streamEvent.type === "action.awaiting-approval"
         && streamEvent.localAction
@@ -12937,17 +13183,60 @@ async function consumeEventStream(stream, assistant) {
         streamEvent.type === "memory-pressure-detected"
         || streamEvent.type === "target-request-recovered"
       ) {
+        if (historical) {
+          continue;
+        }
         void refreshRuntimeStatus();
       }
     }
+  }
+
+  if (terminalSummary) {
+    finishActivity(assistant, terminalSummary, terminalWarning);
   }
 
   return {
     answer,
     completed,
     diagnostic,
-    terminalState
+    terminalState,
+    contentBlocks,
+    timeline
   };
+}
+
+function captureConversationContentBlock(blocks, streamEvent) {
+  const kind = streamEvent.type === "reasoning.delta"
+    ? "reasoning"
+    : streamEvent.type === "response.delta"
+      || (streamEvent.type === "response.completed" && streamEvent.responseTail)
+      ? "response"
+      : null;
+  const content = streamEvent.type === "reasoning.delta"
+    ? streamEvent.reasoningDelta
+    : streamEvent.type === "response.delta"
+      ? streamEvent.delta
+      : streamEvent.responseTail;
+
+  if (!kind || !content) {
+    return;
+  }
+
+  const id = streamEvent.type === "response.completed"
+    ? `terminal:${streamEvent.requestId}`
+    : streamEvent.contentBlockId ?? null;
+  const last = blocks.at(-1);
+
+  if (last?.kind === kind && last.id === id) {
+    last.content += content;
+    return;
+  }
+
+  blocks.push({
+    kind,
+    content,
+    id
+  });
 }
 
 function terminalActivitySummary(label, elapsedMilliseconds, diagnostic) {
@@ -12961,9 +13250,11 @@ function terminalActivitySummary(label, elapsedMilliseconds, diagnostic) {
 }
 
 function addTraceDiagnosticActions(assistant, diagnostic) {
+  const eligibleTerminalState = diagnostic?.terminalState === "failed"
+    || diagnostic?.terminalState === "cancelled-after-slow-warning";
   if (
     !diagnostic?.traceId
-    || diagnostic.terminalState !== "failed"
+    || !eligibleTerminalState
     || diagnostic.persisted !== true
     || assistant.container.querySelector(".trace-diagnostic-actions")
   ) {
@@ -12976,6 +13267,7 @@ function addTraceDiagnosticActions(assistant, diagnostic) {
     "Investigate error",
     "Ask Agentic Router to analyze this sanitized Host trace"
   );
+  investigate.classList.add("trace-diagnostic-investigate");
   investigate.addEventListener(
     "click",
     () => queueDiagnosticInvestigation(
@@ -12985,6 +13277,120 @@ function addTraceDiagnosticActions(assistant, diagnostic) {
   );
   actions.append(investigate);
   assistant.answer.insertAdjacentElement("afterend", actions);
+}
+
+function slowRequestSubject(status) {
+  const base = `${status.harness}/${status.model}`;
+  return status.tool ? `${base} · ${status.tool}` : base;
+}
+
+function isMeaningfulRequestActivity(streamEvent, observedOutputTokens = 0) {
+  if (
+    streamEvent.type === "request.heartbeat"
+    || streamEvent.type.startsWith("request.slow-")
+  ) {
+    return false;
+  }
+  if (streamEvent.type === "context.usage") {
+    return (streamEvent.contextUsage?.outputTokens ?? 0)
+      > observedOutputTokens;
+  }
+  if (
+    streamEvent.delta
+    || streamEvent.reasoningDelta
+    || streamEvent.localAction
+  ) {
+    return true;
+  }
+  const type = streamEvent.type;
+  return type.startsWith("action.")
+    || type.startsWith("execution.")
+    || type.startsWith("execution-")
+    || (
+      type.startsWith("harness.")
+      && !type.endsWith("-selected")
+      && !type.endsWith("-warning")
+      && !type.endsWith("-native-event-preserved")
+    )
+    || type.includes("tool")
+    || type.includes("stdout")
+    || type.includes("stderr")
+    || type.includes("files-changed")
+    || type.includes("edit-applied");
+}
+
+function formatRelativeActivity(milliseconds) {
+  const duration = Math.max(0, Math.floor(milliseconds / 1000));
+  if (duration >= 3600) {
+    return `${Math.floor(duration / 3600)}h ${Math.floor((duration % 3600) / 60)}m`;
+  }
+  if (duration >= 60) {
+    return `${Math.floor(duration / 60)}m ${duration % 60}s`;
+  }
+  return `${duration}s`;
+}
+
+function refreshSlowRequestAlert(assistant, now = Date.now()) {
+  const alert = assistant.slowRequestAlert;
+  const status = assistant.slowRequestStatus;
+  if (!alert || !status) {
+    return;
+  }
+  const lastActivityAt = assistant.lastHostActivityAt
+    ?? Date.parse(status.lastActivityAt)
+    ?? now;
+  const startedAt = Date.parse(status.startedAt) || now;
+  const idle = Math.max(0, now - lastActivityAt);
+  const running = Math.max(0, now - startedAt);
+  const subject = slowRequestSubject(status);
+  alert.classList.toggle("slow-critical", status.level === "critical");
+  alert.classList.toggle("slow-warning", status.level !== "critical");
+  alert.setAttribute(
+    "role",
+    status.level === "critical" ? "alert" : "status"
+  );
+  alert.textContent = status.level === "critical"
+    ? `${subject} is taking much longer than usual · running ${formatRelativeActivity(running)} · last meaningful Host activity ${formatRelativeActivity(idle)} ago. Consider Stop; the trace will remain available for investigation.`
+    : `${subject} is taking longer than usual · running ${formatRelativeActivity(running)} · last meaningful Host activity ${formatRelativeActivity(idle)} ago.`;
+}
+
+function renderSlowRequestAlert(assistant, streamEvent, historical) {
+  if (!streamEvent.slowRequest) {
+    return;
+  }
+  assistant.slowRequestStatus = streamEvent.slowRequest;
+  assistant.slowDiagnostic = streamEvent.diagnostic
+    ?? assistant.slowDiagnostic;
+  assistant.lastHostActivityAt = Date.parse(
+    streamEvent.slowRequest.lastActivityAt
+  ) || assistant.lastHostActivityAt || Date.now();
+  if (!assistant.slowRequestAlert) {
+    const alert = document.createElement("div");
+    alert.className = "request-slow-alert slow-warning";
+    alert.dataset.timelineKind = "slow-request";
+    assistant.slowRequestAlert = alert;
+    assistant.answer.insertAdjacentElement("afterend", alert);
+  }
+  refreshSlowRequestAlert(assistant);
+  if (!historical && !assistant.slowRequestTimer) {
+    assistant.slowRequestTimer = window.setInterval(
+      () => refreshSlowRequestAlert(assistant),
+      1_000
+    );
+  }
+}
+
+function clearSlowRequestAlert(assistant) {
+  stopSlowRequestTimer(assistant);
+  assistant.slowRequestAlert?.remove();
+  assistant.slowRequestAlert = null;
+}
+
+function stopSlowRequestTimer(assistant) {
+  if (assistant.slowRequestTimer) {
+    window.clearInterval(assistant.slowRequestTimer);
+    assistant.slowRequestTimer = null;
+  }
 }
 
 async function openTraceDiagnostic(traceId) {
@@ -13255,13 +13661,15 @@ function activityIconFor(type) {
   return "·";
 }
 
-function updateExecutionSession(assistant, session) {
+function updateExecutionSession(assistant, session, updateVisibleState = true) {
   if (!session) {
     return;
   }
 
   assistant.executionSession = session;
-  state.latestExecutionSessionId = session.id;
+  if (updateVisibleState) {
+    state.latestExecutionSessionId = session.id;
+  }
   if (session.plan?.objective) {
     assistant.workActivity.hidden = false;
     ensureWorkNarrative(
@@ -14796,7 +15204,7 @@ function finishActivity(assistant, summary, keepOpen) {
 }
 
 function startMessageEdit(element, message, historyIndex) {
-  if (state.requestController) {
+  if (state.requestController || state.readOnlyConversation) {
     return;
   }
 
@@ -15314,7 +15722,11 @@ function formatCompactTokens(value) {
 }
 
 function updateComposerStatus() {
-  if (state.requestController) {
+  if (state.readOnlyConversation) {
+    elements.composerStatus.textContent = state.requestController
+      ? "Read-only · another conversation is still running"
+      : "Read-only history · open this conversation again to continue";
+  } else if (state.requestController) {
     elements.composerStatus.textContent = state.steeringMessage
       ? t("steer.sending")
       : state.queueEditingId

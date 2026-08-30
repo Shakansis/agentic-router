@@ -720,7 +720,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       ),
       Tool(
         "create_files",
-        "Create between 1 and 50 new UTF-8 text files as one Host-validated batch. Every target must be new; the Host verifies every result and rolls back files created by a failed batch.",
+        "Create between 1 and 50 new UTF-8 text files as one Host-validated batch. Required parent directories are created automatically. Every target must be new; the Host verifies every result and rolls back files created by a failed batch.",
         new
         {
           files = FileCreationArrayProperty()
@@ -975,8 +975,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     {
       ["type"] = "string",
       ["description"] = required
-        ? "Exact Host-owned ID of the accepted plan step this action advances."
-        : "When the Host has returned an accepted plan, the exact Host-owned ID of the pending plan step this action advances. Omit only while no accepted plan exists."
+        ? "Top-level tool input property containing the exact Host-owned ID of the accepted plan step this action advances. Never place stepId inside a nested array item or object."
+        : "When the Host has returned an accepted plan, set this top-level tool input property to the exact Host-owned ID of the pending plan step this action advances. Never place stepId inside a nested array item or object. Omit only while no accepted plan exists."
     };
     if (required)
     {

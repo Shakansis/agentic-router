@@ -84,16 +84,9 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Expect(Page.Locator(
       "#show-onboarding-before-conversation"
     )).Not.ToBeCheckedAsync();
-    await Page.Locator("#settings-show-onboarding-now").ClickAsync();
-    await Expect(Page.Locator("#setup-onboarding")).ToBeVisibleAsync();
-    await Page.Locator(
-      "#setup-onboarding [data-setup-action=\"continue\"]"
-    ).ClickAsync();
-
-    await Page.Locator("#open-settings").ClickAsync();
-    await Page.Locator(
-      "[data-settings-target=\"harnesses\"]"
-    ).ClickAsync();
+    await Expect(Page.Locator(
+      "#settings-show-onboarding-now"
+    )).ToHaveCountAsync(0);
     await Page.Locator(
       "#show-onboarding-before-conversation"
     ).CheckAsync();
@@ -3293,6 +3286,43 @@ baselineTotal!.Value
         )
       )
     );
+    var successfulGroqRequest = _environment.FakeCloud.Requests.Last(
+      request => request.Body.Contains(
+        "trigger-cloud-retry-once",
+        StringComparison.Ordinal
+      )
+    );
+    using (var requestDocument = JsonDocument.Parse(successfulGroqRequest.Body))
+    {
+      foreach (var message in requestDocument.RootElement.GetProperty(
+        "messages"
+      ).EnumerateArray())
+      {
+        if (
+          message.GetProperty(
+            "role"
+          ).GetString() == "assistant"
+        )
+        {
+          continue;
+        }
+
+        Assert.IsFalse(
+          message.TryGetProperty(
+            "tool_calls",
+            out _
+          ),
+          "OpenAI-compatible providers must not receive a null tool_calls property on non-assistant messages."
+        );
+        Assert.IsFalse(
+          message.TryGetProperty(
+            "tool_call_id",
+            out _
+          ),
+          "OpenAI-compatible providers must not receive a null tool_call_id property on non-tool messages."
+        );
+      }
+    }
 
     var retryAfterStopwatch = Stopwatch.StartNew();
     var retryAfter = await PostChatStreamAsync(
@@ -4489,7 +4519,7 @@ baselineTotal!.Value
       Page.Locator(
         ".activity > summary"
       )
-    ).ToHaveTextAsync(
+    ).ToContainTextAsync(
       "Canceled"
     );
   }
@@ -4893,7 +4923,6 @@ baselineTotal!.Value
         Exact = true
       }
     ).ClickAsync();
-    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.user"

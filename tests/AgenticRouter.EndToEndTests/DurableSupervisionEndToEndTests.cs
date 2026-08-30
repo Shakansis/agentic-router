@@ -324,7 +324,6 @@ public sealed class DurableSupervisionEndToEndTests
     );
     await Expect(sessionButton).ToBeVisibleAsync(new() { Timeout = 10_000 });
     await sessionButton.ClickAsync();
-    await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(Page.Locator(".assistant-answer").Last).ToContainTextAsync(
       "Created hello.txt with the exact text hello world today",
       new() { Timeout = 40_000 }

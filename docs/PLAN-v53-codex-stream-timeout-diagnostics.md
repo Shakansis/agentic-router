@@ -1,5 +1,11 @@
 # PLAN v53: bounded Codex stream timeout and diagnostics
 
+> Superseded on 2026-08-30. This document records the former bounded-timeout
+> design and its evidence. Current request UX emits duration warnings at `T`
+> and `2T`, reports meaningful Host-observed activity separately, and leaves
+> cancellation to the user. The internal 12-hour orphan ceiling is based only
+> on continuous inactivity.
+
 ## Goal
 
 Prevent an idle Codex/Ollama stream from leaving an Agentic Router request active beyond the configured generation timeout, and replace generic turn failures with an actionable typed cause.

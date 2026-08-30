@@ -484,7 +484,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CodexIdleTurnUsesConfiguredGenerationTimeoutThenContinuesOnce()
+  public async Task CodexIdleTurnShowsTwoWarningsAndKeepsInvestigationAfterStop()
   {
     var settings = await GetSettingsJsonAsync();
     settings["runtime"]!["generationTimeoutSeconds"] = 1;
@@ -493,42 +493,42 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       saved.EnsureSuccessStatusCode();
     }
 
-    var events = await ExecuteCodexStreamAsync(
-      "codex host idle timeout",
-      "browser-codex-host-idle-timeout"
-    );
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.Codex);
+    await StartMessageAsync("codex host idle timeout");
 
-    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
-    Assert.HasCount(
-      1,
-      events.Where(
-        item => item["type"]!.GetValue<string>()
-          == "harness.codex-automatic-continuation-started"
-      )
+    var warning = Page.Locator(
+      "[data-event-type=\"request.slow-warning\"]"
     );
-    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
-    Assert.HasCount(
-      1,
-      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    await Expect(warning).ToContainTextAsync("Last meaningful Host activity");
+    var critical = Page.Locator(
+      "[data-event-type=\"request.slow-critical\"]"
     );
-    var recovery = events.Single(
-      item => item["type"]!.GetValue<string>()
-        == "harness.codex-automatic-continuation-started"
+    await Expect(critical).ToContainTextAsync("Consider Stop");
+    await Expect(Page.Locator(".request-slow-alert")).ToHaveClassAsync(
+      new Regex("(^|\\s)slow-critical(\\s|$)")
     );
-    StringAssert.Contains(
-      recovery["message"]!.GetValue<string>(),
-      "codex-event-idle-timeout"
+    await Expect(Page.Locator("[data-event-type=\"error\"]")).ToHaveCountAsync(0);
+    await Expect(
+      Page.Locator("[data-event-type=\"harness.codex-automatic-continuation-started\"]")
+    ).ToHaveCountAsync(0);
+
+    await Page.Locator("#cancel-request").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
+    var investigate = Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Ask Agentic Router to analyze this sanitized Host trace",
+        Exact = true
+      }
     );
-    var recoveryInput = await File.ReadAllTextAsync(
-      Path.Combine(
-        _environment.DataDirectory,
-        "codex-runtime",
-        "fake-app-server-turn-input.txt"
-      )
+    await Expect(investigate).ToBeVisibleAsync();
+    await Expect(investigate).ToHaveClassAsync(
+      new Regex("(^|\\s)trace-diagnostic-investigate(\\s|$)")
     );
-    StringAssert.Contains(recoveryInput, "Failure code: codex-event-idle-timeout.");
-    StringAssert.Contains(recoveryInput, "No Codex App Server event arrived for 1 seconds");
-    Assert.DoesNotContain("Canonical Agentic Router conversation hydration:", recoveryInput);
   }
 
   [TestMethod]
@@ -1826,7 +1826,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       reasoning
-    ).ToHaveCountAsync(3);
+    ).ToHaveCountAsync(1);
     await Expect(
       reasoning.First.Locator(
         ".assistant-reasoning-body"
@@ -1835,11 +1835,12 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "inspect the request"
     );
     await Expect(
-      reasoning.Locator(
-        ".assistant-reasoning-body",
-        new() { HasText = "The response should remain concise and grounded." }
+      reasoning.First.Locator(
+        ".assistant-reasoning-body"
       )
-    ).ToHaveCountAsync(2);
+    ).ToContainTextAsync(
+      "The response should remain concise and grounded."
+    );
     await Expect(
       reasoning.Last
     ).Not.ToHaveAttributeAsync(
@@ -1854,10 +1855,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     CollectionAssert.AreEqual(
       new[]
       {
-        "thinking",
-        "response",
-        "thinking",
-        "response",
         "thinking",
         "response"
       },
@@ -1934,7 +1931,9 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     {
       await Page.Locator(
         "#cancel-request"
-      ).ClickAsync();
+      ).EvaluateAsync(
+        "button => button.click()"
+      );
     }
   }
 
@@ -2288,16 +2287,28 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.GotoAsync(
       "/"
     );
+    var streamingRequestsBefore = _environment.FakeOllama.Requests.Count(
+      request => request.Stream
+    );
     await StartMessageAsync(
       "cancel stream"
     );
-    await Expect(
-      Page.Locator(
-        ".assistant-answer"
-      )
-    ).ToContainTextAsync(
-      "Hello"
+    await WaitUntilAsync(
+      () => _environment.FakeOllama.Requests.Count(
+        request => request.Stream
+      ) > streamingRequestsBefore,
+      TimeSpan.FromSeconds(10)
     );
+    await Expect(
+      Page.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Cancel active response",
+          Exact = true
+        }
+      )
+    ).ToBeVisibleAsync();
     using (
       var measurement = await _environment.HttpClient.PostAsJsonAsync(
         "api/runtime/profiles/measure",
@@ -2499,7 +2510,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator(
       $"#recent-sessions [data-session-id=\"{firstId}\"]"
     ).Locator(".session-entry-content").ClickAsync();
-    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.user"
@@ -3030,6 +3040,27 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       ".assistant-answer"
     );
 
+    var cancel = Page.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Cancel active response",
+        Exact = true
+      }
+    );
+    await Expect(cancel).ToBeHiddenAsync(
+      new()
+      {
+        Timeout = 15_000
+      }
+    );
+    await Expect(
+      Page.Locator(
+        ".activity > summary"
+      )
+    ).ToContainTextAsync(
+      "Completed"
+    );
     await Expect(
       answer.Locator(
         "h1"
@@ -3203,7 +3234,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task RendersHighlightedMarkdownBeforeStreamingCompletes()
+  public async Task RendersHighlightedMarkdownAfterBufferedCompletion()
   {
     await Page.GotoAsync(
       "/"
@@ -3220,7 +3251,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "h1"
       )
     ).ToHaveTextAsync(
-      "Live heading"
+      "Live heading",
+      new()
+      {
+        Timeout = 15_000
+      }
     );
     await Expect(
       answer.Locator(
@@ -3249,16 +3284,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToHaveTextAsync(
       "JSON"
     );
-    await Expect(
-      Page.GetByRole(
-        AriaRole.Button,
-        new()
-        {
-          Name = "Cancel active response",
-          Exact = true
-        }
-      )
-    ).ToBeVisibleAsync();
     await Expect(
       answer
     ).ToContainTextAsync(
@@ -4490,7 +4515,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CancellationPreservesPartialTextButExcludesItFromContext()
+  public async Task CancellationWithholdsNonTerminalTextAndExcludesItFromContext()
   {
     await Page.GotoAsync(
       "/"
@@ -4502,34 +4527,29 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         ".assistant-answer"
       )
-    ).ToContainTextAsync(
-      "Hello"
-    );
-    var partial = await Page.Locator(
-      ".assistant-answer"
-    ).InnerTextAsync();
-    await Page.GetByRole(
+    ).ToBeEmptyAsync();
+    var cancel = Page.GetByRole(
       AriaRole.Button,
       new()
       {
         Name = "Cancel active response",
         Exact = true
       }
-    ).ClickAsync();
+    );
+    await Expect(cancel).ToBeVisibleAsync();
+    await cancel.ClickAsync();
     await Expect(
       Page.Locator(
         ".activity > summary"
       )
-    ).ToHaveTextAsync(
+    ).ToContainTextAsync(
       "Canceled"
     );
     await Expect(
       Page.Locator(
         ".assistant-answer"
       )
-    ).ToContainTextAsync(
-      partial
-    );
+    ).ToBeEmptyAsync();
 
     await SendMessageAsync(
       "Message after cancellation"
@@ -4545,7 +4565,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.IsFalse(
       target.Messages.Any(
         message => message.Content.Contains(
-          partial,
+          "Hello",
           StringComparison.Ordinal
         )
       )
@@ -6533,7 +6553,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         ".activity > summary"
       ).Last
-    ).ToHaveTextAsync(
+    ).ToContainTextAsync(
       "Canceled"
     );
   }
@@ -6616,7 +6636,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         ".activity > summary"
       ).Last
-    ).ToHaveTextAsync(
+    ).ToContainTextAsync(
       "Canceled"
     );
   }
@@ -7065,7 +7085,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ConfiguredOllamaLimitsAndTimeoutApplyToSpecialistExecution()
+  public async Task ConfiguredOllamaLimitsApplyAndSlowGenerationWarnsWithoutCancellation()
   {
     using var save = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
@@ -7108,17 +7128,26 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
 
     await Expect(
-      Page.Locator(
-        "[data-event-type=\"error\"]"
-      )
-    ).ToContainTextAsync(
-      "configured generation timeout of 1 second"
-    );
+      Page.Locator("[data-event-type=\"request.slow-warning\"]")
+    ).ToContainTextAsync("Last meaningful Host activity");
+    await Expect(
+      Page.Locator("[data-event-type=\"error\"]")
+    ).ToHaveCountAsync(0);
     await Expect(
       Page.Locator(
-        "[data-event-type=\"execution-plan-created\"]"
+        "[data-event-type=\"response.completed\"]"
       )
-    ).ToHaveCountAsync(0);
+    ).ToHaveCountAsync(1);
+    await Expect(
+      Page.Locator(".message.assistant .activity").Last
+    ).ToHaveAttributeAsync(
+      "data-terminal",
+      "true",
+      new()
+      {
+        Timeout = 20_000
+      }
+    );
 
     var specialistRequests = _environment.FakeOllama.Requests.Where(
       request => request.Model == "alpha:latest"
@@ -7593,7 +7622,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         HasText = "Corrective smoke conversation."
       }
     ).Locator(".session-entry-content").ClickAsync();
-    await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
         ".message.user"
