@@ -20,7 +20,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   [TestMethod]
   [DoNotParallelize]
   [Timeout(90_000, CooperativeCancellation = true)]
-  public async Task AutoModelHarnessRoutesOnceFallsBackPersistsEvidenceAndManualSelectionBypassesIt()
+  public async Task AutoResolvesModelThenSelectsExactOrAggregateRankedHarnessAndRetainsRoute()
   {
     _environment.FakeOllama.Reset();
     _environment.FakeCloud.Reset();
@@ -41,12 +41,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     };
     try
     {
-      var insufficient = await ExecuteAsync(
-        "router-insufficient",
+      var deterministicFallback = await ExecuteAsync(
+        "router-native-fallback",
         "run process",
         autoModelHarness: true
       );
-      StringAssert.Contains(insufficient, "router.model-harness-insufficient");
+      StringAssert.Contains(deterministicFallback, "router.model-harness-fallback");
+      StringAssert.Contains(deterministicFallback, "deterministic Native fallback");
       Assert.HasCount(0, _environment.FakeCloud.Requests);
 
       var startedAt = new DateTimeOffset(2026, 8, 23, 21, 0, 0, TimeSpan.Zero);
@@ -80,14 +81,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         "run process",
         autoModelHarness: true
       );
-      StringAssert.Contains(first, "router.model-harness-fallback");
+      StringAssert.Contains(first, "router.model-harness-selected");
       StringAssert.Contains(first, "alpha:latest");
       StringAssert.Contains(first, "Native");
       var firstReview = await ReviewAsync(first);
       Assert.IsNotNull(firstReview.Summary.RoutingEvidence);
       Assert.AreEqual("alpha:latest", firstReview.Summary.RoutingEvidence.SelectedModel);
       Assert.AreEqual(HarnessIds.Native, firstReview.Summary.RoutingEvidence.SelectedHarness);
-      Assert.IsTrue(firstReview.Summary.RoutingEvidence.Fallback);
+      Assert.IsFalse(firstReview.Summary.RoutingEvidence.Fallback);
       Assert.IsTrue(firstReview.Summary.RoutingEvidence.SupportingRunIds.Contains(
         available.RunId,
         StringComparer.OrdinalIgnoreCase
@@ -117,6 +118,16 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         correctnessReview.Summary.RoutingEvidence!.TaskCategory
       );
       Assert.AreEqual(HarnessIds.Codex, correctnessReview.Summary.RoutingEvidence.SelectedHarness);
+
+      var aggregate = await ExecuteAsync(
+        "router-session-aggregate",
+        "architect the service boundaries",
+        autoModelHarness: true
+      );
+      StringAssert.Contains(aggregate, "best aggregate harness score");
+      var aggregateReview = await ReviewAsync(aggregate);
+      Assert.AreEqual("beta:code", aggregateReview.Summary.SelectedModel);
+      Assert.IsTrue(aggregateReview.Summary.RoutingEvidence!.Fallback);
 
       using (var customProfile = await routingClient.PutAsJsonAsync(
         "api/benchmarks/scoring-profile",

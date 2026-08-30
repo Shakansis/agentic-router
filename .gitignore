@@ -434,6 +434,7 @@ AgenticRouter.Api/data/usage-aggregates/
 AgenticRouter.Api/data/secrets/
 AgenticRouter.Api/data/providers/
 AgenticRouter.Api/data/codex-runtime/
+AgenticRouter.Api/data/claude-code-runtime/
 AgenticRouter.Api/data/opencode-runtime/
 AgenticRouter.Api/data/qwen-code-runtime/
 

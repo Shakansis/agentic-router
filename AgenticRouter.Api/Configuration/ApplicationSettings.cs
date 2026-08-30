@@ -6,11 +6,11 @@ public sealed record ApplicationSettings
 
   public string OllamaUrl { get; init; } = "http://localhost:11434";
 
-  public string RouterModel { get; init; } = "configure-model";
+  public string RouterModel { get; init; } = "none";
 
   public string RouterGpu { get; init; } = "default";
 
-  public string ActionModel { get; init; } = "functiongemma:270m";
+  public string ActionModel { get; init; } = "none";
 
   public string ActionGpu { get; init; } = "default";
 
@@ -51,6 +51,13 @@ public sealed record ApplicationSettings
   public WebSearchSettings WebSearch { get; init; } = new();
 
   public ModelOrganizationSettings ModelOrganization { get; init; } = new();
+
+  public OnboardingSettings Onboarding { get; init; } = new();
+}
+
+public sealed record OnboardingSettings
+{
+  public bool ShowBeforeNewConversation { get; init; } = true;
 }
 
 public sealed record IncidentJournalSettings

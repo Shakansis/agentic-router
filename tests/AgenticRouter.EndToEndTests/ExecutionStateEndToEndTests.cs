@@ -3175,68 +3175,46 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task FunctionGemmaResidentRetriesOneRejectedRouteWithCorrection()
+  public async Task KeywordAutoRoutingSelectsConfiguredApplicationIntentionWithoutModelRouter()
   {
-    using (
-      var settings = await _environment.PutSettingsAsync(
-        _environment.BaselineSettings with
-        {
-          RouterModel = "functiongemma:270m",
-          ActionModel = "functiongemma:270m",
-          CoordinatorModel = "router:latest"
-        }
-      )
-    )
-    {
-      settings.EnsureSuccessStatusCode();
-    }
+    _environment.FakeOllama.Reset();
     await Page.GotoAsync(
       "/"
     );
-    await SetExecuteModeAsync(
-      "auto"
-    );
     await SendMessageAsync(
-      "execute route repair required functiongemma resident contract create file"
+      "architect the service boundaries"
     );
 
-    Assert.AreEqual(
-      "hello from agent",
-      await File.ReadAllTextAsync(
-        Path.Combine(
-          _environment.WorkspaceDirectory,
-          "hello.txt"
-        )
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"router.classified\"]"
       )
+    ).ToContainTextAsync(
+      "software-architecture"
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"agent.functiongemma-routing-repair-started\"]"
+        "[data-event-type=\"target.configuration\"]"
       )
     ).ToContainTextAsync(
-      "outside the offered closed catalog"
+      "software-architecture"
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"agent.functiongemma-route-selected\"]"
+        "[data-event-type=\"target.model-resolved\"]"
       )
     ).ToContainTextAsync(
-      "qwen3-coder:30b"
+      "beta:code"
     );
-    Assert.AreEqual(
-      2,
-      _environment.FakeOllama.Requests.Count(
-        request => request.Model == "functiongemma:270m"
-          && request.AvailableTools.SequenceEqual(
-            ["route_to_teacher"]
-          )
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(request =>
+        request.Model is "router:latest" or "functiongemma:270m"
       )
     );
   }
-
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ExplicitExecuteModelSkipsFunctionGemmaAndNegotiatesMinimalToolSchemas()
+  public async Task ExplicitExecuteModelIgnoresLegacyRouterSettingsAndNegotiatesMinimalToolSchemas()
   {
     using (
       var settings = await _environment.PutSettingsAsync(
@@ -6723,7 +6701,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(
       organizationCards
     ).ToHaveCountAsync(
-      7
+      6
     );
     await Expect(
       Page.Locator(
@@ -6912,6 +6890,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
     var error = events.Last(item => item["type"]!.GetValue<string>() == "error")["error"]!.AsObject();
     var traceId = error["traceId"]!.GetValue<string>();
+    var diagnostic = events.Last(item => item["type"]!.GetValue<string>() == "error")["diagnostic"]!.AsObject();
+    Assert.AreEqual(traceId, diagnostic["traceId"]!.GetValue<string>());
+    Assert.AreEqual("failed", diagnostic["terminalState"]!.GetValue<string>());
+    Assert.IsTrue(diagnostic["persisted"]!.GetValue<bool>());
     Assert.AreEqual("request-context-does-not-fit", error["code"]!.GetValue<string>());
     Assert.IsTrue(error["diagnosticsPersisted"]!.GetValue<bool>());
 
@@ -6968,11 +6950,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   {
     var stream = await PostChatStreamAsync("Create trace evidence.", "alpha:latest", "browser-trace-lookup-v0913");
     var events = ParseSseEvents(stream);
-    var traceId = events.Last(item => item["type"]!.GetValue<string>() == "response.completed")["requestId"]!.GetValue<string>();
+    var completedEvent = events.Last(item => item["type"]!.GetValue<string>() == "response.completed");
+    var traceId = completedEvent["requestId"]!.GetValue<string>();
+    var canonicalTrace = completedEvent["diagnostic"]!["traceId"]!.GetValue<string>();
+    Assert.AreEqual("completed", completedEvent["diagnostic"]!["terminalState"]!.GetValue<string>());
+    Assert.IsTrue(completedEvent["diagnostic"]!["persisted"]!.GetValue<bool>());
 
     var incidentFile = Directory.GetFiles(Path.Combine(_environment.DataDirectory, "incidents"), "*.jsonl").OrderBy(path => path, StringComparer.Ordinal).Last();
     var persisted = File.ReadLines(incidentFile).Select(line => JsonNode.Parse(line)!.AsObject()).Last(item => item["requestId"]?.GetValue<string>() == traceId);
-    var canonicalTrace = persisted["traceId"]!.GetValue<string>();
+    Assert.AreEqual(canonicalTrace, persisted["traceId"]!.GetValue<string>());
     await File.AppendAllTextAsync(incidentFile, $"{{\"traceId\":\"{canonicalTrace}\"\n");
 
     using var lookup = await _environment.HttpClient.GetAsync($"api/diagnostics/traces/{Uri.EscapeDataString(canonicalTrace)}");
@@ -6988,6 +6974,36 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     using var unknown = await _environment.HttpClient.GetAsync("api/diagnostics/traces/unknown-valid-trace");
     Assert.AreEqual(HttpStatusCode.NotFound, unknown.StatusCode);
     StringAssert.Contains(await unknown.Content.ReadAsStringAsync(), "diagnostic-trace-not-found");
+
+    using var investigation = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "TRACE_DIAGNOSTIC_INVESTIGATION_V1\n"
+          + $"Trace ID: {canonicalTrace}\n"
+          + "Analyze only the sanitized Host evidence.",
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        interactionMode = "chat",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-trace-investigation-v61",
+        diagnosticTraceId = canonicalTrace,
+        hideUserMessage = true
+      }
+    );
+    investigation.EnsureSuccessStatusCode();
+    var investigationEvents = ParseSseEvents(
+      await investigation.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(
+      investigationEvents.Any(
+        item => item["type"]!.GetValue<string>() == "chat.diagnostic-read-completed"
+      )
+    );
+    Assert.AreEqual(
+      "response.completed",
+      investigationEvents.Last()["type"]!.GetValue<string>()
+    );
   }
 
   [TestMethod]
@@ -7010,23 +7026,201 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task BrowserErrorCopiesTraceAndOpensSanitizedTimeline()
+  public async Task BrowserErrorOffersOneTransparentDiagnosticInvestigation()
   {
     await Page.GotoAsync("/");
-    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
-    await Page.Locator("#message-input").FillAsync(new string('z', 132_000));
-    await Page.Locator("#message-input").PressAsync("Enter");
+    await SelectFixtureModelAsync("alpha:latest");
+    await StartMessageAsync("generic HTTP failure");
+    await Expect(
+      Page.Locator(".message.assistant .activity").Last
+    ).ToHaveAttributeAsync(
+      "data-terminal",
+      "true",
+      new()
+      {
+        Timeout = 20_000
+      }
+    );
     await Expect(Page.Locator(".trace-diagnostic-actions")).ToBeVisibleAsync();
     var buttons = Page.Locator(".trace-diagnostic-actions button");
-    await Expect(buttons).ToHaveCountAsync(2);
-    await Expect(buttons.Nth(1)).ToBeEnabledAsync();
-    await buttons.Nth(1).ClickAsync();
-    await Expect(Page.Locator("#trace-diagnostic-dialog")).ToBeVisibleAsync();
-    await Expect(Page.Locator("#trace-diagnostic-facts")).ToContainTextAsync("request-context-does-not-fit");
-    await Expect(Page.Locator("#trace-diagnostic-timeline li")).Not.ToHaveCountAsync(0);
-    await Expect(Page.Locator("#trace-diagnostic-dialog")).Not.ToContainTextAsync(new string('z', 1_000));
-    await Page.Locator("#dismiss-trace-diagnostic").ClickAsync();
-    await Expect(Page.Locator("#trace-diagnostic-dialog")).Not.ToBeVisibleAsync();
+    await Expect(buttons).ToHaveCountAsync(1);
+    await Expect(buttons).ToHaveTextAsync("Investigate error");
+    await Expect(Page.Locator(".message.assistant .activity > summary").Last).ToContainTextAsync("Trace:");
+    var visibleUserMessages = Page.Locator(".message.user");
+    await Expect(visibleUserMessages).ToHaveCountAsync(1);
+
+    await buttons.ClickAsync();
+
+    await Expect(
+      Page.Locator(".message.assistant .assistant-answer").Last
+    ).ToContainTextAsync(
+      "Diagnostic investigation completed from sanitized Host evidence"
+    );
+    await Expect(visibleUserMessages).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".trace-diagnostic-actions")).ToHaveCountAsync(1);
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Role == "system"
+            && message.Content.Contains(
+              "APPLICATION_OWNED_TRACE_DIAGNOSTIC_V1",
+              StringComparison.Ordinal
+            )
+            && message.Content.Contains(
+              "\"failureCode\"",
+              StringComparison.Ordinal
+            )
+        )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BrowserCompletedTurnShowsTraceWithoutInvestigationAction()
+  {
+    await Page.GotoAsync("/");
+    await SelectFixtureModelAsync("alpha:latest");
+    await SendMessageAsync("Completed trace presentation.");
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Completed");
+    await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Trace:");
+    await Expect(assistant.Locator(".trace-diagnostic-actions")).ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DiagnosticReferencesAndHiddenInvestigationPersistAcrossResume()
+  {
+    using var profiles = await _environment.HttpClient.GetAsync(
+      "api/workspaces"
+    );
+    profiles.EnsureSuccessStatusCode();
+    using var profilesDocument = JsonDocument.Parse(
+      await profiles.Content.ReadAsStringAsync()
+    );
+    var matching = profilesDocument.RootElement.GetProperty("profiles")
+      .EnumerateArray()
+      .FirstOrDefault(
+        profile => string.Equals(
+          Path.GetFullPath(profile.GetProperty("path").GetString()!),
+          Path.GetFullPath(_environment.WorkspaceDirectory),
+          StringComparison.OrdinalIgnoreCase
+        )
+      );
+    string workspaceId;
+    if (matching.ValueKind == JsonValueKind.Object)
+    {
+      workspaceId = matching.GetProperty("id").GetString()!;
+      using var activated = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{workspaceId}/activate",
+        null
+      );
+      activated.EnsureSuccessStatusCode();
+    }
+    else
+    {
+      using var workspace = await _environment.HttpClient.PostAsJsonAsync(
+        "api/workspaces",
+        new
+        {
+          name = "Trace persistence",
+          path = _environment.WorkspaceDirectory
+        }
+      );
+      workspace.EnsureSuccessStatusCode();
+      using var workspaceDocument = JsonDocument.Parse(
+        await workspace.Content.ReadAsStringAsync()
+      );
+      workspaceId = workspaceDocument.RootElement.GetProperty("id").GetString()!;
+    }
+    using (var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history",
+      new
+      {
+        enabled = true
+      }
+    ))
+    {
+      history.EnsureSuccessStatusCode();
+    }
+
+    var firstStream = await PostChatStreamAsync(
+      "Persist completed trace metadata.",
+      "alpha:latest",
+      "browser-trace-persistence-v61"
+    );
+    var firstEvents = ParseSseEvents(firstStream);
+    var firstCompleted = firstEvents.Last(
+      item => item["type"]!.GetValue<string>() == "response.completed"
+    );
+    var traceId = firstCompleted["diagnostic"]!["traceId"]!.GetValue<string>();
+    var sessionId = firstCompleted["conversationSessionId"]!.GetValue<string>();
+
+    using var investigation = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "TRACE_DIAGNOSTIC_INVESTIGATION_V1\n"
+          + $"Trace ID: {traceId}\n"
+          + "Analyze only the sanitized Host evidence.",
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        interactionMode = "chat",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-trace-persistence-v61",
+        conversationSessionId = sessionId,
+        diagnosticTraceId = traceId,
+        hideUserMessage = true
+      }
+    );
+    investigation.EnsureSuccessStatusCode();
+    Assert.AreEqual(
+      "response.completed",
+      ParseSseEvents(await investigation.Content.ReadAsStringAsync())
+        .Last()["type"]!.GetValue<string>()
+    );
+
+    using var resumed = await _environment.HttpClient.PostAsJsonAsync(
+      $"api/sessions/{sessionId}/resume",
+      new
+      {
+        browserSessionId = "browser-trace-persistence-resume-v61"
+      }
+    );
+    resumed.EnsureSuccessStatusCode();
+    using var resumedDocument = JsonDocument.Parse(
+      await resumed.Content.ReadAsStringAsync()
+    );
+    var messages = resumedDocument.RootElement.GetProperty("messages")
+      .EnumerateArray()
+      .ToArray();
+    Assert.HasCount(4, messages);
+    Assert.AreEqual(
+      traceId,
+      messages[1].GetProperty("diagnostic").GetProperty("traceId").GetString()
+    );
+    Assert.IsTrue(messages[2].GetProperty("hidden").GetBoolean());
+    StringAssert.Contains(
+      messages[2].GetProperty("content").GetString()!,
+      "TRACE_DIAGNOSTIC_INVESTIGATION_V1"
+    );
+    Assert.IsFalse(
+      messages[3].TryGetProperty("hidden", out var hidden)
+        && hidden.GetBoolean()
+    );
+  }
+
+  private async Task SelectFixtureModelAsync(string model)
+  {
+    await Page.EvaluateAsync(
+      "if (!resizeObserver) initializeScrollFollowing();"
+    );
+    await Page.Locator("#model-selector").EvaluateAsync(
+      "(select, model) => { const option = document.createElement('option'); option.value = model; option.textContent = model; select.append(option); select.value = model; select.dispatchEvent(new Event('change', { bubbles: true })); }",
+      model
+    );
   }
 
   [TestMethod]

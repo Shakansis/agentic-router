@@ -659,6 +659,7 @@ public sealed class ConversationProductivityService
 
     foreach (var message in session.Messages.Where(
       message => message.Role is "user" or "assistant"
+        && !message.Hidden
     ))
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -842,6 +843,7 @@ public sealed class ConversationProductivityService
     fields.AddRange(
       session.Messages.Where(
         message => message.Role is "user" or "assistant"
+          && !message.Hidden
       ).Select(
         message => (
           message.Role == "user"
@@ -1048,6 +1050,7 @@ public sealed class ConversationProductivityService
 
       if (
         user.Role == "user"
+        && !user.Hidden
         && assistant.Role == "assistant"
         && !string.IsNullOrWhiteSpace(
           user.Content

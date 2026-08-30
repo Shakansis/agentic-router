@@ -706,6 +706,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       "get_file_info",
       "search_text",
       "web_search",
+      "get_trace_diagnostic",
       "create_file",
       "create_files",
       "write_file",

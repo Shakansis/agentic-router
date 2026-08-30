@@ -72,6 +72,9 @@ public sealed class OllamaClient : IOllamaClient
       .Where(
         model => !string.IsNullOrWhiteSpace(
           model.Name
+        ) && !model.Name.StartsWith(
+          "functiongemma",
+          StringComparison.OrdinalIgnoreCase
         )
       )
       .Select(
@@ -1110,8 +1113,8 @@ public sealed class OllamaClient : IOllamaClient
       baseUri,
       payload,
       keepAlive == 0
-        ? "resident-model-unload"
-        : "resident-model-preload",
+        ? "model-unload"
+        : "model-preload",
       cancellationToken,
       requestTimeout: TimeSpan.FromSeconds(
         settings.Runtime.GenerationTimeoutSeconds

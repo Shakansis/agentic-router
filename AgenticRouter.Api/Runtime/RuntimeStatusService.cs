@@ -11,7 +11,6 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
   private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
-  private readonly IResidentModelManager _residentModel;
   private readonly ILogger<RuntimeStatusService> _logger;
 
   public RuntimeStatusService(
@@ -19,7 +18,6 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     IGpuMemoryMetricsProvider gpuMemory,
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
-    IResidentModelManager residentModel,
     ILogger<RuntimeStatusService> logger
   )
   {
@@ -27,7 +25,6 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     _gpuMemory = gpuMemory;
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
-    _residentModel = residentModel;
     _logger = logger;
   }
 
@@ -37,7 +34,21 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
   {
     var ram = _systemMemory.GetStatus();
     var gpuMemory = _gpuMemory.GetStatus();
-    var resident = _residentModel.GetStatus();
+    var resident = new ResidentModelStatus(
+      string.Empty,
+      null,
+      "disabled",
+      false,
+      "disabled",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      "Resident routing is disabled; Auto uses deterministic keywords.",
+      null
+    );
     IReadOnlyList<LoadedModelStatus> loadedModels = [];
     var loadedModelsStatus = "available";
     string? loadedModelsDiagnostic = null;
@@ -191,13 +202,10 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     var configuredRoles = OllamaRuntimeProfileResolver.ConfiguredRoles(
       settings,
       model.Name
-    );
-    var role = configuredRoles.Contains(
-      OllamaRuntimeRoleIds.ResidentCoordinator,
-      StringComparer.Ordinal
-    )
-      ? OllamaRuntimeRoleIds.ResidentCoordinator
-      : configuredRoles.FirstOrDefault() ?? OllamaRuntimeRoleIds.Primary;
+    ).Where(role => role is not OllamaRuntimeRoleIds.Router
+      and not OllamaRuntimeRoleIds.ResidentCoordinator)
+      .ToArray();
+    var role = configuredRoles.FirstOrDefault() ?? OllamaRuntimeRoleIds.Primary;
     OllamaContextResolution? resolution = null;
 
     try
@@ -226,16 +234,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
             ? "overridden"
             : "inherited"
           : "context-mismatch";
-    var residentReference = ProviderModelReference.Parse(
-      settings.ActionModel
-    );
     var gpuIndex = OllamaGpuSelection.Resolve(
-      role switch
-      {
-        OllamaRuntimeRoleIds.Router => settings.RouterGpu,
-        OllamaRuntimeRoleIds.ResidentCoordinator => settings.ActionGpu,
-        _ => settings.DefaultGpu
-      },
+      settings.DefaultGpu,
       settings.DefaultGpu
     );
     var gpuName = gpuIndex is null
@@ -255,13 +255,9 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
       estimatedRam,
       processor,
       model.ExpiresAt,
-      string.Equals(
-        model.Name,
-        residentReference.ModelId,
-        StringComparison.OrdinalIgnoreCase
-      ),
+      false,
       profileStatus,
-      configuredRoles.Count > 1,
+      configuredRoles.Length > 1,
       gpuIndex,
       gpuName
     );

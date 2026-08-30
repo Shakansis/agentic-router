@@ -20,6 +20,10 @@ approval, while keeping every mutation and process capability unavailable.
   their existing provider path.
 - Bound the read loop and expose read activity as ordinary technical evidence;
   only the final model completion contributes to the visible assistant answer.
+- Buffer model content while structured tools remain available. When a valid
+  tool call accompanies non-terminal text, withhold that preamble, execute only
+  the Host-validated call, and expose an activity event without leaking the
+  preamble into the user-facing answer.
 
 ## Implementation steps
 
@@ -30,6 +34,9 @@ approval, while keeping every mutation and process capability unavailable.
    session, return authoritative tool results, and render the final completion.
 4. Add fake-provider E2E coverage proving that Chat under `ask` reads a workspace
    file without an approval event and still cannot execute a requested mutation.
+5. Cover structured workspace and Web tool calls that include incidental content;
+   the call executes, the preamble stays hidden, and only the grounded completion
+   becomes visible.
 
 ## Validation
 
@@ -38,4 +45,3 @@ approval, while keeping every mutation and process capability unavailable.
 - Focused and complete fake-provider Playwright E2E coverage.
 - `git diff --check` and intended-diff review.
 - No real model, cloud call, service restart, or GPU workload.
-

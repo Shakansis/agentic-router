@@ -32,9 +32,12 @@ which runtime, harness package, or Ollama model command to run.
    satisfy this readiness check. Unknown GPU memory falls back conservatively.
 8. Safe mode keeps status discovery read-only and rejects installer/model pull
    actions.
-9. The welcome/onboarding surface is shown only while core local readiness is
-   incomplete. The complete validator and all install actions remain available
-   under Settings > Harnesses after the welcome surface disappears.
+9. The welcome/onboarding surface is always shown before a new conversation by
+   default, including when Ollama and compatible models already exist. The user
+   may dismiss it for the current conversation or persist an opt-out. Incomplete
+   core readiness always keeps the surface visible. The complete validator,
+   preference, and an explicit reopen action remain available under Settings >
+   Local resources.
 10. Codex is labeled as the recommended Execute harness because it is the
     current stability recommendation. This is advisory only; Native and every
     other available harness remain selectable.
@@ -65,7 +68,8 @@ runtime speed. Exact provider allocation remains owned by Ollama.
 
 ## Validation boundary
 
-Deterministic E2E covers status composition, browser rendering, rejection of an
-unreviewed model, streamed fake-provider pull, and post-pull discovery. Real
-package installation and real model downloads are intentionally not performed by
-automated validation.
+Deterministic E2E covers status composition, legacy-settings first display,
+per-conversation dismissal, persisted opt-out and re-enable, explicit reopen,
+browser rendering, rejection of an unreviewed model, streamed fake-provider
+pull, and post-pull discovery. Real package installation and real model downloads
+are intentionally not performed by automated validation.

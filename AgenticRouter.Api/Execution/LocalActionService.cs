@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.Platform;
 
 namespace AgenticRouter.Api.Execution;
@@ -92,6 +93,7 @@ public sealed class LocalActionService : ILocalActionService
   private readonly IGitRepositoryService _git;
   private readonly IGitDeliveryService _gitDelivery;
   private readonly IToolNameResolver _toolNames;
+  private readonly IIncidentJournal _incidents;
 
   public LocalActionService(
     ITrustedWorkspaceService workspace,
@@ -100,7 +102,8 @@ public sealed class LocalActionService : ILocalActionService
     IValidationProfileService validationProfiles,
     IGitRepositoryService git,
     IGitDeliveryService gitDelivery,
-    IToolNameResolver toolNames
+    IToolNameResolver toolNames,
+    IIncidentJournal incidents
   )
   {
     _workspace = workspace;
@@ -110,6 +113,7 @@ public sealed class LocalActionService : ILocalActionService
     _git = git;
     _gitDelivery = gitDelivery;
     _toolNames = toolNames;
+    _incidents = incidents;
   }
 
   public async Task<ValidatedLocalAction> ValidateAsync(
@@ -150,6 +154,38 @@ public sealed class LocalActionService : ILocalActionService
         ? resolution.Source
         : proposal.ToolResolutionSource
     };
+
+    if (proposal.Tool == DiagnosticTraceCapability.ToolName)
+    {
+      var traceId = DiagnosticTraceCapability.ReadTraceId(
+        proposal.Arguments
+      );
+      if (
+        executionSession is not null
+        && !executionSession.IsDiagnosticTraceAuthorized(traceId)
+      )
+      {
+        throw new LocalActionException(
+          "diagnostic-trace-not-authorized",
+          "The requested diagnostic trace does not match the exact trace authorized for this turn."
+        );
+      }
+      return AttachAndValidatePlanBinding(
+        new ValidatedLocalAction(
+          Guid.NewGuid().ToString("N"),
+          proposal.Tool,
+          proposal.Arguments.Clone(),
+          null,
+          null,
+          $"get_trace_diagnostic: {traceId}",
+          "Read one exact bounded, sanitized Host diagnostic trace.",
+          true,
+          false
+        ),
+        proposal,
+        executionSession
+      );
+    }
 
     if (proposal.Tool == "run_validation_profile")
     {
@@ -286,6 +322,10 @@ public sealed class LocalActionService : ILocalActionService
       );
       var result = action.Tool switch
       {
+        DiagnosticTraceCapability.ToolName => await GetTraceDiagnosticAsync(
+          action,
+          cancellationToken
+        ),
         "list_files" => await ListFilesAsync(
           action,
           cancellationToken
@@ -421,6 +461,32 @@ public sealed class LocalActionService : ILocalActionService
         exception
       );
     }
+  }
+
+  private async Task<LocalActionResult> GetTraceDiagnosticAsync(
+    ValidatedLocalAction action,
+    CancellationToken cancellationToken
+  )
+  {
+    var traceId = DiagnosticTraceCapability.ReadTraceId(
+      action.Arguments
+    );
+    var report = await _incidents.FindTraceAsync(
+      traceId,
+      cancellationToken
+    );
+    if (report is null)
+    {
+      throw new LocalActionException(
+        "diagnostic-trace-not-found",
+        "No retained diagnostic events match this exact trace identifier."
+      );
+    }
+
+    return new LocalActionResult(
+      DiagnosticTraceCapability.Serialize(report),
+      "diagnostic.trace-read"
+    );
   }
 
   private static LocalActionException ConvertGitFailure(

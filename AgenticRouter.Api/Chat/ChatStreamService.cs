@@ -31,7 +31,7 @@ public sealed class ChatStreamService
   private const int MaximumChatReadToolCalls = 8;
   private const string ChatReadOnlyWorkspaceMarker =
     "CHAT_READ_ONLY_WORKSPACE_V1";
-  private static readonly string[] ChatReadOnlyTools =
+  private static readonly string[] ChatWorkspaceReadOnlyTools =
   [
     "list_files",
     "read_file",
@@ -42,8 +42,7 @@ public sealed class ChatStreamService
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
   private readonly IMarkdownRenderer _markdownRenderer;
-  private readonly IResidentModelManager _residentModel;
-  private readonly IResidentCoordinationEligibilityService _residentEligibility;
+  private readonly IModelRequestTracker _requestTracker;
   private readonly IIntentionRouter _intentionRouter;
   private readonly IModelResolver _modelResolver;
   private readonly IConversationContextBuilder _contextBuilder;
@@ -52,7 +51,6 @@ public sealed class ChatStreamService
   private readonly ISpecialistToolingProfileResolver _toolingProfiles;
   private readonly ISpecialistToolingProtocol _toolingProtocol;
   private readonly IToolNameResolver _toolNames;
-  private readonly IFunctionGemmaResidentProtocol _functionGemma;
   private readonly IExpertExecutionGuidanceService _expertGuidance;
   private readonly ILocalActionService _actionService;
   private readonly IPlanningFailureClassifier _planningFailureClassifier;
@@ -87,8 +85,7 @@ public sealed class ChatStreamService
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
     IMarkdownRenderer markdownRenderer,
-    IResidentModelManager residentModel,
-    IResidentCoordinationEligibilityService residentEligibility,
+    IModelRequestTracker requestTracker,
     IIntentionRouter intentionRouter,
     IModelResolver modelResolver,
     IConversationContextBuilder contextBuilder,
@@ -108,7 +105,6 @@ public sealed class ChatStreamService
     IProjectAwarenessService projectAwareness,
     IRepositoryInstructionService repositoryInstructions,
     IExecutionPlanService executionPlans,
-    IFunctionGemmaResidentProtocol functionGemma,
     IWorkspaceProfileService workspaceProfiles,
     IImageAttachmentValidator imageValidator,
     ICloudImageApprovalStore cloudImageApprovals,
@@ -123,8 +119,7 @@ public sealed class ChatStreamService
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
     _markdownRenderer = markdownRenderer;
-    _residentModel = residentModel;
-    _residentEligibility = residentEligibility;
+    _requestTracker = requestTracker;
     _intentionRouter = intentionRouter;
     _modelResolver = modelResolver;
     _contextBuilder = contextBuilder;
@@ -144,7 +139,6 @@ public sealed class ChatStreamService
     _projectAwareness = projectAwareness;
     _repositoryInstructions = repositoryInstructions;
     _executionPlans = executionPlans;
-    _functionGemma = functionGemma;
     _workspaceProfiles = workspaceProfiles;
     _imageValidator = imageValidator;
     _cloudImageApprovals = cloudImageApprovals;
@@ -193,11 +187,9 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    using var requestLease = _residentModel.BeginRequest();
+    using var requestLease = _requestTracker.BeginRequest();
     _trace.Link("turnId", requestId);
     var stopwatch = Stopwatch.StartNew();
-    var recoveryActive = false;
-    string? recoveryTarget = null;
 
     try
     {
@@ -211,17 +203,12 @@ public sealed class ChatStreamService
       ValidateInteractionMode(
         request
       );
+      ValidateDiagnosticTraceReference(
+        request
+      );
       var settings = await _settingsStore.GetAsync(
         cancellationToken
       );
-      var configuredCoordinatorFallback = settings.CoordinatorModel;
-      if (string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal))
-      {
-        settings = settings with
-        {
-          CoordinatorModel = settings.ActionModel
-        };
-      }
       var isAuto = string.IsNullOrWhiteSpace(
         request.Model
       ) || string.Equals(
@@ -229,15 +216,6 @@ public sealed class ChatStreamService
         "auto",
         StringComparison.OrdinalIgnoreCase
       );
-      var functionGemmaProtocolActive = string.Equals(
-        request.InteractionMode,
-        "execute",
-        StringComparison.Ordinal
-      ) && isAuto && _functionGemma.Supports(
-        settings.ActionModel
-      );
-      IReadOnlyList<FunctionGemmaTeacher> functionGemmaTeacherCatalog =
-        Array.Empty<FunctionGemmaTeacher>();
       var baseUri = new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
@@ -261,63 +239,6 @@ public sealed class ChatStreamService
         cancellationToken
       );
       AutoModelHarnessRoutingResult? autoModelHarnessRoute = null;
-      if (request.AutoModelHarness)
-      {
-        autoModelHarnessRoute = await _autoModelHarnessRouter.RouteAsync(
-          request.ConversationSessionId ?? requestId,
-          request.Message,
-          models,
-          cancellationToken
-        );
-        if (
-          autoModelHarnessRoute.Status
-            != AutoModelHarnessRoutingStatusIds.Selected
-          || autoModelHarnessRoute.SelectedCandidate is null
-        )
-        {
-          yield return Event(
-            requestId,
-            "router.model-harness-insufficient",
-            $"Auto Model × Harness could not select a route: {autoModelHarnessRoute.Reason} Choose a Model × Harness manually or benchmark candidates.",
-            stopwatch
-          );
-          throw new ChatStageException(
-            "auto-model-harness-routing",
-            "Auto Model × Harness needs more usable local evidence. Choose a route manually or benchmark candidates.",
-            autoModelHarnessRoute.Reason,
-            request.Model,
-            autoModelHarnessRoute.TaskCategory,
-            409,
-            true,
-            details: new Dictionary<string, string?>
-            {
-              ["routerVersion"] = autoModelHarnessRoute.RouterVersion,
-              ["recommendationId"] = autoModelHarnessRoute.RecommendationId,
-              ["category"] = autoModelHarnessRoute.TaskCategory,
-              ["confidence"] = BenchmarkRecommendationConfidenceIds.Insufficient
-            }
-          );
-        }
-        var selectedRoute = autoModelHarnessRoute.SelectedCandidate;
-        request = request with
-        {
-          Model = selectedRoute.Model,
-          Harness = selectedRoute.Harness
-        };
-        yield return Event(
-          requestId,
-          autoModelHarnessRoute.Fallback
-            ? "router.model-harness-fallback"
-            : "router.model-harness-selected",
-          $"Auto selected: {selectedRoute.Model} × {HarnessLabel(GetHarnessDefinition(selectedRoute.Harness))}. Reason: {autoModelHarnessRoute.Reason} Confidence: {selectedRoute.Confidence}."
-            + (autoModelHarnessRoute.Fallback
-              ? $" Fallback: {autoModelHarnessRoute.FallbackReason}"
-              : string.Empty),
-          stopwatch,
-          selectedRoute.Model,
-          autoModelHarnessRoute.TaskCategory
-        );
-      }
       var usageWorkspace = await _workspaceProfiles.GetActiveDataAsync(
         cancellationToken
       );
@@ -407,116 +328,28 @@ public sealed class ChatStreamService
         );
         yield return Event(
           requestId,
-          "router.model-resolved",
-          $"Router model: {settings.RouterModel}.",
-          stopwatch,
-          settings.RouterModel
+          "router.classification-started",
+          $"Classifying request intention with {IntentionRouter.RouterVersion}.",
+          stopwatch
         );
-
-        if (!ContainsModel(
-          models,
-          settings.RouterModel
-        ))
-        {
-          yield return Event(
-            requestId,
-            "router.warning",
-            $"Router model '{settings.RouterModel}' is unavailable; using general-chat fallback.",
-            stopwatch,
-            settings.RouterModel,
-            GeneralChat
-          );
-        }
-        else if (
-          functionGemmaProtocolActive
-          && _functionGemma.Supports(
-            settings.RouterModel
-          )
-        )
-        {
-          yield return Event(
-            requestId,
-            "router.functiongemma-contract-deferred",
-            $"Router {settings.RouterModel} uses the trained route_to_teacher contract in Execute; the incompatible generic intention parser was bypassed.",
-            stopwatch,
-            settings.RouterModel,
-            intention
-          );
-        }
-        else
-        {
-          yield return Event(
-            requestId,
-            "router.classification-started",
-            "Classifying request intention.",
-            stopwatch,
-            settings.RouterModel
-          );
-          yield return Event(
-            requestId,
-            "ollama.connection-started",
-            $"Connecting to Ollama for router model {settings.RouterModel}.",
-            stopwatch,
-            settings.RouterModel
-          );
-
-          var routing = await ClassifyAsync(
-            baseUri,
-            settings.RouterModel,
-            request,
-            cancellationToken
-          );
-
-          if (routing.Decision is not null)
-          {
-            intention = routing.Decision.Intention;
-            yield return Event(
-              requestId,
-              "router.classified",
-              $"Intent: {intention}.",
-              stopwatch,
-              settings.RouterModel,
-              intention
-            );
-            yield return Event(
-              requestId,
-              "router.confidence",
-              $"Confidence: {FormatConfidence(routing.Decision.Confidence)}.",
-              stopwatch,
-              settings.RouterModel,
-              intention
-            );
-
-            if (!string.IsNullOrWhiteSpace(
-              routing.Decision.Reason
-            ))
-            {
-              yield return Event(
-                requestId,
-                "router.reason",
-                $"Reason: {routing.Decision.Reason}",
-                stopwatch,
-                settings.RouterModel,
-                intention
-              );
-            }
-          }
-          else
-          {
-            yield return Event(
-              requestId,
-              "router.warning",
-              $"{routing.Warning} Stage: router-response-parse. "
-                + $"Router model: {settings.RouterModel}. "
-                + $"Parse failure: {routing.FailureType ?? "none"}. "
-                + $"Raw output captured internally: {routing.RawOutputCaptured}. "
-                + $"Trace ID: {requestId}. Recoverable: true.",
-              stopwatch,
-              settings.RouterModel,
-              GeneralChat
-            );
-          }
-        }
+        var routing = _intentionRouter.Route(request);
+        intention = routing.Decision.Intention;
+        yield return Event(
+          requestId,
+          "router.classified",
+          $"Intent: {intention}. Rule: {routing.RuleId}.",
+          stopwatch,
+          null,
+          intention
+        );
+        yield return Event(
+          requestId,
+          "router.reason",
+          routing.Decision.Reason,
+          stopwatch,
+          null,
+          intention
+        );
 
         yield return Event(
           requestId,
@@ -585,222 +418,57 @@ public sealed class ChatStreamService
         ? settings.Intentions[intention].Gpu
         : settings.DefaultGpu;
 
-      if (functionGemmaProtocolActive)
+      if (request.AutoModelHarness)
       {
-        if (ContainsModel(
+        autoModelHarnessRoute = await _autoModelHarnessRouter.RouteAsync(
+          request.ConversationSessionId ?? requestId,
+          request.Message,
+          selectedModel,
           models,
-          settings.ActionModel
-        ))
-        {
-          functionGemmaTeacherCatalog = _functionGemma.CreateTeacherCatalog(
-            models,
-            selectedModel,
-            intention
-          );
-          yield return Event(
-            requestId,
-            "agent.functiongemma-routing-started",
-            $"Resident {settings.ActionModel} is applying the trained {FunctionGemmaResidentProtocol.RouteTool} contract.",
-            stopwatch,
-            settings.ActionModel,
-            intention
-          );
-
-          FunctionGemmaRouteDecision? residentRoute = null;
-          Exception? routeFailure = null;
-          try
-          {
-            residentRoute = await _functionGemma.RouteAsync(
-              baseUri,
-              settings.ActionModel,
-              request.Message,
-              functionGemmaTeacherCatalog,
-              UsageContext(
-                settings.ActionModel,
-                UsageModelRoles.Action,
-                "functiongemma-routing"
-              ),
-              cancellationToken
-            );
-          }
-          catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-          {
-            throw;
-          }
-          catch (Exception exception)
-          {
-            routeFailure = exception;
-            _logger.LogWarning(
-              exception,
-              "FunctionGemma routing contract failed for request {RequestId}; preserving the configured target route.",
-              requestId
-            );
-          }
-
-          if (
-            residentRoute is null
-            && routeFailure is FunctionGemmaProtocolException protocolFailure
-            && functionGemmaTeacherCatalog.Count > 0
-          )
-          {
-            yield return Event(
-              requestId,
-              "agent.functiongemma-routing-repair-started",
-              $"The first FunctionGemma route was rejected: {protocolFailure.Message} The Host will make one materially different correction attempt with the same closed Teacher catalog.",
-              stopwatch,
-              settings.ActionModel,
-              intention
-            );
-            try
-            {
-              residentRoute = await _functionGemma.RouteAsync(
-                baseUri,
-                settings.ActionModel,
-                "ROUTING_CORRECTION\nThe previous route was rejected by the Host because: "
-                  + protocolFailure.Message
-                  + " Return exactly one complete route_to_teacher call. Select teacher_model from the closed catalog; its intent must be the intent printed for that same Teacher.\n\nORIGINAL_REQUEST:\n"
-                  + request.Message,
-                functionGemmaTeacherCatalog,
-                UsageContext(
-                  settings.ActionModel,
-                  UsageModelRoles.Action,
-                  "functiongemma-routing-repair"
-                ),
-                cancellationToken
-              );
-              routeFailure = null;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-              throw;
-            }
-            catch (Exception exception)
-            {
-              routeFailure = exception;
-              _logger.LogWarning(
-                exception,
-                "FunctionGemma routing correction failed for request {RequestId}; preserving the configured target route.",
-                requestId
-              );
-            }
-          }
-
-          if (residentRoute is not null)
-          {
-            if (residentRoute.HostNormalization is not null)
-            {
-              yield return Event(
-                requestId,
-                "agent.functiongemma-route-normalized",
-                residentRoute.HostNormalization,
-                stopwatch,
-                settings.ActionModel,
-                residentRoute.Intent
-              );
-            }
-            yield return Event(
-              requestId,
-              isAuto
-                ? "agent.functiongemma-route-selected"
-                : "agent.functiongemma-route-advisory",
-              isAuto
-                ? $"FunctionGemma selected Teacher {residentRoute.TeacherModel} for {residentRoute.Intent}. Reason: {residentRoute.Reason}"
-                : $"FunctionGemma recommended Teacher {residentRoute.TeacherModel} for {residentRoute.Intent}; the explicit user model {selectedModel} remains authoritative.",
-              stopwatch,
-              settings.ActionModel,
-              residentRoute.Intent
-            );
-
-            if (isAuto)
-            {
-              selectedModel = residentRoute.TeacherModel;
-              intention = residentRoute.Intent;
-              selectedModelRole = UsageModelRoles.Specialist;
-              _usageGpu = settings.Intentions[intention].Gpu;
-            }
-          }
-          else
-          {
-            var routeFailureDetail = routeFailure is FunctionGemmaProtocolException rejected
-              ? $" Reason: {rejected.Message}"
-              : string.Empty;
-            yield return Event(
-              requestId,
-              "agent.functiongemma-contract-warning",
-              $"FunctionGemma routing was rejected at {FunctionGemmaFailureStage(routeFailure!)}.{routeFailureDetail} The configured specialist {selectedModel} remains selected and Execute will continue.",
-              stopwatch,
-              settings.ActionModel,
-              intention
-            );
-          }
-        }
-        else
-        {
-          yield return Event(
-            requestId,
-            "agent.functiongemma-contract-warning",
-            $"Configured resident {settings.ActionModel} is unavailable; the configured specialist route will continue without the trained resident contract.",
-            stopwatch,
-            settings.ActionModel,
-            intention
-          );
-        }
-      }
-
-      if (
-        functionGemmaProtocolActive
-        && _functionGemma.Supports(
-          configuredCoordinatorFallback
+          cancellationToken
+        );
+        if (
+          autoModelHarnessRoute.Status != AutoModelHarnessRoutingStatusIds.Selected
+          || autoModelHarnessRoute.SelectedCandidate is null
         )
-      )
-      {
-        var executionFallback = functionGemmaTeacherCatalog
-          .Where(
-            teacher => teacher.Trained
-              && !string.Equals(
-                teacher.Model,
-                selectedModel,
-                StringComparison.OrdinalIgnoreCase
-              )
-          )
-          .OrderBy(
-            teacher => string.Equals(
-              teacher.Intent,
-              "review-and-testing",
-              StringComparison.Ordinal
-            )
-              ? 0
-              : 1
-          )
-          .ThenBy(
-            teacher => teacher.Model,
-            StringComparer.Ordinal
-          )
-          .FirstOrDefault();
+        {
+          yield return Event(
+            requestId,
+            "router.model-harness-insufficient",
+            $"Auto harness selection failed: {autoModelHarnessRoute.Reason} Choose a harness manually.",
+            stopwatch,
+            selectedModel,
+            autoModelHarnessRoute.TaskCategory
+          );
+          throw new ChatStageException(
+            "auto-model-harness-routing",
+            "Auto harness selection could not resolve an available harness.",
+            autoModelHarnessRoute.Reason,
+            selectedModel,
+            autoModelHarnessRoute.TaskCategory,
+            409,
+            true
+          );
+        }
 
-        if (executionFallback is not null)
+        var selectedRoute = autoModelHarnessRoute.SelectedCandidate;
+        request = request with
         {
-          yield return Event(
-            requestId,
-            "agent.functiongemma-execution-fallback-corrected",
-            $"Configured fallback {configuredCoordinatorFallback} is another FunctionGemma supervisor, not a generic action executor. For this turn the Host selected installed Teacher {executionFallback.Model} as the bounded on-demand execution fallback.",
-            stopwatch,
-            executionFallback.Model,
-            executionFallback.Intent
-          );
-          configuredCoordinatorFallback = executionFallback.Model;
-        }
-        else
-        {
-          yield return Event(
-            requestId,
-            "agent.functiongemma-contract-warning",
-            $"Configured fallback {configuredCoordinatorFallback} is supervisory and no distinct installed Teacher is available for execution takeover. The active Teacher path will continue, but FunctionGemma will not be used as a generic executor.",
-            stopwatch,
-            configuredCoordinatorFallback,
-            intention
-          );
-        }
+          Harness = selectedRoute.Harness
+        };
+        yield return Event(
+          requestId,
+          autoModelHarnessRoute.Fallback
+            ? "router.model-harness-fallback"
+            : "router.model-harness-selected",
+          $"Auto selected: {selectedModel} × {HarnessLabel(GetHarnessDefinition(selectedRoute.Harness))}. Reason: {autoModelHarnessRoute.Reason} Confidence: {selectedRoute.Confidence}."
+            + (autoModelHarnessRoute.Fallback
+              ? $" Fallback: {autoModelHarnessRoute.FallbackReason}"
+              : string.Empty),
+          stopwatch,
+          selectedModel,
+          autoModelHarnessRoute.TaskCategory
+        );
       }
 
       yield return Event(
@@ -1072,6 +740,9 @@ public sealed class ChatStreamService
           "resolving",
           settings.Execution
         );
+        _executionSession.AuthorizeDiagnosticTrace(
+          request.DiagnosticTraceId
+        );
         _executionSession.AttachProject(
           project
         );
@@ -1115,7 +786,8 @@ public sealed class ChatStreamService
           ?? ExecutionTurnToolPolicy.Resolve(
             request.Message,
             activeValidationProfile is not null,
-            request.WebSearchEnabled && capabilities.ApplicationWebSearch
+            request.WebSearchEnabled && capabilities.ApplicationWebSearch,
+            !string.IsNullOrWhiteSpace(request.DiagnosticTraceId)
           );
         executionToolScope = executionToolScope with
         {
@@ -1245,11 +917,6 @@ public sealed class ChatStreamService
             invocation.CaptureRoleResult,
             invocation.ActionJournal,
             stopwatch,
-            (active, target) =>
-            {
-              recoveryActive = active;
-              recoveryTarget = target;
-            },
             nativeCancellationToken
           ),
           (transport, externalCancellationToken) =>
@@ -1266,17 +933,11 @@ public sealed class ChatStreamService
               settings,
               capabilities,
               context,
-              models,
               hostCapabilities,
               invocation.UseMinimalToolInventory,
               invocation.CaptureRoleResult,
               invocation.ActionJournal,
               stopwatch,
-              (active, target) =>
-              {
-                recoveryActive = active;
-                recoveryTarget = target;
-              },
               externalCancellationToken
             )
         );
@@ -1326,14 +987,27 @@ public sealed class ChatStreamService
 
       var progress = new GenerationProgress(contextUsage);
 
-      if (recoveryActive)
-      {
-        recoveryTarget = selectedModel;
-      }
-
       var useHostReadOnlyTools = images.Count == 0
         && !capabilities.ProviderNativeWebSearch;
-      await foreach (var streamEvent in useHostReadOnlyTools
+      await foreach (var streamEvent in !string.IsNullOrWhiteSpace(
+        request.DiagnosticTraceId
+      )
+        ? StreamDiagnosticInvestigationAsync(
+          baseUri,
+          selectedModel,
+          messages,
+          request.DiagnosticTraceId,
+          requestId,
+          isAuto
+            ? intention
+            : null,
+          stopwatch,
+          progress,
+          selectedModelRole,
+          chatOptions,
+          cancellationToken
+        )
+        : useHostReadOnlyTools
         ? StreamChatWithWorkspaceReadsAsync(
           baseUri,
           selectedModel,
@@ -1442,7 +1116,23 @@ public sealed class ChatStreamService
             var fallbackUsesHostReadOnlyTools = images.Count == 0
               && !fallbackCapabilities.ProviderNativeWebSearch;
 
-            await foreach (var streamEvent in fallbackUsesHostReadOnlyTools
+            await foreach (var streamEvent in !string.IsNullOrWhiteSpace(
+              request.DiagnosticTraceId
+            )
+              ? StreamDiagnosticInvestigationAsync(
+                baseUri,
+                selectedModel,
+                messages,
+                request.DiagnosticTraceId,
+                requestId,
+                intention,
+                stopwatch,
+                progress,
+                selectedModelRole,
+                fallbackChatOptions,
+                cancellationToken
+              )
+              : fallbackUsesHostReadOnlyTools
               ? StreamChatWithWorkspaceReadsAsync(
                 baseUri,
                 selectedModel,
@@ -1491,193 +1181,12 @@ public sealed class ChatStreamService
 
       if (progress.Failure is not null)
       {
-        var failure = progress.Failure;
-        var canRecover = failure is OllamaProviderException providerFailure
-          && providerFailure.IsMemoryPressure
-          && !progress.ReceivedFirstChunk
-          && !string.Equals(
-            selectedModel,
-            settings.CoordinatorModel,
-            StringComparison.OrdinalIgnoreCase
-          );
-
-        if (!canRecover)
-        {
-          throw ToChatException(
-            failure,
-            selectedModel,
-            isAuto
-              ? intention
-              : null
-          );
-        }
-
-        yield return Event(
-          requestId,
-          "memory-pressure-detected",
-          $"Ollama reported memory pressure while loading {selectedModel}.",
-          stopwatch,
+        throw ToChatException(
+          progress.Failure,
           selectedModel,
-          intention
-        );
-        yield return Event(
-          requestId,
-          "resident-model-eviction-started",
-          $"Evicting resident coordinator model {settings.CoordinatorModel} for one adaptive retry.",
-          stopwatch,
-          settings.CoordinatorModel,
-          intention
-        );
-
-        recoveryActive = await _residentModel.EvictForRecoveryAsync(
-          selectedModel,
-          cancellationToken
-        );
-        recoveryTarget = selectedModel;
-
-        if (!recoveryActive)
-        {
-          throw ToChatException(
-            failure,
-            selectedModel,
-            intention
-          );
-        }
-
-        yield return Event(
-          requestId,
-          "resident-model-evicted",
-          $"Resident coordinator model {settings.CoordinatorModel} was temporarily evicted.",
-          stopwatch,
-          settings.CoordinatorModel,
-          intention
-        );
-        yield return Event(
-          requestId,
-          "target-request-retry-started",
-          $"Retrying target model {selectedModel} once.",
-          stopwatch,
-          selectedModel,
-          intention
-        );
-
-        progress.Failure = null;
-
-        await foreach (var streamEvent in StreamAttemptAsync(
-          baseUri,
-          selectedModel,
-          messages,
-          requestId,
           isAuto
             ? intention
-            : null,
-          stopwatch,
-          progress,
-          selectedModelRole,
-          chatOptions,
-          cancellationToken
-        ))
-        {
-          yield return streamEvent;
-        }
-
-        if (progress.Failure is not null)
-        {
-          var retryFailure = progress.Failure;
-          yield return Event(
-            requestId,
-            "resident-model-reload-started",
-            $"Reloading resident coordinator model {settings.CoordinatorModel}.",
-            stopwatch,
-            settings.CoordinatorModel,
-            intention
-          );
-          var restored = await _residentModel.RestoreAfterRecoveryAsync(
-            selectedModel,
-            cancellationToken
-          );
-          recoveryActive = false;
-          yield return Event(
-            requestId,
-            restored
-              ? "resident-model-reloaded"
-              : "resident-model-reload-failed",
-            restored
-              ? $"Resident coordinator model {settings.CoordinatorModel} was restored."
-              : $"Resident coordinator model {settings.CoordinatorModel} could not be restored.",
-            stopwatch,
-            settings.CoordinatorModel,
-            intention
-          );
-
-          throw ToChatException(
-            retryFailure,
-            selectedModel,
-            intention
-          );
-        }
-
-        yield return Event(
-          requestId,
-          "target-request-recovered",
-          $"Target model {selectedModel} recovered after adaptive eviction.",
-          stopwatch,
-          selectedModel,
-          intention
-        );
-        yield return Event(
-          requestId,
-          "resident-model-reload-started",
-          $"Reloading resident coordinator model {settings.CoordinatorModel}.",
-          stopwatch,
-          settings.CoordinatorModel,
-          intention
-        );
-        var reloaded = await _residentModel.RestoreAfterRecoveryAsync(
-          selectedModel,
-          cancellationToken
-        );
-        recoveryActive = false;
-        yield return Event(
-          requestId,
-          reloaded
-            ? "resident-model-reloaded"
-            : "resident-model-reload-failed",
-          reloaded
-            ? $"Resident coordinator model {settings.CoordinatorModel} was restored."
-            : $"Resident coordinator model {settings.CoordinatorModel} could not be restored.",
-          stopwatch,
-          settings.CoordinatorModel,
-          intention
-        );
-      }
-
-      if (recoveryActive && recoveryTarget is not null)
-      {
-        yield return Event(
-          requestId,
-          "resident-model-reload-started",
-          $"Reloading resident coordinator model {settings.CoordinatorModel}.",
-          stopwatch,
-          settings.CoordinatorModel,
-          intention
-        );
-        var restored = await _residentModel.RestoreAfterRecoveryAsync(
-          recoveryTarget,
-          cancellationToken
-        );
-        recoveryActive = false;
-        yield return Event(
-          requestId,
-          restored
-            ? "resident-model-reloaded"
-            : "resident-model-reload-failed",
-          restored
-            ? $"Resident coordinator model {settings.CoordinatorModel} was restored."
-            : $"Resident coordinator model {settings.CoordinatorModel} could not be restored.",
-          stopwatch,
-          settings.CoordinatorModel,
-          intention
+            : null
         );
       }
 
@@ -1741,14 +1250,6 @@ public sealed class ChatStreamService
             : "failed"
         );
       }
-
-      if (recoveryActive && recoveryTarget is not null)
-      {
-        await _residentModel.RestoreAfterRecoveryAsync(
-          recoveryTarget,
-          CancellationToken.None
-        );
-      }
     }
   }
 
@@ -1765,13 +1266,11 @@ public sealed class ChatStreamService
     ApplicationSettings settings,
     ProviderModelCapabilities capabilities,
     ConversationContextResult context,
-    IReadOnlyList<InstalledModel> models,
     HostCapabilityProfile hostCapabilities,
     bool useMinimalToolInventory,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
     Stopwatch stopwatch,
-    Action<bool, string> setRecovery,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -1806,58 +1305,6 @@ public sealed class ChatStreamService
         false,
         provider: harnessSelectedReference.ProviderId
       );
-    }
-
-    var harnessSelectedIdentity = models.First(
-      installed => string.Equals(
-        installed.Name,
-        selectedModel,
-        StringComparison.OrdinalIgnoreCase
-      )
-    );
-    var harnessResidentEligibility = _residentEligibility.Evaluate(
-      settings,
-      harnessSelectedIdentity,
-      _residentModel.GetStatus(),
-      false
-    );
-    yield return Event(
-      requestId,
-      "agent.memory-eligibility-evaluated",
-      $"Resident {settings.CoordinatorModel}; {harnessDefinition.DisplayName} target {selectedModel}. Evidence: "
-        + $"{harnessResidentEligibility.Evidence}. Consequence: {harnessResidentEligibility.MemoryConsequence}.",
-      stopwatch,
-      settings.CoordinatorModel,
-      intention
-    );
-
-    if (harnessResidentEligibility.RequiresResidentEviction)
-    {
-      yield return Event(
-        requestId,
-        "resident-model-eviction-started",
-        $"Evicting resident {settings.CoordinatorModel} before {harnessDefinition.DisplayName} starts {selectedModel}.",
-        stopwatch,
-        settings.CoordinatorModel,
-        intention
-      );
-      var recoveryActive = await _residentModel.EvictForRecoveryAsync(
-        selectedModel,
-        cancellationToken
-      );
-      setRecovery(recoveryActive, selectedModel);
-      if (!recoveryActive)
-      {
-        throw new ChatStageException(
-          "resident-model-eviction",
-          "The resident could not be evicted for the selected local target.",
-          harnessResidentEligibility.MemoryConsequence,
-          settings.CoordinatorModel,
-          intention,
-          null,
-          true
-        );
-      }
     }
 
     var contextUsage = CreateExternalHarnessContextUsage(
@@ -1926,7 +1373,6 @@ public sealed class ChatStreamService
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
     Stopwatch stopwatch,
-    Action<bool, string> setRecovery,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -1980,70 +1426,11 @@ public sealed class ChatStreamService
       requestId,
       "agent.coordination-path-resolved",
       $"Target {selectedModel} owns the reasoning and tool loop through "
-        + $"{(structuredCoordination ? "direct-structured" : "direct-native")}; "
-        + $"router resident {settings.CoordinatorModel} is not an execution coordinator.",
+        + $"{(structuredCoordination ? "direct-structured" : "direct-native")}.",
       stopwatch,
       selectedModel,
       intention
     );
-    var residentEligibility = _residentEligibility.Evaluate(
-      settings,
-      selectedIdentity,
-      _residentModel.GetStatus(),
-      false
-    );
-    yield return Event(
-      requestId,
-      "agent.memory-eligibility-evaluated",
-      $"Resident {settings.CoordinatorModel}; target {selectedModel}. Evidence: "
-        + $"{residentEligibility.Evidence}. Consequence: {residentEligibility.MemoryConsequence}.",
-      stopwatch,
-      settings.CoordinatorModel,
-      intention
-    );
-
-    if (
-      selectedReference.IsLocal
-      && residentEligibility.RequiresResidentEviction
-    )
-    {
-      yield return Event(
-        requestId,
-        "resident-model-eviction-started",
-        $"Evicting resident {settings.CoordinatorModel} before local target coordination to preserve configured memory headroom.",
-        stopwatch,
-        settings.CoordinatorModel,
-        intention
-      );
-      var recoveryActive = await _residentModel.EvictForRecoveryAsync(
-        selectedModel,
-        cancellationToken
-      );
-      setRecovery(recoveryActive, selectedModel);
-
-      if (!recoveryActive)
-      {
-        throw new ChatStageException(
-          "resident-model-eviction",
-          "The resident could not be evicted for the selected local target.",
-          residentEligibility.MemoryConsequence,
-          settings.CoordinatorModel,
-          intention,
-          null,
-          true
-        );
-      }
-
-      yield return Event(
-        requestId,
-        "resident-model-evicted",
-        $"Resident {settings.CoordinatorModel} was verified absent before {selectedModel} coordination.",
-        stopwatch,
-        settings.CoordinatorModel,
-        intention
-      );
-    }
-
     var session = _executionSession ?? throw new InvalidOperationException(
       "Native harness execution requires an active execution session."
     );
@@ -2054,7 +1441,7 @@ public sealed class ChatStreamService
         : "direct-native"
     );
     session.RecordCoordinationMetadata(
-      settings.CoordinatorModel,
+      null,
       null,
       null
     );
@@ -4498,30 +3885,6 @@ public sealed class ChatStreamService
               intention
             );
 
-            var protocolReview = await TryReviewFunctionGemmaFailureAsync(
-              baseUri,
-              request,
-              applicationSettings,
-              settings,
-              progress,
-              protocolFailure,
-              "invalid_native_protocol",
-              "protocol_error",
-              null,
-              "none",
-              cancellationToken
-            );
-            foreach (var reviewEvent in FunctionGemmaReviewEvents(
-              protocolReview,
-              requestId,
-              stopwatch,
-              applicationSettings.ActionModel,
-              intention
-            ))
-            {
-              yield return reviewEvent;
-            }
-
             if (fallbackToResident)
             {
               yield return Event(
@@ -4646,32 +4009,6 @@ public sealed class ChatStreamService
             || planningFailures + 1 >= maximumPlanningAttempts
           )
           {
-            var planningReview = await TryReviewFunctionGemmaFailureAsync(
-              baseUri,
-              request,
-              applicationSettings,
-              settings,
-              progress,
-              planning.Failure,
-              FunctionGemmaFailureCode(
-                planning.Failure,
-                planningFailureCategory
-              ),
-              "invalid_proposal",
-              null,
-              "none",
-              cancellationToken
-            );
-            foreach (var reviewEvent in FunctionGemmaReviewEvents(
-              planningReview,
-              requestId,
-              stopwatch,
-              applicationSettings.ActionModel,
-              intention
-            ))
-            {
-              yield return reviewEvent;
-            }
           }
 
           planningFailures++;
@@ -4807,34 +4144,6 @@ public sealed class ChatStreamService
 
         var planningResult = planning.Result!;
         var proposal = planningResult.Proposal;
-
-        if (
-          UsesFunctionGemmaSupervision(
-            applicationSettings,
-            model
-          )
-        )
-        {
-          progress.ResidentCoexistenceChecked = true;
-          var coexistence = await _residentModel.EnsureResidentAlongsideTargetAsync(
-            model,
-            cancellationToken
-          );
-          yield return Event(
-            requestId,
-            coexistence.ResidentLoaded && coexistence.TargetLoaded
-              ? "agent.functiongemma-supervision-ready"
-              : "agent.functiongemma-supervision-unavailable",
-            coexistence.ResidentLoaded && coexistence.TargetLoaded
-              ? coexistence.Reasserted
-                ? $"FunctionGemma resident {applicationSettings.ActionModel} was reasserted after Teacher {model} loaded; both exact models are verified concurrently in Ollama."
-                : $"FunctionGemma resident {applicationSettings.ActionModel} and Teacher {model} are verified concurrently in Ollama."
-              : $"FunctionGemma resident coexistence with Teacher {model} was not verified ({coexistence.Outcome}); the Host will continue the Teacher path without a reload loop.",
-            stopwatch,
-            applicationSettings.ActionModel,
-            intention
-          );
-        }
 
         if (
           !progress.RuntimeContextReported
@@ -5609,33 +4918,6 @@ public sealed class ChatStreamService
 
         if (semanticRepairAttempted)
         {
-          var validationReview = await TryReviewFunctionGemmaFailureAsync(
-            baseUri,
-            request,
-            applicationSettings,
-            settings,
-            progress,
-            exception,
-            FunctionGemmaFailureCode(
-              exception,
-              failureCategory
-            ),
-            "tool_call",
-            proposal.Tool,
-            proposal.Tool,
-            cancellationToken
-          );
-          foreach (var reviewEvent in FunctionGemmaReviewEvents(
-            validationReview,
-            requestId,
-            stopwatch,
-            applicationSettings.ActionModel,
-            intention
-          ))
-          {
-            yield return reviewEvent;
-          }
-
           var repeated = string.Equals(
             semanticFailureFingerprint,
             semanticFingerprint,
@@ -6662,6 +5944,121 @@ public sealed class ChatStreamService
       );
   }
 
+  private async IAsyncEnumerable<ChatStreamEvent> StreamDiagnosticInvestigationAsync(
+    Uri baseUri,
+    string model,
+    IReadOnlyList<ChatMessage> messages,
+    string traceId,
+    string requestId,
+    string? intention,
+    Stopwatch stopwatch,
+    GenerationProgress progress,
+    string modelRole,
+    ProviderChatOptions options,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    yield return Event(
+      requestId,
+      "chat.diagnostic-read-started",
+      $"Reading sanitized Host diagnostic trace {traceId}.",
+      stopwatch,
+      model,
+      intention
+    );
+    var arguments = JsonSerializer.SerializeToElement(
+      new
+      {
+        traceId
+      }
+    );
+    var validation = await TryValidateAsync(
+      () => _actionService.ValidateAsync(
+        new LocalActionProposal(
+          DiagnosticTraceCapability.ToolName,
+          arguments,
+          "Host-initiated read-only diagnostic investigation.",
+          HostInitiated: true
+        ),
+        null,
+        cancellationToken
+      )
+    );
+    if (validation.Failure is not null || validation.Action is null)
+    {
+      progress.Failure = validation.Failure ?? new LocalActionException(
+        "diagnostic-trace-read-failed",
+        "The Host could not validate the exact diagnostic trace lookup."
+      );
+      yield return Event(
+        requestId,
+        "chat.diagnostic-read-failed",
+        progress.Failure.Message,
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
+
+    var execution = await TryExecuteAsync(
+      () => _actionService.ExecuteAsync(
+        validation.Action,
+        null,
+        cancellationToken
+      )
+    );
+    if (execution.Failure is not null || execution.Result?.Succeeded != true)
+    {
+      progress.Failure = execution.Failure ?? new LocalActionException(
+        "diagnostic-trace-read-failed",
+        "The exact diagnostic trace lookup did not return Host evidence."
+      );
+      yield return Event(
+        requestId,
+        "chat.diagnostic-read-failed",
+        progress.Failure.Message,
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
+
+    yield return Event(
+      requestId,
+      "chat.diagnostic-read-completed",
+      $"Sanitized Host diagnostic trace {traceId} was supplied to the specialist.",
+      stopwatch,
+      model,
+      intention
+    );
+    var groundedMessages = messages.Append(
+      new ChatMessage(
+        "system",
+        "APPLICATION_OWNED_TRACE_DIAGNOSTIC_V1\n"
+          + $"Exact trace: {traceId}\n"
+          + "The following JSON is bounded, sanitized Host evidence. Distinguish its facts from inference. Do not retry the objective or change configuration in this investigation turn.\n"
+          + execution.Result.Output
+      )
+    ).ToArray();
+    await foreach (var streamEvent in StreamAttemptAsync(
+      baseUri,
+      model,
+      groundedMessages,
+      requestId,
+      intention,
+      stopwatch,
+      progress,
+      modelRole,
+      options,
+      cancellationToken
+    ))
+    {
+      yield return streamEvent;
+    }
+  }
+
   private async IAsyncEnumerable<ChatStreamEvent> StreamChatWithWorkspaceReadsAsync(
     Uri baseUri,
     string model,
@@ -6712,7 +6109,7 @@ public sealed class ChatStreamService
     }
 
     var availableTools = (workspaceReadsAvailable
-        ? ChatReadOnlyTools
+        ? ChatWorkspaceReadOnlyTools
         : [])
       .Concat(
         applicationWebSearchAvailable
@@ -6802,6 +6199,7 @@ public sealed class ChatStreamService
     var completionRequired = false;
     for (var attempt = 1; attempt <= MaximumChatReadToolCalls + 2; attempt++)
     {
+      var bufferedContent = new StringBuilder();
       var streamed = Channel.CreateUnbounded<ChatReadStreamDelta>(
         new UnboundedChannelOptions
         {
@@ -6890,70 +6288,8 @@ public sealed class ChatStreamService
           };
           continue;
         }
-
-        if (progress.Failure is not null)
-        {
-          continue;
-        }
-
-        if (!TryAcceptResponseDelta(
-          progress,
-          delta.Value,
-          out var safeDelta,
-          out var rejectedMarker
-        ))
-        {
-          if (rejectedMarker is not null)
-          {
-            progress.Failure = new LocalActionException(
-              "reserved-assistant-marker",
-              $"The model response was rejected because it began with reserved Host marker '{rejectedMarker}'."
-            );
-          }
-          continue;
-        }
-
-        if (!progress.ReceivedFirstChunk)
-        {
-          progress.ReceivedFirstChunk = true;
-          yield return Event(
-            requestId,
-            "response.first-chunk",
-            "First response chunk received.",
-            stopwatch,
-            model,
-            intention
-          );
-        }
-        progress.Answer.Append(
-          safeDelta
-        );
-        if (!progress.ResponseSegmentActive)
-        {
-          progress.ResponseSegment.Clear();
-          progress.ResponseSegmentActive = true;
-        }
-        progress.ResponseSegment.Append(
-          safeDelta
-        );
-        yield return new ChatStreamEvent(
-          requestId,
-          "response.delta",
-          DateTimeOffset.UtcNow,
-          null,
-          safeDelta,
-          model,
-          intention,
-          stopwatch.ElapsedMilliseconds,
-          _markdownRenderer.Render(
-            progress.Answer.ToString()
-          ),
-          null,
-          null,
-          null,
-          ResponseSegmentHtml: _markdownRenderer.Render(
-            progress.ResponseSegment.ToString()
-          )
+        bufferedContent.Append(
+          delta.Value
         );
       }
 
@@ -7051,19 +6387,21 @@ public sealed class ChatStreamService
       if (
         turn.ToolCalls.Count > 0
         && (
-          progress.ReceivedFirstChunk
-          || progress.PrefixBuffer.Length > 0
+          bufferedContent.Length > 0
           || !string.IsNullOrWhiteSpace(
             response.Content
           )
         )
       )
       {
-        progress.Failure = new LocalActionException(
-          "chat-read-tool-protocol",
-          "The selected model mixed visible response content with a workspace tool call; the tool was not executed."
+        yield return Event(
+          requestId,
+          "chat.tool-preamble-withheld",
+          "The Host withheld non-terminal model text that accompanied a structured tool call.",
+          stopwatch,
+          model,
+          intention
         );
-        yield break;
       }
       if (turn.ToolCalls.Count == 0)
       {
@@ -7073,6 +6411,15 @@ public sealed class ChatStreamService
         }
 
         var completion = turn.Completion?.Content;
+        if (
+          string.IsNullOrWhiteSpace(
+            completion
+          )
+          && bufferedContent.Length > 0
+        )
+        {
+          completion = bufferedContent.ToString();
+        }
         if (string.IsNullOrWhiteSpace(
           completion
         ))
@@ -8207,26 +7554,6 @@ public sealed class ChatStreamService
       || percentage >= 85;
   }
 
-  private async Task<IntentionRoutingResult> ClassifyAsync(
-    Uri baseUri,
-    string routerModel,
-    ChatRequest request,
-    CancellationToken cancellationToken
-  )
-  {
-    return await _intentionRouter.RouteAsync(
-      baseUri,
-      routerModel,
-      request,
-      UsageContext(
-        routerModel,
-        UsageModelRoles.Router,
-        "router-classification"
-      ),
-      cancellationToken
-    );
-  }
-
   private async Task<GuidanceAttempt> TryPrepareGuidanceAsync(
     Uri baseUri,
     string model,
@@ -8663,7 +7990,7 @@ public sealed class ChatStreamService
     {
       var resolution = _toolNames.Resolve(
         call.Name,
-        ChatReadOnlyTools
+        ChatWorkspaceReadOnlyTools
       );
       return new ChatReadProposalAttempt(
         new LocalActionProposal(
@@ -9210,6 +8537,65 @@ public sealed class ChatStreamService
         null,
         400,
         true
+      );
+    }
+  }
+
+  private static void ValidateDiagnosticTraceReference(
+    ChatRequest request
+  )
+  {
+    var traceId = request.DiagnosticTraceId;
+    if (
+      request.HideUserMessage
+      && (
+        string.IsNullOrWhiteSpace(traceId)
+        || !string.Equals(
+          request.InteractionMode,
+          "chat",
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      throw new ChatStageException(
+        "request-validation",
+        "Hidden user messages are reserved for read-only diagnostic investigation.",
+        "hideUserMessage requires Chat mode and one exact diagnosticTraceId.",
+        request.Model,
+        null,
+        400,
+        false,
+        details: new Dictionary<string, string?>
+        {
+          ["code"] = "diagnostic-hidden-message-invalid"
+        }
+      );
+    }
+    if (string.IsNullOrWhiteSpace(traceId))
+    {
+      return;
+    }
+
+    try
+    {
+      JsonlIncidentJournal.ValidateTraceId(traceId);
+    }
+    catch (ArgumentException exception)
+    {
+      throw new ChatStageException(
+        "request-validation",
+        "The diagnostic trace identifier is invalid.",
+        "diagnosticTraceId must contain one exact canonical trace identifier.",
+        null,
+        null,
+        400,
+        false,
+        exception,
+        new Dictionary<string, string?>
+        {
+          ["code"] = "diagnostic-trace-id-invalid"
+        }
       );
     }
   }
@@ -9942,26 +9328,11 @@ public sealed class ChatStreamService
       or "read_file"
       or "get_file_info"
       or "search_text"
+      or DiagnosticTraceCapability.ToolName
       or "git_status"
       or "git_diff"
       or "git_log"
       or "git_show_commit";
-  }
-
-  private static bool FunctionGemmaFailureReviewEnabled => false;
-
-  private bool UsesFunctionGemmaSupervision(
-    ApplicationSettings settings,
-    string targetModel
-  )
-  {
-    return FunctionGemmaFailureReviewEnabled && _functionGemma.Supports(
-      settings.ActionModel
-    ) && !string.Equals(
-      settings.ActionModel,
-      targetModel,
-      StringComparison.OrdinalIgnoreCase
-    );
   }
 
   private OllamaToolMessage CreateCompletionRejectedMessage()
@@ -10030,215 +9401,6 @@ public sealed class ChatStreamService
         message.Content ?? string.Empty
       )
     );
-  }
-
-  private async Task<FunctionGemmaReviewAttempt?> TryReviewFunctionGemmaFailureAsync(
-    Uri baseUri,
-    ChatRequest request,
-    ApplicationSettings applicationSettings,
-    ExecutionSettings executionSettings,
-    ExecutionProgress progress,
-    Exception failure,
-    string failureCode,
-    string observedKind,
-    string? observedTool,
-    string expectedTool,
-    CancellationToken cancellationToken
-  )
-  {
-    if (!FunctionGemmaFailureReviewEnabled || !_functionGemma.Supports(
-      applicationSettings.ActionModel
-    ))
-    {
-      return null;
-    }
-
-    var resident = _residentModel.GetStatus();
-    if (
-      !resident.Loaded
-      || !string.Equals(
-        resident.ConfiguredModel,
-        applicationSettings.ActionModel,
-        StringComparison.OrdinalIgnoreCase
-      )
-    )
-    {
-      return new FunctionGemmaReviewAttempt(
-        null,
-        null,
-        "The FunctionGemma resident is not currently loaded; the Host will continue with its typed recovery policy."
-      );
-    }
-
-    var failedStep = _executionSession?.Plan?.Steps.FirstOrDefault(
-      step => step.Status != "completed"
-    )?.Id ?? "none";
-    var criteria = _executionSession?.Plan?.Steps.Select(
-      step => step.Title
-    ).Take(
-      8
-    ).ToArray() ??
-    [
-      "Complete the user objective using only verified Host effects."
-    ];
-    var availableTools = expectedTool == "none"
-      ? Array.Empty<string>()
-      : new[]
-      {
-        expectedTool
-      };
-
-    try
-    {
-      var review = await _functionGemma.ReviewFailureAsync(
-        baseUri,
-        applicationSettings.ActionModel,
-        new FunctionGemmaFailureContext(
-          request.Message,
-          failureCode,
-          failedStep,
-          FunctionGemmaFailureStage(
-            failure
-          ),
-          failure.InnerException?.Message ?? failure.Message,
-          observedKind,
-          observedTool,
-          expectedTool,
-          availableTools,
-          criteria,
-          Math.Max(
-            0,
-            executionSettings.MaxRecoveryAttemptsPerTurn
-              - progress.RecoveryAttemptCount
-          )
-        ),
-        UsageContext(
-          applicationSettings.ActionModel,
-          UsageModelRoles.Action,
-          "functiongemma-evaluator"
-        ),
-        UsageContext(
-          applicationSettings.ActionModel,
-          UsageModelRoles.Action,
-          "functiongemma-recovery"
-        ),
-        cancellationToken
-      );
-      return new FunctionGemmaReviewAttempt(
-        review,
-        null,
-        null
-      );
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      throw;
-    }
-    catch (Exception exception)
-    {
-      _logger.LogWarning(
-        exception,
-        "FunctionGemma evaluator or recovery contract failed for request {RequestId}; Host recovery remains authoritative.",
-        _usageTurnId
-      );
-      return new FunctionGemmaReviewAttempt(
-        null,
-        exception,
-        null
-      );
-    }
-  }
-
-  private IEnumerable<ChatStreamEvent> FunctionGemmaReviewEvents(
-    FunctionGemmaReviewAttempt? attempt,
-    string requestId,
-    Stopwatch stopwatch,
-    string model,
-    string intention
-  )
-  {
-    if (attempt?.Review is not null)
-    {
-      yield return Event(
-        requestId,
-        "agent.functiongemma-evaluation-explained",
-        $"FunctionGemma explained the Host-owned NACK: {attempt.Review.EvaluationReason}",
-        stopwatch,
-        model,
-        intention
-      );
-      yield return Event(
-        requestId,
-        "agent.functiongemma-recovery-selected",
-        $"FunctionGemma copied Host recovery policy {attempt.Review.Recovery.Action} for {attempt.Review.Recovery.FailureCode}; next tool: {attempt.Review.Recovery.NextTool}. Reason: {attempt.Review.Recovery.Reason}",
-        stopwatch,
-        model,
-        intention
-      );
-      yield break;
-    }
-
-    if (attempt?.Failure is not null)
-    {
-      yield return Event(
-        requestId,
-        "agent.functiongemma-contract-warning",
-        $"FunctionGemma evaluator/recovery output was rejected at {FunctionGemmaFailureStage(attempt.Failure)}; the Host-owned recovery path will continue.",
-        stopwatch,
-        model,
-        intention
-      );
-      yield break;
-    }
-
-    if (attempt?.SkippedReason is not null)
-    {
-      yield return Event(
-        requestId,
-        "agent.functiongemma-review-skipped",
-        attempt.SkippedReason,
-        stopwatch,
-        model,
-        intention
-      );
-    }
-  }
-
-  private static string FunctionGemmaFailureCode(
-    Exception failure,
-    CoordinatorFailureCategory category
-  )
-  {
-    var stage = FunctionGemmaFailureStage(
-      failure
-    );
-    return category switch
-    {
-      CoordinatorFailureCategory.SecurityDenied => "unsafe_security_boundary",
-      CoordinatorFailureCategory.PolicyDenied => "approval_or_policy_denied",
-      CoordinatorFailureCategory.ToolExecution => "tool_execution_failed",
-      CoordinatorFailureCategory.ContextFit => "context_fit_failed",
-      CoordinatorFailureCategory.Provider => "provider_failed",
-      _ when stage.Contains("tool-name", StringComparison.Ordinal) => "wrong_tool",
-      _ when stage.Contains("path", StringComparison.Ordinal) => "invalid_path",
-      _ when stage.Contains("stale", StringComparison.Ordinal)
-        || stage.Contains("conflict", StringComparison.Ordinal) => "stale_state",
-      _ when failure is ToolProtocolException => "invalid_native_protocol",
-      _ => "invalid_proposal"
-    };
-  }
-
-  private static string FunctionGemmaFailureStage(
-    Exception failure
-  )
-  {
-    return failure switch
-    {
-      FunctionGemmaProtocolException protocol => protocol.Stage,
-      LocalActionException localAction => localAction.Stage,
-      OllamaProviderException provider => provider.Stage,
-      _ => "functiongemma-contract"
-    };
   }
 
   private static string CreatePlanningCorrection(
@@ -11371,7 +10533,6 @@ public sealed class ChatStreamService
 
     public bool PartialContextExhausted { get; set; }
 
-    public bool ResidentCoexistenceChecked { get; set; }
   }
 
   private sealed record PlanningAttempt(
@@ -11432,12 +10593,6 @@ public sealed class ChatStreamService
     LocalActionResult? Result,
     LocalActionException? Failure,
     long DurationMilliseconds
-  );
-
-  private sealed record FunctionGemmaReviewAttempt(
-    FunctionGemmaFailureReview? Review,
-    Exception? Failure,
-    string? SkippedReason
   );
 
   private sealed record ToolingInspection(

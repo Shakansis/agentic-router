@@ -68,7 +68,17 @@ public sealed record ChatMessage(
   string Role,
   string Content,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  DateTimeOffset? CreatedAt = null
+  DateTimeOffset? CreatedAt = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  TraceDiagnosticReference? Diagnostic = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+  bool Hidden = false
+);
+
+public sealed record TraceDiagnosticReference(
+  string TraceId,
+  string TerminalState,
+  bool? Persisted = null
 );
 
 public sealed record ChatImageAttachment(
@@ -93,7 +103,9 @@ public sealed record ChatRequest(
   bool CompactContext = false,
   bool AutoModelHarness = false,
   string ExecutionStrategy = "direct",
-  string SupervisionResumePolicy = "manual"
+  string SupervisionResumePolicy = "manual",
+  string? DiagnosticTraceId = null,
+  bool HideUserMessage = false
 );
 
 public sealed record HarnessSteerInput(
@@ -791,7 +803,8 @@ public sealed record ChatStreamEvent(
   string? ContentBlockId = null,
   string? ResponseSegmentHtml = null,
   string? ResponseTail = null,
-  string? ResponseTailHtml = null
+  string? ResponseTailHtml = null,
+  TraceDiagnosticReference? Diagnostic = null
 );
 
 public sealed record ValidationErrorsResponse(

@@ -64,11 +64,6 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
     var configured = new List<ConfiguredModel>
     {
       new(
-        "Router",
-        settings.RouterModel,
-        false
-      ),
-      new(
         "Default",
         settings.DefaultModel,
         false

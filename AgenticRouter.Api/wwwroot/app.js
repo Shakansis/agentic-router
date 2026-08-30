@@ -81,7 +81,10 @@ const state = {
   sidebarCollapsed: false,
   runtime: null,
   setup: null,
-  setupTimer: null
+  setupTimer: null,
+  setupOnboardingDismissed: false,
+  setupOnboardingPreview: false,
+  pendingDiagnosticInvestigation: null
 };
 
 let benchmarkTooltip = null;
@@ -513,6 +516,8 @@ function bindElements() {
     "settings-open-recent",
     "settings-open-git",
     "settings-open-validation",
+    "show-onboarding-before-conversation",
+    "settings-show-onboarding-now",
     "git-dialog",
     "close-git",
     "dismiss-git",
@@ -913,6 +918,10 @@ function bindEvents() {
   elements.settingsOpenRecent.addEventListener("click", openRecentFromSettings);
   elements.settingsOpenGit.addEventListener("click", openGitFromSettings);
   elements.settingsOpenValidation.addEventListener("click", openValidationFromSettings);
+  elements.settingsShowOnboardingNow.addEventListener(
+    "click",
+    openSetupOnboardingNow
+  );
   elements.refreshSettingsYaml.addEventListener("click", loadPortableYaml);
   elements.openSettingsYamlFile.addEventListener(
     "click",
@@ -3172,14 +3181,6 @@ function activeWorkspaceProfile() {
   return state.workspaceProfiles?.profiles?.find(profile => profile.active) ?? null;
 }
 
-function shortenPath(path) {
-  if (!path || path.length <= 46) {
-    return path ?? "";
-  }
-
-  return `…${path.slice(-45)}`;
-}
-
 async function refreshGit() {
   if (!activeWorkspaceProfile()) {
     state.git = {
@@ -5237,6 +5238,9 @@ function renderRestoredConversation(session, options = {}) {
 
   session.messages.forEach(
     (message, index) => {
+      if (message.hidden) {
+        return;
+      }
       if (message.role === "user") {
         appendUserMessage(
           message.content,
@@ -5255,6 +5259,25 @@ function renderRestoredConversation(session, options = {}) {
         assistant.answer.textContent = message.content;
         assistant.rawAnswer = message.content;
         assistant.copyButton.disabled = false;
+        if (message.diagnostic) {
+          const failed = message.diagnostic.terminalState === "failed";
+          finishActivity(
+            assistant,
+            terminalActivitySummary(
+              failed ? "Failed" : "Completed",
+              null,
+              message.diagnostic
+            ),
+            failed
+          );
+          if (failed) {
+            assistant.answer.classList.add("error");
+            addTraceDiagnosticActions(
+              assistant,
+              message.diagnostic
+            );
+          }
+        }
       }
     }
   );
@@ -6829,8 +6852,6 @@ function handleVisibilityChange() {
 }
 
 const runtimeRoleLabels = {
-  router: "Router",
-  residentCoordinator: "Resident coordinator",
   specialist: "Specialist",
   primary: "Primary",
   fallback: "Fallback",
@@ -6850,6 +6871,9 @@ function renderRuntimeProfilesEditor() {
   const profiles = [];
 
   for (const [role, profile] of Object.entries(runtime.roleDefaults)) {
+    if (!(role in runtimeRoleLabels)) {
+      continue;
+    }
     const card = document.createElement("article");
     card.className = "runtime-role-profile";
     card.dataset.role = role;
@@ -6917,7 +6941,7 @@ function renderRuntimeProfilesEditor() {
       value: role,
       label: runtimeRoleLabels[role]
     })),
-    elements.runtimeOverrideRole.value || "residentCoordinator"
+    elements.runtimeOverrideRole.value || "specialist"
   );
   loadRuntimeOverrideEditor();
   renderRuntimeProfileEvidence();
@@ -7232,7 +7256,7 @@ async function measureRuntimeProfile() {
   const consent =
     `Measure ${model} with ${formatInteger(context)} context tokens?\n\n`
     + "This action will load a real model in Ollama and may use GPU, VRAM, and RAM. "
-    + "The Host will try to restore the previous resident state.";
+    + "The Host will restore the target model's prior loaded state when possible.";
 
   if (!await showAppConfirm(consent, {
     title: "Run real measurement?",
@@ -7270,7 +7294,7 @@ async function measureRuntimeProfile() {
       + `estimated RAM ${formatGiB(measurement.estimatedRamSizeBytes)} · `
       + `${measurement.processor}\n`
       + `Load ${formatInteger(measurement.loadDurationMilliseconds)} ms · `
-      + `resident restored: ${result.priorResidentRestored ? "yes" : "not required"}`;
+      + `target was already loaded: ${result.targetWasAlreadyLoaded ? "yes" : "no"}`;
     state.runtimeProfiles = await fetchJson("/api/runtime/profiles");
     renderRuntimeProfileEvidence();
     await refreshRuntimeStatus();
@@ -7392,6 +7416,8 @@ function renderSettings() {
   elements.maxToolOutputTokens.value = state.settings.execution.maxToolOutputTokens;
   elements.generationTimeoutSeconds.value = state.settings.runtime.generationTimeoutSeconds;
   elements.maxConversationMessages.value = state.settings.context.maxConversationMessages;
+  elements.showOnboardingBeforeConversation.checked =
+    state.settings.onboarding?.showBeforeNewConversation !== false;
   renderRuntimeProfilesEditor();
   elements.usageSelectedWindow.value = state.settings.usage.selectedWindow;
   elements.usageRetentionDays.value = state.settings.usage.retentionDays;
@@ -8870,12 +8896,42 @@ async function closeSettings() {
       { title: "Close without saving?", confirmLabel: "Discard", danger: true }
     )
   ) {
-    return;
+    return false;
   }
   state.settingsDirty = false;
   updateSettingsDirtyState();
   elements.settingsDialog.close();
   document.querySelector("#open-settings").focus();
+  return true;
+}
+
+async function openSetupOnboardingNow() {
+  if (!await closeSettings()) {
+    return;
+  }
+
+  const showOnboarding = () => {
+    state.setupOnboardingDismissed = false;
+    state.setupOnboardingPreview = true;
+    renderSetupOnboarding();
+    const onboarding = document.querySelector("#setup-onboarding");
+    onboarding?.scrollIntoView({ block: "start" });
+    onboarding?.querySelector(
+      "[data-setup-action=\"continue\"]"
+    )?.focus();
+  };
+
+  if (!hasMeaningfulConversation()) {
+    showOnboarding();
+    return;
+  }
+
+  await requestConversationTransition(
+    async () => {
+      await beginEmptyConversation();
+      showOnboarding();
+    }
+  );
 }
 
 async function saveSettings(event) {
@@ -8947,7 +9003,11 @@ async function saveSettings(event) {
     },
     cloudProviders: collectCloudProviderSettings(),
     webSearch: state.settings.webSearch,
-    modelOrganization: state.settings.modelOrganization
+    modelOrganization: state.settings.modelOrganization,
+    onboarding: {
+      showBeforeNewConversation:
+        elements.showOnboardingBeforeConversation.checked
+    }
   };
 
   try {
@@ -10100,6 +10160,7 @@ function handleApprovalPolicyChange() {
 function updateInteractionControls() {
   const isStreaming = Boolean(state.requestController);
   const disabled = isStreaming || state.conversationTransitioning;
+  const onboardingBlocked = setupOnboardingBlocksConversation();
   document.querySelectorAll(".mode-option").forEach(
     button => {
       const active = button.dataset.mode === state.interactionMode;
@@ -10110,7 +10171,13 @@ function updateInteractionControls() {
   );
   elements.approvalPolicy.value = state.approvalPolicy;
   elements.approvalPolicy.disabled =
-    disabled || state.interactionMode !== "execute";
+    disabled || onboardingBlocked || state.interactionMode !== "execute";
+  elements.messageInput.disabled =
+    state.conversationTransitioning || onboardingBlocked;
+  elements.sendButton.disabled =
+    state.conversationTransitioning || onboardingBlocked;
+  elements.attachImage.disabled = disabled || onboardingBlocked;
+  elements.imageInput.disabled = disabled || onboardingBlocked;
   elements.composer.classList.toggle(
     "execute-mode",
     state.interactionMode === "execute"
@@ -10374,6 +10441,9 @@ function clearConversationUi() {
   state.queuedDispatchMessage = null;
   state.messageQueuePaused = false;
   state.steeringMessage = false;
+  state.setupOnboardingDismissed = false;
+  state.setupOnboardingPreview = false;
+  state.pendingDiagnosticInvestigation = null;
   state.webEnabled = false;
   state.webControlState = "unavailable";
   state.cloudImageApprovals.clear();
@@ -10565,13 +10635,14 @@ function renderSetupOnboarding() {
   }
 
   const setup = state.setup;
+  const displayOnboarding = shouldDisplaySetupOnboarding();
   if (emptyState) {
-    emptyState.hidden = setup.coreReady;
-    emptyState.classList.toggle("has-setup", !setup.coreReady);
+    emptyState.hidden = setup.coreReady && !displayOnboarding;
+    emptyState.classList.toggle("has-setup", displayOnboarding);
   }
   containers.forEach(container => {
     const onboarding = container.dataset.setupSurface === "onboarding";
-    if (onboarding && setup.coreReady) {
+    if (onboarding && !displayOnboarding) {
       container.replaceChildren();
       container.hidden = true;
       return;
@@ -10579,6 +10650,27 @@ function renderSetupOnboarding() {
     renderSetupSurface(container, setup);
   });
   scheduleSetupRefresh(setup);
+  updateInteractionControls();
+}
+
+function shouldDisplaySetupOnboarding() {
+  if (!state.setup) {
+    return false;
+  }
+  if (!state.setup.coreReady) {
+    return true;
+  }
+  if (hasMeaningfulConversation()) {
+    return false;
+  }
+  return state.setupOnboardingPreview || (
+    state.settings?.onboarding?.showBeforeNewConversation !== false
+    && !state.setupOnboardingDismissed
+  );
+}
+
+function setupOnboardingBlocksConversation() {
+  return shouldDisplaySetupOnboarding();
 }
 
 function renderSetupSurface(container, setup) {
@@ -10640,6 +10732,31 @@ function renderSetupSurface(container, setup) {
     readOnly.textContent = t("setup.read_only");
     container.append(readOnly);
   }
+  if (
+    container.dataset.setupSurface === "onboarding"
+    && setup.coreReady
+  ) {
+    appendSetupOnboardingActions(container);
+  }
+}
+
+function appendSetupOnboardingActions(container) {
+  const actions = document.createElement("footer");
+  actions.className = "setup-onboarding-actions";
+  const preference = document.createElement("label");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.dataset.setupHideOnboarding = "true";
+  const label = document.createElement("span");
+  label.textContent = t("setup.hide_before_conversations");
+  preference.append(checkbox, label);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "primary-button";
+  button.dataset.setupAction = "continue";
+  button.textContent = t("setup.continue");
+  actions.append(preference, button);
+  container.append(actions);
 }
 
 function createSetupOllamaRows(setup) {
@@ -10904,6 +11021,33 @@ async function handleSetupAction(event) {
   const action = button.dataset.setupAction;
   button.disabled = true;
   try {
+    if (action === "continue") {
+      const hideBeforeConversations = Boolean(
+        button.closest("[data-setup-surface]")?.querySelector(
+          "[data-setup-hide-onboarding]"
+        )?.checked
+      );
+      if (hideBeforeConversations) {
+        state.settings = await fetchJson(
+          "/api/settings/onboarding",
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              showBeforeNewConversation: false
+            })
+          }
+        );
+        renderSettings();
+      }
+      state.setupOnboardingDismissed = true;
+      state.setupOnboardingPreview = false;
+      renderSetupOnboarding();
+      elements.messageInput.focus();
+      return;
+    }
     if (action === "refresh") {
       await refreshSetupStatus();
       return;
@@ -11265,6 +11409,55 @@ function scheduleMessageQueueDispatch() {
   queueMicrotask(() => elements.composer.requestSubmit(elements.sendButton));
 }
 
+function referencedDiagnosticTraceId(message) {
+  const known = state.history
+    .map(item => item.diagnostic?.traceId)
+    .filter(Boolean)
+    .find(traceId => message.includes(traceId));
+  if (known) {
+    return known;
+  }
+
+  const explicit = /\btrace\s+id\s*[:#]?\s*([a-z0-9][a-z0-9:._-]{7,127})\b/i.exec(
+    message
+  );
+  return explicit?.[1] ?? null;
+}
+
+function queueDiagnosticInvestigation(traceId, button) {
+  if (state.pendingDiagnosticInvestigation?.diagnosticTraceId === traceId) {
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = "Investigation queued";
+  state.pendingDiagnosticInvestigation = {
+    message:
+      "TRACE_DIAGNOSTIC_INVESTIGATION_V1\n"
+      + `Trace ID: ${traceId}\n`
+      + "Use get_trace_diagnostic for this exact trace. Explain the observed cause, distinguish Host evidence from inference, and recommend a materially different next attempt when one exists. Do not retry the failed objective and do not change models, routing, prompts, permissions, or settings. Respond in the language used by the user in this conversation.",
+    hidden: true,
+    diagnosticTraceId: traceId,
+    interactionMode: "chat"
+  };
+  scheduleDiagnosticInvestigation();
+}
+
+function scheduleDiagnosticInvestigation() {
+  if (
+    !state.pendingDiagnosticInvestigation
+    || state.requestController
+    || state.conversationTransitioning
+    || state.queuedDispatchMessage
+  ) {
+    return;
+  }
+
+  state.queuedDispatchMessage = state.pendingDiagnosticInvestigation;
+  state.pendingDiagnosticInvestigation = null;
+  queueMicrotask(() => elements.composer.requestSubmit(elements.sendButton));
+}
+
 function activeHarnessSupportsSteering() {
   if (state.interactionMode !== "execute") {
     return false;
@@ -11452,6 +11645,13 @@ function finishAssistantSegmentForSteering(assistant) {
 async function handleComposerSubmit(event) {
   event.preventDefault();
 
+  if (setupOnboardingBlocksConversation()) {
+    document.querySelector(
+      "#setup-onboarding [data-setup-action=\"continue\"]"
+    )?.focus();
+    return;
+  }
+
   if (state.requestController) {
     queueCurrentMessage();
     return;
@@ -11460,18 +11660,26 @@ async function handleComposerSubmit(event) {
   const queuedMessage = state.queuedDispatchMessage;
   state.queuedDispatchMessage = null;
   const message = queuedMessage?.message ?? elements.messageInput.value.trim();
+  const hiddenUserMessage = queuedMessage?.hidden === true;
+  const requestInteractionMode = queuedMessage?.interactionMode
+    ?? state.interactionMode;
+  const diagnosticTraceId = queuedMessage?.diagnosticTraceId
+    ?? referencedDiagnosticTraceId(message);
 
   if (!message) {
     return;
   }
 
-  const autoModelHarness = state.interactionMode === "execute"
+  const autoModelHarness = requestInteractionMode === "execute"
     && state.harness === "auto-model-harness";
   const selectedModel = autoModelHarness
     ? "auto"
     : elements.modelSelector.value;
 
-  if (!await ensureCloudImageApproval(selectedModel)) {
+  if (
+    !hiddenUserMessage
+    && !await ensureCloudImageApproval(selectedModel)
+  ) {
     if (queuedMessage) {
       state.messageQueue.unshift(queuedMessage);
       renderMessageQueue();
@@ -11479,7 +11687,7 @@ async function handleComposerSubmit(event) {
     return;
   }
 
-  const requestAttachments = state.attachments.map(
+  const requestAttachments = (hiddenUserMessage ? [] : state.attachments).map(
     attachment => ({
       id: attachment.id,
       fileName: attachment.fileName,
@@ -11503,17 +11711,23 @@ async function handleComposerSubmit(event) {
     elements.composer.classList.remove("editing");
   }
 
-  const requestHistory = state.history.slice(
+  const retainedHistory = state.history.slice(
     0,
     historyIndex
   );
+  const requestHistory = hiddenUserMessage
+    ? retainedHistory.filter(
+      item => !item.hidden && item.content.length <= 8_000
+    ).slice(-2)
+    : retainedHistory;
   const sentAt = new Date();
   state.history = [
-    ...requestHistory,
+    ...retainedHistory,
     {
       role: "user",
       content: message,
-      createdAt: sentAt.toISOString()
+      createdAt: sentAt.toISOString(),
+      hidden: hiddenUserMessage
     }
   ];
   state.conversationState = "running";
@@ -11522,12 +11736,14 @@ async function handleComposerSubmit(event) {
       ? "Saving"
       : "History disabled"
   );
-  appendUserMessage(
-    message,
-    historyIndex,
-    requestAttachments,
-    sentAt
-  );
+  if (!hiddenUserMessage) {
+    appendUserMessage(
+      message,
+      historyIndex,
+      requestAttachments,
+      sentAt
+    );
+  }
   const conversationVersion = state.conversationVersion;
   const controller = new AbortController();
   const assistant = appendAssistantMessage({
@@ -11563,15 +11779,17 @@ async function handleComposerSubmit(event) {
           message,
           model: selectedModel,
           history: requestHistory,
-          interactionMode: state.interactionMode,
+          interactionMode: requestInteractionMode,
           harness: state.harness,
           approvalPolicy: state.approvalPolicy,
           browserSessionId: state.browserSessionId,
           conversationSessionId: state.conversationSessionId,
-          webSearchEnabled: state.webEnabled,
+          webSearchEnabled: hiddenUserMessage ? false : state.webEnabled,
           images: requestAttachments,
-          compactContext,
-          autoModelHarness
+          compactContext: hiddenUserMessage ? false : compactContext,
+          autoModelHarness,
+          diagnosticTraceId,
+          hideUserMessage: hiddenUserMessage
         }),
         signal: controller.signal
       }
@@ -11591,7 +11809,8 @@ async function handleComposerSubmit(event) {
         {
           role: "assistant",
           content: outcome.answer,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          diagnostic: outcome.diagnostic
         }
       );
       state.conversationState = "completed";
@@ -11604,6 +11823,18 @@ async function handleComposerSubmit(event) {
       }
       await refreshSessions();
       await refreshGit();
+    } else if (
+      outcome.terminalState === "failed"
+      && state.conversationVersion === conversationVersion
+    ) {
+      state.history.push({
+        role: "assistant",
+        content: outcome.answer,
+        createdAt: new Date().toISOString(),
+        diagnostic: outcome.diagnostic
+      });
+      state.conversationState = "failed";
+      await refreshSessions();
     }
   } catch (error) {
     if (error.name === "AbortError") {
@@ -11663,6 +11894,7 @@ async function handleComposerSubmit(event) {
       state.messageQueuePaused = false;
     }
     renderMessageQueue();
+    scheduleDiagnosticInvestigation();
     scheduleMessageQueueDispatch();
   }
 }
@@ -12414,6 +12646,8 @@ async function consumeEventStream(stream, assistant) {
   let buffer = "";
   let answer = "";
   let completed = false;
+  let diagnostic = null;
+  let terminalState = null;
 
   while (true) {
     const result = await reader.read();
@@ -12531,6 +12765,8 @@ async function consumeEventStream(stream, assistant) {
         );
       } else if (streamEvent.type === "response.completed") {
         completed = true;
+        terminalState = "completed";
+        diagnostic = streamEvent.diagnostic ?? null;
         closeAssistantContent(assistant);
         const responseTail = streamEvent.responseTail ?? "";
         if (responseTail) {
@@ -12570,16 +12806,26 @@ async function consumeEventStream(stream, assistant) {
         addActivity(assistant, streamEvent, false);
         finishActivity(
           assistant,
-          `${assistant.recovered ? "Recovered" : "Completed"} · `
-            + formatElapsed(streamEvent.elapsedMilliseconds),
+          terminalActivitySummary(
+            assistant.recovered ? "Recovered" : "Completed",
+            streamEvent.elapsedMilliseconds,
+            diagnostic
+          ),
           assistant.recovered
         );
         assistant.reviewButton.hidden =
           !assistant.executionSession?.reviewAvailable;
       } else if (streamEvent.type === "error") {
+        terminalState = "failed";
+        diagnostic = streamEvent.diagnostic ?? {
+          traceId: streamEvent.error.traceId,
+          terminalState: "failed",
+          persisted: streamEvent.error.diagnosticsPersisted === true
+        };
         closeAssistantContent(assistant);
         const errorText = `${streamEvent.error.message}\n`
           + `Reference: ${streamEvent.error.traceId}`;
+        answer = errorText;
         const response = ensureAssistantResponse(
           assistant,
           `error:${streamEvent.error.traceId}`
@@ -12604,15 +12850,29 @@ async function consumeEventStream(stream, assistant) {
         );
         finishActivity(
           assistant,
-          `Failed · ${streamEvent.error.traceId}`,
+          terminalActivitySummary(
+            "Failed",
+            streamEvent.elapsedMilliseconds,
+            diagnostic
+          ),
           true
         );
-        addTraceDiagnosticActions(assistant, streamEvent.error);
+        addTraceDiagnosticActions(assistant, diagnostic);
       } else if (streamEvent.type === "request.cancelled") {
+        terminalState = "cancelled";
+        diagnostic = streamEvent.diagnostic ?? null;
         closeAssistantContent(assistant);
         addActivity(assistant, streamEvent, false);
         assistant.answer.classList.remove("pending");
-        finishActivity(assistant, "Canceled", false);
+        finishActivity(
+          assistant,
+          terminalActivitySummary(
+            "Canceled",
+            streamEvent.elapsedMilliseconds,
+            diagnostic
+          ),
+          false
+        );
       } else if (
         streamEvent.type === "action.awaiting-approval"
         && streamEvent.localAction
@@ -12676,7 +12936,6 @@ async function consumeEventStream(stream, assistant) {
       if (
         streamEvent.type === "memory-pressure-detected"
         || streamEvent.type === "target-request-recovered"
-        || streamEvent.type.startsWith("resident-model-")
       ) {
         void refreshRuntimeStatus();
       }
@@ -12685,26 +12944,46 @@ async function consumeEventStream(stream, assistant) {
 
   return {
     answer,
-    completed
+    completed,
+    diagnostic,
+    terminalState
   };
 }
 
-function addTraceDiagnosticActions(assistant, error) {
-  if (!error?.traceId || assistant.container.querySelector(".trace-diagnostic-actions")) {
+function terminalActivitySummary(label, elapsedMilliseconds, diagnostic) {
+  return [
+    label,
+    elapsedMilliseconds === null || elapsedMilliseconds === undefined
+      ? null
+      : formatElapsed(elapsedMilliseconds),
+    diagnostic?.traceId ? `Trace: ${diagnostic.traceId}` : null
+  ].filter(Boolean).join(" · ");
+}
+
+function addTraceDiagnosticActions(assistant, diagnostic) {
+  if (
+    !diagnostic?.traceId
+    || diagnostic.terminalState !== "failed"
+    || diagnostic.persisted !== true
+    || assistant.container.querySelector(".trace-diagnostic-actions")
+  ) {
     return;
   }
 
   const actions = document.createElement("div");
   actions.className = "trace-diagnostic-actions";
-  const copy = createMessageActionButton("Copy trace", "Copy trace identifier");
-  const view = createMessageActionButton("View diagnostic", "Open sanitized local diagnostic");
-  view.disabled = error.diagnosticsPersisted !== true;
-  if (view.disabled) {
-    view.title = "The local journal did not confirm persistence of this diagnostic.";
-  }
-  copy.addEventListener("click", () => copyText(error.traceId, copy, "Trace ID copied"));
-  view.addEventListener("click", () => openTraceDiagnostic(error.traceId));
-  actions.append(copy, view);
+  const investigate = createMessageActionButton(
+    "Investigate error",
+    "Ask Agentic Router to analyze this sanitized Host trace"
+  );
+  investigate.addEventListener(
+    "click",
+    () => queueDiagnosticInvestigation(
+      diagnostic.traceId,
+      investigate
+    )
+  );
+  actions.append(investigate);
   assistant.answer.insertAdjacentElement("afterend", actions);
 }
 
@@ -13001,7 +13280,6 @@ function updateExecutionSession(assistant, session) {
   coordinator.textContent =
     `Target: ${session.selectedModel || "unavailable"} · `
     + `Specialist: ${session.coordinatorModel} · `
-    + `Resident router: ${session.residentModel || "unavailable"} · `
     + session.executionPath;
   coordinator.title = [
     session.routingEvidence
@@ -13162,7 +13440,6 @@ function renderChangeReview(review, focusRelativePath = null) {
   const metadata = document.createElement("p");
   metadata.textContent =
     `Specialist: ${review.summary.coordinatorModel} · `
-    + `Resident router: ${review.summary.residentModel || "unavailable"} · `
     + `${review.summary.executionPath} · ${review.summary.actionCount} actions · `
     + `${review.summary.changedFileCount} files · `
     + `${formatElapsed(review.summary.elapsedMilliseconds)} · `
@@ -14808,6 +15085,7 @@ function setStreamingState(isStreaming) {
       button.disabled = isStreaming;
     }
   );
+  updateInteractionControls();
   updateHarnessControls();
   updateStreamingComposerActions();
   updateComposerStatus();
@@ -15090,7 +15368,7 @@ function updateActiveAgentLabel() {
   elements.activeAgentLabel.textContent =
     selectedModel && selectedModel !== "auto"
       ? selectedModel
-      : "Auto (Router)";
+      : "Auto (Keywords)";
   elements.activeAgentLabel.title = elements.activeAgentLabel.textContent;
   renderCloudUsage();
 }

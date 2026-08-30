@@ -14,7 +14,6 @@ public sealed class SettingsController : ControllerBase
 {
   private readonly ISettingsStore _settingsStore;
   private readonly IPortableYamlSettingsService _portableYaml;
-  private readonly IResidentModelManager _residentModel;
   private readonly ISettingsValidator _validator;
   private readonly IWorkspaceProfileService _workspaceProfiles;
   private readonly ITrustedWorkspaceService _trustedWorkspace;
@@ -24,7 +23,6 @@ public sealed class SettingsController : ControllerBase
   public SettingsController(
     ISettingsStore settingsStore,
     IPortableYamlSettingsService portableYaml,
-    IResidentModelManager residentModel,
     ISettingsValidator validator,
     IWorkspaceProfileService workspaceProfiles,
     ITrustedWorkspaceService trustedWorkspace,
@@ -34,7 +32,6 @@ public sealed class SettingsController : ControllerBase
   {
     _settingsStore = settingsStore;
     _portableYaml = portableYaml;
-    _residentModel = residentModel;
     _validator = validator;
     _workspaceProfiles = workspaceProfiles;
     _trustedWorkspace = trustedWorkspace;
@@ -84,6 +81,42 @@ public sealed class SettingsController : ControllerBase
       null,
       "Settings were not saved because validation failed.",
       cancellationToken
+    );
+  }
+
+  [HttpPut("onboarding")]
+  public async Task<IActionResult> PutOnboarding(
+    [FromBody] OnboardingSettingsRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    var current = await _settingsStore.GetAsync(
+      cancellationToken
+    );
+    var updated = current with
+    {
+      Onboarding = current.Onboarding with
+      {
+        ShowBeforeNewConversation = request.ShowBeforeNewConversation
+      }
+    };
+    var result = await _settingsStore.SaveAsync(
+      updated,
+      cancellationToken
+    );
+
+    if (!result.IsValid || result.Settings is null)
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "The onboarding preference was not saved.",
+          result.Errors
+        )
+      );
+    }
+
+    return Ok(
+      result.Settings
     );
   }
 
@@ -174,30 +207,6 @@ public sealed class SettingsController : ControllerBase
       cancellationToken
     );
 
-    try
-    {
-      await _residentModel.ChangeResidentModelAsync(
-        previous,
-        settings,
-        cancellationToken
-      );
-    }
-    catch (Exception exception) when (exception is not OperationCanceledException)
-    {
-      return BadRequest(
-        new ValidationErrorsResponse(
-          "Settings were not saved because the resident action model could not be changed.",
-          new Dictionary<string, string[]>
-          {
-            ["actionModel"] =
-            [
-              exception.Message
-            ]
-          }
-        )
-      );
-    }
-
     var result = await _settingsStore.SaveAsync(
       settings,
       cancellationToken
@@ -221,3 +230,7 @@ public sealed class SettingsController : ControllerBase
     );
   }
 }
+
+public sealed record OnboardingSettingsRequest(
+  bool ShowBeforeNewConversation
+);

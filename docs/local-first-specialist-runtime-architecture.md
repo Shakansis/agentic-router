@@ -52,33 +52,35 @@ Intent could be lost or delayed at four transformations: specialist prose to str
 
 ### Chat
 
-1. Respect an explicit model selection or run lightweight intent routing.
+1. Respect an explicit model selection or classify intent through ordered local keyword rules.
 2. Resolve the configured specialist.
 3. Stream one answer from that specialist.
 4. Do not create an execution session or tool catalog.
 
 ### Execute
 
-1. Respect an explicit model selection or route to a specialist.
-2. Validate the active trusted workspace and load bounded project/repository instructions.
-3. Start Host-owned session state for cancellation, history, review, undo, limits, and authoritative facts.
-4. Select native tool calling when supported, otherwise the existing structured-action transport when available.
-5. Offer the selected specialist the Host-owned closed tool catalog directly. Do not offer `create_execution_plan` or `revise_execution_plan` as gates.
-6. Validate the proposed canonical tool, arguments, paths, process policy, and remaining limits deterministically.
-7. Execute it, independently prove its effect, and return the result to the same specialist.
-8. Repeat until the specialist stops or a typed safety/runtime limit blocks progress.
-9. Generate the terminal status from Host facts.
+1. Respect an explicit model selection or classify intent through ordered local keyword rules and resolve its configured specialist.
+2. When Auto Model × Harness is enabled, choose the best available ranked harness for that exact model; if it has no usable ranking, choose the best aggregate harness score, then deterministic Native as the final fallback.
+3. Validate the active trusted workspace and load bounded project/repository instructions.
+4. Start Host-owned session state for cancellation, history, review, undo, limits, and authoritative facts.
+5. Select native tool calling when supported, otherwise the existing structured-action transport when available.
+6. Offer the selected specialist the Host-owned closed tool catalog directly. Do not offer `create_execution_plan` or `revise_execution_plan` as gates.
+7. Validate the proposed canonical tool, arguments, paths, process policy, and remaining limits deterministically.
+8. Execute it, independently prove its effect, and return the result to the same specialist.
+9. Repeat until the specialist stops or a typed safety/runtime limit blocks progress.
+10. Generate the terminal status from Host facts.
 
 ## Component decisions
 
 | Component | Decision | Status | Reason |
 | --- | --- | --- | --- |
-| Intent router and intent profiles | Retain | PROVEN | Chat routing and explicit bypass are covered by browser/API tests. |
+| Keyword router and intent profiles | Retain | PROVEN | Classification is deterministic, local, and covered by browser/API tests; explicit selection bypasses it. |
+| Benchmark-ranked harness selection | Retain for Auto | PROVEN | The selected model remains authoritative; exact-model ranking wins, aggregate harness ranking is the fallback, and Native prevents missing evidence from blocking execution. |
 | Explicit model selection and conversation lock | Retain | PROVEN | The router is bypassed and the selected technical identity is preserved. |
 | Selected-specialist tool loop | Make primary Execute path | PROVEN with fake providers | The same selected model proposes successive tools and receives authoritative results without a resident bridge. Real-model compatibility remains model-specific. |
 | `LOCAL_ACTION_PLANNER_V1` | Simplify to a specialist runtime prompt | PROVEN with fake providers | It now describes the selected specialist's direct loop; it no longer translates another model's guidance or requires a plan first. A future rename is desirable. |
 | Native/structured conformance benchmark | Retain as diagnostics, remove as live prerequisite | PROVEN for the new fake-provider path | Capability and runtime failures are useful evidence, but a benchmark should not insert or require another model before every task. |
-| Resident bridge and coordinator takeover | Remove from Execute | PROVEN for the new fake-provider path | The main arbitration and takeover branches were deleted and their obsolete E2E contracts retired. The selected specialist is recorded as the effective executor; the resident remains routing/resource state only. |
+| Resident bridge, preload, eviction, and coordinator takeover | Remove | PROVEN for the deterministic path | The selected specialist is the effective executor and no resident model is loaded, restored, or consulted by Chat/Execute. |
 | Model-authored execution plan and semantic plan/action binding | Remove as an ordinary action gate | PROVEN for direct file creation | Session facts, tool results, and effect verification provide the needed runtime authority without plan bureaucracy. Optional UI progress may be rebuilt later from Host actions. |
 | Tool alias registry, typed schemas, limits, cancellation, session history, review, undo, effect proof | Retain | PROVEN | These protect deterministic execution or preserve useful product behavior without adding an interpreting model. |
 | Trusted-workspace confinement and reparse-point rejection | Retain | PROVEN | They protect the actual local safety boundary. |
@@ -86,11 +88,11 @@ Intent could be lost or delayed at four transformations: specialist prose to str
 | Default approval policy | Change to automatic inside the trusted workspace | PROVEN for bounded file tools | Repeated approval is not a security boundary. Ask mode remains available; guarded Git writes and higher-risk processes retain explicit approval. |
 | Provider/model management, Ollama runtime profiles, GPU/device metadata, optional cloud providers, usage, conversations, backup, and Git review | Retain | PROVEN existing functionality | These are useful independent product capabilities and were not rewritten. |
 
-## FunctionGemma responsibility
+## FunctionGemma status
 
-FunctionGemma remains an optional extremely lightweight routing experiment. Its supported responsibility is limited to selecting one exact offered Teacher/intent pair through `route_to_teacher`, with bounded exact normalization. It is not required for Execute and is not used as planner, tool executor, architectural reasoner, failure evaluator, or recovery supervisor in the new live path.
+FunctionGemma is disabled and has no production role. The application does not load it, call `route_to_teacher`, use it for failure review, or expose resident-model controls. Legacy router/action fields remain readable only so existing settings files can migrate without breaking; they are ignored by routing and runtime policy.
 
-This is **PROVEN** for the deterministic routing fixture. Its routing quality against Rodrigo's real specialist catalog is **PLAUSIBLE** until evaluated with the actual trained model and representative requests. Complex planning or autonomous recovery by FunctionGemma remains **SPECULATIVE** and is intentionally not an architectural dependency.
+Reintroduction requires independent routing evaluation against representative requests, zero user-facing protocol errors, exact closed-catalog behavior, and a deterministic fallback. It must remain optional and outside the stable Chat/Execute path.
 
 ## Fine-tuning audit
 
@@ -124,12 +126,12 @@ Local-only operation remains the baseline. Provider-qualified model references a
 
 ## Remaining technical debt and intentional deferrals
 
-- Remove the remaining dormant compatibility helpers and DI fields for FunctionGemma failure review, specialist-guidance bridging, and model-authored plan normalization after their diagnostic/API callers are versioned or retired. They are not reachable from the new Execute entry path.
+- Remove legacy router/action settings fields and inactive runtime role defaults in a future schema version after compatibility readers are no longer required.
 - Version the legacy `coordinatorModel` session/JSON field to `specialistModel` in a future public-contract change. The current browser already labels it "Specialist" while retaining the wire name for compatibility.
 - Rename `LOCAL_ACTION_PLANNER_V1` to a specialist-runtime contract and version the change once real-model compatibility evidence exists.
 - Replace keyword-derived tool scope with explicit user/runtime capability constraints where a denial is actually needed; the current direct path already offers the normal trusted-workspace development tools unless the user explicitly forbids processes.
 - Add a configured local/LAN endpoint abstraction before claiming llama.cpp or remote-local specialist support.
-- Evaluate the actual FunctionGemma router weights against Rodrigo's specialist catalog before treating routing quality as proven.
+- Evaluate any future FunctionGemma weights outside the product path before considering an opt-in integration.
 - Add ACP only when Agentic Router must host an external agent process; add MCP only when a concrete external tool integration avoids more custom code than it introduces.
 
 ## Validation status
@@ -150,4 +152,4 @@ The following are **PROVEN** with the real browser/API path and deterministic fa
 
 Obsolete tests that required resident takeover, live conformance gating, mandatory plans, FunctionGemma supervision, or multi-layer recovery checkpoints were removed rather than preserved as compatibility requirements. Retained browser tests continue to cover ask mode, undo, bounded processes, validation, provider/model management, persistence, and structured Git delivery.
 
-Real Ollama smoke and real cloud-provider conformance were not run during this refactor because they require explicit permission. Until that evidence exists, native behavior for each exact real model/digest is **PLAUSIBLE**, not proven.
+With explicit permission, a real local Ollama `0.33.2` smoke classified a software-architecture request through keywords, selected `qwen3.8:27b-gpu0`, and completed without an error event. A second general-chat fallback returned `OK` from the same exact model. The exact digest `d1f9a27632f9cab927948254285394838a1f0e0f8b7e70e53d633624ed9e9169` failed the separate `coordination-conformance-v3` native-strict probe because it did not produce exactly one `benchmark_edit` call. Chat routing is therefore real-smoke proven for this model, while its Native Execute tool protocol remains not accepted. No cloud provider was invoked.

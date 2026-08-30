@@ -20,6 +20,93 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
   [TestMethod]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InitialSetupAppearsForLegacyReadyInstallUntilUserOptsOut()
+  {
+    var legacy = JsonNode.Parse(
+      _environment.BaselineSettings.ToJson()
+    )!.AsObject();
+    Assert.IsTrue(
+      legacy.Remove("onboarding")
+    );
+    await _environment.RestartApplicationAsync(
+      () => File.WriteAllTextAsync(
+        _environment.SettingsPath,
+        legacy.ToJsonString(TestJson.Options) + "\n"
+      )
+    );
+
+    await Page.GotoAsync("/");
+    var onboarding = Page.Locator("#setup-onboarding");
+    await Expect(onboarding).ToBeVisibleAsync();
+    await Expect(onboarding).ToContainTextAsync("Core resources are ready");
+    await Expect(Page.Locator("#message-input")).ToBeDisabledAsync();
+
+    await onboarding.Locator(
+      "[data-setup-action=\"continue\"]"
+    ).ClickAsync();
+    await Expect(onboarding).ToBeHiddenAsync();
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+
+    await Page.Locator("#new-conversation").ClickAsync();
+    onboarding = Page.Locator("#setup-onboarding");
+    await Expect(onboarding).ToBeVisibleAsync();
+    await onboarding.Locator(
+      "[data-setup-hide-onboarding]"
+    ).CheckAsync();
+    await onboarding.Locator(
+      "[data-setup-action=\"continue\"]"
+    ).ClickAsync();
+    await Expect(onboarding).ToBeHiddenAsync();
+
+    using (var settingsResponse = await _environment.HttpClient.GetAsync(
+      "api/settings"
+    ))
+    {
+      settingsResponse.EnsureSuccessStatusCode();
+      var settings = await settingsResponse.Content.ReadFromJsonAsync<JsonElement>(
+        TestJson.Options
+      );
+      Assert.IsFalse(
+        settings.GetProperty("onboarding")
+          .GetProperty("showBeforeNewConversation")
+          .GetBoolean()
+      );
+    }
+
+    await Page.ReloadAsync();
+    await Expect(Page.Locator("#setup-onboarding")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator(
+      "[data-settings-target=\"harnesses\"]"
+    ).ClickAsync();
+    await Expect(Page.Locator(
+      "#show-onboarding-before-conversation"
+    )).Not.ToBeCheckedAsync();
+    await Page.Locator("#settings-show-onboarding-now").ClickAsync();
+    await Expect(Page.Locator("#setup-onboarding")).ToBeVisibleAsync();
+    await Page.Locator(
+      "#setup-onboarding [data-setup-action=\"continue\"]"
+    ).ClickAsync();
+
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator(
+      "[data-settings-target=\"harnesses\"]"
+    ).ClickAsync();
+    await Page.Locator(
+      "#show-onboarding-before-conversation"
+    ).CheckAsync();
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+    await Page.Locator("#close-settings").ClickAsync();
+    await Page.Locator("#new-conversation").ClickAsync();
+    await Expect(Page.Locator("#setup-onboarding")).ToBeVisibleAsync();
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LocalSetupReportsActiveResourcesAndPullsOnlyRecommendedModels()
   {
     _environment.FakeOllama.HideInstalledModels();
@@ -1014,6 +1101,163 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
             "citation_options",
             StringComparison.Ordinal
           )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HostWebSearchWithholdsStructuredToolPreambleBeforeExecution()
+  {
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/web-search/key",
+        new
+        {
+          apiKey = "ollama_fake_mixed_tool_preamble"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "chat web search request",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "chat",
+        harness = "native",
+        approvalPolicy = "auto",
+        browserSessionId = Guid.NewGuid().ToString("N"),
+        webSearchEnabled = true,
+        images = Array.Empty<object>()
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(
+      await response.Content.ReadAsStringAsync()
+    );
+    var answer = string.Concat(
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "response.delta"
+      ).Select(
+        item => item["delta"]?.GetValue<string>() ?? string.Empty
+      )
+    );
+
+    Assert.IsTrue(
+      events.Any(
+        item => item["type"]!.GetValue<string>() == "chat.tool-preamble-withheld"
+      )
+    );
+    Assert.IsTrue(
+      events.Any(
+        item => item["type"]!.GetValue<string>() == "web.search-completed"
+      )
+    );
+    Assert.IsFalse(
+      events.Any(
+        item => item["type"]!.GetValue<string>() == "error"
+      )
+    );
+    StringAssert.Contains(
+      answer,
+      "https://example.test/ollama-source-1"
+    );
+    Assert.DoesNotContain(
+      "This non-terminal preamble must never become visible.",
+      answer
+    );
+  }
+
+  [TestMethod]
+  [DataRow("native")]
+  [DataRow("codex")]
+  [DataRow("claude-code")]
+  [DataRow("opencode")]
+  [DataRow("qwen-code")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ConfiguredHostWebSearchWorksInChatRegardlessOfHarnessSelection(
+    string harness
+  )
+  {
+    using (
+      var saved = await _environment.HttpClient.PutAsJsonAsync(
+        "api/web-search/key",
+        new
+        {
+          apiKey = "ollama_fake_chat_harness_independent"
+        }
+      )
+    )
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    _environment.FakeCloud.Reset();
+    _environment.FakeOllama.Reset();
+
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "qwen3-coder:30b"
+    );
+    await Page.Locator(
+      "#harness-selector"
+    ).SelectOptionAsync(
+      harness
+    );
+    await Expect(
+      Page.Locator(
+        "#web-toggle"
+      )
+    ).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+    await SendMessageAsync(
+      "chat web search request"
+    );
+
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"web.search-completed\"]"
+      ).Last
+    ).ToBeAttachedAsync();
+    await Expect(
+      Page.Locator(
+        ".message.assistant .assistant-answer"
+      ).Last
+    ).ToContainTextAsync(
+      "https://example.test/ollama-source-1"
+    );
+    await Expect(
+      Page.Locator(
+        ".message.assistant .assistant-answer"
+      ).Last
+    ).Not.ToContainTextAsync(
+      "This non-terminal preamble must never become visible."
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"chat.tool-preamble-withheld\"]"
+      ).Last
+    ).ToBeAttachedAsync();
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"error\"]"
+      )
+    ).ToHaveCountAsync(
+      0
+    );
+    Assert.IsTrue(
+      _environment.FakeCloud.Requests.Any(
+        request => request.Path == "/ollama/api/web_search"
       )
     );
   }
@@ -2654,7 +2898,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ).GetString()
       )
       .ToArray();
-    CollectionAssert.Contains(
+    CollectionAssert.DoesNotContain(
       roles,
       "router"
     );
@@ -2816,7 +3060,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     }
 
     using var filteredResponse = await _environment.HttpClient.GetAsync(
-      "api/usage/summary?window=rolling-hour&providerId=ollama-local&modelRole=router"
+      "api/usage/summary?window=rolling-hour&providerId=ollama-local&modelRole=primary"
     );
     filteredResponse.EnsureSuccessStatusCode();
     var filtered = await filteredResponse.Content.ReadFromJsonAsync<JsonElement>(
@@ -2828,12 +3072,9 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "totalTokens"
       ).GetInt64()
     );
-    Assert.IsLessThan(
-      baselineTotal!.Value,
-      filtered.GetProperty(
-        "totalTokens"
-      ).GetInt64()
-    );
+    Assert.IsLessThanOrEqualTo(
+baselineTotal!.Value
+, filtered.GetProperty("totalTokens").GetInt64());
 
     using var recalculatedResponse = await _environment.HttpClient.GetAsync(
       "api/usage/summary?window=rolling-hour&recalculate=true"
@@ -2914,7 +3155,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#settings-usage-summary"
       )
     ).ToContainTextAsync(
-      "router"
+      "primary"
     );
     await Expect(Page.Locator("#settings-runtime #cloud-usage-card"))
       .ToBeVisibleAsync();
@@ -2968,7 +3209,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       ).GetInt64()
     );
     Assert.AreEqual(
-      "mixed",
+      "estimated",
       aggregate.GetProperty(
         "accuracy"
       ).GetString()
@@ -3411,7 +3652,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       await modelsResponse.Content.ReadAsStringAsync()
     );
     Assert.AreEqual(
-      12,
+      11,
       modelsDocument.RootElement.GetProperty(
         "models"
       ).GetArrayLength()
@@ -3443,14 +3684,14 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#model-selector option"
       )
     ).ToHaveCountAsync(
-      13
+      12
     );
     await Expect(
       Page.Locator(
         "#model-selector option[value=\"functiongemma:270m\"]"
       )
     ).ToHaveCountAsync(
-      1
+      0
     );
     await Expect(Page.Locator("#provider-badge")).ToHaveTextAsync("Online");
 
@@ -3700,7 +3941,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task AppliesExactGpuAffinityToResidentRouterAndSpecialist()
+  public async Task AppliesExactGpuAffinityToKeywordSelectedSpecialistWithoutResidentRouter()
   {
     var settings = await GetSettingsJsonAsync();
     settings["defaultGpu"] = "ollama:0";
@@ -3718,16 +3959,8 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       await saved.Content.ReadAsStringAsync()
     );
 
-    var preload = _environment.FakeOllama.Requests.Last(
-      request => request.KeepAlive == -1
-    );
-    Assert.AreEqual(
-      "router:latest",
-      preload.Model
-    );
-    Assert.AreEqual(
-      1,
-      preload.MainGpu
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(request => request.KeepAlive == -1)
     );
 
     _environment.FakeOllama.Reset();
@@ -3738,23 +3971,14 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     );
 
     var requests = _environment.FakeOllama.Requests;
-    var router = requests.First(
-      request => request.Model == "router:latest"
-        && request.Messages.Count > 0
-    );
     var specialist = requests.Last(
       request => request.Model == "docs:latest"
         && request.Stream
     );
     Assert.AreEqual(
-      1,
-      router.MainGpu
-    );
-    Assert.AreEqual(
       0,
       specialist.MainGpu
     );
-
     settings["defaultModel"] = "router:latest";
     using var conflicting = await PutSettingsJsonAsync(
       settings
@@ -3767,12 +3991,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       TestJson.Options
     );
     Assert.IsTrue(
-      conflict.GetProperty(
-        "errors"
-      ).TryGetProperty(
-        "actionGpu",
-        out _
-      )
+      conflict.GetProperty("errors").TryGetProperty("coordinatorGpu", out _)
     );
   }
 
@@ -3843,7 +4062,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       ).GetString(),
       "invalid native tool call"
     );
-    CollectionAssert.Contains(
+    CollectionAssert.DoesNotContain(
       _environment.FakeOllama.LoadedModels.ToArray(),
       "router:latest"
     );
@@ -4010,7 +4229,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ConformantGroqTargetCoordinatesBeforeFailedResidentIsEvaluated()
+  public async Task ConformantGroqTargetCoordinatesWithoutResidentEvaluation()
   {
     const string groqModel = "groq::openai/gpt-oss-120b";
     using (
@@ -4096,13 +4315,6 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       )
     ).ToContainTextAsync(
       $"Specialist: {groqModel}"
-    );
-    await Expect(
-      Page.Locator(
-        ".execution-session-header"
-      )
-    ).ToContainTextAsync(
-      "Resident router: unused:latest"
     );
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
@@ -4382,7 +4594,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#active-agent-label"
       )
     ).ToHaveTextAsync(
-      "Auto (Router)"
+      "Auto (Keywords)"
     );
     await Expect(
       Page.Locator(

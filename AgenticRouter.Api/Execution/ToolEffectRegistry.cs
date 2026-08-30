@@ -28,6 +28,7 @@ public static class ToolEffectRegistry
       ["read_file"] = ToolEffects.Inspected,
       ["get_file_info"] = ToolEffects.Inspected,
       ["search_text"] = ToolEffects.Inspected,
+      [DiagnosticTraceCapability.ToolName] = ToolEffects.Inspected,
       ["create_file"] = ToolEffects.FileCreated,
       ["create_files"] = ToolEffects.FileCreated,
       ["write_file"] = ToolEffects.FileChanged,

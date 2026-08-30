@@ -909,6 +909,37 @@ p {
   box-shadow: none;
 }
 
+.onboarding-preferences,
+.setup-onboarding-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.onboarding-preferences {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-raised);
+}
+
+.onboarding-preferences label,
+.setup-onboarding-actions label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.setup-onboarding-actions {
+  margin-top: 12px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border);
+}
+
 .setup-header {
   display: flex;
   align-items: center;

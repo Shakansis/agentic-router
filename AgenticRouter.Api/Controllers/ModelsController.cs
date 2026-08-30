@@ -19,7 +19,6 @@ public sealed class ModelsController : ControllerBase
   private readonly IOllamaClient _ollamaClient;
   private readonly IModelDiagnosticService _diagnostics;
   private readonly IToolProtocolConformanceService _toolConformance;
-  private readonly IResidentModelManager _residentModel;
   private readonly ILogger<ModelsController> _logger;
 
   public ModelsController(
@@ -27,7 +26,6 @@ public sealed class ModelsController : ControllerBase
     IOllamaClient ollamaClient,
     IModelDiagnosticService diagnostics,
     IToolProtocolConformanceService toolConformance,
-    IResidentModelManager residentModel,
     ILogger<ModelsController> logger
   )
   {
@@ -35,7 +33,6 @@ public sealed class ModelsController : ControllerBase
     _ollamaClient = ollamaClient;
     _diagnostics = diagnostics;
     _toolConformance = toolConformance;
-    _residentModel = residentModel;
     _logger = logger;
   }
 
@@ -248,77 +245,39 @@ public sealed class ModelsController : ControllerBase
       );
     }
 
-    using var requestLease = _residentModel.BeginRequest();
-    var routerEvicted = false;
     var stopwatch = Stopwatch.StartNew();
+    var result = await _toolConformance.VerifyPathAsync(
+      baseUri,
+      selected.Name,
+      selected.Digest,
+      request.Profile,
+      new ProviderCallContext(
+        null,
+        null,
+        HttpContext.TraceIdentifier,
+        null,
+        UsageModelRoles.Benchmark,
+        "tool-protocol-conformance",
+        selected.Digest
+      ),
+      cancellationToken
+    );
 
-    try
-    {
-      routerEvicted = reference.IsLocal
-        && await _residentModel.EvictForRecoveryAsync(
-          selected.Name,
-          cancellationToken
-        );
-      var result = await _toolConformance.VerifyPathAsync(
-        baseUri,
-        selected.Name,
-        selected.Digest,
-        request.Profile,
-        new ProviderCallContext(
-          null,
-          null,
-          HttpContext.TraceIdentifier,
-          null,
-          UsageModelRoles.Benchmark,
-          "tool-protocol-conformance",
-          selected.Digest
-        ),
-        cancellationToken
-      );
-
-      return Ok(
-        new ModelConformanceBenchmarkResult(
-          result.Passed,
-          result.Model,
-          result.Digest,
-          result.OllamaVersion,
-          stopwatch.ElapsedMilliseconds,
-          result.Failure,
-          result.Profile,
-          result.Status,
-          result.Provider,
-          result.AdapterVersion,
-          result.BenchmarkVersion,
-          result.Identity
-        )
-      );
-    }
-    finally
-    {
-      if (
-        routerEvicted
-        && request.RestoreResidentModel
+    return Ok(
+      new ModelConformanceBenchmarkResult(
+        result.Passed,
+        result.Model,
+        result.Digest,
+        result.OllamaVersion,
+        stopwatch.ElapsedMilliseconds,
+        result.Failure,
+        result.Profile,
+        result.Status,
+        result.Provider,
+        result.AdapterVersion,
+        result.BenchmarkVersion,
+        result.Identity
       )
-      {
-        try
-        {
-          await _residentModel.RestoreAfterRecoveryAsync(
-            selected.Name,
-            CancellationToken.None
-          );
-        }
-        catch (Exception exception) when (
-          exception is OllamaProviderException
-          or InvalidOperationException
-        )
-        {
-          _logger.LogWarning(
-            exception,
-            "The resident coordinator model could not be restored after benchmarking {Model}.",
-            selected.Name
-          );
-        }
-      }
-    }
+    );
   }
 }

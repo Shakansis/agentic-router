@@ -75,48 +75,6 @@ public sealed class SafeModeSettingsStore : ISettingsStore
   }
 }
 
-public sealed class SafeResidentModelHostedService : IHostedService
-{
-  private readonly ResidentModelManager _resident;
-  private readonly SafeModeState _safeMode;
-  private bool _started;
-
-  public SafeResidentModelHostedService(
-    ResidentModelManager resident,
-    SafeModeState safeMode
-  )
-  {
-    _resident = resident;
-    _safeMode = safeMode;
-  }
-
-  public async Task StartAsync(
-    CancellationToken cancellationToken
-  )
-  {
-    if (_safeMode.Enabled)
-    {
-      return;
-    }
-
-    await _resident.StartAsync(
-      cancellationToken
-    );
-    _started = true;
-  }
-
-  public Task StopAsync(
-    CancellationToken cancellationToken
-  )
-  {
-    return _started
-      ? _resident.StopAsync(
-        cancellationToken
-      )
-      : Task.CompletedTask;
-  }
-}
-
 public sealed class SafeModeState
 {
   private readonly object _gate = new();

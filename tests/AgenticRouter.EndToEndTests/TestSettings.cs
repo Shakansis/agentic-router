@@ -8,11 +8,11 @@ internal sealed record TestApplicationSettings
 
   public string OllamaUrl { get; init; } = string.Empty;
 
-  public string RouterModel { get; init; } = "router:latest";
+  public string RouterModel { get; init; } = "none";
 
   public string RouterGpu { get; init; } = "default";
 
-  public string ActionModel { get; init; } = "router:latest";
+  public string ActionModel { get; init; } = "none";
 
   public string ActionGpu { get; init; } = "default";
 
@@ -41,6 +41,8 @@ internal sealed record TestApplicationSettings
   public TestGitDeliverySettings GitDelivery { get; init; } = new();
 
   public TestUsageSettings Usage { get; init; } = new();
+
+  public TestOnboardingSettings Onboarding { get; init; } = new();
 
   public static TestApplicationSettings Create(
     string ollamaUrl,
@@ -102,6 +104,11 @@ internal sealed record TestApplicationSettings
       TestJson.Options
     ) + "\n";
   }
+}
+
+internal sealed record TestOnboardingSettings
+{
+  public bool ShowBeforeNewConversation { get; init; }
 }
 
 internal sealed record TestIntentionSettings(

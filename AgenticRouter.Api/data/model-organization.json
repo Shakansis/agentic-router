@@ -5,9 +5,9 @@
     {
       "id": "1295349b2097488aa4d75894c4b6165c",
       "name": "p1",
-      "primaryModel": "functiongemma:270m",
+      "primaryModel": "qwen3.8:27b-gpu0",
       "fallbackModel": "none",
-      "routerModel": "functiongemma:270m",
+      "routerModel": "none",
       "coordinatorModel": "gemma4:12b",
       "webPreference": "off",
       "comparisonModel": null,

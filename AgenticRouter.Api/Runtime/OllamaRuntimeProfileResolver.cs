@@ -202,18 +202,6 @@ public static class OllamaRuntimeProfileResolver
     AddRole(
       roles,
       model,
-      settings.RouterModel,
-      OllamaRuntimeRoleIds.Router
-    );
-    AddRole(
-      roles,
-      model,
-      settings.ActionModel,
-      OllamaRuntimeRoleIds.ResidentCoordinator
-    );
-    AddRole(
-      roles,
-      model,
       settings.CoordinatorModel,
       OllamaRuntimeRoleIds.Fallback
     );

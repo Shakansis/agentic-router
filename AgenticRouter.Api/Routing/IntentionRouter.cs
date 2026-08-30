@@ -1,155 +1,119 @@
-using AgenticRouter.Api.Configuration;
+using System.Globalization;
+using System.Text;
+using System.Text.RegularExpressions;
 using AgenticRouter.Api.Contracts;
-using AgenticRouter.Api.Providers.Ollama;
-using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Routing;
 
 public interface IIntentionRouter
 {
-  Task<IntentionRoutingResult> RouteAsync(
-    Uri baseUri,
-    string routerModel,
-    ChatRequest request,
-    ProviderCallContext usageContext,
-    CancellationToken cancellationToken
+  IntentionRoutingResult Route(
+    ChatRequest request
   );
 }
 
 public sealed record IntentionRoutingResult(
-  RouterDecision? Decision,
-  string? FailureType,
-  string? Warning,
-  bool RawOutputCaptured
+  RouterDecision Decision,
+  string RuleId
 );
 
 public sealed class IntentionRouter : IIntentionRouter
 {
-  private const string RouterPrompt =
-    "Classify the latest user request into exactly one supported intention: "
-    + "general-chat, documentation, software-development, software-architecture, "
-    + "rpg-storytelling, review-and-testing. Return JSON only with intention, "
-    + "optional confidence from 0 to 1, and optional reason up to 240 characters. "
-    + "Do not return Markdown or explanatory prose. The latest user message has priority. "
-    + "Explicit implementation requests override earlier conversational themes. "
-    + "Classify the requested action, not merely the subject: coding a game about an RPG "
-    + "character is software-development; writing a story that mentions code is not "
-    + "automatically software-development; reviewing tests is review-and-testing; "
-    + "designing service boundaries is software-architecture; writing a plan or "
-    + "specification is documentation.";
+  public const string RouterVersion = "keyword-intention-router-v1";
 
-  private readonly IOllamaClient _ollamaClient;
-  private readonly IRouterResponseParser _parser;
-  private readonly ILogger<IntentionRouter> _logger;
+  private static readonly IReadOnlyList<KeywordRule> Rules =
+  [
+    Rule(
+      "review-and-testing",
+      "review-and-testing",
+      "review|test|validate|verify|bug|fix|audit|inspect|revis|test|valid|verific|corrij|erro|falha|auditor|inspec"
+    ),
+    Rule(
+      "software-development",
+      "software-development",
+      "implement|program|refactor|compile|build|create file|edit file|write file|write (?:some )?code|implem|program|refator|compil|crie (?:um )?arquivo|editar? (?:um )?arquivo|escrev(?:a|er) (?:um )?arquivo|escrev(?:a|er) (?:algum )?codigo"
+    ),
+    Rule(
+      "software-architecture",
+      "software-architecture",
+      "architect|architecture|service boundar|component design|system design|design pattern|arquitet|limite de servico|fronteira de servico|design de componente|desenho do sistema|padrao de projeto"
+    ),
+    Rule(
+      "documentation",
+      "documentation",
+      "document|documentation|readme|specification|technical writing|document|documentacao|especificacao|redacao tecnica"
+    ),
+    Rule(
+      "rpg-storytelling",
+      "rpg-storytelling",
+      "rpg|role.?playing|story|storytelling|character|campaign|narrative|historia|narrativa|personagem|campanha|mestre"
+    )
+  ];
 
-  public IntentionRouter(
-    IOllamaClient ollamaClient,
-    IRouterResponseParser parser,
-    ILogger<IntentionRouter> logger
-  )
-  {
-    _ollamaClient = ollamaClient;
-    _parser = parser;
-    _logger = logger;
-  }
-
-  public async Task<IntentionRoutingResult> RouteAsync(
-    Uri baseUri,
-    string routerModel,
-    ChatRequest request,
-    ProviderCallContext usageContext,
-    CancellationToken cancellationToken
-  )
-  {
-    try
-    {
-      var output = await _ollamaClient.ClassifyAsync(
-        baseUri,
-        routerModel,
-        BuildMessages(
-          request
-        ),
-        usageContext,
-        cancellationToken
-      );
-      var parsed = _parser.Parse(
-        output
-      );
-
-      if (parsed.Decision is not null)
-      {
-        return new IntentionRoutingResult(
-          parsed.Decision,
-          null,
-          null,
-          parsed.RawOutputCaptured
-        );
-      }
-
-      _logger.LogWarning(
-        "Router output was captured internally and rejected as {FailureType}.",
-        parsed.FailureType
-      );
-
-      return new IntentionRoutingResult(
-        null,
-        parsed.FailureType,
-        $"Router response rejected ({parsed.FailureType}); using general-chat fallback.",
-        parsed.RawOutputCaptured
-      );
-    }
-    catch (OllamaProviderException exception)
-    {
-      _logger.LogWarning(
-        exception,
-        "Router classification failed."
-      );
-
-      return new IntentionRoutingResult(
-        null,
-        "provider-failure",
-        $"Router classification failed: {exception.Message} Using general-chat fallback.",
-        false
-      );
-    }
-  }
-
-  private static IReadOnlyList<ChatMessage> BuildMessages(
+  public IntentionRoutingResult Route(
     ChatRequest request
   )
   {
-    var current = $"Current user request:\n{request.Message}";
-    var previousUser = request.History?
-      .LastOrDefault(
-        message => message.Role == "user"
-      )
-      ?.Content;
-
-    if (
-      IsDependentFollowUp(
-        request.Message
-      )
-      && !string.IsNullOrWhiteSpace(
-        previousUser
-      )
-    )
+    var text = Normalize(
+      RoutingText(request)
+    );
+    foreach (var rule in Rules)
     {
-      current =
-        $"Immediately previous user request (classification hint only):\n{previousUser}\n\n"
-        + current;
+      if (rule.Pattern.IsMatch(text))
+      {
+        return new IntentionRoutingResult(
+          new RouterDecision(
+            rule.Intention,
+            1,
+            $"Matched deterministic keyword rule '{rule.Id}'."
+          ),
+          rule.Id
+        );
+      }
     }
 
-    return
-    [
-      new ChatMessage(
-        "system",
-        RouterPrompt
+    return new IntentionRoutingResult(
+      new RouterDecision(
+        "general-chat",
+        1,
+        "No deterministic keyword rule matched; using general-chat."
       ),
-      new ChatMessage(
-        "user",
-        current
+      "general-chat-fallback"
+    );
+  }
+
+  private static KeywordRule Rule(
+    string id,
+    string intention,
+    string alternatives
+  )
+  {
+    return new KeywordRule(
+      id,
+      intention,
+      new Regex(
+        $"(?<![a-z0-9])(?:{alternatives})",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(50)
       )
-    ];
+    );
+  }
+
+  private static string RoutingText(
+    ChatRequest request
+  )
+  {
+    if (!IsDependentFollowUp(request.Message))
+    {
+      return request.Message;
+    }
+
+    var previousUser = request.History?.LastOrDefault(message =>
+      string.Equals(message.Role, "user", StringComparison.Ordinal)
+    )?.Content;
+    return string.IsNullOrWhiteSpace(previousUser)
+      ? request.Message
+      : previousUser + "\n" + request.Message;
   }
 
   private static bool IsDependentFollowUp(
@@ -161,24 +125,39 @@ public sealed class IntentionRouter : IIntentionRouter
       return false;
     }
 
-    var normalized = message.Trim();
+    var normalized = Normalize(message).Trim();
     return new[]
     {
       "continue",
-      "continue.",
       "continua",
-      "continue daí",
       "make it shorter",
       "shorten it",
-      "faça menor",
+      "faca menor",
       "deixe mais curto",
       "melhore isso",
       "revise isso"
-    }.Any(
-      marker => normalized.StartsWith(
-        marker,
-        StringComparison.OrdinalIgnoreCase
-      )
-    );
+    }.Any(marker => normalized.StartsWith(marker, StringComparison.Ordinal));
   }
+
+  private static string Normalize(
+    string value
+  )
+  {
+    var decomposed = value.Normalize(NormalizationForm.FormD);
+    var builder = new StringBuilder(decomposed.Length);
+    foreach (var character in decomposed)
+    {
+      if (CharUnicodeInfo.GetUnicodeCategory(character) != UnicodeCategory.NonSpacingMark)
+      {
+        builder.Append(char.ToLowerInvariant(character));
+      }
+    }
+    return builder.ToString().Normalize(NormalizationForm.FormC);
+  }
+
+  private sealed record KeywordRule(
+    string Id,
+    string Intention,
+    Regex Pattern
+  );
 }

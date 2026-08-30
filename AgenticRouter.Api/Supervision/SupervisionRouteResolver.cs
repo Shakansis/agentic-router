@@ -4,6 +4,7 @@ using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Supervision;
@@ -33,13 +34,17 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
   private readonly OllamaClient _ollama;
   private readonly IHarnessRegistry _harnesses;
   private readonly IAutoModelHarnessRoutingService _autoRoutes;
+  private readonly IIntentionRouter _intentionRouter;
+  private readonly IModelResolver _modelResolver;
 
   public SupervisionRouteResolver(
     IWorkspaceProfileService workspaces,
     ISettingsStore settings,
     OllamaClient ollama,
     IHarnessRegistry harnesses,
-    IAutoModelHarnessRoutingService autoRoutes
+    IAutoModelHarnessRoutingService autoRoutes,
+    IIntentionRouter intentionRouter,
+    IModelResolver modelResolver
   )
   {
     _workspaces = workspaces;
@@ -47,6 +52,8 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     _ollama = ollama;
     _harnesses = harnesses;
     _autoRoutes = autoRoutes;
+    _intentionRouter = intentionRouter;
+    _modelResolver = modelResolver;
   }
 
   public async Task<SupervisionRouteResolution> ResolveAsync(
@@ -81,8 +88,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     }
 
     var requestedModel = request.Model?.Trim() ?? string.Empty;
-    var useAutoRoute = request.AutoModelHarness
-      || string.IsNullOrWhiteSpace(requestedModel)
+    var useAutoModel = string.IsNullOrWhiteSpace(requestedModel)
       || string.Equals(requestedModel, "auto", StringComparison.OrdinalIgnoreCase);
     var modelReference = ProviderModelReference.Parse(requestedModel);
     if (
@@ -91,7 +97,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         && !modelReference.IsLocal
       )
       || (
-        !useAutoRoute
+        !useAutoModel
         && string.IsNullOrWhiteSpace(modelReference.ModelId)
       )
     )
@@ -186,11 +192,30 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
 
     var selectedModel = modelReference.ModelId;
     var selectedHarness = request.Harness;
-    if (useAutoRoute)
+    if (useAutoModel)
+    {
+      var routing = _intentionRouter.Route(
+        new ChatRequest(objective, "auto", [], InteractionMode: "execute")
+      );
+      var resolution = _modelResolver.Resolve(
+        settings,
+        routing.Decision.Intention,
+        installed
+      );
+      selectedModel = resolution.Model ?? throw new SupervisionException(
+        "supervision-auto-model-unavailable",
+        "supervision-route",
+        $"No installed local model could be resolved for '{routing.Decision.Intention}'.",
+        true,
+        409
+      );
+    }
+    if (request.AutoModelHarness)
     {
       var autoRoute = await _autoRoutes.RouteAsync(
         request.ClientRunId ?? request.BrowserSessionId,
         objective,
+        selectedModel,
         installed,
         cancellationToken
       );

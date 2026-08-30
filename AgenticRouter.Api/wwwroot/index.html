@@ -244,7 +244,7 @@
           <span class="active-agent-pill">
             <span class="agent-icon" aria-hidden="true">⚡</span>
             <span>Agent:</span>
-            <strong id="active-agent-label">Auto (Router)</strong>
+            <strong id="active-agent-label">Auto (Keywords)</strong>
           </span>
           <span id="active-provider-model" class="active-provider-model">
             Checking capabilities
@@ -774,14 +774,14 @@
           <section id="settings-models" class="settings-section" data-settings-section="models" tabindex="-1">
             <div class="section-heading">
               <h3>Models and routing</h3>
-              <p>The router classifies intent; each intent selects its specialist.</p>
+              <p>Deterministic keywords classify intent; each intent selects its configured specialist.</p>
             </div>
             <div class="settings-grid">
-            <label>
-              <span>Resident router model</span>
+            <label hidden>
+              <span>Legacy router model (ignored)</span>
               <select id="router-model" name="routerModel" required></select>
             </label>
-            <label>
+            <label hidden>
               <span>Router GPU</span>
               <select id="router-gpu" name="routerGpu"></select>
             </label>
@@ -841,7 +841,7 @@
                     <span>Fallback</span>
                     <select id="model-profile-fallback"></select>
                   </label>
-                  <label>
+                  <label hidden>
                     <span>Router</span>
                     <select id="model-profile-router"></select>
                   </label>
@@ -890,7 +890,7 @@
           <section id="settings-coordinator" class="settings-section" data-settings-section="coordinator" tabindex="-1">
             <div class="section-heading">
               <div class="heading-title-row">
-                <h3>Coordinator and recovery</h3>
+                <h3>Specialist recovery</h3>
                 <button
                   class="information-button"
                   type="button"
@@ -900,12 +900,12 @@
               </div>
             </div>
             <div class="settings-grid">
-            <label>
-              <span>Resident action model</span>
+            <label hidden>
+              <span>Legacy action model (ignored)</span>
               <select id="action-model" name="actionModel" required></select>
-              <small>Selects only the next tool; lightweight default: FunctionGemma 270M.</small>
+              <small>Retained only for backward-compatible settings reads.</small>
             </label>
-            <label>
+            <label hidden>
               <span>Resident GPU</span>
               <select id="action-gpu" name="actionGpu"></select>
               <small>Affinity is sent to preload and every resident call.</small>
@@ -997,6 +997,18 @@
               <h3>Local resources</h3>
               <p>Validate or install Ollama, GPU-compatible models, and optional harnesses.</p>
             </div>
+            <div class="onboarding-preferences">
+              <label>
+                <input id="show-onboarding-before-conversation" type="checkbox">
+                <span>Show the initial setup screen before new conversations</span>
+              </label>
+              <button
+                id="settings-show-onboarding-now"
+                class="secondary-button"
+                type="button"
+              >Show initial setup now</button>
+            </div>
+            <br />
             <div
               id="settings-setup-surface"
               class="setup-onboarding settings-setup-surface"

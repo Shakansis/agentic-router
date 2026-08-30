@@ -1014,104 +1014,6 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       return;
     }
 
-    if (availableTools.Contains(
-      "route_to_teacher",
-      StringComparer.Ordinal
-    ))
-    {
-      var request = messages.Last().Content;
-      await RespondWithToolCallAsync(
-        response,
-        "route_to_teacher",
-        new
-        {
-          teacher_model = request.Contains(
-            "route repair required",
-            StringComparison.OrdinalIgnoreCase
-          ) && !request.Contains(
-            "ROUTING_CORRECTION",
-            StringComparison.Ordinal
-          )
-            ? " unavailable-teacher "
-            : request.Contains(
-            "functiongemma resident contract",
-            StringComparison.OrdinalIgnoreCase
-          )
-            ? " qwen3-coder:30b "
-            : " alpha:latest ",
-          intent = request.Contains(
-            "mismatched route pair",
-            StringComparison.OrdinalIgnoreCase
-          )
-            ? " file-operations "
-            : request.Contains(
-            "functiongemma resident contract",
-            StringComparison.OrdinalIgnoreCase
-          )
-            ? " software-development "
-            : " general-chat ",
-          reason = "Selected through the trained FunctionGemma routing contract."
-        },
-        cancellationToken
-      );
-      return;
-    }
-
-    if (availableTools.Contains(
-      "explain_teacher_trace",
-      StringComparer.Ordinal
-    ))
-    {
-      await RespondWithToolCallAsync(
-        response,
-        "explain_teacher_trace",
-        new
-        {
-          reason = "The Host rejected the first invalid step using authoritative comparison facts."
-        },
-        cancellationToken
-      );
-      return;
-    }
-
-    if (availableTools.Contains(
-      "recover_teacher_trace",
-      StringComparer.Ordinal
-    ))
-    {
-      var recoveryPrompt = messages.Last().Content;
-      var failureCode = ExtractRequiredPolicyValue(
-        recoveryPrompt,
-        "failure_code"
-      );
-      var failedStep = ExtractRequiredPolicyValue(
-        recoveryPrompt,
-        "failed_step"
-      );
-      var action = ExtractRequiredPolicyValue(
-        recoveryPrompt,
-        "action"
-      );
-      var nextTool = ExtractRequiredPolicyValue(
-        recoveryPrompt,
-        "next_tool"
-      );
-      await RespondWithToolCallAsync(
-        response,
-        "recover_teacher_trace",
-        new
-        {
-          action = $" {action} ",
-          failure_code = $" {failureCode} ",
-          failed_step = $" {failedStep} ",
-          next_tool = $" {nextTool} ",
-          reason = $"Apply {action} after {failureCode}."
-        },
-        cancellationToken
-      );
-      return;
-    }
-
     if (messages.Any(
       message => message.Content.Contains(
         "SPECIALIST_TOOL_LOOP_V2",
@@ -5453,6 +5355,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.OrdinalIgnoreCase
         )
     );
+    var mixedContentAttempt = webSearchAttempt || messages.Any(
+      message => message.Role == "user"
+        && message.Content.Contains(
+          "mixed content",
+          StringComparison.OrdinalIgnoreCase
+        )
+    );
     var toolResult = messages.LastOrDefault(
       message => message.Role == "tool"
     );
@@ -5463,7 +5372,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var content = budgetFinalization
       ? "Chat completed from the eight trusted-workspace reads already collected."
       : toolResult is null
-        ? string.Empty
+        ? mixedContentAttempt
+          ? "This non-terminal preamble must never become visible."
+          : string.Empty
         : webSearchAttempt
           ? $"Chat used bounded Host web evidence. {toolResult.Content}"
         : mutationAttempt
@@ -5533,7 +5444,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         model,
         content,
         toolResult is null
-          ? webSearchAttempt
+          ? mixedContentAttempt
+            ? null
+            : webSearchAttempt
             ? "I will ask the Host for current public web evidence."
             : mutationAttempt
             ? "I will try a mutation that Chat must reject."
@@ -5571,6 +5484,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     int messageCount
   )
   {
+    if (current.Contains(
+      "TRACE_DIAGNOSTIC_INVESTIGATION_V1",
+      StringComparison.Ordinal
+    ))
+    {
+      return "Diagnostic investigation completed from sanitized Host evidence.";
+    }
+
     if (current.Contains(
       "Reply with exactly: OK",
       StringComparison.Ordinal
@@ -6148,33 +6069,6 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         done = true
       },
       cancellationToken
-    );
-  }
-
-  private static string ExtractRequiredPolicyValue(
-    string content,
-    string propertyName
-  )
-  {
-    const string marker = "REQUIRED_POLICY (copy the four typed fields exactly):\n";
-    var markerIndex = content.LastIndexOf(
-      marker,
-      StringComparison.Ordinal
-    );
-    if (markerIndex < 0)
-    {
-      throw new InvalidOperationException(
-        "FunctionGemma recovery fixture did not receive REQUIRED_POLICY."
-      );
-    }
-
-    using var document = JsonDocument.Parse(
-      content[(markerIndex + marker.Length)..]
-    );
-    return document.RootElement.GetProperty(
-      propertyName
-    ).GetString() ?? throw new InvalidOperationException(
-      $"FunctionGemma recovery fixture omitted {propertyName}."
     );
   }
 

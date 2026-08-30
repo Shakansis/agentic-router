@@ -757,7 +757,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task SavesRoutingSettingsAndChangesResidentModel()
+  public async Task SavesRoutingSettingsWithoutLoadingLegacyResidentModels()
   {
     await Page.GotoAsync(
       "/"
@@ -766,16 +766,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator(
       "[data-settings-target=\"models-routing\"]"
     ).ClickAsync();
-    await Page.Locator(
-      "#router-model"
-    ).SelectOptionAsync(
-      "beta:code"
-    );
-    await Page.Locator(
-      "#action-model"
-    ).SelectOptionAsync(
-      "command-r:latest"
-    );
     await Page.Locator(
       "[data-intention=\"documentation\"] .intention-prompt"
     ).FillAsync(
@@ -824,13 +814,13 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       )
     );
     Assert.AreEqual(
-      "beta:code",
+      "none",
       savedDocument.RootElement.GetProperty(
         "routerModel"
       ).GetString()
     );
     Assert.AreEqual(
-      "command-r:latest",
+      "none",
       savedDocument.RootElement.GetProperty(
         "actionModel"
       ).GetString()
@@ -894,23 +884,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         .GetInt32()
     );
 
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
-        request => request.Model == "router:latest"
-          && request.KeepAlive == 0
-      )
-    );
-    Assert.IsTrue(
-      _environment.FakeOllama.Requests.Any(
-        request => request.Model == "command-r:latest"
+        request => request.Messages.Count == 0
           && request.KeepAlive == -1
-          && request.ContextTokens == 8_192
-          && request.Messages.Count == 0
       )
-    );
-    CollectionAssert.Contains(
-      _environment.FakeOllama.LoadedModels.ToArray(),
-      "command-r:latest"
     );
   }
 
@@ -1664,18 +1642,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     var errors = payload.GetProperty(
       "errors"
     );
-    Assert.IsTrue(
-      errors.TryGetProperty(
-        "routerModel",
-        out _
-      )
-    );
-    Assert.IsTrue(
-      errors.TryGetProperty(
-        "actionModel",
-        out _
-      )
-    );
+    Assert.IsFalse(errors.TryGetProperty("routerModel", out _));
+    Assert.IsFalse(errors.TryGetProperty("actionModel", out _));
     Assert.IsTrue(
       errors.TryGetProperty(
         "defaultModel",
@@ -1747,22 +1715,18 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         "[data-event-type=\"router.model-resolved\"]"
       )
-    ).ToContainTextAsync(
-      "router:latest"
-    );
+    ).ToHaveCountAsync(0);
     await Expect(
       Page.Locator(
         "[data-event-type=\"router.confidence\"]"
       )
-    ).ToContainTextAsync(
-      "91%"
-    );
+    ).ToHaveCountAsync(0);
     await Expect(
       Page.Locator(
         "[data-event-type=\"router.reason\"]"
       )
     ).ToContainTextAsync(
-      "Latest user request classification"
+      "Matched deterministic keyword rule"
     );
     await Expect(
       Page.Locator(
@@ -1808,30 +1772,23 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
     var requests = _environment.FakeOllama.Requests;
     Assert.HasCount(
-      2,
+      1,
       requests
     );
     Assert.AreEqual(
-      "router:latest",
+      "docs:latest",
       requests[0].Model
     );
-    Assert.IsFalse(
+    Assert.IsTrue(
       requests[0].Stream
     );
     Assert.AreEqual(
-      "docs:latest",
-      requests[1].Model
-    );
-    Assert.IsTrue(
-      requests[1].Stream
-    );
-    Assert.AreEqual(
       "system",
-      requests[1].Messages[0].Role
+      requests[0].Messages[0].Role
     );
     Assert.HasCount(
       1,
-      requests[1].Messages.Where(
+      requests[0].Messages.Where(
         message => string.Equals(
           message.Role,
           "system",
@@ -1840,11 +1797,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       ).ToArray()
     );
     StringAssert.Contains(
-      requests[1].Messages[0].Content,
+      requests[0].Messages[0].Content,
       "CHAT_READ_ONLY_WORKSPACE_V1"
     );
     StringAssert.Contains(
-      requests[1].Messages[0].Content,
+      requests[0].Messages[0].Content,
       "The latest user instruction has priority over earlier conversational patterns. "
         + "Do not continue a previous task when the user explicitly changes the objective. "
         + "Do not claim that you executed, tested, opened, accessed, or verified something "
@@ -2659,100 +2616,36 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task MissingRouterConfidenceIsReportedAsUnavailable()
+  public async Task NoKeywordFallsBackToGeneralChatWithoutModelRouter()
   {
+    _environment.FakeOllama.Reset();
     await Page.GotoAsync(
       "/"
     );
     await SendMessageAsync(
-      "documentation with missing confidence"
-    );
-
-    var classification = Page.Locator(
-      "[data-event-type=\"router.confidence\"]"
-    );
-    await Expect(
-      classification
-    ).ToContainTextAsync(
-      "Confidence: unavailable"
-    );
-    await Expect(
-      classification
-    ).Not.ToContainTextAsync(
-      "0%"
-    );
-    await Expect(
-      Page.Locator(
-        ".assistant-answer"
-      )
-    ).ToContainTextAsync(
-      "Hello from docs:latest"
-    );
-  }
-
-  [TestMethod]
-  [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task OutOfRangeRouterConfidenceFallsBackSafely()
-  {
-    await Page.GotoAsync(
-      "/"
-    );
-    await SendMessageAsync(
-      "documentation with out of range confidence"
+      "How are you today?"
     );
 
     await Expect(
       Page.Locator(
-        "[data-event-type=\"router.warning\"]"
+        "[data-event-type=\"router.classified\"]"
       )
     ).ToContainTextAsync(
-      "invalid-confidence"
+      "general-chat"
     );
     await Expect(
       Page.Locator(
-        ".assistant-answer"
+        "[data-event-type=\"router.reason\"]"
       )
     ).ToContainTextAsync(
-      "Hello from alpha:latest"
+      "No deterministic keyword rule matched"
     );
-  }
-
-  [TestMethod]
-  [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task InvalidRouterOutputFallsBackToGeneralChat()
-  {
-    await Page.GotoAsync(
-      "/"
-    );
-    await SendMessageAsync(
-      "invalid router response"
-    );
-
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"router.warning\"]"
-      )
-    ).ToContainTextAsync(
-      "invalid-json"
-    );
-    await Expect(
-      Page.Locator(
-        ".assistant-answer"
-      )
-    ).ToContainTextAsync(
-      "Hello from alpha:latest"
-    );
-    var requests = _environment.FakeOllama.Requests;
-    Assert.HasCount(
-      2,
-      requests
-    );
+    Assert.HasCount(1, _environment.FakeOllama.Requests);
     Assert.AreEqual(
       "alpha:latest",
-      requests[1].Model
+      _environment.FakeOllama.Requests[0].Model
     );
   }
-
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LatestRequestedActionOverridesEarlierRpgTheme()
@@ -2774,24 +2667,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "software-development"
     );
-    var secondRouter = _environment.FakeOllama.Requests
-      .Where(
-        request => !request.Stream
-      )
-      .Last();
-    Assert.HasCount(
-      2,
-      secondRouter.Messages
-    );
-    StringAssert.Contains(
-      secondRouter.Messages[1].Content,
-      "Implement an HTML and JavaScript game"
-    );
     Assert.IsFalse(
-      secondRouter.Messages[1].Content.Contains(
-        "wandering mage",
-        StringComparison.Ordinal
-      )
+      _environment.FakeOllama.Requests.Any(request => request.Model == "router:latest")
     );
 
     await SendMessageAsync(
@@ -2821,47 +2698,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task RouterValidationDistinguishesZeroNegativeAndUnsupportedValues()
-  {
-    await Page.GotoAsync(
-      "/"
-    );
-    await SendMessageAsync(
-      "documentation with explicit zero confidence"
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"router.confidence\"]"
-      ).Last
-    ).ToContainTextAsync(
-      "0%"
-    );
-
-    await SendMessageAsync(
-      "documentation with negative confidence"
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"router.warning\"]"
-      ).Last
-    ).ToContainTextAsync(
-      "invalid-confidence"
-    );
-
-    await SendMessageAsync(
-      "documentation with unsupported intention"
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"router.warning\"]"
-      ).Last
-    ).ToContainTextAsync(
-      "unsupported-intention"
-    );
-  }
-
-  [TestMethod]
-  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ConversationContextIsSentOnlyAsVisibleUserAssistantHistory()
   {
     await Page.GotoAsync(
@@ -2876,33 +2712,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
     var requests = _environment.FakeOllama.Requests;
     Assert.HasCount(
-      4,
+      2,
       requests
     );
-    var secondRouter = requests[2];
-    var secondTarget = requests[3];
-    Assert.HasCount(
-      2,
-      secondRouter.Messages
-    );
-    StringAssert.Contains(
-      secondRouter.Messages[1].Content,
-      "Second message"
-    );
-    Assert.IsFalse(
-      secondRouter.Messages.Any(
-        message => message.Content.Contains(
-          "First message",
-          StringComparison.Ordinal
-        ) || message.Content.Contains(
-          "Hello from",
-          StringComparison.Ordinal
-        ) || message.Content.Contains(
-          "Router model",
-          StringComparison.Ordinal
-        )
-      )
-    );
+    var secondTarget = requests[1];
     Assert.HasCount(
       4,
       secondTarget.Messages
@@ -3704,9 +3517,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           HasText = "Router"
         }
       )
-    ).ToContainTextAsync(
-      "Loaded"
-    );
+    ).ToHaveCountAsync(0);
     await Expect(
       Page.Locator(
         ".model-diagnostic-row:has(> span:first-child:text-is(\"Default\"))"
@@ -3838,7 +3649,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ShowsRuntimeMemoryAndConfirmedResidentModel()
+  public async Task ShowsRuntimeMemoryAndReportsResidentRoutingDisabled()
   {
     var settings = await GetSettingsJsonAsync();
     settings["defaultGpu"] = "ollama:0";
@@ -3959,14 +3770,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "Total Context Window"
     );
-    await Page.Locator(
-      "#runtime-model-list .loaded-model-details > summary"
-    ).First.ClickAsync();
-    await Expect(
-      Page.Locator(
-        "#runtime-model-list .loaded-model-details-content"
-      ).First
-    ).ToContainTextAsync("router:latest");
     if (detectedOllamaGpuCount > 1)
     {
       await Page.Locator(
@@ -4019,6 +3822,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "status"
       ).GetString()
     );
+    Assert.AreEqual(
+      "disabled",
+      root.GetProperty("residentModel").GetProperty("state").GetString()
+    );
 
     var availableGpuCount = 0;
 
@@ -4051,7 +3858,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       availableGpuCount
     );
 
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.AllRequests.Any(
         request => request.Model == "router:latest"
           && request.KeepAlive == -1
@@ -4083,7 +3890,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "targetContextTokens"
       ).GetInt32()
     );
-    Assert.IsTrue(
+    Assert.IsFalse(
       profiles.GetProperty(
         "sharedModelWarnings"
       ).EnumerateArray().Any(
@@ -4172,7 +3979,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "stale"
       ).GetBoolean()
     );
-    Assert.IsTrue(
+    Assert.IsFalse(
       measurementDocument.RootElement.GetProperty(
         "priorResidentRestored"
       ).GetBoolean()
@@ -4288,7 +4095,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       }
     );
     saveResponse.EnsureSuccessStatusCode();
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "router:latest"
           && request.KeepAlive == -1
@@ -4330,12 +4137,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       await statusResponse.Content.ReadAsStringAsync()
     );
     Assert.AreEqual(
-      12_288,
-      statusDocument.RootElement.GetProperty(
-        "residentModel"
-      ).GetProperty(
-        "actualContextTokens"
-      ).GetInt32()
+      "disabled",
+      statusDocument.RootElement.GetProperty("residentModel")
+        .GetProperty("state")
+        .GetString()
     );
     _environment.FakeOllama.SetLoadedModelContext(
       "router:latest",
@@ -4394,13 +4199,13 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       }
     );
     reloadResponse.EnsureSuccessStatusCode();
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "router:latest"
           && request.KeepAlive == 0
       )
     );
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "router:latest"
           && request.KeepAlive == -1
@@ -4419,7 +4224,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         "#runtime-role-profiles"
       )
-    ).ToContainTextAsync(
+    ).Not.ToContainTextAsync(
       "Resident coordinator"
     );
     var memoryPolicy = Page.Locator(
@@ -4459,7 +4264,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task SharedCoordinatorAndSpecialistUseLargestConfiguredContext()
+  public async Task LegacyActionModelDoesNotPreloadOrCreateSharedRuntimeRole()
   {
     using var saveResponse = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
@@ -4469,7 +4274,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       }
     );
     saveResponse.EnsureSuccessStatusCode();
-    Assert.IsTrue(
+    Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Model == "alpha:latest"
           && request.KeepAlive == -1
@@ -4486,16 +4291,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       await profilesResponse.Content.ReadAsStringAsync()
     );
     Assert.IsTrue(
-      profilesDocument.RootElement.GetProperty(
-        "sharedModelWarnings"
-      ).EnumerateArray().Any(
-        warning => warning.GetProperty(
-          "model"
-        ).GetString() == "alpha:latest"
-          && warning.GetProperty(
-            "largestConfiguredTarget"
-          ).GetInt32() == 32_768
-      )
+      profilesDocument.RootElement.GetProperty("sharedModelWarnings")
+        .EnumerateArray()
+        .All(warning => !warning.GetProperty("roles").EnumerateArray().Any(role =>
+          role.GetString() is "router" or "residentCoordinator"
+        ))
     );
   }
 
@@ -4633,13 +4433,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#jump-latest"
       )
     ).ToBeVisibleAsync();
-    await Expect(
-      Page.Locator(
-        ".activity > summary"
-      )
-    ).ToContainTextAsync(
-      "Completed"
-    );
     var remainingWhilePaused = await RemainingScrollAsync();
     Assert.IsGreaterThan(
       120,
@@ -4768,7 +4561,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task MemoryPressureEvictsRetriesOnceAndRestoresResidentModel()
+  public async Task MemoryPressureScenarioDoesNotLoadOrEvictLegacyResident()
   {
     await Page.GotoAsync(
       "/"
@@ -4776,104 +4569,42 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await StartMessageAsync(
       "memory pressure recover documentation"
     );
-    await Expect(
-      Page.Locator(
-        ".activity > summary"
-      )
-    ).ToContainTextAsync(
-      "Recovered"
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(request => request.KeepAlive == 0)
     );
     await Expect(
       Page.Locator(
-        ".activity"
-      )
-    ).ToHaveAttributeAsync(
-      "open",
-      string.Empty
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"memory-pressure-detected\"]"
+        "[data-event-type^=\"resident-model-\"]"
       )
     ).ToHaveCountAsync(
-      1
-    );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"resident-model-reloaded\"]"
-      )
-    ).ToHaveCountAsync(
-      1
-    );
-
-    Assert.HasCount(
-      2,
-      _environment.FakeOllama.Requests.Where(
-        request => request.Model == "docs:latest"
-          && request.Stream
-      )
-    );
-    CollectionAssert.Contains(
-      _environment.FakeOllama.LoadedModels.ToArray(),
-      "router:latest"
-    );
-    CollectionAssert.DoesNotContain(
-      _environment.FakeOllama.LoadedModels.ToArray(),
-      "docs:latest"
+      0
     );
   }
-
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task FailedMemoryRetryDoesNotLoopAndStillRestoresResidentModel()
+  public async Task RuntimeStatusDoesNotPreloadLegacyResidentModel()
   {
-    await Page.GotoAsync(
-      "/"
-    );
-    await StartMessageAsync(
-      "memory pressure fail documentation"
-    );
-    await Expect(
-      Page.Locator(
-        ".activity > summary"
-      )
-    ).ToContainTextAsync(
-      "Failed"
-    );
-    Assert.HasCount(
-      2,
-      _environment.FakeOllama.Requests.Where(
-        request => request.Model == "docs:latest"
-          && request.Stream
-      )
-    );
-    CollectionAssert.Contains(
-      _environment.FakeOllama.LoadedModels.ToArray(),
-      "router:latest"
-    );
-  }
-
-  [TestMethod]
-  [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task MissingResidentModelIsPreloadedAgain()
-  {
+    _environment.FakeOllama.Reset();
     _environment.FakeOllama.RemoveLoadedModel(
       "router:latest"
     );
-    await WaitUntilAsync(
-      () => _environment.FakeOllama.LoadedModels.Contains(
-        "router:latest"
-      ),
-      TimeSpan.FromSeconds(
-        20
-      )
+    using var response = await _environment.HttpClient.GetAsync(
+      "api/runtime/status"
     );
-    CollectionAssert.Contains(
+    response.EnsureSuccessStatusCode();
+
+    CollectionAssert.DoesNotContain(
       _environment.FakeOllama.LoadedModels.ToArray(),
       "router:latest"
     );
+    Assert.IsFalse(
+      _environment.FakeOllama.Requests.Any(request =>
+        request.Model == "router:latest"
+          && request.Messages.Count == 0
+          && request.KeepAlive == -1
+      )
+    );
   }
-
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task TrustedWorkspaceModalValidatesPersistsAndClearsPath()
@@ -5184,6 +4915,76 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "search_text"
       },
       toolRequest.AvailableTools.ToArray()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ChatWithholdsStructuredToolPreambleAndExecutesReadOnlyCall()
+  {
+    var target = Path.Combine(
+      _environment.WorkspaceDirectory,
+      "chat-readable.txt"
+    );
+    await File.WriteAllTextAsync(
+      target,
+      "chat workspace evidence"
+    );
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "chat workspace read request with mixed content: read chat-readable.txt",
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        interactionMode = "chat",
+        harness = "native",
+        approvalPolicy = "ask",
+        browserSessionId = Guid.NewGuid().ToString("N"),
+        webSearchEnabled = false,
+        images = Array.Empty<object>()
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(
+      await response.Content.ReadAsStringAsync()
+    );
+    var answer = string.Concat(
+      events.Where(
+        item => item["type"]!.GetValue<string>() == "response.delta"
+      ).Select(
+        item => item["delta"]?.GetValue<string>() ?? string.Empty
+      )
+    );
+
+    Assert.IsTrue(
+      events.Any(
+        item => item["type"]!.GetValue<string>() == "chat.tool-preamble-withheld"
+      )
+    );
+    Assert.IsTrue(
+      events.Any(
+        item => item["type"]!.GetValue<string>() == "chat.workspace-read-completed"
+      )
+    );
+    Assert.IsFalse(
+      events.Any(
+        item => item["type"]!.GetValue<string>() == "error"
+      )
+    );
+    StringAssert.Contains(
+      answer,
+      "chat workspace evidence"
+    );
+    Assert.DoesNotContain(
+      "This non-terminal preamble must never become visible.",
+      answer
+    );
+    Assert.AreEqual(
+      "chat workspace evidence",
+      await File.ReadAllTextAsync(
+        target
+      )
     );
   }
 
@@ -7339,19 +7140,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ", ",
         specialistRequests.Select(request => $"ctx={request.ContextTokens};predict={request.PredictTokens}")
       )
-    );
-    var routerRequest = _environment.FakeOllama.Requests.First(
-      request => request.Model == "router:latest"
-        && !request.HasTools
-        && request.Messages.Count > 0
-    );
-    Assert.AreEqual(
-      8_192,
-      routerRequest.ContextTokens
-    );
-    Assert.AreEqual(
-      1_024,
-      routerRequest.PredictTokens
     );
   }
 

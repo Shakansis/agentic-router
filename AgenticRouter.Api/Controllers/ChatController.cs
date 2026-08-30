@@ -142,6 +142,7 @@ public sealed class ChatController : ControllerBase
           request.InteractionMode,
           request.Model,
           request.Images,
+          request.HideUserMessage,
           cancellationToken
         );
         _conversationSessionId = persisted?.Id
@@ -227,7 +228,11 @@ public sealed class ChatController : ControllerBase
               request.InteractionMode,
               streamEvent.SelectedModel,
               review,
-              cancellationToken
+              cancellationToken,
+              new TraceDiagnosticReference(
+                _trace.TraceId,
+                "completed"
+              )
             );
             if (persisted is not null)
             {
@@ -253,13 +258,19 @@ public sealed class ChatController : ControllerBase
           }
         }
 
-        await WriteEventAsync(
+        var writtenEvent = await WriteEventAsync(
           streamEvent with
           {
             ConversationSessionId = _conversationSessionId
           },
           cancellationToken
         );
+        if (writtenEvent.Type == "error")
+        {
+          await PersistFailureMessageAsync(
+            writtenEvent
+          );
+        }
       }
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -559,7 +570,11 @@ public sealed class ChatController : ControllerBase
               "execute",
               streamEvent.SelectedModel,
               null,
-              cancellationToken
+              cancellationToken,
+              new TraceDiagnosticReference(
+                _trace.TraceId,
+                "completed"
+              )
             );
             if (persisted is not null)
             {
@@ -994,10 +1009,58 @@ public sealed class ChatController : ControllerBase
       CurrentExecutionSummary()
     );
 
-    await WriteEventAsync(
+    var writtenEvent = await WriteEventAsync(
       streamEvent,
       cancellationToken
     );
+    await PersistFailureMessageAsync(
+      writtenEvent
+    );
+  }
+
+  private async Task PersistFailureMessageAsync(
+    ChatStreamEvent streamEvent
+  )
+  {
+    if (
+      streamEvent.Error is null
+      || string.IsNullOrWhiteSpace(_conversationSessionId)
+    )
+    {
+      return;
+    }
+
+    var diagnostic = streamEvent.Diagnostic
+      ?? new TraceDiagnosticReference(
+        _trace.TraceId,
+        "failed",
+        streamEvent.Error.DiagnosticsPersisted
+      );
+    var review = string.IsNullOrWhiteSpace(_executionSessionId)
+      ? null
+      : _executionSessions.GetReview(_executionSessionId);
+    try
+    {
+      await _persistentSessions.MarkTerminalAsync(
+        _conversationSessionId,
+        "failed",
+        review,
+        CancellationToken.None,
+        new ChatMessage(
+          "assistant",
+          $"{streamEvent.Error.Message}\nReference: {diagnostic.TraceId}",
+          DateTimeOffset.UtcNow,
+          diagnostic
+        )
+      );
+    }
+    catch (WorkspaceProfileException exception)
+    {
+      _logger.LogWarning(
+        exception,
+        "The failed conversation diagnostic reference could not be persisted."
+      );
+    }
   }
 
   private ExecutionSessionSummary? CurrentExecutionSummary()
@@ -1011,7 +1074,7 @@ public sealed class ChatController : ControllerBase
       )?.CreateSummary();
   }
 
-  private async Task WriteEventAsync(
+  private async Task<ChatStreamEvent> WriteEventAsync(
     ChatStreamEvent streamEvent,
     CancellationToken cancellationToken
   )
@@ -1056,6 +1119,22 @@ public sealed class ChatController : ControllerBase
           }
         };
       }
+      if (terminal)
+      {
+        streamEvent = streamEvent with
+        {
+          Diagnostic = new TraceDiagnosticReference(
+            _trace.TraceId,
+            streamEvent.Type switch
+            {
+              "response.completed" => "completed",
+              "request.cancelled" => "cancelled",
+              _ => "failed"
+            },
+            result.Persisted
+          )
+        };
+      }
     }
 
     var json = JsonSerializer.Serialize(
@@ -1070,5 +1149,6 @@ public sealed class ChatController : ControllerBase
     await Response.Body.FlushAsync(
       cancellationToken
     );
+    return streamEvent;
   }
 }

@@ -135,7 +135,7 @@ public sealed class JsonSettingsStore : ISettingsStore
       {
         settings = settings with
         {
-          ActionModel = "functiongemma:270m"
+          ActionModel = "none"
         };
       }
 
@@ -238,6 +238,9 @@ public sealed class JsonSettingsStore : ISettingsStore
         out _
       ) || !document.RootElement.TryGetProperty(
         "modelOrganization",
+        out _
+      ) || !document.RootElement.TryGetProperty(
+        "onboarding",
         out _
       ) || !hasProviderContext
         || !document.RootElement.GetProperty(

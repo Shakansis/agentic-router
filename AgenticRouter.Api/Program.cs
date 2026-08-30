@@ -193,7 +193,6 @@ builder.Services.AddSingleton<IPersistentSessionStore, PersistentSessionStore>()
 builder.Services.AddSingleton<IPersistentSessionService, PersistentSessionService>();
 builder.Services.AddSingleton<ISupervisionCheckpointStore, SupervisionCheckpointStore>();
 builder.Services.AddSingleton<IMarkdownRenderer, SafeMarkdownRenderer>();
-builder.Services.AddSingleton<IRouterResponseParser, RouterResponseParser>();
 builder.Services.AddScoped<IIntentionRouter, IntentionRouter>();
 builder.Services.AddScoped<IModelResolver, ModelResolver>();
 builder.Services.AddScoped<IConversationContextBuilder, ConversationContextBuilder>();
@@ -218,7 +217,6 @@ builder.Services.AddSingleton<IGitRepositoryService, GitRepositoryService>();
 builder.Services.AddSingleton<IGitDeliveryService, GitDeliveryService>();
 builder.Services.AddScoped<IWorkspaceGitActionService, WorkspaceGitActionService>();
 builder.Services.AddScoped<ILocalActionPlanner, LocalActionPlanner>();
-builder.Services.AddScoped<IFunctionGemmaResidentProtocol, FunctionGemmaResidentProtocol>();
 builder.Services.AddSingleton<IPlanningFailureClassifier, PlanningFailureClassifier>();
 builder.Services.AddSingleton<IToolProtocolConformanceService, ToolProtocolConformanceService>();
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
@@ -415,25 +413,17 @@ builder.Services.AddSingleton<
   IBenchmarkEnvironmentSnapshotProvider,
   BenchmarkEnvironmentSnapshotProvider
 >();
-builder.Services.AddSingleton<
-  IResidentCoordinationEligibilityService,
-  ResidentCoordinationEligibilityService
->();
-builder.Services.AddSingleton<ResidentModelManager>();
-builder.Services.AddSingleton<IResidentModelManager>(
-  services => services.GetRequiredService<ResidentModelManager>()
-);
 builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
   services => new OllamaRuntimeProfileService(
     dataDirectory,
     services.GetRequiredService<ISettingsStore>(),
     services.GetRequiredService<IOllamaClient>(),
-    services.GetRequiredService<IResidentModelManager>(),
+    services.GetRequiredService<IModelRequestTracker>(),
     services.GetRequiredService<IGpuMemoryMetricsProvider>(),
     services.GetRequiredService<ISystemMemoryMetricsProvider>()
   )
 );
-builder.Services.AddHostedService<SafeResidentModelHostedService>();
+builder.Services.AddSingleton<IModelRequestTracker, ModelRequestTracker>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
 builder.Services.AddScoped<ChatStreamService>();
 builder.Services.AddScoped<IChatStreamService>(

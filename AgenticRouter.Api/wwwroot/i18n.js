@@ -82,6 +82,8 @@
       "setup.action_started": "{resource} setup started. Availability will update automatically.",
       "setup.model_started": "{resource} download started.",
       "setup.refresh_failed": "Local setup status could not be refreshed.",
+      "setup.continue": "Continue to chat",
+      "setup.hide_before_conversations": "Do not show before new conversations",
       "empty.ready_title": "Ready to chat",
       "empty.ready_description": "Use Auto to classify intent and choose the configured model."
     })

@@ -706,6 +706,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         },
         ["path", "query"]
       ),
+      DiagnosticTraceCapability.ToolDefinition,
       WebSearchCapability.ToolDefinition,
       Tool(
         "create_file",

@@ -23,7 +23,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
   private readonly string _storePath;
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
-  private readonly IResidentModelManager _residentModel;
+  private readonly IModelRequestTracker _requestTracker;
   private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly ISystemMemoryMetricsProvider _systemMemory;
   private readonly SemaphoreSlim _measurementGate = new(
@@ -35,7 +35,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     string dataDirectory,
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
-    IResidentModelManager residentModel,
+    IModelRequestTracker requestTracker,
     IGpuMemoryMetricsProvider gpuMemory,
     ISystemMemoryMetricsProvider systemMemory
   )
@@ -47,7 +47,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     );
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
-    _residentModel = residentModel;
+    _requestTracker = requestTracker;
     _gpuMemory = gpuMemory;
     _systemMemory = systemMemory;
   }
@@ -331,7 +331,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       );
     }
 
-    if (_residentModel.HasActiveRequests)
+    if (_requestTracker.HasActiveRequests)
     {
       throw new OllamaRuntimeProfileException(
         "reload-blocked-by-active-request",
@@ -462,12 +462,9 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         gpuBefore,
         ramBefore
       );
-      var residentEvicted = false;
       long? minimalRequestMilliseconds = null;
       OllamaRunningModel? measured = null;
       var loadStopwatch = Stopwatch.StartNew();
-      using var requestLease = _residentModel.BeginRequest();
-
       try
       {
         if (
@@ -479,14 +476,6 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
             baseUri,
             installed.Name,
             0,
-            cancellationToken
-          );
-        }
-
-        if (priorTarget is null)
-        {
-          residentEvicted = await _residentModel.EvictForRecoveryAsync(
-            installed.Name,
             cancellationToken
           );
         }
@@ -615,7 +604,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
 
         return new OllamaRuntimeMeasurementResult(
           measurement,
-          true,
+          false,
           targetWasLoaded
         );
       }
@@ -659,13 +648,6 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
             );
           }
 
-          if (residentEvicted)
-          {
-            await _residentModel.RestoreAfterRecoveryAsync(
-              installed.Name,
-              CancellationToken.None
-            );
-          }
         }
         catch (Exception exception)
         {
@@ -1128,16 +1110,6 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
   )
   {
     var values = new List<ConfiguredModelRole>();
-    AddConfigured(
-      values,
-      settings.RouterModel,
-      OllamaRuntimeRoleIds.Router
-    );
-    AddConfigured(
-      values,
-      settings.ActionModel,
-      OllamaRuntimeRoleIds.ResidentCoordinator
-    );
     AddConfigured(
       values,
       settings.CoordinatorModel,

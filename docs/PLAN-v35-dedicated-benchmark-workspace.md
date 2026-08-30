@@ -3,7 +3,8 @@
 ## Goal
 
 Replace the Benchmark CRUD modal with a dedicated main application view based
-on `benchmark_modal_example.html`. Keep the existing benchmark behavior and
+on the original benchmark modal visual spike (removed after the production UI
+superseded it). Keep the existing benchmark behavior and
 provide an explicit route back to the conversation view.
 
 ## Smallest complete change

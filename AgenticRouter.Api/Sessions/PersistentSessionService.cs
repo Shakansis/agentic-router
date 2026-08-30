@@ -32,6 +32,7 @@ public interface IPersistentSessionService
     string interactionMode,
     string? model,
     IReadOnlyList<ChatImageAttachment>? images,
+    bool hidden,
     CancellationToken cancellationToken
   );
 
@@ -41,14 +42,16 @@ public interface IPersistentSessionService
     string interactionMode,
     string? model,
     ExecutionSessionReview? review,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    TraceDiagnosticReference? diagnostic = null
   );
 
   Task MarkTerminalAsync(
     string? sessionId,
     string state,
     ExecutionSessionReview? review,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    ChatMessage? terminalMessage = null
   );
 
   Task<ConversationSessionRecord> ResumeAsync(
@@ -399,6 +402,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string interactionMode,
     string? model,
     IReadOnlyList<ChatImageAttachment>? images,
+    bool hidden,
     CancellationToken cancellationToken
   )
   {
@@ -533,7 +537,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
               message,
               images
             ),
-            updatedAt
+            updatedAt,
+            Hidden: hidden
           )
         ).ToArray()
       };
@@ -579,7 +584,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string interactionMode,
     string? model,
     ExecutionSessionReview? review,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    TraceDiagnosticReference? diagnostic = null
   )
   {
     if (string.IsNullOrWhiteSpace(
@@ -652,7 +658,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
         new ChatMessage(
           "assistant",
           answer,
-          updatedAt
+          updatedAt,
+          diagnostic
         )
       ).ToArray(),
       ExecutionReviews = bounded is null
@@ -681,7 +688,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string? sessionId,
     string state,
     ExecutionSessionReview? review,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    ChatMessage? terminalMessage = null
   )
   {
     if (string.IsNullOrWhiteSpace(
@@ -736,6 +744,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
         State = state,
         Interrupted = state == "interrupted",
         UpdatedAt = DateTimeOffset.UtcNow,
+        Messages = AppendTerminalMessage(
+          session.Messages,
+          terminalMessage
+        ),
         ExecutionReviews = MergeReview(
           session.ExecutionReviews,
           bounded
@@ -748,6 +760,29 @@ public sealed class PersistentSessionService : IPersistentSessionService
       limits.MaxSessionBytes,
       cancellationToken
     );
+  }
+
+  private static IReadOnlyList<ChatMessage> AppendTerminalMessage(
+    IReadOnlyList<ChatMessage> messages,
+    ChatMessage? terminalMessage
+  )
+  {
+    if (terminalMessage is null)
+    {
+      return messages;
+    }
+
+    var traceId = terminalMessage.Diagnostic?.TraceId;
+    if (
+      traceId is not null
+      && messages.LastOrDefault()?.Diagnostic?.TraceId is { } lastTraceId
+      && string.Equals(traceId, lastTraceId, StringComparison.Ordinal)
+    )
+    {
+      return messages;
+    }
+
+    return messages.Append(terminalMessage).ToArray();
   }
 
   public async Task<ConversationSessionRecord> ResumeAsync(
@@ -1245,6 +1280,16 @@ public sealed class PersistentSessionService : IPersistentSessionService
         message => message.Role is not "user" and not "assistant"
           || string.IsNullOrWhiteSpace(
             message.Content
+          )
+          || (
+            message.Hidden
+            && (
+              message.Role != "user"
+              || !message.Content.StartsWith(
+                "TRACE_DIAGNOSTIC_INVESTIGATION_V1",
+                StringComparison.Ordinal
+              )
+            )
           )
       )
       || (

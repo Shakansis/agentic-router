@@ -991,6 +991,7 @@ public sealed class ExecutionSession
   private string _completionStatus = "not-evaluated";
   private string? _forcedCompletionStatus;
   private ExecutionRoutingEvidence? _routingEvidence;
+  private string? _authorizedDiagnosticTraceId;
 
   public ExecutionSession(
     string id,
@@ -1049,6 +1050,28 @@ public sealed class ExecutionSession
   public string? ConformanceIdentity { get; private set; }
 
   public string? HandoffReason { get; private set; }
+
+  public void AuthorizeDiagnosticTrace(string? traceId)
+  {
+    lock (_gate)
+    {
+      _authorizedDiagnosticTraceId = string.IsNullOrWhiteSpace(traceId)
+        ? null
+        : traceId;
+    }
+  }
+
+  public bool IsDiagnosticTraceAuthorized(string traceId)
+  {
+    lock (_gate)
+    {
+      return string.Equals(
+        _authorizedDiagnosticTraceId,
+        traceId,
+        StringComparison.Ordinal
+      );
+    }
+  }
 
   public string State { get; private set; } = "running";
 
@@ -1739,7 +1762,7 @@ public sealed class ExecutionSession
   }
 
   public void RecordCoordinationMetadata(
-    string residentModel,
+    string? residentModel,
     string? conformanceIdentity,
     string? handoffReason
   )

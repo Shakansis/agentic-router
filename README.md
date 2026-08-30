@@ -16,7 +16,8 @@ when required by the filesystem).
 `0.9.18_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
-or Settings > Local resources.
+or Settings > Local resources. The initial setup screen appears before new
+conversations by default and can be disabled or reopened from Local resources.
 
 The public distribution repository contains only this README, the evaluation
 license, its referenced screenshots, and downloadable release assets. Source code, development
@@ -57,8 +58,8 @@ separate future feature and is not claimed by this release.
 The application follows a flexible pipeline that adapts to available hardware:
 
 1. **User Request**: User sends a prompt (e.g., "Create a dialogue for the tavern keeper based on campaign history")
-2. **Intent Classification**: Router model analyzes the text to identify the user's intent
-3. **Intent Detection**: Router identifies the intent (e.g., "rpg-storytelling") and triggers the appropriate expert
+2. **Intent Classification**: Ordered local keyword rules identify the user's intent without an inference call
+3. **Intent Detection**: The deterministic router selects an intent (e.g., "rpg-storytelling") and its configured expert
 4. **Model Resolution**: System resolves the target model based on configuration precedence
 5. **Device Resolution**: System selects the appropriate device (auto, specific GPU, or CPU-only)
 6. **Provider Connection**: Application connects to Ollama Local or an enabled cloud provider through the provider registry
@@ -174,7 +175,6 @@ Execute mode includes a safe Git workflow for committing changes:
 /
   AGENTS.md                    # Project mission and architectural rules
   README.md                    # This file
-  layout-example.html          # Visual reference for UI design
   AgenticRouter.slnx           # Solution file
   AgenticRouter.Api/
     Controllers/               # HTTP endpoints (Chat, Settings, Models, Devices, Execute, Git, etc.)
@@ -198,9 +198,9 @@ Execute mode includes a safe Git workflow for committing changes:
       ProviderDispatchClient.cs
       ProviderHealth.cs
     Contracts/                 # Typed request/response contracts
-    Runtime/                   # GPU/memory metrics, resident model management, context profiles
+    Runtime/                   # GPU/memory metrics, request tracking, context profiles
       OllamaRuntimeProfileService.cs
-      ResidentModelManager.cs
+      ModelRequestTracker.cs
       RuntimeStatusService.cs
     Usage/                     # Token usage analytics, pricing, reconciliation
       UsageLedger.cs
@@ -220,7 +220,8 @@ Execute mode includes a safe Git workflow for committing changes:
     data/                      # Local JSON configuration store
   tests/
     AgenticRouter.EndToEndTests/
-      ChatEndToEndTests.cs     # E2E test scenarios
+      ExecuteCoreEndToEndTests.cs # Core browser/API Execute scenarios
+      ProviderAndUiEndToEndTests.cs # Provider and browser UI scenarios
       FakeOllamaServer.cs      # Test double for Ollama
       FakeCloudProviderServer.cs # Test double for cloud providers
       TestEnvironment.cs       # Test setup utilities
@@ -297,8 +298,6 @@ The application is designed to work with any hardware configuration:
 Configuration is stored in a local JSON file in the `data/` directory. The application supports:
 
 - Ollama base URL
-- Router model selection
-- Action model selection (lightweight resident tool coordinator, default: `functiongemma:270m`)
 - Coordinator model selection (on-demand fallback for Execute)
 - Global default expert model
 - Global default device (or `auto`)
@@ -318,8 +317,8 @@ Default intents include:
 - `review-and-testing`
 
 The **Advanced** settings section can export and atomically import a portable
-`agentic-router.yaml` backup. It includes the Ollama connection, router,
-coordinator, default and intent models, GPU choices, system prompts, context,
+`agentic-router.yaml` backup. It includes the Ollama connection, coordinator,
+default and intent models, GPU choices, system prompts, context,
 runtime, execution, retention, project-awareness, and Git-delivery limits.
 Ollama runtime role profiles, memory headroom, and exact model/digest overrides
 are portable too. Workspace paths, conversations, validation commands,
@@ -331,10 +330,6 @@ Model roles use only `primary` and `fallback`:
 ```yaml
 schema_version: 1
 models:
-  router:
-    primary: qwen3:1.7b
-  action:
-    primary: functiongemma:270m
   coordinator:
     primary: qwen3-coder:30b
   software-development:
@@ -353,21 +348,19 @@ same operations are available at `GET /api/settings/yaml` and
 ### Ollama runtime context and memory profiles
 
 Local Ollama requests use native `/api/chat` with a Host-selected `num_ctx`.
-Profiles are resolved per router, resident coordinator, specialist, primary,
-fallback, benchmark, model-test, web-search-synthesis, and vision role. An
+Profiles are resolved per specialist, primary, fallback, benchmark, model-test,
+web-search-synthesis, and vision role. An
 optional override applies only to one exact local model ID and digest. The
 provider context and model-declared context remain hard ceilings.
 
-The resident coordinator defaults to 8,192 context tokens and is considered
-ready only after `/api/ps` confirms the exact model and `context_length`.
 Request fit reserves output and accounts for bounded messages, tool state, and
 image overhead. It grows only through the configured discrete context ladder.
 
 `GET /api/runtime/profiles` exposes policy and evidence.
 `POST /api/runtime/profiles/analyze` reads metadata without loading a model.
 `POST /api/runtime/profiles/measure` requires explicit permission because it
-loads a real model; it is blocked during active requests and restores prior
-resident state. Measured records stay local under
+loads a real model and restores the measured target's prior loaded state when
+possible. Measured records stay local under
 `data/runtime-profiles/ollama-model-memory.json` and are never included in
 portable YAML.
 
@@ -583,39 +576,22 @@ Only `response.delta` contributes to the visible assistant answer. Routing, mode
 
 The following are explicitly out of scope unless a later approved specification requests them:
 
-**For Chat Mode:**
-- Autonomous agents, recursive delegation, agent graphs, planning graphs, or approval gates
-- Workflow builders, persistent/background job queues, schedulers, or background job systems
-- Hugging Face training pipelines, fine-tuning, LoRA, dataset preparation, or tokenizer management
-- RAG, embeddings, vector databases, document ingestion, or knowledge bases
-- Custom GPU schedulers or VRAM allocation engines (delegated to provider)
-- Databases, repository patterns, event buses, CQRS, MediatR, or microservices
-- Authentication, accounts, teams, permissions, billing, telemetry platforms, installers, auto-update, or release infrastructure
-- Image generation
-- Persistent chat history across application restarts
+The current product deliberately excludes:
 
-**For Execute Mode:**
-- Shell interpreters, command chaining, or unrestricted filesystem access
-- MCP tools, plugins, or function calling beyond the registered tool set
-- Recursive delegation or autonomous agent graphs
-- Background job systems or long-running processes
-- Custom GPU schedulers or VRAM allocation engines (delegated to provider)
-- Remote code execution or network access beyond HTTP provider calls
-- Authentication, accounts, teams, permissions, billing, telemetry platforms, installers, auto-update, or release infrastructure
+- unrestricted filesystem or operating-system access;
+- recursive autonomous delegation and unsupervised agent graphs;
+- background schedulers or distributed execution;
+- automatic model downloads without an explicit user action;
+- authentication, billing, telemetry platforms, installers, and auto-update;
+- custom GPU scheduling beyond provider-managed device selection;
+- frontend frameworks and JavaScript build pipelines;
+- destructive Git history rewriting.
 
-**Note**: Remote model providers beyond Ollama are not implemented in v1, but the architecture leaves clean extension points for future HTTP-based providers (OpenAI, Anthropic, etc.).
+Bounded Host capabilities, approved process execution, conversation persistence,
+optional cloud providers, and the harness MCP bridge are implemented product
+behavior and are therefore not listed as non-goals.
 
-## 🔮 Future Vision
-
-The specification document describes a broader vision involving:
-
-- **Hugging Face Ecosystem Integration**: Datasets for data collection, Tokenizers for text processing, Transformers for training and inference
-- **Fine-Tuning with LoRA**: Efficient parameter adaptation for custom RPG universes
-- **Custom GPU Scheduling**: Advanced VRAM management and model caching strategies
-
-These capabilities require separate specifications and are not implemented in the current version. The current implementation focuses on the core routing and inference pipeline using Ollama as the provider.
-
-## � Key Architectural Insights
+## Key Architectural Insights
 
 ### GPU-Agnostic Design
 

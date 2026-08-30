@@ -40,16 +40,6 @@ public sealed class SettingsValidator : ISettingsValidator
 
     ValidateRequiredModel(
       errors,
-      "routerModel",
-      settings.RouterModel
-    );
-    ValidateRequiredModel(
-      errors,
-      "actionModel",
-      settings.ActionModel
-    );
-    ValidateRequiredModel(
-      errors,
       "coordinatorModel",
       settings.CoordinatorModel
     );
@@ -177,18 +167,6 @@ public sealed class SettingsValidator : ISettingsValidator
       "defaultGpu",
       settings.DefaultGpu,
       false
-    );
-    ValidateGpuSelection(
-      errors,
-      "routerGpu",
-      settings.RouterGpu,
-      true
-    );
-    ValidateGpuSelection(
-      errors,
-      "actionGpu",
-      settings.ActionGpu,
-      true
     );
     ValidateGpuSelection(
       errors,
@@ -321,20 +299,6 @@ public sealed class SettingsValidator : ISettingsValidator
       List<(string Gpu, string Field)>
     >(
       StringComparer.OrdinalIgnoreCase
-    );
-    AddGpuAssignment(
-      assignments,
-      settings.RouterModel,
-      settings.RouterGpu,
-      "routerGpu",
-      settings.DefaultGpu
-    );
-    AddGpuAssignment(
-      assignments,
-      settings.ActionModel,
-      settings.ActionGpu,
-      "actionGpu",
-      settings.DefaultGpu
     );
     AddGpuAssignment(
       assignments,
