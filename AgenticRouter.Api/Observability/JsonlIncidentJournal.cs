@@ -89,80 +89,88 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
   {
     ValidateTraceId(traceId);
     var policy = (await _settings.GetAsync(cancellationToken)).Incidents;
-    if (!Directory.Exists(_directory))
+    await _gate.WaitAsync(cancellationToken);
+    try
     {
-      return null;
-    }
-
-    var matches = new List<IncidentEvent>();
-    long bytes = 0;
-    var truncated = false;
-    var malformed = 0;
-    foreach (var file in EnumerateFilesNewestFirst())
-    {
-      using var reader = new StreamReader(file.FullName, Encoding.UTF8, true, 4_096);
-      while (await reader.ReadLineAsync(cancellationToken) is { } line)
+      if (!Directory.Exists(_directory))
       {
-        if (!line.Contains(traceId, StringComparison.Ordinal))
-        {
-          continue;
-        }
+        return null;
+      }
 
-        bytes += Encoding.UTF8.GetByteCount(line);
-        if (matches.Count >= policy.BrowserMaximumEvents || bytes > policy.BrowserMaximumBytes)
+      var matches = new List<IncidentEvent>();
+      long bytes = 0;
+      var truncated = false;
+      var malformed = 0;
+      foreach (var file in EnumerateFilesNewestFirst())
+      {
+        using var reader = new StreamReader(file.FullName, Encoding.UTF8, true, 4_096);
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
-          truncated = true;
-          continue;
-        }
-
-        try
-        {
-          var item = JsonSerializer.Deserialize<IncidentEvent>(line, JsonOptions);
-          if (item is not null && string.Equals(item.TraceId, traceId, StringComparison.Ordinal))
+          if (!line.Contains(traceId, StringComparison.Ordinal))
           {
-            matches.Add(item);
+            continue;
+          }
+
+          bytes += Encoding.UTF8.GetByteCount(line);
+          if (matches.Count >= policy.BrowserMaximumEvents || bytes > policy.BrowserMaximumBytes)
+          {
+            truncated = true;
+            continue;
+          }
+
+          try
+          {
+            var item = JsonSerializer.Deserialize<IncidentEvent>(line, JsonOptions);
+            if (item is not null && string.Equals(item.TraceId, traceId, StringComparison.Ordinal))
+            {
+              matches.Add(item);
+            }
+          }
+          catch (JsonException)
+          {
+            malformed++;
           }
         }
-        catch (JsonException)
-        {
-          malformed++;
-        }
       }
-    }
 
-    if (matches.Count == 0)
+      if (matches.Count == 0)
+      {
+        return null;
+      }
+
+      matches.Sort((left, right) => left.Sequence.CompareTo(right.Sequence));
+      var failure = matches.LastOrDefault(item => item.Status == "failed");
+      var last = matches[^1];
+      var context = matches.LastOrDefault(item => item.ContextFit is not null)?.ContextFit;
+      var completed = matches.Any(item => item.Completed == true);
+      var review = matches.Any(item => item.ReviewAvailable == true);
+      return new IncidentTraceReport(
+        traceId,
+        failure is not null ? "failed" : completed ? "completed" : last.Status,
+        failure?.Code,
+        failure?.Stage,
+        failure?.Provider ?? last.Provider,
+        failure?.Model ?? last.Model,
+        matches.LastOrDefault(item => item.Coordinator is not null)?.Coordinator,
+        matches.LastOrDefault(item => item.ExecutionPath is not null)?.ExecutionPath,
+        context,
+        completed,
+        review,
+        truncated,
+        matches.Count,
+        matches,
+        completed
+          ? "Review the terminal execution summary and retained artifacts."
+          : review
+            ? "Open the execution review before deciding whether to retry."
+            : "Use the failure code and context arithmetic to choose a different execution path.",
+        malformed
+      );
+    }
+    finally
     {
-      return null;
+      _gate.Release();
     }
-
-    matches.Sort((left, right) => left.Sequence.CompareTo(right.Sequence));
-    var failure = matches.LastOrDefault(item => item.Status == "failed");
-    var last = matches[^1];
-    var context = matches.LastOrDefault(item => item.ContextFit is not null)?.ContextFit;
-    var completed = matches.Any(item => item.Completed == true);
-    var review = matches.Any(item => item.ReviewAvailable == true);
-    return new IncidentTraceReport(
-      traceId,
-      failure is not null ? "failed" : completed ? "completed" : last.Status,
-      failure?.Code,
-      failure?.Stage,
-      failure?.Provider ?? last.Provider,
-      failure?.Model ?? last.Model,
-      matches.LastOrDefault(item => item.Coordinator is not null)?.Coordinator,
-      matches.LastOrDefault(item => item.ExecutionPath is not null)?.ExecutionPath,
-      context,
-      completed,
-      review,
-      truncated,
-      matches.Count,
-      matches,
-      completed
-        ? "Review the terminal execution summary and retained artifacts."
-        : review
-          ? "Open the execution review before deciding whether to retry."
-          : "Use the failure code and context arithmetic to choose a different execution path.",
-      malformed
-    );
   }
 
   private string SelectWritableFile(long maximumBytes, int incomingBytes)

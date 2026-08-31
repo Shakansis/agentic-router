@@ -1,9 +1,40 @@
-# Agentic Router v0.9.18 alpha
+# Agentic Router v0.9.19 alpha
 
-This alpha closes the automatic Web Search, persistent exact-command permission,
-and Linux x64 release package. Web availability now follows the effective route
-without a manual toggle, useful native harness capabilities remain available,
-and an explicitly approved process command can be remembered for one workspace.
+This alpha removes the obsolete resident-model execution path and makes the
+selected model + harness the direct owner of Chat and Execute reasoning. It also
+stabilizes mixed-content Chat tool calls and refreshes the project/session UI for
+the next large implementation cycle.
+
+## Direct routing and simpler runtime
+
+- Replaces router-model inference with deterministic Portuguese/English keyword
+  classification while preserving the configured intent model and session route.
+- Selects the harness from exact-model benchmark evidence, aggregate evidence,
+  or the deterministic Native fallback; an Auto model selection therefore does
+  not erase useful harness rankings.
+- Removes FunctionGemma resident loading, coordination, takeover, and recovery
+  from active paths. Compatibility settings remain readable, but the selected
+  model + harness now owns the turn without a hidden second model.
+- Removes generated Claude runtime state and obsolete prototypes/scripts while
+  retaining historical validation evidence and versioned compatibility fields.
+
+## Reliable Chat tool rounds
+
+- Accepts valid structured tool calls even when a provider emits incidental
+  assistant preamble in the same generation round.
+- Withholds that ungrounded preamble, executes the canonical Host-validated tool,
+  and publishes only the final grounded answer once tool use is complete.
+- Preserves typed protocol failures for genuinely malformed or ambiguous calls
+  instead of weakening Host validation.
+
+## Projects, sessions, and Execute presentation
+
+- Improves project/session persistence, navigation, search, rename/archive flows,
+  and compact Git actions while keeping the active workspace explicit.
+- Refines the docked composer, optional execution plan, context accounting, and
+  approval presentation without making a plan mandatory for ordinary actions.
+- Expands deterministic browser/API coverage for routing, session lifecycle,
+  navigation, Execute review, and the corrected Chat tool protocol.
 
 ## Trace self-investigation
 
@@ -14,9 +45,18 @@ and an explicitly approved process command can be remembered for one workspace.
   analysis without filling the composer or retrying the failed objective.
 - Successful turns expose no investigation shortcut; the user can copy the trace
   ID and request a later analysis explicitly.
+- Serializes journal reads with append/rotation work so an immediate investigation
+  cannot collide with the active JSONL writer on Windows.
 - Removes the final unreachable resident-recovery branch from direct Execute.
   Recovery stays on the selected model + harness unless the user makes a new
   routing decision; Host-owned recovery checkpoints and bounded retries remain.
+
+# Agentic Router v0.9.18 alpha
+
+This alpha closes the automatic Web Search, persistent exact-command permission,
+and Linux x64 release package. Web availability now follows the effective route
+without a manual toggle, useful native harness capabilities remain available,
+and an explicitly approved process command can be remembered for one workspace.
 
 ## Automatic Web Search
 

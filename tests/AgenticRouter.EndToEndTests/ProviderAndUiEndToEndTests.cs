@@ -15,6 +15,7 @@ using Microsoft.Playwright.MSTest;
 namespace AgenticRouter.EndToEndTests;
 
 [TestClass]
+[DoNotParallelize]
 public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAndUiEndToEndTests>
 {
   [TestMethod]
@@ -3769,7 +3770,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.18_alpha"
+      "v0.9.19_alpha"
     );
     await Expect(
       Page.Locator(
@@ -3872,16 +3873,26 @@ baselineTotal!.Value
     var configuration = new DirectoryInfo(
       AppContext.BaseDirectory
     ).Parent?.Name ?? "Debug";
-    var executablePath = Path.Combine(
-      _environment.RepositoryRoot,
-      "AgenticRouter.Api",
-      "bin",
-      configuration,
-      "net10.0",
-      OperatingSystem.IsWindows()
-        ? "AgenticRouter.Api.exe"
-        : "AgenticRouter.Api"
+    var executablePath = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_API_PATH"
     );
+    if (string.IsNullOrWhiteSpace(executablePath))
+    {
+      executablePath = Path.Combine(
+        _environment.RepositoryRoot,
+        "AgenticRouter.Api",
+        "bin",
+        configuration,
+        "net10.0",
+        OperatingSystem.IsWindows()
+          ? "AgenticRouter.Api.exe"
+          : "AgenticRouter.Api"
+      );
+    }
+    else
+    {
+      executablePath = Path.GetFullPath(executablePath);
+    }
     var output = new StringBuilder();
     var processStartInfo = new ProcessStartInfo
     {
@@ -3922,9 +3933,11 @@ baselineTotal!.Value
       }
     };
 
+    var processStarted = false;
     try
     {
       Assert.IsTrue(process.Start());
+      processStarted = true;
       process.BeginOutputReadLine();
       process.BeginErrorReadLine();
 
@@ -4015,7 +4028,7 @@ baselineTotal!.Value
     }
     finally
     {
-      if (!process.HasExited)
+      if (processStarted && !process.HasExited)
       {
         process.Kill(entireProcessTree: true);
         await process.WaitForExitAsync();
@@ -4881,46 +4894,48 @@ baselineTotal!.Value
     ).ToHaveClassAsync(
       new Regex("active")
     );
+    var activeProjectMarker = secondProject.Locator(
+      ".project-active-marker"
+    );
     await Expect(
-      secondProject.Locator(
-        ".project-active-marker"
-      )
+      activeProjectMarker
     ).ToBeVisibleAsync();
     await Expect(
       secondProject.Locator(
         ".project-icon"
       )
     ).ToBeVisibleAsync();
-    var projectVisuals = await secondProject.EvaluateAsync<string[]>(
-      """
-      element => {
-        const summary = element.querySelector(":scope > summary");
-        const marker = element.querySelector(".project-active-marker");
-        return [
-          getComputedStyle(element).backgroundColor,
-          getComputedStyle(summary).backgroundColor,
-          getComputedStyle(summary, "::before").content,
-          getComputedStyle(marker).backgroundColor,
-          String(summary.getBoundingClientRect().height)
-        ];
-      }
-      """
+    var secondProjectSummary = secondProject.Locator(
+      ":scope > summary"
     );
-    CollectionAssert.AreEqual(
-      new[]
-      {
-        "rgb(26, 27, 34)",
-        "rgb(30, 32, 41)",
-        "\"›\"",
-        "rgb(85, 200, 148)"
-      },
-      projectVisuals.Take(4).ToArray()
+    await Expect(
+      secondProject
+    ).ToHaveCSSAsync(
+      "background-color",
+      "rgb(26, 27, 34)"
+    );
+    await Expect(
+      secondProjectSummary
+    ).ToHaveCSSAsync(
+      "background-color",
+      "rgb(30, 32, 41)"
+    );
+    Assert.AreEqual(
+      "\"›\"",
+      await secondProjectSummary.EvaluateAsync<string>(
+        "element => getComputedStyle(element, '::before').content"
+      )
+    );
+    await Expect(
+      activeProjectMarker
+    ).ToHaveCSSAsync(
+      "background-color",
+      "rgb(85, 200, 148)"
     );
     Assert.IsGreaterThanOrEqualTo(
       42,
-      double.Parse(
-        projectVisuals[4],
-        System.Globalization.CultureInfo.InvariantCulture
+      await secondProjectSummary.EvaluateAsync<double>(
+        "element => element.getBoundingClientRect().height"
       )
     );
     await Expect(
