@@ -6,6 +6,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Knowledge;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Observability;
@@ -189,6 +190,9 @@ builder.Services.AddSingleton<IWorkspaceProfileStore>(
   )
 );
 builder.Services.AddSingleton<IWorkspaceProfileService, WorkspaceProfileService>();
+builder.Services.AddSingleton<IKnowledgeProvider, AnythingLlmKnowledgeProvider>();
+builder.Services.AddSingleton<IKnowledgeProviderRegistry, KnowledgeProviderRegistry>();
+builder.Services.AddScoped<IKnowledgeContextService, KnowledgeContextService>();
 builder.Services.AddSingleton<IPersistentSessionStore, PersistentSessionStore>();
 builder.Services.AddSingleton<IPersistentSessionService, PersistentSessionService>();
 builder.Services.AddSingleton<ISupervisionCheckpointStore, SupervisionCheckpointStore>();

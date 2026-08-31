@@ -7780,6 +7780,22 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task BrowserCompletedTurnShowsTraceWithoutInvestigationAction()
   {
+    await Page.AddInitScriptAsync(
+      """
+      Object.defineProperty(
+        navigator,
+        "clipboard",
+        {
+          configurable: true,
+          value: {
+            writeText: async text => {
+              window.__copiedTraceId = text;
+            }
+          }
+        }
+      );
+      """
+    );
     await Page.GotoAsync("/");
     await SelectFixtureModelAsync("alpha:latest");
     await SendMessageAsync("Completed trace presentation.");
@@ -7787,6 +7803,18 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var assistant = Page.Locator(".message.assistant").Last;
     await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Completed");
     await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Trace:");
+    var traceCopy = assistant.Locator(".activity-trace-copy");
+    await Expect(traceCopy).ToBeVisibleAsync();
+    await Expect(traceCopy).ToHaveAccessibleNameAsync("Copy trace ID");
+    var details = assistant.Locator(".activity");
+    await Expect(details).Not.ToHaveAttributeAsync("open", "");
+    await traceCopy.ClickAsync();
+    await Expect(traceCopy).ToHaveAccessibleNameAsync("Trace ID copied");
+    var copiedTrace = await Page.EvaluateAsync<string>(
+      "() => window.__copiedTraceId"
+    );
+    StringAssert.StartsWith(copiedTrace, "0H");
+    await Expect(details).Not.ToHaveAttributeAsync("open", "");
     await Expect(assistant.Locator(".trace-diagnostic-actions")).ToHaveCountAsync(0);
   }
 

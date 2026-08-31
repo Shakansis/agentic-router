@@ -42,6 +42,10 @@ predate the direct selected-specialist runtime. The current replacement is
   results do not generalize to a different model digest, provider, or harness.
 - `validation/` is generated/raw audit evidence. Preserve it as historical input;
   do not rewrite old outcomes to match current behavior.
+- [`v0.10.0-real-acceptance.md`](v0.10.0-real-acceptance.md) records the
+  user-observed AnythingLLM and overnight integrated-project acceptance for the
+  current alpha while keeping deterministic, Benchmark, cloud, and Linux
+  evidence categories separate.
 
 ## Open cleanup decisions
 

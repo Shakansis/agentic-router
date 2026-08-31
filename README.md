@@ -2,18 +2,23 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.9.19_alpha - direct selected-specialist routing, deterministic intent classification, reliable Chat tool rounds, improved project/session navigation, and Windows/Linux x64 portable releases from one shared core. This remains evaluation software.
+**Current Status**: v0.10.0_alpha - project-scoped AnythingLLM retrieval, direct selected-specialist routing, supervised Execute, improved project/session navigation, and Windows/Linux x64 portable releases from one shared core. This remains evaluation software.
 
 ## Download
 
-Portable Windows and Linux x64 builds are published in the
-[Agentic Router Releases](https://github.com/Shakansis/agentic-router-releases/releases)
-repository. Download the archive and its `.sha256` file. On Windows, extract
-the ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
+| Current version | Platform | Package | Checksum |
+| --- | --- | --- | --- |
+| `v0.10.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-win-x64.zip.sha256) |
+| `v0.10.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-linux-x64.tar.gz.sha256) |
+
+[View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
+
+Download the archive and its matching `.sha256` file. On Windows, extract the
+ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.9.19_alpha` is a pre-release intended for evaluation. The package is
+`0.10.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
@@ -433,6 +438,22 @@ must confirm that upload for the current browser session and provider. History
 stores only bounded attachment metadata with a `missing-attachment` marker;
 image bytes and cloud-upload approvals are never persisted.
 
+### Project Knowledge / RAG
+
+Agentic Router can use AnythingLLM as an optional project-scoped knowledge
+source. Configure the AnythingLLM server and developer API key in the selected
+project, choose one or more AnythingLLM workspaces, and explicitly enable
+Knowledge/RAG for that project. The key is protected by the platform secret
+store and is never returned to the browser after saving.
+
+Before an enabled turn, Agentic Router performs bounded vector retrieval and
+injects relevant chunks into its own managed context. AnythingLLM remains
+responsible for documents, embeddings, chunking, indexing, and vector storage;
+it never owns Agentic Router generation, routing, model selection, execution,
+security, or persistence. Disabling Knowledge/RAG preserves the configured
+provider and libraries. Retrieval failure is visible in activity evidence and
+does not terminate an otherwise valid turn.
+
 ## 🎮 Usage
 
 ### Interface Overview
@@ -445,7 +466,8 @@ The application provides a clean, dark-themed interface with real-time status mo
 - **Sidebar Status**: Shows Ollama connection status, available local models, detected graphics devices, trusted workspace, authoritative Git state, token usage, and clickable cloud usage
 - **Chat Workspace**: Main conversation area with streaming responses
 - **Model Selector**: Choose "Auto" for intent-based routing or select a specific model
-- **Workspace Manager**: Uses collapsible sections for saved workspaces, local history, project profile, and validation profile; the `+` action reveals the new-workspace form only when needed
+- **Projects and conversations**: Groups bounded conversation history by project, provides direct new-chat and project-edit actions, and keeps the active workspace explicit
+- **Focused project settings**: Shows profile, optional AnythingLLM Knowledge/RAG, local history, and validation settings for only the selected project
 - **Collapsible Activity**: Routing and inference details in expandable panels
 - **Recent Conversations**: Shows saved sessions for the active workspace and supports explicit resume
 - **Git Panel**: Shows repository overview and bounded current-session, working-tree, staged, and last-commit diffs
@@ -461,7 +483,7 @@ Click the "Configurações" button to access the configuration interface:
 - **General Settings**: Ollama URL, default model, default GPU, runtime limits, and local-resource preferences
 - **Intent Configuration**: Per-intent model overrides, device preferences, and system prompts
 - **Model Selection**: Choose from installed Ollama models for each intent
-- **Workspace and Git Summaries**: Opens the trusted-workspace, history, validation, and read-only Git configuration surfaces
+- **Workspace and Git Summaries**: Opens the trusted-workspace, project Knowledge/RAG, history, validation, and read-only Git configuration surfaces
 - **Portable YAML**: Import, copy, download, and restore global configuration without exporting workspace-local or conversation data
 
 ### Sending a Message

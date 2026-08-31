@@ -47,6 +47,14 @@ public interface IWorkspaceProfileService
     CancellationToken cancellationToken
   );
 
+  Task<WorkspaceProfileView> SetKnowledgeAsync(
+    string id,
+    bool enabled,
+    string? providerId,
+    IReadOnlyList<string>? libraryIds,
+    CancellationToken cancellationToken
+  );
+
   Task UpdateProjectProfileAsync(
     ProjectProfile profile,
     CancellationToken cancellationToken
@@ -524,6 +532,71 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
     );
   }
 
+  public Task<WorkspaceProfileView> SetKnowledgeAsync(
+    string id,
+    bool enabled,
+    string? providerId,
+    IReadOnlyList<string>? libraryIds,
+    CancellationToken cancellationToken
+  )
+  {
+    var normalizedProvider = providerId?.Trim();
+    var normalizedLibraries = libraryIds?.Where(
+      id => !string.IsNullOrWhiteSpace(id)
+    ).Select(id => id.Trim())
+      .Distinct(StringComparer.Ordinal)
+      .ToArray();
+    if (
+      normalizedLibraries is { Length: > 20 }
+      || normalizedLibraries?.Any(
+        library => library.Length > 200
+          || library.Any(character => char.IsControl(character))
+      ) == true
+    )
+    {
+      throw new WorkspaceProfileException(
+        "workspace-knowledge-invalid",
+        "workspace-knowledge-settings",
+        "Select at most 20 valid knowledge libraries.",
+        false
+      );
+    }
+    return UpdateAsync(
+      id,
+      profile =>
+      {
+        var effectiveProvider = normalizedProvider ?? profile.Knowledge.ProviderId;
+        var effectiveLibraries = normalizedLibraries ?? profile.Knowledge.LibraryIds;
+        if (
+          enabled
+          && (
+            string.IsNullOrWhiteSpace(effectiveProvider)
+            || effectiveLibraries.Count == 0
+          )
+        )
+        {
+          throw new WorkspaceProfileException(
+            "workspace-knowledge-incomplete",
+            "workspace-knowledge-settings",
+            "Enabled project knowledge requires a provider and at least one selected library.",
+            false
+          );
+        }
+
+        return profile with
+        {
+          Knowledge = new ProjectKnowledgeSettings
+          {
+            Enabled = enabled,
+            ProviderId = effectiveProvider,
+            LibraryIds = effectiveLibraries
+          }
+        };
+      },
+      cancellationToken
+    );
+  }
+
   public async Task UpdateProjectProfileAsync(
     ProjectProfile profile,
     CancellationToken cancellationToken
@@ -938,7 +1011,8 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
           permission.WorkingDirectory,
           permission.CreatedAt
         )
-      ).ToArray()
+      ).ToArray(),
+      profile.Knowledge
     );
   }
 }

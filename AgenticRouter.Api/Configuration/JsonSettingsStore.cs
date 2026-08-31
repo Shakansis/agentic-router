@@ -237,6 +237,9 @@ public sealed class JsonSettingsStore : ISettingsStore
         "cloudProviders",
         out _
       ) || !document.RootElement.TryGetProperty(
+        "knowledgeProviders",
+        out _
+      ) || !document.RootElement.TryGetProperty(
         "modelOrganization",
         out _
       ) || !document.RootElement.TryGetProperty(

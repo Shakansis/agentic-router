@@ -51,6 +51,19 @@ internal static class HarnessConversationPromptBuilder
       }
     }
 
+    if (request.ManagedContext is not null)
+    {
+      foreach (var managedContext in request.ManagedContext.Where(
+        context => !string.IsNullOrWhiteSpace(context)
+      ))
+      {
+        builder.Append('\n')
+          .Append("Agentic Router managed context for this turn:\n")
+          .Append(managedContext.Trim())
+          .Append('\n');
+      }
+    }
+
     var conversation = request.Conversation;
     var synchronizedThrough = synchronizedThroughVersion ?? 0;
     if (

@@ -50,6 +50,8 @@ public sealed record ApplicationSettings
 
   public WebSearchSettings WebSearch { get; init; } = new();
 
+  public KnowledgeProvidersSettings KnowledgeProviders { get; init; } = new();
+
   public ModelOrganizationSettings ModelOrganization { get; init; } = new();
 
   public OnboardingSettings Onboarding { get; init; } = new();
@@ -91,6 +93,27 @@ public sealed record WebSearchSettings
   public int MaxResults { get; init; } = 5;
 
   public int TimeoutSeconds { get; init; } = 15;
+}
+
+public sealed record KnowledgeProvidersSettings
+{
+  public int MaxContextCharacters { get; init; } = 24_000;
+
+  public AnythingLlmKnowledgeSettings AnythingLlm { get; init; } = new();
+}
+
+public sealed record AnythingLlmKnowledgeSettings
+{
+  public string BaseUrl { get; init; } = "http://localhost:3001";
+
+  public string? SecretReference { get; init; }
+
+  public int TopN { get; init; } = 4;
+
+  public double ScoreThreshold { get; init; } = 0.25;
+
+  public int TimeoutSeconds { get; init; } = 10;
+
 }
 
 public sealed record CloudProvidersSettings

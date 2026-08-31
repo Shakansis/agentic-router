@@ -21,6 +21,400 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
   [TestMethod]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AnythingLlmRetrievalIsProjectScopedRetrievalOnlyAndFailOpen()
+  {
+    const string apiKey = "anything-secret-test";
+    using (var configured = await _environment.HttpClient.PutAsJsonAsync(
+      "api/knowledge-providers/anythingllm/connection",
+      new
+      {
+        baseUrl = $"{_environment.FakeCloud.BaseUrl}/anythingllm/",
+        apiKey
+      }
+    ))
+    {
+      configured.EnsureSuccessStatusCode();
+      var payload = await configured.Content.ReadAsStringAsync();
+      Assert.IsFalse(payload.Contains(apiKey, StringComparison.Ordinal));
+      using var document = JsonDocument.Parse(payload);
+      var provider = document.RootElement.GetProperty("providers")[0];
+      Assert.IsTrue(provider.GetProperty("availability").GetProperty("available").GetBoolean());
+      Assert.HasCount(2, provider.GetProperty("libraries").EnumerateArray().ToArray());
+      StringAssert.Contains(
+        document.RootElement.GetProperty("installation")
+          .GetProperty("embeddingRecommendation")
+          .GetString()!,
+        "embedder"
+      );
+    }
+
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (var selected = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/knowledge",
+      new
+      {
+        enabled = true,
+        providerId = "anythingllm",
+        libraryIds = new[]
+        {
+          "project-handbook"
+        }
+      }
+    ))
+    {
+      selected.EnsureSuccessStatusCode();
+    }
+
+    var retrieved = await PostChatStreamAsync(
+      "What is the project codename?",
+      "alpha:latest",
+      "browser-knowledge-retrieved"
+    );
+    StringAssert.Contains(retrieved, "knowledge.context-retrieved");
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Role == "system"
+            && message.Content.Contains(
+              "AR_KNOWLEDGE_CONTEXT_V1",
+              StringComparison.Ordinal
+            )
+            && message.Content.Contains(
+              "The project codename is Kestrel.",
+              StringComparison.Ordinal
+            )
+        )
+      )
+    );
+    var vectorRequest = _environment.FakeCloud.Requests.Single(
+      request => request.Path.EndsWith(
+        "/project-handbook/vector-search",
+        StringComparison.Ordinal
+      )
+    );
+    Assert.AreEqual("Bearer anything-secret-test", vectorRequest.Authorization);
+    StringAssert.Contains(vectorRequest.Body, "\"topN\":4");
+    Assert.IsFalse(
+      _environment.FakeCloud.Requests.Any(
+        request => request.Path.Contains("/chat", StringComparison.Ordinal)
+      )
+    );
+
+    var harnessStream = await PostChatStreamAsync(
+      "What is the project codename through Codex?",
+      "alpha:latest",
+      "browser-knowledge-codex",
+      interactionMode: "execute",
+      harness: "codex",
+      approvalPolicy: "auto"
+    );
+    StringAssert.Contains(harnessStream, "knowledge.context-retrieved");
+    StringAssert.Contains(harnessStream, "response.completed");
+    var codexPromptPath = Path.Combine(
+      _environment.DataDirectory,
+      "codex-runtime",
+      "fake-app-server-turn-input.txt"
+    );
+    await WaitUntilAsync(
+      () => File.Exists(codexPromptPath),
+      TimeSpan.FromSeconds(5)
+    );
+    var codexPrompt = await File.ReadAllTextAsync(codexPromptPath);
+    StringAssert.Contains(codexPrompt, "Agentic Router managed context for this turn:");
+    StringAssert.Contains(codexPrompt, "AR_KNOWLEDGE_CONTEXT_V1");
+    StringAssert.Contains(codexPrompt, "The project codename is Kestrel.");
+
+    var priorVectorRequests = _environment.FakeCloud.Requests.Count(
+      request => request.Path.EndsWith("/vector-search", StringComparison.Ordinal)
+    );
+    using (var disabled = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/knowledge",
+      new
+      {
+        enabled = false,
+        providerId = (string?)null,
+        libraryIds = (string[]?)null
+      }
+    ))
+    {
+      disabled.EnsureSuccessStatusCode();
+      using var document = JsonDocument.Parse(
+        await disabled.Content.ReadAsStringAsync()
+      );
+      var knowledge = document.RootElement.GetProperty("knowledge");
+      Assert.IsFalse(knowledge.GetProperty("enabled").GetBoolean());
+      Assert.AreEqual("anythingllm", knowledge.GetProperty("providerId").GetString());
+      Assert.AreEqual(
+        "project-handbook",
+        knowledge.GetProperty("libraryIds")[0].GetString()
+      );
+    }
+    var disabledStream = await PostChatStreamAsync(
+      "Configured does not mean enabled.",
+      "alpha:latest",
+      "browser-knowledge-disabled"
+    );
+    Assert.IsFalse(
+      disabledStream.Contains(
+        "knowledge.context-retrieved",
+        StringComparison.Ordinal
+      )
+    );
+    Assert.AreEqual(
+      priorVectorRequests,
+      _environment.FakeCloud.Requests.Count(
+        request => request.Path.EndsWith("/vector-search", StringComparison.Ordinal)
+      )
+    );
+
+    using (var enabledAgain = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/knowledge",
+      new
+      {
+        enabled = true,
+        providerId = (string?)null,
+        libraryIds = (string[]?)null
+      }
+    ))
+    {
+      enabledAgain.EnsureSuccessStatusCode();
+    }
+    var failed = await PostChatStreamAsync(
+      "fail-knowledge and continue",
+      "alpha:latest",
+      "browser-knowledge-failed"
+    );
+    StringAssert.Contains(failed, "knowledge.retrieval-failed");
+    StringAssert.Contains(failed, "response.completed");
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ProjectKnowledgeUiConfiguresLibrariesPreservesDisabledSelectionAndPreparesExecute()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-workspace").ClickAsync();
+    await Expect(
+      Page.Locator("#workspace-profile-list .workspace-profile-entry.active")
+    ).ToHaveCountAsync(1);
+    await Page.Locator("#knowledge-section").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Page.Locator("#knowledge-base-url").FillAsync(
+      $"{_environment.FakeCloud.BaseUrl}/anythingllm/"
+    );
+    await Page.Locator("#knowledge-api-key").FillAsync("anything-secret-ui");
+    await Page.Locator("#save-knowledge-connection").ClickAsync();
+    await Expect(Page.Locator("#knowledge-provider-status")).ToContainTextAsync(
+      "available"
+    );
+    var library = Page.Locator(
+      "#knowledge-library-list input[value=\"project-handbook\"]"
+    );
+    await library.CheckAsync();
+    await Page.Locator("#knowledge-enabled").CheckAsync();
+    await Expect(Page.Locator("#knowledge-save-status")).ToContainTextAsync(
+      "enabled"
+    );
+
+    await Page.Locator("#cancel-workspace").ClickAsync();
+    await Page.Locator("#open-workspace").ClickAsync();
+    await Page.Locator("#knowledge-section").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(Page.Locator("#knowledge-enabled")).ToBeCheckedAsync();
+    library = Page.Locator(
+      "#knowledge-library-list input[value=\"project-handbook\"]"
+    );
+    await Expect(library).ToBeCheckedAsync();
+
+    await Page.Locator("#knowledge-enabled").UncheckAsync();
+    await Expect(Page.Locator("#knowledge-save-status")).ToContainTextAsync(
+      "selection preserved"
+    );
+    await Expect(library).ToBeCheckedAsync();
+
+    await Page.Locator("#prepare-knowledge-setup").ClickAsync();
+    await Expect(Page.Locator("#workspace-dialog")).ToBeHiddenAsync();
+    await Expect(Page.Locator("[data-mode=\"execute\"]")).ToHaveAttributeAsync(
+      "aria-pressed",
+      "true"
+    );
+    await Expect(Page.Locator("#message-input")).ToHaveValueAsync(
+      new Regex("Install or start AnythingLLM")
+    );
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ProjectCardStartsConversationAndEditorTargetsOnlySelectedProject()
+  {
+    var firstWorkspaceId = await ActiveWorkspaceIdAsync();
+    var secondPath = _environment.CreateWorkspaceDirectory(
+      $"project-editor-{Guid.NewGuid():N}"
+    );
+    using var createdResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Focused Project Editor",
+        path = secondPath
+      }
+    );
+    createdResponse.EnsureSuccessStatusCode();
+    using var createdDocument = JsonDocument.Parse(
+      await createdResponse.Content.ReadAsStringAsync()
+    );
+    var secondWorkspaceId = createdDocument.RootElement.GetProperty("id")
+      .GetString()!;
+
+    await Page.GotoAsync("/");
+    if (await Page.Locator("body").EvaluateAsync<bool>(
+      "element => element.classList.contains('sidebar-collapsed')"
+    ))
+    {
+      await Page.Locator("#toggle-sidebar").ClickAsync();
+    }
+    var activeProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{firstWorkspaceId}\"]"
+    );
+    var newConversation = activeProject.Locator(
+      ":scope > summary > .project-new-chat-button"
+    );
+    await Expect(newConversation).ToBeVisibleAsync();
+    await Expect(newConversation).ToHaveAccessibleNameAsync(
+      new Regex("New conversation in")
+    );
+    var menuControl = activeProject.Locator(
+      ":scope > summary > .project-menu-button"
+    );
+    var activeMarker = activeProject.Locator(
+      ":scope > summary .project-active-marker"
+    );
+    await Expect(menuControl).ToBeVisibleAsync();
+    await Expect(activeMarker).ToBeVisibleAsync();
+    var chatLeft = await newConversation.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().left"
+    );
+    var menuPosition = await menuControl.EvaluateAsync<double[]>(
+      "element => { const box = element.getBoundingClientRect(); return [box.left, box.top]; }"
+    );
+    var markerTop = await activeMarker.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().top"
+    );
+    Assert.IsLessThan(menuPosition[0], chatLeft);
+    Assert.IsLessThan(menuPosition[1], markerTop);
+
+    var selectedProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{secondWorkspaceId}\"]"
+    );
+    await selectedProject.Locator(
+      ":scope > summary > .project-menu-button"
+    ).ClickAsync();
+    var activationResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        $"/api/workspaces/{secondWorkspaceId}/activate",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await activationResponse;
+
+    var editor = Page.Locator("#workspace-dialog");
+    await Expect(editor).ToBeVisibleAsync();
+    await Expect(editor).ToHaveAttributeAsync("data-mode", "project");
+    await Expect(Page.Locator("#workspace-dialog-title")).ToHaveTextAsync(
+      "Focused Project Editor"
+    );
+    await Expect(Page.Locator("#workspace-dialog-path")).ToHaveTextAsync(
+      secondPath
+    );
+    await Expect(Page.Locator("#saved-workspaces-section")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#workspace-profile-list")).ToBeHiddenAsync();
+    var projectSections = editor.Locator(".project-settings-section");
+    await Expect(projectSections).ToHaveCountAsync(4);
+    var editorWidth = await editor.EvaluateAsync<double>(
+      "element => element.getBoundingClientRect().width"
+    );
+    Assert.IsLessThanOrEqualTo(740, editorWidth);
+    var visualOrder = await projectSections.EvaluateAllAsync<string[]>(
+      """
+      sections => sections
+        .map(section => ({
+          title: section.querySelector("summary").textContent.trim(),
+          top: section.getBoundingClientRect().top
+        }))
+        .sort((left, right) => left.top - right.top)
+        .map(section => section.title)
+      """
+    );
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "Project profile",
+        "Knowledge / RAG",
+        "Local history",
+        "Validation profile"
+      },
+      visualOrder
+    );
+    await Expect(Page.Locator("#project-profile-details .project-profile-row"))
+      .ToHaveCountAsync(4);
+    var switchGeometry = await Page.Locator(
+      "#knowledge-enabled"
+    ).EvaluateAsync<double[]>(
+      """
+      element => {
+        const box = element.getBoundingClientRect();
+        return [box.width, box.height];
+      }
+      """
+    );
+    Assert.IsGreaterThanOrEqualTo(32, switchGeometry[0]);
+    Assert.IsGreaterThanOrEqualTo(18, switchGeometry[1]);
+    await Expect(Page.Locator("#history-usage .history-metric"))
+      .ToHaveCountAsync(4);
+    if (await Page.Locator("#validation-empty-state").IsVisibleAsync())
+    {
+      await Page.Locator("#add-validation-step-empty").ClickAsync();
+      await Expect(Page.Locator("#validation-steps .validation-step-editor"))
+        .ToHaveCountAsync(1);
+      await Expect(Page.Locator("#validation-empty-state")).ToBeHiddenAsync();
+    }
+    var sectionIntegrity = await projectSections.EvaluateAllAsync<bool[]>(
+      """
+      sections => sections.map(section =>
+        section.getBoundingClientRect().height + 1 >= section.scrollHeight)
+      """
+    );
+    Assert.IsTrue(sectionIntegrity.All(value => value));
+    await Expect(
+      Page.Locator(
+        $".project-accordion[data-workspace-id=\"{secondWorkspaceId}\"]"
+      )
+    ).ToHaveClassAsync(new Regex("active"));
+
+    await Page.Locator("#close-workspace").ClickAsync();
+    var activeNewConversation = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{secondWorkspaceId}\"]"
+    ).Locator(":scope > summary > .project-new-chat-button");
+    await Expect(activeNewConversation).ToBeVisibleAsync();
+    var newSessionResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        "/api/sessions/new",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await activeNewConversation.ClickAsync();
+    await newSessionResponse;
+    await Expect(Page.Locator(".message")).ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task InitialSetupAppearsForLegacyReadyInstallUntilUserOptsOut()
   {
     var legacy = JsonNode.Parse(
@@ -3770,7 +4164,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.9.19_alpha"
+      "v0.10.0_alpha"
     );
     await Expect(
       Page.Locator(

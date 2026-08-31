@@ -1,3 +1,59 @@
+# Agentic Router v0.10.0 alpha
+
+This alpha adds optional project-scoped knowledge retrieval through AnythingLLM
+and completes the focused project-management experience. AnythingLLM remains a
+retrieval-only provider: Agentic Router still owns routing, model and harness
+selection, context construction, generation, execution, security, and
+persistence.
+
+## Knowledge / RAG
+
+- Adds a generic knowledge-provider boundary and one implementation for
+  AnythingLLM without coupling Chat or Projects to provider DTOs.
+- Detects AnythingLLM availability, protects the developer API key, lists
+  available workspaces, and retrieves bounded relevant chunks through vector
+  search before inference.
+- Lets each project select libraries and explicitly enable or disable retrieval.
+  Disabling RAG preserves its provider and library selection; configuration by
+  itself never activates retrieval.
+- Injects retrieved context into both Native Chat and external-harness Execute
+  turns while preventing AnythingLLM from owning generation or routing.
+- Emits typed retrieval activity and fails open when the optional knowledge
+  service is unavailable, so an AnythingLLM failure does not terminate an
+  otherwise valid turn.
+- Exposes Execute-compatible installation guidance and recommends a small CPU
+  embedder without silently installing a model or creating a privileged
+  installer path.
+
+## Projects and diagnostics
+
+- Opens one selected project in a focused 720-pixel editor instead of mixing all
+  projects with truncated settings.
+- Reworks profile, Knowledge/RAG, local-history, and validation sections into
+  structured cards with the same accessible switch treatment used by Benchmark.
+- Adds a new-conversation action directly to every available project while
+  keeping the active-project indicator visually separate.
+- Makes successful trace IDs directly copyable and retains error investigation
+  as an error-only action.
+
+## Validation
+
+- Passes the complete deterministic Playwright/API gate: 371 passed, zero
+  failed, and zero skipped.
+- Verifies both portable artifacts contain no diagnostics, tests, fake-provider
+  assets, secrets, or local application data. Windows Production HTTP and Linux
+  WSL package/runtime/setup/port-fallback smokes pass separately.
+- Adds deterministic browser/API coverage for AnythingLLM health,
+  authentication, library selection, retrieval-only behavior, Native and Codex
+  context injection, explicit disablement, preserved selection, and fail-open
+  recovery.
+- Adds focused UI regression coverage for project targeting, card sizing and
+  order, switches, history metrics, validation empty state, and direct project
+  conversation creation.
+- Records user-reported real AnythingLLM acceptance across three knowledge
+  questions and an overnight integrated 15-step project run. Manual Benchmark
+  Lab acceptance remains separate from that evidence.
+
 # Agentic Router v0.9.19 alpha
 
 This alpha removes the obsolete resident-model execution path and makes the

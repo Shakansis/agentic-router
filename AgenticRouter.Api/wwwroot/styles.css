@@ -251,6 +251,107 @@ body.resizing-sidebar {
 
 .workspace-section-shell {
   position: relative;
+  flex: 0 0 auto;
+}
+
+.workspace-dialog[data-mode="project"] .workspace-manager-section,
+.workspace-dialog[data-mode="project"] #new-workspace-section {
+  display: none;
+}
+
+.workspace-dialog[data-mode="project"] .workspace-sections {
+  gap: 24px;
+  padding: 24px;
+}
+
+.workspace-dialog[data-mode="project"] .dialog-header {
+  padding: 20px 24px;
+}
+
+.workspace-dialog[data-mode="project"] .dialog-header h2 {
+  margin-top: 3px;
+  font-size: 18px;
+}
+
+.workspace-dialog[data-mode="project"] #workspace-dialog-eyebrow {
+  color: var(--subtle);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.workspace-dialog[data-mode="project"] #workspace-dialog-path {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.workspace-dialog[data-mode="project"] .profile-settings-card {
+  order: 1;
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-settings-card {
+  order: 2;
+}
+
+.workspace-dialog[data-mode="project"] .history-settings-card {
+  order: 3;
+}
+
+.workspace-dialog[data-mode="project"] .validation-settings-card {
+  order: 4;
+}
+
+.workspace-dialog[data-mode="project"] .project-settings-section > .workspace-accordion {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--sidebar));
+}
+
+.workspace-dialog[data-mode="project"] .project-settings-section > .workspace-accordion > summary {
+  min-height: 60px;
+  padding: 15px 20px;
+  border-bottom: 1px solid transparent;
+  background: color-mix(in srgb, var(--panel-raised) 68%, var(--panel));
+  font-size: 14px;
+}
+
+.workspace-dialog[data-mode="project"] .project-settings-section > .workspace-accordion[open] > summary {
+  border-bottom-color: var(--border);
+}
+
+.workspace-dialog[data-mode="project"] .project-settings-section > .workspace-accordion > summary::before {
+  font-size: 15px;
+}
+
+.workspace-dialog[data-mode="project"] .project-settings-section .workspace-section-panel {
+  margin: 0;
+  padding: 20px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.workspace-dialog[data-mode="project"] .workspace-section-actions {
+  top: 17px;
+  right: 16px;
+}
+
+.workspace-dialog[data-mode="project"] .history-settings-card .workspace-section-actions {
+  display: none;
+}
+
+.workspace-dialog[data-mode="project"] .dialog-footer {
+  padding: 14px 24px;
+  background: color-mix(in srgb, var(--panel) 48%, var(--sidebar));
+}
+
+#workspace-dialog-path {
+  max-width: min(72vw, 760px);
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workspace-section-actions {
@@ -356,6 +457,65 @@ body.resizing-sidebar {
 
 .history-toggle input {
   width: auto;
+}
+
+.project-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.project-switch input[type="checkbox"] {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  min-height: 20px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 34px;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: var(--border-strong);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent);
+  cursor: pointer;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.project-switch input[type="checkbox"]::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 78%, var(--panel));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  content: "";
+  transition: transform 140ms ease, background-color 140ms ease;
+}
+
+.project-switch input[type="checkbox"]:checked {
+  background: color-mix(in srgb, var(--accent) 84%, #1f6eaa);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 68%, white 10%);
+}
+
+.project-switch input[type="checkbox"]:checked::before {
+  background: color-mix(in srgb, white 82%, var(--text));
+  transform: translateX(14px);
+}
+
+.project-switch input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.project-switch:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .status-heading {
@@ -1546,6 +1706,29 @@ p {
 
 .activity[open] > summary::before {
   transform: rotate(90deg);
+}
+
+.activity-trace-copy {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 2px;
+  cursor: copy;
+}
+
+.activity-trace-copy:hover,
+.activity-trace-copy:focus-visible {
+  color: var(--text);
+  text-decoration-color: currentColor;
+}
+
+.activity-trace-copy.copied {
+  color: #89d185;
 }
 
 .activity-list {
@@ -3202,6 +3385,12 @@ p {
   max-height: 95dvh;
 }
 
+.settings-dialog.workspace-dialog[data-mode="project"] {
+  width: min(720px, calc(100vw - 32px));
+  height: auto;
+  max-height: 90dvh;
+}
+
 .workspace-project-header {
   display: flex;
   gap: 12px;
@@ -3217,6 +3406,122 @@ p {
   font-size: 12px;
 }
 
+.project-profile-details {
+  display: grid;
+  gap: 0;
+}
+
+.project-profile-row {
+  display: grid;
+  min-height: 38px;
+  grid-template-columns: minmax(110px, 0.55fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.project-profile-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.project-profile-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+  text-align: right;
+}
+
+.project-profile-badge {
+  width: fit-content;
+  justify-self: end;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--muted);
+  background: var(--panel-raised);
+}
+
+.knowledge-editor,
+.knowledge-editor label {
+  display: grid;
+  gap: 8px;
+}
+
+.knowledge-editor label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.knowledge-heading-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.knowledge-heading-actions,
+.knowledge-editor .knowledge-heading-actions .history-toggle {
+  display: flex;
+  align-items: center;
+}
+
+.knowledge-heading-actions {
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.knowledge-editor .knowledge-heading-actions .history-toggle {
+  grid-template-columns: none;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.knowledge-heading-row p {
+  margin: 4px 0 0;
+}
+
+.knowledge-connection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.knowledge-libraries {
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.knowledge-libraries legend {
+  padding: 0 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.knowledge-library-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+
+.knowledge-library-list label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  grid-template-columns: none;
+}
+
+.knowledge-library-list span {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .validation-profile-editor {
   display: grid;
   gap: 10px;
@@ -3228,6 +3533,187 @@ p {
   gap: 5px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.validation-empty-state {
+  display: grid;
+  min-height: 118px;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: 22px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--bg) 48%, transparent);
+  text-align: center;
+}
+
+.validation-empty-state[hidden] {
+  display: none;
+}
+
+.validation-empty-state p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.validation-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.history-metric {
+  display: grid;
+  gap: 5px;
+}
+
+.history-metric span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-metric strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.workspace-dialog[data-mode="project"] .profile-settings-card #project-profile-summary {
+  display: none;
+}
+
+.workspace-dialog[data-mode="project"] .profile-settings-card > details > summary {
+  padding-right: 112px;
+}
+
+.workspace-dialog[data-mode="project"] #refresh-project-profile {
+  position: absolute;
+  z-index: 4;
+  top: 14px;
+  right: 20px;
+}
+
+.workspace-dialog[data-mode="project"] .history-settings-card > details > summary,
+.workspace-dialog[data-mode="project"] .knowledge-settings-card > details > summary {
+  padding-right: 190px;
+}
+
+.workspace-dialog[data-mode="project"] .history-settings-card .project-switch,
+.workspace-dialog[data-mode="project"] .knowledge-settings-card .project-switch {
+  position: absolute;
+  z-index: 4;
+  top: 20px;
+  right: 20px;
+}
+
+.workspace-dialog[data-mode="project"] .local-history-data .workspace-project-header {
+  display: block;
+}
+
+.workspace-dialog[data-mode="project"] #history-usage {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px 32px;
+  margin-bottom: 5px;
+}
+
+.workspace-dialog[data-mode="project"] .local-history-data > .validation-profile-actions,
+.workspace-dialog[data-mode="project"] .knowledge-editor > .validation-profile-actions {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-heading-row {
+  display: block;
+}
+
+.workspace-dialog[data-mode="project"] #knowledge-provider-status {
+  position: absolute;
+  z-index: 4;
+  top: 21px;
+  left: 164px;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, currentColor 10%, var(--panel));
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-heading-actions {
+  justify-content: flex-end;
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-editor label > span:first-child,
+.workspace-dialog[data-mode="project"] .validation-profile-editor label > span:first-child {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-editor input:not([type="checkbox"]),
+.workspace-dialog[data-mode="project"] .knowledge-editor select,
+.workspace-dialog[data-mode="project"] .validation-profile-editor input:not([type="checkbox"]) {
+  min-height: 40px;
+  padding: 9px 11px;
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--bg) 88%, black);
+  font-size: 12px;
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-libraries {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 7px;
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-libraries legend {
+  width: 100%;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-raised) 55%, transparent);
+}
+
+.workspace-dialog[data-mode="project"] .knowledge-library-list {
+  min-height: 44px;
+  padding: 11px 14px;
+}
+
+.workspace-dialog[data-mode="project"] #save-project-knowledge {
+  min-height: 42px;
+  margin-top: 4px;
+}
+
+.workspace-dialog[data-mode="project"] #knowledge-save-status {
+  min-height: 16px;
+  margin: -2px 0 0;
+  color: var(--success);
+  text-align: center;
+}
+
+.workspace-dialog[data-mode="project"] #knowledge-embedding-guidance {
+  position: relative;
+  padding: 2px 0 2px 22px;
+}
+
+.workspace-dialog[data-mode="project"] #knowledge-embedding-guidance::before {
+  position: absolute;
+  top: 2px;
+  left: 1px;
+  color: var(--accent);
+  content: "ⓘ";
+}
+
+.workspace-dialog[data-mode="project"] .validation-profile-editor-empty > label,
+.workspace-dialog[data-mode="project"] .validation-profile-editor-empty > .validation-command-preview,
+.workspace-dialog[data-mode="project"] .validation-profile-editor-empty > .validation-profile-actions {
+  display: none;
+}
+
+.workspace-dialog[data-mode="project"] .validation-profile-editor-empty:not(.validation-profile-editor-detected) > #detected-validation-profile {
+  display: none;
 }
 
 .validation-steps {
@@ -3560,12 +4046,13 @@ p {
 }
 
 .project-accordion > summary {
+  position: relative;
   display: flex;
   min-width: 0;
-  min-height: 42px;
+  min-height: 48px;
   align-items: center;
   gap: 7px;
-  padding: 10px 38px 10px 10px;
+  padding: 12px 70px 10px 10px;
   border-radius: 7px;
   cursor: pointer;
   list-style: none;
@@ -3639,18 +4126,21 @@ p {
 }
 
 .project-active-marker {
+  position: absolute;
+  z-index: 3;
+  top: 15px;
+  right: 15px;
   width: 6px;
   height: 6px;
-  flex: 0 0 6px;
   border-radius: 50%;
   background: var(--success);
 }
 
-.project-menu-button {
+.project-menu-button,
+.project-new-chat-button {
   position: absolute;
   z-index: 2;
-  top: 5px;
-  right: 5px;
+  top: 18px;
   display: grid;
   width: 26px;
   height: 26px;
@@ -3664,11 +4154,29 @@ p {
   line-height: 1;
 }
 
+.project-menu-button {
+  right: 5px;
+}
+
+.project-new-chat-button {
+  right: 33px;
+  font-size: 25px;
+  top: 10px;
+  padding-bottom: 30px;
+}
+
 .project-menu-button:hover,
 .project-menu-button:focus-visible,
-.project-menu-button[aria-expanded="true"] {
+.project-menu-button[aria-expanded="true"],
+.project-new-chat-button:hover,
+.project-new-chat-button:focus-visible {
   color: var(--text);
-  background: #292c37;
+  background: #494c57;
+}
+
+.project-new-chat-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .project-body {
@@ -4099,6 +4607,11 @@ p {
 .project-menu-edit:hover,
 .project-menu-edit:focus-visible {
   background: #353535;
+}
+
+.project-menu-edit:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .runtime-details > summary {
@@ -6543,6 +7056,16 @@ textarea[readonly] {
 
   .workspace-section-panel {
     padding: 12px;
+  }
+
+  .knowledge-heading-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .knowledge-connection-grid,
+  .knowledge-library-list {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Knowledge;
 using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,14 +12,17 @@ public sealed class WorkspaceProfilesController : ControllerBase
 {
   private readonly IWorkspaceProfileService _profiles;
   private readonly IFolderLauncherService _folderLauncher;
+  private readonly IKnowledgeProviderRegistry _knowledgeProviders;
 
   public WorkspaceProfilesController(
     IWorkspaceProfileService profiles,
-    IFolderLauncherService folderLauncher
+    IFolderLauncherService folderLauncher,
+    IKnowledgeProviderRegistry knowledgeProviders
   )
   {
     _profiles = profiles;
     _folderLauncher = folderLauncher;
+    _knowledgeProviders = knowledgeProviders;
   }
 
   [HttpGet]
@@ -127,6 +131,39 @@ public sealed class WorkspaceProfilesController : ControllerBase
       () => _profiles.SetHistoryEnabledAsync(
         id,
         request.Enabled,
+        cancellationToken
+      )
+    );
+  }
+
+  [HttpPut("{id}/knowledge")]
+  public async Task<IActionResult> SetKnowledge(
+    string id,
+    [FromBody] SetWorkspaceKnowledgeRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      request.ProviderId is not null
+      && !_knowledgeProviders.TryGet(request.ProviderId, out _)
+    )
+    {
+      return BadRequest(
+        Error(
+          "knowledge-provider-not-found",
+          "workspace-knowledge-settings",
+          "The selected knowledge provider is not registered.",
+          false
+        )
+      );
+    }
+
+    return await ExecuteAsync(
+      () => _profiles.SetKnowledgeAsync(
+        id,
+        request.Enabled,
+        request.ProviderId,
+        request.LibraryIds,
         cancellationToken
       )
     );

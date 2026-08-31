@@ -8,7 +8,8 @@ public interface IConversationContextBuilder
   ConversationContextResult Build(
     ChatRequest request,
     ApplicationSettings settings,
-    string intention
+    string intention,
+    string? knowledgeContext
   );
 }
 
@@ -28,10 +29,11 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
   public ConversationContextResult Build(
     ChatRequest request,
     ApplicationSettings settings,
-    string intention
+    string intention,
+    string? knowledgeContext
   )
   {
-    var systemMessages = new[]
+    var systemMessages = new List<ChatMessage>
     {
       new ChatMessage(
         "system",
@@ -42,6 +44,15 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
         settings.Intentions[intention].SystemPrompt
       )
     };
+    if (!string.IsNullOrWhiteSpace(knowledgeContext))
+    {
+      systemMessages.Add(
+        new ChatMessage(
+          "system",
+          knowledgeContext
+        )
+      );
+    }
     var current = new ChatMessage(
       "user",
       request.Message

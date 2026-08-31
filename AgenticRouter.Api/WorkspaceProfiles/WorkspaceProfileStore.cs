@@ -30,6 +30,8 @@ public sealed record WorkspaceProfileData
   public string? PreferredModelProfileId { get; init; }
 
   public IReadOnlyList<WorkspaceProcessPermissionData> ProcessPermissions { get; init; } = [];
+
+  public ProjectKnowledgeSettings Knowledge { get; init; } = new();
 }
 
 public sealed record WorkspaceProfileDocument
@@ -233,6 +235,16 @@ public sealed class WorkspaceProfileStore : IWorkspaceProfileStore
             "A workspace process permission is invalid."
           );
         }
+
+        if (
+          profile.Knowledge is null
+          || !IsValidKnowledgeSettings(profile.Knowledge)
+        )
+        {
+          throw new InvalidDataException(
+            "A workspace knowledge configuration is invalid."
+          );
+        }
       }
 
       return document;
@@ -386,6 +398,29 @@ public sealed class WorkspaceProfileStore : IWorkspaceProfileStore
       ).Contains(
         "..",
         StringComparer.Ordinal
+      );
+  }
+
+  private static bool IsValidKnowledgeSettings(
+    ProjectKnowledgeSettings settings
+  )
+  {
+    return (
+        settings.ProviderId is null
+        || (
+          settings.ProviderId.Length is > 0 and <= 64
+          && settings.ProviderId.All(
+            character => char.IsAsciiLetterOrDigit(character)
+              || character is '-' or '_'
+          )
+        )
+      )
+      && settings.LibraryIds.Count <= 20
+      && settings.LibraryIds.Distinct(StringComparer.Ordinal).Count()
+        == settings.LibraryIds.Count
+      && settings.LibraryIds.All(
+        id => id.Length is > 0 and <= 200
+          && id.All(character => !char.IsControl(character))
       );
   }
 }

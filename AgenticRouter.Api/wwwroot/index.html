@@ -95,7 +95,7 @@
       <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
     </section>
 
-    <span class="app-version sidebar-expanded-only">v0.9.19_alpha</span>
+    <span class="app-version sidebar-expanded-only">v0.10.0_alpha</span>
   </aside>
 
   <div
@@ -1002,8 +1002,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.9.19."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.9.19."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.10.0."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.10.0."
                 >i</button>
               </div>
             </div>
@@ -1367,14 +1367,15 @@
     <form id="workspace-form" method="dialog">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Controlled execution</span>
-          <h2>Trusted workspace</h2>
+          <span id="workspace-dialog-eyebrow" class="eyebrow">Controlled execution</span>
+          <h2 id="workspace-dialog-title">Trusted workspace</h2>
+          <p id="workspace-dialog-path" hidden></p>
         </div>
         <button id="close-workspace" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
 
       <div class="dialog-body workspace-sections">
-        <section class="workspace-section-shell">
+        <section class="workspace-section-shell workspace-manager-section">
           <div class="workspace-section-actions">
             <button
               class="information-button"
@@ -1449,23 +1450,23 @@
           </details>
         </section>
 
-        <section class="workspace-section-shell">
+        <section class="workspace-section-shell project-settings-section history-settings-card">
           <div class="workspace-section-actions">
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.9.19."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.9.19. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.10.0."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.10.0. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
             <summary>Local history</summary>
             <div id="local-history-data" class="workspace-section-panel local-history-data">
               <div class="workspace-project-header">
-                <p id="history-usage" class="workspace-usage">No stored sessions.</p>
-                <label class="history-toggle">
+                <div id="history-usage" class="workspace-usage">No stored sessions.</div>
+                <label class="history-toggle project-switch">
+                  <span>Save history</span>
                   <input id="workspace-history-enabled" type="checkbox">
-                  <span>Save history in this workspace</span>
                 </label>
               </div>
               <div class="validation-profile-actions">
@@ -1480,7 +1481,7 @@
           </details>
         </section>
 
-        <section class="workspace-section-shell">
+        <section class="workspace-section-shell project-settings-section profile-settings-card">
           <details id="project-profile-section" class="workspace-accordion">
             <summary>Project profile</summary>
             <div class="workspace-section-panel">
@@ -1495,7 +1496,63 @@
           </details>
         </section>
 
-        <section class="workspace-section-shell">
+        <section class="workspace-section-shell project-settings-section knowledge-settings-card">
+          <details id="knowledge-section" class="workspace-accordion">
+            <summary>Knowledge / RAG</summary>
+            <div class="workspace-section-panel knowledge-editor">
+              <div class="knowledge-heading-row">
+                <div>
+                  <strong id="knowledge-provider-status">AnythingLLM not configured</strong>
+                  <p id="knowledge-provider-diagnostic" class="inline-status"></p>
+                </div>
+                <div class="knowledge-heading-actions">
+                  <label class="history-toggle project-switch">
+                    <span>Enable for project</span>
+                    <input id="knowledge-enabled" type="checkbox">
+                  </label>
+                  <button id="refresh-knowledge-provider" class="secondary-button" type="button">
+                    Refresh
+                  </button>
+                </div>
+              </div>
+              <label>
+                <span>Provider</span>
+                <select id="knowledge-provider">
+                  <option value="anythingllm">AnythingLLM</option>
+                </select>
+              </label>
+              <div class="knowledge-connection-grid">
+                <label>
+                  <span>Server address</span>
+                  <input id="knowledge-base-url" type="url" placeholder="http://localhost:3001">
+                </label>
+                <label>
+                  <span>Developer API key</span>
+                  <input id="knowledge-api-key" type="password" autocomplete="new-password" placeholder="Stored protected; not displayed again">
+                </label>
+              </div>
+              <div class="validation-profile-actions">
+                <button id="save-knowledge-connection" class="secondary-button" type="button">
+                  Save connection
+                </button>
+                <button id="prepare-knowledge-setup" class="secondary-button" type="button">
+                  Prepare setup in Execute
+                </button>
+              </div>
+              <p id="knowledge-embedding-guidance" class="inline-status"></p>
+              <fieldset class="knowledge-libraries">
+                <legend>Selected AnythingLLM libraries</legend>
+                <div id="knowledge-library-list" class="knowledge-library-list"></div>
+              </fieldset>
+              <button id="save-project-knowledge" class="primary-button" type="button">
+                Save project knowledge
+              </button>
+              <p id="knowledge-save-status" class="save-status" role="status"></p>
+            </div>
+          </details>
+        </section>
+
+        <section class="workspace-section-shell project-settings-section validation-settings-card">
           <details id="validation-profile-section" class="workspace-accordion">
             <summary>Validation profile</summary>
             <div class="workspace-section-panel validation-profile-editor">
@@ -1505,6 +1562,17 @@
                 <input id="validation-profile-name" type="text" maxlength="80">
               </label>
               <div id="validation-steps" class="validation-steps"></div>
+              <div id="validation-empty-state" class="validation-empty-state" hidden>
+                <p>No validation steps configured yet.</p>
+                <div class="validation-empty-actions">
+                  <button id="add-validation-step-empty" class="primary-button" type="button">
+                    Add validation step
+                  </button>
+                  <button id="use-detected-validation-empty" class="secondary-button" type="button" hidden>
+                    Use detected suggestion
+                  </button>
+                </div>
+              </div>
               <div class="validation-profile-actions">
                 <button id="add-validation-step" class="secondary-button" type="button">
                   Add step

@@ -138,7 +138,8 @@ public sealed record HarnessTurnRequest(
   bool ReleaseWorkspaceAfterTurn = false,
   bool ReleaseWorkspaceOnCancellation = false,
   IReadOnlyList<HarnessImageInput>? Images = null,
-  bool IsRecoveryContinuation = false
+  bool IsRecoveryContinuation = false,
+  IReadOnlyList<string>? ManagedContext = null
 );
 
 public sealed record HarnessEvent

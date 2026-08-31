@@ -105,6 +105,10 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       settings.WebSearch
     );
+    ValidateKnowledgeProviders(
+      errors,
+      settings.KnowledgeProviders
+    );
 
     if (settings.ModelOrganization.MaximumProfiles is < 1 or > 50)
     {
@@ -538,6 +542,82 @@ public sealed class SettingsValidator : ISettingsValidator
         errors,
         "webSearch.ollamaSecretReference",
         "Enabled Ollama Web Search requires a protected key reference."
+      );
+    }
+  }
+
+  private static void ValidateKnowledgeProviders(
+    IDictionary<string, List<string>> errors,
+    KnowledgeProvidersSettings providers
+  )
+  {
+    var anythingLlm = providers.AnythingLlm;
+    if (
+      !Uri.TryCreate(anythingLlm.BaseUrl, UriKind.Absolute, out var uri)
+      || (
+        uri.Scheme != Uri.UriSchemeHttp
+        && uri.Scheme != Uri.UriSchemeHttps
+      )
+      || !string.IsNullOrEmpty(uri.UserInfo)
+      || !string.IsNullOrEmpty(uri.Query)
+      || !string.IsNullOrEmpty(uri.Fragment)
+    )
+    {
+      AddError(
+        errors,
+        "knowledgeProviders.anythingLlm.baseUrl",
+        "AnythingLLM address must be an absolute HTTP or HTTPS URL without credentials, query, or fragment."
+      );
+    }
+
+    if (
+      anythingLlm.SecretReference is not null
+      && (
+        !anythingLlm.SecretReference.StartsWith("secret-", StringComparison.Ordinal)
+        || anythingLlm.SecretReference.Length != 39
+      )
+    )
+    {
+      AddError(
+        errors,
+        "knowledgeProviders.anythingLlm.secretReference",
+        "The AnythingLLM protected secret reference is invalid."
+      );
+    }
+
+    if (anythingLlm.TopN is < 1 or > 20)
+    {
+      AddError(
+        errors,
+        "knowledgeProviders.anythingLlm.topN",
+        "AnythingLLM results per library must be between 1 and 20."
+      );
+    }
+
+    if (anythingLlm.ScoreThreshold is < 0 or > 1)
+    {
+      AddError(
+        errors,
+        "knowledgeProviders.anythingLlm.scoreThreshold",
+        "AnythingLLM similarity threshold must be between 0 and 1."
+      );
+    }
+
+    if (anythingLlm.TimeoutSeconds is < 3 or > 60)
+    {
+      AddError(
+        errors,
+        "knowledgeProviders.anythingLlm.timeoutSeconds",
+        "AnythingLLM timeout must be between 3 and 60 seconds."
+      );
+    }
+
+    if (providers.MaxContextCharacters is < 1_000 or > 100_000)
+    {
+      AddError(
+        errors,
+        "knowledgeProviders.maxContextCharacters",
+        "Knowledge context must be limited to between 1000 and 100000 characters."
       );
     }
   }

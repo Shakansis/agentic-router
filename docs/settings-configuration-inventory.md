@@ -65,6 +65,7 @@ migrations, not active routing behavior.
 | --- | --- | --- |
 | `cloudProviders.{groq,googleAiStudio,cerebras}` | ACTIVE | Explicit enablement, opaque secret reference, billing label, and optional per-model quota windows. Secrets never return to the browser. |
 | `webSearch.*` | ACTIVE | Optional Ollama Web Search credential, result cap, and timeout. Route capability determines whether Web is shown; availability alone never starts a search. |
+| `knowledgeProviders.anythingLlm.*`, `knowledgeProviders.maxContextCharacters` | ACTIVE | Protected AnythingLLM connection plus bounded retrieval limits. Project enablement and selected libraries remain workspace-local under `workspaces[].knowledge`; configuration alone never activates retrieval. |
 | `usage.*` | ACTIVE | Local ledger retention, windows, comparison model, display plan reference, provider reconciliation windows, and alert thresholds. These are labels/estimates where exact provider evidence is unavailable. |
 | `incidents.*` | ACTIVE/INTERNAL | Opt-in bounded sanitized incident journal, retention/size/event limits, and browser lookup limits. |
 | `modelOrganization.maximumProfiles` | ACTIVE | Maximum saved model configuration profiles. |

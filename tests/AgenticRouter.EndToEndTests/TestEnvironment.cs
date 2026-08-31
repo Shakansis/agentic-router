@@ -405,6 +405,21 @@ internal sealed class TestEnvironment : IAsyncDisposable
         $"Baseline settings reset failed with {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
       );
     }
+    var secretsDirectory = Path.Combine(
+      DataDirectory,
+      "secrets"
+    );
+    if (Directory.Exists(secretsDirectory))
+    {
+      foreach (var secretFile in Directory.EnumerateFiles(
+        secretsDirectory,
+        "secret-*.bin",
+        SearchOption.TopDirectoryOnly
+      ))
+      {
+        File.Delete(secretFile);
+      }
+    }
     using var profilesResponse = await HttpClient.GetAsync(
       "api/workspaces"
     );
@@ -464,6 +479,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
         }
       );
       history.EnsureSuccessStatusCode();
+      using var knowledge = await HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{id}/knowledge",
+        new
+        {
+          enabled = false,
+          providerId = "anythingllm",
+          libraryIds = Array.Empty<string>()
+        }
+      );
+      knowledge.EnsureSuccessStatusCode();
       foreach (var permission in profile.GetProperty(
         "processPermissions"
       ).EnumerateArray())

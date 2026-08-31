@@ -183,8 +183,18 @@ public sealed record WorkspaceProfileView(
   bool Available,
   string? Diagnostic,
   string? PreferredModelProfileId = null,
-  IReadOnlyList<WorkspaceProcessPermissionView>? ProcessPermissions = null
+  IReadOnlyList<WorkspaceProcessPermissionView>? ProcessPermissions = null,
+  ProjectKnowledgeSettings? Knowledge = null
 );
+
+public sealed record ProjectKnowledgeSettings
+{
+  public bool Enabled { get; init; }
+
+  public string? ProviderId { get; init; }
+
+  public IReadOnlyList<string> LibraryIds { get; init; } = [];
+}
 
 public sealed record WorkspaceProcessPermissionView(
   string Id,
@@ -212,6 +222,12 @@ public sealed record RenameWorkspaceProfileRequest(
 
 public sealed record SetWorkspaceHistoryRequest(
   bool Enabled
+);
+
+public sealed record SetWorkspaceKnowledgeRequest(
+  bool Enabled,
+  string? ProviderId,
+  IReadOnlyList<string>? LibraryIds
 );
 
 public sealed record WorkspaceHistoryUsage(

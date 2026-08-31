@@ -9,6 +9,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Knowledge;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.ProjectAwareness;
@@ -46,6 +47,7 @@ public sealed class ChatStreamService
   private readonly IIntentionRouter _intentionRouter;
   private readonly IModelResolver _modelResolver;
   private readonly IConversationContextBuilder _contextBuilder;
+  private readonly IKnowledgeContextService _knowledgeContext;
   private readonly ITrustedWorkspaceService _workspace;
   private readonly ILocalActionPlanner _actionPlanner;
   private readonly ISpecialistToolingProfileResolver _toolingProfiles;
@@ -89,6 +91,7 @@ public sealed class ChatStreamService
     IIntentionRouter intentionRouter,
     IModelResolver modelResolver,
     IConversationContextBuilder contextBuilder,
+    IKnowledgeContextService knowledgeContext,
     ITrustedWorkspaceService workspace,
     ILocalActionPlanner actionPlanner,
     ISpecialistToolingProfileResolver toolingProfiles,
@@ -123,6 +126,7 @@ public sealed class ChatStreamService
     _intentionRouter = intentionRouter;
     _modelResolver = modelResolver;
     _contextBuilder = contextBuilder;
+    _knowledgeContext = knowledgeContext;
     _workspace = workspace;
     _actionPlanner = actionPlanner;
     _toolingProfiles = toolingProfiles;
@@ -637,10 +641,40 @@ public sealed class ChatStreamService
           : null
       );
 
+      var knowledge = await _knowledgeContext.RetrieveAsync(
+        request.Message,
+        cancellationToken
+      );
+      if (knowledge.State != "disabled")
+      {
+        yield return Event(
+          requestId,
+          knowledge.State switch
+          {
+            "retrieved" => "knowledge.context-retrieved",
+            "empty" => "knowledge.context-empty",
+            _ => "knowledge.retrieval-failed"
+          },
+          knowledge.State switch
+          {
+            "retrieved" => $"Retrieved {knowledge.ChunkCount} relevant chunk(s) from {knowledge.LibraryCount} project knowledge librar{(knowledge.LibraryCount == 1 ? "y" : "ies")}.",
+            "empty" => knowledge.Diagnostic
+              ?? "The selected project knowledge libraries returned no relevant chunks.",
+            _ => $"Project knowledge was not injected: {knowledge.Diagnostic ?? "retrieval failed"}"
+          },
+          stopwatch,
+          selectedModel,
+          isAuto
+            ? intention
+            : null
+        );
+      }
+
       var context = _contextBuilder.Build(
         request,
         settings,
-        intention
+        intention,
+        knowledge.Context
       );
       ContextUsageView? contextUsage = null;
       if (!string.Equals(
@@ -965,6 +999,7 @@ public sealed class ChatStreamService
               settings,
               capabilities,
               context,
+              knowledge.Context,
               hostCapabilities,
               invocation.UseMinimalToolInventory,
               invocation.CaptureRoleResult,
@@ -1298,6 +1333,7 @@ public sealed class ChatStreamService
     ApplicationSettings settings,
     ProviderModelCapabilities capabilities,
     ConversationContextResult context,
+    string? managedContext,
     HostCapabilityProfile hostCapabilities,
     bool useMinimalToolInventory,
     Action<string>? captureRoleResult,
@@ -1370,6 +1406,7 @@ public sealed class ChatStreamService
       settings.Execution,
       settings.ProjectAwareness,
       context,
+      managedContext,
       contextUsage,
       hostCapabilities,
       images,
@@ -1622,6 +1659,7 @@ public sealed class ChatStreamService
     ExecutionSettings executionSettings,
     ProjectAwarenessSettings projectAwareness,
     ConversationContextResult context,
+    string? managedContext,
     ContextUsageView initialContextUsage,
     HostCapabilityProfile hostCapabilities,
     IReadOnlyList<ProviderImagePayload> images,
@@ -1731,7 +1769,10 @@ public sealed class ChatStreamService
           image.MimeType,
           image.Bytes
         )
-      ).ToArray()
+      ).ToArray(),
+      ManagedContext: string.IsNullOrWhiteSpace(managedContext)
+        ? null
+        : [managedContext]
     );
     var automaticContinuationAttempts = 0;
   StartHarnessTurn:

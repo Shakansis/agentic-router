@@ -19,6 +19,7 @@ const state = {
   workspace: null,
   workspaceProfiles: null,
   projectProfile: null,
+  knowledgeProviders: null,
   validationProfiles: null,
   sessions: null,
   conversationSessionId: null,
@@ -453,7 +454,11 @@ function bindElements() {
     "cancel-session-summary",
     "save-session-summary",
     "workspace-dialog",
+    "workspace-dialog-eyebrow",
+    "workspace-dialog-title",
+    "workspace-dialog-path",
     "workspace-form",
+    "close-workspace",
     "workspace-profile-list",
     "saved-workspaces-section",
     "add-workspace",
@@ -476,9 +481,26 @@ function bindElements() {
     "project-profile-details",
     "project-profile-section",
     "refresh-project-profile",
+    "knowledge-section",
+    "knowledge-provider-status",
+    "knowledge-provider-diagnostic",
+    "knowledge-enabled",
+    "knowledge-provider",
+    "knowledge-base-url",
+    "knowledge-api-key",
+    "save-knowledge-connection",
+    "prepare-knowledge-setup",
+    "refresh-knowledge-provider",
+    "knowledge-embedding-guidance",
+    "knowledge-library-list",
+    "save-project-knowledge",
+    "knowledge-save-status",
     "detected-validation-profile",
     "validation-profile-section",
     "validation-profile-name",
+    "validation-empty-state",
+    "add-validation-step-empty",
+    "use-detected-validation-empty",
     "validation-steps",
     "add-validation-step",
     "reset-validation-profile",
@@ -830,9 +852,37 @@ function bindEvents() {
     saveWorkspaceModelProfile
   );
   elements.refreshProjectProfile.addEventListener("click", refreshProjectProfile);
+  elements.refreshKnowledgeProvider.addEventListener(
+    "click",
+    refreshKnowledgeProvider
+  );
+  elements.saveKnowledgeConnection.addEventListener(
+    "click",
+    saveKnowledgeConnection
+  );
+  elements.knowledgeEnabled.addEventListener(
+    "change",
+    changeProjectKnowledgeEnabled
+  );
+  elements.saveProjectKnowledge.addEventListener(
+    "click",
+    saveProjectKnowledge
+  );
+  elements.prepareKnowledgeSetup.addEventListener(
+    "click",
+    prepareKnowledgeSetup
+  );
   elements.addValidationStep.addEventListener(
     "click",
     () => addValidationStep()
+  );
+  elements.addValidationStepEmpty.addEventListener(
+    "click",
+    () => addValidationStep()
+  );
+  elements.useDetectedValidationEmpty.addEventListener(
+    "click",
+    resetValidationProfile
   );
   elements.resetValidationProfile.addEventListener(
     "click",
@@ -1260,6 +1310,7 @@ async function loadApplicationState() {
     modelsResponse,
     workspace,
     projectProfile,
+    knowledgeProviders,
     validationProfiles,
     workspaceProfiles,
     usageOverview,
@@ -1275,6 +1326,7 @@ async function loadApplicationState() {
     fetchJson("/api/models"),
     fetchJson("/api/workspace"),
     fetchJson("/api/workspace/project-profile"),
+    fetchJson("/api/knowledge-providers"),
     fetchJson("/api/workspace/validation-profile"),
     fetchJson("/api/workspaces"),
     fetchJson("/api/usage/overview"),
@@ -1300,6 +1352,7 @@ async function loadApplicationState() {
   state.devices = devicesResponse.devices;
   state.workspace = workspace;
   state.projectProfile = projectProfile;
+  state.knowledgeProviders = knowledgeProviders;
   state.validationProfiles = validationProfiles;
   state.workspaceProfiles = workspaceProfiles;
   state.usageOverview = usageOverview;
@@ -1321,6 +1374,7 @@ async function loadApplicationState() {
   renderWorkspace();
   renderWorkspaceProfiles();
   renderProjectProfile();
+  renderKnowledgeSettings();
   renderValidationProfile();
   updateInteractionControls();
   await refreshSelectedModelCapabilities();
@@ -3899,6 +3953,7 @@ function renderWorkspaceProfiles() {
     metadata.textContent = [
       profile.projectProfile?.projectTypes?.join(", ") || "profile not detected",
       profile.historyEnabled ? "history enabled" : "history disabled",
+      profile.knowledge?.enabled ? "knowledge enabled" : "knowledge disabled",
       profile.available ? null : profile.diagnostic || "unavailable"
     ].filter(Boolean).join(" · ");
     const actions = document.createElement("div");
@@ -3930,6 +3985,7 @@ async function refreshWorkspaceState() {
     workspaceProfiles,
     workspace,
     projectProfile,
+    knowledgeProviders,
     validationProfiles,
     settings
   ] =
@@ -3937,17 +3993,20 @@ async function refreshWorkspaceState() {
       fetchJson("/api/workspaces"),
       fetchJson("/api/workspace"),
       fetchJson("/api/workspace/project-profile"),
+      fetchJson("/api/knowledge-providers"),
       fetchJson("/api/workspace/validation-profile"),
       fetchJson("/api/settings")
     ]);
   state.workspaceProfiles = workspaceProfiles;
   state.workspace = workspace;
   state.projectProfile = projectProfile;
+  state.knowledgeProviders = knowledgeProviders;
   state.validationProfiles = validationProfiles;
   state.settings = settings;
   renderWorkspace();
   renderWorkspaceProfiles();
   renderProjectProfile();
+  renderKnowledgeSettings();
   renderValidationProfile();
   await refreshSupervisionRuns();
   await refreshSessions();
@@ -4068,7 +4127,7 @@ async function discardSupervisionRun(run) {
   await refreshSupervisionRuns();
 }
 
-async function activateWorkspace(id) {
+async function activateWorkspace(id, onActivated = null) {
   await requestConversationTransition(
     async () =>
     {
@@ -4085,6 +4144,9 @@ async function activateWorkspace(id) {
         await refreshWorkspaceState();
         elements.workspaceSaveStatus.textContent =
           "Workspace activated. Chat mode and manual approval restored.";
+        if (onActivated) {
+          await onActivated();
+        }
       } catch (error) {
         elements.workspaceSaveStatus.textContent = error.message;
       }
@@ -4225,22 +4287,38 @@ function renderProjectProfile() {
   elements.projectProfileSummary.textContent =
     `${profile.displayName} · ${profile.projectTypes.join(", ") || "no project markers"}`;
   elements.projectProfileDetails.replaceChildren();
-  const repository = document.createElement("p");
-  repository.textContent = profile.repository.isGitRepository
-    ? `Git · ${profile.repository.branch ?? "detached"} · `
-      + `${profile.repository.hasUncommittedChanges ? "existing changes" : "clean"}`
-    : "Git not detected";
-  const instructions = document.createElement("p");
-  instructions.textContent =
-    `${profile.instructionFiles.length} AGENTS.md file(s)`;
-  const validation = document.createElement("p");
-  validation.textContent =
-    `Validation: ${profile.validationProfile?.name ?? "not configured"} `
-    + `(${profile.validationProfile?.source ?? "none"})`;
-  elements.projectProfileDetails.append(
-    repository,
-    instructions,
-    validation
+  const appendProfileRow = (label, value, className = "") => {
+    const row = document.createElement("div");
+    row.className = "project-profile-row";
+    const heading = document.createElement("span");
+    heading.className = "project-profile-label";
+    heading.textContent = label;
+    const detail = document.createElement("span");
+    detail.className = `project-profile-value ${className}`.trim();
+    detail.textContent = value;
+    row.append(heading, detail);
+    elements.projectProfileDetails.append(row);
+  };
+  appendProfileRow(
+    "Profile type",
+    profile.projectTypes.join(", ") || "No project markers",
+    "project-profile-badge"
+  );
+  appendProfileRow(
+    "Version control",
+    profile.repository.isGitRepository
+      ? `Git (${profile.repository.branch ?? "detached"}) · `
+        + `${profile.repository.hasUncommittedChanges ? "Existing changes" : "Clean"}`
+      : "Git not detected"
+  );
+  appendProfileRow(
+    "Agents context",
+    `${profile.instructionFiles.length} AGENTS.md file(s) found`
+  );
+  appendProfileRow(
+    "Validation",
+    `${profile.validationProfile?.name ?? "Not configured"} `
+      + `(${profile.validationProfile?.source ?? "none"})`
   );
 
   if (profile.diagnostic) {
@@ -4249,6 +4327,196 @@ function renderProjectProfile() {
     diagnostic.textContent = profile.diagnostic;
     elements.projectProfileDetails.append(diagnostic);
   }
+}
+
+function selectedKnowledgeProvider() {
+  const providerId = elements.knowledgeProvider.value || "anythingllm";
+  return state.knowledgeProviders?.providers?.find(
+    provider => provider.definition.id === providerId
+  ) ?? null;
+}
+
+function renderKnowledgeSettings() {
+  const active = activeWorkspaceProfile();
+  const selection = active?.knowledge ?? {
+    enabled: false,
+    providerId: "anythingllm",
+    libraryIds: []
+  };
+  elements.knowledgeProvider.value = selection.providerId ?? "anythingllm";
+  const provider = selectedKnowledgeProvider();
+  const available = Boolean(provider?.availability?.available);
+  const configured = Boolean(provider?.availability?.configured);
+  elements.knowledgeProviderStatus.textContent = available
+    ? `${provider.definition.displayName} available`
+    : configured
+      ? `${provider?.definition?.displayName ?? "AnythingLLM"} unavailable`
+      : "AnythingLLM not configured";
+  elements.knowledgeProviderDiagnostic.textContent =
+    provider?.availability?.diagnostic
+      ?? (available ? `${provider.libraries.length} libraries available.` : "");
+  elements.knowledgeProviderStatus.className = available
+    ? "verification-ok"
+    : "verification-warning";
+  elements.knowledgeEnabled.checked = Boolean(selection.enabled);
+  elements.knowledgeEnabled.disabled = !active;
+  elements.knowledgeBaseUrl.value = provider?.baseUrl
+    ?? "http://localhost:3001";
+  elements.knowledgeApiKey.value = "";
+  elements.knowledgeApiKey.placeholder = provider?.authenticationConfigured
+    ? "Protected API key configured"
+    : "AnythingLLM developer API key";
+  elements.knowledgeEmbeddingGuidance.textContent =
+    state.knowledgeProviders?.installation?.embeddingRecommendation ?? "";
+  elements.knowledgeLibraryList.replaceChildren();
+
+  const selectedIds = new Set(selection.libraryIds ?? []);
+  const libraries = [...(provider?.libraries ?? [])];
+  for (const id of selectedIds) {
+    if (!libraries.some(library => library.id === id)) {
+      libraries.push({ id, name: `${id} · currently unavailable` });
+    }
+  }
+
+  if (libraries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "inline-status";
+    empty.textContent = available
+      ? "AnythingLLM has no workspaces to select."
+      : "Connect AnythingLLM to list libraries.";
+    elements.knowledgeLibraryList.append(empty);
+  } else {
+    for (const library of libraries) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = library.id;
+      input.checked = selectedIds.has(library.id);
+      input.disabled = !active;
+      const name = document.createElement("span");
+      name.textContent = library.name;
+      name.title = library.id;
+      label.append(input, name);
+      elements.knowledgeLibraryList.append(label);
+    }
+  }
+
+  elements.saveProjectKnowledge.disabled = !active;
+}
+
+async function refreshKnowledgeProvider() {
+  elements.knowledgeSaveStatus.textContent = "Checking AnythingLLM…";
+  try {
+    state.knowledgeProviders = await fetchJson(
+      `/api/knowledge-providers/${encodeURIComponent(elements.knowledgeProvider.value)}/refresh`,
+      { method: "POST" }
+    );
+    renderKnowledgeSettings();
+    elements.knowledgeSaveStatus.textContent = selectedKnowledgeProvider()
+      ?.availability?.available
+        ? "AnythingLLM connection refreshed."
+        : "AnythingLLM remains unavailable; see the provider diagnostic.";
+  } catch (error) {
+    elements.knowledgeSaveStatus.textContent = error.message;
+  }
+}
+
+async function saveKnowledgeConnection() {
+  elements.knowledgeSaveStatus.textContent = "Protecting key and checking connection…";
+  try {
+    state.knowledgeProviders = await fetchJson(
+      "/api/knowledge-providers/anythingllm/connection",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: elements.knowledgeBaseUrl.value.trim(),
+          apiKey: elements.knowledgeApiKey.value
+        })
+      }
+    );
+    state.settings = await fetchJson("/api/settings");
+    renderKnowledgeSettings();
+    elements.knowledgeSaveStatus.textContent = selectedKnowledgeProvider()
+      ?.availability?.available
+        ? "AnythingLLM connection saved and verified."
+        : "Connection saved, but AnythingLLM is not currently available.";
+  } catch (error) {
+    const fieldErrors = error.payload?.errors
+      ? Object.values(error.payload.errors).flat().join(" ")
+      : "";
+    elements.knowledgeSaveStatus.textContent =
+      `${error.message} ${fieldErrors}`.trim();
+  }
+}
+
+async function saveProjectKnowledge() {
+  const active = activeWorkspaceProfile();
+  if (!active) {
+    return false;
+  }
+
+  const libraryIds = Array.from(
+    elements.knowledgeLibraryList.querySelectorAll("input[type=checkbox]:checked")
+  ).map(input => input.value);
+  elements.knowledgeSaveStatus.textContent = "Saving project knowledge…";
+  try {
+    const updated = await fetchJson(
+      `/api/workspaces/${encodeURIComponent(active.id)}/knowledge`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: elements.knowledgeEnabled.checked,
+          providerId: elements.knowledgeProvider.value,
+          libraryIds
+        })
+      }
+    );
+    state.workspaceProfiles.profiles = state.workspaceProfiles.profiles.map(
+      profile => profile.id === updated.id ? updated : profile
+    );
+    renderKnowledgeSettings();
+    elements.knowledgeSaveStatus.textContent = updated.knowledge.enabled
+      ? "Project knowledge enabled. Retrieval will run before inference."
+      : "Project knowledge disabled. Provider and library selection preserved.";
+    return true;
+  } catch (error) {
+    elements.knowledgeSaveStatus.textContent = error.message;
+    return false;
+  }
+}
+
+async function changeProjectKnowledgeEnabled(event) {
+  const toggle = event.currentTarget;
+  const enabled = toggle.checked;
+  toggle.disabled = true;
+  const saved = await saveProjectKnowledge();
+  if (!saved) {
+    toggle.checked = !enabled;
+  }
+  toggle.disabled = !activeWorkspaceProfile();
+}
+
+function prepareKnowledgeSetup() {
+  const prompt = state.knowledgeProviders?.installation?.executePrompt;
+  if (!prompt) {
+    elements.knowledgeSaveStatus.textContent =
+      "AnythingLLM setup guidance is unavailable.";
+    return;
+  }
+
+  closeWorkspace();
+  setInteractionMode("execute");
+  elements.messageInput.value = prompt;
+  resizeComposer();
+  updateStreamingComposerActions();
+  elements.messageInput.focus();
+  showToast(
+    "AnythingLLM setup prepared in Execute. Review the request before sending; downloads and installers remain Host-approved.",
+    "success",
+    8_000
+  );
 }
 
 async function refreshProjectProfile() {
@@ -4281,13 +4549,27 @@ function renderValidationProfile(profile = state.validationProfiles?.active) {
     ? `Detected suggestion: ${detected.name} · ${detected.steps.length} step(s)`
     : "No validation suggestion was detected.";
   elements.validationProfileName.value = profile?.name ?? "";
+  elements.useDetectedValidationEmpty.hidden = !detected;
+  elements.validationEmptyState.closest(".validation-profile-editor")
+    ?.classList.toggle("validation-profile-editor-detected", Boolean(detected));
   elements.validationSteps.replaceChildren();
 
   for (const step of profile?.steps ?? []) {
     addValidationStep(step);
   }
 
+  updateValidationEmptyState();
   updateValidationCommandPreview();
+}
+
+function updateValidationEmptyState() {
+  elements.validationEmptyState.hidden =
+    elements.validationSteps.children.length !== 0;
+  elements.validationEmptyState.closest(".validation-profile-editor")
+    ?.classList.toggle(
+      "validation-profile-editor-empty",
+      elements.validationSteps.children.length === 0
+    );
 }
 
 function addValidationStep(step = {}) {
@@ -4337,6 +4619,7 @@ function addValidationStep(step = {}) {
     "click",
     () => {
       row.remove();
+      updateValidationEmptyState();
       updateValidationCommandPreview();
     }
   );
@@ -4361,6 +4644,7 @@ function addValidationStep(step = {}) {
     }
   );
   elements.validationSteps.append(row);
+  updateValidationEmptyState();
   updateValidationCommandPreview();
 }
 
@@ -4472,15 +4756,53 @@ async function clearValidationProfile() {
 
 function openWorkspace() {
   elements.runtimeDetails.open = false;
+  elements.workspaceDialog.dataset.mode = "manage";
+  elements.workspaceDialogEyebrow.textContent = "Controlled execution";
+  elements.workspaceDialogTitle.textContent = "Trusted workspace";
+  elements.workspaceDialogPath.textContent = "";
+  elements.workspaceDialogPath.hidden = true;
+  elements.clearWorkspace.textContent = "Remove active profile";
   elements.workspaceSaveStatus.textContent = "";
   renderWorkspace();
+  renderKnowledgeSettings();
   elements.savedWorkspacesSection.open = true;
   elements.localHistorySection.open = true;
   elements.projectProfileSection.open = false;
+  elements.knowledgeSection.open = false;
   elements.validationProfileSection.open = false;
   hideNewWorkspaceForm();
   elements.workspaceDialog.showModal();
   elements.addWorkspace.focus();
+}
+
+function openProjectEditor(projectId) {
+  const project = state.workspaceProfiles?.profiles?.find(
+    profile => profile.id === projectId
+  );
+  if (!project || !project.active) {
+    return;
+  }
+
+  elements.runtimeDetails.open = false;
+  hideNewWorkspaceForm();
+  elements.workspaceDialog.dataset.mode = "project";
+  elements.workspaceDialogEyebrow.textContent = "Project settings";
+  elements.workspaceDialogTitle.textContent = project.name;
+  elements.workspaceDialogPath.textContent = project.path;
+  elements.workspaceDialogPath.hidden = false;
+  elements.clearWorkspace.textContent = "Remove project";
+  elements.workspaceSaveStatus.textContent = "";
+  renderWorkspace();
+  renderProjectProfile();
+  renderKnowledgeSettings();
+  renderValidationProfile();
+  elements.savedWorkspacesSection.open = false;
+  elements.localHistorySection.open = true;
+  elements.projectProfileSection.open = true;
+  elements.knowledgeSection.open = true;
+  elements.validationProfileSection.open = true;
+  elements.workspaceDialog.showModal();
+  elements.closeWorkspace.focus();
 }
 
 function closeWorkspace() {
@@ -4640,16 +4962,37 @@ async function refreshSessions() {
 
 function renderSessionHistory() {
   const usage = state.sessions?.usage;
-  elements.historyUsage.textContent = usage
-    ? `${usage.sessionCount} session(s) · ${formatBytes(usage.storageBytes)} · `
-      + `${usage.enabled ? "history enabled" : "history disabled"}`
-      + `${usage.oldestSessionAt
-        ? ` · oldest ${new Date(usage.oldestSessionAt).toLocaleDateString(window.AgenticRouterI18n.locale)}`
-        : ""}`
-      + `${usage.newestSessionAt
-        ? ` · newest ${new Date(usage.newestSessionAt).toLocaleDateString(window.AgenticRouterI18n.locale)}`
-        : ""}`
-    : "No stored sessions.";
+  elements.historyUsage.replaceChildren();
+  if (!usage) {
+    elements.historyUsage.textContent = "No stored sessions.";
+  } else {
+    const metrics = [
+      ["Total sessions", `${usage.sessionCount} session(s)`],
+      ["Storage used", formatBytes(usage.storageBytes)],
+      [
+        "Oldest entry",
+        usage.oldestSessionAt
+          ? new Date(usage.oldestSessionAt).toLocaleDateString(window.AgenticRouterI18n.locale)
+          : "—"
+      ],
+      [
+        "Newest entry",
+        usage.newestSessionAt
+          ? new Date(usage.newestSessionAt).toLocaleDateString(window.AgenticRouterI18n.locale)
+          : "—"
+      ]
+    ];
+    for (const [label, value] of metrics) {
+      const metric = document.createElement("div");
+      metric.className = "history-metric";
+      const heading = document.createElement("span");
+      heading.textContent = label;
+      const detail = document.createElement("strong");
+      detail.textContent = value;
+      metric.append(heading, detail);
+      elements.historyUsage.append(metric);
+    }
+  }
   elements.enableSessionHistory.hidden = Boolean(usage?.enabled);
   renderPersistenceStatus();
   renderProjectSidebar();
@@ -4729,6 +5072,22 @@ function renderProjectSidebar() {
     menu.setAttribute("aria-label", `Details for ${project.name}`);
     menu.setAttribute("aria-haspopup", "dialog");
     menu.setAttribute("aria-expanded", "false");
+
+    const newConversation = document.createElement("button");
+    newConversation.type = "button";
+    newConversation.className = "project-new-chat-button sidebar-expanded-only";
+    newConversation.textContent = "＋";
+    newConversation.title = `New conversation in ${project.name}`;
+    newConversation.setAttribute(
+      "aria-label",
+      `New conversation in ${project.name}`
+    );
+    newConversation.disabled = !project.available;
+    newConversation.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void startProjectConversation(project);
+    });
 
     const body = document.createElement("div");
     body.className = "project-body sidebar-expanded-only";
@@ -4817,7 +5176,8 @@ function renderProjectSidebar() {
       openProjectMenu(project, activeCount, menu);
     });
     body.append(actions, conversationStack);
-    details.append(summary, menu, body);
+    summary.append(newConversation, menu);
+    details.append(summary, body);
     details.addEventListener("toggle", () => {
       if (searching) {
         return;
@@ -4888,6 +5248,7 @@ function openProjectMenu(project, conversationCount, anchor) {
   elements.projectMenuTitle.textContent = project.name;
   elements.projectMenuCount.textContent = `${conversationCount} ${conversationCount === 1 ? "conversation" : "conversations"}`;
   elements.projectMenuPath.textContent = project.path;
+  elements.projectMenuEdit.disabled = !project.available;
 
   const repository = project.active && state.git?.state === "available"
     ? state.git.repository
@@ -4933,9 +5294,34 @@ function closeProjectMenu() {
   delete elements.projectMenuPopover.dataset.workspaceId;
 }
 
-function editSelectedProject() {
+async function editSelectedProject() {
+  const projectId = elements.projectMenuPopover.dataset.workspaceId;
+  const project = state.workspaceProfiles?.profiles?.find(
+    profile => profile.id === projectId
+  );
   closeProjectMenu();
-  openWorkspace();
+  if (!project) {
+    return;
+  }
+
+  if (project.active) {
+    openProjectEditor(project.id);
+    return;
+  }
+
+  await activateWorkspace(
+    project.id,
+    () => openProjectEditor(project.id)
+  );
+}
+
+async function startProjectConversation(project) {
+  if (project.active) {
+    await requestNewConversation();
+    return;
+  }
+
+  await activateWorkspace(project.id);
 }
 
 function createProjectSessionEntry(session) {
@@ -9217,6 +9603,7 @@ async function saveSettings(event) {
     },
     cloudProviders: collectCloudProviderSettings(),
     webSearch: state.settings.webSearch,
+    knowledgeProviders: state.settings.knowledgeProviders,
     modelOrganization: state.settings.modelOrganization,
     onboarding: {
       showBeforeNewConversation:
@@ -10788,6 +11175,12 @@ function cancelConversationTransition() {
 function setConversationTransitioning(isTransitioning) {
   state.conversationTransitioning = isTransitioning;
   elements.newConversation.disabled = isTransitioning;
+  elements.projectList?.querySelectorAll(".project-new-chat-button").forEach(
+    button => {
+      button.disabled = isTransitioning
+        || button.closest(".project-accordion")?.classList.contains("unavailable");
+    }
+  );
   elements.messageInput.disabled = isTransitioning;
   elements.sendButton.disabled = isTransitioning;
   updateInteractionControls();
@@ -15472,9 +15865,37 @@ function finishActivity(assistant, summary, keepOpen) {
   cancelAnimationFrame(assistant.clockFrame);
   assistant.progress.hidden = true;
   assistant.runningIndicator.hidden = true;
-  assistant.summary.textContent = summary;
+  renderTerminalActivitySummary(assistant.summary, summary);
   assistant.details.dataset.terminal = "true";
   assistant.details.open = keepOpen;
+}
+
+function renderTerminalActivitySummary(element, summary) {
+  const traceMarker = " · Trace: ";
+  const traceIndex = summary.lastIndexOf(traceMarker);
+  if (traceIndex < 0) {
+    element.textContent = summary;
+    return;
+  }
+
+  const traceId = summary.slice(traceIndex + traceMarker.length);
+  const prefix = summary.slice(0, traceIndex);
+  const copyTrace = document.createElement("button");
+  copyTrace.type = "button";
+  copyTrace.className = "activity-trace-copy";
+  copyTrace.textContent = `Trace: ${traceId}`;
+  copyTrace.title = "Copy trace ID";
+  copyTrace.setAttribute("aria-label", "Copy trace ID");
+  copyTrace.dataset.originalLabel = "Copy trace ID";
+  copyTrace.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    void copyText(traceId, copyTrace, "Trace ID copied");
+  });
+  element.replaceChildren(
+    document.createTextNode(`${prefix} · `),
+    copyTrace
+  );
 }
 
 function startMessageEdit(element, message, historyIndex) {
