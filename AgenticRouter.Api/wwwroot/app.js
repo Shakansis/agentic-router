@@ -588,6 +588,7 @@ function bindEvents() {
   elements.benchmarkView.addEventListener("scroll", hideBenchmarkTooltip, true);
   window.addEventListener("resize", hideBenchmarkTooltip);
   window.addEventListener("resize", closeProjectMenu);
+  window.addEventListener("resize", refreshProjectScrollIndicators);
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
@@ -4742,9 +4743,9 @@ function renderProjectSidebar() {
       activate.addEventListener("click", () => activateWorkspace(project.id));
       actions.append(activate);
     }
-    const list = document.createElement("div");
-    list.className = "project-conversation-list";
-    list.setAttribute("aria-label", `Conversations in ${project.name}`);
+    const conversationStack = document.createElement("div");
+    conversationStack.className = "project-conversation-stack";
+    conversationStack.setAttribute("aria-label", `Conversations in ${project.name}`);
     if (project.active) {
       const pinned = document.createElement("section");
       pinned.id = "pinned-session-section";
@@ -4758,15 +4759,20 @@ function renderProjectSidebar() {
       for (const session of state.sessions?.pinned ?? []) {
         pinnedList.append(createProjectSessionEntry(session));
       }
-      pinned.append(pinnedTitle, pinnedList);
-      list.append(pinned);
+      pinned.append(
+        pinnedTitle,
+        createProjectScrollRegion(pinnedList)
+      );
+      conversationStack.append(pinned);
       const recent = document.createElement("div");
       recent.id = "recent-sessions";
       recent.className = "project-conversation-list";
       for (const session of state.sessions?.recent ?? []) {
         recent.append(createProjectSessionEntry(session));
       }
-      list.append(recent);
+      conversationStack.append(
+        createProjectScrollRegion(recent)
+      );
       const archived = document.createElement("details");
       archived.id = "archived-session-section";
       archived.className = "archived-session-section";
@@ -4779,12 +4785,20 @@ function renderProjectSidebar() {
       for (const session of state.sessions?.archived ?? []) {
         archivedList.append(createProjectSessionEntry(session));
       }
-      archived.append(archivedSummary, archivedList);
-      list.append(archived);
+      archived.append(
+        archivedSummary,
+        createProjectScrollRegion(archivedList)
+      );
+      conversationStack.append(archived);
     } else {
+      const conversations = document.createElement("div");
+      conversations.className = "project-conversation-list";
       for (const session of projectSessions) {
-        list.append(createProjectSessionEntry(session));
+        conversations.append(createProjectSessionEntry(session));
       }
+      conversationStack.append(
+        createProjectScrollRegion(conversations)
+      );
     }
     const activeCount = project.active
       ? (state.sessions?.pinned?.length ?? 0) + (state.sessions?.recent?.length ?? 0)
@@ -4795,14 +4809,14 @@ function renderProjectSidebar() {
       empty.textContent = project.historyEnabled
         ? "No saved conversations."
         : "History disabled.";
-      list.append(empty);
+      conversationStack.append(empty);
     }
     menu.addEventListener("click", event => {
       event.preventDefault();
       event.stopPropagation();
       openProjectMenu(project, activeCount, menu);
     });
-    body.append(actions, list);
+    body.append(actions, conversationStack);
     details.append(summary, menu, body);
     details.addEventListener("toggle", () => {
       if (searching) {
@@ -4814,9 +4828,48 @@ function renderProjectSidebar() {
         state.expandedProjectIds.delete(project.id);
       }
       persistExpandedProjects();
+      requestAnimationFrame(refreshProjectScrollIndicators);
     });
     elements.projectList.append(details);
   }
+
+  requestAnimationFrame(refreshProjectScrollIndicators);
+}
+
+function createProjectScrollRegion(list) {
+  const region = document.createElement("div");
+  region.className = "project-scroll-region";
+  const indicator = document.createElement("span");
+  indicator.className = "project-scroll-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+  indicator.hidden = true;
+  list.addEventListener(
+    "scroll",
+    () => updateProjectScrollIndicator(list, indicator),
+    { passive: true }
+  );
+  region.append(list, indicator);
+  return region;
+}
+
+function updateProjectScrollIndicator(list, indicator) {
+  const scrollable = list.scrollHeight > list.clientHeight + 1;
+  const hasMoreBelow = scrollable
+    && list.scrollTop + list.clientHeight < list.scrollHeight - 1;
+  list.classList.toggle("has-more-below", hasMoreBelow);
+  indicator.hidden = !hasMoreBelow;
+}
+
+function refreshProjectScrollIndicators() {
+  elements.projectList?.querySelectorAll(".project-scroll-region").forEach(
+    region => {
+      const list = region.querySelector(":scope > .project-conversation-list");
+      const indicator = region.querySelector(":scope > .project-scroll-indicator");
+      if (list && indicator) {
+        updateProjectScrollIndicator(list, indicator);
+      }
+    }
+  );
 }
 
 function openProjectMenu(project, conversationCount, anchor) {
@@ -11882,6 +11935,7 @@ async function handleComposerSubmit(event) {
   updateJumpControl();
   elements.emptyState?.remove();
   const historyIndex = state.editingTurn?.historyIndex ?? state.history.length;
+  const replaceFromMessageIndex = state.editingTurn?.historyIndex ?? null;
 
   if (state.editingTurn) {
     removeConversationFrom(state.editingTurn.element);
@@ -11979,6 +12033,7 @@ async function handleComposerSubmit(event) {
           compactContext: hiddenUserMessage ? false : compactContext,
           autoModelHarness,
           diagnosticTraceId,
+          replaceFromMessageIndex,
           hideUserMessage: hiddenUserMessage
         }),
         signal: controller.signal
@@ -12888,7 +12943,7 @@ async function consumeEventStream(stream, assistant, options = {}) {
       if (isMeaningfulRequestActivity(streamEvent, observedOutputTokens)) {
         assistant.lastHostActivityAt = Date.parse(streamEvent.timestamp)
           || Date.now();
-        refreshSlowRequestAlert(assistant);
+        clearSlowRequestAlert(assistant);
       }
       assistant.lastObservedOutputTokens = Math.max(
         observedOutputTokens,
@@ -13142,7 +13197,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
       ) {
         addApprovalActivity(
           assistant,
-          streamEvent
+          streamEvent,
+          historical
         );
       } else if (
         streamEvent.localAction
@@ -13157,7 +13213,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
       ) {
         addRecoveryDecisionActivity(
           assistant,
-          streamEvent
+          streamEvent,
+          historical
         );
       } else if (streamEvent.type === "agent.toolset-requested") {
         addToolsetRequest(
@@ -13367,8 +13424,8 @@ function refreshSlowRequestAlert(assistant, now = Date.now()) {
     status.level === "critical" ? "alert" : "status"
   );
   alert.textContent = status.level === "critical"
-    ? `${subject} is taking much longer than usual · running ${formatRelativeActivity(running)} · last meaningful Host activity ${formatRelativeActivity(idle)} ago. Consider Stop; the trace will remain available for investigation.`
-    : `${subject} is taking longer than usual · running ${formatRelativeActivity(running)} · last meaningful Host activity ${formatRelativeActivity(idle)} ago.`;
+    ? `${subject} has produced no meaningful Host activity for ${formatRelativeActivity(idle)} · total runtime ${formatRelativeActivity(running)}. Consider Stop; the trace will remain available for investigation.`
+    : `${subject} has produced no meaningful Host activity for ${formatRelativeActivity(idle)} · total runtime ${formatRelativeActivity(running)}.`;
 }
 
 function renderSlowRequestAlert(assistant, streamEvent, historical) {
@@ -13401,6 +13458,8 @@ function clearSlowRequestAlert(assistant) {
   stopSlowRequestTimer(assistant);
   assistant.slowRequestAlert?.remove();
   assistant.slowRequestAlert = null;
+  assistant.slowRequestStatus = null;
+  assistant.slowDiagnostic = null;
 }
 
 function stopSlowRequestTimer(assistant) {
@@ -13728,14 +13787,14 @@ function updateExecutionSession(assistant, session, updateVisibleState = true) {
     coordinator,
     counts
   );
-  renderExecutionPlan(assistant, session, updateVisibleState);
+  renderExecutionPlan(assistant, session);
 
   if (session.reviewAvailable && session.state !== "running") {
     assistant.reviewButton.hidden = false;
   }
 }
 
-function renderExecutionPlan(assistant, session, dock = true) {
+function renderExecutionPlan(assistant, session) {
   const plan = session?.plan;
   if (!plan) {
     assistant.planPanel.hidden = true;
@@ -13744,16 +13803,14 @@ function renderExecutionPlan(assistant, session, dock = true) {
     return;
   }
 
-  if (dock) {
-    document.querySelectorAll(".execution-plan.docked").forEach(
-      panel => {
-        if (panel !== assistant.planPanel) {
-          panel.classList.remove("docked");
-        }
+  document.querySelectorAll(".execution-plan.docked").forEach(
+    panel => {
+      if (panel !== assistant.planPanel) {
+        panel.classList.remove("docked");
       }
-    );
-    assistant.planPanel.classList.add("docked");
-  }
+    }
+  );
+  assistant.planPanel.classList.add("docked");
   assistant.planPanel.hidden = false;
   assistant.planPanel.dataset.state = session.state;
   const totalSteps = plan.steps.length;
@@ -14779,14 +14836,18 @@ async function validateChanges() {
   }
 }
 
-function addApprovalActivity(assistant, streamEvent) {
+function addApprovalActivity(assistant, streamEvent, historical = false) {
   const action = streamEvent.localAction;
   closeAssistantReasoning(assistant);
   closeAssistantResponse(assistant);
   const row = document.createElement("details");
   row.className = "activity-row action-approval";
+  row.classList.toggle("historical-approval", historical);
+  const terminalExecution = action.tool === "run_process";
+  row.classList.toggle("terminal-execution-approval", terminalExecution);
   row.open = true;
   row.dataset.eventType = streamEvent.type;
+  row.dataset.tool = action.tool;
   row.dataset.actionId = action.actionId;
   row.dataset.executionSessionId = action.executionSessionId ?? "";
   const summary = document.createElement("summary");
@@ -14798,7 +14859,7 @@ function addApprovalActivity(assistant, streamEvent) {
   );
   const toggle = document.createElement("span");
   toggle.className = "action-approval-toggle";
-  toggle.textContent = "›";
+  toggle.textContent = terminalExecution ? "🛡" : "›";
   toggle.setAttribute(
     "aria-hidden",
     "true"
@@ -14806,10 +14867,14 @@ function addApprovalActivity(assistant, streamEvent) {
   const summaryContent = document.createElement("span");
   summaryContent.className = "action-approval-summary-content";
   const title = document.createElement("strong");
-  title.textContent = action.summary;
+  title.textContent = terminalExecution
+    ? terminalExecutionApprovalTitle(action)
+    : action.summary;
   const status = document.createElement("span");
   status.className = "approval-status";
-  status.textContent = "Waiting for decision";
+  status.textContent = historical
+    ? "Expired · no longer actionable"
+    : "Waiting for decision";
   summaryContent.append(title, status);
   summary.append(time, toggle, summaryContent);
   const content = document.createElement("div");
@@ -14831,6 +14896,13 @@ function addApprovalActivity(assistant, streamEvent) {
     content.append(warning);
   }
 
+  if (historical) {
+    const notice = document.createElement("p");
+    notice.className = "historical-approval-notice";
+    notice.textContent = "This approval belongs to an earlier turn and cannot be executed now.";
+    content.append(notice);
+  }
+
   const controls = document.createElement("div");
   controls.className = "approval-controls";
   const reject = document.createElement("button");
@@ -14849,21 +14921,43 @@ function addApprovalActivity(assistant, streamEvent) {
     remember.type = "button";
     remember.textContent = "Always allow exact command";
   }
-  controls.append(reject, approve);
+  approve.disabled = historical;
+  reject.disabled = historical;
+  if (remember) {
+    remember.disabled = historical;
+  }
+  if (terminalExecution) {
+    controls.append(approve, reject);
+  } else {
+    controls.append(reject, approve);
+  }
   if (remember) {
     controls.append(remember);
   }
   content.append(controls);
   row.append(summary, content);
+  row.addEventListener(
+    "toggle",
+    () => {
+      const label = row.querySelector(".terminal-output-toggle");
+      if (label) {
+        label.textContent = row.open ? "Hide output" : "View output";
+      }
+    }
+  );
   assistant.workActivity.hidden = false;
   ensureWorkNarrative(
     assistant,
-    "I need your decision to continue this change."
+    historical
+      ? "This saved turn ended before the decision was completed."
+      : "I need your decision to continue this change."
   );
   assistant.workActivity.append(row);
 
   if (command.input) {
     row.dataset.editableText = command.input.value;
+    command.input.readOnly = historical;
+    command.input.disabled = historical;
     command.input.addEventListener(
       "input",
       () => {
@@ -14984,6 +15078,34 @@ function createTerminalCommand(action, title) {
   return { host, input: null };
 }
 
+function terminalCommandText(action, approval = null) {
+  return (
+    action.editableText
+    ?? approval?.dataset.editableText
+    ?? action.preview
+    ?? action.summary
+    ?? "command"
+  ).trim();
+}
+
+function terminalExecutionApprovalTitle(action) {
+  const command = terminalCommandText(action);
+  const match = /^(?:"([^"]+)"|(\S+))/.exec(command);
+  const executable = (match?.[1] ?? match?.[2] ?? "command")
+    .split(/[\\/]/)
+    .at(-1)
+    ?.replace(/\.exe$/i, "")
+    ?? "command";
+  const label = {
+    node: "Node.js",
+    powershell: "PowerShell",
+    pwsh: "PowerShell",
+    cmd: "Command Prompt",
+    dotnet: ".NET"
+  }[executable.toLowerCase()] ?? executable;
+  return `Action required: allow ${label} execution`;
+}
+
 function updateApprovalActivity(assistant, streamEvent) {
   const action = streamEvent.localAction;
   const approval = assistant.container.querySelector(
@@ -15001,8 +15123,13 @@ function updateApprovalActivity(assistant, streamEvent) {
   const input = approval.querySelector(".terminal-command-input");
   const controls = approval.querySelector(".approval-controls");
 
+  const terminalExecution = approval.classList.contains(
+    "terminal-execution-approval"
+  );
   if (title && action.summary) {
-    title.textContent = action.summary;
+    title.textContent = terminalExecution
+      ? terminalExecutionApprovalTitle(action)
+      : action.summary;
   }
 
   if (input && action.editableText) {
@@ -15022,6 +15149,9 @@ function updateApprovalActivity(assistant, streamEvent) {
     status.textContent = "Completed";
     approval.dataset.decision = "completed";
     renderApprovalResponse(approval, action, false);
+    if (terminalExecution) {
+      renderCompletedTerminalApproval(approval, action);
+    }
   } else if (action.state === "failed") {
     status.textContent = "Failed";
     approval.dataset.decision = "failed";
@@ -15051,6 +15181,10 @@ function updateApprovalActivity(assistant, streamEvent) {
     approval.open = true;
   }
 
+  if (terminalExecution && action.state === "completed") {
+    approval.open = false;
+  }
+
   return true;
 }
 
@@ -15068,12 +15202,41 @@ function renderApprovalResponse(approval, action, failed) {
   }
 
   response.dataset.state = failed ? "failed" : "completed";
-  response.open = false;
+  response.open = !failed && approval.classList.contains(
+    "terminal-execution-approval"
+  );
   response.querySelector("summary").textContent = failed
     ? "Execution · failed"
     : "Execution · completed";
   response.querySelector(".action-response-output").textContent =
     action.resultOutput || "Completed without textual output.";
+}
+
+function renderCompletedTerminalApproval(approval, action) {
+  approval.classList.add("terminal-execution-completed");
+  const summary = approval.querySelector(":scope > summary");
+  const time = summary?.querySelector(".activity-time");
+  const icon = summary?.querySelector(".action-approval-toggle");
+  const content = summary?.querySelector(".action-approval-summary-content");
+  const title = content?.querySelector("strong");
+  const status = content?.querySelector(".approval-status");
+  if (!summary || !time || !icon || !content || !title || !status) {
+    return;
+  }
+
+  time.textContent = "Completed";
+  icon.textContent = "✓";
+  title.textContent = "Executed command:";
+  status.textContent = terminalCommandText(action, approval);
+  status.classList.add("terminal-command-summary");
+  const outputToggle = document.createElement("span");
+  outputToggle.className = "terminal-output-toggle";
+  outputToggle.textContent = "View output";
+  content.replaceChildren(title, status, outputToggle);
+  summary.setAttribute(
+    "aria-label",
+    `Executed command: ${status.textContent}. View output.`
+  );
 }
 
 async function decideAction(
@@ -15164,12 +15327,13 @@ async function decideAction(
   }
 }
 
-function addRecoveryDecisionActivity(assistant, streamEvent) {
+function addRecoveryDecisionActivity(assistant, streamEvent, historical = false) {
   const recovery = streamEvent.recoveryDecision;
   closeAssistantReasoning(assistant);
   closeAssistantResponse(assistant);
   const row = document.createElement("details");
   row.className = "activity-row action-approval recovery-decision";
+  row.classList.toggle("historical-approval", historical);
   row.open = true;
   row.dataset.eventType = streamEvent.type;
   row.dataset.checkpointId = recovery.checkpointId;
@@ -15194,7 +15358,9 @@ function addRecoveryDecisionActivity(assistant, streamEvent) {
   title.textContent = "Automatic recovery exhausted";
   const status = document.createElement("span");
   status.className = "approval-status";
-  status.textContent = "Choose an alternative";
+  status.textContent = historical
+    ? "Expired · no longer actionable"
+    : "Choose an alternative";
   summaryContent.append(title, status);
   summary.append(time, toggle, summaryContent);
   const content = document.createElement("div");
@@ -15221,6 +15387,7 @@ function addRecoveryDecisionActivity(assistant, streamEvent) {
       button.title = option.description;
       button.textContent =
         `${String.fromCharCode(65 + index)} · ${option.label}`;
+      button.disabled = historical;
       const description = document.createElement("small");
       description.textContent = option.description;
       optionRow.append(button, description);
@@ -15241,12 +15408,20 @@ function addRecoveryDecisionActivity(assistant, streamEvent) {
     }
   );
   controls.append(...optionRows);
+  if (historical) {
+    const notice = document.createElement("p");
+    notice.className = "historical-approval-notice";
+    notice.textContent = "This recovery decision belongs to an earlier turn and cannot be applied now.";
+    content.append(notice);
+  }
   content.append(message, reason, controls);
   row.append(summary, content);
   assistant.workActivity.hidden = false;
   ensureWorkNarrative(
     assistant,
-    "Automatic recovery has ended; choose how the task should continue."
+    historical
+      ? "This saved turn ended without a recovery decision."
+      : "Automatic recovery has ended; choose how the task should continue."
   );
   assistant.workActivity.append(row);
 }

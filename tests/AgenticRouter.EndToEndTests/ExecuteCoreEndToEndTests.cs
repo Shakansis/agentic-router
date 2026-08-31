@@ -2849,6 +2849,19 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task EditingUserMessageReplacesTurnAndTruncatesLaterContext()
   {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
     await Page.GotoAsync(
       "/"
     );
@@ -2908,6 +2921,18 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator(
         ".message.assistant .activity"
       ).Last
+    ).ToHaveAttributeAsync(
+      "data-terminal",
+      "true",
+      new()
+      {
+        Timeout = 20_000
+      }
+    );
+    await Expect(
+      Page.Locator(
+        ".message.assistant .activity"
+      ).Last
     ).Not.ToHaveAttributeAsync(
       "open",
       string.Empty
@@ -2940,6 +2965,76 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "First message edited",
       editedTarget.Messages.Last().Content
     );
+
+    using var sessionsResponse = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    sessionsResponse.EnsureSuccessStatusCode();
+    using var sessionsDocument = JsonDocument.Parse(
+      await sessionsResponse.Content.ReadAsStringAsync()
+    );
+    var sessionId = sessionsDocument.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+    using var sessionResponse = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{sessionId}?workspaceId={workspaceId}"
+    );
+    sessionResponse.EnsureSuccessStatusCode();
+    using var sessionDocument = JsonDocument.Parse(
+      await sessionResponse.Content.ReadAsStringAsync()
+    );
+    var persistedMessages = sessionDocument.RootElement.GetProperty(
+      "messages"
+    );
+    Assert.AreEqual(
+      2,
+      persistedMessages.GetArrayLength(),
+      "The replaced branch must not remain in persistent history."
+    );
+    Assert.AreEqual(
+      "First message edited",
+      persistedMessages[0].GetProperty("content").GetString()
+    );
+    Assert.AreEqual(
+      persistedMessages[0].GetProperty("turnId").GetString(),
+      persistedMessages[1].GetProperty("turnId").GetString(),
+      "The persisted answer must remain correlated with its replacement prompt."
+    );
+    Assert.IsGreaterThan(
+      0,
+      persistedMessages[1].GetProperty("timeline").GetArrayLength(),
+      "The replacement turn's visible activity must remain persisted."
+    );
+
+    var newConversationResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        "/api/sessions/new",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator("#new-conversation").ClickAsync();
+    await newConversationResponse;
+    await Expect(Page.Locator("#harness-selector")).ToBeEnabledAsync();
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    var resumeResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        $"/api/sessions/{sessionId}/resume",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator(
+      $"#recent-sessions [data-session-id=\"{sessionId}\"] .session-entry-content"
+    ).ClickAsync();
+    await resumeResponse;
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Expect(
+      Page.Locator(".message.assistant [data-timeline-kind]").First
+    ).ToBeAttachedAsync();
   }
 
   [TestMethod]

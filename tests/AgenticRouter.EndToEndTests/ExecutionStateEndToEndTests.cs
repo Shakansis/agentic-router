@@ -3590,6 +3590,31 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         Path.Combine(_environment.WorkspaceDirectory, "tracked-plan.txt")
       )
     );
+
+    await Page.EvaluateAsync(
+      """
+      async () => {
+        const timeline = [...state.history].reverse().find(
+          item => item.role === "assistant" && item.timeline?.length
+        )?.timeline;
+        if (!timeline) {
+          throw new Error("Expected the completed turn timeline.");
+        }
+        const replayedAssistant = appendAssistantMessage({
+          modelSelectionOrigin: "agent"
+        });
+        await replayConversationTimeline(timeline, replayedAssistant);
+      }
+      """
+    );
+    var replayedPlan = Page.Locator(
+      ".message.assistant > .execution-plan.docked"
+    );
+    await Expect(replayedPlan).ToHaveCountAsync(1);
+    await Expect(replayedPlan.Locator(".execution-plan-step-count"))
+      .ToHaveTextAsync("2/2 steps");
+    await Expect(replayedPlan.Locator(".execution-plan-body"))
+      .ToBeHiddenAsync();
   }
 
   [TestMethod]
@@ -3753,6 +3778,30 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var approval = Page.Locator(
       ".action-approval"
     ).Last;
+    await Expect(approval).ToHaveClassAsync(
+      new System.Text.RegularExpressions.Regex("terminal-execution-approval")
+    );
+    await Expect(approval.Locator(":scope > summary"))
+      .ToContainTextAsync("Action required: allow .NET execution");
+    await Expect(approval.Locator(".terminal-command")).ToBeVisibleAsync();
+    await Expect(approval.Locator(".approval-boundary-warning"))
+      .ToContainTextAsync("Host user's authority");
+    await Page.SetViewportSizeAsync(420, 720);
+    var contained = await approval.EvaluateAsync<bool>(
+      """
+      element => {
+        const rect = element.getBoundingClientRect();
+        const command = element.querySelector(".terminal-command");
+        return rect.left >= 0
+          && rect.right <= window.innerWidth
+          && command.scrollWidth <= command.clientWidth + 1;
+      }
+      """
+    );
+    Assert.IsTrue(
+      contained,
+      "The terminal permission panel must remain inside a compact viewport."
+    );
     var editor = approval.GetByRole(
       AriaRole.Textbox,
       new()
@@ -3795,10 +3844,20 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToBeAttachedAsync();
     await Expect(
       response
-    ).Not.ToHaveAttributeAsync(
+    ).ToHaveAttributeAsync(
       "open",
       string.Empty
     );
+    await Expect(approval).ToHaveClassAsync(
+      new System.Text.RegularExpressions.Regex("terminal-execution-completed")
+    );
+    await Expect(approval).Not.ToHaveAttributeAsync("open", string.Empty);
+    await Expect(approval.Locator(":scope > summary"))
+      .ToContainTextAsync("Executed command:");
+    await Expect(approval.Locator(":scope > summary"))
+      .ToContainTextAsync("dotnet --version");
+    await Expect(approval.Locator(":scope > summary"))
+      .ToContainTextAsync("View output");
     var completedActivity = Page.Locator(
       ".message.assistant .activity"
     ).Last;
@@ -3809,20 +3868,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     {
       await completedActivity.Locator(":scope > summary").ClickAsync();
     }
-    if (!await response.Locator(":scope > summary").IsVisibleAsync())
-    {
-      await approval.Locator(":scope > summary").ClickAsync();
-    }
-    await Expect(
-      response.Locator(
-        ":scope > summary"
-      )
-    ).ToContainTextAsync(
-      "Execution"
-    );
-    await response.Locator(
-      ":scope > summary"
-    ).ClickAsync();
+    await approval.Locator(":scope > summary").ClickAsync();
     await Expect(
       response.Locator(
         ".action-response-output"
@@ -3842,6 +3888,134 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToHaveCountAsync(
       0
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RestoredPendingCommandApprovalIsVisibleButExpired()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("ask");
+    await StartMessageAsync("execute unknown process");
+    await Expect(
+      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
+    ).ToBeVisibleAsync();
+    await Page.Locator("#cancel-request").ClickAsync();
+    await Expect(Page.Locator("#cancel-request")).ToBeHiddenAsync();
+
+    using var sessionsResponse = await _environment.HttpClient.GetAsync(
+      "api/sessions"
+    );
+    sessionsResponse.EnsureSuccessStatusCode();
+    using var sessionsDocument = JsonDocument.Parse(
+      await sessionsResponse.Content.ReadAsStringAsync()
+    );
+    var sessionId = sessionsDocument.RootElement.GetProperty(
+      "recent"
+    )[0].GetProperty(
+      "id"
+    ).GetString()!;
+    var timelinePersisted = false;
+    var persistenceDeadline = DateTimeOffset.UtcNow.AddSeconds(5);
+    while (!timelinePersisted && DateTimeOffset.UtcNow < persistenceDeadline)
+    {
+      using var sessionResponse = await _environment.HttpClient.GetAsync(
+        $"api/sessions/{sessionId}?workspaceId={workspaceId}"
+      );
+      sessionResponse.EnsureSuccessStatusCode();
+      using var sessionDocument = JsonDocument.Parse(
+        await sessionResponse.Content.ReadAsStringAsync()
+      );
+      var messages = sessionDocument.RootElement.GetProperty("messages");
+      timelinePersisted = messages.GetArrayLength() > 0
+        && messages[0].TryGetProperty("timeline", out var timeline)
+        && timeline.GetArrayLength() > 0;
+      if (!timelinePersisted)
+      {
+        await Task.Delay(50);
+      }
+    }
+    Assert.IsTrue(
+      timelinePersisted,
+      "The cancelled turn's visible approval timeline must be persisted before restore."
+    );
+    var newConversationResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        "/api/sessions/new",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator("#new-conversation").ClickAsync();
+    await newConversationResponse;
+    await Expect(Page.Locator("#harness-selector")).ToBeEnabledAsync();
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    var resumeResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        $"/api/sessions/{sessionId}/resume",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator(
+      $"#recent-sessions [data-session-id=\"{sessionId}\"] .session-entry-content"
+    ).ClickAsync();
+    await resumeResponse;
+
+    var historicalApproval = Page.Locator(
+      ".action-approval[data-event-type=\"action.awaiting-approval\"]"
+    );
+    await Expect(historicalApproval).ToBeVisibleAsync();
+    await Expect(historicalApproval).ToHaveClassAsync(
+      new System.Text.RegularExpressions.Regex("historical-approval")
+    );
+    await Expect(historicalApproval.Locator(".approval-status"))
+      .ToContainTextAsync("Expired");
+    await Expect(historicalApproval.Locator(".historical-approval-notice"))
+      .ToContainTextAsync("cannot be executed now");
+    await Expect(
+      historicalApproval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Approve",
+          Exact = true
+        }
+      )
+    ).ToBeDisabledAsync();
+    await Expect(
+      historicalApproval.GetByRole(
+        AriaRole.Button,
+        new()
+        {
+          Name = "Reject",
+          Exact = true
+        }
+      )
+    ).ToBeDisabledAsync();
+    await Expect(
+      historicalApproval.GetByRole(
+        AriaRole.Textbox,
+        new()
+        {
+          Name = "Edit run_process command",
+          Exact = true
+        }
+      )
+    ).ToBeDisabledAsync();
   }
 
   [TestMethod]

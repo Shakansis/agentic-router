@@ -78,7 +78,9 @@ public sealed record ChatMessage(
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   string? RenderedHtml = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  IReadOnlyList<ChatStreamEvent>? Timeline = null
+  IReadOnlyList<ChatStreamEvent>? Timeline = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? TurnId = null
 );
 
 public sealed record ChatMessageContentBlock(
@@ -131,7 +133,8 @@ public sealed record ChatRequest(
   string ExecutionStrategy = "direct",
   string SupervisionResumePolicy = "manual",
   string? DiagnosticTraceId = null,
-  bool HideUserMessage = false
+  bool HideUserMessage = false,
+  int? ReplaceFromMessageIndex = null
 );
 
 public sealed record HarnessSteerInput(

@@ -5746,8 +5746,6 @@ public sealed class ChatStreamService
     );
     var startedAt = DateTimeOffset.UtcNow;
     var lastActivityAt = startedAt;
-    var warningDelay = Task.Delay(warningAfter, cancellationToken);
-    var criticalDelay = Task.Delay(criticalAfter, cancellationToken);
     var warningSent = false;
     var criticalSent = false;
     var selectedModel = string.IsNullOrWhiteSpace(request.Model)
@@ -5758,10 +5756,12 @@ public sealed class ChatStreamService
       : request.Harness;
     string? activeTool = null;
     long lastObservedOutputTokens = 0;
-    CancellationTokenSource idleLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+    CancellationTokenSource activityLifetime = CancellationTokenSource.CreateLinkedTokenSource(
       requestLifetime.Token
     );
-    var safetyDelay = Task.Delay(ExtremeInactivityCeiling, idleLifetime.Token);
+    var warningDelay = Task.Delay(warningAfter, activityLifetime.Token);
+    var criticalDelay = Task.Delay(criticalAfter, activityLifetime.Token);
+    var safetyDelay = Task.Delay(ExtremeInactivityCeiling, activityLifetime.Token);
 
     try
     {
@@ -5875,12 +5875,19 @@ public sealed class ChatStreamService
         if (outputAdvanced || IsMeaningfulExecutionActivity(streamEvent))
         {
           lastActivityAt = DateTimeOffset.UtcNow;
-          idleLifetime.Cancel();
-          idleLifetime.Dispose();
-          idleLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+          activityLifetime.Cancel();
+          activityLifetime.Dispose();
+          activityLifetime = CancellationTokenSource.CreateLinkedTokenSource(
             requestLifetime.Token
           );
-          safetyDelay = Task.Delay(ExtremeInactivityCeiling, idleLifetime.Token);
+          warningDelay = Task.Delay(warningAfter, activityLifetime.Token);
+          criticalDelay = Task.Delay(criticalAfter, activityLifetime.Token);
+          safetyDelay = Task.Delay(
+            ExtremeInactivityCeiling,
+            activityLifetime.Token
+          );
+          warningSent = false;
+          criticalSent = false;
         }
         yield return streamEvent;
         moveNext = enumerator.MoveNextAsync().AsTask();
@@ -5888,8 +5895,8 @@ public sealed class ChatStreamService
     }
     finally
     {
-      idleLifetime.Cancel();
-      idleLifetime.Dispose();
+      activityLifetime.Cancel();
+      activityLifetime.Dispose();
     }
   }
 

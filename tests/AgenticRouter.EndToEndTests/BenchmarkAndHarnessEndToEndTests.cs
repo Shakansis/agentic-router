@@ -3423,7 +3423,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task SlowWatchdogPreservesTAndTwoTWhileReportingRecentMeaningfulActivity()
+  public async Task SlowWatchdogUsesContinuousInactivityInsteadOfTotalRuntime()
   {
     var settings = await GetSettingsJsonAsync();
     settings["runtime"]!["generationTimeoutSeconds"] = 1;
@@ -3438,30 +3438,54 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       $"browser-claude-active-watchdog-{Guid.NewGuid():N}"
     );
 
-    var warning = events.Single(item =>
-      item["type"]!.GetValue<string>() == "request.slow-warning"
-    );
-    var critical = events.Single(item =>
-      item["type"]!.GetValue<string>() == "request.slow-critical"
-    );
-    Assert.IsLessThan(
-      1_000,
-      warning["slowRequest"]!["idleMilliseconds"]!.GetValue<long>()
-    );
-    Assert.IsLessThan(
-      1_000,
-      critical["slowRequest"]!["idleMilliseconds"]!.GetValue<long>()
-    );
-    Assert.IsGreaterThanOrEqualTo(
-      2_000,
-      critical["slowRequest"]!["runningMilliseconds"]!.GetValue<long>()
-    );
+    Assert.IsEmpty(events.Where(item =>
+      item["type"]!.GetValue<string>().StartsWith(
+        "request.slow-",
+        StringComparison.Ordinal
+      )
+    ));
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
     Assert.HasCount(
       1,
       events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
     );
     Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SlowWatchdogClearsAlertAndRestartsAfterSuccessfulToolActivity()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["runtime"]!["generationTimeoutSeconds"] = 2;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.ClaudeCode);
+    await StartMessageAsync("claude slow watchdog tool recovery");
+
+    await Expect(Page.Locator(
+      "[data-event-type=\"request.slow-warning\"]"
+    )).ToContainTextAsync("Last meaningful Host activity");
+    await Expect(Page.Locator(".request-slow-alert")).ToBeVisibleAsync();
+    await Expect(Page.Locator(
+      ".work-action[data-state=\"completed\"]"
+    )).ToContainTextAsync("slow-watchdog-recovery.txt");
+    await Expect(Page.Locator(".request-slow-alert")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(
+      "[data-event-type=\"request.slow-critical\"]"
+    )).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    Assert.IsTrue(File.Exists(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "slow-watchdog-recovery.txt"
+    )));
   }
 
   [TestMethod]

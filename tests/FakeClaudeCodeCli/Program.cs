@@ -296,6 +296,26 @@ else if (prompt.Contains("claude nested batch step binding", StringComparison.Or
   );
   finalText = result;
 }
+else if (prompt.Contains("claude slow watchdog tool recovery", StringComparison.OrdinalIgnoreCase))
+{
+  await Task.Delay(2600);
+  var result = await InvokeHostToolAsync(
+    "create_files",
+    new
+    {
+      files = new[]
+      {
+        new
+        {
+          path = "slow-watchdog-recovery.txt",
+          content = "successful Host tool activity reset the idle window\n"
+        }
+      }
+    }
+  );
+  await Task.Delay(1700);
+  finalText = $"Claude recovered after a slow warning. {result}";
+}
 else if (prompt.Contains("claude active slow watchdog", StringComparison.OrdinalIgnoreCase))
 {
   for (var index = 0; index < 6; index++)

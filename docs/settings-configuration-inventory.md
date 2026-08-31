@@ -34,7 +34,7 @@ migrations, not active routing behavior.
 | Config group | Status | Current behavior |
 | --- | --- | --- |
 | `context.*` | ACTIVE | Default/provider context ceilings, reserved response budget, and bounded conversation history. `execution.maxToolOutputTokens` must remain below the provider context ceiling. |
-| `runtime.generationTimeoutSeconds` | ACTIVE | First slow-request warning threshold (`T`), validated from 1 to 1,800 seconds. The Host emits a stronger duration warning at `2T`; neither warning cancels the turn. Meaningful execution activity is reported independently, and the internal 12-hour orphan ceiling is based only on continuous inactivity. |
+| `runtime.generationTimeoutSeconds` | ACTIVE | Continuous-inactivity threshold (`T`), validated from 1 to 1,800 seconds. Meaningful Host-observed progress, including a completed tool action, restarts the window and clears the visible warning. The Host emits a stronger warning after `2T` without progress; neither warning cancels the turn. The internal 12-hour orphan ceiling is also based only on continuous inactivity. |
 | `runtime.runtimeStatusIdleRefreshSeconds`, `runtime.runtimeStatusActiveRefreshSeconds` | ACTIVE | Browser runtime-status polling cadence. |
 | `runtime.residentModelPolicy`, `runtime.residentModelVerificationIntervalSeconds` | COMPATIBILITY | Validated and portable so older configuration remains readable. There is no resident-model manager or verification loop in the current runtime. |
 | `ollamaRuntime.profileSchemaVersion` | INTERNAL | Version marker for runtime-profile migrations; current default schema is 2. |

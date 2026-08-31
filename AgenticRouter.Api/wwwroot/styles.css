@@ -1269,6 +1269,7 @@ p {
 .message.assistant {
   align-self: flex-start;
   padding-inline: 2px;
+  margin-bottom: 40px;
 }
 
 .assistant-response {
@@ -3539,7 +3540,7 @@ p {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 5px;
+  gap: 10px;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
@@ -3547,9 +3548,11 @@ p {
 .project-accordion {
   position: relative;
   flex: 0 0 auto;
-  border: 0;
+  overflow: hidden;
+  border: 1px solid #242631;
   border-radius: 8px;
-  background: transparent;
+  background: #1a1b22;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
 }
 
 .project-accordion.unavailable {
@@ -3559,13 +3562,15 @@ p {
 .project-accordion > summary {
   display: flex;
   min-width: 0;
-  min-height: 34px;
+  min-height: 42px;
   align-items: center;
   gap: 7px;
-  padding: 6px 34px 6px 8px;
-  border-radius: 8px;
+  padding: 10px 38px 10px 10px;
+  border-radius: 7px;
   cursor: pointer;
   list-style: none;
+  background: #1e2029;
+  transition: background-color 120ms ease;
 }
 
 .project-accordion > summary::-webkit-details-marker {
@@ -3584,12 +3589,21 @@ p {
   transform: rotate(90deg);
 }
 
+.project-accordion[open] > summary {
+  border-bottom: 1px solid #242631;
+  border-radius: 7px 7px 0 0;
+}
+
 .project-accordion > summary:hover {
-  background: var(--panel-raised);
+  background: #242733;
 }
 
 .project-accordion.active > summary {
-  background: color-mix(in srgb, var(--panel-raised) 78%, transparent);
+  background: #1e2029;
+}
+
+.project-accordion.active > summary:hover {
+  background: #242733;
 }
 
 .project-accordion > summary strong {
@@ -3597,6 +3611,7 @@ p {
   flex: 1;
   overflow: hidden;
   font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3653,16 +3668,17 @@ p {
 .project-menu-button:focus-visible,
 .project-menu-button[aria-expanded="true"] {
   color: var(--text);
-  background: var(--panel-raised);
+  background: #292c37;
 }
 
 .project-body {
-  padding: 2px 4px 7px 25px;
+  padding: 0 0 8px;
 }
 
 .project-actions {
   display: flex;
   justify-content: flex-end;
+  padding: 4px 10px 0;
 }
 
 .project-activate {
@@ -3678,13 +3694,25 @@ p {
   color: var(--text);
 }
 
+.project-conversation-stack {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.project-scroll-region {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .project-conversation-list {
   display: grid;
-  max-height: min(250px, 30vh);
-  gap: 3px;
+  max-height: min(240px, 30vh);
+  gap: 0;
+  padding: 3px 0 20px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .project-conversation-list {
@@ -3692,34 +3720,91 @@ p {
 }
 
 .project-conversation-list::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  display: none;
+}
+
+.project-conversation-list.has-more-below {
+  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+}
+
+.project-scroll-indicator {
+  position: absolute;
+  z-index: 3;
+  bottom: 5px;
+  left: 50%;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid rgba(107, 114, 128, 0.18);
+  border-radius: 50%;
+  color: #7d8593;
+  background: rgba(26, 27, 34, 0.84);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: project-scroll-pulse 2s ease-in-out infinite;
+}
+
+.project-scroll-indicator[hidden] {
+  display: none;
+}
+
+.project-scroll-indicator::before {
+  width: 7px;
+  height: 7px;
+  margin-top: -3px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  content: "";
+  transform: rotate(45deg);
+}
+
+@keyframes project-scroll-pulse {
+  0%,
+  100% {
+    opacity: 0.52;
+    transform: translate(-50%, 0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(-50%, 3px);
+  }
 }
 
 .project-conversation-list .session-entry {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 24px;
+  min-height: 48px;
   gap: 2px;
-  padding: 2px;
+  padding: 1px 6px 1px 8px;
   border: 0;
-  border-radius: 7px;
+  border-left: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
 }
 
 .project-conversation-list .session-entry:hover,
 .project-conversation-list .session-entry:focus-within {
-  background: var(--panel-raised);
+  background: #20222b;
 }
 
 .project-conversation-list .session-entry.current {
-  background: var(--panel-raised);
+  border-left-color: #3b82f6;
+  color: #fff;
+  background: #1e2538;
 }
 
 .project-conversation-list .session-entry-content {
   display: grid;
   min-width: 0;
-  gap: 2px;
-  padding: 6px;
+  gap: 4px;
+  padding: 8px 4px 8px 10px;
   border: 0;
   color: var(--text);
   background: transparent;
@@ -3733,9 +3818,19 @@ p {
   white-space: nowrap;
 }
 
+.project-conversation-list .session-entry-content strong {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.project-conversation-list .session-entry.current .session-entry-content strong {
+  color: #fff;
+  font-weight: 600;
+}
+
 .project-conversation-list .session-entry-content small {
-  color: var(--subtle);
-  font-size: 9px;
+  color: #6b7280;
+  font-size: 10px;
 }
 
 .session-details-button {
@@ -3747,12 +3842,21 @@ p {
   border-radius: 6px;
   color: var(--muted);
   background: transparent;
+  opacity: 0.62;
 }
 
 .session-details-button:hover,
 .session-details-button:focus-visible {
   color: var(--text);
   background: var(--panel);
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-scroll-indicator {
+    animation: none;
+    transform: translateX(-50%);
+  }
 }
 
 .project-empty,
@@ -4511,6 +4615,244 @@ textarea.terminal-command-input {
   color: #f4c66a;
   font-size: 11px;
   line-height: 1.45;
+}
+
+.historical-approval-notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.action-approval.historical-approval .approval-controls button,
+.action-approval.historical-approval .approval-controls button:hover,
+.action-approval.historical-approval .approval-controls button:focus-visible {
+  border-color: var(--border);
+  color: var(--subtle);
+  background: var(--panel);
+  box-shadow: none;
+  cursor: not-allowed;
+  filter: saturate(0.35);
+  opacity: 0.52;
+}
+
+.action-approval.historical-approval .terminal-command-input:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.terminal-execution-approval {
+  width: min(800px, 100%);
+  border-color: color-mix(in srgb, var(--accent) 78%, var(--border));
+  background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+}
+
+.terminal-execution-approval > .action-approval-summary {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-raised));
+}
+
+.terminal-execution-approval > .action-approval-summary .activity-time {
+  display: none;
+}
+
+.terminal-execution-approval > .action-approval-summary .action-approval-toggle {
+  color: var(--accent);
+  font-size: 14px;
+  transform: none;
+}
+
+.terminal-execution-approval > .action-approval-summary .action-approval-summary-content {
+  justify-content: flex-start;
+}
+
+.terminal-execution-approval > .action-approval-summary .terminal-tool-title {
+  color: color-mix(in srgb, var(--accent) 76%, var(--text)) !important;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.terminal-execution-approval > .action-approval-summary .approval-status {
+  margin-left: auto;
+}
+
+.terminal-execution-approval > .action-approval-content {
+  gap: 14px;
+  padding: 16px;
+}
+
+.terminal-execution-approval > .action-approval-content > .activity-message {
+  display: none;
+}
+
+.terminal-execution-approval .terminal-command {
+  margin: 0;
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.terminal-execution-approval .terminal-command-input,
+.terminal-execution-approval .terminal-command-input:read-only {
+  color: var(--success);
+}
+
+.terminal-execution-approval .approval-boundary-warning {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.terminal-execution-approval .approval-boundary-warning::before {
+  flex: 0 0 auto;
+  content: "ⓘ";
+}
+
+.terminal-execution-approval .approval-controls {
+  gap: 12px;
+}
+
+.terminal-execution-approval .approval-controls button {
+  min-height: 34px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.terminal-execution-approval .approval-controls .primary-button {
+  border-color: var(--accent);
+  color: #fff;
+  background: var(--accent);
+}
+
+.terminal-execution-approval .approval-controls .primary-button:hover,
+.terminal-execution-approval .approval-controls .primary-button:focus-visible {
+  background: var(--accent-hover);
+}
+
+.terminal-execution-completed {
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.terminal-execution-completed > .action-approval-summary {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  min-height: 36px;
+  gap: 10px;
+  padding: 7px 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.terminal-execution-completed > .action-approval-summary:hover,
+.terminal-execution-completed > .action-approval-summary:focus-visible {
+  background: color-mix(in srgb, var(--panel) 62%, transparent);
+}
+
+.terminal-execution-completed > .action-approval-summary .activity-time {
+  display: block;
+  grid-column: 3;
+  grid-row: 1;
+  color: var(--subtle);
+  font-size: 11px;
+  text-align: right;
+}
+
+.terminal-execution-completed > .action-approval-summary .action-approval-toggle {
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--success);
+  font-size: 13px;
+}
+
+.terminal-execution-completed > .action-approval-summary .action-approval-summary-content {
+  grid-column: 2;
+  grid-row: 1;
+  gap: 9px;
+  overflow: hidden;
+}
+
+.terminal-execution-completed > .action-approval-summary .terminal-tool-title {
+  flex: 0 0 auto;
+  color: var(--muted) !important;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.terminal-command-summary {
+  min-width: 0;
+  max-width: 360px;
+  overflow: hidden;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text) !important;
+  background: var(--panel);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-output-toggle {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.terminal-execution-completed > .action-approval-content {
+  padding: 4px 0 8px 28px;
+}
+
+.terminal-execution-completed > .action-approval-content > :not(.action-response) {
+  display: none;
+}
+
+.terminal-execution-completed .action-response {
+  margin: 0;
+}
+
+.terminal-execution-completed .action-response > summary {
+  display: none;
+}
+
+.terminal-execution-completed .action-response-output {
+  border-top: 0;
+}
+
+@media (max-width: 620px) {
+  .terminal-execution-approval .approval-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .terminal-execution-completed > .action-approval-summary {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+
+  .terminal-execution-completed > .action-approval-summary .activity-time {
+    display: none;
+  }
+
+  .terminal-execution-completed > .action-approval-summary .action-approval-summary-content {
+    flex-wrap: wrap;
+  }
+
+  .terminal-command-summary {
+    max-width: 100%;
+  }
 }
 
 .workspace-process-permissions {

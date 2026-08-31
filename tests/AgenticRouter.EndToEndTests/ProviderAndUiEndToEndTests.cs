@@ -4888,6 +4888,43 @@ baselineTotal!.Value
     ).ToBeVisibleAsync();
     await Expect(
       secondProject.Locator(
+        ".project-icon"
+      )
+    ).ToBeVisibleAsync();
+    var projectVisuals = await secondProject.EvaluateAsync<string[]>(
+      """
+      element => {
+        const summary = element.querySelector(":scope > summary");
+        const marker = element.querySelector(".project-active-marker");
+        return [
+          getComputedStyle(element).backgroundColor,
+          getComputedStyle(summary).backgroundColor,
+          getComputedStyle(summary, "::before").content,
+          getComputedStyle(marker).backgroundColor,
+          String(summary.getBoundingClientRect().height)
+        ];
+      }
+      """
+    );
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "rgb(26, 27, 34)",
+        "rgb(30, 32, 41)",
+        "\"›\"",
+        "rgb(85, 200, 148)"
+      },
+      projectVisuals.Take(4).ToArray()
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      42,
+      double.Parse(
+        projectVisuals[4],
+        System.Globalization.CultureInfo.InvariantCulture
+      )
+    );
+    await Expect(
+      secondProject.Locator(
         ".badge.success"
       )
     ).ToHaveCountAsync(
@@ -4946,13 +4983,29 @@ baselineTotal!.Value
     Assert.IsTrue(
       await secondProject.EvaluateAsync<bool>("element => element.open")
     );
+    var recentSessions = secondProject.Locator("#recent-sessions");
     Assert.IsTrue(
-      await secondProject.Locator(
-        "#recent-sessions"
-      ).EvaluateAsync<bool>(
+      await recentSessions.EvaluateAsync<bool>(
         "element => element.scrollHeight > element.clientHeight"
       )
     );
+    await Expect(recentSessions).ToHaveClassAsync(
+      new Regex("has-more-below")
+    );
+    Assert.AreEqual(
+      "none",
+      await recentSessions.EvaluateAsync<string>(
+        "element => getComputedStyle(element).scrollbarWidth"
+      )
+    );
+    var scrollIndicator = recentSessions.Locator("xpath=..").Locator(
+      ".project-scroll-indicator"
+    );
+    await Expect(scrollIndicator).ToBeVisibleAsync();
+    await recentSessions.EvaluateAsync(
+      "element => element.scrollTop = element.scrollHeight"
+    );
+    await Expect(scrollIndicator).ToBeHiddenAsync();
 
     await Page.Locator(
       "#open-session-search"
@@ -4991,6 +5044,34 @@ baselineTotal!.Value
       )
     ).ToContainTextAsync(
       "cobalt marker"
+    );
+    var currentConversation = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{firstWorkspaceId}\"] .session-entry.current"
+    );
+    await Expect(currentConversation).ToBeVisibleAsync();
+    var currentVisuals = await currentConversation.EvaluateAsync<string[]>(
+      """
+      element => [
+        getComputedStyle(element).backgroundColor,
+        getComputedStyle(element).borderLeftColor,
+        String(element.getBoundingClientRect().height)
+      ]
+      """
+    );
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "rgb(30, 37, 56)",
+        "rgb(59, 130, 246)"
+      },
+      currentVisuals.Take(2).ToArray()
+    );
+    Assert.IsGreaterThanOrEqualTo(
+      48,
+      double.Parse(
+        currentVisuals[2],
+        System.Globalization.CultureInfo.InvariantCulture
+      )
     );
     await Page.Locator(
       "#toggle-sidebar"

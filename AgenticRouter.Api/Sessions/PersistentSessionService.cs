@@ -28,6 +28,7 @@ public interface IPersistentSessionService
 
   Task<ConversationSessionRecord?> BeginTurnAsync(
     string? sessionId,
+    string turnId,
     string message,
     string interactionMode,
     string? model,
@@ -35,11 +36,13 @@ public interface IPersistentSessionService
     string harness,
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
+    int? replaceFromMessageIndex,
     CancellationToken cancellationToken
   );
 
   Task<ConversationSessionRecord?> CompleteTurnAsync(
     string? sessionId,
+    string? turnId,
     string answer,
     string interactionMode,
     string? model,
@@ -52,6 +55,7 @@ public interface IPersistentSessionService
 
   Task MarkTerminalAsync(
     string? sessionId,
+    string? turnId,
     string state,
     ExecutionSessionReview? review,
     CancellationToken cancellationToken,
@@ -60,6 +64,7 @@ public interface IPersistentSessionService
 
   Task PersistTimelineAsync(
     string sessionId,
+    string? turnId,
     IReadOnlyList<ChatStreamEvent> timeline,
     CancellationToken cancellationToken
   );
@@ -421,6 +426,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
   public async Task<ConversationSessionRecord?> BeginTurnAsync(
     string? sessionId,
+    string turnId,
     string message,
     string interactionMode,
     string? model,
@@ -428,6 +434,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string harness,
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
+    int? replaceFromMessageIndex,
     CancellationToken cancellationToken
   )
   {
@@ -549,6 +556,15 @@ public sealed class PersistentSessionService : IPersistentSessionService
         }
       }
 
+      if (replaceFromMessageIndex is { } replaceIndex)
+      {
+        session = RewindForEditedMessage(
+          session,
+          replaceIndex,
+          message
+        );
+      }
+
       var updatedAt = DateTimeOffset.UtcNow;
       session = session with
       {
@@ -569,7 +585,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
               images
             ),
             updatedAt,
-            Hidden: hidden
+            Hidden: hidden,
+            TurnId: turnId
           )
         ).ToArray()
       };
@@ -583,6 +600,132 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       _gate.Release();
     }
+  }
+
+  private static ConversationSessionRecord RewindForEditedMessage(
+    ConversationSessionRecord session,
+    int replaceFromMessageIndex,
+    string replacementMessage
+  )
+  {
+    if (
+      replaceFromMessageIndex < 0
+      || replaceFromMessageIndex >= session.Messages.Count
+      || session.Messages[replaceFromMessageIndex].Role != "user"
+    )
+    {
+      throw new WorkspaceProfileException(
+        "session-edit-conflict",
+        "session-edit",
+        "The conversation changed before the edited message could replace its original turn.",
+        true
+      );
+    }
+
+    var removedExecutionIds = session.Messages.Skip(
+      replaceFromMessageIndex
+    ).SelectMany(
+      message => message.Timeline ?? []
+    ).Select(
+      streamEvent => streamEvent.ExecutionSession?.Id
+    ).Where(
+      id => !string.IsNullOrWhiteSpace(id)
+    ).ToHashSet(
+      StringComparer.Ordinal
+    );
+    var retainedMessages = session.Messages.Take(
+      replaceFromMessageIndex
+    ).ToArray();
+    return session with
+    {
+      Title = replaceFromMessageIndex == 0
+        ? CreateTitle(replacementMessage)
+        : session.Title,
+      State = "running",
+      Interrupted = false,
+      Messages = retainedMessages,
+      ExecutionReviews = session.ExecutionReviews.Where(
+        review => !removedExecutionIds.Contains(review.Summary.Id)
+      ).ToArray(),
+      ExecutionRollbacks = session.ExecutionRollbacks?.Where(
+        rollback => !removedExecutionIds.Contains(rollback.Id)
+      ).ToArray(),
+      SessionSummary = null
+    };
+  }
+
+  private static int FindTurnIndex(
+    IReadOnlyList<ChatMessage> messages,
+    string? turnId
+  )
+  {
+    if (turnId is null)
+    {
+      return -1;
+    }
+
+    for (var index = 0; index < messages.Count; index++)
+    {
+      if (
+        messages[index].Role == "user"
+        && string.Equals(
+          messages[index].TurnId,
+          turnId,
+          StringComparison.Ordinal
+        )
+      )
+      {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private static int FindLastUserIndex(
+    IReadOnlyList<ChatMessage> messages
+  )
+  {
+    for (var index = messages.Count - 1; index >= 0; index--)
+    {
+      if (messages[index].Role == "user")
+      {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private static int FindTimelineTargetIndex(
+    IReadOnlyList<ChatMessage> messages,
+    string? turnId
+  )
+  {
+    if (turnId is null)
+    {
+      var lastUserIndex = FindLastUserIndex(messages);
+      return messages.Count - 1 > lastUserIndex
+        && messages[^1].Role == "assistant"
+          ? messages.Count - 1
+          : lastUserIndex;
+    }
+
+    for (var index = 0; index < messages.Count; index++)
+    {
+      if (
+        messages[index].Role == "assistant"
+        && string.Equals(messages[index].TurnId, turnId, StringComparison.Ordinal)
+      )
+      {
+        return index;
+      }
+    }
+
+    return FindTurnIndex(
+      messages,
+      turnId
+    );
   }
 
   private static string PersistedUserMessage(
@@ -611,6 +754,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
   public async Task<ConversationSessionRecord?> CompleteTurnAsync(
     string? sessionId,
+    string? turnId,
     string answer,
     string interactionMode,
     string? model,
@@ -628,99 +772,151 @@ public sealed class PersistentSessionService : IPersistentSessionService
       return null;
     }
 
-    var active = await RequireActiveAsync(
+    await _gate.WaitAsync(
       cancellationToken
     );
-    var session = await RequireSessionAsync(
-      active,
-      sessionId,
-      cancellationToken
-    );
-    if (
-      session.State == "completed"
-      && !session.Interrupted
-      && session.Messages.LastOrDefault() is { Role: "assistant" } last
-      && string.Equals(last.Content, answer, StringComparison.Ordinal)
-    )
-    {
-      return session;
-    }
-    var limits = (
-      await _settings.GetAsync(
-        cancellationToken
-      )
-    ).SessionHistory;
-    var artifactsTruncated = false;
-    var bounded = review is null
-      ? null
-      : BoundReview(
-        review,
-        limits,
-        out artifactsTruncated
-      );
-    var snapshot = review is null
-      ? null
-      : _executionSessions.CapturePersistenceSnapshot(
-        review.Summary.Id
-      );
-    var rollbackTruncated = snapshot is not null
-      && snapshot.Files.Sum(
-        file => file.RollbackBytes
-      ) > limits.MaxSessionBytes / 2;
 
-    if (rollbackTruncated)
+    try
     {
-      snapshot = null;
-      artifactsTruncated = true;
-      bounded = DisableUndo(
-        bounded,
-        "Undo metadata is unavailable because retained rollback content exceeded the session limit."
+      var active = await RequireActiveAsync(
+        cancellationToken
+      );
+      var session = await RequireSessionAsync(
+        active,
+        sessionId,
+        cancellationToken
+      );
+      var turnIndex = FindTurnIndex(
+        session.Messages,
+        turnId
+      );
+      if (turnId is not null && turnIndex < 0)
+      {
+        return session;
+      }
+      if (
+        session.State == "completed"
+        && !session.Interrupted
+        && session.Messages.LastOrDefault() is { Role: "assistant" } last
+        && string.Equals(last.Content, answer, StringComparison.Ordinal)
+        && (turnId is null || string.Equals(last.TurnId, turnId, StringComparison.Ordinal))
+      )
+      {
+        return session;
+      }
+      var limits = (
+        await _settings.GetAsync(
+          cancellationToken
+        )
+      ).SessionHistory;
+      var artifactsTruncated = false;
+      var bounded = review is null
+        ? null
+        : BoundReview(
+          review,
+          limits,
+          out artifactsTruncated
+        );
+      var snapshot = review is null
+        ? null
+        : _executionSessions.CapturePersistenceSnapshot(
+          review.Summary.Id
+        );
+      var rollbackTruncated = snapshot is not null
+        && snapshot.Files.Sum(
+          file => file.RollbackBytes
+        ) > limits.MaxSessionBytes / 2;
+
+      if (rollbackTruncated)
+      {
+        snapshot = null;
+        artifactsTruncated = true;
+        bounded = DisableUndo(
+          bounded,
+          "Undo metadata is unavailable because retained rollback content exceeded the session limit."
+        );
+      }
+      var updatedAt = DateTimeOffset.UtcNow;
+      var assistantMessage = new ChatMessage(
+        "assistant",
+        answer,
+        updatedAt,
+        diagnostic,
+        ContentBlocks: contentBlocks,
+        Timeline: timeline,
+        TurnId: turnId
+      );
+      var messages = session.Messages.ToList();
+      if (turnIndex >= 0)
+      {
+        var existingAssistantIndex = messages.FindIndex(
+          turnIndex + 1,
+          candidate => candidate.Role == "assistant"
+            && string.Equals(candidate.TurnId, turnId, StringComparison.Ordinal)
+        );
+        if (existingAssistantIndex >= 0)
+        {
+          messages[existingAssistantIndex] = assistantMessage;
+        }
+        else
+        {
+          messages.Insert(
+            turnIndex + 1,
+            assistantMessage
+          );
+        }
+      }
+      else
+      {
+        messages.Add(
+          assistantMessage
+        );
+      }
+      var isLatestTurn = turnId is null
+        || turnIndex == FindLastUserIndex(session.Messages);
+      var completed = session with
+      {
+        State = isLatestTurn ? "completed" : session.State,
+        Interrupted = isLatestTurn ? false : session.Interrupted,
+        UpdatedAt = updatedAt,
+        LastInteractionMode = isLatestTurn
+          ? interactionMode
+          : session.LastInteractionMode,
+        SelectedModel = isLatestTurn
+          ? NormalizeModel(model) ?? session.SelectedModel
+          : session.SelectedModel,
+        Messages = messages.ToArray(),
+        ExecutionReviews = bounded is null
+          ? session.ExecutionReviews
+          : MergeReview(
+            session.ExecutionReviews,
+            bounded
+          ),
+        ArtifactsTruncated = session.ArtifactsTruncated
+          || (
+            review is not null
+            && artifactsTruncated
+          ),
+        ExecutionRollbacks = MergeSnapshot(
+          session.ExecutionRollbacks,
+          snapshot
+        )
+      };
+      return await _store.WriteAsync(
+        completed,
+        limits.MaxSessionBytes,
+        cancellationToken
       );
     }
-    var updatedAt = DateTimeOffset.UtcNow;
-    var completed = session with
+    finally
     {
-      State = "completed",
-      Interrupted = false,
-      UpdatedAt = updatedAt,
-      LastInteractionMode = interactionMode,
-      SelectedModel = NormalizeModel(
-        model
-      ) ?? session.SelectedModel,
-      Messages = session.Messages.Append(
-        new ChatMessage(
-          "assistant",
-          answer,
-          updatedAt,
-          diagnostic,
-          ContentBlocks: contentBlocks,
-          Timeline: timeline
-        )
-      ).ToArray(),
-      ExecutionReviews = bounded is null
-        ? session.ExecutionReviews
-        : session.ExecutionReviews.Append(
-          bounded
-        ).ToArray(),
-      ArtifactsTruncated = session.ArtifactsTruncated
-        || (
-          review is not null
-          && artifactsTruncated
-        ),
-      ExecutionRollbacks = MergeSnapshot(
-        session.ExecutionRollbacks,
-        snapshot
-      )
-    };
-    return await _store.WriteAsync(
-      completed,
-      limits.MaxSessionBytes,
-      cancellationToken
-    );
+      _gate.Release();
+    }
   }
 
   public async Task MarkTerminalAsync(
     string? sessionId,
+    string? turnId,
     string state,
     ExecutionSessionReview? review,
     CancellationToken cancellationToken,
@@ -734,67 +930,94 @@ public sealed class PersistentSessionService : IPersistentSessionService
       return;
     }
 
-    var active = await RequireActiveAsync(
+    await _gate.WaitAsync(
       cancellationToken
     );
-    var session = await RequireSessionAsync(
-      active,
-      sessionId,
-      cancellationToken
-    );
-    var limits = (
-      await _settings.GetAsync(
-        cancellationToken
-      )
-    ).SessionHistory;
-    var bounded = review is null
-      ? null
-      : BoundReview(
-        review,
-        limits,
-        out _
-      );
-    var snapshot = review is null
-      ? null
-      : _executionSessions.CapturePersistenceSnapshot(
-        review.Summary.Id
-      );
 
-    if (
-      snapshot is not null
-      && snapshot.Files.Sum(
-        file => file.RollbackBytes
-      ) > limits.MaxSessionBytes / 2
-    )
+    try
     {
-      snapshot = null;
-      bounded = DisableUndo(
-        bounded,
-        "Undo metadata is unavailable because retained rollback content exceeded the session limit."
+      var active = await RequireActiveAsync(
+        cancellationToken
+      );
+      var session = await RequireSessionAsync(
+        active,
+        sessionId,
+        cancellationToken
+      );
+      var turnIndex = FindTurnIndex(
+        session.Messages,
+        turnId
+      );
+      if (turnId is not null && turnIndex < 0)
+      {
+        return;
+      }
+      var limits = (
+        await _settings.GetAsync(
+          cancellationToken
+        )
+      ).SessionHistory;
+      var bounded = review is null
+        ? null
+        : BoundReview(
+          review,
+          limits,
+          out _
+        );
+      var snapshot = review is null
+        ? null
+        : _executionSessions.CapturePersistenceSnapshot(
+          review.Summary.Id
+        );
+
+      if (
+        snapshot is not null
+        && snapshot.Files.Sum(
+          file => file.RollbackBytes
+        ) > limits.MaxSessionBytes / 2
+      )
+      {
+        snapshot = null;
+        bounded = DisableUndo(
+          bounded,
+          "Undo metadata is unavailable because retained rollback content exceeded the session limit."
+        );
+      }
+      var latestTurnIndex = FindLastUserIndex(
+        session.Messages
+      );
+      var isLatestTurn = turnId is null || turnIndex == latestTurnIndex;
+      await _store.WriteAsync(
+        session with
+        {
+          State = isLatestTurn ? state : session.State,
+          Interrupted = isLatestTurn
+            ? state == "interrupted"
+            : session.Interrupted,
+          UpdatedAt = DateTimeOffset.UtcNow,
+          Messages = AppendTerminalMessage(
+            session.Messages,
+            terminalMessage is null
+              ? null
+              : terminalMessage with { TurnId = turnId }
+          ),
+          ExecutionReviews = MergeReview(
+            session.ExecutionReviews,
+            bounded
+          ),
+          ExecutionRollbacks = MergeSnapshot(
+            session.ExecutionRollbacks,
+            snapshot
+          )
+        },
+        limits.MaxSessionBytes,
+        cancellationToken
       );
     }
-    await _store.WriteAsync(
-      session with
-      {
-        State = state,
-        Interrupted = state == "interrupted",
-        UpdatedAt = DateTimeOffset.UtcNow,
-        Messages = AppendTerminalMessage(
-          session.Messages,
-          terminalMessage
-        ),
-        ExecutionReviews = MergeReview(
-          session.ExecutionReviews,
-          bounded
-        ),
-        ExecutionRollbacks = MergeSnapshot(
-          session.ExecutionRollbacks,
-          snapshot
-        )
-      },
-      limits.MaxSessionBytes,
-      cancellationToken
-    );
+    finally
+    {
+      _gate.Release();
+    }
   }
 
   private static IReadOnlyList<ChatMessage> AppendTerminalMessage(
@@ -817,11 +1040,46 @@ public sealed class PersistentSessionService : IPersistentSessionService
       return messages;
     }
 
-    return messages.Append(terminalMessage).ToArray();
+    if (terminalMessage.TurnId is null)
+    {
+      return messages.Append(terminalMessage).ToArray();
+    }
+
+    var turnIndex = FindTurnIndex(
+      messages,
+      terminalMessage.TurnId
+    );
+    if (turnIndex < 0)
+    {
+      return messages;
+    }
+    var updated = messages.ToList();
+    var assistantIndex = updated.FindIndex(
+      turnIndex + 1,
+      candidate => candidate.Role == "assistant"
+        && string.Equals(
+          candidate.TurnId,
+          terminalMessage.TurnId,
+          StringComparison.Ordinal
+        )
+    );
+    if (assistantIndex >= 0)
+    {
+      updated[assistantIndex] = terminalMessage;
+    }
+    else
+    {
+      updated.Insert(
+        turnIndex + 1,
+        terminalMessage
+      );
+    }
+    return updated;
   }
 
   public async Task PersistTimelineAsync(
     string sessionId,
+    string? turnId,
     IReadOnlyList<ChatStreamEvent> timeline,
     CancellationToken cancellationToken
   )
@@ -846,14 +1104,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
         cancellationToken
       );
       var messages = session.Messages.ToArray();
-      var lastUserIndex = Array.FindLastIndex(
+      var targetIndex = FindTimelineTargetIndex(
         messages,
-        message => message.Role == "user"
+        turnId
       );
-      var targetIndex = messages.Length - 1 > lastUserIndex
-        && messages[^1].Role == "assistant"
-          ? messages.Length - 1
-          : lastUserIndex;
 
       if (targetIndex < 0)
       {
@@ -929,6 +1183,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       await MarkTerminalAsync(
         sessionId,
+        null,
         "interrupted",
         null,
         cancellationToken
@@ -1490,7 +1745,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
             RenderedHtml = null
           }
           ).ToArray(),
-          Timeline = stored?.Timeline
+          Timeline = stored?.Timeline,
+          TurnId = stored?.TurnId ?? message.TurnId
         };
       }
     ).ToArray();

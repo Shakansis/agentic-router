@@ -35,6 +35,7 @@ public sealed class ChatController : ControllerBase
   private readonly IMarkdownRenderer _markdown;
   private string? _executionSessionId;
   private string? _conversationSessionId;
+  private string? _turnId;
   private string? _durableSupervisionRunId;
   private string? _lastExecutionCheckpoint;
   private readonly List<Task<IncidentAppendResult>> _incidentWrites = [];
@@ -77,6 +78,7 @@ public sealed class ChatController : ControllerBase
     var requestId = Guid.NewGuid().ToString(
       "N"
     );
+    _turnId = requestId;
     _trace.Link("requestId", requestId);
 
     if (string.IsNullOrWhiteSpace(
@@ -139,6 +141,7 @@ public sealed class ChatController : ControllerBase
         _conversationSessionId = request.ConversationSessionId;
         var persisted = await _persistentSessions.BeginTurnAsync(
           request.ConversationSessionId,
+          requestId,
           request.Message,
           request.InteractionMode,
           request.Model,
@@ -146,6 +149,7 @@ public sealed class ChatController : ControllerBase
           request.Harness,
           request.Images,
           request.HideUserMessage,
+          request.ReplaceFromMessageIndex,
           cancellationToken
         );
         _conversationSessionId = persisted?.Id
@@ -180,6 +184,23 @@ public sealed class ChatController : ControllerBase
           ),
           cancellationToken
         );
+        if (request.ReplaceFromMessageIndex is not null)
+        {
+          throw new ChatStageException(
+            exception.Stage,
+            "The edited message could not replace the original conversation turn.",
+            exception.Message,
+            request.Model,
+            null,
+            409,
+            exception.Retryable,
+            exception,
+            new Dictionary<string, string?>
+            {
+              ["code"] = exception.Code
+            }
+          );
+        }
       }
 
       var answer = new System.Text.StringBuilder();
@@ -232,6 +253,7 @@ public sealed class ChatController : ControllerBase
               );
             var persisted = await _persistentSessions.CompleteTurnAsync(
               _conversationSessionId,
+              requestId,
               answer.ToString(),
               request.InteractionMode,
               streamEvent.SelectedModel,
@@ -587,6 +609,7 @@ public sealed class ChatController : ControllerBase
           {
             var persisted = await _persistentSessions.CompleteTurnAsync(
               _conversationSessionId,
+              null,
               answer.ToString(),
               "execute",
               streamEvent.SelectedModel,
@@ -913,6 +936,7 @@ public sealed class ChatController : ControllerBase
     {
       await _persistentSessions.MarkTerminalAsync(
         _conversationSessionId,
+        _turnId,
         summary.State,
         review,
         HttpContext.RequestAborted
@@ -942,6 +966,7 @@ public sealed class ChatController : ControllerBase
         );
       await _persistentSessions.MarkTerminalAsync(
         _conversationSessionId,
+        _turnId,
         state,
         review,
         CancellationToken.None
@@ -1072,6 +1097,7 @@ public sealed class ChatController : ControllerBase
     {
       await _persistentSessions.MarkTerminalAsync(
         _conversationSessionId,
+        _turnId,
         "failed",
         review,
         CancellationToken.None,
@@ -1183,6 +1209,7 @@ public sealed class ChatController : ControllerBase
     {
       await _persistentSessions.PersistTimelineAsync(
         _conversationSessionId,
+        _turnId,
         _presentationTimeline,
         CancellationToken.None
       );
