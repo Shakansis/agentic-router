@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "vertical": 1,
+  "metrics": {
+    "ordinary_action_plan_rejections": 0,
+    "full_plan_projections": 0,
+    "full_plan_projection_chars": 0,
+    "exact_deterministic_repeats": 0,
+    "untyped_tool_failures": 0
+  },
+  "scope": {
+    "full_plan_projections": "ordinary tool results in Vertical 1 replays",
+    "exact_deterministic_repeats": "tool invocations after the first unchanged deterministic failure",
+    "untyped_tool_failures": "main native and MCP Host-tool result paths"
+  },
+  "evidence": [
+    "ExecutionEffectTests.OrdinaryPlanBindingsAreAdvisoryWithoutSemanticInference",
+    "ExecutionEffectTests.OrdinaryHostResultUsesCompactTypedEnvelope",
+    "ExecutionEffectTests.ExactDeterministicRepeatRequiresUnchangedArgumentsAndRelevantState",
+    "ExecutionStateEndToEndTests.ExternalHarnessHostBridgeSupportsOptionalVisiblePlan",
+    "ExecutionStateEndToEndTests.ExternalHarnessSuppressesExactDeterministicRepeat"
+  ]
+}

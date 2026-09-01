@@ -2956,14 +2956,14 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "[data-event-type=\"action.security-denied\"]"
       )
     ).ToHaveCountAsync(
-      2
+      1
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.security-denied\"]"
+        "[data-event-type=\"action.deterministic-repeat-suppressed\"]"
       ).Last
     ).ToContainTextAsync(
-      "repeated an identical denied proposal"
+      "suppressed an unchanged repeat"
     );
     await Expect(
       Page.Locator(
@@ -3100,14 +3100,14 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "[data-event-type=\"action.policy-denied\"]"
       )
     ).ToHaveCountAsync(
-      2
+      1
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.policy-denied\"]"
+        "[data-event-type=\"action.deterministic-repeat-suppressed\"]"
       ).Last
     ).ToContainTextAsync(
-      "repeated an identical denied proposal"
+      "suppressed an unchanged repeat"
     );
     await Expect(
       Page.Locator(
@@ -3284,7 +3284,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     CollectionAssert.AreEqual(
       new[]
       {
-        LocalActionPlanner.RequestToolsetTool
+        LocalActionPlanner.RequestToolsetTool,
+        "get_execution_plan",
+        "list_files",
+        "read_file",
+        "get_file_info",
+        "search_text"
       },
       plannerRequests[0].AvailableTools.ToArray()
     );
@@ -3301,6 +3306,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         request => request.AvailableTools.SequenceEqual(
           [
             LocalActionPlanner.RequestToolsetTool,
+            "get_execution_plan",
+            "list_files",
+            "read_file",
+            "get_file_info",
+            "search_text",
             "create_file"
           ]
         )
@@ -3311,7 +3321,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         request => request.AvailableTools.SequenceEqual(
           [
             LocalActionPlanner.RequestToolsetTool,
+            "get_execution_plan",
+            "list_files",
             "read_file",
+            "get_file_info",
+            "search_text",
             "create_file"
           ]
         )
@@ -3321,6 +3335,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       plannerRequests.All(
         request => request.AvailableTools.All(
           tool => tool is LocalActionPlanner.RequestToolsetTool
+            or "get_execution_plan"
+            or "list_files"
+            or "get_file_info"
+            or "search_text"
             or "create_file"
             or "read_file"
         )
@@ -3331,7 +3349,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".assistant-toolset-request"
       )
     ).ToHaveCountAsync(
-      2
+      1
     );
     await Expect(
       Page.Locator(
@@ -3339,13 +3357,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       ).Nth(0)
     ).ToContainTextAsync(
       "create_file"
-    );
-    await Expect(
-      Page.Locator(
-        ".assistant-toolset-request"
-      ).Nth(1)
-    ).ToContainTextAsync(
-      "read_file"
     );
     Assert.AreEqual(
       "hello from agent",
@@ -3417,7 +3428,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(
       rejection
     ).ToContainTextAsync(
-      "neither canonical nor an approved alias"
+      "no exact canonical name or registered alias matches"
     );
     await Expect(
       Page.Locator(
@@ -3446,7 +3457,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     CollectionAssert.AreEqual(
       new[]
       {
-        LocalActionPlanner.RequestToolsetTool
+        LocalActionPlanner.RequestToolsetTool,
+        "get_execution_plan",
+        "list_files",
+        "read_file",
+        "get_file_info",
+        "search_text"
       },
       firstPlannerRequest.AvailableTools.ToArray()
     );
@@ -3493,7 +3509,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     CollectionAssert.AreEqual(
       new[]
       {
-        LocalActionPlanner.RequestToolsetTool
+        LocalActionPlanner.RequestToolsetTool,
+        "get_execution_plan",
+        "list_files",
+        "read_file",
+        "get_file_info",
+        "search_text"
       },
       plannerRequests[0].AvailableTools.ToArray()
     );
@@ -4118,6 +4139,43 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BareExecutableExactPermissionCanBeRemembered()
+  {
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await StartMessageAsync("execute unknown process");
+
+    var approval = Page.Locator(".action-approval").Last;
+    await approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Always allow exact command",
+        Exact = true
+      }
+    ).ClickAsync();
+    await Expect(
+      Page.Locator("[data-event-type=\"action.process-output\"]").Last
+    ).ToContainTextAsync("Exit code: 0");
+    var approvalCount = await Page.Locator(
+      "[data-event-type=\"action.awaiting-approval\"]"
+    ).CountAsync();
+
+    await SendMessageAsync("execute unknown process");
+
+    Assert.AreEqual(
+      approvalCount,
+      await Page.Locator(
+        "[data-event-type=\"action.awaiting-approval\"]"
+      ).CountAsync()
+    );
+    await Expect(
+      Page.Locator("[data-event-type=\"action.process-output\"]").Last
+    ).ToContainTextAsync("Exit code: 0");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task PendingStructuredFileActionRunsInlineEditedArgumentsOnApproval()
   {
     var originalPath = Path.Combine(
@@ -4182,6 +4240,113 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         originalPath
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ApprovalWaitUsesSeparateClockAndPersistsOriginalPendingAction()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history",
+      new { enabled = true }
+    ))
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    var target = Path.Combine(_environment.WorkspaceDirectory, "hello.txt");
+    File.Delete(target);
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("ask");
+    await StartMessageAsync("execute create file");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToContainTextAsync("create_file");
+    await Task.Delay(1_200);
+
+    using var sessions = await _environment.HttpClient.GetAsync("api/sessions");
+    sessions.EnsureSuccessStatusCode();
+    using var sessionsDocument = JsonDocument.Parse(await sessions.Content.ReadAsStringAsync());
+    var sessionId = sessionsDocument.RootElement.GetProperty("recent")[0].GetProperty("id").GetString()!;
+    using var pendingSession = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{sessionId}?workspaceId={workspaceId}"
+    );
+    pendingSession.EnsureSuccessStatusCode();
+    using var pendingDocument = JsonDocument.Parse(await pendingSession.Content.ReadAsStringAsync());
+    var pendingEvents = pendingDocument.RootElement.GetProperty("messages")
+      .EnumerateArray()
+      .Where(message => message.TryGetProperty("timeline", out _))
+      .SelectMany(message => message.GetProperty("timeline").EnumerateArray().Select(item => item.Clone()))
+      .ToArray();
+    var awaiting = pendingEvents.Single(item => item.GetProperty("type").GetString() == "action.awaiting-approval");
+    Assert.AreEqual(
+      HostActionCodes.ApprovalPending,
+      awaiting.GetProperty("localAction").GetProperty("code").GetString()
+    );
+    var pendingActionId = awaiting.GetProperty("localAction").GetProperty("actionId").GetString();
+
+    await approval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Approve", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator("[data-event-type=\"action.edit-applied\"]").Last).ToBeAttachedAsync();
+    var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");
+    using var review = await _environment.HttpClient.GetAsync(
+      $"api/execution-sessions/{executionId}/review"
+    );
+    review.EnsureSuccessStatusCode();
+    using var reviewDocument = JsonDocument.Parse(await review.Content.ReadAsStringAsync());
+    var timing = reviewDocument.RootElement.GetProperty("summary").GetProperty("timing");
+    Assert.IsGreaterThanOrEqualTo(1_000, timing.GetProperty("approvalWaitMilliseconds").GetInt64());
+    Assert.IsLessThan(
+      reviewDocument.RootElement.GetProperty("summary").GetProperty("elapsedMilliseconds").GetInt64(),
+      timing.GetProperty("harnessActiveMilliseconds").GetInt64()
+    );
+    var action = reviewDocument.RootElement.GetProperty("actions").EnumerateArray()
+      .Single(item => item.GetProperty("actionId").GetString() == pendingActionId);
+    Assert.AreEqual(JsonValueKind.String, action.GetProperty("actionCreatedAt").ValueKind);
+    Assert.AreEqual(JsonValueKind.String, action.GetProperty("approvalRequestedAt").ValueKind);
+    Assert.AreEqual(JsonValueKind.String, action.GetProperty("approvalResolvedAt").ValueKind);
+    Assert.AreEqual("completed", action.GetProperty("state").GetString());
+
+    using var completedSession = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{sessionId}?workspaceId={workspaceId}"
+    );
+    completedSession.EnsureSuccessStatusCode();
+    using var completedDocument = JsonDocument.Parse(await completedSession.Content.ReadAsStringAsync());
+    var persistedEvents = completedDocument.RootElement.GetProperty("messages")
+      .EnumerateArray()
+      .Where(message => message.TryGetProperty("timeline", out _))
+      .SelectMany(message => message.GetProperty("timeline").EnumerateArray().Select(item => item.Clone()))
+      .ToArray();
+    Assert.IsLessThanOrEqualTo(
+      11,
+      persistedEvents.Count(item => item.GetProperty("type").GetString() == "context.usage")
+    );
+    Assert.IsLessThanOrEqualTo(
+      1,
+      persistedEvents.Count(item => item.GetProperty("type").GetString() == "request.heartbeat")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ApprovalResumeRevalidatesWorkspaceBeforeExecutingOriginalAction()
+  {
+    var target = Path.Combine(_environment.WorkspaceDirectory, "hello.txt");
+    File.Delete(target);
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("ask");
+    await StartMessageAsync("execute create file");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToContainTextAsync("create_file");
+    await File.WriteAllTextAsync(target, "external change during approval");
+    await approval.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Approve", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator("[data-event-type=\"file-conflict-detected\"]").Last)
+      .ToContainTextAsync("changed after the action was proposed");
+    Assert.AreEqual("external change during approval", await File.ReadAllTextAsync(target));
   }
 
   [TestMethod]
@@ -4426,6 +4591,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task WorkspaceManagerAddsRenamesSwitchesAndResetsSessionAuthority()
   {
+    await _environment.RestartApplicationAsync();
     var secondPath = _environment.CreateWorkspaceDirectory(
       $"second-workspace-{Guid.NewGuid():N}"
     );
@@ -4906,7 +5072,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "timeline"
     ).EnumerateArray().Select(
       streamEvent => streamEvent.GetProperty("type").GetString()
-    ).ToArray();
+    ).OfType<string>().ToArray();
     Assert.Contains("response.completed", persistedEventTypes);
     Assert.IsTrue(
       persistedEventTypes.Any(type => type?.StartsWith(
@@ -4914,6 +5080,36 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         StringComparison.Ordinal
       ) == true)
     );
+    string[] replaceableTimelineTypes =
+    [
+      "context.usage",
+      "request.heartbeat",
+      "usage.updated",
+      "harness.progress"
+    ];
+    var originalSemanticEventTypes = originalActivityTypes.Where(
+      type => !replaceableTimelineTypes.Contains(type, StringComparer.Ordinal)
+    ).ToArray();
+    foreach (var replaceableType in replaceableTimelineTypes)
+    {
+      var originalCount = originalActivityTypes.Count(
+        type => string.Equals(type, replaceableType, StringComparison.Ordinal)
+      );
+      var persistedCount = persistedEventTypes.Count(
+        type => string.Equals(type, replaceableType, StringComparison.Ordinal)
+      );
+      Assert.IsLessThanOrEqualTo(
+        originalCount,
+        persistedCount
+      );
+      if (originalCount > 0)
+      {
+        Assert.IsGreaterThan(
+          0,
+          persistedCount
+        );
+      }
+    }
 
     await _environment.RestartApplicationAsync();
     await Page.GotoAsync("/");
@@ -4946,13 +5142,51 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ".assistant-work"
       ).InnerTextAsync()
     );
+    await Expect(
+      assistant.Locator(".activity")
+    ).ToHaveAttributeAsync(
+      "data-terminal",
+      "true"
+    );
+    var restoredActivityTypes = await assistant.Locator(
+      "[data-event-type]"
+    ).EvaluateAllAsync<string[]>(
+      "elements => elements.map(element => element.dataset.eventType)"
+    );
+    var restoredSemanticEventTypes = restoredActivityTypes.Where(
+      type => !replaceableTimelineTypes.Contains(type, StringComparer.Ordinal)
+    ).ToArray();
     CollectionAssert.AreEqual(
-      originalActivityTypes,
-      await assistant.Locator(
-        "[data-event-type]"
-      ).EvaluateAllAsync<string[]>(
-        "elements => elements.map(element => element.dataset.eventType)"
+      originalSemanticEventTypes,
+      restoredSemanticEventTypes,
+      $"Live semantic events: {string.Join(", ", originalSemanticEventTypes)}{Environment.NewLine}Restored semantic events: {string.Join(", ", restoredSemanticEventTypes)}"
+    );
+    foreach (var replaceableType in replaceableTimelineTypes)
+    {
+      var originalCount = originalActivityTypes.Count(
+        type => string.Equals(type, replaceableType, StringComparison.Ordinal)
+      );
+      var persistedCount = persistedEventTypes.Count(
+        type => string.Equals(type, replaceableType, StringComparison.Ordinal)
+      );
+      var restoredCount = restoredActivityTypes.Count(
+        type => string.Equals(type, replaceableType, StringComparison.Ordinal)
+      );
+      Assert.AreEqual(
+        persistedCount,
+        restoredCount
+      );
+      Assert.IsLessThanOrEqualTo(
+        originalCount,
+        restoredCount
+      );
+    }
+    await Expect(
+      assistant.Locator(
+        "[data-timeline-kind]"
       )
+    ).ToHaveCountAsync(
+      originalTimelineKinds.Length
     );
     CollectionAssert.AreEqual(
       originalTimelineKinds,
@@ -4961,6 +5195,13 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       ).EvaluateAllAsync<string[]>(
         "elements => elements.map(element => element.dataset.timelineKind)"
       )
+    );
+    await Expect(
+      assistant.Locator(
+        ".assistant-reasoning"
+      )
+    ).ToHaveCountAsync(
+      originalReasoningOpenState.Length
     );
     CollectionAssert.AreEqual(
       originalReasoningOpenState,
@@ -8064,8 +8305,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       1,
       events.Where(item => item["type"]!.GetValue<string>() == "execution-plan-created")
     );
-    Assert.HasCount(
-      1,
+    Assert.IsEmpty(
       events.Where(item => item["type"]!.GetValue<string>() == "action.input-rejected")
     );
     Assert.HasCount(
@@ -8086,24 +8326,239 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     )));
     Assert.IsTrue(marker.RootElement.GetProperty("succeeded").GetBoolean());
     var unboundAction = marker.RootElement.GetProperty("unboundAction");
-    Assert.IsFalse(unboundAction.GetProperty("succeeded").GetBoolean());
+    Assert.IsTrue(unboundAction.GetProperty("succeeded").GetBoolean());
     var unboundOutput = unboundAction.GetProperty("output").GetString()!;
-    StringAssert.Contains(unboundOutput, "must bind every action");
-    StringAssert.Contains(unboundOutput, "\"ActionableStepIds\":[\"step-1\"]");
+    AssertTypedHostActionResult(unboundOutput);
+    StringAssert.Contains(unboundOutput, "\"schemaVersion\":1");
+    StringAssert.Contains(unboundOutput, "\"state\":\"auto\"");
+    Assert.IsFalse(unboundOutput.Contains("HOST_OWNED_PLAN_STATE", StringComparison.Ordinal));
     var firstAction = marker.RootElement.GetProperty("firstAction");
     Assert.IsTrue(firstAction.GetProperty("succeeded").GetBoolean());
     var firstOutput = firstAction.GetProperty("output").GetString()!;
-    StringAssert.Contains(firstOutput, "HOST_OWNED_PLAN_STATE");
-    StringAssert.Contains(
-      firstOutput,
-      "\"Id\":\"step-1\",\"Title\":\"Run the first Host process\",\"Status\":\"completed\""
-    );
-    StringAssert.Contains(firstOutput, "\"ActionableStepIds\":[\"step-2\"]");
+    AssertTypedHostActionResult(firstOutput);
+    StringAssert.Contains(firstOutput, "\"state\":\"corrected\"");
+    StringAssert.Contains(firstOutput, "\"requestedStepId\":\"step-1\"");
+    StringAssert.Contains(firstOutput, "\"effectiveStepId\":\"step-2\"");
+    Assert.IsFalse(firstOutput.Contains("HOST_OWNED_PLAN_STATE", StringComparison.Ordinal));
     var secondAction = marker.RootElement.GetProperty("secondAction");
     Assert.IsTrue(secondAction.GetProperty("succeeded").GetBoolean());
     var secondOutput = secondAction.GetProperty("output").GetString()!;
-    StringAssert.Contains(secondOutput, "\"ActionableStepIds\":[]");
-    StringAssert.Contains(secondOutput, "accepted Host plan has no actionable steps");
+    AssertTypedHostActionResult(secondOutput);
+    Assert.IsFalse(secondOutput.Contains("\"full\":", StringComparison.Ordinal));
+    var fullPlanOutput = marker.RootElement.GetProperty("fullPlan").GetProperty("output").GetString()!;
+    AssertTypedHostActionResult(fullPlanOutput);
+    StringAssert.Contains(fullPlanOutput, "\"full\":");
+    StringAssert.Contains(fullPlanOutput, "\"id\":\"step-1\"");
+    StringAssert.Contains(fullPlanOutput, "\"id\":\"step-2\"");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessSuppressesExactDeterministicRepeat()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "repeat guard host bridge opencode",
+      "browser-opencode-host-repeat-guard",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "opencode-runtime",
+      "fake-opencode-host-repeat-guard.json"
+    )));
+    var firstOutput = marker.RootElement.GetProperty("first").GetProperty("output").GetString()!;
+    var secondOutput = marker.RootElement.GetProperty("second").GetProperty("output").GetString()!;
+    Assert.IsTrue(
+      marker.RootElement.GetProperty("succeeded").GetBoolean(),
+      $"First output: {firstOutput}{Environment.NewLine}Second output: {secondOutput}"
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.execution-error"),
+      $"Observed events: {string.Join(", ", events.Select(item => item["type"]!.GetValue<string>()))}"
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "action.deterministic-repeat-suppressed")
+    );
+    StringAssert.Contains(
+      secondOutput,
+      "\"code\":\"DETERMINISTIC_REPEAT\""
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessVerticalTwoConvergesAndPreservesPartialEffects()
+  {
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(20)
+    };
+    HttpResponseMessage response;
+    try
+    {
+      response = await client.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = "vertical two host bridge opencode",
+          model = "qwen3.8:27b-gpu0",
+          history = Array.Empty<object>(),
+          interactionMode = "execute",
+          harness = "opencode",
+          approvalPolicy = "auto",
+          browserSessionId = "browser-opencode-host-vertical-two"
+        }
+      );
+    }
+    catch (TaskCanceledException)
+    {
+      var checkpointPath = Path.Combine(
+        _environment.DataDirectory,
+        "opencode-runtime",
+        "fake-opencode-host-vertical-two.checkpoint"
+      );
+      var checkpoint = File.Exists(checkpointPath)
+        ? await File.ReadAllTextAsync(checkpointPath)
+        : "not-started";
+      Assert.Fail(
+        $"Vertical 2 replay timed out after checkpoint: {checkpoint}{Environment.NewLine}{_environment.ApiOutput}"
+      );
+      throw;
+    }
+    using (response)
+    {
+      response.EnsureSuccessStatusCode();
+      var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+
+      Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+      using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+        _environment.DataDirectory,
+        "opencode-runtime",
+        "fake-opencode-host-vertical-two.json"
+      )));
+      JsonObject Result(string name) => JsonNode.Parse(
+        marker.RootElement.GetProperty(name).GetProperty("Output").GetString()!
+      )!.AsObject();
+
+      var directoryAgain = Result("directoryAgain");
+      Assert.AreEqual("no_op", directoryAgain["outcome"]!.GetValue<string>());
+      Assert.AreEqual("ALREADY_PRESENT", directoryAgain["code"]!.GetValue<string>());
+      Assert.IsFalse(directoryAgain["effect"]!["changed"]!.GetValue<bool>());
+      Assert.IsTrue(directoryAgain["effect"]!["postconditionSatisfied"]!.GetValue<bool>());
+
+      var createAgain = Result("createAgain");
+      Assert.AreEqual("no_op", createAgain["outcome"]!.GetValue<string>());
+      Assert.AreEqual("ALREADY_PRESENT", createAgain["code"]!.GetValue<string>());
+      Assert.AreEqual("TARGET_CONFLICT", Result("conflict")["code"]!.GetValue<string>());
+      Assert.AreEqual("RENAME_COMPLETED", Result("rename")["code"]!.GetValue<string>());
+      Assert.AreEqual("no_op", Result("renameAgain")["outcome"]!.GetValue<string>());
+      Assert.AreEqual("ALREADY_APPLIED", Result("renameAgain")["code"]!.GetValue<string>());
+      StringAssert.Contains(Result("emptyList").ToJsonString(), "entries");
+      StringAssert.Contains(Result("emptySearch").ToJsonString(), "results");
+
+      var largeRead = Result("largeRead");
+      Assert.AreEqual("recoverable", largeRead["outcome"]!.GetValue<string>());
+      Assert.AreEqual("FILE_READ_RANGE_REQUIRED", largeRead["code"]!.GetValue<string>());
+      Assert.AreEqual("read_file", largeRead["nextActions"]![0]!["tool"]!.GetValue<string>());
+      Assert.IsTrue(marker.RootElement.GetProperty("rangedRead").GetProperty("Succeeded").GetBoolean());
+
+      var deleteAgain = Result("deleteAgain");
+      Assert.AreEqual("no_op", deleteAgain["outcome"]!.GetValue<string>());
+      Assert.AreEqual("ALREADY_ABSENT", deleteAgain["code"]!.GetValue<string>());
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessVerticalTwoProcessFailurePreservesPartialEffects()
+  {
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    using var response = await client.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "vertical two process host bridge opencode",
+        model = "qwen3.8:27b-gpu0",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "opencode",
+        approvalPolicy = "auto",
+        browserSessionId = "browser-opencode-host-vertical-two-process"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "opencode-runtime",
+      "fake-opencode-host-vertical-two-process.json"
+    )));
+    JsonObject Result(string name) => JsonNode.Parse(
+      marker.RootElement.GetProperty(name).GetProperty("Output").GetString()!
+    )!.AsObject();
+    var process = Result("process");
+    Assert.AreEqual("PROCESS_EXIT_NONZERO", process["code"]!.GetValue<string>());
+    Assert.AreEqual("partial", process["effect"]!["state"]!.GetValue<string>());
+    Assert.IsTrue(process["effect"]!["changed"]!.GetValue<bool>());
+    Assert.AreEqual(
+      "DETERMINISTIC_REPEAT",
+      Result("processWithoutRefresh")["code"]!.GetValue<string>()
+    );
+    Assert.IsTrue(marker.RootElement.GetProperty("refresh").GetProperty("Succeeded").GetBoolean());
+    Assert.AreEqual(
+      "PROCESS_EXIT_NONZERO",
+      Result("processAfterRefresh")["code"]!.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessVerticalTwoTreatsUnbornGitLogAsEmptySuccess()
+  {
+    await RunGitAsync("init");
+    var events = await ExecuteHarnessStreamAsync(
+      "opencode",
+      "vertical two unborn git host bridge opencode",
+      "browser-opencode-host-vertical-two-unborn",
+      "qwen3.8:27b-gpu0"
+    );
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "opencode-runtime",
+      "fake-opencode-host-vertical-two-unborn.json"
+    )));
+    Assert.IsTrue(marker.RootElement.GetProperty("log").GetProperty("Succeeded").GetBoolean());
+    var result = JsonNode.Parse(
+      marker.RootElement.GetProperty("log").GetProperty("Output").GetString()!
+    )!.AsObject();
+    Assert.AreEqual("succeeded", result["outcome"]!.GetValue<string>());
+    StringAssert.Contains(result.ToJsonString(), "unborn");
+    StringAssert.Contains(result.ToJsonString(), "commits");
+  }
+
+  private static void AssertTypedHostActionResult(string output)
+  {
+    using var result = JsonDocument.Parse(output);
+    Assert.AreEqual(
+      1,
+      result.RootElement.GetProperty("schemaVersion").GetInt32()
+    );
+    Assert.IsTrue(result.RootElement.TryGetProperty("outcome", out _));
+    Assert.IsTrue(result.RootElement.TryGetProperty("code", out _));
+    Assert.IsTrue(result.RootElement.TryGetProperty("effect", out _));
+    Assert.IsTrue(result.RootElement.TryGetProperty("workspaceRevision", out _));
   }
 
   [TestMethod]

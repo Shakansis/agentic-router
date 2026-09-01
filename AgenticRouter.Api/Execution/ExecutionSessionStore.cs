@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.GitDelivery;
@@ -966,6 +967,12 @@ public sealed class ExecutionSession
   private readonly Dictionary<string, int> _verifiedEffectCounts = new(
     StringComparer.Ordinal
   );
+  private readonly Dictionary<string, DeterministicRepeatRecord> _deterministicFailures = new(
+    StringComparer.Ordinal
+  );
+  private readonly Dictionary<string, string> _verifiedPostconditions = new(
+    StringComparer.Ordinal
+  );
   private readonly HashSet<string> _appliedInstructions = new(
     StringComparer.OrdinalIgnoreCase
   );
@@ -992,6 +999,15 @@ public sealed class ExecutionSession
   private string? _forcedCompletionStatus;
   private ExecutionRoutingEvidence? _routingEvidence;
   private string? _authorizedDiagnosticTraceId;
+  private long _workspaceRevision;
+  private long _planStateRevision;
+  private long _approvalRevision;
+  private long _observationRevision;
+  private bool _processRefreshRequired;
+  private DateTimeOffset? _lastHarnessActivityAt;
+  private long _approvalWaitMilliseconds;
+  private long _processMilliseconds;
+  private long _hostOrchestrationMilliseconds;
 
   public ExecutionSession(
     string id,
@@ -1038,6 +1054,39 @@ public sealed class ExecutionSession
   public DateTimeOffset StartedAt { get; }
 
   public DateTimeOffset? CompletedAt { get; private set; }
+
+  public long WorkspaceRevision
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return _workspaceRevision;
+      }
+    }
+  }
+
+  public long PlanStateRevision
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return _planStateRevision;
+      }
+    }
+  }
+
+  public bool ProcessRefreshRequired
+  {
+    get
+    {
+      lock (_gate)
+      {
+        return _processRefreshRequired;
+      }
+    }
+  }
 
   public CancellationToken CancellationToken => _cancellation.Token;
 
@@ -1306,6 +1355,7 @@ public sealed class ExecutionSession
       }
 
       _plan = plan;
+      _planStateRevision++;
     }
   }
 
@@ -1316,6 +1366,53 @@ public sealed class ExecutionSession
     lock (_gate)
     {
       _plan = plan;
+      _planStateRevision++;
+    }
+  }
+
+  public PlanActionBindingResolution ResolvePlanActionBinding(
+    string? requestedStepId
+  )
+  {
+    lock (_gate)
+    {
+      if (_plan is null)
+      {
+        return new PlanActionBindingResolution(
+          HostPlanBindingStates.Unbound,
+          requestedStepId,
+          null
+        );
+      }
+
+      var actionable = ActionablePlanStepIdsUnsafe();
+      var requestedIsActionable = !string.IsNullOrWhiteSpace(requestedStepId)
+        && actionable.Contains(requestedStepId, StringComparer.Ordinal);
+      if (requestedIsActionable)
+      {
+        return new PlanActionBindingResolution(
+          HostPlanBindingStates.Explicit,
+          requestedStepId,
+          requestedStepId
+        );
+      }
+
+      if (actionable.Length == 1)
+      {
+        return new PlanActionBindingResolution(
+          string.IsNullOrWhiteSpace(requestedStepId)
+            ? HostPlanBindingStates.Auto
+            : HostPlanBindingStates.Corrected,
+          requestedStepId,
+          actionable[0]
+        );
+      }
+
+      return new PlanActionBindingResolution(
+        HostPlanBindingStates.Unbound,
+        requestedStepId,
+        null
+      );
     }
   }
 
@@ -1340,17 +1437,6 @@ public sealed class ExecutionSession
         return false;
       }
 
-      var bindingFailure = ValidatePlanStepBindingUnsafe(
-        stepId
-      );
-      if (bindingFailure is not null)
-      {
-        throw new LocalActionException(
-          "plan-action-binding",
-          bindingFailure
-        );
-      }
-
       var steps = _plan.Steps.ToArray();
       var index = Array.FindIndex(
         steps,
@@ -1360,6 +1446,16 @@ public sealed class ExecutionSession
           StringComparison.Ordinal
         )
       );
+      if (
+        index < 0
+        || !ActionablePlanStepIdsUnsafe().Contains(
+          steps[index].Id,
+          StringComparer.Ordinal
+        )
+      )
+      {
+        return false;
+      }
       _planActionBindings[actionId] = new PlanActionBinding(
         steps[index].Id,
         effect,
@@ -1374,71 +1470,9 @@ public sealed class ExecutionSession
         Steps = steps,
         CurrentStepId = steps[index].Id
       };
+      _planStateRevision++;
       return true;
     }
-  }
-
-  public string? ValidatePlanStepBinding(
-    string? stepId
-  )
-  {
-    lock (_gate)
-    {
-      return ValidatePlanStepBindingUnsafe(
-        stepId
-      );
-    }
-  }
-
-  private string? ValidatePlanStepBindingUnsafe(
-    string? stepId
-  )
-  {
-    if (_plan is null)
-    {
-      return stepId is null
-        ? null
-        : "An action cannot bind to a plan step because this execution has no accepted plan.";
-    }
-    if (string.IsNullOrWhiteSpace(stepId))
-    {
-      var actionableStepIds = ActionablePlanStepIdsUnsafe();
-      return actionableStepIds.Length == 0
-        ? "The accepted Host plan has no actionable stepId. Return the final answer if the objective is complete; otherwise revise the existing plan before requesting another action."
-        : "The specialist must bind every action to an exact Host-owned stepId while an accepted plan exists. "
-          + $"Actionable stepIds: {string.Join(", ", actionableStepIds)}.";
-    }
-    var step = _plan.Steps.FirstOrDefault(
-      candidate => string.Equals(
-        candidate.Id,
-        stepId,
-        StringComparison.Ordinal
-      )
-    );
-    if (step is null)
-    {
-      return $"Plan step '{stepId}' does not exist in the accepted Host plan.";
-    }
-    if (step.Status is "completed" or "failed" or "blocked" or "skipped")
-    {
-      var actionableStepIds = ActionablePlanStepIdsUnsafe();
-      return $"Plan step '{stepId}' is already terminal ({step.Status}). "
-        + (actionableStepIds.Length == 0
-          ? "No actionable stepId remains; return the final answer if the objective is complete or revise the existing plan."
-          : $"Actionable stepIds: {string.Join(", ", actionableStepIds)}.");
-    }
-    var blockedDependencies = (step.Dependencies ?? []).Where(
-      dependency => _plan.Steps.FirstOrDefault(
-        candidate => string.Equals(
-          candidate.Id,
-          dependency,
-          StringComparison.Ordinal
-        )
-      )?.Status != "completed"
-    ).ToArray();
-    return blockedDependencies.Length == 0
-      ? null
-      : $"Plan step '{stepId}' is waiting for completed dependencies: {string.Join(", ", blockedDependencies)}.";
   }
 
   private string[] ActionablePlanStepIdsUnsafe()
@@ -1457,6 +1491,428 @@ public sealed class ExecutionSession
     ).Select(
       step => step.Id
     ).ToArray() ?? [];
+  }
+
+  public HostActionPlanProjection? CreateAgentPlanProjection(
+    ValidatedLocalAction? action = null,
+    bool includeFull = false
+  )
+  {
+    lock (_gate)
+    {
+      if (_plan is null)
+      {
+        return null;
+      }
+
+      var current = _plan.Steps.FirstOrDefault(
+        step => string.Equals(
+          step.Id,
+          _plan.CurrentStepId,
+          StringComparison.Ordinal
+        )
+      ) ?? _plan.Steps.FirstOrDefault(
+        step => ActionablePlanStepIdsUnsafe().Contains(
+          step.Id,
+          StringComparer.Ordinal
+        )
+      );
+      var boundStep = action?.PlanStepId is null
+        ? null
+        : _plan.Steps.FirstOrDefault(
+          step => string.Equals(
+            step.Id,
+            action.PlanStepId,
+            StringComparison.Ordinal
+          )
+        );
+      IReadOnlyList<HostPlanDelta>? delta = boundStep is null
+        ? null
+        : [new HostPlanDelta(boundStep.Id, boundStep.Status)];
+      var correction = action is null
+        ? null
+        : new PlanActionBindingResolution(
+          action.PlanBindingState,
+          action.RequestedPlanStepId,
+          action.PlanStepId
+        ).CreateCorrection();
+
+      return new HostActionPlanProjection(
+        _planStateRevision,
+        current is null
+          ? null
+          : new HostPlanStepProjection(current.Id, current.Status),
+        delta,
+        correction,
+        includeFull ? _plan : null
+      );
+    }
+  }
+
+  public bool TryGetDeterministicRepeat(
+    string canonicalTool,
+    JsonElement arguments,
+    out DeterministicRepeatRecord? repeat
+  )
+  {
+    lock (_gate)
+    {
+      var key = CreateRepeatLookupKeyUnsafe(
+        canonicalTool,
+        arguments
+      );
+      var found = _deterministicFailures.TryGetValue(
+        key,
+        out var existing
+      );
+      repeat = existing;
+      return found;
+    }
+  }
+
+  public void RecordDeterministicFailure(
+    string canonicalTool,
+    JsonElement arguments,
+    string stableFailureCode,
+    string evidenceId,
+    string requiredChange,
+    HostActionResult result
+  )
+  {
+    lock (_gate)
+    {
+      var key = CreateRepeatLookupKeyUnsafe(
+        canonicalTool,
+        arguments
+      );
+      var fingerprint = HashState(
+        $"{key}\n{stableFailureCode}"
+      );
+      if (_deterministicFailures.Count >= 128)
+      {
+        _deterministicFailures.Remove(
+          _deterministicFailures.Keys.First()
+        );
+      }
+      _deterministicFailures[key] = new DeterministicRepeatRecord(
+        fingerprint,
+        stableFailureCode,
+        evidenceId,
+        requiredChange,
+        result
+      );
+    }
+  }
+
+  public void RecordApprovalResolution()
+  {
+    lock (_gate)
+    {
+      _approvalRevision++;
+    }
+  }
+
+  public void RequireProcessRefresh()
+  {
+    lock (_gate)
+    {
+      if (!_processRefreshRequired)
+      {
+        _processRefreshRequired = true;
+        _observationRevision++;
+      }
+    }
+  }
+
+  public void RecordWorkspaceRefresh()
+  {
+    lock (_gate)
+    {
+      _processRefreshRequired = false;
+      _observationRevision++;
+    }
+  }
+
+  public void RecordVerifiedPostcondition(
+    string canonicalTool,
+    JsonElement arguments,
+    string stateToken
+  )
+  {
+    lock (_gate)
+    {
+      _verifiedPostconditions[CreatePostconditionKeyUnsafe(canonicalTool, arguments)] = stateToken;
+    }
+  }
+
+  public bool IsVerifiedPostcondition(
+    string canonicalTool,
+    JsonElement arguments,
+    string stateToken
+  )
+  {
+    lock (_gate)
+    {
+      return _verifiedPostconditions.TryGetValue(
+        CreatePostconditionKeyUnsafe(canonicalTool, arguments),
+        out var recorded
+      ) && string.Equals(recorded, stateToken, StringComparison.Ordinal);
+    }
+  }
+
+  private static string CreatePostconditionKeyUnsafe(
+    string canonicalTool,
+    JsonElement arguments
+  )
+  {
+    return $"{canonicalTool}:{HashState(CanonicalizeJson(arguments))}";
+  }
+
+  private string CreateRepeatLookupKeyUnsafe(
+    string canonicalTool,
+    JsonElement arguments
+  )
+  {
+    var argumentsHash = HashState(
+      CanonicalizeJson(arguments)
+    );
+    var relevantState = CreateRelevantStateTokenUnsafe(
+      canonicalTool,
+      arguments
+    );
+    return HashState(
+      $"{RequestId}\n{canonicalTool}\n{argumentsHash}\n{relevantState}"
+    );
+  }
+
+  private string CreateRelevantStateTokenUnsafe(
+    string canonicalTool,
+    JsonElement arguments
+  )
+  {
+    if (canonicalTool is "create_execution_plan" or "revise_execution_plan" or "get_execution_plan")
+    {
+      return $"plan:{_planStateRevision}";
+    }
+
+    var states = new List<string>();
+    if (
+      arguments.ValueKind == JsonValueKind.Object
+      && arguments.TryGetProperty("path", out var path)
+      && path.ValueKind == JsonValueKind.String
+    )
+    {
+      states.Add(CreatePathStateTokenUnsafe(path.GetString()));
+    }
+    if (
+      arguments.ValueKind == JsonValueKind.Object
+      && arguments.TryGetProperty("paths", out var paths)
+      && paths.ValueKind == JsonValueKind.Array
+    )
+    {
+      states.AddRange(
+        paths.EnumerateArray().Where(
+          item => item.ValueKind == JsonValueKind.String
+        ).Select(
+          item => CreatePathStateTokenUnsafe(item.GetString())
+        )
+      );
+    }
+    if (
+      arguments.ValueKind == JsonValueKind.Object
+      && arguments.TryGetProperty("files", out var files)
+      && files.ValueKind == JsonValueKind.Array
+    )
+    {
+      states.AddRange(
+        files.EnumerateArray().Where(
+          item => item.ValueKind == JsonValueKind.Object
+            && item.TryGetProperty("path", out var itemPath)
+            && itemPath.ValueKind == JsonValueKind.String
+        ).Select(
+          item => CreatePathStateTokenUnsafe(
+            item.GetProperty("path").GetString()
+          )
+        )
+      );
+    }
+    if (canonicalTool.StartsWith("git_", StringComparison.Ordinal))
+    {
+      states.Add(CreateGitStateTokenUnsafe());
+    }
+    if (states.Count == 0)
+    {
+      states.Add($"workspace:{_workspaceRevision}");
+    }
+    states.Add($"approval:{_approvalRevision}");
+    states.Add($"observation:{_observationRevision}:{_processRefreshRequired}");
+    states.Add("capabilities:1");
+    return string.Join("|", states.Order(StringComparer.Ordinal));
+  }
+
+  private string CreatePathStateTokenUnsafe(string? relativePath)
+  {
+    if (string.IsNullOrWhiteSpace(relativePath)) return "path:missing";
+    try
+    {
+      if (Path.IsPathFullyQualified(relativePath)) return "path:outside";
+      var root = Path.GetFullPath(WorkspacePath);
+      var candidate = Path.GetFullPath(
+        Path.Combine(root, relativePath)
+      );
+      var rootPrefix = root.EndsWith(
+        Path.DirectorySeparatorChar
+      ) ? root : root + Path.DirectorySeparatorChar;
+      if (
+        !candidate.StartsWith(
+          rootPrefix,
+          FileSystemPathSemantics.Comparison
+        )
+        && !string.Equals(
+          candidate,
+          root,
+          FileSystemPathSemantics.Comparison
+        )
+      )
+      {
+        return "path:outside";
+      }
+      if (ContainsReparsePoint(root, candidate))
+      {
+        return $"path-reparse:{relativePath}";
+      }
+      var workspaceRelative = Path.GetRelativePath(root, candidate);
+      var observation = _observedFiles.TryGetValue(
+        workspaceRelative,
+        out var observed
+      )
+        ? $"observed:{observed.Hash}:{observed.LastWriteTimeUtc.UtcTicks}"
+        : "unobserved";
+      if (File.Exists(candidate))
+      {
+        var info = new FileInfo(candidate);
+        return $"file:{relativePath}:{info.Length}:{info.LastWriteTimeUtc.Ticks}:{observation}";
+      }
+      if (Directory.Exists(candidate))
+      {
+        var info = new DirectoryInfo(candidate);
+        return $"directory:{relativePath}:{info.LastWriteTimeUtc.Ticks}:{observation}";
+      }
+      return $"absent:{relativePath}:{observation}";
+    }
+    catch (Exception exception) when (
+      exception is ArgumentException
+        or IOException
+        or NotSupportedException
+        or UnauthorizedAccessException
+    )
+    {
+      return $"path-unavailable:{relativePath}";
+    }
+  }
+
+  private static bool ContainsReparsePoint(
+    string root,
+    string candidate
+  )
+  {
+    if (
+      Directory.Exists(root)
+      && (File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0
+    )
+    {
+      return true;
+    }
+    var relative = Path.GetRelativePath(root, candidate);
+    var current = root;
+    foreach (var segment in relative.Split(
+      [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+      StringSplitOptions.RemoveEmptyEntries
+    ))
+    {
+      current = Path.Combine(current, segment);
+      if (
+        (File.Exists(current) || Directory.Exists(current))
+        && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0
+      )
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private string CreateGitStateTokenUnsafe()
+  {
+    try
+    {
+      var gitDirectory = Path.Combine(WorkspacePath, ".git");
+      var headPath = Path.Combine(gitDirectory, "HEAD");
+      var indexPath = Path.Combine(gitDirectory, "index");
+      var head = File.Exists(headPath)
+        ? File.ReadAllText(headPath).Trim()
+        : "absent";
+      var index = File.Exists(indexPath)
+        ? new FileInfo(indexPath)
+        : null;
+      return $"git:{head}:{index?.Length ?? -1}:{index?.LastWriteTimeUtc.Ticks ?? 0}";
+    }
+    catch (Exception exception) when (
+      exception is IOException or UnauthorizedAccessException
+    )
+    {
+      return $"git:unavailable:{_workspaceRevision}";
+    }
+  }
+
+  private static string HashState(string value)
+  {
+    return Convert.ToHexString(
+      SHA256.HashData(Encoding.UTF8.GetBytes(value))
+    ).ToLowerInvariant();
+  }
+
+  private static string CanonicalizeJson(JsonElement value)
+  {
+    using var stream = new MemoryStream();
+    using (var writer = new Utf8JsonWriter(stream))
+    {
+      WriteCanonicalJson(writer, value);
+    }
+    return Encoding.UTF8.GetString(stream.ToArray());
+  }
+
+  private static void WriteCanonicalJson(
+    Utf8JsonWriter writer,
+    JsonElement value
+  )
+  {
+    switch (value.ValueKind)
+    {
+      case JsonValueKind.Object:
+        writer.WriteStartObject();
+        foreach (var property in value.EnumerateObject().OrderBy(
+          property => property.Name,
+          StringComparer.Ordinal
+        ))
+        {
+          writer.WritePropertyName(property.Name);
+          WriteCanonicalJson(writer, property.Value);
+        }
+        writer.WriteEndObject();
+        break;
+      case JsonValueKind.Array:
+        writer.WriteStartArray();
+        foreach (var item in value.EnumerateArray())
+        {
+          WriteCanonicalJson(writer, item);
+        }
+        writer.WriteEndArray();
+        break;
+      default:
+        value.WriteTo(writer);
+        break;
+    }
   }
 
   public bool RecordPlanActionResult(
@@ -1517,6 +1973,7 @@ public sealed class ExecutionSession
         )
       };
       _planActionBindings.Remove(actionId);
+      _planStateRevision++;
       return true;
     }
   }
@@ -1652,6 +2109,7 @@ public sealed class ExecutionSession
       _warnings.Add(
         $"{conflict.RelativePath}: file changed after inspection."
       );
+      _workspaceRevision++;
     }
   }
 
@@ -1795,15 +2253,23 @@ public sealed class ExecutionSession
       var existing = _actions.FindIndex(
         item => item.ActionId == action.ActionId
       );
+      var previous = existing >= 0 ? _actions[existing] : null;
+      var now = DateTimeOffset.UtcNow;
       var record = new ExecutionActionRecord(
         action.ActionId,
         action.Tool,
         action.Summary,
         state,
         result,
-        DateTimeOffset.UtcNow,
+        now,
         action.OriginalTool,
-        action.ToolResolutionSource
+        action.ToolResolutionSource,
+        previous?.ActionCreatedAt ?? now,
+        previous?.ApprovalRequestedAt,
+        previous?.ApprovalResolvedAt,
+        previous?.ProcessStartedAt,
+        previous?.ProcessFinishedAt,
+        previous?.LastHarnessActivityAt
       );
 
       var wasCompleted = existing >= 0 && _actions[existing].State == "completed";
@@ -1828,6 +2294,87 @@ public sealed class ExecutionSession
           _verifiedEffectCounts[effect] = EffectCount(effect) + 1;
         }
       }
+    }
+  }
+
+  public void RecordHarnessActivity(string? actionId = null)
+  {
+    lock (_gate)
+    {
+      var now = DateTimeOffset.UtcNow;
+      _lastHarnessActivityAt = now;
+      if (!string.IsNullOrWhiteSpace(actionId))
+      {
+        var index = _actions.FindIndex(action => action.ActionId == actionId);
+        if (index >= 0)
+        {
+          _actions[index] = _actions[index] with { LastHarnessActivityAt = now };
+        }
+      }
+    }
+  }
+
+  public void RecordApprovalRequested(string actionId)
+  {
+    lock (_gate)
+    {
+      var index = _actions.FindIndex(action => action.ActionId == actionId);
+      if (index >= 0 && _actions[index].ApprovalRequestedAt is null)
+      {
+        _actions[index] = _actions[index] with { ApprovalRequestedAt = DateTimeOffset.UtcNow };
+      }
+    }
+  }
+
+  public void RecordApprovalResolved(string actionId)
+  {
+    lock (_gate)
+    {
+      var index = _actions.FindIndex(action => action.ActionId == actionId);
+      if (index < 0)
+      {
+        return;
+      }
+      var now = DateTimeOffset.UtcNow;
+      var action = _actions[index];
+      if (action.ApprovalResolvedAt is null && action.ApprovalRequestedAt is { } requested)
+      {
+        _approvalWaitMilliseconds += Math.Max(0, (long)(now - requested).TotalMilliseconds);
+      }
+      _actions[index] = action with { ApprovalResolvedAt = now };
+    }
+  }
+
+  public void RecordProcessStarted(string actionId)
+  {
+    lock (_gate)
+    {
+      var index = _actions.FindIndex(action => action.ActionId == actionId);
+      if (index >= 0)
+      {
+        _actions[index] = _actions[index] with { ProcessStartedAt = DateTimeOffset.UtcNow };
+      }
+    }
+  }
+
+  public void RecordProcessFinished(string actionId, long durationMilliseconds)
+  {
+    lock (_gate)
+    {
+      var index = _actions.FindIndex(action => action.ActionId == actionId);
+      if (index >= 0)
+      {
+        _actions[index] = _actions[index] with { ProcessFinishedAt = DateTimeOffset.UtcNow };
+      }
+      _processMilliseconds += Math.Max(0, durationMilliseconds);
+    }
+  }
+
+  public void RecordHostOrchestration(long durationMilliseconds)
+  {
+    lock (_gate)
+    {
+      _hostOrchestrationMilliseconds += Math.Max(0, durationMilliseconds);
     }
   }
 
@@ -1941,6 +2488,7 @@ public sealed class ExecutionSession
           change.UndoDiagnostic
         );
       }
+      _workspaceRevision++;
     }
   }
 
@@ -2008,6 +2556,7 @@ public sealed class ExecutionSession
       _createdDirectories.Add(
         relativePath
       );
+      _workspaceRevision++;
     }
   }
 
@@ -2128,9 +2677,28 @@ public sealed class ExecutionSession
         ResidentModel,
         ConformanceIdentity,
         HandoffReason,
-        _routingEvidence
+        _routingEvidence,
+        CreateTimingUnsafe()
       );
     }
+  }
+
+  private ExecutionTimingView CreateTimingUnsafe()
+  {
+    var elapsed = _stopwatch.ElapsedMilliseconds;
+    var harness = Math.Max(
+      0,
+      elapsed - _approvalWaitMilliseconds - _processMilliseconds - _hostOrchestrationMilliseconds
+    );
+    return new ExecutionTimingView(
+      StartedAt,
+      CompletedAt,
+      _lastHarnessActivityAt,
+      harness,
+      _approvalWaitMilliseconds,
+      _processMilliseconds,
+      _hostOrchestrationMilliseconds
+    );
   }
 
   public ExecutionSessionReview CreateReview()
@@ -2153,7 +2721,13 @@ public sealed class ExecutionSession
         _validationProfile,
         _validation,
         _delivery,
-        _toolNameResolutions.ToArray()
+        _toolNameResolutions.ToArray(),
+        _actions.Select(
+          action => action with
+          {
+            Result = null
+          }
+        ).ToArray()
       );
     }
   }
@@ -2219,6 +2793,10 @@ public sealed class ExecutionSession
         ? snapshot.State
         : "interrupted";
       _completionStatus = snapshot.Review.Summary.CompletionStatus;
+      _workspaceRevision = snapshot.Files.Count;
+      _planStateRevision = _plan is null
+        ? 0
+        : Math.Max(1, _plan.RevisionCount + 1);
       CompletedAt = DateTimeOffset.UtcNow;
       _stopwatch.Stop();
     }
@@ -2782,7 +3360,13 @@ public sealed record ExecutionActionRecord(
   string? Result,
   DateTimeOffset Timestamp,
   string? OriginalTool = null,
-  string ToolResolutionSource = ToolNameResolver.CanonicalSource
+  string ToolResolutionSource = ToolNameResolver.CanonicalSource,
+  DateTimeOffset? ActionCreatedAt = null,
+  DateTimeOffset? ApprovalRequestedAt = null,
+  DateTimeOffset? ApprovalResolvedAt = null,
+  DateTimeOffset? ProcessStartedAt = null,
+  DateTimeOffset? ProcessFinishedAt = null,
+  DateTimeOffset? LastHarnessActivityAt = null
 );
 
 public sealed record ExecutionSessionPersistenceSnapshot(

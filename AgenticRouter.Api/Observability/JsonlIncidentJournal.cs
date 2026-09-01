@@ -98,8 +98,6 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
       }
 
       var matches = new List<IncidentEvent>();
-      long bytes = 0;
-      var truncated = false;
       var malformed = 0;
       foreach (var file in EnumerateFilesNewestFirst())
       {
@@ -108,13 +106,6 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
         {
           if (!line.Contains(traceId, StringComparison.Ordinal))
           {
-            continue;
-          }
-
-          bytes += Encoding.UTF8.GetByteCount(line);
-          if (matches.Count >= policy.BrowserMaximumEvents || bytes > policy.BrowserMaximumBytes)
-          {
-            truncated = true;
             continue;
           }
 
@@ -139,6 +130,12 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
       }
 
       matches.Sort((left, right) => left.Sequence.CompareTo(right.Sequence));
+      var projected = ProjectEvents(
+        matches,
+        policy.BrowserMaximumEvents,
+        policy.BrowserMaximumBytes
+      );
+      var truncated = projected.Count < matches.Count;
       var failure = matches.LastOrDefault(item => item.Status == "failed");
       var last = matches[^1];
       var context = matches.LastOrDefault(item => item.ContextFit is not null)?.ContextFit;
@@ -158,7 +155,8 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
         review,
         truncated,
         matches.Count,
-        matches,
+        projected.Count,
+        projected,
         completed
           ? "Review the terminal execution summary and retained artifacts."
           : review
@@ -171,6 +169,69 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
     {
       _gate.Release();
     }
+  }
+
+  private static IReadOnlyList<IncidentEvent> ProjectEvents(
+    IReadOnlyList<IncidentEvent> events,
+    int maximumEvents,
+    long maximumBytes
+  )
+  {
+    if (events.Count == 0)
+    {
+      return [];
+    }
+
+    var firstSequence = events[0].Sequence;
+    var lastSequence = events[^1].Sequence;
+    var selected = new List<IncidentEvent>(Math.Min(events.Count, maximumEvents));
+    long selectedBytes = 0;
+    foreach (var incident in events
+      .OrderBy(item => ProjectionPriority(item, firstSequence, lastSequence))
+      .ThenBy(item => item.Sequence))
+    {
+      if (selected.Count >= maximumEvents)
+      {
+        break;
+      }
+
+      var serializedBytes = Encoding.UTF8.GetByteCount(
+        JsonSerializer.Serialize(incident, JsonOptions)
+      );
+      if (selectedBytes + serializedBytes > maximumBytes)
+      {
+        continue;
+      }
+
+      selected.Add(incident);
+      selectedBytes += serializedBytes;
+    }
+
+    selected.Sort((left, right) => left.Sequence.CompareTo(right.Sequence));
+    return selected;
+  }
+
+  private static int ProjectionPriority(
+    IncidentEvent incident,
+    long firstSequence,
+    long lastSequence
+  )
+  {
+    if (
+      incident.Status is "completed" or "failed" or "cancelled"
+      || incident.Completed == true
+      || incident.ReviewAvailable == true
+    )
+    {
+      return 0;
+    }
+    if (incident.Sequence == firstSequence || incident.Sequence == lastSequence)
+    {
+      return 1;
+    }
+    return string.Equals(incident.Category, "context", StringComparison.Ordinal)
+      ? 3
+      : 2;
   }
 
   private string SelectWritableFile(long maximumBytes, int incomingBytes)

@@ -3741,7 +3741,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(capabilityProjection).ToContainTextAsync(
       "native implementation [create_file, write_file, replace_text, apply_patch]"
     );
-    await Expect(capabilityProjection).ToContainTextAsync("Host bridge [create_execution_plan, revise_execution_plan, list_files, read_file");
+    await Expect(capabilityProjection).ToContainTextAsync("Host bridge [create_execution_plan, revise_execution_plan, get_execution_plan, list_files, read_file");
     await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
     await Expect(capabilityProjection).ToContainTextAsync("run_process");
     await Expect(capabilityProjection).ToContainTextAsync("missing adapter []");
@@ -4140,7 +4140,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(capabilityProjection).ToContainTextAsync(
       "native implementation []"
     );
-    await Expect(capabilityProjection).ToContainTextAsync("Host bridge [create_execution_plan, revise_execution_plan, list_files, read_file");
+    await Expect(capabilityProjection).ToContainTextAsync("Host bridge [create_execution_plan, revise_execution_plan, get_execution_plan, list_files, read_file");
     await Expect(capabilityProjection).ToContainTextAsync("delete_paths");
     await Expect(capabilityProjection).ToContainTextAsync("run_process");
     await Expect(capabilityProjection).ToContainTextAsync("missing adapter []");
@@ -5581,6 +5581,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     string targetHarness
   )
   {
+    await File.WriteAllTextAsync(
+      Path.Combine(_environment.WorkspaceDirectory, "hello.txt"),
+      "canonical harness continuity fixture"
+    );
     var conversationId = $"browser-switch-{sourceHarness}-{targetHarness}";
     var sourceModel = sourceHarness is "opencode" or "qwen-code"
       ? "qwen3.8:27b-gpu0"

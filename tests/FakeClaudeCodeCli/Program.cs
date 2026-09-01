@@ -47,6 +47,8 @@ await WriteMarkerAsync("fake-claude-invocation.json", new
   nonessentialTrafficDisabled = Environment.GetEnvironmentVariable(
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
   ),
+  apiTimeoutMs = Environment.GetEnvironmentVariable("API_TIMEOUT_MS"),
+  streamIdleTimeoutMs = Environment.GetEnvironmentVariable("CLAUDE_STREAM_IDLE_TIMEOUT_MS"),
   claudeConfigDir = runtime,
   hostTokenConfigured = !string.IsNullOrWhiteSpace(
     Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_TOKEN")
@@ -116,6 +118,42 @@ await EmitAsync(new
   permissionMode = "default",
   capabilities = new[] { "interrupt_receipt_v1" }
 });
+
+if (prompt.Contains("diagnostic overflow", StringComparison.OrdinalIgnoreCase))
+{
+  for (var index = 0; index < 260; index++)
+  {
+    await EmitAsync(new
+    {
+      type = "future_claude_event",
+      detail = $"bounded-diagnostic-{index}",
+      session_id = nativeSessionId
+    });
+  }
+}
+
+if (prompt.Contains("synthetic timeout", StringComparison.OrdinalIgnoreCase))
+{
+  await EmitAsync(new
+  {
+    type = "assistant",
+    message = new
+    {
+      role = "assistant",
+      model = "<synthetic>",
+      stop_reason = "stop_sequence",
+      usage = new { input_tokens = 0, output_tokens = 0 },
+      content = new object[]
+      {
+        new { type = "text", text = "API Error: The operation timed out." }
+      }
+    },
+    uuid = Guid.NewGuid().ToString(),
+    session_id = nativeSessionId,
+    parent_tool_use_id = (string?)null
+  });
+  return;
+}
 
 if (prompt.Contains("claude envelope storm", StringComparison.OrdinalIgnoreCase))
 {

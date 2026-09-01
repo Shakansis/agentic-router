@@ -10,6 +10,8 @@ public interface IToolNameResolver
 
   IReadOnlyList<ToolAliasRegistration> Aliases { get; }
 
+  IReadOnlyList<CanonicalToolRegistration> Registrations { get; }
+
   ToolNameResolution Resolve(
     string proposedName,
     IEnumerable<string> offeredCanonicalNames
@@ -23,6 +25,15 @@ public interface IToolNameResolver
 public sealed record ToolAliasRegistration(
   string Alias,
   string CanonicalTool
+);
+
+public sealed record CanonicalToolRegistration(
+  string CanonicalName,
+  string Capability,
+  IReadOnlyList<string> SupportedHarnesses,
+  string RequiredPolicy,
+  IReadOnlyList<string> ExactAliases,
+  int SchemaVersion
 );
 
 public sealed record ToolNameResolution(
@@ -47,7 +58,8 @@ public sealed class ToolNameResolver : IToolNameResolver
   private static readonly string[] PlanningTools =
   [
     "create_execution_plan",
-    "revise_execution_plan"
+    "revise_execution_plan",
+    "get_execution_plan"
   ];
 
   private static readonly string[] MetaTools =
@@ -69,6 +81,7 @@ public sealed class ToolNameResolver : IToolNameResolver
     "replace_text",
     "apply_patch",
     "delete_paths",
+    "rename_path",
     "create_directory",
     "run_process",
     "run_validation_profile",
@@ -98,6 +111,7 @@ public sealed class ToolNameResolver : IToolNameResolver
     "replace_text",
     "apply_patch",
     "delete_paths",
+    "rename_path",
     "create_directory",
     "run_process",
     "run_validation_profile"
@@ -112,6 +126,8 @@ public sealed class ToolNameResolver : IToolNameResolver
     Alias("revise-execution-plan", "revise_execution_plan"),
     Alias("reviseexecutionplan", "revise_execution_plan"),
     Alias("update_execution_plan", "revise_execution_plan"),
+    Alias("get-execution-plan", "get_execution_plan"),
+    Alias("getexecutionplan", "get_execution_plan"),
     Alias("list-files", "list_files"),
     Alias("listfiles", "list_files"),
     Alias("list_directory", "list_files"),
@@ -158,6 +174,10 @@ public sealed class ToolNameResolver : IToolNameResolver
     Alias("remove-files", "delete_paths"),
     Alias("remove_paths", "delete_paths"),
     Alias("remove-paths", "delete_paths"),
+    Alias("rename-path", "rename_path"),
+    Alias("renamepath", "rename_path"),
+    Alias("move_file", "rename_path"),
+    Alias("move-file", "rename_path"),
     Alias("create-directory", "create_directory"),
     Alias("createdirectory", "create_directory"),
     Alias("run-process", "run_process"),
@@ -260,6 +280,19 @@ public sealed class ToolNameResolver : IToolNameResolver
         registration.CanonicalTool
       );
     }
+    Registrations = CanonicalTools.Select(
+      canonical => new CanonicalToolRegistration(
+        canonical,
+        CapabilityFor(canonical),
+        SupportedHarnessesFor(canonical),
+        RequiredPolicyFor(canonical),
+        Aliases.Where(alias => alias.CanonicalTool == canonical)
+          .Select(alias => alias.Alias)
+          .Order(StringComparer.Ordinal)
+          .ToArray(),
+        1
+      )
+    ).ToArray();
   }
 
   public IReadOnlyList<string> CanonicalTools { get; }
@@ -269,6 +302,8 @@ public sealed class ToolNameResolver : IToolNameResolver
   public IReadOnlyList<string> StructuredGuidanceTools { get; }
 
   public IReadOnlyList<ToolAliasRegistration> Aliases { get; }
+
+  public IReadOnlyList<CanonicalToolRegistration> Registrations { get; }
 
   public ToolNameResolution Resolve(
     string proposedName,
@@ -314,7 +349,8 @@ public sealed class ToolNameResolver : IToolNameResolver
     {
       throw new LocalActionException(
         "tool-name-resolution",
-        $"Tool name '{Bounded(proposedName)}' is neither canonical nor an approved alias."
+        DescribeUnknownTool(proposedName),
+        proposedCanonicalTool: CanonicalSuggestion(proposedName)
       );
     }
 
@@ -371,6 +407,74 @@ public sealed class ToolNameResolver : IToolNameResolver
       alias,
       canonicalTool
     );
+  }
+
+  private string DescribeUnknownTool(string proposedName)
+  {
+    var family = Registrations.Where(
+      registration => string.Equals(
+        registration.Capability,
+        proposedName,
+        StringComparison.OrdinalIgnoreCase
+      )
+    ).ToArray();
+    return family.Length switch
+    {
+      1 => $"Unknown tool '{Bounded(proposedName)}'. Use canonical tool '{family[0].CanonicalName}'.",
+      > 1 => $"Unknown tool '{Bounded(proposedName)}' names capability family '{family[0].Capability}'; request one exact canonical tool from that family.",
+      _ => $"Unknown tool '{Bounded(proposedName)}'; no exact canonical name or registered alias matches."
+    };
+  }
+
+  private string? CanonicalSuggestion(string proposedName)
+  {
+    var matches = Registrations.Where(
+      registration => string.Equals(
+        registration.Capability,
+        proposedName,
+        StringComparison.OrdinalIgnoreCase
+      )
+    ).Select(registration => registration.CanonicalName).ToArray();
+    return matches.Length == 1 ? matches[0] : null;
+  }
+
+  private static string CapabilityFor(string canonical)
+  {
+    return canonical switch
+    {
+      "create_execution_plan" or "revise_execution_plan" or "get_execution_plan" => "plan-state",
+      "request_toolset" => "capability-query",
+      "list_files" or "get_file_info" => "workspace-inspection",
+      "read_file" => "file-read",
+      "search_text" => "file-search",
+      "create_file" or "create_files" or "write_file" or "replace_text" or "apply_patch"
+        or "delete_paths" or "rename_path" or "create_directory" => "file-mutation",
+      "run_process" => "process-execution",
+      "run_validation_profile" => "validation",
+      var value when value.StartsWith("git_", StringComparison.Ordinal) => "git",
+      var value when value == WebSearchCapability.ToolName => "web-search",
+      var value when value == DiagnosticTraceCapability.ToolName => "diagnostic-read",
+      _ => "host-capability"
+    };
+  }
+
+  private static IReadOnlyList<string> SupportedHarnessesFor(string canonical)
+  {
+    return canonical == LocalActionPlanner.RequestToolsetTool
+      ? [HarnessIds.Native]
+      : [HarnessIds.Native, HarnessIds.Codex, HarnessIds.OpenCode, HarnessIds.QwenCode, HarnessIds.ClaudeCode];
+  }
+
+  private static string RequiredPolicyFor(string canonical)
+  {
+    return canonical switch
+    {
+      "run_process" => "process-policy",
+      var value when value is "create_file" or "create_files" or "write_file" or "replace_text"
+        or "apply_patch" or "delete_paths" or "rename_path" or "create_directory"
+        || value.StartsWith("git_", StringComparison.Ordinal) => "workspace-and-approval-policy",
+      _ => "current-mode-and-capability-policy"
+    };
   }
 
   private static string Bounded(

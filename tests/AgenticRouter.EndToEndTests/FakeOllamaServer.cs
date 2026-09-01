@@ -2536,10 +2536,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     )
     {
       plan = CreateForkGameAction(
-        Math.Max(
-          0,
-          attempt - availableTools.Count
-        )
+        actionResults.Length
       );
     }
     else if (
@@ -4538,34 +4535,34 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
 
     if (current.Contains(
-      "case canonical read file",
+      "case canonical create directory",
       StringComparison.OrdinalIgnoreCase
     ))
     {
       return new
       {
-        tool = "READ_FILE",
+        tool = "CREATE_DIRECTORY",
         arguments = new
         {
-          path = "hello.txt"
+          path = "canonical-dir"
         },
         explanation = "Use a casing-only canonical tool variant."
       };
     }
 
     if (current.Contains(
-      "alias read doc",
+      "alias create directory",
       StringComparison.OrdinalIgnoreCase
     ))
     {
       return new
       {
-        tool = "Read_Doc",
+        tool = "CreateDirectory",
         arguments = new
         {
-          path = "hello.txt"
+          path = "alias-dir"
         },
-        explanation = "Use a curated read alias."
+        explanation = "Use a curated directory-creation alias."
       };
     }
 

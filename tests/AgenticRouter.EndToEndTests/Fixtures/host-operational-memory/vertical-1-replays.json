@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "vertical": 1,
+  "capturedAt": "2026-08-31T23:40:00Z",
+  "fixtures": [
+    { "id": "ordinary-action-without-step-id", "expectedBaseline": "plan-action-binding" },
+    { "id": "action-bound-to-terminal-step", "expectedBaseline": "plan-action-binding" },
+    { "id": "exactly-one-actionable-step", "expectedBaseline": "explicit-step-id-required" },
+    { "id": "zero-actionable-steps", "expectedBaseline": "plan-action-binding" },
+    { "id": "multiple-actionable-steps", "expectedBaseline": "explicit-step-id-required" },
+    { "id": "repeated-search-terminal-step", "expectedBaseline": "same-rejection-reexecuted" },
+    { "id": "exact-repeat-unchanged-state", "expectedBaseline": "same-call-reexecuted" },
+    { "id": "ordinary-result-full-plan", "expectedBaseline": "HOST_OWNED_PLAN_STATE" },
+    { "id": "nonzero-process-possible-file-change", "expectedBaseline": "untyped-process-failure" },
+    { "id": "approval-wait-timeout", "expectedBaseline": "generic-timeout" },
+    { "id": "unborn-git-log", "expectedBaseline": "failed" },
+    { "id": "large-file-read", "expectedBaseline": "untyped-size-limit" }
+  ]
+}

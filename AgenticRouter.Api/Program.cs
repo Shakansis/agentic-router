@@ -315,7 +315,8 @@ builder.Services.AddSingleton(
       )
       : null,
     Path.Combine(dataDirectory, "claude-code-runtime"),
-    TimeSpan.FromSeconds(15)
+    TimeSpan.FromSeconds(15),
+    TimeSpan.FromHours(12)
   )
 );
 builder.Services.AddSingleton<ClaudeCodeHarnessAdapter>();

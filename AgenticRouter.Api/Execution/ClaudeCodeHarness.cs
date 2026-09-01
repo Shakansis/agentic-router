@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -12,7 +13,8 @@ public sealed record ClaudeCodeHarnessOptions(
   string? ExecutablePath,
   string? ManagedExecutablePath,
   string RuntimeDirectory,
-  TimeSpan StartupTimeout
+  TimeSpan StartupTimeout,
+  TimeSpan ProviderRequestTimeout
 );
 
 public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport
@@ -602,6 +604,11 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     info.Environment["DISABLE_AUTOUPDATER"] = "1";
     info.Environment["DISABLE_ERROR_REPORTING"] = "1";
     info.Environment["DISABLE_TELEMETRY"] = "1";
+    var providerRequestTimeoutMilliseconds = checked(
+      (long)_options.ProviderRequestTimeout.TotalMilliseconds
+    ).ToString(CultureInfo.InvariantCulture);
+    info.Environment["API_TIMEOUT_MS"] = providerRequestTimeoutMilliseconds;
+    info.Environment["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] = providerRequestTimeoutMilliseconds;
     info.Environment["NO_COLOR"] = "1";
     info.Environment.Remove("CLAUDE_CODE_USE_BEDROCK");
     info.Environment.Remove("CLAUDE_CODE_USE_VERTEX");
@@ -1221,6 +1228,10 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       if (!string.IsNullOrWhiteSpace(reported)
         && !string.Equals(reported, request.Model, StringComparison.Ordinal))
       {
+        if (string.Equals(reported, "<synthetic>", StringComparison.Ordinal))
+        {
+          throw SyntheticAssistantFailure(payload, request);
+        }
         throw Failure(
           "claude-code-model-substitution",
           $"Claude Code emitted assistant content from '{reported}' after Agentic Router selected '{request.Model}'."
@@ -1247,6 +1258,55 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
         );
       }
     }
+  }
+
+  private static HarnessException SyntheticAssistantFailure(
+    JsonElement payload,
+    HarnessTurnRequest request
+  )
+  {
+    var text = SyntheticAssistantText(payload);
+    if (
+      text?.StartsWith("API Error:", StringComparison.OrdinalIgnoreCase) == true
+      && text.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+    )
+    {
+      return Failure(
+        "claude-code-provider-timeout",
+        $"Claude Code reported that the selected local provider request for '{request.Model}' timed out."
+      );
+    }
+    if (text?.StartsWith("API Error:", StringComparison.OrdinalIgnoreCase) == true)
+    {
+      return Failure(
+        "claude-code-provider-error",
+        $"Claude Code reported a synthetic API failure for the selected local provider model '{request.Model}'."
+      );
+    }
+    return Failure(
+      "claude-code-synthetic-response",
+      "Claude Code emitted a synthetic assistant response that cannot be attributed to the selected model."
+    );
+  }
+
+  private static string? SyntheticAssistantText(JsonElement payload)
+  {
+    if (
+      !payload.TryGetProperty("message", out var message)
+      || !message.TryGetProperty("content", out var content)
+      || content.ValueKind != JsonValueKind.Array
+    )
+    {
+      return null;
+    }
+    foreach (var block in content.EnumerateArray())
+    {
+      if (string.Equals(String(block, "type"), "text", StringComparison.Ordinal))
+      {
+        return String(block, "text");
+      }
+    }
+    return null;
   }
 
   private static IReadOnlyList<string> PermissionPaths(

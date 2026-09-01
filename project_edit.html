@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Settings - Layout Fixed</title>
+<style>
+  /* 1. RESET CRÍTICO: Garante que paddings não quebrem as larguras/alturas */
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: #0d0d12;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #e2e8f0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 40px 20px;
+  }
+
+  /* MODAL CONTAINER */
+  .settings-modal {
+    background-color: #14151c;
+    border: 1px solid #2a2c38;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 720px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    display: flex;
+    flex-direction: column;
+    /* Define uma altura máxima clara para o modal, forçando a rolagem interna */
+    max-height: 90vh; 
+  }
+
+  /* HEADER */
+  .modal-header {
+    padding: 20px 24px;
+    border-bottom: 1px solid #2a2c38;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-shrink: 0; /* Impede o cabeçalho de ser esmagado */
+  }
+
+  .header-titles h2 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
+  .header-titles p { margin: 0; font-size: 13px; color: #8b8d98; font-family: monospace; }
+  .close-btn { background: none; border: none; color: #8b8d98; font-size: 20px; cursor: pointer; }
+  .close-btn:hover { color: #fff; }
+
+  /* CONTENT SCROLL AREA */
+  .modal-content {
+    padding: 24px;
+    /* A mágica da rolagem acontece aqui */
+    overflow-y: auto; 
+    flex-grow: 1; /* Preenche o resto do espaço disponível */
+    display: flex;
+    flex-direction: column;
+    gap: 24px; /* Espaço entre os cards */
+  }
+
+  /* SECTION CARDS - A CORREÇÃO PRINCIPAL ESTÁ AQUI */
+  .settings-section {
+    background-color: #1a1b22;
+    border: 1px solid #242631;
+    border-radius: 8px;
+    overflow: hidden;
+    /* flex-shrink: 0 proíbe o modal de amassar este card! Ele manterá 100% da sua altura real */
+    flex-shrink: 0; 
+    display: flex;
+    flex-direction: column;
+  }
+
+  .section-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid #242631;
+    font-weight: 500;
+    font-size: 14px;
+    background-color: #1e2029;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .section-body {
+    /* Padding com espaço extra no fundo (24px) para garantir que os botões não toquem a borda */
+    padding: 20px 20px 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px; /* Mantém a distância entre os itens internos */
+  }
+
+  /* INFO ROWS & TYPOGRAPHY */
+  .info-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+  .info-label { color: #8b8d98; font-size: 12px; font-weight: 500; }
+  .info-value { color: #e2e8f0; font-weight: 500; text-align: right; }
+  .helper-text { font-size: 12px; color: #8b8d98; line-height: 1.5; display: flex; gap: 8px; align-items: flex-start; }
+  
+  /* BADGES */
+  .badge { background-color: #232530; border: 1px solid #36394a; padding: 4px 8px; border-radius: 4px; font-size: 12px; color: #a0a2b0; }
+  .badge-success { background-color: rgba(74, 222, 128, 0.1); border-color: rgba(74, 222, 128, 0.2); color: #4ade80; display: flex; align-items: center; gap: 6px; }
+  .badge-success::before { content: ''; width: 6px; height: 6px; background-color: #4ade80; border-radius: 50%; }
+
+  /* TOGGLE SWITCH */
+  .toggle-container { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  .toggle { width: 36px; height: 20px; background-color: #3b82f6; border-radius: 10px; position: relative; cursor: pointer; flex-shrink: 0;}
+  .toggle::after { content: ''; position: absolute; top: 2px; left: 18px; width: 16px; height: 16px; background-color: white; border-radius: 50%; transition: 0.2s; }
+  .toggle.off { background-color: #36394a; }
+  .toggle.off::after { left: 2px; }
+
+  /* FORMS & INPUTS */
+  .form-group { display: flex; flex-direction: column; gap: 8px; }
+  .form-control { background-color: #0d0d12; border: 1px solid #36394a; color: #e2e8f0; padding: 10px 12px; border-radius: 6px; font-size: 13px; outline: none; font-family: inherit; }
+  .form-control:focus { border-color: #3b82f6; }
+
+  /* LIBRARIES BOX (RAG) */
+  .libraries-box { border: 1px solid #2a2c38; border-radius: 6px; background-color: #14151c; overflow: hidden; }
+  .libraries-header { background-color: #1a1b22; padding: 10px 16px; border-bottom: 1px solid #2a2c38; font-size: 12px; color: #8b8d98; font-weight: 500; }
+  .libraries-list { padding: 12px 16px; display: flex; gap: 24px; flex-wrap: wrap; }
+  .checkbox-label { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+
+  /* BUTTONS */
+  .btn-group { display: flex; gap: 12px; flex-wrap: wrap; } /* wrap evita cortes horizontais em telas menores */
+  .btn { padding: 10px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid transparent; transition: 0.2s; white-space: nowrap; }
+  .btn-primary { background-color: #3b82f6; color: white; }
+  .btn-primary:hover { background-color: #2563eb; }
+  .btn-secondary { background-color: #232530; border-color: #36394a; color: #e2e8f0; }
+  .btn-secondary:hover { background-color: #2a2c38; }
+  .btn-danger-outline { background-color: transparent; border-color: #ef4444; color: #ef4444; }
+  .btn-danger-outline:hover { background-color: rgba(239, 68, 68, 0.1); }
+
+  /* EMPTY STATE */
+  .empty-state { text-align: center; padding: 24px; background-color: #14151c; border: 1px dashed #36394a; border-radius: 6px; color: #8b8d98; font-size: 13px; }
+
+  /* SCROLLBAR CUSTOMIZATION */
+  .modal-content::-webkit-scrollbar { width: 6px; }
+  .modal-content::-webkit-scrollbar-thumb { background: #36394a; border-radius: 6px; }
+
+</style>
+</head>
+<body>
+
+<div class="settings-modal">
+  
+  <div class="modal-header">
+    <div class="header-titles">
+      <h2>Projeto Server</h2>
+      <p>C:\Users\Rodrigo\source\repos\New folder</p>
+    </div>
+    <button class="close-btn">×</button>
+  </div>
+
+  <div class="modal-content">
+    
+    <!-- PROJECT PROFILE -->
+    <div class="settings-section">
+      <div class="section-header">
+        <span>Project Profile</span>
+        <button class="btn btn-secondary" style="padding: 6px 12px; font-size: 12px;">Refresh</button>
+      </div>
+      <div class="section-body">
+        <div class="info-row">
+          <span class="info-label">Profile Type</span>
+          <span class="badge">vanilla-web</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Version Control</span>
+          <span class="info-value">Git (main) · Existing changes</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Agents Context</span>
+          <span class="info-value">0 AGENTS.md file(s) found</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- KNOWLEDGE / RAG -->
+    <div class="settings-section">
+      <div class="section-header">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+          <span>Knowledge / RAG</span>
+          <span class="badge badge-success">AnythingLLM Available</span>
+        </div>
+        <div class="toggle-container">
+          <span>Enable for project</span>
+          <div class="toggle"></div>
+        </div>
+      </div>
+      
+      <div class="section-body">
+        <div class="form-group">
+          <label class="info-label">Provider</label>
+          <select class="form-control">
+            <option>AnythingLLM</option>
+          </select>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div class="form-group">
+            <label class="info-label">Server Address</label>
+            <input type="text" class="form-control" value="http://localhost:3001">
+          </div>
+          <div class="form-group">
+            <label class="info-label">Developer API Key</label>
+            <input type="password" class="form-control" value="*********" placeholder="Protected API key configured">
+          </div>
+        </div>
+
+        <div class="btn-group" style="padding-bottom: 12px; border-bottom: 1px solid #242631;">
+          <button class="btn btn-secondary">Save connection</button>
+          <button class="btn btn-secondary">Prepare setup in Execute</button>
+          <button class="btn btn-secondary" style="margin-left: auto;">Refresh</button>
+        </div>
+
+        <div class="helper-text">
+          <span>ℹ️</span> 
+          <span>Prefer AnythingLLM's built-in all-MiniLM-L6-v2 embedder: it is a small CPU model and avoids competing for AR GPU memory.</span>
+        </div>
+
+        <div class="libraries-box">
+          <div class="libraries-header">Selected AnythingLLM libraries (2 available)</div>
+          <div class="libraries-list">
+            <label class="checkbox-label"><input type="checkbox" checked> Argamangi</label>
+            <label class="checkbox-label"><input type="checkbox"> My Workspace</label>
+          </div>
+        </div>
+
+        <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 8px; align-items: center;">
+          <button class="btn btn-primary" style="width: 100%; padding: 12px; font-size: 14px;">Save Project Knowledge</button>
+          <span style="font-size: 11px; color: #4ade80;">AnythingLLM connection refreshed.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- LOCAL HISTORY -->
+    <div class="settings-section">
+      <div class="section-header">
+        <span>Local History</span>
+        <div class="toggle-container">
+          <span>Save history</span>
+          <div class="toggle"></div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 8px;">
+          <div>
+            <div class="info-label">Total Sessions</div>
+            <div class="info-value" style="font-size: 16px; margin-top: 4px; text-align: left;">9 sessions</div>
+          </div>
+          <div>
+            <div class="info-label">Storage Used</div>
+            <div class="info-value" style="font-size: 16px; margin-top: 4px; text-align: left;">10.6 MiB</div>
+          </div>
+          <div>
+            <div class="info-label">Oldest Entry</div>
+            <div class="info-value" style="margin-top: 4px; text-align: left;">8/30/2026</div>
+          </div>
+          <div>
+            <div class="info-label">Newest Entry</div>
+            <div class="info-value" style="margin-top: 4px; text-align: left;">8/30/2026</div>
+          </div>
+        </div>
+        
+        <div class="btn-group" style="margin-top: 8px; border-top: 1px solid #242631; padding-top: 16px;">
+          <button class="btn btn-danger-outline">Clear Archived</button>
+          <button class="btn btn-danger-outline">Clear All History</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- VALIDATION PROFILE -->
+    <div class="settings-section">
+      <div class="section-header">
+        <span>Validation Profile</span>
+      </div>
+      <div class="section-body">
+        <div class="empty-state">
+          <div style="margin-bottom: 12px;">No validation steps configured yet.</div>
+          <button class="btn btn-primary">Add Validation Step</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- DANGER ZONE -->
+    <div style="text-align: right; margin-top: 8px; margin-bottom: 8px; flex-shrink: 0;">
+      <button class="btn btn-danger-outline" style="border: none; text-decoration: underline;">Remove Project from Workspace</button>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

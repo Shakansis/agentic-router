@@ -299,7 +299,7 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
           arguments = new[] { "--version" },
           workingDirectory = ".",
           timeoutSeconds = 30,
-          stepId = ActionablePlanStepId(unboundAction)
+          stepId = "step-1"
         }
       );
       var secondAction = await InvokeHostToolAsync(
@@ -309,9 +309,12 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
           executable = "dotnet",
           arguments = new[] { "--version" },
           workingDirectory = ".",
-          timeoutSeconds = 30,
-          stepId = ActionablePlanStepId(firstAction)
+          timeoutSeconds = 30
         }
+      );
+      var fullPlan = await InvokeHostToolAsync(
+        "get_execution_plan",
+        new { }
       );
       if (runtime is not null)
       {
@@ -319,13 +322,215 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
           Path.Combine(runtime, "fake-opencode-host-plan.json"),
           JsonSerializer.Serialize(new
           {
-            succeeded = plan.Succeeded && !unboundAction.Succeeded
-              && firstAction.Succeeded && secondAction.Succeeded,
+            succeeded = plan.Succeeded && unboundAction.Succeeded
+              && firstAction.Succeeded && secondAction.Succeeded && fullPlan.Succeeded,
             plan = new { succeeded = plan.Succeeded, output = plan.Output },
             unboundAction = new { succeeded = unboundAction.Succeeded, output = unboundAction.Output },
             firstAction = new { succeeded = firstAction.Succeeded, output = firstAction.Output },
-            secondAction = new { succeeded = secondAction.Succeeded, output = secondAction.Output }
+            secondAction = new { succeeded = secondAction.Succeeded, output = secondAction.Output },
+            fullPlan = new { succeeded = fullPlan.Succeeded, output = fullPlan.Output }
           })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    if (text.Contains("repeat guard host bridge opencode", StringComparison.Ordinal))
+    {
+      var first = await InvokeHostToolAsync(
+        "read_file",
+        new { path = "missing-repeat-guard.txt" }
+      );
+      var second = await InvokeHostToolAsync(
+        "read_file",
+        new { path = "missing-repeat-guard.txt" }
+      );
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-repeat-guard.json"),
+          JsonSerializer.Serialize(new
+          {
+            succeeded = !first.Succeeded && !second.Succeeded,
+            first = new { succeeded = first.Succeeded, output = first.Output },
+            second = new { succeeded = second.Succeeded, output = second.Output }
+          })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    if (text.Contains("vertical two host bridge opencode", StringComparison.Ordinal))
+    {
+      async Task CheckpointAsync(string value)
+      {
+        if (runtime is not null)
+        {
+          await File.WriteAllTextAsync(
+            Path.Combine(runtime, "fake-opencode-host-vertical-two.checkpoint"),
+            value
+          );
+        }
+      }
+      await CheckpointAsync("started");
+      var directoryAction = await InvokeHostToolAsync("create_directory", new { path = "empty" });
+      var directoryAgain = await InvokeHostToolAsync("create_directory", new { path = "empty" });
+      var emptyList = await InvokeHostToolAsync("list_files", new { path = "empty", recursive = false });
+      await CheckpointAsync("directories");
+      var create = await InvokeHostToolAsync(
+        "create_files",
+        new { files = new[] { new { path = "item.txt", content = "alpha beta" } } }
+      );
+      await CheckpointAsync("create-first");
+      var createAgain = await InvokeHostToolAsync(
+        "create_files",
+        new { files = new[] { new { path = "item.txt", content = "alpha beta" } } }
+      );
+      await CheckpointAsync("create-again");
+      var conflict = await InvokeHostToolAsync(
+        "create_files",
+        new { files = new[] { new { path = "item.txt", content = "different" } } }
+      );
+      await CheckpointAsync("create");
+      var renameSource = await InvokeHostToolAsync(
+        "create_files",
+        new { files = new[] { new { path = "rename-source.txt", content = "rename me" } } }
+      );
+      var inspectRename = await InvokeHostToolAsync("read_file", new { path = "rename-source.txt" });
+      var rename = await InvokeHostToolAsync(
+        "rename_path",
+        new { sourcePath = "rename-source.txt", destinationPath = "rename-destination.txt" }
+      );
+      var renameAgain = await InvokeHostToolAsync(
+        "rename_path",
+        new { sourcePath = "rename-source.txt", destinationPath = "rename-destination.txt" }
+      );
+      await CheckpointAsync("rename");
+      var emptySearch = await InvokeHostToolAsync(
+        "search_text",
+        new { path = "item.txt", query = "missing" }
+      );
+      var largeContent = new string('x', 140_000);
+      var largeCreate = await InvokeHostToolAsync(
+        "create_files",
+        new { files = new[] { new { path = "large.txt", content = largeContent } } }
+      );
+      var largeRead = await InvokeHostToolAsync("read_file", new { path = "large.txt" });
+      var rangedRead = await InvokeHostToolAsync(
+        "read_file",
+        new { path = "large.txt", offsetBytes = 0, lengthBytes = 1024 }
+      );
+      await CheckpointAsync("large-read");
+      var delete = await InvokeHostToolAsync(
+        "delete_paths",
+        new { paths = new[] { "item.txt" }, recursive = false }
+      );
+      var deleteAgain = await InvokeHostToolAsync(
+        "delete_paths",
+        new { paths = new[] { "item.txt" }, recursive = false }
+      );
+      await CheckpointAsync("delete");
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-vertical-two.json"),
+          JsonSerializer.Serialize(new
+          {
+            directory = directoryAction,
+            directoryAgain,
+            emptyList,
+            create,
+            createAgain,
+            conflict,
+            renameSource,
+            inspectRename,
+            rename,
+            renameAgain,
+            emptySearch,
+            largeCreate,
+            largeRead,
+            rangedRead,
+            delete,
+            deleteAgain
+          })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    if (text.Contains("vertical two process host bridge opencode", StringComparison.Ordinal))
+    {
+      var processFiles = await InvokeHostToolAsync(
+        "create_files",
+        new
+        {
+          files = new[]
+          {
+            new
+            {
+              path = "effect.csproj",
+              content = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"
+            },
+            new { path = "Program.cs", content = "this will not compile" }
+          }
+        }
+      );
+      var process = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "build", "effect.csproj", "--no-restore", "--nologo" },
+          workingDirectory = ".",
+          timeoutSeconds = 30
+        }
+      );
+      var processWithoutRefresh = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "build", "effect.csproj", "--no-restore", "--nologo" },
+          workingDirectory = ".",
+          timeoutSeconds = 30
+        }
+      );
+      var refresh = await InvokeHostToolAsync("list_files", new { path = ".", recursive = true });
+      var processAfterRefresh = await InvokeHostToolAsync(
+        "run_process",
+        new
+        {
+          executable = "dotnet",
+          arguments = new[] { "build", "effect.csproj", "--no-restore", "--nologo" },
+          workingDirectory = ".",
+          timeoutSeconds = 30
+        }
+      );
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-vertical-two-process.json"),
+          JsonSerializer.Serialize(new
+          {
+            processFiles,
+            process,
+            processWithoutRefresh,
+            refresh,
+            processAfterRefresh
+          })
+        );
+      }
+      await CompleteAsync(sessionId);
+      return;
+    }
+    if (text.Contains("vertical two unborn git host bridge opencode", StringComparison.Ordinal))
+    {
+      var log = await InvokeHostToolAsync("git_log", new { maxEntries = 10 });
+      if (runtime is not null)
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(runtime, "fake-opencode-host-vertical-two-unborn.json"),
+          JsonSerializer.Serialize(new { log })
         );
       }
       await CompleteAsync(sessionId);
@@ -691,22 +896,6 @@ async Task EmitAsync(string type, object properties)
   {
     await subscriber.Writer.WriteAsync(payload);
   }
-}
-
-string ActionablePlanStepId(McpToolResult result)
-{
-  var lines = result.Output.Split('\n');
-  var marker = Array.FindIndex(lines, line => line.Trim() == "HOST_OWNED_PLAN_STATE");
-  if (marker < 0 || marker + 1 >= lines.Length)
-  {
-    throw new InvalidOperationException("The Host action result omitted authoritative plan state.");
-  }
-  using var document = JsonDocument.Parse(lines[marker + 1]);
-  var ids = document.RootElement.TryGetProperty("actionableStepIds", out var camelIds)
-    ? camelIds
-    : document.RootElement.GetProperty("ActionableStepIds");
-  return ids[0].GetString()
-    ?? throw new InvalidOperationException("The Host action result omitted its next actionable step ID.");
 }
 
 async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)

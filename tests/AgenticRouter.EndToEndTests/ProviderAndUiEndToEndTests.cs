@@ -4971,7 +4971,14 @@ baselineTotal!.Value
         "[data-event-type=\"agent.coordination-path-change-required\"]"
       )
     ).ToHaveCountAsync(
-      1
+      0
+    );
+    await Expect(
+      Page.Locator(
+        "[data-event-type=\"action.deterministic-repeat-suppressed\"]"
+      ).First
+    ).ToContainTextAsync(
+      "suppressed an unchanged repeat"
     );
     Assert.IsFalse(
       File.Exists(

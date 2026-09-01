@@ -4941,6 +4941,7 @@ p {
 }
 
 .action-approval-summary-content {
+  width: 800px;
   display: flex;
   min-width: 0;
   gap: 8px;
@@ -5255,6 +5256,7 @@ textarea.terminal-command-input {
   border: 0;
   background: transparent;
   box-shadow: none;
+  width: 895px;
 }
 
 .terminal-execution-completed > .action-approval-summary {
@@ -5304,7 +5306,7 @@ textarea.terminal-command-input {
 
 .terminal-command-summary {
   min-width: 0;
-  max-width: 360px;
+  max-width: 630px;
   overflow: hidden;
   padding: 2px 6px;
   border: 1px solid var(--border);

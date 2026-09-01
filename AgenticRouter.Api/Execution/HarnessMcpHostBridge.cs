@@ -376,9 +376,19 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
 
   private static object ToolResult(bool succeeded, string output)
   {
+    var payload = HostActionResultAdapter.IsSerialized(output)
+      ? output
+      : HostActionResultAdapter.FromLegacy(
+        output,
+        succeeded,
+        succeeded ? "MCP_BRIDGE_COMPLETED" : "MCP_BRIDGE_FAILED",
+        null,
+        effectVerified: false,
+        retryUnchanged: succeeded ? null : true
+      ).Serialize();
     return new
     {
-      content = new[] { new { type = "text", text = output } },
+      content = new[] { new { type = "text", text = payload } },
       isError = !succeeded
     };
   }

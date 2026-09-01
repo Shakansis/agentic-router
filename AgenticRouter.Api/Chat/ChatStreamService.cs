@@ -39,6 +39,16 @@ public sealed class ChatStreamService
     "get_file_info",
     "search_text"
   ];
+  private static readonly HashSet<string> MinimalRecoveryTools = new(
+    [
+      "list_files",
+      "read_file",
+      "get_file_info",
+      "search_text",
+      "get_execution_plan"
+    ],
+    StringComparer.OrdinalIgnoreCase
+  );
 
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
@@ -1782,6 +1792,7 @@ public sealed class ChatStreamService
       cancellationToken
     ))
     {
+      session.RecordHarnessActivity();
       if (!string.Equals(
         harnessEvent.HarnessId,
         harnessDefinition.Id,
@@ -2141,6 +2152,8 @@ public sealed class ChatStreamService
               break;
             }
 
+            session.RecordAction(action, "proposed");
+            session.RecordApprovalRequested(action.ActionId);
             var decisionTask = _approvalCoordinator.WaitAsync(
               action,
               session.BrowserSessionId,
@@ -2152,7 +2165,7 @@ public sealed class ChatStreamService
                   $"{harnessDefinition.DisplayName} native approvals do not support inline argument editing."
                 )
               ),
-              cancellationToken
+              session.CancellationToken
             );
             yield return HarnessApprovalEvent(
               requestId,
@@ -2166,6 +2179,7 @@ public sealed class ChatStreamService
               "awaiting-approval"
             );
             var decision = await decisionTask;
+            session.RecordApprovalResolved(action.ActionId);
             await harness.ResolveApprovalAsync(
               harnessEvent.ApprovalId,
               decision.Approved,
@@ -2424,10 +2438,17 @@ public sealed class ChatStreamService
 
     if (terminalFailure is not null)
     {
+      var originalFailureCode = terminalFailure.ErrorCode
+        ?? $"{harnessDefinition.Id}-turn-failed";
+      var failureCode = originalFailureCode.Contains("idle-timeout", StringComparison.Ordinal)
+        || originalFailureCode.Contains("stall", StringComparison.Ordinal)
+          ? HostActionCodes.HarnessStall
+          : originalFailureCode;
       throw new HarnessException(
-        terminalFailure.ErrorCode ?? $"{harnessDefinition.Id}-turn-failed",
+        failureCode,
         terminalFailure.Message ?? $"{harnessDefinition.DisplayName} turn failed.",
-        terminalFailure.Message ?? $"{harnessDefinition.DisplayName} reported a failed turn.",
+        $"Original harness code: {originalFailureCode}. "
+          + (terminalFailure.Message ?? $"{harnessDefinition.DisplayName} reported a failed turn."),
         true,
         harnessId: harnessDefinition.Id
       );
@@ -2566,7 +2587,7 @@ public sealed class ChatStreamService
         + $"- Host-observed changed paths: {FormatRecoveryFacts(changedPaths)}.\n"
         + $"- Completed plan steps: {FormatRecoveryFacts(completedSteps)}.\n"
         + $"- Pending plan steps: {FormatRecoveryFacts(pendingSteps)}.\n\n"
-        + "Continue the same objective from the current Codex thread. Reinspect the workspace and the Host state above before acting. Do not repeat completed actions or recreate completed plan steps. Bind every new action to the exact pending Host-owned stepId while an accepted plan exists. If the objective is already complete, verify that from current facts and report it."
+        + "Continue the same objective from the current Codex thread. Reinspect the workspace and the Host state above before acting. Do not repeat completed actions or recreate completed plan steps. stepId is optional plan metadata for ordinary actions; Host validation, policy, approval, and workspace state remain authoritative. If the objective is already complete, verify that from current facts and report it."
     );
   }
 
@@ -2708,7 +2729,14 @@ public sealed class ChatStreamService
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
-          unavailable,
+          CreateHostActionResult(
+            harnessEvent.Tool,
+            "rejected",
+            unavailable,
+            code: "WEB_SEARCH_UNAVAILABLE",
+            retryUnchanged: false,
+            evidenceId: harnessEvent.ToolCallId
+          ).Serialize(),
           cancellationToken
         );
         session.RecordToolFailure();
@@ -2744,7 +2772,14 @@ public sealed class ChatStreamService
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           true,
-          web.UntrustedContext,
+          CreateHostActionResult(
+            harnessEvent.Tool,
+            "completed",
+            web.UntrustedContext,
+            code: "WEB_SEARCH_COMPLETED",
+            effectVerified: false,
+            evidenceId: harnessEvent.ToolCallId
+          ).Serialize(),
           cancellationToken
         );
         session.RecordToolSuccess();
@@ -2766,7 +2801,17 @@ public sealed class ChatStreamService
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
-          failure.Message,
+          CreateHostActionResult(
+            harnessEvent.Tool,
+            "failed",
+            failure.Message,
+            code: failure is LocalActionException localFailure
+              ? localFailure.Stage
+              : "WEB_SEARCH_FAILED",
+            retryUnchanged: true,
+            cause: CreateSanitizedCause(failure),
+            evidenceId: harnessEvent.ToolCallId
+          ).Serialize(),
           cancellationToken
         );
         session.RecordToolFailure();
@@ -2824,13 +2869,93 @@ public sealed class ChatStreamService
         intention
       );
     }
+    var repeatArguments = CreateRepeatArguments(proposal);
+    if (
+      session.TryGetDeterministicRepeat(
+        proposal.Tool,
+        repeatArguments,
+        out var repeatedFailure
+      )
+      && repeatedFailure is not null
+    )
+    {
+      var repeatResult = HostActionResultAdapter.DeterministicRepeat(
+        session,
+        repeatedFailure
+      );
+      await harness.ResolveToolCallAsync(
+        harnessEvent.ToolCallId,
+        false,
+        repeatResult.Serialize(),
+        cancellationToken
+      );
+      session.RecordToolFailure();
+      yield return Event(
+        requestId,
+        "action.deterministic-repeat-suppressed",
+        $"Host suppressed an unchanged repeat of {proposal.Tool}; previous evidence {repeatedFailure.EvidenceId} remains authoritative.",
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
+    if (proposal.Tool == "get_execution_plan")
+    {
+      var currentPlan = session.Plan;
+      var planOutput = currentPlan is null
+        ? "This execution session has no accepted plan."
+        : "Returned the current authoritative Host plan.";
+      await harness.ResolveToolCallAsync(
+        harnessEvent.ToolCallId,
+        true,
+        CreateHostActionResult(
+          proposal.Tool,
+          "completed",
+          planOutput,
+          code: currentPlan is null ? "PLAN_ABSENT" : "PLAN_RETRIEVED",
+          effectVerified: false,
+          evidenceId: harnessEvent.ToolCallId,
+          includeFullPlan: true
+        ).Serialize(),
+        cancellationToken
+      );
+      session.RecordToolSuccess();
+      yield return Event(
+        requestId,
+        "execution-plan-read",
+        planOutput,
+        stopwatch,
+        model,
+        intention
+      );
+      yield break;
+    }
     if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
     {
       var failure = TryApplyExecutionPlan(proposal, projectAwareness, out var plan);
       if (failure is not null)
       {
         var output = FormatExecutionFailure(failure);
-        var harnessOutput = WithAuthoritativePlanState(output, session);
+        var rejectedResult = CreateHostActionResult(
+          proposal.Tool,
+          "rejected",
+          output,
+          code: failure.Stage,
+          retryUnchanged: false,
+          cause: CreateSanitizedCause(failure),
+          evidenceId: harnessEvent.ToolCallId,
+          includeFullPlan: true
+        );
+        var harnessOutput = rejectedResult.Serialize();
+        session.RecordDeterministicFailure(
+          proposal.Tool,
+          repeatArguments,
+          rejectedResult.Code,
+          harnessEvent.ToolCallId,
+          "Revise the existing plan or change the plan-management arguments before retrying.",
+          rejectedResult
+        );
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
@@ -2850,10 +2975,17 @@ public sealed class ChatStreamService
         yield break;
       }
       var accepted = JsonSerializer.Serialize(plan);
-      var acceptedOutput = WithAuthoritativePlanState(
+      var acceptedOutput = CreateHostActionResult(
+        proposal.Tool,
+        "completed",
         $"Accepted Host plan:\n{accepted}",
-        session
-      );
+        code: proposal.Tool == "create_execution_plan"
+          ? "PLAN_CREATED"
+          : "PLAN_REVISED",
+        effectVerified: false,
+        evidenceId: harnessEvent.ToolCallId,
+        includeFullPlan: true
+      ).Serialize();
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         true,
@@ -2895,7 +3027,24 @@ public sealed class ChatStreamService
         $"The Host rejected the {harnessDefinition.DisplayName} tool arguments."
       );
       var output = FormatExecutionFailure(failure);
-      var harnessOutput = WithAuthoritativePlanState(output, session);
+      var rejectedResult = CreateHostActionResult(
+        proposal.Tool,
+        "rejected",
+        output,
+        code: failure.Stage,
+        retryUnchanged: false,
+        cause: CreateSanitizedCause(failure),
+        evidenceId: harnessEvent.ToolCallId
+      );
+      var harnessOutput = rejectedResult.Serialize();
+      session.RecordDeterministicFailure(
+        proposal.Tool,
+        repeatArguments,
+        rejectedResult.Code,
+        harnessEvent.ToolCallId,
+        "Change the tool arguments or relevant workspace state before retrying.",
+        rejectedResult
+      );
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         false,
@@ -2916,6 +3065,7 @@ public sealed class ChatStreamService
     }
 
     var action = validation.Action;
+    var approvalRevised = false;
     var planStepStarted = session.RecordPlanActionStarted(
       action.ActionId,
       action.Tool,
@@ -2962,6 +3112,7 @@ public sealed class ChatStreamService
     }
     if (requiresApproval)
     {
+      session.RecordApprovalRequested(action.ActionId);
       var decisionTask = _approvalCoordinator.WaitAsync(
         action,
         session.BrowserSessionId,
@@ -2976,7 +3127,7 @@ public sealed class ChatStreamService
           session,
           revisionCancellationToken
         ),
-        cancellationToken
+        session.CancellationToken
       );
       if (actionJournal is not null)
       {
@@ -3000,9 +3151,11 @@ public sealed class ChatStreamService
         true
       );
       var decision = await decisionTask;
+      session.RecordApprovalResolved(action.ActionId);
       action = decision.Action;
       if (decision.Revised)
       {
+        approvalRevised = true;
         session.RecordAction(action, "revised", "The pending batch was edited and revalidated by the Host.");
         if (actionJournal is not null)
         {
@@ -3045,10 +3198,16 @@ public sealed class ChatStreamService
           action.Tool,
           "blocked"
         );
-        var harnessRejection = WithAuthoritativePlanState(
+        session.RecordApprovalResolution();
+        var harnessRejection = CreateHostActionResult(
+          action.Tool,
+          "rejected",
           rejection,
-          session
-        );
+          action,
+          HostActionCodes.ApprovalRejected,
+          retryUnchanged: false,
+          evidenceId: harnessEvent.ToolCallId
+        ).Serialize();
         await harness.ResolveToolCallAsync(
           harnessEvent.ToolCallId,
           false,
@@ -3079,6 +3238,7 @@ public sealed class ChatStreamService
         );
         yield break;
       }
+      session.RecordApprovalResolution();
       yield return ActionEvent(
         requestId,
         "action.approved",
@@ -3138,6 +3298,9 @@ public sealed class ChatStreamService
     var execution = await TryExecuteAsync(
       () => _actionService.ExecuteAsync(action, session, cancellationToken)
     );
+    session.RecordHostOrchestration(
+      Math.Max(0, execution.DurationMilliseconds - (execution.Result?.Process?.DurationMilliseconds ?? 0))
+    );
     if (hostGitMutation)
     {
       await observer.AcceptHostGitMutationAsync(cancellationToken);
@@ -3173,10 +3336,20 @@ public sealed class ChatStreamService
           "completed"
         );
       }
-      var harnessResult = WithAuthoritativePlanState(
+      var harnessResult = CreateHostActionResult(
+        action.Tool,
+        "completed",
         result.Output,
-        session
-      );
+        action,
+        result.Code ?? $"{action.Tool}_completed",
+        effectVerified: true,
+        evidenceId: harnessEvent.ToolCallId,
+        effectState: result.EffectState,
+        outcome: result.Outcome,
+        changed: result.Changed,
+        postconditionSatisfied: result.PostconditionSatisfied,
+        nextActions: result.NextActions
+      ).Serialize();
       await harness.ResolveToolCallAsync(
         harnessEvent.ToolCallId,
         true,
@@ -3231,10 +3404,37 @@ public sealed class ChatStreamService
     }
     session.RecordToolFailure();
     session.AddWarning($"{action.Tool} failed: {failureOutput}");
-    var harnessFailure = WithAuthoritativePlanState(
+    var failureCode = execution.Result?.Code ?? exception.Stage;
+    var retryUnchanged = execution.Result?.RetryUnchanged
+      ?? IsRetryableWithoutStateChange(exception);
+    var failedResult = CreateHostActionResult(
+      action.Tool,
+      "failed",
       failureOutput,
-      session
+      action,
+      failureCode,
+      effectVerified: false,
+      retryUnchanged: retryUnchanged,
+      cause: CreateSanitizedCause(exception),
+      evidenceId: harnessEvent.ToolCallId,
+      effectState: execution.Result?.EffectState,
+      outcome: execution.Result?.Outcome,
+      changed: execution.Result?.Changed,
+      postconditionSatisfied: execution.Result?.PostconditionSatisfied,
+      nextActions: execution.Result?.NextActions
     );
+    var harnessFailure = failedResult.Serialize();
+    if (retryUnchanged == false && !approvalRevised)
+    {
+      session.RecordDeterministicFailure(
+        proposal.Tool,
+        repeatArguments,
+        failedResult.Code,
+        harnessEvent.ToolCallId,
+        "Change the tool arguments or relevant workspace state before retrying.",
+        failedResult
+      );
+    }
     await harness.ResolveToolCallAsync(
       harnessEvent.ToolCallId,
       false,
@@ -3251,7 +3451,8 @@ public sealed class ChatStreamService
       action,
       "failed",
       requiresApproval,
-      failureOutput
+      failureOutput,
+      failureCode
     );
   }
 
@@ -3425,6 +3626,9 @@ public sealed class ChatStreamService
       var planHandled = false;
       var toolsetHandled = false;
       var proposalCycles = 0;
+      JsonElement? lastRepeatArguments = null;
+      string? lastProposedTool = null;
+      string? lastToolEvidenceId = null;
       var planningFingerprints = new Dictionary<string, int>(
         StringComparer.Ordinal
       );
@@ -4341,6 +4545,11 @@ public sealed class ChatStreamService
           break;
         }
 
+        var proposalRepeatArguments = CreateRepeatArguments(proposal);
+        lastRepeatArguments = proposalRepeatArguments;
+        lastProposedTool = proposal.Tool;
+        lastToolEvidenceId = planningResult.CallId;
+
         progress.ToolMessages.Add(
           planningResult.AssistantMessage
         );
@@ -4542,6 +4751,92 @@ public sealed class ChatStreamService
           );
         }
 
+        if (
+          _executionSession is not null
+          && _executionSession.TryGetDeterministicRepeat(
+            proposal.Tool,
+            proposalRepeatArguments,
+            out var repeatedFailure
+          )
+          && repeatedFailure is not null
+        )
+        {
+          var repeatResult = HostActionResultAdapter.DeterministicRepeat(
+            _executionSession,
+            repeatedFailure
+          );
+          progress.Messages.Add(
+            new ChatMessage(
+              "user",
+              HostActionResultAdapter.LegacyCompatibleMessage(
+                proposal.Tool,
+                "failed",
+                repeatResult
+              )
+            )
+          );
+          progress.ToolMessages.Add(
+            _toolingProtocol.CreateToolResultMessage(
+              progress.ToolingProfile,
+              new CanonicalToolResult(
+                planningResult.CallId ?? $"host_{Guid.NewGuid():N}",
+                proposal.Tool,
+                "failed",
+                repeatResult.Serialize(),
+                false,
+                false
+              )
+            )
+          );
+          _executionSession.RecordToolFailure();
+          yield return Event(
+            requestId,
+            "action.deterministic-repeat-suppressed",
+            $"Host suppressed an unchanged repeat of {proposal.Tool}; previous evidence {repeatedFailure.EvidenceId} remains authoritative.",
+            stopwatch,
+            model,
+            intention
+          );
+          RecordRecoveryAttempt(
+            progress,
+            settings,
+            $"Deterministic repeat of {proposal.Tool} after {repeatedFailure.FailureCode}.",
+            model,
+            intention
+          );
+          var checkpoint = CreateRecoveryCheckpoint(
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            $"The specialist repeated the exact {proposal.Tool} call after deterministic failure {repeatedFailure.FailureCode}; the Host did not invoke it again.",
+            cancellationToken
+          );
+          yield return checkpoint.Event;
+          var resolution = await ResolveRecoveryDecisionAsync(
+            checkpoint,
+            baseUri,
+            requestId,
+            stopwatch,
+            model,
+            intention,
+            progress,
+            cancellationToken
+          );
+          foreach (var recoveryEvent in resolution.Events)
+          {
+            yield return recoveryEvent;
+          }
+          if (!resolution.ContinueExecution)
+          {
+            yield break;
+          }
+          planningFailures = 0;
+          exhaustedFailure = null;
+          planningFingerprints.Clear();
+          continue;
+        }
+
         if (string.Equals(
           proposal.Tool,
           WebSearchCapability.ToolName,
@@ -4592,10 +4887,22 @@ public sealed class ChatStreamService
               progress.Citations,
               web.Citations
             );
+            var webResult = CreateHostActionResult(
+              proposal.Tool,
+              "completed",
+              web.UntrustedContext,
+              code: "WEB_SEARCH_COMPLETED",
+              effectVerified: false,
+              evidenceId: planningResult.CallId
+            );
             progress.Messages.Add(
               new ChatMessage(
                 "user",
-                $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: completed\nOutput:\n{web.UntrustedContext}"
+                HostActionResultAdapter.LegacyCompatibleMessage(
+                  proposal.Tool,
+                  "completed",
+                  webResult
+                )
               )
             );
             progress.ToolMessages.Add(
@@ -4604,7 +4911,9 @@ public sealed class ChatStreamService
                 proposal.Tool,
                 "completed",
                 web.UntrustedContext,
-                false
+                false,
+                code: webResult.Code,
+                evidenceId: planningResult.CallId
               )
             );
             _executionSession?.RecordToolSuccess();
@@ -4630,7 +4939,14 @@ public sealed class ChatStreamService
                 progress,
                 proposal.Tool,
                 "failed",
-                failure.Message
+                failure.Message,
+                false,
+                code: failure is LocalActionException localFailure
+                  ? localFailure.Stage
+                  : "WEB_SEARCH_FAILED",
+                retryUnchanged: true,
+                cause: CreateSanitizedCause(failure),
+                evidenceId: planningResult.CallId
               )
             );
             _executionSession?.RecordToolFailure();
@@ -4647,6 +4963,56 @@ public sealed class ChatStreamService
         }
 
         ValidationAttempt validation;
+
+        if (proposal.Tool == "get_execution_plan")
+        {
+          var currentPlan = _executionSession?.Plan;
+          var planOutput = currentPlan is null
+            ? "This execution session has no accepted plan."
+            : "Returned the current authoritative Host plan.";
+          var planResult = CreateHostActionResult(
+            proposal.Tool,
+            "completed",
+            planOutput,
+            code: currentPlan is null ? "PLAN_ABSENT" : "PLAN_RETRIEVED",
+            effectVerified: false,
+            evidenceId: planningResult.CallId,
+            includeFullPlan: true
+          );
+          progress.Messages.Add(
+            new ChatMessage(
+              "user",
+              HostActionResultAdapter.LegacyCompatibleMessage(
+                proposal.Tool,
+                "completed",
+                planResult
+              )
+            )
+          );
+          progress.ToolMessages.Add(
+            NativeToolResultMessage(
+              progress,
+              proposal.Tool,
+              "completed",
+              planOutput,
+              false,
+              code: planResult.Code,
+              evidenceId: planningResult.CallId,
+              includeFullPlan: true
+            )
+          );
+          _executionSession?.RecordToolSuccess();
+          yield return Event(
+            requestId,
+            "execution-plan-read",
+            planOutput,
+            stopwatch,
+            model,
+            intention
+          );
+          planHandled = true;
+          break;
+        }
 
         if (proposal.Tool is "create_execution_plan" or "revise_execution_plan")
         {
@@ -4681,12 +5047,26 @@ public sealed class ChatStreamService
             var acceptedPlan = JsonSerializer.Serialize(
               plan
             );
+            var acceptedOutput = $"Accepted Host plan:\n{acceptedPlan}";
+            var planResult = CreateHostActionResult(
+              proposal.Tool,
+              "completed",
+              acceptedOutput,
+              code: proposal.Tool == "create_execution_plan"
+                ? "PLAN_CREATED"
+                : "PLAN_REVISED",
+              effectVerified: false,
+              evidenceId: planningResult.CallId,
+              includeFullPlan: true
+            );
             progress.Messages.Add(
               new ChatMessage(
                 "user",
-                $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: completed\n"
-                  + $"Output:\nAccepted Host plan:\n{acceptedPlan}\n"
-                  + "Now propose the first required local action and bind it to one exact pending stepId."
+                HostActionResultAdapter.LegacyCompatibleMessage(
+                  proposal.Tool,
+                  "completed",
+                  planResult
+                )
               )
             );
             progress.ToolMessages.Add(
@@ -4694,7 +5074,11 @@ public sealed class ChatStreamService
                 progress,
                 proposal.Tool,
                 "completed",
-                $"Accepted Host plan:\n{acceptedPlan}"
+                acceptedOutput,
+                false,
+                code: planResult.Code,
+                evidenceId: planningResult.CallId,
+                includeFullPlan: true
               )
             );
             progress.RecoveryAttemptCount = 0;
@@ -4760,13 +5144,36 @@ public sealed class ChatStreamService
         }
 
         var exception = validation.Failure;
+        var validationResult = CreateHostActionResult(
+          proposal.Tool,
+          "rejected",
+          exception.Message,
+          code: exception.Stage,
+          effectVerified: false,
+          retryUnchanged: false,
+          cause: CreateSanitizedCause(exception),
+          evidenceId: planningResult.CallId
+        );
         progress.ToolMessages.Add(
           NativeToolResultMessage(
             progress,
             proposal.Tool,
             "rejected",
-            exception.Message
+            exception.Message,
+            false,
+            code: validationResult.Code,
+            retryUnchanged: false,
+            cause: validationResult.Cause,
+            evidenceId: planningResult.CallId
           )
+        );
+        _executionSession?.RecordDeterministicFailure(
+          proposal.Tool,
+          proposalRepeatArguments,
+          validationResult.Code,
+          planningResult.CallId ?? $"host_{Guid.NewGuid():N}",
+          "Change the tool arguments or relevant workspace state before retrying.",
+          validationResult
         );
         _logger.LogWarning(
           exception,
@@ -4815,11 +5222,23 @@ public sealed class ChatStreamService
               model,
               intention
             );
+            var repeatedDenialResult = CreateHostActionResult(
+              proposal.Tool,
+              "policy-denied",
+              $"{exception.Message} The repeated action was not executed. Choose a materially different safe alternative.",
+              code: exception.Stage,
+              effectVerified: false,
+              retryUnchanged: false,
+              cause: CreateSanitizedCause(exception),
+              evidenceId: planningResult.CallId
+            );
             var denialMessage = new ChatMessage(
               "user",
-              $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: policy-denied\n"
-                + $"Output:\n{exception.Message} The repeated action was not executed. "
-                + "Choose a materially different safe alternative."
+              HostActionResultAdapter.LegacyCompatibleMessage(
+                proposal.Tool,
+                "policy-denied",
+                repeatedDenialResult
+              )
             );
             progress.Messages.Add(
               denialMessage
@@ -4829,7 +5248,12 @@ public sealed class ChatStreamService
                 progress,
                 proposal.Tool,
                 "policy-denied",
-                exception.Message
+                exception.Message,
+                false,
+                code: exception.Stage,
+                retryUnchanged: false,
+                cause: CreateSanitizedCause(exception),
+                evidenceId: planningResult.CallId
               )
             );
             var checkpoint = CreateRecoveryCheckpoint(
@@ -4929,12 +5353,24 @@ public sealed class ChatStreamService
             model,
             intention
           );
+          var deniedResult = CreateHostActionResult(
+            proposal.Tool,
+            "policy-denied",
+            $"{exception.Message} The action was not executed. Do not repeat the denied proposal; choose a safe alternative inside the trusted workspace.",
+            code: exception.Stage,
+            effectVerified: false,
+            retryUnchanged: false,
+            cause: CreateSanitizedCause(exception),
+            evidenceId: planningResult.CallId
+          );
           progress.Messages.Add(
             new ChatMessage(
               "user",
-              $"LOCAL_ACTION_RESULT\nTool: {proposal.Tool}\nStatus: policy-denied\n"
-                + $"Output:\n{exception.Message} The action was not executed. "
-                + "Do not repeat the denied proposal; choose a safe alternative inside the trusted workspace."
+              HostActionResultAdapter.LegacyCompatibleMessage(
+                proposal.Tool,
+                "policy-denied",
+                deniedResult
+              )
             )
           );
           progress.ToolMessages.Add(
@@ -4942,7 +5378,12 @@ public sealed class ChatStreamService
               progress,
               proposal.Tool,
               "policy-denied",
-              exception.Message
+              exception.Message,
+              false,
+              code: exception.Stage,
+              retryUnchanged: false,
+              cause: CreateSanitizedCause(exception),
+              evidenceId: planningResult.CallId
             )
           );
           await DelayBeforeRecoveryRetryAsync(
@@ -5106,6 +5547,7 @@ public sealed class ChatStreamService
       }
 
       var action = validatedAction;
+      var approvalRevised = false;
 
       foreach (var correction in action.Corrections ?? [])
       {
@@ -5215,6 +5657,7 @@ public sealed class ChatStreamService
 
       if (requiresApproval)
       {
+        _executionSession!.RecordApprovalRequested(action.ActionId);
         var decisionTask = _approvalCoordinator.WaitAsync(
           action,
           _executionSession!.BrowserSessionId,
@@ -5229,7 +5672,7 @@ public sealed class ChatStreamService
             _executionSession,
             revisionCancellationToken
           ),
-          cancellationToken
+          _executionSession.CancellationToken
         );
         if (actionJournal is not null)
         {
@@ -5253,10 +5696,13 @@ public sealed class ChatStreamService
           true
         );
         var approvalOutcome = await decisionTask;
+        _executionSession.RecordApprovalResolved(action.ActionId);
         action = approvalOutcome.Action;
+        _executionSession.RecordApprovalResolution();
 
         if (approvalOutcome.Revised)
         {
+          approvalRevised = true;
           _executionSession.RecordAction(
             action,
             "revised",
@@ -5315,7 +5761,12 @@ public sealed class ChatStreamService
               progress,
               action.Tool,
               "rejected",
-              "The user rejected this action. It was not executed."
+              "The user rejected this action. It was not executed.",
+              false,
+              action,
+              HostActionCodes.ApprovalRejected,
+              false,
+              evidenceId: progress.ActiveToolCallId
             )
           );
           _executionSession.RecordAction(
@@ -5420,6 +5871,9 @@ public sealed class ChatStreamService
           cancellationToken
         )
       );
+      _executionSession?.RecordHostOrchestration(
+        Math.Max(0, execution.DurationMilliseconds - (execution.Result?.Process?.DurationMilliseconds ?? 0))
+      );
 
       if (execution.Result?.Succeeded == true)
       {
@@ -5484,7 +5938,15 @@ public sealed class ChatStreamService
           ToolResultMessage(
             action,
             "completed",
-            result.Output
+            result.Output,
+            result.Code ?? $"{action.Tool}_completed",
+            true,
+            evidenceId: progress.ActiveToolCallId,
+            effectState: result.EffectState,
+            outcome: result.Outcome,
+            changed: result.Changed,
+            postconditionSatisfied: result.PostconditionSatisfied,
+            nextActions: result.NextActions
           )
         );
         progress.ToolMessages.Add(
@@ -5492,7 +5954,16 @@ public sealed class ChatStreamService
             progress,
             action.Tool,
             "completed",
-            result.Output
+            result.Output,
+            true,
+            action,
+            result.Code ?? $"{action.Tool}_completed",
+            evidenceId: progress.ActiveToolCallId,
+            effectState: result.EffectState,
+            outcome: result.Outcome,
+            changed: result.Changed,
+            postconditionSatisfied: result.PostconditionSatisfied,
+            nextActions: result.NextActions
           )
         );
         _executionSession?.RecordAction(
@@ -5611,13 +6082,25 @@ public sealed class ChatStreamService
           action,
           "failed",
           requiresApproval,
-          failureOutput
+          failureOutput,
+          execution.Result?.Code ?? exception.Stage
         );
         progress.Messages.Add(
           ToolResultMessage(
             action,
             "failed",
-            failureOutput
+            failureOutput,
+            execution.Result?.Code ?? exception.Stage,
+            false,
+            execution.Result?.RetryUnchanged
+              ?? IsRetryableWithoutStateChange(exception),
+            CreateSanitizedCause(exception),
+            progress.ActiveToolCallId,
+            execution.Result?.EffectState,
+            execution.Result?.Outcome,
+            execution.Result?.Changed,
+            execution.Result?.PostconditionSatisfied,
+            execution.Result?.NextActions
           )
         );
         progress.ToolMessages.Add(
@@ -5625,7 +6108,19 @@ public sealed class ChatStreamService
             progress,
             action.Tool,
             "failed",
-            failureOutput
+            failureOutput,
+            false,
+            action,
+            execution.Result?.Code ?? exception.Stage,
+            execution.Result?.RetryUnchanged
+              ?? IsRetryableWithoutStateChange(exception),
+            CreateSanitizedCause(exception),
+            progress.ActiveToolCallId,
+            effectState: execution.Result?.EffectState,
+            outcome: execution.Result?.Outcome,
+            changed: execution.Result?.Changed,
+            postconditionSatisfied: execution.Result?.PostconditionSatisfied,
+            nextActions: execution.Result?.NextActions
           )
         );
         _executionSession?.RecordAction(
@@ -5647,6 +6142,37 @@ public sealed class ChatStreamService
         _executionSession?.AddWarning(
           $"{action.Tool} failed: {failureOutput}"
         );
+        var failedRetryUnchanged = execution.Result?.RetryUnchanged
+          ?? IsRetryableWithoutStateChange(exception);
+        if (
+          failedRetryUnchanged == false
+          && !approvalRevised
+          && _executionSession is not null
+          && lastRepeatArguments is JsonElement repeatArguments
+          && lastProposedTool is not null
+        )
+        {
+          var deterministicFailure = CreateHostActionResult(
+            action.Tool,
+            "failed",
+            failureOutput,
+            action,
+            execution.Result?.Code ?? exception.Stage,
+            effectVerified: false,
+            retryUnchanged: false,
+            cause: CreateSanitizedCause(exception),
+            evidenceId: lastToolEvidenceId,
+            effectState: execution.Result?.EffectState
+          );
+          _executionSession.RecordDeterministicFailure(
+            lastProposedTool,
+            repeatArguments,
+            deterministicFailure.Code,
+            lastToolEvidenceId ?? action.ActionId,
+            "Change the tool arguments or relevant workspace state before retrying.",
+            deterministicFailure
+          );
+        }
         var failedProcess = execution.Result?.Process is null
           ? CreateFailedProcessReview(
             action,
@@ -8182,7 +8708,12 @@ public sealed class ChatStreamService
         ).ToArray()
       : [];
     return new ExecutionProcessReview(
-      action.TargetPath ?? string.Empty,
+      action.Arguments.TryGetProperty(
+        "executable",
+        out var executableElement
+      )
+        ? executableElement.GetString() ?? string.Empty
+        : string.Empty,
       arguments,
       executionSession is not null
         && action.WorkingDirectory is not null
@@ -8774,6 +9305,7 @@ public sealed class ChatStreamService
         or "replace_text"
         or "apply_patch"
         or "delete_paths"
+        or "rename_path"
         or "create_directory"
         or "run_process"
         or "git_stage_files"
@@ -8795,7 +9327,8 @@ public sealed class ChatStreamService
     ValidatedLocalAction action,
     string state,
     bool requiresApproval,
-    string? resultOutput = null
+    string? resultOutput = null,
+    string? code = null
   )
   {
     return new ChatStreamEvent(
@@ -8838,6 +9371,17 @@ public sealed class ChatStreamService
         resultOutput,
         action.Tool == "run_process"
           && action.RequiresExplicitApproval
+          && action.TargetPath is not null
+          && Path.IsPathFullyQualified(
+            action.TargetPath
+          )
+          && action.WorkingDirectory is not null,
+        code ?? type switch
+        {
+          "action.awaiting-approval" => HostActionCodes.ApprovalPending,
+          "action.rejected" => HostActionCodes.ApprovalRejected,
+          _ => null
+        }
       ),
       _executionSession?.CreateSummary()
     );
@@ -8960,20 +9504,46 @@ public sealed class ChatStreamService
     };
   }
 
-  private static ChatMessage ToolResultMessage(
+  private ChatMessage ToolResultMessage(
     ValidatedLocalAction action,
     string status,
-    string output
+    string output,
+    string? code = null,
+    bool effectVerified = true,
+    bool? retryUnchanged = null,
+    HostActionCause? cause = null,
+    string? evidenceId = null,
+    string? effectState = null,
+    string? outcome = null,
+    bool? changed = null,
+    bool? postconditionSatisfied = null,
+    IReadOnlyList<HostActionNextAction>? nextActions = null
   )
   {
-    const int limit = 16_000;
-    var safeOutput = output.Length <= limit
-      ? output
-      : $"{output[..limit]}\n[tool result truncated]";
+    var result = CreateHostActionResult(
+      action.Tool,
+      status,
+      output,
+      action,
+      code,
+      effectVerified,
+      retryUnchanged,
+      cause,
+      evidenceId,
+      effectState: effectState,
+      outcome: outcome,
+      changed: changed,
+      postconditionSatisfied: postconditionSatisfied,
+      nextActions: nextActions
+    );
 
     return new ChatMessage(
       "user",
-      $"LOCAL_ACTION_RESULT\nTool: {action.Tool}\nStatus: {status}\nOutput:\n{safeOutput}"
+      HostActionResultAdapter.LegacyCompatibleMessage(
+        action.Tool,
+        status,
+        result
+      )
     );
   }
 
@@ -8982,7 +9552,18 @@ public sealed class ChatStreamService
     string tool,
     string status,
     string output,
-    bool effectVerified = true
+    bool effectVerified = true,
+    ValidatedLocalAction? action = null,
+    string? code = null,
+    bool? retryUnchanged = null,
+    HostActionCause? cause = null,
+    string? evidenceId = null,
+    bool includeFullPlan = false,
+    string? effectState = null,
+    string? outcome = null,
+    bool? changed = null,
+    bool? postconditionSatisfied = null,
+    IReadOnlyList<HostActionNextAction>? nextActions = null
   )
   {
     var succeeded = string.Equals(
@@ -8990,16 +9571,88 @@ public sealed class ChatStreamService
       "completed",
       StringComparison.Ordinal
     );
+    var hostResult = CreateHostActionResult(
+      tool,
+      status,
+      output,
+      action,
+      code,
+      effectVerified,
+      retryUnchanged,
+      cause,
+      evidenceId,
+      includeFullPlan,
+      effectState,
+      outcome,
+      changed,
+      postconditionSatisfied,
+      nextActions
+    );
     return _toolingProtocol.CreateToolResultMessage(
       progress.ToolingProfile,
       new CanonicalToolResult(
         progress.ActiveToolCallId ?? $"host_{Guid.NewGuid():N}",
         tool,
         status,
-        output,
+        hostResult.Serialize(),
         succeeded,
         succeeded && effectVerified
       )
+    );
+  }
+
+  private HostActionResult CreateHostActionResult(
+    string tool,
+    string status,
+    string output,
+    ValidatedLocalAction? action = null,
+    string? code = null,
+    bool effectVerified = true,
+    bool? retryUnchanged = null,
+    HostActionCause? cause = null,
+    string? evidenceId = null,
+    bool includeFullPlan = false,
+    string? effectState = null,
+    string? outcome = null,
+    bool? changed = null,
+    bool? postconditionSatisfied = null,
+    IReadOnlyList<HostActionNextAction>? nextActions = null
+  )
+  {
+    var succeeded = string.Equals(
+      status,
+      "completed",
+      StringComparison.Ordinal
+    ) || string.Equals(
+      status,
+      "granted",
+      StringComparison.Ordinal
+    );
+    var effectiveOutcome = outcome ?? status switch
+    {
+      "rejected" or "policy-denied" => HostActionOutcomes.Blocked,
+      "cancelled" => HostActionOutcomes.Cancelled,
+      "pending" => HostActionOutcomes.Pending,
+      "failed" => HostActionOutcomes.Recoverable,
+      _ when succeeded => HostActionOutcomes.Succeeded,
+      _ => HostActionOutcomes.Recoverable
+    };
+    return HostActionResultAdapter.FromLegacy(
+      output,
+      succeeded,
+      code ?? $"{tool}_{status}",
+      _executionSession,
+      action,
+      effectVerified,
+      retryUnchanged,
+      effectiveOutcome,
+      cause,
+      nextActions,
+      includeFullPlan: includeFullPlan,
+      evidenceId: evidenceId,
+      effectState: effectState,
+      changed: changed,
+      postconditionSatisfied: postconditionSatisfied
     );
   }
 
@@ -9932,53 +10585,48 @@ public sealed class ChatStreamService
       : $"{exception.Message} Details: {technical}";
   }
 
-  private static string WithAuthoritativePlanState(
-    string output,
-    ExecutionSession session
+  private static HostActionCause CreateSanitizedCause(Exception exception)
+  {
+    var code = exception switch
+    {
+      LocalActionException local => local.Stage,
+      HarnessException harness => harness.Code,
+      _ => exception.GetType().Name
+    };
+    var source = exception.Message;
+    var sanitized = new string(
+      source.Where(
+        character => !char.IsControl(character) || character is '\r' or '\n' or '\t'
+      ).Take(1_000).ToArray()
+    );
+    return new HostActionCause(
+      HostActionResultAdapter.StableCode(code),
+      sanitized
+    );
+  }
+
+  private static bool IsRetryableWithoutStateChange(
+    LocalActionException exception
   )
   {
-    var plan = session.Plan;
-    if (plan is null)
+    return exception.Stage is "provider-failure"
+      or "web-search-failed"
+      or "harness-transport";
+  }
+
+  private static JsonElement CreateRepeatArguments(
+    LocalActionProposal proposal
+  )
+  {
+    if (string.IsNullOrWhiteSpace(proposal.PlanStepId))
     {
-      return output;
+      return proposal.Arguments.Clone();
     }
-
-    var actionableStepIds = plan.Steps.Where(
-      step => step.Status is "pending" or "in-progress"
-        && (step.Dependencies ?? []).All(
-          dependency => plan.Steps.FirstOrDefault(
-            candidate => string.Equals(
-              candidate.Id,
-              dependency,
-              StringComparison.Ordinal
-            )
-          )?.Status == "completed"
-        )
-    ).Select(
-      step => step.Id
-    ).ToArray();
-    var state = JsonSerializer.Serialize(
-      new
-      {
-        plan.Objective,
-        plan.RevisionCount,
-        Steps = plan.Steps.Select(
-          step => new
-          {
-            step.Id,
-            step.Title,
-            step.Status,
-            Dependencies = step.Dependencies ?? []
-          }
-        ),
-        ActionableStepIds = actionableStepIds
-      }
-    );
-    var instruction = actionableStepIds.Length == 0
-      ? "The accepted Host plan has no actionable steps. If the objective is complete, return the final answer without another tool call. If more work is genuinely required, call revise_execution_plan; do not call create_execution_plan."
-      : $"The next executable action must include one exact stepId from actionableStepIds: {string.Join(", ", actionableStepIds)}.";
-
-    return $"{output}\n\nHOST_OWNED_PLAN_STATE\n{state}\n{instruction}";
+    var value = JsonNode.Parse(
+      proposal.Arguments.GetRawText()
+    )?.AsObject() ?? new JsonObject();
+    value["stepId"] = proposal.PlanStepId;
+    return JsonSerializer.SerializeToElement(value);
   }
 
   private ProviderCallContext UsageContext(
@@ -10400,6 +11048,8 @@ public sealed class ChatStreamService
       ToolScope = toolScope ?? ExecutionTurnToolPolicy.Resolve(
         messages.Select(message => (message.Role, (string?)message.Content))
       );
+      GrantedTools = ToolScope.AvailableTools.Where(MinimalRecoveryTools.Contains)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
       ToolMessages = toolMessages ?? messages.Select(
         ToToolMessage
       ).ToList();
@@ -10436,9 +11086,7 @@ public sealed class ChatStreamService
 
     public ExecutionTurnToolScope ToolScope { get; }
 
-    public HashSet<string> GrantedTools { get; } = new(
-      StringComparer.OrdinalIgnoreCase
-    );
+    public HashSet<string> GrantedTools { get; }
 
     public int ToolsetRequestCount { get; set; }
 

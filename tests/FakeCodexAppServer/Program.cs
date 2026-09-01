@@ -924,20 +924,19 @@ async Task RunTurnAsync(
       var unboundSpecialistAction = await CallDynamicToolAsync(
         threadId,
         turnId,
-        "run_process",
+        "list_files",
         new
         {
-          executable = "node",
-          arguments = new[] { "--version" },
-          workingDirectory = cwd
+          path = ".",
+          recursive = false
         },
         61_000L + turnIndex,
         cancellationToken
       );
-      if (unboundSpecialistAction.Success)
+      if (!unboundSpecialistAction.Success)
       {
         throw new InvalidOperationException(
-          "The unbound specialist action unexpectedly bypassed plan-step binding."
+          $"The unbound specialist inspection was not auto-bound to the sole actionable step: {unboundSpecialistAction.Text}"
         );
       }
 
@@ -963,7 +962,7 @@ async Task RunTurnAsync(
       if (!created.Success)
       {
         throw new InvalidOperationException(
-          $"The plan-bound fixture creation failed: {created.Text}"
+          $"The terminal-step fixture creation was not corrected to the sole actionable step: {created.Text}"
         );
       }
     }

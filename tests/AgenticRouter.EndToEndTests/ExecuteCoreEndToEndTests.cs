@@ -41,6 +41,19 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         Path.Combine(_environment.WorkspaceDirectory, "native-estilo.css")
       )
     );
+    Assert.IsTrue(
+      _environment.FakeOllama.Requests.Any(
+        request => request.Messages.Any(
+          message => message.Content.Contains(
+            "Tool: create_files",
+            StringComparison.Ordinal
+          ) && message.Content.Contains(
+            "\"schemaVersion\":1",
+            StringComparison.Ordinal
+          )
+        )
+      )
+    );
   }
 
   [TestMethod]
@@ -111,8 +124,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.IsEmpty(
       events.Where(item => item["type"]!.GetValue<string>() == "error")
     );
-    Assert.HasCount(
-      1,
+    Assert.IsEmpty(
       events.Where(
         item => item["type"]!.GetValue<string>() == "action.input-rejected"
       )
@@ -636,7 +648,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
     Assert.AreEqual(
-      "codex-provider-stream-idle-timeout",
+      HostActionCodes.HarnessStall,
       error["error"]!["code"]!.GetValue<string>()
     );
   }
@@ -5865,6 +5877,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       new[]
       {
         LocalActionPlanner.RequestToolsetTool,
+        "get_execution_plan",
+        "list_files",
+        "read_file",
+        "get_file_info",
+        "search_text",
         "create_file"
       },
       actionRequest.AvailableTools.ToArray()
@@ -6450,13 +6467,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task NativeAliasesAndCanonicalCasingUseDeterministicResolverAndAudit()
   {
-    await File.WriteAllTextAsync(
-      Path.Combine(
-        _environment.WorkspaceDirectory,
-        "hello.txt"
-      ),
-      "alias evidence"
-    );
     await Page.GotoAsync(
       "/"
     );
@@ -6469,7 +6479,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "auto"
     );
     await SendMessageAsync(
-      "execute native alias read doc"
+      "execute native alias create directory"
     );
     await Expect(
       Page.Locator(
@@ -6477,19 +6487,23 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       ).Filter(
         new()
         {
-          HasText = "Read_Doc → read_file"
+          HasText = "CreateDirectory → create_directory"
         }
       ).Last
     ).ToContainTextAsync(
-      "Read_Doc → read_file"
+      "CreateDirectory → create_directory"
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.output\"]"
+        "[data-event-type=\"action.edit-applied\"]"
       ).Last
     ).ToContainTextAsync(
-      "Read file: hello.txt."
+      "Created directory alias-dir."
     );
+    Assert.IsTrue(Directory.Exists(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "alias-dir"
+    )));
     var aliasExecutionId = await Page.EvaluateAsync<string>(
       "() => state.latestExecutionSessionId"
     );
@@ -6507,13 +6521,13 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "toolNameResolutions"
       )[0];
       Assert.AreEqual(
-        "Read_Doc",
+        "CreateDirectory",
         evidence.GetProperty(
           "originalTool"
         ).GetString()
       );
       Assert.AreEqual(
-        "read_file",
+        "create_directory",
         evidence.GetProperty(
           "canonicalTool"
         ).GetString()
@@ -6533,7 +6547,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     }
 
     await SendMessageAsync(
-      "execute case canonical read file"
+      "execute case canonical create directory"
     );
     await Expect(
       Page.Locator(
@@ -6541,12 +6555,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       ).Filter(
         new()
         {
-          HasText = "READ_FILE → read_file"
+          HasText = "CREATE_DIRECTORY → create_directory"
         }
       ).Last
     ).ToContainTextAsync(
-      "READ_FILE → read_file"
+      "CREATE_DIRECTORY → create_directory"
     );
+    Assert.IsTrue(Directory.Exists(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "canonical-dir"
+    )));
   }
 
   [TestMethod]
@@ -6556,13 +6574,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await BenchmarkStructuredConformanceAsync(
       "structured:latest",
       true
-    );
-    await File.WriteAllTextAsync(
-      Path.Combine(
-        _environment.WorkspaceDirectory,
-        "hello.txt"
-      ),
-      "structured alias evidence"
     );
     await Page.GotoAsync(
       "/"
@@ -6576,7 +6587,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "auto"
     );
     await SendMessageAsync(
-      "execute structured alias read doc"
+      "execute structured alias create directory"
     );
 
     await Expect(
@@ -6584,15 +6595,19 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".assistant-toolset-request"
       ).Last
     ).ToContainTextAsync(
-      "Read_Doc → read_file"
+      "CreateDirectory → create_directory"
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.output\"]"
+        "[data-event-type=\"action.edit-applied\"]"
       ).Last
     ).ToContainTextAsync(
-      "Read file: hello.txt."
+      "Created directory alias-dir."
     );
+    Assert.IsTrue(Directory.Exists(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "alias-dir"
+    )));
   }
 
   [TestMethod]
@@ -6625,7 +6640,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "[data-event-type=\"action.planning-retry\"]"
       ).Last
     ).ToContainTextAsync(
-      "neither canonical nor an approved alias"
+      "no exact canonical name or registered alias matches"
     );
     await Expect(
       Page.Locator(
@@ -6769,7 +6784,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "[data-event-type=\"agent.toolset-request-rejected\"]"
       )
     ).ToContainTextAsync(
-      "neither canonical nor an approved alias"
+      "no exact canonical name or registered alias matches"
     );
     await Expect(
       Page.Locator(

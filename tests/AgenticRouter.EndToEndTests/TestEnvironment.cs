@@ -394,17 +394,6 @@ internal sealed class TestEnvironment : IAsyncDisposable
       }
     }
 
-    using var response = await HttpClient.PutAsJsonAsync(
-          "api/settings",
-          BaselineSettings,
-          TestJson.Options
-    );
-    if (!response.IsSuccessStatusCode)
-    {
-      throw new HttpRequestException(
-        $"Baseline settings reset failed with {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
-      );
-    }
     var secretsDirectory = Path.Combine(
       DataDirectory,
       "secrets"
@@ -430,13 +419,34 @@ internal sealed class TestEnvironment : IAsyncDisposable
     var activeWorkspaceId = profilesDocument.RootElement.GetProperty(
       "activeWorkspaceId"
     ).GetString();
-
-    foreach (var profile in profilesDocument.RootElement
+    var profiles = profilesDocument.RootElement
       .GetProperty(
         "profiles"
       )
       .EnumerateArray()
-      .ToArray())
+      .ToArray();
+    var baselineProfile = profiles.FirstOrDefault(
+      profile => string.Equals(
+        Path.GetFullPath(profile.GetProperty("path").GetString()!),
+        Path.GetFullPath(WorkspaceDirectory),
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    if (baselineProfile.ValueKind == JsonValueKind.Object)
+    {
+      var baselineId = baselineProfile.GetProperty("id").GetString()!;
+      if (!string.Equals(activeWorkspaceId, baselineId, StringComparison.Ordinal))
+      {
+        using var activated = await HttpClient.PostAsync(
+          $"api/workspaces/{baselineId}/activate",
+          null
+        );
+        activated.EnsureSuccessStatusCode();
+        activeWorkspaceId = baselineId;
+      }
+    }
+
+    foreach (var profile in profiles)
     {
       var id = profile.GetProperty(
         "id"
@@ -455,10 +465,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
         StringComparison.OrdinalIgnoreCase
       ))
       {
-        using var removed = await HttpClient.DeleteAsync(
-          $"api/workspaces/{id}?confirmed=true"
+        await RemoveWorkspaceProfileForResetAsync(
+          id
         );
-        removed.EnsureSuccessStatusCode();
         continue;
       }
 
@@ -511,6 +520,18 @@ internal sealed class TestEnvironment : IAsyncDisposable
       modelProfile.EnsureSuccessStatusCode();
     }
 
+    using var response = await HttpClient.PutAsJsonAsync(
+      "api/settings",
+      BaselineSettings,
+      TestJson.Options
+    );
+    if (!response.IsSuccessStatusCode)
+    {
+      throw new HttpRequestException(
+        $"Baseline settings reset failed with {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}"
+      );
+    }
+
     using var deletedSessions = await HttpClient.DeleteAsync(
       "api/sessions?confirmed=true"
     );
@@ -521,6 +542,46 @@ internal sealed class TestEnvironment : IAsyncDisposable
     purgedUsage.EnsureSuccessStatusCode();
     _fakeOllama.Reset();
     _fakeCloud.Reset();
+  }
+
+  private async Task RemoveWorkspaceProfileForResetAsync(
+    string workspaceId
+  )
+  {
+    using var removed = await HttpClient.DeleteAsync(
+      $"api/workspaces/{workspaceId}?confirmed=true"
+    );
+    if (removed.IsSuccessStatusCode)
+    {
+      return;
+    }
+
+    var failure = await removed.Content.ReadAsStringAsync();
+    if (
+      removed.StatusCode == HttpStatusCode.BadRequest
+      && failure.Contains(
+        "workspace-activation-blocked",
+        StringComparison.Ordinal
+      )
+    )
+    {
+      await RestartApplicationAsync();
+      using var retried = await HttpClient.DeleteAsync(
+        $"api/workspaces/{workspaceId}?confirmed=true"
+      );
+      if (retried.IsSuccessStatusCode)
+      {
+        return;
+      }
+
+      throw new HttpRequestException(
+        $"Workspace reset retry failed with {(int)retried.StatusCode}: {await retried.Content.ReadAsStringAsync()}"
+      );
+    }
+
+    throw new HttpRequestException(
+      $"Workspace reset failed with {(int)removed.StatusCode}: {failure}"
+    );
   }
 
   public string CreateWorkspaceDirectory(

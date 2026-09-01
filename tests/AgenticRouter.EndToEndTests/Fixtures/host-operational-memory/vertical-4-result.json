@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "gate": "vertical-4",
+  "authoritativePermittedTools": 29,
+  "unprojectedSchemaCharacters": 14154,
+  "perHarness": {
+    "native": { "projectedTools": 29, "schemaCharacters": 14154, "projectedPayloadCharacters": 14154, "toolsActuallyUsed": ["create_file", "replace_text", "run_process", "git_log"] },
+    "codex": { "projectedTools": 28, "schemaCharacters": 13544, "projectedPayloadCharacters": 13544, "toolsActuallyUsed": ["web_search"] },
+    "opencode": { "projectedTools": 25, "schemaCharacters": 12230, "projectedPayloadCharacters": 12230, "toolsActuallyUsed": ["create_directory", "create_files", "get_file_info", "run_process", "git_status", "delete_paths", "web_search"] },
+    "qwen-code": { "projectedTools": 29, "schemaCharacters": 14154, "projectedPayloadCharacters": 14154, "toolsActuallyUsed": ["create_directory", "create_files", "get_file_info", "run_process", "git_status", "delete_paths", "web_search"] },
+    "claude-code": { "projectedTools": 26, "schemaCharacters": 12527, "projectedPayloadCharacters": 12527, "toolsActuallyUsed": ["web_search"] }
+  },
+  "effectiveCapabilityLosses": 0,
+  "aliasesExposedAsSchemas": 0,
+  "fuzzyMappings": 0,
+  "guessedToolExecutions": 0,
+  "recoverySet": [
+    "request_toolset",
+    "get_execution_plan",
+    "list_files",
+    "read_file",
+    "get_file_info",
+    "search_text"
+  ]
+}

@@ -49,7 +49,10 @@ public sealed record ValidatedLocalAction(
   string ToolResolutionSource = ToolNameResolver.CanonicalSource,
   IReadOnlyList<PendingFileChange>? PendingFileChanges = null,
   IReadOnlyList<LocalActionCorrection>? Corrections = null,
-  string? PlanStepId = null
+  string? PlanStepId = null,
+  string PlanBindingState = HostPlanBindingStates.Unbound,
+  string? RequestedPlanStepId = null,
+  PendingRenameChange? PendingRename = null
 );
 
 public sealed record LocalActionCorrection(
@@ -64,7 +67,15 @@ public sealed record LocalActionResult(
   string EventType,
   ExecutionProcessReview? Process = null,
   bool Succeeded = true,
-  ValidationRunView? Validation = null
+  ValidationRunView? Validation = null,
+  string? Code = null,
+  bool? RetryUnchanged = null,
+  string EffectState = HostActionEffectStates.Complete,
+  string Outcome = HostActionOutcomes.Succeeded,
+  bool? Changed = null,
+  bool? PostconditionSatisfied = null,
+  IReadOnlyList<HostActionNextAction>? NextActions = null,
+  IReadOnlyList<string>? ChangedPaths = null
 );
 
 public sealed record PendingFileChange(
@@ -79,6 +90,17 @@ public sealed record PendingFileChange(
   bool UndoAvailable,
   string? UndoDiagnostic,
   string? OriginalBinaryBase64 = null
+);
+
+public sealed record PendingRenameChange(
+  string SourceRelativePath,
+  string DestinationRelativePath,
+  string SourceHash,
+  string ExpectedDestinationHash,
+  bool AlreadyApplied,
+  long OriginalBytes,
+  bool UndoAvailable,
+  string? UndoDiagnostic
 );
 
 public sealed class LocalActionService : ILocalActionService
@@ -170,7 +192,7 @@ public sealed class LocalActionService : ILocalActionService
           "The requested diagnostic trace does not match the exact trace authorized for this turn."
         );
       }
-      return AttachAndValidatePlanBinding(
+      return AttachPlanBinding(
         new ValidatedLocalAction(
           Guid.NewGuid().ToString("N"),
           proposal.Tool,
@@ -197,7 +219,7 @@ public sealed class LocalActionService : ILocalActionService
         );
       }
 
-      return AttachAndValidatePlanBinding(
+      return AttachPlanBinding(
         new ValidatedLocalAction(
         Guid.NewGuid().ToString(
           "N"
@@ -221,7 +243,7 @@ public sealed class LocalActionService : ILocalActionService
       StringComparison.Ordinal
     ))
     {
-      return AttachAndValidatePlanBinding(
+      return AttachPlanBinding(
         await ValidateGitActionAsync(
         proposal,
         executionSession,
@@ -234,7 +256,7 @@ public sealed class LocalActionService : ILocalActionService
 
     if (proposal.Tool == "delete_paths")
     {
-      return AttachAndValidatePlanBinding(
+      return AttachPlanBinding(
         await ValidateDeletePathsAsync(
           proposal,
           executionSession,
@@ -245,9 +267,18 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    if (proposal.Tool == "rename_path")
+    {
+      return AttachPlanBinding(
+        await ValidateRenamePathAsync(proposal, executionSession, cancellationToken),
+        proposal,
+        executionSession
+      );
+    }
+
     if (proposal.Tool == "create_files")
     {
-      return AttachAndValidatePlanBinding(
+      return AttachPlanBinding(
         await ValidateCreateFilesAsync(
           proposal,
           executionSession,
@@ -259,47 +290,48 @@ public sealed class LocalActionService : ILocalActionService
     }
 
     var validated = proposal.Tool == "run_process"
-      ? await ValidateProcessAsync(
-        proposal,
-        cancellationToken
-      )
+      ? executionSession?.ProcessRefreshRequired == true
+        ? throw new LocalActionException(
+          "process-refresh-required",
+          "The previous process left partial or unknown effects. Inspect the relevant workspace state before another process execution."
+        )
+        : await ValidateProcessAsync(
+          proposal,
+          cancellationToken
+        )
       : await ValidateFileActionAsync(
         proposal,
         executionSession,
         cancellationToken
       );
-    return AttachAndValidatePlanBinding(
+    return AttachPlanBinding(
       validated,
       proposal,
       executionSession
     );
   }
 
-  private static ValidatedLocalAction AttachAndValidatePlanBinding(
+  private static ValidatedLocalAction AttachPlanBinding(
     ValidatedLocalAction action,
     LocalActionProposal proposal,
     ExecutionSession? executionSession
   )
   {
-    var validated = action with
+    var binding = executionSession?.ResolvePlanActionBinding(
+      proposal.PlanStepId
+    ) ?? new PlanActionBindingResolution(
+      HostPlanBindingStates.Unbound,
+      proposal.PlanStepId,
+      null
+    );
+    return action with
     {
       OriginalTool = proposal.OriginalTool ?? proposal.Tool,
       ToolResolutionSource = proposal.ToolResolutionSource,
-      PlanStepId = proposal.PlanStepId
+      PlanStepId = binding.EffectiveStepId,
+      PlanBindingState = binding.State,
+      RequestedPlanStepId = binding.RequestedStepId
     };
-    var bindingFailure = proposal.HostInitiated
-      ? null
-      : executionSession?.ValidatePlanStepBinding(
-        proposal.PlanStepId
-      );
-    if (bindingFailure is not null)
-    {
-      throw new LocalActionException(
-        "plan-action-binding",
-        bindingFailure
-      );
-    }
-    return validated;
   }
 
   public async Task<LocalActionResult> ExecuteAsync(
@@ -320,6 +352,11 @@ public sealed class LocalActionService : ILocalActionService
         executionSession,
         cancellationToken
       );
+      await ValidatePendingRenameStateAsync(action, cancellationToken);
+      if (action.Tool == "run_process")
+      {
+        await RevalidateProcessActionAsync(action, cancellationToken);
+      }
       var result = action.Tool switch
       {
         DiagnosticTraceCapability.ToolName => await GetTraceDiagnosticAsync(
@@ -370,11 +407,17 @@ public sealed class LocalActionService : ILocalActionService
           executionSession,
           cancellationToken
         ),
+        "rename_path" => await RenamePathAsync(
+          action,
+          executionSession,
+          cancellationToken
+        ),
         "create_directory" => CreateDirectory(
           action
         ),
         "run_process" => await RunProcessAsync(
           action,
+          executionSession,
           cancellationToken
         ),
         "run_validation_profile" => await RunValidationProfileAsync(
@@ -422,6 +465,7 @@ public sealed class LocalActionService : ILocalActionService
       else if (
         action.Tool == "create_directory"
         && executionSession is not null
+        && result.Changed != false
       )
       {
         executionSession.RecordCreatedDirectory(
@@ -435,6 +479,31 @@ public sealed class LocalActionService : ILocalActionService
       }
 
       if (
+        executionSession is not null
+        && result.PostconditionSatisfied == true
+        && action.PendingFileChange is { } satisfiedFile
+      )
+      {
+        executionSession.RecordVerifiedPostcondition(
+          action.Tool,
+          action.Arguments,
+          satisfiedFile.ExpectedFinalHash
+        );
+      }
+      if (
+        executionSession is not null
+        && result.PostconditionSatisfied == true
+        && action.PendingRename is { } satisfiedRename
+      )
+      {
+        executionSession.RecordVerifiedPostcondition(
+          action.Tool,
+          action.Arguments,
+          satisfiedRename.ExpectedDestinationHash
+        );
+      }
+
+      if (
         result.Process is not null
         && executionSession is not null
       )
@@ -442,6 +511,14 @@ public sealed class LocalActionService : ILocalActionService
         executionSession.RecordProcess(
           result.Process
         );
+      }
+
+      if (
+        executionSession is not null
+        && action.Tool is "list_files" or "read_file" or "get_file_info" or "search_text" or "git_status" or "git_diff"
+      )
+      {
+        executionSession.RecordWorkspaceRefresh();
       }
 
       return result;
@@ -618,15 +695,26 @@ public sealed class LocalActionService : ILocalActionService
         );
         break;
       case "git_log":
-        result = await _git.GetLogAsync(
+        var status = await _git.GetStatusAsync(
           session.WorkspacePath,
-          GetOptionalInteger(
-            action.Arguments,
-            "maxEntries",
-            20
-          ),
+          false,
           cancellationToken
         );
+        result = string.IsNullOrWhiteSpace(status.Head)
+          ? new
+          {
+            commits = (IReadOnlyList<GitLogEntryView>)Array.Empty<GitLogEntryView>(),
+            repositoryState = "unborn"
+          }
+          : new
+          {
+            commits = await _git.GetLogAsync(
+              session.WorkspacePath,
+              GetOptionalInteger(action.Arguments, "maxEntries", 20),
+              cancellationToken
+            ),
+            repositoryState = "initialized"
+          };
         break;
       case "git_show_commit":
         result = await _git.ShowCommitAsync(
@@ -934,65 +1022,6 @@ public sealed class LocalActionService : ILocalActionService
       );
 
     if (
-      proposal.Tool == "create_file"
-      && File.Exists(targetPath)
-    )
-    {
-      var effectivePath = relativePath.Replace(
-        Path.DirectorySeparatorChar,
-        '/'
-      );
-      if (
-        executionSession is not null
-        && executionSession.TryGetObservedFile(
-          relativePath,
-          out var observed
-        )
-        && observed is not null
-      )
-      {
-        proposal = proposal with
-        {
-          Tool = "write_file"
-        };
-        corrections.Add(
-          new LocalActionCorrection(
-            "tool",
-            "create_file",
-            "write_file",
-            "The exact plan target already exists and was inspected during this session. The Host changed the repeated creation proposal to a stale-write-protected replacement using the model-supplied content."
-          )
-        );
-      }
-      else
-      {
-        corrections.Add(
-          new LocalActionCorrection(
-            "tool",
-            "create_file",
-            "read_file",
-            "The exact plan target already exists. The Host changed this proposal to a safe inspection; after receiving its content, use write_file or a bounded edit instead of retrying create_file."
-          )
-        );
-        return new ValidatedLocalAction(
-          Guid.NewGuid().ToString("N"),
-          "read_file",
-          JsonSerializer.SerializeToElement(new
-          {
-            path = effectivePath
-          }),
-          targetPath,
-          null,
-          $"read_file: {relativePath}",
-          null,
-          true,
-          false,
-          Corrections: corrections
-        );
-      }
-    }
-
-    if (
       proposal.Tool is "create_file" or "create_directory"
       && relativePath == "."
     )
@@ -1200,6 +1229,170 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
+  private async Task<ValidatedLocalAction> ValidateRenamePathAsync(
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "rename_path requires an active execution session."
+      );
+    }
+    var source = await _workspace.ResolveCreationPathAsync(
+      GetRequiredString(proposal.Arguments, "sourcePath"),
+      cancellationToken
+    );
+    var destination = await _workspace.ResolveCreationPathAsync(
+      GetRequiredString(proposal.Arguments, "destinationPath"),
+      cancellationToken
+    );
+    if (
+      source.RelativePath == "."
+      || destination.RelativePath == "."
+      || string.Equals(source.FullPath, destination.FullPath, FileSystemPathSemantics.Comparison)
+    )
+    {
+      throw new LocalActionException(
+        "action-validation",
+        "rename_path requires distinct file paths inside the trusted workspace."
+      );
+    }
+    if (Directory.Exists(source.FullPath) || Directory.Exists(destination.FullPath))
+    {
+      throw new LocalActionException(
+        "target-conflict",
+        "rename_path supports files only; a directory occupies the source or destination."
+      );
+    }
+
+    PendingRenameChange pending;
+    if (File.Exists(source.FullPath))
+    {
+      if (File.Exists(destination.FullPath))
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          $"{destination.RelativePath}: the rename destination already exists."
+        );
+      }
+      var sourceInfo = new FileInfo(source.FullPath);
+      var sourceHash = await HashFileAsync(source.FullPath, cancellationToken);
+      var undoAvailable = executionSession.CanTrackRollback(sourceInfo.Length, out var undoDiagnostic);
+      pending = new PendingRenameChange(
+        source.RelativePath,
+        destination.RelativePath,
+        sourceHash,
+        sourceHash,
+        false,
+        sourceInfo.Length,
+        undoAvailable,
+        undoDiagnostic
+      );
+    }
+    else if (File.Exists(destination.FullPath))
+    {
+      var destinationHash = await HashFileAsync(destination.FullPath, cancellationToken);
+      if (!executionSession.IsVerifiedPostcondition(proposal.Tool, proposal.Arguments, destinationHash))
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          "The source is absent and the destination exists, but this session has no verified matching rename postcondition."
+        );
+      }
+      pending = new PendingRenameChange(
+        source.RelativePath,
+        destination.RelativePath,
+        destinationHash,
+        destinationHash,
+        true,
+        new FileInfo(destination.FullPath).Length,
+        false,
+        null
+      );
+    }
+    else
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"{source.RelativePath}: the rename source does not exist."
+      );
+    }
+
+    var protectedPath = IsProtectedInstructionFile(source.RelativePath)
+      || IsProtectedInstructionFile(destination.RelativePath);
+    var explicitlyRequested = executionSession.Objective.Contains(
+      Path.GetFileName(source.RelativePath),
+      StringComparison.OrdinalIgnoreCase
+    ) || executionSession.Objective.Contains(
+      Path.GetFileName(destination.RelativePath),
+      StringComparison.OrdinalIgnoreCase
+    );
+    return new ValidatedLocalAction(
+      Guid.NewGuid().ToString("N"),
+      proposal.Tool,
+      proposal.Arguments.Clone(),
+      source.FullPath,
+      destination.FullPath,
+      $"rename_path: {source.RelativePath} -> {destination.RelativePath}",
+      $"{source.RelativePath} -> {destination.RelativePath}",
+      false,
+      protectedPath && !explicitlyRequested,
+      PendingRename: pending
+    );
+  }
+
+  private static async Task ValidatePendingRenameStateAsync(
+    ValidatedLocalAction action,
+    CancellationToken cancellationToken
+  )
+  {
+    if (action.PendingRename is not { } pending)
+    {
+      return;
+    }
+    var source = RequiredTarget(action);
+    var destination = action.WorkingDirectory
+      ?? throw new LocalActionException("action-execution", "rename_path omitted its destination.");
+    if (pending.AlreadyApplied)
+    {
+      if (File.Exists(source) || !File.Exists(destination))
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          "The already-applied rename postcondition changed before execution."
+        );
+      }
+      var destinationHash = await HashFileAsync(destination, cancellationToken);
+      if (!string.Equals(destinationHash, pending.ExpectedDestinationHash, StringComparison.Ordinal))
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          "The rename destination no longer has the verified expected hash."
+        );
+      }
+      return;
+    }
+    if (!File.Exists(source) || File.Exists(destination) || Directory.Exists(destination))
+    {
+      throw new LocalActionException(
+        "target-conflict",
+        "The rename source or destination changed after validation."
+      );
+    }
+    var sourceHash = await HashFileAsync(source, cancellationToken);
+    if (!string.Equals(sourceHash, pending.SourceHash, StringComparison.Ordinal))
+    {
+      throw new LocalActionException(
+        "target-conflict",
+        "The rename source changed after validation."
+      );
+    }
+  }
+
   private async Task<ValidatedLocalAction> ValidateDeletePathsAsync(
     LocalActionProposal proposal,
     ExecutionSession? executionSession,
@@ -1235,8 +1428,9 @@ public sealed class LocalActionService : ILocalActionService
 
     foreach (var requestedPath in requestedPaths)
     {
-      var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
-      var relative = await GetRelativePathAsync(target, cancellationToken);
+      var resolution = await _workspace.ResolveCreationPathAsync(requestedPath, cancellationToken);
+      var target = resolution.FullPath;
+      var relative = resolution.RelativePath;
 
       if (relative == ".")
       {
@@ -1250,10 +1444,22 @@ public sealed class LocalActionService : ILocalActionService
       var isDirectory = Directory.Exists(target);
       if (!isFile && !isDirectory)
       {
-        throw new LocalActionException(
-          "action-validation",
-          $"{relative}: delete_paths accepts existing files or directories only."
+        explicitTargets.Add((target, relative, false));
+        prepared.Add(
+          new PendingFileChange(
+            relative,
+            "already-absent",
+            false,
+            HashText(string.Empty),
+            null,
+            string.Empty,
+            HashText(string.Empty),
+            0,
+            false,
+            null
+          )
         );
+        continue;
       }
 
       if (explicitTargets.Any(existing => PathsOverlap(existing.FullPath, target)))
@@ -1435,12 +1641,42 @@ public sealed class LocalActionService : ILocalActionService
           $"{relative}: create_files contains the same effective target more than once."
         );
       }
-      if (File.Exists(target) || Directory.Exists(target))
+      if (Directory.Exists(target))
       {
         throw new LocalActionException(
-          "action-validation",
-          $"{relative}: create_files accepts new file targets only."
+          "target-conflict",
+          $"{relative}: an existing directory conflicts with the requested file."
         );
+      }
+
+      if (File.Exists(target))
+      {
+        var existingContent = await File.ReadAllTextAsync(target, cancellationToken);
+        if (!string.Equals(existingContent, requested.Content, StringComparison.Ordinal))
+        {
+          throw new LocalActionException(
+            "target-conflict",
+            $"{relative}: the file already exists with different content."
+          );
+        }
+        var existingHash = HashText(existingContent);
+        var effectiveExistingPath = relative.Replace(Path.DirectorySeparatorChar, '/');
+        normalized.Add(new { path = effectiveExistingPath, content = requested.Content });
+        prepared.Add(
+          new PendingFileChange(
+            relative,
+            "already-present",
+            true,
+            existingHash,
+            null,
+            requested.Content,
+            existingHash,
+            new FileInfo(target).Length,
+            false,
+            null
+          )
+        );
+        continue;
       }
 
       var parent = Path.GetDirectoryName(target);
@@ -1648,7 +1884,7 @@ public sealed class LocalActionService : ILocalActionService
       ),
       cancellationToken
     );
-    var preview = $"{command.Executable} {string.Join(" ", arguments.Select(QuoteArgument))}";
+    var preview = $"{executable} {string.Join(" ", arguments.Select(QuoteArgument))}";
 
     return new ValidatedLocalAction(
       Guid.NewGuid().ToString(
@@ -1658,7 +1894,7 @@ public sealed class LocalActionService : ILocalActionService
       proposal.Arguments.Clone(),
       command.Executable,
       command.WorkingDirectory,
-      $"run_process: {Path.GetFileName(command.Executable)}",
+      $"run_process: {Path.GetFileName(executable)}",
       LimitPreview(
         preview
       ),
@@ -1718,7 +1954,7 @@ public sealed class LocalActionService : ILocalActionService
       string.IsNullOrEmpty(
         output
       )
-        ? "[directory is empty]"
+        ? JsonSerializer.Serialize(new { entries = Array.Empty<string>() })
         : output,
       "action.output"
     );
@@ -1745,21 +1981,89 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
-    if (file.Length > FileReadLimit)
+    var requestedOffset = GetOptionalLong(action.Arguments, "offsetBytes", 0);
+    var hasRequestedLength = action.Arguments.TryGetProperty("lengthBytes", out _);
+    var requestedLength = GetOptionalInteger(action.Arguments, "lengthBytes", FileReadLimit);
+    if (requestedOffset < 0 || requestedLength is < 1 or > FileReadLimit)
     {
       throw new LocalActionException(
-        "action-execution",
-        "The file exceeds the 128 KiB read limit."
+        "action-validation",
+        "read_file range must use offsetBytes >= 0 and lengthBytes between 1 and 131072."
       );
     }
 
-    var content = await File.ReadAllTextAsync(
-      target,
-      cancellationToken
-    );
+    if (file.Length > FileReadLimit && !hasRequestedLength)
+    {
+      var preparedLength = (int)Math.Min(FileReadLimit, file.Length);
+      return new LocalActionResult(
+        JsonSerializer.Serialize(new
+        {
+          sizeBytes = file.Length,
+          maxRangeBytes = FileReadLimit,
+          validRange = new { minimumOffsetBytes = 0, maximumOffsetBytes = Math.Max(0, file.Length - 1) }
+        }),
+        "action.output",
+        Succeeded: false,
+        Code: "FILE_READ_RANGE_REQUIRED",
+        RetryUnchanged: false,
+        EffectState: HostActionEffectStates.None,
+        Outcome: HostActionOutcomes.Recoverable,
+        Changed: false,
+        PostconditionSatisfied: false,
+        NextActions:
+        [
+          new HostActionNextAction(
+            "read_file",
+            JsonSerializer.SerializeToElement(new
+            {
+              path = await GetRelativePathAsync(target, cancellationToken),
+              offsetBytes = 0,
+              lengthBytes = preparedLength
+            }),
+            "Read the first valid bounded range."
+          )
+        ]
+      );
+    }
+
+    if (requestedOffset >= file.Length && file.Length > 0)
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"read_file offsetBytes must be lower than the file size ({file.Length})."
+      );
+    }
+
+    var rangeRead = hasRequestedLength || requestedOffset > 0;
+    string content;
+    if (rangeRead)
+    {
+      await using var stream = new FileStream(
+        target,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.ReadWrite,
+        65_536,
+        FileOptions.Asynchronous | FileOptions.SequentialScan
+      );
+      stream.Seek(requestedOffset, SeekOrigin.Begin);
+      var buffer = new byte[Math.Min(requestedLength, (int)Math.Min(int.MaxValue, file.Length - requestedOffset))];
+      var read = await stream.ReadAsync(buffer.AsMemory(), cancellationToken);
+      content = JsonSerializer.Serialize(new
+      {
+        offsetBytes = requestedOffset,
+        lengthBytes = read,
+        sizeBytes = file.Length,
+        content = Encoding.UTF8.GetString(buffer, 0, read)
+      });
+    }
+    else
+    {
+      content = await File.ReadAllTextAsync(target, cancellationToken);
+    }
     await RecordObservationAsync(
       target,
-      content,
+      rangeRead ? null : content,
       executionSession,
       cancellationToken
     );
@@ -2015,7 +2319,12 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       matches == 0
-        ? $"[no matches; searched {searched} text files]"
+        ? JsonSerializer.Serialize(new
+        {
+          results = Array.Empty<object>(),
+          searchedFiles = searched,
+          truncated
+        })
         : output.ToString().TrimEnd(),
       "action.output"
     );
@@ -2036,6 +2345,22 @@ public sealed class LocalActionService : ILocalActionService
     ValidateContent(
       content
     );
+
+    if (action.PendingFileChange?.Operation == "already-present")
+    {
+      var actual = await File.ReadAllTextAsync(target, cancellationToken);
+      if (!string.Equals(actual, content, StringComparison.Ordinal))
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          "The existing file no longer matches the requested content."
+        );
+      }
+      return NoOpResult(
+        "already_present",
+        $"{Path.GetFileName(target)} already contains the requested content."
+      );
+    }
 
     if (File.Exists(
       target
@@ -2061,7 +2386,10 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       $"Created {Path.GetFileName(target)} ({content.Length} characters).",
-      "action.edit-applied"
+      "action.edit-applied",
+      Code: "create_file_completed",
+      Changed: true,
+      PostconditionSatisfied: true
     );
   }
 
@@ -2093,6 +2421,18 @@ public sealed class LocalActionService : ILocalActionService
             pending.RelativePath
           )
         );
+        if (pending.Operation == "already-present")
+        {
+          var existingContent = await File.ReadAllTextAsync(target, cancellationToken);
+          if (!string.Equals(existingContent, pending.FinalContent, StringComparison.Ordinal))
+          {
+            throw new LocalActionException(
+              "target-conflict",
+              $"{pending.RelativePath}: the existing file no longer matches the requested content."
+            );
+          }
+          continue;
+        }
         TrackAndCreateParents(target, createdDirectories);
         await using var stream = new FileStream(
           target,
@@ -2126,10 +2466,18 @@ public sealed class LocalActionService : ILocalActionService
       throw;
     }
 
-    return new LocalActionResult(
-      $"Created {createdFiles.Count} verified file(s): {string.Join(", ", pendingChanges.Select(item => item.RelativePath))}.",
-      "action.edit-applied"
-    );
+    return createdFiles.Count == 0
+      ? NoOpResult(
+        "already_present",
+        $"All {pendingChanges.Count} requested file(s) already contain the requested content."
+      )
+      : new LocalActionResult(
+        $"Created {createdFiles.Count} verified file(s): {string.Join(", ", pendingChanges.Where(item => item.Operation == "created").Select(item => item.RelativePath))}.",
+        "action.edit-applied",
+        Code: "create_files_completed",
+        Changed: true,
+        PostconditionSatisfied: true
+      );
   }
 
   private static async Task<LocalActionResult> WriteFileAsync(
@@ -2147,6 +2495,14 @@ public sealed class LocalActionService : ILocalActionService
     ValidateContent(
       content
     );
+
+    if (action.PendingFileChange?.Operation == "already-present")
+    {
+      return NoOpResult(
+        "already_present",
+        $"{Path.GetFileName(target)} already contains the requested content."
+      );
+    }
 
     if (!File.Exists(
       target
@@ -2166,7 +2522,10 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       $"Updated {Path.GetFileName(target)} ({content.Length} characters).",
-      "action.edit-applied"
+      "action.edit-applied",
+      Code: "write_file_completed",
+      Changed: true,
+      PostconditionSatisfied: true
     );
   }
 
@@ -2190,6 +2549,13 @@ public sealed class LocalActionService : ILocalActionService
       action.Arguments,
       "replaceAll"
     );
+    if (action.PendingFileChange?.Operation == "already-applied")
+    {
+      return NoOpResult(
+        "already_applied",
+        $"The requested replacement is already proven in {Path.GetFileName(target)}."
+      );
+    }
     var content = await ReadEditableFileAsync(
       target,
       cancellationToken
@@ -2234,7 +2600,10 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       $"Replaced text in {Path.GetFileName(target)}.",
-      "action.edit-applied"
+      "action.edit-applied",
+      Code: "replace_text_completed",
+      Changed: true,
+      PostconditionSatisfied: true
     );
   }
 
@@ -2292,7 +2661,10 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       $"Applied {replacements.Count} patch replacement(s) to {Path.GetFileName(target)}.",
-      "action.edit-applied"
+      "action.edit-applied",
+      Code: "apply_patch_completed",
+      Changed: true,
+      PostconditionSatisfied: true
     );
   }
 
@@ -2308,9 +2680,9 @@ public sealed class LocalActionService : ILocalActionService
       target
     ))
     {
-      throw new LocalActionException(
-        "action-execution",
-        "The directory already exists."
+      return NoOpResult(
+        "already_present",
+        $"Directory {Path.GetFileName(target)} already exists."
       );
     }
 
@@ -2320,7 +2692,101 @@ public sealed class LocalActionService : ILocalActionService
 
     return new LocalActionResult(
       $"Created directory {Path.GetFileName(target)}.",
-      "action.edit-applied"
+      "action.edit-applied",
+      Code: "create_directory_completed",
+      Changed: true,
+      PostconditionSatisfied: true
+    );
+  }
+
+  private static LocalActionResult NoOpResult(string code, string output)
+  {
+    return new LocalActionResult(
+      output,
+      "action.output",
+      Code: code,
+      EffectState: HostActionEffectStates.None,
+      Outcome: HostActionOutcomes.NoOp,
+      Changed: false,
+      PostconditionSatisfied: true
+    );
+  }
+
+  private static async Task<LocalActionResult> RenamePathAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var pending = action.PendingRename
+      ?? throw new LocalActionException("action-execution", "rename_path omitted its validated state.");
+    var source = RequiredTarget(action);
+    var destination = action.WorkingDirectory
+      ?? throw new LocalActionException("action-execution", "rename_path omitted its destination.");
+    if (pending.AlreadyApplied)
+    {
+      return NoOpResult(
+        "already_applied",
+        $"Rename {pending.SourceRelativePath} -> {pending.DestinationRelativePath} is already verified."
+      );
+    }
+    EnsureParentExists(destination);
+    File.Move(source, destination, false);
+    if (File.Exists(source) || !File.Exists(destination))
+    {
+      throw new LocalActionException(
+        "post-write-verification",
+        "The rename postcondition was not observed."
+      );
+    }
+    var destinationHash = await HashFileAsync(destination, cancellationToken);
+    if (!string.Equals(destinationHash, pending.ExpectedDestinationHash, StringComparison.Ordinal))
+    {
+      throw new LocalActionException(
+        "post-write-verification",
+        "The rename destination hash does not match the validated source hash."
+      );
+    }
+    executionSession?.RecordFileChange(
+      new ExecutionFileChange(
+        pending.SourceRelativePath,
+        "deleted",
+        true,
+        pending.SourceHash,
+        string.Empty,
+        null,
+        string.Empty,
+        0,
+        DateTimeOffset.UtcNow,
+        true,
+        false,
+        "Rename rollback is represented by the verified destination, not an automatic content restore.",
+        0
+      )
+    );
+    executionSession?.RecordFileChange(
+      new ExecutionFileChange(
+        pending.DestinationRelativePath,
+        "created",
+        false,
+        string.Empty,
+        destinationHash,
+        null,
+        string.Empty,
+        new FileInfo(destination).Length,
+        DateTimeOffset.UtcNow,
+        true,
+        false,
+        "Rename rollback is represented by the verified source, not an automatic content restore.",
+        0
+      )
+    );
+    return new LocalActionResult(
+      $"Renamed {pending.SourceRelativePath} to {pending.DestinationRelativePath}.",
+      "action.edit-applied",
+      Code: "rename_completed",
+      Changed: true,
+      PostconditionSatisfied: true
     );
   }
 
@@ -2347,7 +2813,11 @@ public sealed class LocalActionService : ILocalActionService
       foreach (var requestedPath in requestedPaths)
       {
         cancellationToken.ThrowIfCancellationRequested();
-        var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
+        var target = (await _workspace.ResolveCreationPathAsync(requestedPath, cancellationToken)).FullPath;
+        if (!File.Exists(target) && !Directory.Exists(target))
+        {
+          continue;
+        }
         if (Directory.Exists(target))
         {
           Directory.Delete(target, recursive);
@@ -2401,14 +2871,24 @@ public sealed class LocalActionService : ILocalActionService
       throw;
     }
 
-    return new LocalActionResult(
-      $"Deleted {requestedPaths.Length} verified path(s): {string.Join(", ", requestedPaths)}.",
-      "action.edit-applied"
-    );
+    var changedCount = pendingChanges.Count(change => change.Operation != "already-absent");
+    return changedCount == 0
+      ? NoOpResult(
+        "already_absent",
+        $"All {requestedPaths.Length} requested path(s) are already absent."
+      )
+      : new LocalActionResult(
+        $"Deleted {requestedPaths.Length} verified path(s): {string.Join(", ", requestedPaths)}.",
+        "action.edit-applied",
+        Code: "delete_completed",
+        Changed: true,
+        PostconditionSatisfied: true
+      );
   }
 
   private async Task<LocalActionResult> RunProcessAsync(
     ValidatedLocalAction action,
+    ExecutionSession? executionSession,
     CancellationToken cancellationToken
   )
   {
@@ -2430,15 +2910,37 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
-    var result = await _processExecution.ExecuteAsync(
-      new ProcessExecutionRequest(
-        action.TargetPath!,
-        arguments,
-        action.WorkingDirectory!,
-        TimeSpan.FromSeconds(
-          timeoutSeconds
-        )
-      ),
+    var workspaceRevisionBefore = executionSession?.WorkspaceRevision ?? 0;
+    var observationRoot = executionSession?.WorkspacePath ?? action.WorkingDirectory!;
+    var before = await CaptureProcessWorkspaceAsync(
+      observationRoot,
+      cancellationToken
+    );
+    executionSession?.RecordProcessStarted(action.ActionId);
+    var processClock = System.Diagnostics.Stopwatch.StartNew();
+    ProcessExecutionResult result;
+    try
+    {
+      result = await _processExecution.ExecuteAsync(
+        new ProcessExecutionRequest(
+          action.TargetPath!,
+          arguments,
+          action.WorkingDirectory!,
+          TimeSpan.FromSeconds(
+            timeoutSeconds
+          )
+        ),
+        cancellationToken
+      );
+    }
+    finally
+    {
+      executionSession?.RecordProcessFinished(action.ActionId, processClock.ElapsedMilliseconds);
+    }
+    var changedPaths = await ObserveProcessWorkspaceChangesAsync(
+      observationRoot,
+      before,
+      executionSession,
       cancellationToken
     );
     var output = new StringBuilder();
@@ -2477,11 +2979,35 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    if (changedPaths.Count > 0)
+    {
+      output.AppendLine("changed paths:");
+      foreach (var path in changedPaths)
+      {
+        output.AppendLine(path);
+      }
+    }
+    output.AppendLine($"Workspace revision: {workspaceRevisionBefore} -> {executionSession?.WorkspaceRevision ?? workspaceRevisionBefore}");
+
+    var succeeded = result.ExitCode == 0 && !result.TimedOut && !result.Cancelled;
+    var effectState = succeeded
+      ? HostActionEffectStates.Complete
+      : changedPaths.Count > 0
+        ? HostActionEffectStates.Partial
+        : HostActionEffectStates.Unknown;
+    if (!succeeded)
+    {
+      executionSession?.RequireProcessRefresh();
+    }
+
     return new LocalActionResult(
       output.ToString().TrimEnd(),
       "action.process-output",
       new ExecutionProcessReview(
-        action.TargetPath!,
+        GetRequiredString(
+          action.Arguments,
+          "executable"
+        ),
         arguments,
         await GetRelativePathAsync(
           action.WorkingDirectory!,
@@ -2496,11 +3022,150 @@ public sealed class LocalActionService : ILocalActionService
         result.StandardOutput,
         result.StandardError
       ),
-      result.ExitCode == 0
-        && !result.TimedOut
-        && !result.Cancelled
+      succeeded,
+      Code: result.Cancelled
+        ? HostActionCodes.UserCancelled
+        : result.TimedOut
+          ? HostActionCodes.ProcessTimeout
+          : result.ExitCode == 0
+            ? "PROCESS_COMPLETED"
+            : "PROCESS_EXIT_NONZERO",
+      RetryUnchanged: succeeded ? null : false,
+      EffectState: effectState,
+      Outcome: result.Cancelled
+        ? HostActionOutcomes.Cancelled
+        : succeeded
+          ? HostActionOutcomes.Succeeded
+          : HostActionOutcomes.Recoverable,
+      Changed: changedPaths.Count > 0,
+      PostconditionSatisfied: succeeded,
+      ChangedPaths: changedPaths
     );
   }
+
+  private async Task RevalidateProcessActionAsync(
+    ValidatedLocalAction action,
+    CancellationToken cancellationToken
+  )
+  {
+    var validated = await _processPolicy.ValidateAsync(
+      GetRequiredString(action.Arguments, "executable"),
+      GetStringArray(action.Arguments, "arguments"),
+      GetOptionalString(action.Arguments, "workingDirectory"),
+      cancellationToken
+    );
+    if (
+      !string.Equals(validated.Executable, action.TargetPath, FileSystemPathSemantics.Comparison)
+      || !string.Equals(validated.WorkingDirectory, action.WorkingDirectory, FileSystemPathSemantics.Comparison)
+      || !validated.Arguments.SequenceEqual(
+        GetStringArray(action.Arguments, "arguments"),
+        StringComparer.Ordinal
+      )
+    )
+    {
+      throw new LocalActionException(
+        "approval-state-conflict",
+        "The process policy resolution changed while approval was pending. Propose the action again against current Host state."
+      );
+    }
+  }
+
+  private static async Task<Dictionary<string, ProcessFileStamp>> CaptureProcessWorkspaceAsync(
+    string root,
+    CancellationToken cancellationToken
+  )
+  {
+    const int maximumFiles = 5_000;
+    var result = new Dictionary<string, ProcessFileStamp>(FileSystemPathSemantics.Comparer);
+    var pending = new Stack<string>();
+    pending.Push(root);
+    while (pending.Count > 0 && result.Count < maximumFiles)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var directory = pending.Pop();
+      foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+      {
+        var info = new DirectoryInfo(childDirectory);
+        if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Name == ".git")
+        {
+          continue;
+        }
+        pending.Push(childDirectory);
+      }
+      foreach (var file in Directory.EnumerateFiles(directory))
+      {
+        var info = new FileInfo(file);
+        if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+          continue;
+        }
+        result[Path.GetRelativePath(root, file)] = new ProcessFileStamp(
+          info.Length,
+          info.LastWriteTimeUtc.Ticks
+        );
+        if (result.Count >= maximumFiles)
+        {
+          break;
+        }
+      }
+    }
+    await Task.CompletedTask;
+    return result;
+  }
+
+  private static async Task<IReadOnlyList<string>> ObserveProcessWorkspaceChangesAsync(
+    string root,
+    IReadOnlyDictionary<string, ProcessFileStamp> before,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    var after = await CaptureProcessWorkspaceAsync(root, cancellationToken);
+    var changedPaths = before.Keys.Concat(after.Keys)
+      .Distinct(FileSystemPathSemantics.Comparer)
+      .Where(path =>
+      {
+        var hadBefore = before.TryGetValue(path, out var previous);
+        var hasAfter = after.TryGetValue(path, out var current);
+        return hadBefore != hasAfter || previous != current;
+      })
+      .Order(FileSystemPathSemantics.Comparer)
+      .ToArray();
+
+    foreach (var relativePath in changedPaths)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      before.TryGetValue(relativePath, out var previous);
+      after.TryGetValue(relativePath, out var current);
+      var target = Path.GetFullPath(Path.Combine(root, relativePath));
+      var finalHash = current is null
+        ? string.Empty
+        : await HashFileAsync(target, cancellationToken);
+      var originalHash = executionSession?.TryGetObservedFile(relativePath, out var observed) == true
+        ? observed?.Hash ?? string.Empty
+        : string.Empty;
+      executionSession?.RecordFileChange(
+        new ExecutionFileChange(
+          relativePath,
+          previous is null ? "created" : current is null ? "deleted" : "modified",
+          previous is not null,
+          originalHash,
+          finalHash,
+          null,
+          string.Empty,
+          current?.Length ?? 0,
+          DateTimeOffset.UtcNow,
+          true,
+          false,
+          "Process effects are observed after execution but are not automatically rollbackable.",
+          0
+        )
+      );
+    }
+    return changedPaths;
+  }
+
+  private sealed record ProcessFileStamp(long Length, long LastWriteTicks);
 
   private static async Task<PendingFileChange?> PrepareFileChangeAsync(
     LocalActionProposal proposal,
@@ -2524,14 +3189,6 @@ public sealed class LocalActionService : ILocalActionService
       targetPath
     );
 
-    if (proposal.Tool == "create_file" && existedBefore)
-    {
-      throw new LocalActionException(
-        "action-validation",
-        "The file already exists."
-      );
-    }
-
     if (proposal.Tool != "create_file" && !existedBefore)
     {
       throw new LocalActionException(
@@ -2545,6 +3202,33 @@ public sealed class LocalActionService : ILocalActionService
     var originalHash = HashText(
       string.Empty
     );
+
+    if (proposal.Tool == "create_file" && existedBefore)
+    {
+      var expectedContent = GetRequiredString(proposal.Arguments, "content");
+      ValidateContent(expectedContent);
+      var actualContent = await File.ReadAllTextAsync(targetPath, cancellationToken);
+      if (!string.Equals(actualContent, expectedContent, StringComparison.Ordinal))
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          $"{relativePath}: the file already exists with different content."
+        );
+      }
+      var actualHash = HashText(actualContent);
+      return new PendingFileChange(
+        relativePath,
+        "already-present",
+        true,
+        actualHash,
+        null,
+        expectedContent,
+        actualHash,
+        new FileInfo(targetPath).Length,
+        false,
+        null
+      );
+    }
 
     if (existedBefore)
     {
@@ -2647,6 +3331,28 @@ public sealed class LocalActionService : ILocalActionService
 
         if (first < 0)
         {
+          var currentHash = HashText(finalContent);
+          if (
+            executionSession?.IsVerifiedPostcondition(
+              proposal.Tool,
+              proposal.Arguments,
+              currentHash
+            ) == true
+          )
+          {
+            return new PendingFileChange(
+              relativePath,
+              "already-applied",
+              true,
+              currentHash,
+              null,
+              finalContent,
+              currentHash,
+              originalBytes,
+              false,
+              null
+            );
+          }
           throw new LocalActionException(
             "action-validation",
             "The requested text was not found."
@@ -2709,6 +3415,24 @@ public sealed class LocalActionService : ILocalActionService
     ValidateContent(
       finalContent
     );
+    if (
+      existedBefore
+      && string.Equals(originalHash, HashText(finalContent), StringComparison.Ordinal)
+    )
+    {
+      return new PendingFileChange(
+        relativePath,
+        proposal.Tool == "replace_text" ? "already-applied" : "already-present",
+        true,
+        originalHash,
+        null,
+        finalContent,
+        originalHash,
+        originalBytes,
+        false,
+        null
+      );
+    }
     string? undoDiagnostic = null;
     var undoAvailable = executionSession is not null
       && executionSession.CanTrackRollback(
@@ -2811,7 +3535,7 @@ public sealed class LocalActionService : ILocalActionService
       var snapshot = action.PendingFileChanges ?? [];
       foreach (var requestedPath in GetStringArray(action.Arguments, "paths"))
       {
-        var target = await _workspace.ResolvePathAsync(requestedPath, cancellationToken);
+        var target = (await _workspace.ResolveCreationPathAsync(requestedPath, cancellationToken)).FullPath;
         if (!Directory.Exists(target))
         {
           continue;
@@ -2837,9 +3561,21 @@ public sealed class LocalActionService : ILocalActionService
 
     foreach (var pending in action.PendingFileChanges ?? [])
     {
-      var target = pending.Operation == "created"
+      var target = pending.Operation is "created" or "already-absent"
         ? (await _workspace.ResolveCreationPathAsync(pending.RelativePath, cancellationToken)).FullPath
         : await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+
+      if (pending.Operation == "already-absent")
+      {
+        if (File.Exists(target) || Directory.Exists(target))
+        {
+          throw new LocalActionException(
+            "file-conflict",
+            $"{pending.RelativePath}: the target appeared after its absence was verified."
+          );
+        }
+        continue;
+      }
 
       if (pending.Operation == "created")
       {
@@ -2848,6 +3584,26 @@ public sealed class LocalActionService : ILocalActionService
           throw new LocalActionException(
             "file-conflict",
             $"{pending.RelativePath}: the target appeared after create_files was proposed."
+          );
+        }
+        continue;
+      }
+
+      if (pending.Operation == "already-present")
+      {
+        if (!File.Exists(target))
+        {
+          throw new LocalActionException(
+            "file-conflict",
+            $"{pending.RelativePath}: the previously satisfied file disappeared."
+          );
+        }
+        var satisfiedHash = await HashFileAsync(target, cancellationToken);
+        if (!string.Equals(satisfiedHash, pending.ExpectedFinalHash, StringComparison.Ordinal))
+        {
+          throw new LocalActionException(
+            "target-conflict",
+            $"{pending.RelativePath}: the existing file no longer satisfies the requested content."
           );
         }
         continue;
@@ -2911,9 +3667,21 @@ public sealed class LocalActionService : ILocalActionService
   {
     foreach (var pending in action.PendingFileChanges ?? [])
     {
-      var target = pending.Operation == "created"
+      var target = pending.Operation is "created" or "already-absent"
         ? (await _workspace.ResolveCreationPathAsync(pending.RelativePath, cancellationToken)).FullPath
         : await _workspace.ResolvePathAsync(pending.RelativePath, cancellationToken);
+
+      if (pending.Operation == "already-absent")
+      {
+        if (File.Exists(target) || Directory.Exists(target))
+        {
+          throw new LocalActionException(
+            "target-conflict",
+            $"{pending.RelativePath}: the target no longer satisfies the already-absent postcondition."
+          );
+        }
+        continue;
+      }
 
       if (pending.Operation == "created")
       {
@@ -2953,6 +3721,30 @@ public sealed class LocalActionService : ILocalActionService
             0
           )
         );
+        continue;
+      }
+
+      if (pending.Operation == "already-present")
+      {
+        if (!File.Exists(target))
+        {
+          throw new LocalActionException(
+            "post-write-verification",
+            $"{pending.RelativePath}: the already-present file disappeared."
+          );
+        }
+        var content = await File.ReadAllTextAsync(target, cancellationToken);
+        if (
+          !string.Equals(content, pending.FinalContent, StringComparison.Ordinal)
+          || !string.Equals(HashText(content), pending.ExpectedFinalHash, StringComparison.Ordinal)
+        )
+        {
+          throw new LocalActionException(
+            "target-conflict",
+            $"{pending.RelativePath}: the existing file does not satisfy the requested content."
+          );
+        }
+        await RecordObservationAsync(target, content, executionSession, cancellationToken);
         continue;
       }
 
@@ -3038,6 +3830,30 @@ public sealed class LocalActionService : ILocalActionService
     var target = RequiredTarget(
       action
     );
+
+    if (pending.Operation is "already-present" or "already-applied")
+    {
+      if (!File.Exists(target))
+      {
+        throw new LocalActionException(
+          "post-write-verification",
+          "The file disappeared before its convergent postcondition was verified."
+        );
+      }
+      var satisfiedContent = await File.ReadAllTextAsync(target, cancellationToken);
+      if (
+        !string.Equals(HashText(satisfiedContent), pending.ExpectedFinalHash, StringComparison.Ordinal)
+        || !string.Equals(satisfiedContent, pending.FinalContent, StringComparison.Ordinal)
+      )
+      {
+        throw new LocalActionException(
+          "target-conflict",
+          "The file no longer satisfies the requested postcondition."
+        );
+      }
+      await RecordObservationAsync(target, satisfiedContent, executionSession, cancellationToken);
+      return;
+    }
 
     if (!File.Exists(
       target
@@ -3741,6 +4557,26 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    return number;
+  }
+
+  private static long GetOptionalLong(
+    JsonElement arguments,
+    string name,
+    long defaultValue
+  )
+  {
+    if (!arguments.TryGetProperty(name, out var value))
+    {
+      return defaultValue;
+    }
+    if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var number))
+    {
+      throw new LocalActionException(
+        "action-validation",
+        $"Action argument '{name}' must be an integer."
+      );
+    }
     return number;
   }
 

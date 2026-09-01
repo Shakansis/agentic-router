@@ -114,7 +114,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   {
     var requested = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
     return ToolDefinitions.Where(tool => requested.Contains(tool.Name))
-      .Select(tool => tool.Name is "create_execution_plan" or "revise_execution_plan"
+      .Select(tool => tool.Name is "create_execution_plan" or "revise_execution_plan" or "get_execution_plan"
         ? tool
         : AddPlanStepBinding(tool, required: false))
       .ToArray();
@@ -312,8 +312,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           tool.Name
         )
       ).Select(
-        tool => !planRequired && tool.Name is not "create_execution_plan" and not "revise_execution_plan"
-          ? AddPlanStepBinding(tool)
+        tool => !planRequired && tool.Name is not "create_execution_plan" and not "revise_execution_plan" and not "get_execution_plan"
+          ? AddPlanStepBinding(tool, required: false)
           : tool
       )
     ).ToArray();
@@ -334,7 +334,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           : string.Empty
       )
       + (!planRequired
-        ? "\nAn accepted Host plan exists. Every executable action must include the exact stepId returned by the Host; the Host will reject missing, unknown, terminal, or dependency-blocked step IDs."
+        ? "\nAn accepted Host plan exists. stepId is optional metadata for ordinary actions: the Host may bind the sole actionable step, correct a terminal binding when exactly one step is actionable, or execute unbound when no unique association exists."
         : string.Empty);
     var toolCatalogText = $"{ToolCatalogMarker}\n{CreateCompactCatalog(catalogTools)}";
     var prompt = $"{instructionText}\n{toolCatalogText}";
@@ -669,6 +669,14 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         ]
       ),
       Tool(
+        "get_execution_plan",
+        "Read the current authoritative Host plan when an explicit full snapshot is required.",
+        new
+        {
+        },
+        []
+      ),
+      Tool(
         "list_files",
         "List bounded entries inside the trusted workspace.",
         new
@@ -680,10 +688,12 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       ),
       Tool(
         "read_file",
-        "Read a bounded text file inside the trusted workspace.",
+        "Read a bounded text file or an explicit byte range inside the trusted workspace.",
         new
         {
-          path = StringProperty()
+          path = StringProperty(),
+          offsetBytes = new { type = "integer", minimum = 0 },
+          lengthBytes = new { type = "integer", minimum = 1, maximum = 131072 }
         },
         ["path"]
       ),
@@ -786,6 +796,16 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           recursive = BooleanProperty()
         },
         ["paths", "recursive"]
+      ),
+      Tool(
+        "rename_path",
+        "Rename one previously inspected file inside the trusted workspace. The Host verifies the destination hash and detects an already-completed rename.",
+        new
+        {
+          sourcePath = StringProperty(),
+          destinationPath = StringProperty()
+        },
+        ["sourcePath", "destinationPath"]
       ),
       Tool(
         "create_directory",
@@ -965,7 +985,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
   private static CanonicalToolDefinition AddPlanStepBinding(
     CanonicalToolDefinition definition,
-    bool required = true
+    bool required = false
   )
   {
     var parameters = JsonNode.Parse(
@@ -976,7 +996,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       ["type"] = "string",
       ["description"] = required
         ? "Top-level tool input property containing the exact Host-owned ID of the accepted plan step this action advances. Never place stepId inside a nested array item or object."
-        : "When the Host has returned an accepted plan, set this top-level tool input property to the exact Host-owned ID of the pending plan step this action advances. Never place stepId inside a nested array item or object. Omit only while no accepted plan exists."
+        : "Optional top-level Host plan-step association. The Host may bind, correct, or leave the action unbound without changing authorization or blocking an otherwise valid ordinary action."
     };
     if (required)
     {

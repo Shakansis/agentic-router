@@ -147,9 +147,9 @@ public sealed class ProcessPolicyService : IProcessPolicyService
         cancellationToken
       );
     }
-    else if (shellInterpreter)
+    else
     {
-      executable = ResolveShellExecutable(
+      executable = ResolveExecutable(
         executable
       ) ?? executable;
     }
@@ -304,7 +304,7 @@ public sealed class ProcessPolicyService : IProcessPolicyService
         : null;
   }
 
-  private static string? ResolveShellExecutable(string executable)
+  private static string? ResolveExecutable(string executable)
   {
     var fileName = Path.GetFileName(
       executable

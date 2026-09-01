@@ -28,6 +28,7 @@ public static class ExecutionTurnToolPolicy
   [
     "create_execution_plan",
     "revise_execution_plan",
+    "get_execution_plan",
     "list_files",
     "read_file",
     "get_file_info",
@@ -36,7 +37,8 @@ public static class ExecutionTurnToolPolicy
     "create_files",
     "write_file",
     "replace_text",
-    "apply_patch"
+    "apply_patch",
+    "rename_path"
   ];
 
   private static readonly string[] GitTools =

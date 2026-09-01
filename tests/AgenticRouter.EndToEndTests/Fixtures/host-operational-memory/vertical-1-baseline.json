@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "period": "2026-08-28/2026-08-31",
+  "source": "Host incident journals and local harness rollouts",
+  "metrics": {
+    "ordinary_action_plan_rejections": 71,
+    "full_plan_projections": 172,
+    "full_plan_projection_chars": 380805,
+    "exact_deterministic_repeats": 14,
+    "same_failure_class_repeats": 43,
+    "untyped_tool_failures": 98,
+    "persisted_context_usage_events": 6096,
+    "session_file_too_large_warnings": 13
+  },
+  "caveats": [
+    "Detailed failed tool calls were concentrated in 2 of 13 Codex rollouts.",
+    "The active 2026-08-31 rollout was still changing at capture time.",
+    "Metrics outside Vertical 1 remain baseline-only until their owning vertical."
+  ]
+}

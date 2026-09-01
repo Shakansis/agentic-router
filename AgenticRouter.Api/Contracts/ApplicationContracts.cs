@@ -654,7 +654,8 @@ public sealed record LocalActionEvent(
   bool Editable = false,
   string? EditableText = null,
   string? ResultOutput = null,
-  bool CanRememberApproval = false
+  bool CanRememberApproval = false,
+  string? Code = null
 );
 
 public sealed record ToolNameResolutionEvidence(
@@ -669,7 +670,8 @@ public sealed record ToolNameRegistryView(
   string Comparison,
   bool CollisionFree,
   IReadOnlyList<string> CanonicalTools,
-  IReadOnlyList<ToolAliasRegistration> Aliases
+  IReadOnlyList<ToolAliasRegistration> Aliases,
+  IReadOnlyList<CanonicalToolRegistration>? Registrations = null
 );
 
 public sealed record ExecutionSessionSummary(
@@ -694,7 +696,18 @@ public sealed record ExecutionSessionSummary(
   string? ResidentModel = null,
   string? ConformanceIdentity = null,
   string? HandoffReason = null,
-  ExecutionRoutingEvidence? RoutingEvidence = null
+  ExecutionRoutingEvidence? RoutingEvidence = null,
+  ExecutionTimingView? Timing = null
+);
+
+public sealed record ExecutionTimingView(
+  DateTimeOffset StartedAt,
+  DateTimeOffset? CompletedAt,
+  DateTimeOffset? LastHarnessActivityAt,
+  long HarnessActiveMilliseconds,
+  long ApprovalWaitMilliseconds,
+  long ProcessMilliseconds,
+  long HostOrchestrationMilliseconds
 );
 
 public sealed record ExecutionRoutingEvidence(
@@ -756,7 +769,8 @@ public sealed record ExecutionSessionReview(
   ValidationProfileSettings? ValidationProfile = null,
   ValidationRunView? Validation = null,
   GitDeliveryStateView? Delivery = null,
-  IReadOnlyList<ToolNameResolutionEvidence>? ToolNameResolutions = null
+  IReadOnlyList<ToolNameResolutionEvidence>? ToolNameResolutions = null,
+  IReadOnlyList<ExecutionActionRecord>? Actions = null
 );
 
 public sealed record UndoExecutionRequest(

@@ -233,6 +233,12 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         request.WorkingDirectory
       );
       _activeTurns[request.SessionId] = active;
+      using var hostTurn = _hostTools.BeginTurn(
+        HarnessIds.QwenCode,
+        session.SessionId,
+        request.SessionId,
+        hostProfile
+      );
 
       yield return Event(
         "turn.started",
@@ -270,12 +276,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
       active.PromptId = RequiredString(prompt, "promptId");
       var baselineEventId = Long(prompt, "lastEventId") ?? 0;
-      using var hostTurn = _hostTools.BeginTurn(
-        HarnessIds.QwenCode,
-        session.SessionId,
-        active.PromptId,
-        hostProfile
-      );
 
       await using var stream = await eventsResponse.Content.ReadAsStreamAsync(cancellationToken);
       using var reader = new StreamReader(stream, new UTF8Encoding(false, true));

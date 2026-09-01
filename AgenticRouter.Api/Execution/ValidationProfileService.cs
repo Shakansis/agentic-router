@@ -237,7 +237,7 @@ public sealed class ValidationProfileService : IValidationProfileService
       var result = new ValidationStepResultView(
         step.Id,
         step.Label,
-        command.Executable,
+        step.Executable,
         command.Arguments,
         Path.GetRelativePath(
           session.WorkspacePath,
@@ -261,7 +261,7 @@ public sealed class ValidationProfileService : IValidationProfileService
       );
       session.RecordProcess(
         new ExecutionProcessReview(
-          command.Executable,
+          step.Executable,
           command.Arguments,
           result.WorkingDirectory,
           process.ExitCode,

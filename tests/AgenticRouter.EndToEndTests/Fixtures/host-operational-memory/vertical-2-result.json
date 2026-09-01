@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "gate": "vertical-2",
+  "metrics": {
+    "convergent_repeat_failures": 0,
+    "unverified_no_op_successes": 0,
+    "partial_process_effects_hidden": 0,
+    "process_retries_without_refresh": 0,
+    "empty_observation_failures": 0,
+    "large_file_terminal_failures": 0
+  },
+  "evidence": {
+    "convergentOperations": [
+      "create_directory",
+      "create_file",
+      "create_files",
+      "delete_paths",
+      "replace_text",
+      "rename_path"
+    ],
+    "processFailureEffect": "partial",
+    "processRepeatBeforeRefresh": "DETERMINISTIC_REPEAT",
+    "processRetryAfterRefresh": "PROCESS_EXIT_NONZERO",
+    "emptyObservations": ["list_files", "search_text", "git_log"],
+    "largeFileRecovery": "FILE_READ_RANGE_REQUIRED"
+  }
+}

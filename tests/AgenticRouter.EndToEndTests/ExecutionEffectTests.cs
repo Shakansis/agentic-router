@@ -213,7 +213,7 @@ public sealed class ExecutionEffectTests
   }
 
   [TestMethod]
-  public void PlanActionsRequireExplicitSpecialistStepIdWithoutSemanticInference()
+  public void OrdinaryPlanBindingsAreAdvisoryWithoutSemanticInference()
   {
     var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(workspace);
@@ -242,14 +242,15 @@ public sealed class ExecutionEffectTests
           0
         )
       );
-      var missingBinding = session.ValidatePlanStepBinding(null);
-      StringAssert.Contains(missingBinding, "must bind every action");
-      StringAssert.Contains(missingBinding, "Actionable stepIds: style, script");
-      Assert.IsNull(session.ValidatePlanStepBinding("style"));
-      StringAssert.Contains(
-        session.ValidatePlanStepBinding("missing"),
-        "does not exist"
-      );
+      var missingBinding = session.ResolvePlanActionBinding(null);
+      Assert.AreEqual(HostPlanBindingStates.Unbound, missingBinding.State);
+      Assert.IsNull(missingBinding.EffectiveStepId);
+      var explicitBinding = session.ResolvePlanActionBinding("style");
+      Assert.AreEqual(HostPlanBindingStates.Explicit, explicitBinding.State);
+      Assert.AreEqual("style", explicitBinding.EffectiveStepId);
+      var invalidBinding = session.ResolvePlanActionBinding("missing");
+      Assert.AreEqual(HostPlanBindingStates.Unbound, invalidBinding.State);
+      Assert.IsNull(invalidBinding.EffectiveStepId);
 
       var completed = CreateSession("Completed browser artifacts", workspace);
       completed.CreatePlan(
@@ -261,13 +262,326 @@ public sealed class ExecutionEffectTests
           0
         )
       );
-      var completedBinding = completed.ValidatePlanStepBinding(null);
-      StringAssert.Contains(completedBinding, "no actionable stepId");
-      StringAssert.Contains(completedBinding, "revise the existing plan");
+      var completedBinding = completed.ResolvePlanActionBinding(null);
+      Assert.AreEqual(HostPlanBindingStates.Unbound, completedBinding.State);
+      Assert.IsNull(completedBinding.EffectiveStepId);
+
+      var single = CreateSession("Single actionable step", workspace);
+      single.CreatePlan(
+        new ExecutionPlanView(
+          "Single actionable step",
+          [
+            new ExecutionPlanStep("done", "Completed", "completed"),
+            new ExecutionPlanStep("next", "Continue", "pending")
+          ],
+          null,
+          1,
+          0
+        )
+      );
+      var automatic = single.ResolvePlanActionBinding(null);
+      Assert.AreEqual(HostPlanBindingStates.Auto, automatic.State);
+      Assert.AreEqual("next", automatic.EffectiveStepId);
+      var corrected = single.ResolvePlanActionBinding("done");
+      Assert.AreEqual(HostPlanBindingStates.Corrected, corrected.State);
+      Assert.AreEqual("next", corrected.EffectiveStepId);
     }
     finally
     {
       Directory.Delete(workspace, true);
+    }
+  }
+
+  [TestMethod]
+  public void OrdinaryHostResultUsesCompactTypedEnvelope()
+  {
+    var session = CreateSession("Inspect workspace");
+    session.CreatePlan(
+      new ExecutionPlanView(
+        "Inspect workspace",
+        [new ExecutionPlanStep("inspect", "Inspect", "pending")],
+        null,
+        0,
+        0
+      )
+    );
+    using var arguments = JsonDocument.Parse("{}");
+    var action = new ValidatedLocalAction(
+      "action-1",
+      "search_text",
+      arguments.RootElement.Clone(),
+      null,
+      null,
+      "search",
+      null,
+      true,
+      false,
+      PlanStepId: "inspect",
+      PlanBindingState: HostPlanBindingStates.Auto
+    );
+
+    var result = HostActionResultAdapter.FromLegacy(
+      "No matches.",
+      true,
+      "SEARCH_COMPLETED",
+      session,
+      action
+    );
+    var serialized = result.Serialize();
+    using var parsed = JsonDocument.Parse(serialized);
+
+    Assert.AreEqual(1, parsed.RootElement.GetProperty("schemaVersion").GetInt32());
+    Assert.AreEqual("succeeded", parsed.RootElement.GetProperty("outcome").GetString());
+    Assert.AreEqual("SEARCH_COMPLETED", parsed.RootElement.GetProperty("code").GetString());
+    Assert.AreEqual(
+      HostPlanBindingStates.Auto,
+      parsed.RootElement.GetProperty("plan").GetProperty("bindingCorrection").GetProperty("state").GetString()
+    );
+    Assert.IsFalse(parsed.RootElement.GetProperty("plan").TryGetProperty("full", out _));
+    Assert.IsFalse(serialized.Contains("HOST_OWNED_PLAN_STATE", StringComparison.Ordinal));
+  }
+
+  [TestMethod]
+  public void TimeoutAndApprovalOutcomeCodesRemainDistinct()
+  {
+    var codes = new[]
+    {
+      HostActionCodes.ApprovalPending,
+      HostActionCodes.ApprovalRejected,
+      HostActionCodes.ApprovalExpired,
+      HostActionCodes.ProcessTimeout,
+      HostActionCodes.HarnessStall,
+      HostActionCodes.TurnTimeout,
+      HostActionCodes.UserCancelled
+    };
+    Assert.HasCount(codes.Length, codes.Distinct(StringComparer.Ordinal));
+  }
+
+  [TestMethod]
+  public void CanonicalRegistryCoversSchemasAliasesAndEffectiveHarnessCapabilities()
+  {
+    var resolver = new ToolNameResolver();
+    Assert.HasCount(resolver.CanonicalTools.Count, resolver.Registrations);
+    Assert.HasCount(
+      resolver.CanonicalTools.Count,
+      resolver.Registrations.Select(item => item.CanonicalName).Distinct(StringComparer.OrdinalIgnoreCase)
+    );
+    var definitions = LocalActionPlanner.GetToolDefinitions(resolver.CanonicalTools);
+    var definitionNames = definitions.Select(item => item.Name)
+      .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    foreach (var canonical in resolver.CanonicalTools.Where(
+      tool => tool != LocalActionPlanner.RequestToolsetTool
+    ))
+    {
+      Assert.Contains(canonical, definitionNames);
+    }
+    Assert.IsEmpty(
+      resolver.Aliases.Where(alias => definitionNames.Contains(alias.Alias))
+    );
+    foreach (var alias in resolver.Aliases)
+    {
+      var resolution = resolver.Resolve(alias.Alias, resolver.CanonicalTools);
+      Assert.AreEqual(alias.CanonicalTool, resolution.CanonicalName);
+      Assert.AreEqual(ToolNameResolver.CuratedAliasSource, resolution.Source);
+    }
+
+    var profile = HostCapabilityProfile.Create(
+      ExecutionTurnToolPolicy.Resolve(
+        string.Empty,
+        validationProfileAvailable: true,
+        webSearchAvailable: true,
+        diagnosticTraceAvailable: true
+      ),
+      "auto"
+    );
+    var fullDefinitions = LocalActionPlanner.GetToolDefinitions(profile.ToolScope.AvailableTools);
+    var fullCharacters = SchemaCharacters(fullDefinitions);
+    foreach (var harness in new[]
+    {
+      HarnessIds.Native,
+      HarnessIds.Codex,
+      HarnessIds.OpenCode,
+      HarnessIds.QwenCode,
+      HarnessIds.ClaudeCode
+    })
+    {
+      CollectionAssert.AreEquivalent(
+        profile.ToolScope.AvailableTools.ToArray(),
+        HarnessCapabilityProjection.EffectiveCanonicalCapabilities(harness, profile).ToArray()
+      );
+      var projected = LocalActionPlanner.GetToolDefinitions(
+        HarnessCapabilityProjection.HostBridgeTools(harness, profile)
+      );
+      var projectedCharacters = SchemaCharacters(projected);
+      Assert.IsLessThanOrEqualTo(fullCharacters, projectedCharacters);
+      Console.WriteLine(
+        $"projection harness={harness} authoritative={fullDefinitions.Count} projected={projected.Count} fullChars={fullCharacters} projectedChars={projectedCharacters}"
+      );
+    }
+  }
+
+  [TestMethod]
+  public void UnknownToolHandlingSuggestsOnlyClosedUnambiguousCapabilities()
+  {
+    var resolver = new ToolNameResolver();
+    var unambiguous = Assert.ThrowsExactly<LocalActionException>(
+      () => resolver.Resolve("file-read", resolver.ExecutableTools)
+    );
+    Assert.AreEqual("read_file", unambiguous.ProposedCanonicalTool);
+    StringAssert.Contains(unambiguous.Message, "Use canonical tool 'read_file'");
+
+    var ambiguous = Assert.ThrowsExactly<LocalActionException>(
+      () => resolver.Resolve("file-mutation", resolver.ExecutableTools)
+    );
+    Assert.IsNull(ambiguous.ProposedCanonicalTool);
+    StringAssert.Contains(ambiguous.Message, "capability family 'file-mutation'");
+
+    var unknown = Assert.ThrowsExactly<LocalActionException>(
+      () => resolver.Resolve("read_flie", resolver.ExecutableTools)
+    );
+    Assert.IsNull(unknown.ProposedCanonicalTool);
+    Assert.IsFalse(unknown.Message.Contains("read_file", StringComparison.Ordinal));
+  }
+
+  private static int SchemaCharacters(IReadOnlyList<CanonicalToolDefinition> definitions)
+  {
+    return definitions.Sum(
+      definition => definition.Name.Length
+        + definition.Description.Length
+        + definition.Parameters.GetRawText().Length
+    );
+  }
+
+  [TestMethod]
+  public void ExactDeterministicRepeatRequiresUnchangedArgumentsAndRelevantState()
+  {
+    var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(workspace);
+    try
+    {
+      var session = CreateSession("Read missing file", workspace);
+      using var firstArguments = JsonDocument.Parse("{\"path\":\"missing.txt\",\"query\":\"needle\"}");
+      using var reorderedArguments = JsonDocument.Parse("{\"query\":\"needle\",\"path\":\"missing.txt\"}");
+      var failure = HostActionResultAdapter.FromLegacy(
+        "The file does not exist.",
+        false,
+        "ACTION_VALIDATION",
+        session,
+        retryUnchanged: false,
+        evidenceId: "call-1"
+      );
+      session.RecordDeterministicFailure(
+        "search_text",
+        firstArguments.RootElement,
+        failure.Code,
+        "call-1",
+        "Create the file or change the path.",
+        failure
+      );
+
+      Assert.IsTrue(
+        session.TryGetDeterministicRepeat(
+          "search_text",
+          reorderedArguments.RootElement,
+          out var repeat
+        )
+      );
+      Assert.AreEqual("call-1", repeat?.EvidenceId);
+
+      File.WriteAllText(Path.Combine(workspace, "missing.txt"), "needle");
+      Assert.IsFalse(
+        session.TryGetDeterministicRepeat(
+          "search_text",
+          reorderedArguments.RootElement,
+          out _
+        )
+      );
+    }
+    finally
+    {
+      Directory.Delete(workspace, true);
+    }
+  }
+
+  [TestMethod]
+  public async Task FileCreationAndReplacementConvergeOnlyAfterVerifiedPostconditions()
+  {
+    var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+      var session = CreateSession("Create and update item.txt", root);
+      var service = new LocalActionService(
+        new TestWorkspaceService(root),
+        null!,
+        null!,
+        null!,
+        null!,
+        null!,
+        new ToolNameResolver(),
+        null!
+      );
+      using var createArguments = JsonDocument.Parse(
+        "{\"path\":\"item.txt\",\"content\":\"alpha beta\"}"
+      );
+      var createProposal = new LocalActionProposal(
+        "create_file",
+        createArguments.RootElement.Clone(),
+        null
+      );
+      var firstCreate = await service.ExecuteAsync(
+        await service.ValidateAsync(createProposal, session, CancellationToken.None),
+        session,
+        CancellationToken.None
+      );
+      var secondCreate = await service.ExecuteAsync(
+        await service.ValidateAsync(createProposal, session, CancellationToken.None),
+        session,
+        CancellationToken.None
+      );
+      Assert.AreEqual(HostActionOutcomes.Succeeded, firstCreate.Outcome);
+      Assert.AreEqual(HostActionOutcomes.NoOp, secondCreate.Outcome);
+      Assert.AreEqual("already_present", secondCreate.Code);
+      Assert.IsFalse(secondCreate.Changed);
+      Assert.IsTrue(secondCreate.PostconditionSatisfied);
+
+      using var readArguments = JsonDocument.Parse("{\"path\":\"item.txt\"}");
+      var readProposal = new LocalActionProposal(
+        "read_file",
+        readArguments.RootElement.Clone(),
+        null
+      );
+      _ = await service.ExecuteAsync(
+        await service.ValidateAsync(readProposal, session, CancellationToken.None),
+        session,
+        CancellationToken.None
+      );
+      using var replaceArguments = JsonDocument.Parse(
+        "{\"path\":\"item.txt\",\"oldText\":\"beta\",\"newText\":\"gamma\",\"replaceAll\":false}"
+      );
+      var replaceProposal = new LocalActionProposal(
+        "replace_text",
+        replaceArguments.RootElement.Clone(),
+        null
+      );
+      var firstReplace = await service.ExecuteAsync(
+        await service.ValidateAsync(replaceProposal, session, CancellationToken.None),
+        session,
+        CancellationToken.None
+      );
+      var secondReplace = await service.ExecuteAsync(
+        await service.ValidateAsync(replaceProposal, session, CancellationToken.None),
+        session,
+        CancellationToken.None
+      );
+      Assert.AreEqual("replace_text_completed", firstReplace.Code);
+      Assert.AreEqual(HostActionOutcomes.NoOp, secondReplace.Outcome);
+      Assert.AreEqual("already_applied", secondReplace.Code);
+      Assert.AreEqual("alpha gamma", await File.ReadAllTextAsync(Path.Combine(root, "item.txt")));
+    }
+    finally
+    {
+      Directory.Delete(root, true);
     }
   }
 
@@ -487,10 +801,9 @@ public sealed class ExecutionEffectTests
     );
 
     var firstInspection = Action("inspect-1", "read_file");
-    StringAssert.Contains(
-      session.ValidatePlanStepBinding("delete"),
-      "waiting for completed dependencies"
-    );
+    var dependencyCorrection = session.ResolvePlanActionBinding("delete");
+    Assert.AreEqual(HostPlanBindingStates.Corrected, dependencyCorrection.State);
+    Assert.AreEqual("inspect", dependencyCorrection.EffectiveStepId);
     Assert.IsTrue(
       session.RecordPlanActionStarted(
         firstInspection.ActionId,
@@ -552,10 +865,9 @@ public sealed class ExecutionEffectTests
     {
       TargetPath = Path.Combine(workspace, "index.html")
     };
-    StringAssert.Contains(
-      session.ValidatePlanStepBinding("review"),
-      "waiting for completed dependencies"
-    );
+    var dependencyCorrection = session.ResolvePlanActionBinding("review");
+    Assert.AreEqual(HostPlanBindingStates.Corrected, dependencyCorrection.State);
+    Assert.AreEqual("create", dependencyCorrection.EffectiveStepId);
 
     var creation = Action("create", "create_file") with
     {
@@ -792,5 +1104,59 @@ public sealed class ExecutionEffectTests
       true,
       false
     );
+  }
+
+  private sealed class TestWorkspaceService(string root) : ITrustedWorkspaceService
+  {
+    private readonly string _root = Path.GetFullPath(root);
+
+    public Task<TrustedWorkspaceStatus> GetStatusAsync(CancellationToken cancellationToken) =>
+      Task.FromException<TrustedWorkspaceStatus>(new NotSupportedException());
+
+    public Task<TrustedWorkspaceStatus> ConfigureAsync(string path, CancellationToken cancellationToken) =>
+      Task.FromException<TrustedWorkspaceStatus>(new NotSupportedException());
+
+    public Task<TrustedWorkspaceStatus> ClearAsync(CancellationToken cancellationToken) =>
+      Task.FromException<TrustedWorkspaceStatus>(new NotSupportedException());
+
+    public Task<string> ResolvePathAsync(string? path, CancellationToken cancellationToken)
+    {
+      var resolved = Resolve(path);
+      if (!File.Exists(resolved) && !Directory.Exists(resolved))
+      {
+        throw new LocalActionException("workspace-path", "The requested path does not exist.");
+      }
+      return Task.FromResult(resolved);
+    }
+
+    public Task<TrustedWorkspacePathResolution> ResolveCreationPathAsync(
+      string? path,
+      CancellationToken cancellationToken
+    )
+    {
+      var resolved = Resolve(path);
+      return Task.FromResult(
+        new TrustedWorkspacePathResolution(
+          resolved,
+          Path.GetRelativePath(_root, resolved),
+          path,
+          false
+        )
+      );
+    }
+
+    private string Resolve(string? path)
+    {
+      var resolved = Path.GetFullPath(Path.Combine(_root, path ?? "."));
+      var prefix = Path.TrimEndingDirectorySeparator(_root) + Path.DirectorySeparatorChar;
+      if (
+        !string.Equals(resolved, _root, StringComparison.OrdinalIgnoreCase)
+        && !resolved.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+      )
+      {
+        throw new LocalActionException("workspace-boundary", "The path escapes the test workspace.");
+      }
+      return resolved;
+    }
   }
 }

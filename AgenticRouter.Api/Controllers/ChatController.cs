@@ -303,6 +303,10 @@ public sealed class ChatController : ControllerBase
             writtenEvent
           );
         }
+        else if (writtenEvent.Type == "action.awaiting-approval")
+        {
+          await PersistPresentationTimelineAsync(requestId);
+        }
       }
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

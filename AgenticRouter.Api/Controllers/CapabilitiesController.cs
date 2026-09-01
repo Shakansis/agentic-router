@@ -41,7 +41,8 @@ public sealed class CapabilitiesController : ControllerBase
         "ordinal-ignore-case",
         true,
         _toolNames.CanonicalTools,
-        _toolNames.Aliases
+        _toolNames.Aliases,
+        _toolNames.Registrations
       )
     );
   }

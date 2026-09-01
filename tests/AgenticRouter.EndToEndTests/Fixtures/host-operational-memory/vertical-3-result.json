@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "gate": "vertical-3",
+  "metrics": {
+    "approval_wait_charged_as_harness_active_time": 0,
+    "generic_timeout_codes_on_main_path": 0,
+    "lost_pending_approval_events": 0,
+    "context_usage_events_per_turn_maximum": 11,
+    "persisted_heartbeat_events_per_turn_maximum": 1,
+    "repetitive_telemetry_size_warnings": 0
+  },
+  "clocks": [
+    "harnessActiveTime",
+    "approvalWaitTime",
+    "processTime",
+    "hostOrchestrationTime"
+  ],
+  "codes": [
+    "APPROVAL_PENDING",
+    "APPROVAL_REJECTED",
+    "APPROVAL_EXPIRED",
+    "PROCESS_TIMEOUT",
+    "HARNESS_STALL",
+    "TURN_TIMEOUT",
+    "USER_CANCELLED"
+  ]
+}

@@ -843,7 +843,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
         updatedAt,
         diagnostic,
         ContentBlocks: contentBlocks,
-        Timeline: timeline,
+        Timeline: CoalesceTimeline(timeline),
         TurnId: turnId
       );
       var messages = session.Messages.ToList();
@@ -1116,7 +1116,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
       messages[targetIndex] = messages[targetIndex] with
       {
-        Timeline = timeline.ToArray()
+        Timeline = CoalesceTimeline(timeline)
       };
       var limits = (
         await _settings.GetAsync(
@@ -1137,6 +1137,67 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       _gate.Release();
     }
+  }
+
+  private static IReadOnlyList<ChatStreamEvent>? CoalesceTimeline(
+    IReadOnlyList<ChatStreamEvent>? timeline
+  )
+  {
+    if (timeline is null || timeline.Count == 0)
+    {
+      return timeline;
+    }
+    var result = new List<ChatStreamEvent>(timeline.Count);
+    var replaceableIndexes = new Dictionary<string, int>(StringComparer.Ordinal);
+    var lastContextBucket = -1;
+    var warningCrossed = false;
+    foreach (var item in timeline)
+    {
+      if (item.Type == "context.usage" && item.ContextUsage is { } usage)
+      {
+        var limit = usage.EffectiveLimitTokens > 0
+          ? usage.EffectiveLimitTokens
+          : usage.ApplicationLimit;
+        var percent = limit <= 0
+          ? 0
+          : (int)Math.Clamp(usage.InputTokens * 100 / limit, 0, 100);
+        var bucket = percent / 10;
+        var crossed = percent >= usage.WarningThreshold;
+        if (bucket != lastContextBucket || crossed != warningCrossed)
+        {
+          result.Add(item);
+          replaceableIndexes[item.Type] = result.Count - 1;
+          lastContextBucket = bucket;
+          warningCrossed = crossed;
+        }
+        else if (replaceableIndexes.TryGetValue(item.Type, out var contextIndex))
+        {
+          result[contextIndex] = item;
+        }
+        continue;
+      }
+
+      if (item.Type is "request.heartbeat" or "usage.updated" or "harness.progress")
+      {
+        if (replaceableIndexes.TryGetValue(item.Type, out var index))
+        {
+          result.RemoveAt(index);
+          foreach (var key in replaceableIndexes.Keys.ToArray())
+          {
+            if (replaceableIndexes[key] > index)
+            {
+              replaceableIndexes[key]--;
+            }
+          }
+        }
+        result.Add(item);
+        replaceableIndexes[item.Type] = result.Count - 1;
+        continue;
+      }
+
+      result.Add(item);
+    }
+    return result.ToArray();
   }
 
   public async Task<ConversationSessionRecord> ResumeAsync(

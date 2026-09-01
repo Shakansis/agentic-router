@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "gate": "vertical-4-baseline",
+  "authoritativePermittedTools": 29,
+  "unprojectedSchemaCharacters": 14154,
+  "perHarness": {
+    "native": { "exposedTools": 29, "schemaCharacters": 14154, "projectedPayloadCharacters": 14154, "toolsActuallyUsed": ["create_file", "replace_text", "run_process", "git_log"] },
+    "codex": { "exposedTools": 28, "schemaCharacters": 13544, "projectedPayloadCharacters": 13544, "toolsActuallyUsed": ["web_search"] },
+    "opencode": { "exposedTools": 25, "schemaCharacters": 12230, "projectedPayloadCharacters": 12230, "toolsActuallyUsed": ["create_directory", "create_files", "get_file_info", "run_process", "git_status", "delete_paths", "web_search"] },
+    "qwen-code": { "exposedTools": 29, "schemaCharacters": 14154, "projectedPayloadCharacters": 14154, "toolsActuallyUsed": ["create_directory", "create_files", "get_file_info", "run_process", "git_status", "delete_paths", "web_search"] },
+    "claude-code": { "exposedTools": 26, "schemaCharacters": 12527, "projectedPayloadCharacters": 12527, "toolsActuallyUsed": ["web_search"] }
+  },
+  "aliasesExposedAsSchemas": 0,
+  "invalidToolReplayNames": ["open_file", "file-mutation", "read_flie"]
+}

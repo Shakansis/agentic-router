@@ -83,6 +83,7 @@ public sealed record IncidentTraceReport(
   bool ReviewAvailable,
   bool Truncated,
   int TotalEvents,
+  int ReturnedEvents,
   IReadOnlyList<IncidentEvent> Events,
   string Recommendation,
   int MalformedRecordCount = 0

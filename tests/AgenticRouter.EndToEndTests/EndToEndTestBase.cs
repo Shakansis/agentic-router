@@ -477,7 +477,12 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     CollectionAssert.AreEqual(
       new[]
       {
-        LocalActionPlanner.RequestToolsetTool
+        LocalActionPlanner.RequestToolsetTool,
+        "get_execution_plan",
+        "list_files",
+        "read_file",
+        "get_file_info",
+        "search_text"
       },
       firstRequest.AvailableTools.ToArray()
     );
@@ -611,6 +616,8 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       ["revise-execution-plan"] = "revise_execution_plan",
       ["reviseexecutionplan"] = "revise_execution_plan",
       ["update_execution_plan"] = "revise_execution_plan",
+      ["get-execution-plan"] = "get_execution_plan",
+      ["getexecutionplan"] = "get_execution_plan",
       ["list-files"] = "list_files",
       ["listfiles"] = "list_files",
       ["list_directory"] = "list_files",
@@ -657,6 +664,10 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       ["remove-files"] = "delete_paths",
       ["remove_paths"] = "delete_paths",
       ["remove-paths"] = "delete_paths",
+      ["rename-path"] = "rename_path",
+      ["renamepath"] = "rename_path",
+      ["move_file"] = "rename_path",
+      ["move-file"] = "rename_path",
       ["create-directory"] = "create_directory",
       ["createdirectory"] = "create_directory",
       ["run-process"] = "run_process",
@@ -701,6 +712,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       "request_toolset",
       "create_execution_plan",
       "revise_execution_plan",
+      "get_execution_plan",
       "list_files",
       "read_file",
       "get_file_info",
@@ -713,6 +725,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       "replace_text",
       "apply_patch",
       "delete_paths",
+      "rename_path",
       "create_directory",
       "run_process",
       "run_validation_profile",
