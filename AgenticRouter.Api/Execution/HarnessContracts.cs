@@ -139,7 +139,9 @@ public sealed record HarnessTurnRequest(
   bool ReleaseWorkspaceOnCancellation = false,
   IReadOnlyList<HarnessImageInput>? Images = null,
   bool IsRecoveryContinuation = false,
-  IReadOnlyList<string>? ManagedContext = null
+  IReadOnlyList<string>? ManagedContext = null,
+  string RequestedEffort = Providers.ModelEffortLevels.Medium,
+  bool ModelSupportsReasoning = false
 );
 
 public sealed record HarnessEvent

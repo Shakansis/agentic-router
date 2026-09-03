@@ -1,5 +1,24 @@
 namespace AgenticRouter.Api.Providers;
 
+public static class ModelEffortLevels
+{
+  public const string Low = "low";
+  public const string Medium = "medium";
+  public const string High = "high";
+
+  public static readonly IReadOnlyList<string> All =
+  [
+    Low,
+    Medium,
+    High
+  ];
+
+  public static bool IsValid(string? value)
+  {
+    return value is Low or Medium or High;
+  }
+}
+
 public static class ModelProviderIds
 {
   public const string OllamaLocal = "ollama-local";
@@ -106,7 +125,8 @@ public sealed record ProviderImagePayload(
 
 public sealed record ProviderChatOptions(
   bool WebSearchEnabled,
-  IReadOnlyList<ProviderImagePayload> Images
+  IReadOnlyList<ProviderImagePayload> Images,
+  string? RequestedEffort = null
 )
 {
   public static ProviderChatOptions Empty { get; } = new(

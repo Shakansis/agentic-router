@@ -11,7 +11,13 @@ public static class IncidentEventFactory
 
   public static IncidentEvent? FromChatEvent(ITraceContext trace, ChatStreamEvent source)
   {
-    if (IgnoredTypes.Contains(source.Type))
+    if (
+      IgnoredTypes.Contains(source.Type)
+      || (
+        source.Type == "context.usage"
+        && string.IsNullOrWhiteSpace(source.Message)
+      )
+    )
     {
       return null;
     }
@@ -61,6 +67,14 @@ public static class IncidentEventFactory
       OriginalTool = source.LocalAction?.OriginalTool,
       ActionId = source.LocalAction?.ActionId,
       RetryCount = ParseInt(Detail(details, "retryCount")),
+      RequestElapsedMilliseconds = source.ElapsedMilliseconds is { } elapsed
+        ? Math.Max(0, elapsed)
+        : null,
+      SupervisionRunId = SafeIdentifier(source.SupervisionProgress?.RunId)
+        ?? SafeIdentifier(links.GetValueOrDefault("supervisionRunId")),
+      Role = SafeIdentifier(source.SupervisionProgress?.Role),
+      ContextId = SafeIdentifier(source.SupervisionProgress?.ContextId),
+      WorkItemId = SafeIdentifier(source.SupervisionProgress?.WorkItemId),
       Completed = source.Type == "response.completed",
       ReviewAvailable = source.ExecutionSession?.ReviewAvailable,
       ContextFit = contextFit

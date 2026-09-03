@@ -17,6 +17,12 @@ Use these sources for the current checkout, in this order:
    [`harness-capability-matrix.md`](harness-capability-matrix.md), platform support,
    security, backup, and distribution documents.
 
+Current focused implementation records include
+[`PLAN-v59-durable-supervised-execute.md`](PLAN-v59-durable-supervised-execute.md)
+for the local durable Supervisor/Autonomous contract and
+[`PLAN-v62-phase-effort-profile.md`](PLAN-v62-phase-effort-profile.md) for the
+Host-owned effort mapping used by each supervised phase.
+
 When a historical document conflicts with those sources or current tests/code,
 it is historical unless the user explicitly approves it as the active feature
 specification.

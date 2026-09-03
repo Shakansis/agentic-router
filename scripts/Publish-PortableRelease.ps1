@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$VersionLabel = '0.10.0_alpha',
+  [string]$VersionLabel = '0.11.0_alpha',
   [ValidateSet('win-x64', 'linux-x64')]
   [string]$RuntimeIdentifier = 'win-x64',
   [string]$OutputDirectory,
@@ -102,7 +102,7 @@ function New-PosixTarGzip {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.10.0_alpha.'
+  throw 'VersionLabel must use the form 0.11.0_alpha.'
 }
 
 $packageVersion = $VersionLabel.Replace('_', '-')

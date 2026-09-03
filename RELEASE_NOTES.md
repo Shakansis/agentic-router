@@ -1,3 +1,79 @@
+# Agentic Router v0.11.0 alpha
+
+This alpha makes the Execute path explicit at send time and completes the
+durable local supervision workflow. A request can stay in one direct context,
+use a supervisor-managed serial queue, let Auto choose between those paths, or
+explicitly delegate user-approvable decisions to Autonomous while the Host
+continues to enforce every hard boundary.
+
+## Execute strategy and Autonomous mode
+
+- Adds a compact split Send button in Execute with Auto (`A`), Direct (`D`),
+  Supervisor (`S`), and Autonomous (`∞`) strategies selected per request.
+- Keeps Auto as the default. An accepted structured plan stays Direct at or
+  below the configured limit and moves to durable supervision above it.
+- Keeps explicit Direct available for one focused model + harness context and
+  retains `/direct` and `/supervisor` as input aliases.
+- Makes Autonomous an explicit supervised-run authority instead of a global
+  approval policy. It can approve every action the user could approve for that
+  run, but it cannot bypass trusted-workspace, process, Git, provider,
+  capability, validation, or recovery constraints.
+- Adds bounded Autonomous inactivity recovery: the Host interrupts only the
+  inactive model turn and retries once with a materially different supervisor
+  continuation when no governed action is unresolved.
+
+## Durable supervision and recovery
+
+- Runs supervisor and worker contexts serially on one fixed local model,
+  digest, Ollama endpoint, harness/version, workspace, and approval contract;
+  cloud fallback, concurrent workers, and recursive delegation remain absent.
+- Persists integrity-checked checkpoints, current queue state, logical context
+  summaries, recovery budgets, and a sanitized write-ahead action ledger when
+  local history is enabled.
+- Reattaches a resumed browser session to the same Host-owned run and applies
+  `manual` or proven-boundary `auto-safe` restart reconciliation without
+  blindly replaying ambiguous actions.
+- Requires supervisor acceptance to cite current Host-observed evidence and
+  sends a focused correction when an artifact or validation criterion does not
+  match the worker claim.
+- Recovers eligible direct failures through Supervisor only after preserving
+  already verified effects and records the strategy change visibly.
+
+## Host-owned effort by phase
+
+- Adds validated `low`, `medium`, or `high` settings for Plan, Work, Verify,
+  Complete, and Recovery under Settings > General and portable YAML.
+- Defaults to high/medium/medium/low/high respectively: invest most in initial
+  decomposition and failure diagnosis, balance repeated work and evidence-based
+  review, and keep final synthesis concise after Host acceptance.
+- Maps the Host target to reviewed native controls for Ollama, Codex, OpenCode,
+  and Qwen Code. Claude Code through Ollama uses visible prompt guidance because
+  that compatibility path exposes no reviewed effort field.
+- Keeps effort separate from Benchmark scoring weights and from every security,
+  approval, tool, route, validation, and recovery decision.
+
+## Execution evidence and diagnostics
+
+- Uses compact typed Host result envelopes and exact canonical tool identities
+  while retaining only closed, unambiguous aliases.
+- Separates approval-wait time from active harness time, persists the original
+  pending action, and revalidates current workspace state before execution.
+- Preserves verified partial effects across materially different recovery
+  attempts and suppresses unchanged deterministic retries.
+- Adds bounded trace indexing/reconstruction that preserves completed, failed,
+  timeout, approval, and recovery terminal truth across restart.
+
+## Validation
+
+- Passes the complete deterministic Playwright/API suite: 409 passed, zero
+  failed, and zero skipped.
+- Passes an isolated Release solution build with zero warnings and zero errors,
+  `dotnet format`, JavaScript and PowerShell parsing, Markdown asset checks,
+  browser console review, and intended-diff whitespace validation.
+- Keeps deterministic fake-provider evidence separate from real Ollama, GPU,
+  cloud-provider, and physical-Linux acceptance; this release gate did not start
+  any of those workloads.
+
 # Agentic Router v0.10.0 alpha
 
 This alpha adds optional project-scoped knowledge retrieval through AnythingLLM

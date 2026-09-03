@@ -92,6 +92,67 @@ public sealed class TraceAndClaudeRegressionEndToEndTests
     ));
   }
 
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task IncidentJournalRebuildsItsTraceIndexOnceAfterRestart()
+  {
+    var firstTrace = await SendJournalProbeAsync("before-restart");
+    using var firstReportDocument = await GetTraceAsync(firstTrace);
+    var firstTotal = firstReportDocument.RootElement.GetProperty("totalEvents").GetInt32();
+
+    await _environment.RestartApplicationAsync();
+
+    var secondTrace = await SendJournalProbeAsync("after-restart-one");
+    using var secondReportDocument = await GetTraceAsync(secondTrace);
+    var secondReport = secondReportDocument.RootElement;
+    var secondMetrics = secondReport.GetProperty("journalMetrics");
+    Assert.AreEqual(1, secondMetrics.GetProperty("traceIndexRebuilds").GetInt64());
+    Assert.IsGreaterThanOrEqualTo(
+      firstTotal,
+      secondMetrics.GetProperty("traceIndexRecordsScanned").GetInt64()
+    );
+    Assert.IsTrue(secondReport.GetProperty("events").EnumerateArray().Any(item =>
+      item.GetProperty("status").GetString() == "completed"
+      && item.GetProperty("requestElapsedMilliseconds").ValueKind == JsonValueKind.Number
+    ));
+
+    var indexedRecords = secondMetrics.GetProperty("traceIndexRecordsScanned").GetInt64();
+    var rebuilds = secondMetrics.GetProperty("traceIndexRebuilds").GetInt64();
+    var appendAttempts = secondMetrics.GetProperty("appendAttempts").GetInt64();
+    var thirdTrace = await SendJournalProbeAsync("after-restart-two");
+    using var thirdReportDocument = await GetTraceAsync(thirdTrace);
+    var thirdMetrics = thirdReportDocument.RootElement.GetProperty("journalMetrics");
+    Assert.AreEqual(rebuilds, thirdMetrics.GetProperty("traceIndexRebuilds").GetInt64());
+    Assert.AreEqual(indexedRecords, thirdMetrics.GetProperty("traceIndexRecordsScanned").GetInt64());
+    Assert.IsGreaterThan(
+      appendAttempts,
+      thirdMetrics.GetProperty("appendAttempts").GetInt64()
+    );
+
+    using var retainedFirst = await GetTraceAsync(firstTrace);
+    Assert.AreEqual(firstTrace, retainedFirst.RootElement.GetProperty("traceId").GetString());
+  }
+
+  private static async Task<string> SendJournalProbeAsync(string marker)
+  {
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = $"Incident journal index probe {marker}.",
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        interactionMode = "chat",
+        approvalPolicy = "ask",
+        browserSessionId = $"browser-journal-index-{marker}-{Guid.NewGuid():N}"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    return events.Last(item => item["type"]!.GetValue<string>() == "response.completed")
+      ["diagnostic"]!["traceId"]!.GetValue<string>();
+  }
+
   private static async Task<JsonDocument> GetTraceAsync(string traceId)
   {
     using var response = await _environment.HttpClient.GetAsync(

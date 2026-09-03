@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Supervision;
@@ -467,6 +468,28 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
         }
         checkpoint = Migrate(legacy);
       }
+      else if (schemaVersion == 2)
+      {
+        var legacy = JsonSerializer.Deserialize<DurableSupervisionCheckpointV2>(json, JsonOptions)
+          ?? throw InvalidCheckpoint("The supervision checkpoint is empty.");
+        var legacyExpected = ComputeLegacyIntegrity(legacy with { IntegritySha256 = string.Empty });
+        if (!string.Equals(legacyExpected, legacy.IntegritySha256, StringComparison.Ordinal))
+        {
+          throw InvalidCheckpoint("The supervision checkpoint integrity hash is invalid.");
+        }
+        checkpoint = Migrate(legacy);
+      }
+      else if (schemaVersion == 3)
+      {
+        var legacy = JsonSerializer.Deserialize<DurableSupervisionCheckpointV3>(json, JsonOptions)
+          ?? throw InvalidCheckpoint("The supervision checkpoint is empty.");
+        var legacyExpected = ComputeLegacyIntegrity(legacy with { IntegritySha256 = string.Empty });
+        if (!string.Equals(legacyExpected, legacy.IntegritySha256, StringComparison.Ordinal))
+        {
+          throw InvalidCheckpoint("The supervision checkpoint integrity hash is invalid.");
+        }
+        checkpoint = Migrate(legacy);
+      }
       else
       {
         checkpoint = JsonSerializer.Deserialize<DurableSupervisionCheckpoint>(json, JsonOptions)
@@ -565,8 +588,16 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
         StringComparison.Ordinal
       )
       || checkpoint.ApprovalPolicy is not "auto" and not "ask"
+      || checkpoint.ExecutionStrategy is not SupervisionExecutionStrategies.Auto
+        and not SupervisionExecutionStrategies.Autonomous
+        and not SupervisionExecutionStrategies.Supervised
       || checkpoint.ResumePolicy is not SupervisionResumePolicies.Manual
         and not SupervisionResumePolicies.AutoSafe
+      || (
+        checkpoint.ExecutionStrategy == SupervisionExecutionStrategies.Autonomous
+        && checkpoint.Durable
+        && checkpoint.ResumePolicy != SupervisionResumePolicies.AutoSafe
+      )
       || (
         checkpoint.ResumePolicy == SupervisionResumePolicies.AutoSafe
         && !checkpoint.Durable
@@ -581,6 +612,7 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
       )
       || checkpoint.WaitCode?.Length > 128
       || (checkpoint.Runtime is null) != (checkpoint.Recovery is null)
+      || !IsValidTakeover(checkpoint.Takeover)
     )
     {
       throw InvalidCheckpoint(
@@ -763,6 +795,20 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
     );
   }
 
+  private static string ComputeLegacyIntegrity(DurableSupervisionCheckpointV2 checkpoint)
+  {
+    return SupervisionRequestPolicy.Hash(
+      JsonSerializer.Serialize(checkpoint, IntegrityOptions)
+    );
+  }
+
+  private static string ComputeLegacyIntegrity(DurableSupervisionCheckpointV3 checkpoint)
+  {
+    return SupervisionRequestPolicy.Hash(
+      JsonSerializer.Serialize(checkpoint, IntegrityOptions)
+    );
+  }
+
   private static DurableSupervisionCheckpoint Migrate(
     DurableSupervisionCheckpointV1 checkpoint
   )
@@ -795,6 +841,97 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
     return migrated with { IntegritySha256 = ComputeIntegrity(migrated) };
   }
 
+  private static DurableSupervisionCheckpoint Migrate(
+    DurableSupervisionCheckpointV2 checkpoint
+  )
+  {
+    var migrated = new DurableSupervisionCheckpoint(
+      DurableSupervisionCheckpoint.CurrentSchemaVersion,
+      checkpoint.RunId,
+      checkpoint.WorkspaceId,
+      checkpoint.ConversationSessionId,
+      checkpoint.BrowserSessionId,
+      checkpoint.Objective,
+      checkpoint.ObjectiveSha256,
+      checkpoint.Route,
+      checkpoint.ApprovalPolicy,
+      checkpoint.ResumePolicy,
+      checkpoint.State,
+      checkpoint.Phase,
+      checkpoint.Revision,
+      checkpoint.Durable,
+      checkpoint.AutoResumeEligible,
+      checkpoint.WaitReason,
+      checkpoint.Events,
+      checkpoint.CreatedAt,
+      checkpoint.UpdatedAt,
+      string.Empty,
+      checkpoint.Runtime,
+      checkpoint.Recovery,
+      checkpoint.WaitCode
+    );
+    return migrated with { IntegritySha256 = ComputeIntegrity(migrated) };
+  }
+
+  private static DurableSupervisionCheckpoint Migrate(
+    DurableSupervisionCheckpointV3 checkpoint
+  )
+  {
+    var migrated = new DurableSupervisionCheckpoint(
+      DurableSupervisionCheckpoint.CurrentSchemaVersion,
+      checkpoint.RunId,
+      checkpoint.WorkspaceId,
+      checkpoint.ConversationSessionId,
+      checkpoint.BrowserSessionId,
+      checkpoint.Objective,
+      checkpoint.ObjectiveSha256,
+      checkpoint.Route,
+      checkpoint.ApprovalPolicy,
+      checkpoint.ResumePolicy,
+      checkpoint.State,
+      checkpoint.Phase,
+      checkpoint.Revision,
+      checkpoint.Durable,
+      checkpoint.AutoResumeEligible,
+      checkpoint.WaitReason,
+      checkpoint.Events,
+      checkpoint.CreatedAt,
+      checkpoint.UpdatedAt,
+      string.Empty,
+      checkpoint.Runtime,
+      checkpoint.Recovery,
+      checkpoint.WaitCode,
+      checkpoint.Takeover
+    );
+    return migrated with { IntegritySha256 = ComputeIntegrity(migrated) };
+  }
+
+  private static bool IsValidTakeover(SupervisionTakeoverSnapshot? takeover)
+  {
+    return takeover is null
+      || (
+        takeover.Trigger is { Length: > 0 and <= 128 }
+        && takeover.DirectExecutionSessionId is { Length: > 0 and <= 64 }
+        && takeover.DetectedPlanSteps is >= 0 and <= ProjectAwarenessSettings.MaximumPlanSteps
+        && takeover.MaximumDirectPlanSteps is >= 1 and <= ProjectAwarenessSettings.MaximumPlanSteps
+        && (
+          takeover.Plan is null
+            ? takeover.DetectedPlanSteps == 0
+            : takeover.Plan.Steps.Count == takeover.DetectedPlanSteps
+        )
+        && takeover.Files is { Count: <= 64 }
+        && takeover.Files.All(file =>
+          file.RelativePath is { Length: > 0 and <= 1_024 }
+          && !IsUnsafeRelativePath(file.RelativePath)
+          && file.Operation is { Length: > 0 and <= 64 }
+          && file.FinalHash is { Length: > 0 and <= 128 }
+          && file.Verified
+        )
+        && takeover.DirectCompletionStatus is { Length: <= 128 }
+        && takeover.ValidationStatus?.Length <= 128
+      );
+  }
+
   private sealed record DurableSupervisionCheckpointV1(
     int SchemaVersion,
     string RunId,
@@ -816,6 +953,59 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     string IntegritySha256
+  );
+
+  private sealed record DurableSupervisionCheckpointV2(
+    int SchemaVersion,
+    string RunId,
+    string WorkspaceId,
+    string ConversationSessionId,
+    string BrowserSessionId,
+    string Objective,
+    string ObjectiveSha256,
+    SupervisionRouteSnapshot Route,
+    string ApprovalPolicy,
+    string ResumePolicy,
+    string State,
+    string Phase,
+    long Revision,
+    bool Durable,
+    bool AutoResumeEligible,
+    string? WaitReason,
+    IReadOnlyList<SupervisionRunEvent> Events,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    string IntegritySha256,
+    SupervisionRuntimeView? Runtime = null,
+    SupervisionRecoverySnapshot? Recovery = null,
+    string? WaitCode = null
+  );
+
+  private sealed record DurableSupervisionCheckpointV3(
+    int SchemaVersion,
+    string RunId,
+    string WorkspaceId,
+    string ConversationSessionId,
+    string BrowserSessionId,
+    string Objective,
+    string ObjectiveSha256,
+    SupervisionRouteSnapshot Route,
+    string ApprovalPolicy,
+    string ResumePolicy,
+    string State,
+    string Phase,
+    long Revision,
+    bool Durable,
+    bool AutoResumeEligible,
+    string? WaitReason,
+    IReadOnlyList<SupervisionRunEvent> Events,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    string IntegritySha256,
+    SupervisionRuntimeView? Runtime = null,
+    SupervisionRecoverySnapshot? Recovery = null,
+    string? WaitCode = null,
+    SupervisionTakeoverSnapshot? Takeover = null
   );
 
   private static IEnumerable<string> EnumerateCheckpointPaths(string root)

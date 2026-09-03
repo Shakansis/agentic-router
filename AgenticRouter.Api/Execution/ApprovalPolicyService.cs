@@ -29,6 +29,15 @@ public sealed class ApprovalPolicyService : IApprovalPolicyService
       return true;
     }
 
+    if (string.Equals(
+      policy,
+      "autonomous",
+      StringComparison.Ordinal
+    ))
+    {
+      return false;
+    }
+
     if (!string.Equals(
       policy,
       "auto",
@@ -37,7 +46,7 @@ public sealed class ApprovalPolicyService : IApprovalPolicyService
     {
       throw new LocalActionException(
         "approval-policy",
-        "Approval policy must be ask or auto."
+        "Approval policy must be ask, auto, or autonomous."
       );
     }
 

@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AgenticRouter.Api.Platform;
+using AgenticRouter.Api.Providers;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -206,6 +207,16 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         turnId,
         message: $"OpenCode session {sessionId} started."
       );
+      yield return Event(
+        request.ModelSupportsReasoning
+          ? "effort.applied"
+          : "effort.prompt-guided",
+        sessionId,
+        turnId,
+        message: request.ModelSupportsReasoning
+          ? $"Applied {request.RequestedEffort} effort through OpenCode model variant '{request.RequestedEffort}'."
+          : $"The selected model does not advertise reasoning support; {request.RequestedEffort} effort is prompt-guided for this OpenCode turn."
+      );
 
       using var eventsRequest = CreateRequest(
         HttpMethod.Get,
@@ -224,6 +235,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         new
         {
           model = new { providerID = ProviderId, modelID = request.Model },
+          variant = request.ModelSupportsReasoning
+            ? request.RequestedEffort
+            : null,
           agent = "build",
           tools = new Dictionary<string, bool>(StringComparer.Ordinal)
           {
@@ -436,6 +450,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                       "tool.started",
                       sessionId,
                       turnId,
+                      message: ToolActivityMessage(toolState, tool, status),
                       tool: tool,
                       state: status,
                       itemId: callId,
@@ -447,6 +462,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                       "tool.completed",
                       sessionId,
                       turnId,
+                      message: ToolActivityMessage(toolState, tool, status),
                       tool: tool,
                       state: status,
                       output: String(toolState, "output"),
@@ -459,6 +475,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                       "tool.failed",
                       sessionId,
                       turnId,
+                      message: ToolActivityMessage(toolState, tool, status),
                       tool: tool,
                       state: "failed",
                       output: String(toolState, "error"),
@@ -1032,7 +1049,24 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           npm = "@ai-sdk/openai-compatible",
           name = "Agentic Router Ollama",
           options = new { baseURL = $"{endpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1" },
-          models = new Dictionary<string, object> { [model] = new { name = model } }
+          models = new Dictionary<string, object>
+          {
+            [model] = new
+            {
+              name = model,
+              variants = ModelEffortLevels.All.ToDictionary(
+                effort => effort,
+                effort => (object)new
+                {
+                  body = new Dictionary<string, string>
+                  {
+                    ["reasoning_effort"] = effort
+                  }
+                },
+                StringComparer.Ordinal
+              )
+            }
+          }
         }
       },
       ["mcp"] = new Dictionary<string, object>
@@ -1306,6 +1340,42 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       && value.ValueKind == JsonValueKind.String
         ? value.GetString()
         : null;
+  }
+
+  private static string ToolActivityMessage(
+    JsonElement state,
+    string? tool,
+    string status
+  )
+  {
+    var title = String(state, "title");
+    if (!string.IsNullOrWhiteSpace(title))
+    {
+      return title;
+    }
+    var toolName = string.IsNullOrWhiteSpace(tool) ? "OpenCode tool" : tool;
+    if (
+      state.TryGetProperty("input", out var input)
+      && input.ValueKind == JsonValueKind.Object
+    )
+    {
+      foreach (var property in new[] { "path", "filePath", "file", "relativePath", "target" })
+      {
+        var target = String(input, property);
+        if (!string.IsNullOrWhiteSpace(target))
+        {
+          return $"{toolName}: {target}";
+        }
+      }
+    }
+    var activity = status switch
+    {
+      "running" => "started",
+      "completed" => "completed",
+      "error" => "failed",
+      _ => status
+    };
+    return $"{toolName} {activity}.";
   }
 
   private static long Number(JsonElement element, string name)

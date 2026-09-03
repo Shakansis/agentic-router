@@ -1317,6 +1317,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       exported,
       "retention_days: 90"
     );
+    StringAssert.Contains(exported, "plan_effort: \"high\"");
+    StringAssert.Contains(exported, "complete_effort: \"low\"");
     Assert.IsFalse(
       exported.Contains(
         "usage_history",
@@ -1354,6 +1356,12 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           fallback: docs:latest
       runtime:
         generation_timeout_seconds: 222
+      execution:
+        plan_effort: low
+        work_effort: high
+        verify_effort: low
+        complete_effort: high
+        recovery_effort: medium
       ollama_runtime:
         memory:
           devices:
@@ -1409,6 +1417,12 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         )
         .GetInt32()
     );
+    var importedEffort = imported.GetProperty("execution").GetProperty("phaseEffort");
+    Assert.AreEqual("low", importedEffort.GetProperty("plan").GetString());
+    Assert.AreEqual("high", importedEffort.GetProperty("work").GetString());
+    Assert.AreEqual("low", importedEffort.GetProperty("verify").GetString());
+    Assert.AreEqual("high", importedEffort.GetProperty("complete").GetString());
+    Assert.AreEqual("medium", importedEffort.GetProperty("recovery").GetString());
     var importedGpuPolicy = imported.GetProperty(
         "ollamaRuntime"
       )
@@ -1964,6 +1978,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await SetExecuteModeAsync(
       "auto"
     );
+    await Page.Locator("#send-strategy-toggle").ClickAsync();
+    await Page.Locator(
+      "#send-strategy-menu [data-send-strategy=\"direct\"]"
+    ).ClickAsync();
     await StartMessageAsync(
       "chronological thinking stream create two files"
     );

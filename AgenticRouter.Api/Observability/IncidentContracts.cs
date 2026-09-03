@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace AgenticRouter.Api.Observability;
 
 public sealed record IncidentContextFit(
@@ -56,6 +58,21 @@ public sealed record IncidentEvent
 
   public int? RetryCount { get; init; }
 
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public long? RequestElapsedMilliseconds { get; init; }
+
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public string? SupervisionRunId { get; init; }
+
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public string? Role { get; init; }
+
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public string? ContextId { get; init; }
+
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public string? WorkItemId { get; init; }
+
   public bool? Completed { get; init; }
 
   public bool? ReviewAvailable { get; init; }
@@ -67,6 +84,28 @@ public sealed record IncidentAppendResult(
   bool Persisted,
   string? EventId = null,
   string? FailureCode = null
+);
+
+public sealed record IncidentJournalMetrics(
+  DateTimeOffset ObservedAt,
+  long AppendAttempts,
+  long PersistedEvents,
+  long RejectedEvents,
+  long QueueWaitMilliseconds,
+  long WriteMilliseconds,
+  long TraceIndexRebuilds,
+  long TraceIndexFilesScanned,
+  long TraceIndexRecordsScanned,
+  long TraceIndexMilliseconds,
+  long LookupCount,
+  long LookupFilesScanned,
+  long LookupRecordsScanned,
+  long LookupMilliseconds,
+  long RetentionEvaluations,
+  long RetentionFilesDeleted,
+  long RetentionMilliseconds,
+  int IndexedTraceCount,
+  long RetainedBytes
 );
 
 public sealed record IncidentTraceReport(
@@ -86,7 +125,8 @@ public sealed record IncidentTraceReport(
   int ReturnedEvents,
   IReadOnlyList<IncidentEvent> Events,
   string Recommendation,
-  int MalformedRecordCount = 0
+  int MalformedRecordCount = 0,
+  IncidentJournalMetrics? JournalMetrics = null
 );
 
 public interface IIncidentJournal

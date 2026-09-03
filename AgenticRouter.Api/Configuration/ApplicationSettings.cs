@@ -572,6 +572,10 @@ public static class OllamaRuntimeDefaults
 
 public sealed record ExecutionSettings
 {
+  public int MaxDirectPlanSteps { get; init; } = 5;
+
+  public PhaseEffortSettings PhaseEffort { get; init; } = new();
+
   public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 5;
 
   public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
@@ -595,6 +599,19 @@ public sealed record ExecutionSettings
   public int MaxSearchMatches { get; init; } = 200;
 
   public int MaxToolOutputTokens { get; init; } = 2_048;
+}
+
+public sealed record PhaseEffortSettings
+{
+  public string Plan { get; init; } = Providers.ModelEffortLevels.High;
+
+  public string Work { get; init; } = Providers.ModelEffortLevels.Medium;
+
+  public string Verify { get; init; } = Providers.ModelEffortLevels.Medium;
+
+  public string Complete { get; init; } = Providers.ModelEffortLevels.Low;
+
+  public string Recovery { get; init; } = Providers.ModelEffortLevels.High;
 }
 
 public sealed record ProjectAwarenessSettings

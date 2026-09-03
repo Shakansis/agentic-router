@@ -130,11 +130,12 @@ public sealed record ChatRequest(
   IReadOnlyList<ChatImageAttachment>? Images = null,
   bool CompactContext = false,
   bool AutoModelHarness = false,
-  string ExecutionStrategy = "direct",
+  string ExecutionStrategy = "auto",
   string SupervisionResumePolicy = "manual",
   string? DiagnosticTraceId = null,
   bool HideUserMessage = false,
-  int? ReplaceFromMessageIndex = null
+  int? ReplaceFromMessageIndex = null,
+  string? SupervisionRunId = null
 );
 
 public sealed record HarnessSteerInput(
@@ -844,6 +845,32 @@ public sealed record ModelConformanceBenchmarkResult(
   string Identity = ""
 );
 
+public sealed record SupervisionWorkItemProgressView(
+  string Id,
+  string Objective,
+  string Status,
+  int AttemptCount
+);
+
+public sealed record SupervisionProgressView(
+  string RunId,
+  string Objective,
+  string ExecutionStrategy,
+  string State,
+  string Phase,
+  string? Role,
+  string? WorkItemId,
+  int CompletedItems,
+  int TotalItems,
+  long EventSequence,
+  bool TurnInFlight,
+  IReadOnlyList<SupervisionWorkItemProgressView> WorkItems,
+  string? Model = null,
+  string? Harness = null,
+  string? ApprovalPolicy = null,
+  string? ContextId = null
+);
+
 public sealed record ChatStreamEvent(
   string RequestId,
   string Type,
@@ -868,7 +895,8 @@ public sealed record ChatStreamEvent(
   string? ResponseTail = null,
   string? ResponseTailHtml = null,
   TraceDiagnosticReference? Diagnostic = null,
-  SlowRequestStatusView? SlowRequest = null
+  SlowRequestStatusView? SlowRequest = null,
+  SupervisionProgressView? SupervisionProgress = null
 );
 
 public sealed record ValidationErrorsResponse(

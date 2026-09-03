@@ -50,7 +50,8 @@ public interface ILocalActionPlanner
     bool completionAllowed,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
+    string? requestedEffort = null
   );
 }
 
@@ -240,7 +241,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     bool completionAllowed,
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
-    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null
+    Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
+    string? requestedEffort = null
   )
   {
     var request = CreatePlanningRequest(
@@ -260,7 +262,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       "local-action-planning",
       usageContext,
       cancellationToken,
-      onThinkingDelta
+      onThinkingDelta,
+      requestedEffort: requestedEffort
     );
     var canonicalTurn = _toolingProtocol.Normalize(toolingProfile, response);
     var assistantMessage = _toolingProtocol.CreateAssistantMessage(canonicalTurn);

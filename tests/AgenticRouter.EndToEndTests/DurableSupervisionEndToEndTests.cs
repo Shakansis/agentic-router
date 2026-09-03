@@ -99,6 +99,1007 @@ public sealed class DurableSupervisionEndToEndTests
   }
 
   [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutoKeepsFiveStructuredItemsInDirectExecution()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    const string fiveItemObjective = """
+      inspect the project without changing files
+      - inspect item one
+      - inspect item two
+      - inspect item three
+      - inspect item four
+      - inspect item five
+      """;
+    using var fiveItemResponse = await client.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = fiveItemObjective,
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "auto",
+        executionStrategy = "auto",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    fiveItemResponse.EnsureSuccessStatusCode();
+    var fiveItemEvents = ParseSseEvents(
+      await fiveItemResponse.Content.ReadAsStringAsync()
+    );
+    Assert.HasCount(
+      0,
+      fiveItemEvents.Where(item => item["type"]!.GetValue<string>().StartsWith(
+        "supervision.",
+        StringComparison.Ordinal
+      ))
+    );
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutoPromotesSixStructuredItemsWhileDirectOverrideKeepsThemDirect()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    const string objective = """
+      create file hello.txt with exact text hello world today
+      - inspect the current artifact
+      - implement the first bounded component
+      - implement the second bounded component
+      - implement the third bounded component
+      - validate the integrated result
+      - review the final artifact
+      """;
+
+    HttpResponseMessage automaticResponse;
+    try
+    {
+      automaticResponse = await client.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = objective,
+          model = "qwen3-coder:30b",
+          history = Array.Empty<object>(),
+          interactionMode = "execute",
+          harness = "native",
+          approvalPolicy = "auto",
+          executionStrategy = "auto",
+          browserSessionId = Guid.NewGuid().ToString("N")
+        }
+      );
+    }
+    catch (Exception exception)
+    {
+      Assert.Fail($"{exception}{Environment.NewLine}API output:{Environment.NewLine}{_environment.ApiOutput}");
+      throw;
+    }
+    using var automaticResponseOwner = automaticResponse;
+    automaticResponse.EnsureSuccessStatusCode();
+    var automaticEvents = ParseSseEvents(
+      await automaticResponse.Content.ReadAsStringAsync()
+    );
+    Assert.HasCount(
+      1,
+      automaticEvents.Where(item => item["type"]!.GetValue<string>() == "supervision.auto-selected")
+    );
+    Assert.HasCount(
+      1,
+      automaticEvents.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    const string directObjective = """
+      inspect the project without changing files
+      - inspect item one
+      - inspect item two
+      - inspect item three
+      - inspect item four
+      - inspect item five
+      - inspect item six
+      """;
+    using var directResponse = await client.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "/direct " + directObjective,
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "auto",
+        executionStrategy = "auto",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    directResponse.EnsureSuccessStatusCode();
+    var directEvents = ParseSseEvents(
+      await directResponse.Content.ReadAsStringAsync()
+    );
+    Assert.HasCount(
+      0,
+      directEvents.Where(item => item["type"]!.GetValue<string>().StartsWith(
+        "supervision.",
+        StringComparison.Ordinal
+      ))
+    );
+    Assert.IsFalse(_environment.FakeOllama.Requests.Any(request => request.Messages.Any(
+      message => message.Content.Contains("/direct", StringComparison.OrdinalIgnoreCase)
+    )));
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutoTakesOverAcceptedPlanAboveConfiguredDirectLimit()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    HttpResponseMessage response;
+    try
+    {
+      response = await client.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = "automatic plan takeover create file hello.txt with exact text hello world today",
+          model = "qwen3-coder:30b",
+          history = Array.Empty<object>(),
+          interactionMode = "execute",
+          harness = "native",
+          approvalPolicy = "auto",
+          executionStrategy = "auto",
+          browserSessionId = Guid.NewGuid().ToString("N")
+        }
+      );
+    }
+    catch (Exception exception)
+    {
+      Assert.Fail($"{exception}{Environment.NewLine}API output:{Environment.NewLine}{_environment.ApiOutput}");
+      throw;
+    }
+    using (response)
+    {
+      response.EnsureSuccessStatusCode();
+      var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+      var eventTypes = events.Select(item => item["type"]!.GetValue<string>()).ToArray();
+      Assert.IsLessThan(
+        Array.IndexOf(eventTypes, "supervision.auto-selected"),
+        Array.IndexOf(eventTypes, "execution-plan-created"),
+        string.Join(", ", eventTypes)
+      );
+      Assert.HasCount(1, eventTypes.Where(type => type == "response.completed"));
+    }
+
+    using var runsResponse = await _environment.HttpClient.GetAsync("api/supervision/runs");
+    runsResponse.EnsureSuccessStatusCode();
+    var run = JsonNode.Parse(
+      await runsResponse.Content.ReadAsStringAsync()
+    )!["runs"]!.AsArray().Select(item => item!.AsObject()).Single(item =>
+      item["objective"]!.GetValue<string>().Contains(
+        "automatic plan takeover",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    Assert.AreEqual(6, run["takeover"]!["detectedPlanSteps"]!.GetValue<int>());
+    Assert.AreEqual(5, run["takeover"]!["maximumDirectPlanSteps"]!.GetValue<int>());
+    Assert.AreEqual(
+      "accepted-plan-step-limit",
+      run["takeover"]!["trigger"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "completed",
+      run["state"]!.GetValue<string>(),
+      run.ToJsonString()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutoTakesOverRevisedLargePlanAfterVerifiedMutation()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    HttpResponseMessage response;
+    try
+    {
+      response = await client.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = "late automatic plan takeover create file hello.txt with exact text hello world today",
+          model = "qwen3-coder:30b",
+          history = Array.Empty<object>(),
+          interactionMode = "execute",
+          harness = "native",
+          approvalPolicy = "auto",
+          executionStrategy = "auto",
+          browserSessionId = Guid.NewGuid().ToString("N")
+        }
+      );
+    }
+    catch (Exception exception)
+    {
+      Assert.Fail($"{exception}{Environment.NewLine}API output:{Environment.NewLine}{_environment.ApiOutput}");
+      throw;
+    }
+    using var responseOwner = response;
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "supervision.auto-selected"),
+      string.Join(", ", events.Select(item => item["type"]!.GetValue<string>()))
+    );
+    Assert.AreEqual(
+      "hello world today",
+      await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
+    );
+
+    using var runsResponse = await _environment.HttpClient.GetAsync("api/supervision/runs");
+    runsResponse.EnsureSuccessStatusCode();
+    var run = JsonNode.Parse(
+      await runsResponse.Content.ReadAsStringAsync()
+    )!["runs"]!.AsArray().Select(item => item!.AsObject()).Single(item =>
+      item["objective"]!.GetValue<string>().Contains(
+        "late automatic plan takeover",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    var takeover = run["takeover"]!.AsObject();
+    Assert.IsTrue(takeover["afterVerifiedMutation"]!.GetValue<bool>());
+    Assert.IsTrue(takeover["files"]!.AsArray().Any(file =>
+      file!["relativePath"]!.GetValue<string>() == "hello.txt"
+      && file["verified"]!.GetValue<bool>()
+    ));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>());
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutoRecoversProviderTimeoutAfterVerifiedDirectEffectThroughSupervisor()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    using var response = await client.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "automatic resource timeout takeover create file hello.txt with exact text hello world today",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "auto",
+        executionStrategy = "auto",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "supervision.auto-selected"),
+      string.Join(", ", events.Select(item => item["type"]!.GetValue<string>()))
+    );
+    StringAssert.Contains(
+      events.Single(item => item["type"]!.GetValue<string>() == "supervision.auto-selected")["message"]!.GetValue<string>(),
+      "recoverable resource failure"
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "error")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed"),
+      string.Join(Environment.NewLine, events.Select(item => item.ToJsonString()))
+    );
+
+    using var runsResponse = await _environment.HttpClient.GetAsync("api/supervision/runs");
+    runsResponse.EnsureSuccessStatusCode();
+    var run = JsonNode.Parse(
+      await runsResponse.Content.ReadAsStringAsync()
+    )!["runs"]!.AsArray().Select(item => item!.AsObject()).Single(item =>
+      item["objective"]!.GetValue<string>().Contains(
+        "automatic resource timeout takeover",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    Assert.IsTrue(run["takeover"]!["afterVerifiedMutation"]!.GetValue<bool>());
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>());
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutonomousApprovesExplicitDeleteAndCorrectsAwaitUserWithoutPausing()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    _ = await EnableHistoryAsync();
+    var obsoletePath = Path.Combine(_environment.WorkspaceDirectory, "obsolete.txt");
+    await File.WriteAllTextAsync(obsoletePath, "obsolete");
+
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "autonomous explicit delete obsolete.txt and resolve ordinary ambiguity yourself",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "ask",
+        executionStrategy = "autonomous",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "supervision.autonomous-selected")
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() is
+        "action.awaiting-approval" or "supervision.action-awaiting-approval")
+    );
+    Assert.HasCount(
+      0,
+      events.Where(item => item["type"]!.GetValue<string>() == "supervision.awaiting-user")
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed"),
+      string.Join(Environment.NewLine, events.Select(item => item.ToJsonString()))
+    );
+    Assert.IsFalse(File.Exists(obsoletePath));
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        "SUPERVISION_AUTONOMOUS_DECISION_V1",
+        StringComparison.Ordinal
+      ))
+    ));
+
+    using var runsResponse = await _environment.HttpClient.GetAsync("api/supervision/runs");
+    runsResponse.EnsureSuccessStatusCode();
+    var run = JsonNode.Parse(
+      await runsResponse.Content.ReadAsStringAsync()
+    )!["runs"]!.AsArray().Select(item => item!.AsObject()).Single(item =>
+      item["objective"]!.GetValue<string>().Contains(
+        "autonomous explicit delete",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    Assert.AreEqual("autonomous", run["executionStrategy"]!.GetValue<string>());
+    Assert.AreEqual("ask", run["approvalPolicy"]!.GetValue<string>());
+    Assert.AreEqual("auto-safe", run["resumePolicy"]!.GetValue<string>());
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>());
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutonomousCannotBypassTrustedWorkspaceBoundary()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.BaseUri,
+      Timeout = TimeSpan.FromSeconds(45)
+    };
+    var outsidePath = Path.GetFullPath(Path.Combine(
+      _environment.WorkspaceDirectory,
+      "..",
+      "outside-autonomous.txt"
+    ));
+    await File.WriteAllTextAsync(outsidePath, "must remain");
+    try
+    {
+      using var response = await client.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = "autonomous hard boundary",
+          model = "qwen3-coder:30b",
+          history = Array.Empty<object>(),
+          interactionMode = "execute",
+          harness = "native",
+          approvalPolicy = "auto",
+          executionStrategy = "autonomous",
+          browserSessionId = Guid.NewGuid().ToString("N")
+        }
+      );
+      response.EnsureSuccessStatusCode();
+      var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+      Assert.HasCount(
+        1,
+        events.Where(item => item["type"]!.GetValue<string>() == "supervision.blocked"),
+        string.Join(Environment.NewLine, events.Select(item => item.ToJsonString()))
+      );
+      Assert.HasCount(
+        0,
+        events.Where(item => item["type"]!.GetValue<string>() is
+          "action.awaiting-approval" or "supervision.action-awaiting-approval")
+      );
+      Assert.AreEqual("must remain", await File.ReadAllTextAsync(outsidePath));
+    }
+    finally
+    {
+      if (File.Exists(outsidePath))
+      {
+        File.Delete(outsidePath);
+      }
+    }
+  }
+
+  [TestMethod]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task AutonomousApprovalAuthorityIsRejectedOutsideAutonomousSupervision()
+  {
+    _environment.FakeOllama.Reset();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "do not execute",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "autonomous",
+        executionStrategy = "direct",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var error = ParseSseEvents(await response.Content.ReadAsStringAsync())
+      .Single(item => item["type"]!.GetValue<string>() == "error");
+    Assert.AreEqual(
+      "autonomous-approval-requires-supervision",
+      error["error"]!["code"]!.GetValue<string>()
+    );
+    Assert.HasCount(0, _environment.FakeOllama.Requests);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(45_000, CooperativeCancellation = true)]
+  public async Task AutonomousShowsPrimaryProgressAndRecoversOneInactiveTurn()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var originalResponse = await _environment.HttpClient.GetAsync("api/settings");
+    originalResponse.EnsureSuccessStatusCode();
+    var original = JsonNode.Parse(
+      await originalResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var updated = original.DeepClone().AsObject();
+    updated["runtime"]!["generationTimeoutSeconds"] = 2;
+    using var updateResponse = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings",
+      updated
+    );
+    updateResponse.EnsureSuccessStatusCode();
+
+    try
+    {
+      await Page.GotoAsync("/");
+      await Page.GetByRole(
+        AriaRole.Button,
+        new() { Name = "Execute", Exact = true }
+      ).ClickAsync();
+      await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+      await Page.Locator("#harness-selector").SelectOptionAsync("native");
+      await Page.Locator("#send-strategy-toggle").ClickAsync();
+      await Page.Locator(
+        "#send-strategy-menu [data-send-strategy=\"autonomous\"]"
+      ).ClickAsync();
+      await Page.Locator("#message-input").FillAsync(
+        "autonomous watchdog feedback compact supervisor plan title create file hello.txt with exact text hello world today"
+      );
+      await Page.Locator("#send-button").ClickAsync();
+
+      var assistant = Page.Locator(".message.assistant").Last;
+      await Expect(
+        assistant.Locator(".supervision-progress-panel")
+      ).ToHaveCountAsync(0);
+      await Expect(assistant.Locator(".assistant-progress")).ToContainTextAsync(
+        "Autonomous"
+      );
+      var sessionHeader = assistant.Locator(".execution-session-header");
+      await Expect(sessionHeader).Not.ToHaveAttributeAsync("hidden", string.Empty);
+      await assistant.Locator(".activity > summary").ClickAsync();
+      await Expect(sessionHeader).ToBeVisibleAsync();
+      await Expect(sessionHeader).ToContainTextAsync("qwen3-coder:30b");
+      await Expect(sessionHeader).ToContainTextAsync("native");
+      await Expect(sessionHeader).ToContainTextAsync("Autonomous");
+      await Expect(sessionHeader).ToContainTextAsync("approval auto");
+      await Expect(assistant.Locator(".assistant-work-narrative")).ToContainTextAsync(
+        "Supervisor: Planning the work queue for:",
+        new() { Timeout = 1_800 }
+      );
+      await Expect(assistant.Locator(".request-slow-alert")).ToBeVisibleAsync(
+        new() { Timeout = 6_000 }
+      );
+      await Expect(
+        assistant.Locator(
+          "[data-event-type=\"supervision.turn-slow-warning\"]"
+        )
+      ).ToHaveCountAsync(1);
+      Assert.IsGreaterThan(
+        0,
+        await assistant.Locator(
+          "[data-event-type=\"supervision.turn-status\"]"
+        ).CountAsync()
+      );
+      await Expect(
+        assistant.Locator(
+          "[data-event-type=\"supervision.turn-slow-critical\"]"
+        )
+      ).ToHaveCountAsync(1);
+      var recoveryEvent = assistant.Locator(
+        "[data-event-type=\"supervision.turn-watchdog-recovery\"]"
+      );
+      try
+      {
+        await Expect(recoveryEvent).ToHaveCountAsync(1);
+      }
+      catch (PlaywrightException)
+      {
+        var activity = await assistant.Locator(".activity-row").AllTextContentsAsync();
+        Assert.Fail(
+          "Autonomous watchdog recovery was not observed. "
+            + $"Narrative: {await assistant.Locator(".assistant-work-narrative").TextContentAsync()} "
+            + $"Answer: {await assistant.Locator(".assistant-response").TextContentAsync()} "
+            + $"Activity: {string.Join(" | ", activity)} "
+            + $"API output: {_environment.ApiOutput}"
+        );
+      }
+      var plan = assistant.Locator(".execution-plan");
+      await Expect(plan).ToBeVisibleAsync(
+        new() { Timeout = 25_000 }
+      );
+      await Expect(plan.Locator(".execution-plan-title")).ToContainTextAsync(
+        "Plan"
+      );
+      await Expect(plan.Locator(".plan-step")).ToHaveCountAsync(1);
+      var planStepTitle = plan.Locator(".plan-step > span").Nth(1);
+      await Expect(planStepTitle).ToHaveTextAsync(
+        "Claude Code-3 (Jogo da Velha) · criar o jogo em hello.txt com o conteúdo…"
+      );
+      await Expect(planStepTitle).ToHaveAttributeAsync(
+        "title",
+        new System.Text.RegularExpressions.Regex("deliberately verbose implementation details")
+      );
+      await Expect(Page.Locator("#context-usage-summary-text")).ToContainTextAsync(
+        "Context "
+      );
+      await Expect(Page.Locator("#context-usage-summary-text")).Not.ToHaveTextAsync(
+        "Context will be calculated when sending"
+      );
+      await plan.Locator("summary").ClickAsync();
+      await Expect(plan).ToHaveAttributeAsync("open", string.Empty);
+      Assert.AreEqual(
+        "auto",
+        await plan.Locator(".execution-plan-body").EvaluateAsync<string>(
+          "element => getComputedStyle(element).overflowY"
+        )
+      );
+      await Page.Locator(".chat-header").ClickAsync();
+      await Expect(plan).Not.ToHaveAttributeAsync("open", string.Empty);
+      var reasoning = assistant.Locator(".assistant-reasoning").First;
+      await Expect(reasoning).ToBeVisibleAsync();
+      await Expect(reasoning.Locator(".assistant-reasoning-body")).ToContainTextAsync(
+        "The supervisor is reviewing"
+      );
+      await Expect(reasoning).Not.ToHaveAttributeAsync("open", string.Empty);
+      var workerReasoning = assistant.Locator(
+        ".assistant-reasoning-body",
+        new() { HasText = "Reasoning segment 30" }
+      );
+      Assert.IsGreaterThan(
+        0,
+        await workerReasoning.CountAsync(),
+        "Worker reasoning must remain available beyond the former 24-update cutoff."
+      );
+      Assert.IsFalse(
+        await assistant.Locator(".assistant-reasoning").EvaluateAllAsync<bool>(
+          "nodes => nodes.some(node => node.open)"
+        ),
+        "Supervisor and worker reasoning must remain available but start collapsed."
+      );
+      await Expect(
+        assistant.Locator(
+          ".work-action[data-state=\"completed\"] .work-action-file",
+          new() { HasText = "hello.txt" }
+        ).First
+      ).ToBeVisibleAsync();
+      await Expect(assistant.Locator(".assistant-response")).ToContainTextAsync(
+        "Created hello.txt",
+        new() { Timeout = 25_000 }
+      );
+      await Expect(
+        assistant.Locator(
+          ".activity-message",
+          new() { HasText = "The active supervised context usage changed." }
+        )
+      ).ToHaveCountAsync(0);
+      Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+        request.Messages.Any(message => message.Content.Contains(
+          "SUPERVISION_WATCHDOG_RECOVERY_V1",
+          StringComparison.Ordinal
+        ))
+      ));
+    }
+    finally
+    {
+      using var restoreResponse = await _environment.HttpClient.PutAsJsonAsync(
+        "api/settings",
+        original
+      );
+      restoreResponse.EnsureSuccessStatusCode();
+    }
+  }
+
+  [TestMethod]
+  [DataRow(
+    "opencode",
+    "opencode-supervised.txt",
+    "Created opencode-supervised.txt",
+    "Edit",
+    null
+  )]
+  [DataRow(
+    "qwen-code",
+    "qwen-supervised.txt",
+    "Created qwen-supervised.txt",
+    "Create files",
+    "List files"
+  )]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalAutonomousHarnessShowsCommentaryActionsAndExistingProgressSurfaces(
+    string harness,
+    string relativePath,
+    string finalAnswer,
+    string mutationLabel,
+    string? inspectionLabel
+  )
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var targetPath = Path.Combine(_environment.WorkspaceDirectory, relativePath);
+    if (File.Exists(targetPath))
+    {
+      File.Delete(targetPath);
+    }
+    await Page.GotoAsync("/");
+    await Page.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Execute", Exact = true }
+    ).ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+    await Page.Locator("#send-strategy-toggle").ClickAsync();
+    await Page.Locator(
+      "#send-strategy-menu [data-send-strategy=\"autonomous\"]"
+    ).ClickAsync();
+    await Page.Locator("#message-input").FillAsync(
+      $"Use {harness} autonomous supervision and expose generic worker activity."
+    );
+    await Page.Locator("#send-button").ClickAsync();
+
+    var assistant = Page.Locator(".message.assistant").Last;
+    var plan = assistant.Locator(".execution-plan");
+    await Expect(plan).ToBeVisibleAsync();
+    await Expect(plan.Locator(".plan-step")).ToHaveCountAsync(1);
+    var mutation = assistant.Locator(
+      ".work-action[data-state=\"completed\"]",
+      new() { HasText = relativePath }
+    );
+    await Expect(mutation).ToBeVisibleAsync();
+    await Expect(mutation.Locator(".work-action-label")).ToHaveTextAsync(mutationLabel);
+    if (inspectionLabel is not null)
+    {
+      var inspection = assistant.Locator(
+        ".work-action[data-state=\"completed\"]",
+        new() { HasText = inspectionLabel }
+      );
+      await Expect(inspection).ToHaveCountAsync(1);
+      await Expect(inspection).ToBeVisibleAsync();
+    }
+    await Expect(assistant.Locator(".assistant-reasoning").First).ToBeVisibleAsync();
+    await Expect(assistant.Locator(".assistant-response")).ToContainTextAsync(
+      finalAnswer
+    );
+    var commentary = assistant.Locator(
+      ".activity-row[data-event-type=\"supervision.turn-commentary\"]"
+    );
+    Assert.IsGreaterThan(0, await commentary.CountAsync());
+    await Expect(commentary.First).ToContainTextAsync("I will");
+    Assert.IsGreaterThan(
+      0,
+      await assistant.Locator(
+        $"[data-event-type=\"harness.{harness}-effects-observed\"]"
+      ).CountAsync()
+    );
+    Assert.IsGreaterThan(
+      0,
+      await assistant.Locator(
+        "[data-event-type=\"validation-started\"]"
+      ).CountAsync()
+    );
+    Assert.IsTrue(File.Exists(targetPath));
+  }
+
+  [TestMethod]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task ComposerExposesIntegratedCompactStrategySplitButtonIncludingAutonomous()
+  {
+    await Page.GotoAsync("/");
+    await Page.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Execute", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator("#send-strategy-toggle")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#send-strategy-indicator")).ToHaveTextAsync("A");
+    var send = Page.Locator("#send-button");
+    var toggle = Page.Locator("#send-strategy-toggle");
+    Assert.AreEqual(
+      await send.EvaluateAsync<string>("element => getComputedStyle(element).backgroundColor"),
+      await toggle.EvaluateAsync<string>("element => getComputedStyle(element).backgroundColor")
+    );
+    var sendBox = await send.BoundingBoxAsync();
+    var toggleBox = await toggle.BoundingBoxAsync();
+    Assert.IsNotNull(sendBox);
+    Assert.IsNotNull(toggleBox);
+    Assert.AreEqual(sendBox.X + sendBox.Width, toggleBox.X, 1);
+
+    await toggle.ClickAsync();
+    var menu = Page.Locator("#send-strategy-menu");
+    await Expect(menu).ToBeVisibleAsync();
+    Assert.IsLessThanOrEqualTo(260, (await menu.BoundingBoxAsync())!.Width);
+    Assert.AreEqual(
+      "1",
+      await menu.EvaluateAsync<string>("element => getComputedStyle(element).opacity")
+    );
+    await menu.Locator("[data-send-strategy=\"direct\"]").ClickAsync();
+    await Expect(Page.Locator("#send-strategy-indicator")).ToHaveTextAsync("D");
+    await Expect(Page.Locator("#send-button")).ToHaveAttributeAsync(
+      "aria-label",
+      "Send message using Direct execution strategy"
+    );
+
+    await Page.Locator("#send-strategy-toggle").ClickAsync();
+    await menu.Locator("[data-send-strategy=\"autonomous\"]").ClickAsync();
+    await Expect(Page.Locator("#send-strategy-indicator")).ToHaveTextAsync("∞");
+    await Expect(Page.Locator("#approval-policy")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#approval-policy")).ToHaveAttributeAsync(
+      "title",
+      "Autonomous supervision approves every action the user could permit; hard Host boundaries remain enforced."
+    );
+
+    await toggle.ClickAsync();
+    await menu.Locator("[data-send-strategy=\"auto\"]").ClickAsync();
+    await Expect(Page.Locator("#send-strategy-indicator")).ToHaveTextAsync("A");
+    await Expect(Page.Locator("#approval-policy")).ToBeEnabledAsync();
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task GeneralSettingsPersistsDirectLimitAndPhaseEffortProfile()
+  {
+    using var originalResponse = await _environment.HttpClient.GetAsync("api/settings");
+    originalResponse.EnsureSuccessStatusCode();
+    var original = JsonNode.Parse(
+      await originalResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    try
+    {
+      await Page.GotoAsync("/");
+      await Page.Locator("#open-settings").ClickAsync();
+      var limit = Page.Locator("#max-direct-plan-steps");
+      await Expect(limit).ToHaveValueAsync("5");
+      await Expect(Page.Locator("#phase-effort-plan")).ToHaveValueAsync("high");
+      await Expect(Page.Locator("#phase-effort-work")).ToHaveValueAsync("medium");
+      await Expect(Page.Locator("#phase-effort-verify")).ToHaveValueAsync("medium");
+      await Expect(Page.Locator("#phase-effort-complete")).ToHaveValueAsync("low");
+      await Expect(Page.Locator("#phase-effort-recovery")).ToHaveValueAsync("high");
+      await limit.FillAsync("6");
+      await Page.Locator("#phase-effort-plan").SelectOptionAsync("low");
+      await Page.Locator("#phase-effort-work").SelectOptionAsync("high");
+      await Page.Locator("#phase-effort-verify").SelectOptionAsync("low");
+      await Page.Locator("#phase-effort-complete").SelectOptionAsync("high");
+      await Page.Locator("#phase-effort-recovery").SelectOptionAsync("medium");
+      await Page.Locator("#save-settings").ClickAsync();
+      await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+
+      using var savedResponse = await _environment.HttpClient.GetAsync("api/settings");
+      savedResponse.EnsureSuccessStatusCode();
+      var saved = JsonNode.Parse(
+        await savedResponse.Content.ReadAsStringAsync()
+      )!.AsObject();
+      Assert.AreEqual(
+        6,
+        saved["execution"]!["maxDirectPlanSteps"]!.GetValue<int>()
+      );
+      var effort = saved["execution"]!["phaseEffort"]!;
+      Assert.AreEqual("low", effort["plan"]!.GetValue<string>());
+      Assert.AreEqual("high", effort["work"]!.GetValue<string>());
+      Assert.AreEqual("low", effort["verify"]!.GetValue<string>());
+      Assert.AreEqual("high", effort["complete"]!.GetValue<string>());
+      Assert.AreEqual("medium", effort["recovery"]!.GetValue<string>());
+    }
+    finally
+    {
+      using var restoreResponse = await _environment.HttpClient.PutAsJsonAsync(
+        "api/settings",
+        original
+      );
+      restoreResponse.EnsureSuccessStatusCode();
+    }
+  }
+
+  [TestMethod]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task SettingsRejectsUnknownPhaseEffortAtomically()
+  {
+    using var originalResponse = await _environment.HttpClient.GetAsync("api/settings");
+    originalResponse.EnsureSuccessStatusCode();
+    var candidate = JsonNode.Parse(
+      await originalResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    candidate["execution"]!["phaseEffort"]!["verify"] = "extreme";
+
+    using var response = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings",
+      candidate
+    );
+
+    Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
+    var problem = await response.Content.ReadAsStringAsync();
+    StringAssert.Contains(problem, "execution.phaseEffort.verify");
+    using var unchangedResponse = await _environment.HttpClient.GetAsync("api/settings");
+    unchangedResponse.EnsureSuccessStatusCode();
+    var unchanged = JsonNode.Parse(
+      await unchangedResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    Assert.AreNotEqual(
+      "extreme",
+      unchanged["execution"]!["phaseEffort"]!["verify"]!.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task SupervisionAppliesConfiguredEffortToEachPhaseAndRecovery()
+  {
+    using var originalResponse = await _environment.HttpClient.GetAsync("api/settings");
+    originalResponse.EnsureSuccessStatusCode();
+    var original = JsonNode.Parse(
+      await originalResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var configured = original.DeepClone().AsObject();
+    configured["execution"]!["phaseEffort"] = new JsonObject
+    {
+      ["plan"] = "low",
+      ["work"] = "high",
+      ["verify"] = "low",
+      ["complete"] = "high",
+      ["recovery"] = "medium"
+    };
+
+    try
+    {
+      using var saveResponse = await _environment.HttpClient.PutAsJsonAsync(
+        "api/settings",
+        configured
+      );
+      saveResponse.EnsureSuccessStatusCode();
+      _environment.FakeOllama.Reset();
+      ResetSupervisionFixture();
+      using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+        "api/supervision/runs/prepare",
+        new
+        {
+          objective = "create file hello.txt with exact text hello world today",
+          model = "gpt-oss:20b",
+          harness = "native",
+          approvalPolicy = "auto",
+          resumePolicy = "manual",
+          browserSessionId = Guid.NewGuid().ToString("N")
+        }
+      );
+      prepareResponse.EnsureSuccessStatusCode();
+      var prepared = JsonNode.Parse(
+        await prepareResponse.Content.ReadAsStringAsync()
+      )!.AsObject();
+      var runId = prepared["runId"]!.GetValue<string>();
+      using var startResponse = await _environment.HttpClient.PostAsync(
+        $"api/supervision/runs/{runId}/start",
+        null
+      );
+      startResponse.EnsureSuccessStatusCode();
+
+      JsonObject run;
+      var deadline = DateTimeOffset.UtcNow.AddSeconds(40);
+      do
+      {
+        await Task.Delay(100);
+        run = await GetRunAsync(runId);
+        if (run["terminal"]!.GetValue<bool>())
+        {
+          break;
+        }
+      } while (DateTimeOffset.UtcNow < deadline);
+
+      Assert.IsTrue(run["terminal"]!.GetValue<bool>(), run.ToJsonString());
+      Assert.AreEqual("completed", run["state"]!.GetValue<string>());
+      var requests = _environment.FakeOllama.Requests;
+      AssertEffort("SUPERVISION_DECOMPOSE_V1", "low");
+      AssertEffort("SUPERVISION_WORKER_V1", "high");
+      AssertEffort("SUPERVISION_VERIFY_V1", "low");
+      AssertEffort("SUPERVISION_CORRECTION_V1", "medium");
+      AssertEffort("SUPERVISION_COMPLETE_V1", "high");
+
+      void AssertEffort(string marker, string expected)
+      {
+        Assert.IsTrue(
+          requests.Any(request =>
+            string.Equals(request.Think, expected, StringComparison.Ordinal)
+            && request.Messages.Any(message => message.Content.Contains(
+              marker,
+              StringComparison.Ordinal
+            ))),
+          $"No Ollama request applied effort '{expected}' for marker '{marker}'."
+        );
+      }
+    }
+    finally
+    {
+      using var restoreResponse = await _environment.HttpClient.PutAsJsonAsync(
+        "api/settings",
+        original
+      );
+      restoreResponse.EnsureSuccessStatusCode();
+    }
+  }
+
+  [TestMethod]
   [Timeout(90_000, CooperativeCancellation = true)]
   public async Task SupervisedExecuteRejectsCorrectsVerifiesAndCompletesOnce()
   {
@@ -344,6 +1345,117 @@ public sealed class DurableSupervisionEndToEndTests
 
   [TestMethod]
   [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ExplicitCancelTerminatesAutonomousCheckpointBeforeEditedPromptRestarts()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var workspaceId = await EnableHistoryAsync();
+    await Page.GotoAsync("/");
+    await Page.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Execute", Exact = true }
+    ).ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await Page.Locator("#harness-selector").SelectOptionAsync("native");
+    await Page.Locator("#send-strategy-toggle").ClickAsync();
+    await Page.Locator(
+      "#send-strategy-menu [data-send-strategy=\"autonomous\"]"
+    ).ClickAsync();
+    const string prompt = "supervision restart boundary";
+    await Page.Locator("#message-input").FillAsync(prompt);
+    await Page.Locator("#send-button").ClickAsync();
+
+    JsonObject? firstRun = null;
+    var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+    do
+    {
+      using var response = await _environment.HttpClient.GetAsync(
+        "api/supervision/runs"
+      );
+      response.EnsureSuccessStatusCode();
+      firstRun = JsonNode.Parse(
+        await response.Content.ReadAsStringAsync()
+      )!["runs"]!.AsArray().Select(item => item!.AsObject()).Where(run =>
+        run["objective"]!.GetValue<string>() == prompt
+        && run["executionStrategy"]!.GetValue<string>() == "autonomous"
+        && !run["terminal"]!.GetValue<bool>()
+      ).OrderByDescending(run => run["createdAt"]!.GetValue<DateTimeOffset>())
+        .FirstOrDefault();
+      if (firstRun?["phase"]!.GetValue<string>() == "verifying")
+      {
+        break;
+      }
+      await Task.Delay(50);
+    } while (DateTimeOffset.UtcNow < deadline);
+    Assert.IsNotNull(firstRun);
+    Assert.AreEqual("verifying", firstRun["phase"]!.GetValue<string>());
+    var firstRunId = firstRun["runId"]!.GetValue<string>();
+    var conversationSessionId = firstRun["conversationSessionId"]!.GetValue<string>();
+
+    await Page.Locator("#cancel-request").ClickAsync();
+    var cancelled = await WaitForStateAsync(
+      firstRunId,
+      "cancelled",
+      TimeSpan.FromSeconds(10)
+    );
+    Assert.IsTrue(cancelled["terminal"]!.GetValue<bool>());
+    await Expect(Page.Locator("#cancel-request")).ToBeHiddenAsync();
+    using (var sessionResponse = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{conversationSessionId}?workspaceId={workspaceId}"
+    ))
+    {
+      sessionResponse.EnsureSuccessStatusCode();
+      var persisted = JsonNode.Parse(
+        await sessionResponse.Content.ReadAsStringAsync()
+      )!.AsObject();
+      Assert.AreEqual("cancelled", persisted["state"]!.GetValue<string>());
+      Assert.IsFalse(persisted["interrupted"]!.GetValue<bool>());
+    }
+
+    await Page.Locator(".message.user").First.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Edit message", Exact = true }
+    ).ClickAsync();
+    await Expect(Page.Locator("#message-input")).ToHaveValueAsync(prompt);
+    await Page.Locator("#message-input").PressAsync("Enter");
+
+    JsonObject? replacement = null;
+    deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+    do
+    {
+      using var response = await _environment.HttpClient.GetAsync(
+        "api/supervision/runs"
+      );
+      response.EnsureSuccessStatusCode();
+      replacement = JsonNode.Parse(
+        await response.Content.ReadAsStringAsync()
+      )!["runs"]!.AsArray().Select(item => item!.AsObject()).FirstOrDefault(run =>
+        run["conversationSessionId"]!.GetValue<string>() == conversationSessionId
+        && run["objective"]!.GetValue<string>() == prompt
+        && run["runId"]!.GetValue<string>() != firstRunId
+      );
+      if (replacement is not null)
+      {
+        break;
+      }
+      await Task.Delay(50);
+    } while (DateTimeOffset.UtcNow < deadline);
+    Assert.IsNotNull(replacement);
+    var replacementRunId = replacement["runId"]!.GetValue<string>();
+    var completed = await WaitForTerminalAsync(
+      replacementRunId,
+      TimeSpan.FromSeconds(30)
+    );
+    Assert.AreEqual("completed", completed["state"]!.GetValue<string>());
+    Assert.AreNotEqual(
+      "supervision-recovery-workspace-busy",
+      completed["waitCode"]?.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task SupervisorRejectsAcceptanceWhenEvidenceChangesDuringVerification()
   {
@@ -433,7 +1545,7 @@ public sealed class DurableSupervisionEndToEndTests
 
   [TestMethod]
   [Timeout(30_000, CooperativeCancellation = true)]
-  public async Task MalformedSupervisorDecisionBlocksOnceWithoutWorkerOrIdenticalRetry()
+  public async Task MalformedSupervisorDecisionUsesOneDifferentRecoveryThenBlocks()
   {
     _environment.FakeOllama.Reset();
     using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
@@ -483,7 +1595,15 @@ public sealed class DurableSupervisionEndToEndTests
         StringComparison.Ordinal
       ))
     ).ToArray();
-    Assert.HasCount(1, decompositionRequests);
+    Assert.HasCount(2, decompositionRequests);
+    Assert.IsTrue(
+      decompositionRequests.Any(request => request.Messages.Any(message =>
+        message.Content.Contains(
+          "SUPERVISION_CANONICAL_RECOVERY_V1",
+          StringComparison.Ordinal
+        )
+      ))
+    );
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Messages.Any(message => message.Content.Contains(
@@ -505,6 +1625,367 @@ public sealed class DurableSupervisionEndToEndTests
       1,
       events.Where(item => item["terminal"]!.GetValue<bool>())
     );
+  }
+
+  [TestMethod]
+  [Timeout(45_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeSupervisorParsesOnlyCanonicalTextAfterLastToolCall()
+  {
+    ResetSupervisionFixture();
+    using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/supervision/runs/prepare",
+      new
+      {
+        objective = "claude supervision canonical after tool preamble",
+        model = "qwen3-coder:30b",
+        harness = "claude-code",
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    Assert.AreEqual(
+      HttpStatusCode.Accepted,
+      prepareResponse.StatusCode,
+      await prepareResponse.Content.ReadAsStringAsync()
+    );
+    var prepared = JsonNode.Parse(
+      await prepareResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var runId = prepared["runId"]!.GetValue<string>();
+    using var startResponse = await _environment.HttpClient.PostAsync(
+      $"api/supervision/runs/{runId}/start",
+      null
+    );
+    startResponse.EnsureSuccessStatusCode();
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+
+    Assert.AreEqual(
+      "completed",
+      run["state"]!.GetValue<string>(),
+      run.ToJsonString()
+    );
+    Assert.IsNull(run["runtime"]!["lastFailure"]);
+    Assert.AreEqual(
+      "Created hello.txt and verified its exact content.",
+      run["runtime"]!["finalAnswer"]!.GetValue<string>()
+    );
+    using var eventResponse = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    eventResponse.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(
+      await eventResponse.Content.ReadAsStringAsync()
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "supervision.turn-canonical-recovery"
+      )
+    );
+    Assert.AreEqual(
+      "hello world today",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "hello.txt")
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(45_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeAutonomousContextSnapshotsStaySilentAndRetainTerminalFit()
+  {
+    ResetSupervisionFixture();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "claude supervision canonical after tool preamble",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "claude-code",
+        approvalPolicy = "auto",
+        executionStrategy = "autonomous",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    var contextEvents = events.Where(item =>
+      item["type"]!.GetValue<string>() == "context.usage"
+    ).ToArray();
+    Assert.IsNotEmpty(contextEvents);
+    Assert.IsTrue(contextEvents.All(item =>
+      string.IsNullOrWhiteSpace(item["message"]?.GetValue<string>())
+      && item["supervisionProgress"] is null
+      && item["contextUsage"] is JsonObject
+    ), string.Join(
+      Environment.NewLine,
+      contextEvents.Select(item =>
+        $"message={item["message"]?.GetValue<string>() ?? "<null>"}; "
+        + $"supervisionProgress={item["supervisionProgress"] is not null}; "
+        + $"contextUsage={item["contextUsage"] is JsonObject}"
+      )
+    ));
+    var terminal = events.Single(item =>
+      item["type"]!.GetValue<string>() == "response.completed"
+    );
+    Assert.IsInstanceOfType<JsonObject>(terminal["contextUsage"]);
+    var traceId = terminal["diagnostic"]!["traceId"]!.GetValue<string>();
+
+    using var traceResponse = await _environment.HttpClient.GetAsync(
+      $"api/diagnostics/traces/{Uri.EscapeDataString(traceId)}"
+    );
+    traceResponse.EnsureSuccessStatusCode();
+    var report = JsonNode.Parse(
+      await traceResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    Assert.IsInstanceOfType<JsonObject>(report["contextFit"]);
+    Assert.IsFalse(report["events"]!.AsArray().Any(item =>
+      item?["stage"]?.GetValue<string>() == "context.usage"
+    ));
+  }
+
+  [TestMethod]
+  [Timeout(45_000, CooperativeCancellation = true)]
+  public async Task ClaudeCodeSupervisorRecoversOutputTokenLimitInFreshNativeSession()
+  {
+    ResetSupervisionFixture();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "claude supervision recovers output ceiling",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "claude-code",
+        approvalPolicy = "auto",
+        executionStrategy = "autonomous",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "supervision.turn-harness-recovery"
+      )
+    );
+    Assert.HasCount(0, events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+    Assert.AreEqual(
+      "recovered",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "output-recovery.txt")
+      )
+    );
+    using var recoveryMarker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "claude-code-runtime",
+      "fake-claude-harness-recovery.json"
+    )));
+    Assert.IsFalse(recoveryMarker.RootElement.GetProperty("resumed").GetBoolean());
+    Assert.IsTrue(
+      recoveryMarker.RootElement.GetProperty("promptContainsRecoveryMarker").GetBoolean()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(45_000, CooperativeCancellation = true)]
+  public async Task RepeatedClaudeCodeOutputTokenLimitRetainsTypedTerminalCode()
+  {
+    ResetSupervisionFixture();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "claude supervision repeats output ceiling",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "claude-code",
+        approvalPolicy = "auto",
+        executionStrategy = "autonomous",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "supervision.turn-harness-recovery"
+      )
+    );
+    var terminal = events.Single(item => item["type"]!.GetValue<string>() == "error");
+    var error = terminal["error"]!.AsObject();
+    Assert.AreEqual(
+      "claude-code-output-token-limit",
+      error["code"]!.GetValue<string>()
+    );
+    StringAssert.Contains(
+      error["message"]!.GetValue<string>(),
+      "exceeded its configured output-token limit"
+    );
+    var runId = error["details"]!["runId"]!.GetValue<string>();
+    var run = await GetRunAsync(runId);
+    Assert.AreEqual(
+      "claude-code-output-token-limit",
+      run["waitCode"]!.GetValue<string>()
+    );
+    using var traceResponse = await _environment.HttpClient.GetAsync(
+      $"api/diagnostics/traces/{Uri.EscapeDataString(terminal["diagnostic"]!["traceId"]!.GetValue<string>())}"
+    );
+    traceResponse.EnsureSuccessStatusCode();
+    var trace = JsonNode.Parse(await traceResponse.Content.ReadAsStringAsync())!.AsObject();
+    Assert.AreEqual(
+      "claude-code-output-token-limit",
+      trace["failureCode"]!.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task ConfiguredEvidencePathLimitAllowsFourteenDeclaredPaths()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/supervision/runs/prepare",
+      new
+      {
+        objective = "supervision fourteen evidence paths",
+        model = "qwen3-coder:30b",
+        harness = "native",
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    prepareResponse.EnsureSuccessStatusCode();
+    var prepared = JsonNode.Parse(
+      await prepareResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var runId = prepared["runId"]!.GetValue<string>();
+    using var startResponse = await _environment.HttpClient.PostAsync(
+      $"api/supervision/runs/{runId}/start",
+      null
+    );
+    startResponse.EnsureSuccessStatusCode();
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(20));
+
+    Assert.AreEqual(
+      "completed",
+      run["state"]!.GetValue<string>(),
+      run.ToJsonString()
+    );
+    Assert.HasCount(
+      14,
+      run["runtime"]!["workItems"]![0]!["evidencePaths"]!.AsArray()
+    );
+    Assert.IsNull(run["runtime"]!["lastFailure"]);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task SupervisionTurnStatusDoesNotDependOnProviderFrames()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var originalResponse = await _environment.HttpClient.GetAsync("api/settings");
+    originalResponse.EnsureSuccessStatusCode();
+    var original = JsonNode.Parse(
+      await originalResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var updated = original.DeepClone().AsObject();
+    updated["runtime"]!["generationTimeoutSeconds"] = 6;
+    using var updateResponse = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings",
+      updated
+    );
+    updateResponse.EnsureSuccessStatusCode();
+
+    try
+    {
+      using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+        "api/supervision/runs/prepare",
+        new
+        {
+          objective = "supervision independent periodic status create file hello.txt",
+          model = "qwen3-coder:30b",
+          harness = "native",
+          approvalPolicy = "auto",
+          resumePolicy = "manual",
+          browserSessionId = Guid.NewGuid().ToString("N")
+        }
+      );
+      prepareResponse.EnsureSuccessStatusCode();
+      var prepared = JsonNode.Parse(
+        await prepareResponse.Content.ReadAsStringAsync()
+      )!.AsObject();
+      var runId = prepared["runId"]!.GetValue<string>();
+      using var startResponse = await _environment.HttpClient.PostAsync(
+        $"api/supervision/runs/{runId}/start",
+        null
+      );
+      startResponse.EnsureSuccessStatusCode();
+
+      IReadOnlyList<JsonObject> events = [];
+      var deadline = DateTimeOffset.UtcNow.AddSeconds(3.5);
+      do
+      {
+        await Task.Delay(100);
+        using var eventResponse = await _environment.HttpClient.GetAsync(
+          $"api/supervision/runs/{runId}/events?follow=false"
+        );
+        eventResponse.EnsureSuccessStatusCode();
+        events = ParseSseEvents(
+          await eventResponse.Content.ReadAsStringAsync()
+        );
+        if (events.Any(item =>
+          item["type"]!.GetValue<string>() == "supervision.turn-status"
+        ))
+        {
+          break;
+        }
+      } while (DateTimeOffset.UtcNow < deadline);
+
+      Assert.HasCount(
+        1,
+        events.Where(item =>
+          item["type"]!.GetValue<string>() == "supervision.turn-status"
+        )
+      );
+      Assert.HasCount(
+        0,
+        events.Where(item =>
+          item["type"]!.GetValue<string>() is "supervision.turn-slow-warning"
+            or "supervision.turn-slow-critical"
+        )
+      );
+      var active = await GetRunAsync(runId);
+      Assert.IsFalse(active["terminal"]!.GetValue<bool>());
+      _ = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(15));
+    }
+    finally
+    {
+      using var restoreResponse = await _environment.HttpClient.PutAsJsonAsync(
+        "api/settings",
+        original
+      );
+      restoreResponse.EnsureSuccessStatusCode();
+    }
   }
 
   [TestMethod]
@@ -727,8 +2208,12 @@ public sealed class DurableSupervisionEndToEndTests
       checkpointText
     );
     Assert.AreEqual(
-      2,
+      4,
       checkpointDocument.RootElement.GetProperty("schemaVersion").GetInt32()
+    );
+    Assert.AreEqual(
+      "supervised",
+      checkpointDocument.RootElement.GetProperty("executionStrategy").GetString()
     );
     Assert.IsTrue(checkpointDocument.RootElement.TryGetProperty("runtime", out _));
     Assert.IsTrue(checkpointDocument.RootElement.TryGetProperty("recovery", out _));
@@ -755,8 +2240,10 @@ public sealed class DurableSupervisionEndToEndTests
     Assert.IsFalse(checkpointText.Contains("originalContent", StringComparison.OrdinalIgnoreCase));
 
     await _environment.RestartApplicationAsync();
-    var restored = await GetRunAsync(
-      runId
+    var restored = await WaitForStateAsync(
+      runId,
+      "interrupted-recoverable",
+      TimeSpan.FromSeconds(10)
     );
     Assert.AreEqual(
       "interrupted-recoverable",
@@ -949,7 +2436,11 @@ public sealed class DurableSupervisionEndToEndTests
     );
 
     await _environment.RestartApplicationAsync();
-    var restored = await GetRunAsync(runId);
+    var restored = await WaitForStateAsync(
+      runId,
+      "awaiting-user",
+      TimeSpan.FromSeconds(10)
+    );
     Assert.AreEqual("awaiting-user", restored["state"]!.GetValue<string>());
     Assert.AreEqual(
       "supervision-recovery-approval-pending",
@@ -1015,16 +2506,25 @@ public sealed class DurableSupervisionEndToEndTests
       Path.Combine(_environment.WorkspaceDirectory, "hello.txt"),
       "external user drift"
     );
-    var requestsBeforeRestart = _environment.FakeOllama.Requests.Count;
-
-    await _environment.RestartApplicationAsync();
-    var restored = await GetRunAsync(runId);
+    var requestsWhileStopped = -1;
+    await _environment.RestartApplicationAsync(
+      () =>
+      {
+        requestsWhileStopped = _environment.FakeOllama.Requests.Count;
+        return Task.CompletedTask;
+      }
+    );
+    var restored = await WaitForStateAsync(
+      runId,
+      "awaiting-user",
+      TimeSpan.FromSeconds(10)
+    );
     Assert.AreEqual("awaiting-user", restored["state"]!.GetValue<string>());
     Assert.AreEqual(
       "supervision-recovery-workspace-drift",
       restored["waitCode"]!.GetValue<string>()
     );
-    Assert.HasCount(requestsBeforeRestart, _environment.FakeOllama.Requests);
+    Assert.HasCount(requestsWhileStopped, _environment.FakeOllama.Requests);
     Assert.AreEqual(
       "external user drift",
       await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
@@ -1047,7 +2547,11 @@ public sealed class DurableSupervisionEndToEndTests
     );
 
     await _environment.RestartApplicationAsync();
-    var restored = await GetRunAsync(runId);
+    var restored = await WaitForStateAsync(
+      runId,
+      "awaiting-user",
+      TimeSpan.FromSeconds(10)
+    );
     Assert.AreEqual("awaiting-user", restored["state"]!.GetValue<string>());
     Assert.AreEqual(
       "supervision-recovery-instructions-changed",
@@ -1079,7 +2583,11 @@ public sealed class DurableSupervisionEndToEndTests
     var runId = prepared["runId"]!.GetValue<string>();
 
     await _environment.RestartApplicationAsync();
-    var restored = await GetRunAsync(runId);
+    var restored = await WaitForStateAsync(
+      runId,
+      "interrupted-recoverable",
+      TimeSpan.FromSeconds(10)
+    );
     Assert.AreEqual("interrupted-recoverable", restored["state"]!.GetValue<string>());
     await Page.GotoAsync("/");
 
@@ -1291,6 +2799,33 @@ public sealed class DurableSupervisionEndToEndTests
       await Task.Delay(100);
     } while (DateTimeOffset.UtcNow < deadline);
     Assert.Fail($"Run {runId} did not become terminal. Last view: {run}");
+    return run;
+  }
+
+  private static async Task<JsonObject> WaitForStateAsync(
+    string runId,
+    string expectedState,
+    TimeSpan timeout
+  )
+  {
+    var deadline = DateTimeOffset.UtcNow.Add(timeout);
+    JsonObject run;
+    do
+    {
+      run = await GetRunAsync(runId);
+      if (string.Equals(
+        run["state"]!.GetValue<string>(),
+        expectedState,
+        StringComparison.Ordinal
+      ))
+      {
+        return run;
+      }
+      await Task.Delay(100);
+    } while (DateTimeOffset.UtcNow < deadline);
+    Assert.Fail(
+      $"Run {runId} did not reach state {expectedState}. Last view: {run}"
+    );
     return run;
   }
 

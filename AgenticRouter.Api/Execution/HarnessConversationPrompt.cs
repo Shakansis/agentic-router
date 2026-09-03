@@ -1,4 +1,5 @@
 using System.Text;
+using AgenticRouter.Api.Providers;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -27,6 +28,11 @@ internal static class HarnessConversationPromptBuilder
     builder.Append(
       "- Report only actions and results that actually occurred.\n"
     );
+    builder.Append("- Host effort target for this turn: ")
+      .Append(request.RequestedEffort)
+      .Append(". ")
+      .Append(EffortGuidance(request.RequestedEffort))
+      .Append('\n');
     builder.Append(
       "- If the Host denies one native action, treat that action as rejected, use the returned tool result and Host constraints to propose a materially different safe action, and continue the objective unless no safe alternative remains.\n"
     );
@@ -123,5 +129,15 @@ internal static class HarnessConversationPromptBuilder
         ? synchronizedThroughVersion ?? checked((conversation?.Version ?? 0) + 2)
         : checked((conversation?.Version ?? 0) + 2)
     );
+  }
+
+  private static string EffortGuidance(string effort)
+  {
+    return effort switch
+    {
+      ModelEffortLevels.High => "Reason carefully about dependencies and risks before acting, then execute the bounded objective.",
+      ModelEffortLevels.Low => "Use established facts, avoid unnecessary analysis, and complete the bounded objective directly.",
+      _ => "Use only the reasoning needed for a reliable result and proceed to action without repeated analysis."
+    };
   }
 }

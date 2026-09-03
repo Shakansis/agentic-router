@@ -313,6 +313,10 @@ internal static class TestOllamaRuntimeDefaults
 
 internal sealed record TestExecutionSettings
 {
+  public int MaxDirectPlanSteps { get; init; } = 5;
+
+  public TestPhaseEffortSettings PhaseEffort { get; init; } = new();
+
   public int DirectCoordinatorPlanningFailuresBeforeHandoff { get; init; } = 5;
 
   public int ResidentCoordinatorPlanningFailuresBeforeFailure { get; init; } = 5;
@@ -336,6 +340,19 @@ internal sealed record TestExecutionSettings
   public int MaxSearchMatches { get; init; } = 200;
 
   public int MaxToolOutputTokens { get; init; } = 2_048;
+}
+
+internal sealed record TestPhaseEffortSettings
+{
+  public string Plan { get; init; } = "high";
+
+  public string Work { get; init; } = "medium";
+
+  public string Verify { get; init; } = "medium";
+
+  public string Complete { get; init; } = "low";
+
+  public string Recovery { get; init; } = "high";
 }
 
 internal sealed record TestSessionHistorySettings

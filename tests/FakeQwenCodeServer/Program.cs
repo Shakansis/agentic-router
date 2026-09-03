@@ -304,6 +304,40 @@ app.MapGet("/session/{sessionId}/events", async (string sessionId, HttpContext c
   }
 });
 
+app.MapPost("/session/{sessionId}/config-option", async (string sessionId, HttpContext context) =>
+{
+  if (!sessions.TryGetValue(sessionId, out var session))
+  {
+    return Results.NotFound();
+  }
+  if (!HasRegisteredClient(context, session))
+  {
+    return InvalidClient(session, context);
+  }
+  using var body = await JsonDocument.ParseAsync(context.Request.Body);
+  var configId = body.RootElement.GetProperty("configId").GetString();
+  var value = body.RootElement.GetProperty("value").GetString();
+  if (!string.Equals(configId, "reasoning_effort", StringComparison.Ordinal)
+    || value is not "low" and not "medium" and not "high")
+  {
+    return Results.BadRequest(new { error = "invalid reasoning effort" });
+  }
+  await WriteMarkerAsync("fake-qwen-effort.json", new
+  {
+    sessionId,
+    clientId = context.Request.Headers["X-Qwen-Client-Id"].ToString(),
+    configId,
+    value
+  });
+  return Results.Json(new
+  {
+    configOptions = new[]
+    {
+      new { id = configId, currentValue = value }
+    }
+  });
+});
+
 app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext context) =>
 {
   if (!sessions.TryGetValue(sessionId, out var session))
@@ -339,6 +373,107 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   if (text.Contains("crash qwen code", StringComparison.Ordinal))
   {
     Environment.Exit(23);
+  }
+  if (text.Contains("SUPERVISION_", StringComparison.Ordinal))
+  {
+    const string criterion = "qwen-supervised.txt contains the exact text visible Qwen activity";
+    if (text.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
+    {
+      await CompleteAsync(
+        session,
+        promptId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "complete_goal",
+          finalAnswer = "Created qwen-supervised.txt and verified the Qwen worker activity."
+        }),
+        includeReadTool: false
+      );
+      return Results.Empty;
+    }
+    if (
+      text.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+      || text.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)
+    )
+    {
+      await CompleteAsync(
+        session,
+        promptId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "accept_work",
+          evidenceRevision = ExtractEvidenceRevision(text),
+          coveredCriteria = new[] { criterion },
+          summary = "The current Host evidence contains the Qwen-created artifact."
+        }),
+        includeReadTool: false
+      );
+      return Results.Empty;
+    }
+    if (text.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal))
+    {
+      await EmitSessionUpdateAsync(session, new
+      {
+        sessionUpdate = "agent_message_chunk",
+        content = new { type = "text", text = "I will inspect the workspace before creating the assigned artifact." }
+      });
+      var inspected = await InvokeHostToolAsync(
+        "list_files",
+        new { path = ".", recursive = false }
+      );
+      if (!inspected.Succeeded)
+      {
+        throw new InvalidOperationException(inspected.Output);
+      }
+      await EmitSessionUpdateAsync(session, new
+      {
+        sessionUpdate = "agent_message_chunk",
+        content = new { type = "text", text = "I will now create qwen-supervised.txt with the required content." }
+      });
+      var created = await InvokeHostToolAsync(
+        "create_files",
+        new
+        {
+          files = new[]
+          {
+            new { path = "qwen-supervised.txt", content = "visible Qwen activity" }
+          }
+        }
+      );
+      if (!created.Succeeded)
+      {
+        throw new InvalidOperationException(created.Output);
+      }
+      await CompleteAsync(
+        session,
+        promptId,
+        "Qwen completed the assigned inspected and verified file creation.",
+        includeReadTool: false
+      );
+      return Results.Empty;
+    }
+    if (text.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
+    {
+      await CompleteAsync(
+        session,
+        promptId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = "Inspect the workspace and create qwen-supervised.txt through Qwen Code.",
+              acceptanceCriteria = new[] { criterion },
+              evidencePaths = new[] { "qwen-supervised.txt" }
+            }
+          }
+        }),
+        includeReadTool: false
+      );
+      return Results.Empty;
+    }
   }
   if (text.Contains("long qwen code", StringComparison.Ordinal))
   {
@@ -782,34 +917,42 @@ string? ValueAfter(string flag)
   return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
 }
 
-async Task CompleteAsync(FakeSession session, string promptId)
+async Task CompleteAsync(
+  FakeSession session,
+  string promptId,
+  string? answerOverride = null,
+  bool includeReadTool = true
+)
 {
   await EmitSessionUpdateAsync(session, new
   {
     sessionUpdate = "agent_thought_chunk",
     content = new { type = "text", text = "Inspecting Qwen Code workspace." }
   });
-  await EmitSessionUpdateAsync(session, new
+  if (includeReadTool)
   {
-    sessionUpdate = "tool_call",
-    toolCallId = "qwen-read-1",
-    title = "Read README.md",
-    kind = "read",
-    status = "in_progress",
-    rawInput = new { file_path = "README.md" },
-    locations = new[] { new { path = "README.md", line = 1 } },
-    _meta = new { toolName = "read_file" }
-  });
-  await EmitSessionUpdateAsync(session, new
-  {
-    sessionUpdate = "tool_call_update",
-    toolCallId = "qwen-read-1",
-    title = "Read README.md",
-    kind = "read",
-    status = "completed",
-    rawOutput = "ok",
-    _meta = new { toolName = "read_file" }
-  });
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "tool_call",
+      toolCallId = "qwen-read-1",
+      title = "Read README.md",
+      kind = "read",
+      status = "in_progress",
+      rawInput = new { file_path = "README.md" },
+      locations = new[] { new { path = "README.md", line = 1 } },
+      _meta = new { toolName = "read_file" }
+    });
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "tool_call_update",
+      toolCallId = "qwen-read-1",
+      title = "Read README.md",
+      kind = "read",
+      status = "completed",
+      rawOutput = "ok",
+      _meta = new { toolName = "read_file" }
+    });
+  }
   await EmitSessionUpdateAsync(session, new
   {
     sessionUpdate = "usage_update",
@@ -819,7 +962,11 @@ async Task CompleteAsync(FakeSession session, string promptId)
   await EmitSessionUpdateAsync(session, new
   {
     sessionUpdate = "agent_message_chunk",
-    content = new { type = "text", text = "Qwen Code streamed with qwen3.8:27b-gpu0" }
+    content = new
+    {
+      type = "text",
+      text = answerOverride ?? "Qwen Code streamed with qwen3.8:27b-gpu0"
+    }
   });
   await EmitAsync(session, "turn_complete", new
   {
@@ -827,6 +974,27 @@ async Task CompleteAsync(FakeSession session, string promptId)
     promptId,
     stopReason = "end_turn"
   });
+}
+
+static long ExtractEvidenceRevision(string prompt)
+{
+  const string marker = "Host evidence revision ";
+  var start = prompt.IndexOf(marker, StringComparison.Ordinal);
+  if (start < 0)
+  {
+    return 0;
+  }
+  start += marker.Length;
+  var end = prompt.IndexOf(':', start);
+  return end > start
+    && long.TryParse(
+      prompt[start..end],
+      System.Globalization.NumberStyles.None,
+      System.Globalization.CultureInfo.InvariantCulture,
+      out var revision
+    )
+      ? revision
+      : 0;
 }
 
 async Task CompleteBenchmarkAsync(FakeSession session, string promptId, string request)

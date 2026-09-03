@@ -274,7 +274,8 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
-    bool toolOutput = true
+    bool toolOutput = true,
+    string? requestedEffort = null
   )
   {
     var stopwatch = Stopwatch.StartNew();
@@ -324,7 +325,8 @@ public sealed class OllamaClient : IOllamaClient
                 tool.Parameters
               )
             )
-          ).ToArray()
+          ).ToArray(),
+        requestedEffort: requestedEffort
       );
       using var response = await SendChatAsync(
         baseUri,
@@ -627,7 +629,8 @@ public sealed class OllamaClient : IOllamaClient
           policy.MainGpu
         ),
         null,
-        images: options.Images
+        images: options.Images,
+        requestedEffort: options.RequestedEffort
       );
       using var response = await SendChatAsync(
         baseUri,
@@ -1267,7 +1270,8 @@ public sealed class OllamaClient : IOllamaClient
         policy.MainGpu
       ),
       null,
-      images: options.Images
+      images: options.Images,
+      requestedEffort: options.RequestedEffort
     );
     using var response = await SendChatAsync(
       baseUri,
@@ -1831,7 +1835,8 @@ public sealed class OllamaClient : IOllamaClient
     OllamaOptions? options,
     int? keepAlive,
     IReadOnlyList<OllamaApiTool>? tools = null,
-    IReadOnlyList<ProviderImagePayload>? images = null
+    IReadOnlyList<ProviderImagePayload>? images = null,
+    string? requestedEffort = null
   )
   {
     var normalizedMessages = NormalizeSystemMessages(
@@ -1873,7 +1878,8 @@ public sealed class OllamaClient : IOllamaClient
       format,
       options,
       keepAlive,
-      tools
+      tools,
+      requestedEffort
     );
   }
 
@@ -1929,7 +1935,8 @@ public sealed class OllamaClient : IOllamaClient
     JsonElement? format,
     OllamaOptions? options,
     int? keepAlive,
-    IReadOnlyList<OllamaApiTool>? tools = null
+    IReadOnlyList<OllamaApiTool>? tools = null,
+    string? requestedEffort = null
   )
   {
     return new OllamaChatRequest(
@@ -1958,7 +1965,8 @@ public sealed class OllamaClient : IOllamaClient
       format,
       options,
       keepAlive,
-      tools
+      tools,
+      requestedEffort
     );
   }
 
@@ -2024,7 +2032,8 @@ public sealed class OllamaClient : IOllamaClient
     JsonElement? Format,
     OllamaOptions? Options,
     [property: JsonPropertyName("keep_alive")] int? KeepAlive,
-    IReadOnlyList<OllamaApiTool>? Tools
+    IReadOnlyList<OllamaApiTool>? Tools,
+    string? Think
   );
 
   private sealed record OllamaOptions(

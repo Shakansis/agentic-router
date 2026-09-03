@@ -742,6 +742,13 @@ public sealed class SettingsValidator : ISettingsValidator
   {
     ValidateRange(
       errors,
+      "execution.maxDirectPlanSteps",
+      execution.MaxDirectPlanSteps,
+      1,
+      ProjectAwarenessSettings.MaximumPlanSteps
+    );
+    ValidateRange(
+      errors,
       "execution.directCoordinatorPlanningFailuresBeforeHandoff",
       execution.DirectCoordinatorPlanningFailuresBeforeHandoff,
       1,
@@ -824,6 +831,56 @@ public sealed class SettingsValidator : ISettingsValidator
       256,
       16_384
     );
+    if (execution.PhaseEffort is null)
+    {
+      AddError(
+        errors,
+        "execution.phaseEffort",
+        "Phase effort settings are required."
+      );
+      return;
+    }
+    ValidateEffort(
+      errors,
+      "execution.phaseEffort.plan",
+      execution.PhaseEffort.Plan
+    );
+    ValidateEffort(
+      errors,
+      "execution.phaseEffort.work",
+      execution.PhaseEffort.Work
+    );
+    ValidateEffort(
+      errors,
+      "execution.phaseEffort.verify",
+      execution.PhaseEffort.Verify
+    );
+    ValidateEffort(
+      errors,
+      "execution.phaseEffort.complete",
+      execution.PhaseEffort.Complete
+    );
+    ValidateEffort(
+      errors,
+      "execution.phaseEffort.recovery",
+      execution.PhaseEffort.Recovery
+    );
+  }
+
+  private static void ValidateEffort(
+    IDictionary<string, List<string>> errors,
+    string field,
+    string? value
+  )
+  {
+    if (!Providers.ModelEffortLevels.IsValid(value))
+    {
+      AddError(
+        errors,
+        field,
+        "Effort must be low, medium, or high."
+      );
+    }
   }
 
   private static void ValidateProjectAwareness(

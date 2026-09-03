@@ -517,13 +517,27 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           parameter_size = "8B",
           quantization_level = "Q4_K_M"
         },
-        capabilities = model is "alpha:latest" or "qwen3.8:27b-gpu0"
+        capabilities = model is "qwen3.8:27b-gpu0"
+          ? new[]
+          {
+            "completion",
+            "vision",
+            "thinking"
+          }
+          : model is "alpha:latest"
           ? new[]
           {
             "completion",
             "vision"
           }
-          : model is "command-r:latest" or "router:latest" or "functiongemma:270m" or "qwen3-coder:30b" or "gpt-oss:20b" or "unused:latest" or "structured:latest"
+          : model is "gpt-oss:20b"
+          ? new[]
+          {
+            "completion",
+            "tools",
+            "thinking"
+          }
+          : model is "command-r:latest" or "router:latest" or "functiongemma:270m" or "qwen3-coder:30b" or "unused:latest" or "structured:latest"
           ? new[]
           {
             "completion",
@@ -643,6 +657,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       )
         ? mainGpuElement.GetInt32()
         : null;
+    var think = document.RootElement.TryGetProperty("think", out var thinkElement)
+      && thinkElement.ValueKind == JsonValueKind.String
+        ? thinkElement.GetString()
+        : null;
     var recorded = new RecordedChatRequest(
       model,
       stream,
@@ -652,7 +670,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       availableTools,
       contextTokens,
       predictTokens,
-      mainGpu
+      mainGpu,
+      think
     );
     _requests.Enqueue(
       recorded
@@ -2187,13 +2206,41 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
     }
+    if (
+      current.Contains(
+        "autonomous watchdog feedback",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+      && !current.Contains(
+        "SUPERVISION_WATCHDOG_RECOVERY_V1",
+        StringComparison.Ordinal
+      )
+      && _generationAttempts.TryAdd("supervision:autonomous-watchdog-delay", 1)
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+    }
+    if (
+      current.Contains(
+        "supervision independent periodic status",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+      && _generationAttempts.TryAdd("supervision:independent-periodic-status", 1)
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(4), cancellationToken);
+    }
     if (TryCreateSupervisionDecision(current, out var supervisionDecision))
     {
       await WriteStreamingToolResponseAsync(
         response,
         model,
         supervisionDecision,
-        null,
+        current.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal)
+          ? "The worker is inspecting the assigned item and its acceptance evidence."
+          : "The supervisor is reviewing the current Host facts before choosing the next bounded step.",
         null,
         0,
         cancellationToken
@@ -2218,9 +2265,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     ).ToArray();
-    var trackedPlanFixture = current.Contains(
-      "specialist tracked plan",
-      StringComparison.OrdinalIgnoreCase
+    var trackedPlanFixture = !messages.Any(message => message.Content.Contains(
+      "SUPERVISION_",
+      StringComparison.Ordinal
+    )) && (
+      current.Contains(
+        "specialist tracked plan",
+        StringComparison.OrdinalIgnoreCase
+      ) || current.Contains(
+        "automatic plan takeover",
+        StringComparison.OrdinalIgnoreCase
+      ) || current.Contains(
+        "automatic resource timeout takeover",
+        StringComparison.OrdinalIgnoreCase
+      )
     );
     var hasPlan = !trackedPlanFixture || results.Any(
       message => (
@@ -2276,6 +2334,27 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var hasResult = actionResults.Length > 0
       || activeMessages.Any(message => message.Content.StartsWith("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal)
         && message.Content.Contains(":completed:", StringComparison.Ordinal));
+    if (
+      trackedPlanFixture
+      &&
+      actionResults.Length > 0
+      && current.Contains(
+        "automatic resource timeout takeover",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      await WriteJsonAsync(
+        response,
+        HttpStatusCode.GatewayTimeout,
+        new
+        {
+          error = "The operation timed out after the verified direct effect."
+        },
+        cancellationToken
+      );
+      return;
+    }
     var allContent = string.Join(
       "\n",
       new[]
@@ -2395,7 +2474,89 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var planOnly = availableTools.Count == 1
       && availableTools[0] == "create_execution_plan";
 
-    if (current.Contains(
+    if (trackedPlanFixture && current.Contains(
+      "automatic resource timeout takeover",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      var acceptedPlan = results.Any(message => message.ToolName == "create_execution_plan"
+        || message.Content.Contains("Tool: create_execution_plan", StringComparison.Ordinal));
+      plan = !acceptedPlan
+        ? new
+        {
+          tool = (string?)"create_execution_plan",
+          arguments = (object)new
+          {
+            objective = "Create and verify an artifact before the provider timeout",
+            steps = new[]
+            {
+              new { title = "Create the verified artifact" },
+              new { title = "Finish after provider recovery" }
+            }
+          },
+          explanation = "Keep the initial direct plan below the automatic supervision threshold."
+        }
+        : new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = "hello.txt",
+            content = "hello world today",
+            stepId = "step-1"
+          },
+          explanation = "Create a verified effect before the simulated provider timeout."
+        };
+    }
+    else if (trackedPlanFixture && current.Contains(
+      "late automatic plan takeover",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      var acceptedPlan = results.Any(message => message.ToolName == "create_execution_plan"
+        || message.Content.Contains("Tool: create_execution_plan", StringComparison.Ordinal));
+      plan = !acceptedPlan
+        ? new
+        {
+          tool = (string?)"create_execution_plan",
+          arguments = (object)new
+          {
+            objective = "Create an initial artifact, then expand the discovered work",
+            steps = new[]
+            {
+              new { title = "Create the initial verified artifact" },
+              new { title = "Replan the remaining discovered work" }
+            }
+          },
+          explanation = "Start with a direct plan below the configured supervision threshold."
+        }
+        : actionResults.Length == 0
+          ? new
+          {
+            tool = (string?)"create_file",
+            arguments = (object)new
+            {
+              path = "hello.txt",
+              content = "hello world today",
+              stepId = "step-1"
+            },
+            explanation = "Create one verified effect before the broader work is discovered."
+          }
+          : new
+          {
+            tool = (string?)"revise_execution_plan",
+            arguments = (object)new
+            {
+              objective = "Break the newly discovered remaining work into bounded items",
+              steps = Enumerable.Range(1, 6).Select(index => new
+              {
+                title = $"Complete discovered bounded item {index}"
+              }).ToArray()
+            },
+            explanation = "The verified first effect revealed six remaining independently verifiable items."
+          };
+    }
+    else if (current.Contains(
       "chronological thinking stream",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -3588,7 +3749,18 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     var thinking = toolCalls is null
       ? null
-      : $"I will use the Host tool {toolName} and inspect its authoritative result.";
+      : current.Contains(
+        "long supervision reasoning stream",
+        StringComparison.OrdinalIgnoreCase
+      )
+        ? "SUPERVISION_LONG_REASONING_FIXTURE|" + string.Join(
+          '|',
+          Enumerable.Range(1, 30).Select(index =>
+            $"Reasoning segment {index:00}: "
+              + new string((char)('a' + index % 26), 340)
+          )
+        )
+        : $"I will use the Host tool {toolName} and inspect its authoritative result.";
 
     if (stream)
     {
@@ -3778,6 +3950,29 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string objective
   )
   {
+    if (objective.Contains(
+      "automatic plan takeover",
+      StringComparison.OrdinalIgnoreCase
+    ) && !objective.Contains(
+      "late automatic plan takeover",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_execution_plan",
+        arguments = new
+        {
+          objective = "Complete the automatic supervision takeover fixture",
+          steps = Enumerable.Range(1, 6).Select(index => new
+          {
+            title = $"Complete independently verifiable item {index}"
+          }).ToArray()
+        },
+        explanation = "Expose six bounded steps so the Host can promote Auto to supervised execution."
+      };
+    }
+
     if (objective.Contains(
       "specialist tracked plan",
       StringComparison.OrdinalIgnoreCase
@@ -4401,6 +4596,54 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       StringComparison.Ordinal
     ))
     {
+      if (current.Contains(
+        "autonomous explicit delete",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "delete_paths",
+          arguments = new
+          {
+            paths = new[] { "obsolete.txt" }
+          },
+          explanation = "Delete the bounded obsolete artifact under autonomous Host approval."
+        };
+      }
+      if (current.Contains(
+        "autonomous hard boundary",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "delete_paths",
+          arguments = new
+          {
+            paths = new[] { "../outside-autonomous.txt" }
+          },
+          explanation = "Attempt the fixture escape so the Host proves the hard boundary remains enforced."
+        };
+      }
+
+      if (current.Contains(
+        "automatic takeover inspect preserved effect",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "create_file",
+          arguments = new
+          {
+            path = "takeover-reconciled.txt",
+            content = "preserved hello.txt verified by automatic supervision"
+          },
+          explanation = "Record bounded reconciliation evidence without overwriting the preserved direct effect."
+        };
+      }
+
       return new
       {
         tool = "create_file",
@@ -5016,8 +5259,152 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   {
     const string criterion =
       "hello.txt must contain the exact text hello world today.";
+    const string autonomousDeleteCriterion = "obsolete.txt must be absent.";
+    var autonomousDelete = current.Contains(
+      "autonomous explicit delete",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var autonomousBoundary = current.Contains(
+      "autonomous hard boundary",
+      StringComparison.OrdinalIgnoreCase
+    );
+    if (
+      autonomousBoundary
+      && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = "autonomous hard boundary delete ../outside-autonomous.txt",
+              acceptanceCriteria = new[] { "The requested external deletion must not bypass the Host boundary." },
+              evidencePaths = Array.Empty<string>()
+            }
+          }
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+    if (
+      autonomousDelete
+      && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = "autonomous explicit delete obsolete.txt",
+              acceptanceCriteria = new[] { autonomousDeleteCriterion },
+              evidencePaths = new[] { "obsolete.txt" }
+            }
+          }
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+    if (
+      autonomousDelete
+      && current.Contains("SUPERVISION_AUTONOMOUS_DECISION_V1", StringComparison.Ordinal)
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "accept_work",
+          evidenceRevision = ExtractSupervisionEvidenceRevision(current),
+          coveredCriteria = new[] { autonomousDeleteCriterion },
+          summary = "The Host evidence confirms the obsolete artifact is absent."
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+    if (
+      autonomousDelete
+      && (
+        current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+        || current.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)
+      )
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "await_user",
+          summary = "Ask whether the obsolete artifact should remain deleted."
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+    if (
+      autonomousDelete
+      && current.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal)
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "complete_goal",
+          finalAnswer = "Deleted obsolete.txt and verified that the artifact is absent."
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
     if (current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
     {
+      if (current.Contains(
+        "supervision fourteen evidence paths",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "dispatch_work",
+            items = new[]
+            {
+              new
+              {
+                objective = "supervision fourteen evidence paths create file hello.txt with content hello world today",
+                acceptanceCriteria = new[] { criterion },
+                evidencePaths = new[]
+                {
+                  "hello.txt",
+                  "evidence-02.txt",
+                  "evidence-03.txt",
+                  "evidence-04.txt",
+                  "evidence-05.txt",
+                  "evidence-06.txt",
+                  "evidence-07.txt",
+                  "evidence-08.txt",
+                  "evidence-09.txt",
+                  "evidence-10.txt",
+                  "evidence-11.txt",
+                  "evidence-12.txt",
+                  "evidence-13.txt",
+                  "evidence-14.txt"
+                }
+              }
+            }
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
       if (current.Contains(
         "malformed supervision decision",
         StringComparison.OrdinalIgnoreCase
@@ -5035,11 +5422,19 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             new
             {
               objective = current.Contains(
-                "no progress supervision",
-                StringComparison.OrdinalIgnoreCase
+                "HOST_AUTO_SUPERVISION_TAKEOVER_V1",
+                StringComparison.Ordinal
+              ) && current.Contains(
+                "\"AfterVerifiedMutation\":true",
+                StringComparison.Ordinal
               )
-                ? "no progress supervision create file hello.txt with content hello world today"
+                ? "automatic takeover inspect preserved effect in hello.txt"
                 : current.Contains(
+                  "no progress supervision",
+                  StringComparison.OrdinalIgnoreCase
+                )
+                  ? "no progress supervision create file hello.txt with content hello world today"
+                  : current.Contains(
                   "supervision restart boundary",
                   StringComparison.OrdinalIgnoreCase
                 )
@@ -5049,6 +5444,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
                     StringComparison.OrdinalIgnoreCase
                   )
                     ? "supervision stale boundary create file hello.txt with content hello world today"
+                    : current.Contains(
+                      "compact supervisor plan title",
+                      StringComparison.OrdinalIgnoreCase
+                    )
+                      ? "Claude Code-3 (Jogo da Velha): criar o jogo em hello.txt com o conteúdo hello world today; long supervision reasoning stream with deliberately verbose implementation details that belong in the worker objective, not in the visible plan bullet"
                   : "create file hello.txt with content hello world today",
               acceptanceCriteria = new[] { criterion },
               evidencePaths = new[] { "hello.txt" }
@@ -5642,37 +6042,38 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       thinking
     ))
     {
-      var split = Math.Max(
-        1,
-        thinking.Length / 2
-      );
-      await WriteToolChunkAsync(
-        response,
-        model,
-        string.Empty,
-        thinking[..split],
-        null,
-        false,
-        cancellationToken
-      );
-
-      if (thinkingDelayMilliseconds > 0)
+      var thinkingChunks = thinking.StartsWith(
+        "SUPERVISION_LONG_REASONING_FIXTURE|",
+        StringComparison.Ordinal
+      )
+        ? thinking.Split('|', StringSplitOptions.RemoveEmptyEntries)[1..]
+        :
+        [
+          thinking[..Math.Max(1, thinking.Length / 2)],
+          thinking[Math.Max(1, thinking.Length / 2)..]
+        ];
+      for (var index = 0; index < thinkingChunks.Length; index++)
       {
-        await Task.Delay(
-          thinkingDelayMilliseconds,
+        await WriteToolChunkAsync(
+          response,
+          model,
+          string.Empty,
+          thinkingChunks[index],
+          null,
+          false,
           cancellationToken
         );
+        if (
+          thinkingDelayMilliseconds > 0
+          && index < thinkingChunks.Length - 1
+        )
+        {
+          await Task.Delay(
+            thinkingDelayMilliseconds,
+            cancellationToken
+          );
+        }
       }
-
-      await WriteToolChunkAsync(
-        response,
-        model,
-        string.Empty,
-        thinking[split..],
-        null,
-        false,
-        cancellationToken
-      );
     }
 
     await WriteToolChunkAsync(
@@ -6139,7 +6540,8 @@ internal sealed record RecordedChatRequest(
   IReadOnlyList<string> AvailableTools,
   int? ContextTokens,
   int? PredictTokens,
-  int? MainGpu
+  int? MainGpu,
+  string? Think
 );
 
 internal sealed record RecordedMessage(

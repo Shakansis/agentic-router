@@ -260,6 +260,30 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
       await EnsureSuccessAsync(eventsResponse, "qwen-code-event-stream", cancellationToken);
 
+      if (request.ModelSupportsReasoning)
+      {
+        await SendAsync(
+          HttpMethod.Post,
+          $"session/{EncodePath(session.SessionId)}/config-option",
+          new
+          {
+            configId = "reasoning_effort",
+            value = request.RequestedEffort
+          },
+          session.ClientId,
+          cancellationToken
+        );
+      }
+      yield return Event(
+        request.ModelSupportsReasoning
+          ? "effort.applied"
+          : "effort.prompt-guided",
+        active,
+        message: request.ModelSupportsReasoning
+          ? $"Applied {request.RequestedEffort} effort through the Qwen Code reasoning_effort session option."
+          : $"The selected model does not advertise reasoning support; {request.RequestedEffort} effort is prompt-guided for this Qwen Code turn."
+      );
+
       var prompt = await SendAsync(
         HttpMethod.Post,
         $"session/{EncodePath(session.SessionId)}/prompt",

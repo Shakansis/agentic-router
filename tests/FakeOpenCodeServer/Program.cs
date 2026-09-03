@@ -29,6 +29,30 @@ var password = Environment.GetEnvironmentVariable("OPENCODE_SERVER_PASSWORD") ??
 var runtime = Directory.GetParent(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? string.Empty)?.FullName;
 if (runtime is not null)
 {
+  var configPath = Path.Combine(runtime, "config", "opencode", "opencode.json");
+  using var config = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+  var configuredModel = config.RootElement.GetProperty("provider")
+    .GetProperty("agentic-router-ollama")
+    .GetProperty("models")
+    .EnumerateObject()
+    .Single()
+    .Value;
+  var variants = configuredModel.GetProperty("variants");
+  var validVariants = variants.ValueKind == JsonValueKind.Object
+    && new[] { "low", "medium", "high" }.All(effort =>
+      variants.TryGetProperty(effort, out var variant)
+      && string.Equals(
+        variant.GetProperty("body").GetProperty("reasoning_effort").GetString(),
+        effort,
+        StringComparison.Ordinal
+      )
+    );
+  if (!validVariants)
+  {
+    Console.Error.WriteLine("OpenCode effort variants must be an object keyed by effort level.");
+    Environment.ExitCode = 2;
+    return;
+  }
   Directory.CreateDirectory(runtime);
   await File.WriteAllTextAsync(
     Path.Combine(runtime, "fake-opencode-process-id.txt"),
@@ -109,6 +133,16 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
     ?? throw new InvalidOperationException("OpenCode prompt omitted modelID.");
   var provider = body.RootElement.GetProperty("model").GetProperty("providerID").GetString()
     ?? throw new InvalidOperationException("OpenCode prompt omitted providerID.");
+  var variant = body.RootElement.TryGetProperty("variant", out var variantElement)
+    && variantElement.ValueKind == JsonValueKind.String
+      ? variantElement.GetString()
+      : null;
+  if (variant is not null and not "low" and not "medium" and not "high")
+  {
+    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+    await context.Response.CompleteAsync();
+    return;
+  }
   prompts[sessionId] = text;
   selections[sessionId] = new ModelSelection(provider, model);
   if (runtime is not null)
@@ -120,6 +154,7 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
         directory = context.Request.Query["directory"].ToString(),
         model = body.RootElement.GetProperty("model").GetProperty("modelID").GetString(),
         provider = body.RootElement.GetProperty("model").GetProperty("providerID").GetString(),
+        variant,
         sessionId,
         text
       })
@@ -140,6 +175,131 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
     },
     time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
   });
+  if (text.Contains("SUPERVISION_", StringComparison.Ordinal))
+  {
+    const string criterion = "opencode-supervised.txt contains the exact text visible native edit";
+    if (text.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
+    {
+      await CompleteAsync(
+        sessionId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "complete_goal",
+          finalAnswer = "Created opencode-supervised.txt and verified the native OpenCode edit."
+        }),
+        includeReadTool: false
+      );
+      return;
+    }
+    if (
+      text.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+      || text.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)
+    )
+    {
+      await CompleteAsync(
+        sessionId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "accept_work",
+          evidenceRevision = ExtractEvidenceRevision(text),
+          coveredCriteria = new[] { criterion },
+          summary = "The current Host evidence contains the native OpenCode edit."
+        }),
+        includeReadTool: false
+      );
+      return;
+    }
+    if (text.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal))
+    {
+      var directory = context.Request.Query["directory"].ToString();
+      const string relativePath = "opencode-supervised.txt";
+      await EmitAsync("message.part.updated", new
+      {
+        sessionID = sessionId,
+        part = new
+        {
+          id = $"prt_supervision_commentary_{sessionId}",
+          sessionID = sessionId,
+          type = "text",
+          text = ""
+        },
+        time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+      });
+      await EmitAsync("message.part.delta", new
+      {
+        sessionID = sessionId,
+        messageID = $"msg_supervision_commentary_{sessionId}",
+        partID = $"prt_supervision_commentary_{sessionId}",
+        field = "text",
+        delta = $"I will now edit {relativePath} with the required content."
+      });
+      await EmitAsync("message.part.updated", new
+      {
+        sessionID = sessionId,
+        part = new
+        {
+          id = $"prt_supervision_edit_{sessionId}",
+          sessionID = sessionId,
+          type = "tool",
+          callID = $"call_supervision_edit_{sessionId}",
+          tool = "edit",
+          state = new { status = "running", input = new { filePath = relativePath } }
+        },
+        time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+      });
+      await File.WriteAllTextAsync(
+        Path.Combine(directory, relativePath),
+        "visible native edit"
+      );
+      await EmitAsync("message.part.updated", new
+      {
+        sessionID = sessionId,
+        part = new
+        {
+          id = $"prt_supervision_edit_{sessionId}",
+          sessionID = sessionId,
+          type = "tool",
+          callID = $"call_supervision_edit_{sessionId}",
+          tool = "edit",
+          state = new
+          {
+            status = "completed",
+            output = "updated",
+            title = $"edit: {relativePath}",
+            metadata = new { }
+          }
+        },
+        time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+      });
+      await CompleteAsync(
+        sessionId,
+        "Native OpenCode edit completed for the assigned work item.",
+        includeReadTool: false
+      );
+      return;
+    }
+    if (text.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
+    {
+      await CompleteAsync(
+        sessionId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = "Create opencode-supervised.txt through a native OpenCode edit.",
+              acceptanceCriteria = new[] { criterion },
+              evidencePaths = new[] { "opencode-supervised.txt" }
+            }
+          }
+        }),
+        includeReadTool: false
+      );
+      return;
+    }
+  }
   if (text.Contains("Benchmark test: FS-", StringComparison.Ordinal))
   {
     var directory = context.Request.Query["directory"].ToString();
@@ -682,10 +842,14 @@ app.MapPost("/permission/{requestId}/reply", async (string requestId, HttpContex
 
 await app.RunAsync();
 
-async Task CompleteAsync(string sessionId)
+async Task CompleteAsync(
+  string sessionId,
+  string? answerOverride = null,
+  bool includeReadTool = true
+)
 {
   const string reasoning = "Inspecting OpenCode workspace. Internal reasoning stays in Thinking.";
-  const string answer = "OpenCode streamed with qwen3.8:27b-gpu0";
+  var answer = answerOverride ?? "OpenCode streamed with qwen3.8:27b-gpu0";
   await EmitAsync("message.part.updated", new
   {
     sessionID = sessionId,
@@ -706,34 +870,37 @@ async Task CompleteAsync(string sessionId)
     part = new { id = "prt_reason", sessionID = sessionId, type = "reasoning", text = reasoning },
     time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
   });
-  await EmitAsync("message.part.updated", new
+  if (includeReadTool)
   {
-    sessionID = sessionId,
-    part = new
+    await EmitAsync("message.part.updated", new
     {
-      id = "prt_tool",
       sessionID = sessionId,
-      type = "tool",
-      callID = "call_read",
-      tool = "read",
-      state = new { status = "running", input = new { path = "README.md" } }
-    },
-    time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-  });
-  await EmitAsync("message.part.updated", new
-  {
-    sessionID = sessionId,
-    part = new
+      part = new
+      {
+        id = "prt_tool",
+        sessionID = sessionId,
+        type = "tool",
+        callID = "call_read",
+        tool = "read",
+        state = new { status = "running", input = new { path = "README.md" } }
+      },
+      time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+    });
+    await EmitAsync("message.part.updated", new
     {
-      id = "prt_tool",
       sessionID = sessionId,
-      type = "tool",
-      callID = "call_read",
-      tool = "read",
-      state = new { status = "completed", output = "ok", title = "Read README.md", metadata = new { } }
-    },
-    time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-  });
+      part = new
+      {
+        id = "prt_tool",
+        sessionID = sessionId,
+        type = "tool",
+        callID = "call_read",
+        tool = "read",
+        state = new { status = "completed", output = "ok", title = "Read README.md", metadata = new { } }
+      },
+      time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+    });
+  }
   await EmitAsync("message.part.updated", new
   {
     sessionID = sessionId,
@@ -781,6 +948,27 @@ async Task CompleteAsync(string sessionId)
   });
   await EmitAsync("session.diff", new { sessionID = sessionId, diff = Array.Empty<object>() });
   await EmitAsync("session.idle", new { sessionID = sessionId });
+}
+
+static long ExtractEvidenceRevision(string prompt)
+{
+  const string marker = "Host evidence revision ";
+  var start = prompt.IndexOf(marker, StringComparison.Ordinal);
+  if (start < 0)
+  {
+    return 0;
+  }
+  start += marker.Length;
+  var end = prompt.IndexOf(':', start);
+  return end > start
+    && long.TryParse(
+      prompt[start..end],
+      System.Globalization.NumberStyles.None,
+      System.Globalization.CultureInfo.InvariantCulture,
+      out var revision
+    )
+      ? revision
+      : 0;
 }
 
 async Task CompleteBenchmarkAsync(string sessionId, string answer)

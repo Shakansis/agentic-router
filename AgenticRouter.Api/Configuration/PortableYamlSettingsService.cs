@@ -306,6 +306,42 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "max_tool_output_tokens",
       settings.Execution.MaxToolOutputTokens
     );
+    Scalar(
+      yaml,
+      1,
+      "max_direct_plan_steps",
+      settings.Execution.MaxDirectPlanSteps
+    );
+    Scalar(
+      yaml,
+      1,
+      "plan_effort",
+      settings.Execution.PhaseEffort.Plan
+    );
+    Scalar(
+      yaml,
+      1,
+      "work_effort",
+      settings.Execution.PhaseEffort.Work
+    );
+    Scalar(
+      yaml,
+      1,
+      "verify_effort",
+      settings.Execution.PhaseEffort.Verify
+    );
+    Scalar(
+      yaml,
+      1,
+      "complete_effort",
+      settings.Execution.PhaseEffort.Complete
+    );
+    Scalar(
+      yaml,
+      1,
+      "recovery_effort",
+      settings.Execution.PhaseEffort.Recovery
+    );
     yaml.AppendLine(
       "project_awareness:"
     );
@@ -1598,7 +1634,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       return settings;
     }
 
-    var keys = new[]
+    var numericKeys = new[]
     {
       "direct_planning_failures_before_handoff",
       "resident_planning_failures_before_failure",
@@ -1611,16 +1647,25 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "max_rollback_bytes_per_session",
       "max_search_files",
       "max_search_matches",
-      "max_tool_output_tokens"
+      "max_tool_output_tokens",
+      "max_direct_plan_steps"
+    };
+    var effortKeys = new[]
+    {
+      "plan_effort",
+      "work_effort",
+      "verify_effort",
+      "complete_effort",
+      "recovery_effort"
     };
     ValidateKeys(
       section,
-      keys,
+      numericKeys.Concat(effortKeys).ToArray(),
       "execution",
       errors
     );
     var current = settings.Execution;
-    var values = keys.Select(
+    var values = numericKeys.Select(
       (
         key,
         index
@@ -1650,7 +1695,46 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         MaxRollbackBytesPerSession = values[8],
         MaxSearchFiles = values[9],
         MaxSearchMatches = values[10],
-        MaxToolOutputTokens = values[11]
+        MaxToolOutputTokens = values[11],
+        MaxDirectPlanSteps = values[12],
+        PhaseEffort = new PhaseEffortSettings
+        {
+          Plan = ReadString(
+            section,
+            effortKeys[0],
+            current.PhaseEffort.Plan,
+            "execution.plan_effort",
+            errors
+          ),
+          Work = ReadString(
+            section,
+            effortKeys[1],
+            current.PhaseEffort.Work,
+            "execution.work_effort",
+            errors
+          ),
+          Verify = ReadString(
+            section,
+            effortKeys[2],
+            current.PhaseEffort.Verify,
+            "execution.verify_effort",
+            errors
+          ),
+          Complete = ReadString(
+            section,
+            effortKeys[3],
+            current.PhaseEffort.Complete,
+            "execution.complete_effort",
+            errors
+          ),
+          Recovery = ReadString(
+            section,
+            effortKeys[4],
+            current.PhaseEffort.Recovery,
+            "execution.recovery_effort",
+            errors
+          )
+        }
       }
     };
   }
@@ -1673,7 +1757,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       8 => settings.MaxRollbackBytesPerSession,
       9 => settings.MaxSearchFiles,
       10 => settings.MaxSearchMatches,
-      _ => settings.MaxToolOutputTokens
+      11 => settings.MaxToolOutputTokens,
+      _ => settings.MaxDirectPlanSteps
     };
   }
 

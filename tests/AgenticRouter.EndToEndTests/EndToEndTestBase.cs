@@ -73,6 +73,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
         interactionMode = "execute",
         harness = "codex",
         approvalPolicy = "auto",
+        executionStrategy = "direct",
         browserSessionId
       }
     );
@@ -98,6 +99,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
         interactionMode = "execute",
         harness,
         approvalPolicy = "auto",
+        executionStrategy = "direct",
         browserSessionId
       }
     );

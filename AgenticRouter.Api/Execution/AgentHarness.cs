@@ -4,8 +4,10 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using AgenticRouter.Api.Platform;
+using AgenticRouter.Api.Providers;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -273,18 +275,24 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         );
       }
 
+      var turnParameters = new Dictionary<string, object?>
+      {
+        ["threadId"] = threadId,
+        ["input"] = CreateTurnInput(turnPrompt.Text, request.Images),
+        ["cwd"] = request.WorkingDirectory,
+        ["approvalPolicy"] = request.ApprovalPolicy == "ask" ? "on-request" : "never",
+        ["permissions"] = PermissionProfileId,
+        ["runtimeWorkspaceRoots"] = new[] { request.WorkingDirectory },
+        ["model"] = request.Model
+      };
+      if (request.ModelSupportsReasoning)
+      {
+        turnParameters["effort"] = request.RequestedEffort;
+      }
+
       var turnResult = await SendRequestAsync(
         "turn/start",
-        new
-        {
-          threadId,
-          input = CreateTurnInput(turnPrompt.Text, request.Images),
-          cwd = request.WorkingDirectory,
-          approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
-          permissions = PermissionProfileId,
-          runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
-          model = request.Model
-        },
+        turnParameters,
         _options.StartupTimeout,
         cancellationToken
       );
@@ -299,6 +307,18 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         new HarnessEvent(
           "turn.started",
           $"Codex turn {active.TurnId} started."
+        ),
+        turnResult
+      );
+      yield return CreateEvent(
+        active,
+        new HarnessEvent(
+          request.ModelSupportsReasoning
+            ? "effort.applied"
+            : "effort.prompt-guided",
+          request.ModelSupportsReasoning
+            ? $"Applied {request.RequestedEffort} effort through Codex turn/start."
+            : $"Codex is using prompt guidance for {request.RequestedEffort} effort because the selected model does not expose reasoning control."
         ),
         turnResult
       );
@@ -1562,13 +1582,15 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     var metadata = new CodexLocalModelMetadata(
       request.Model,
       contextConfiguration.ContextWindowTokens,
-      supportsImages
+      supportsImages,
+      request.ModelSupportsReasoning
     );
     if (_knownModelMetadata.TryGetValue(request.Model, out var current))
     {
       metadata = metadata with
       {
-        SupportsImages = current.SupportsImages || metadata.SupportsImages
+        SupportsImages = current.SupportsImages || metadata.SupportsImages,
+        SupportsReasoning = current.SupportsReasoning || metadata.SupportsReasoning
       };
       if (metadata == current)
       {
@@ -1589,7 +1611,23 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         slug = model.Slug,
         display_name = model.Slug,
         description = "Agentic Router local Ollama model.",
-        supported_reasoning_levels = Array.Empty<object>(),
+        default_reasoning_level = model.SupportsReasoning
+          ? ModelEffortLevels.Medium
+          : null,
+        supported_reasoning_levels = (model.SupportsReasoning
+          ? ModelEffortLevels.All
+          : Array.Empty<string>()).Select(
+          effort => new
+          {
+            effort,
+            description = effort switch
+            {
+              ModelEffortLevels.Low => "Fast execution with lighter reasoning",
+              ModelEffortLevels.High => "Greater reasoning depth for complex phases",
+              _ => "Balanced reasoning for ordinary work"
+            }
+          }
+        ).ToArray(),
         shell_type = "shell_command",
         visibility = "list",
         supported_in_api = true,
@@ -1614,7 +1652,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       new { models },
       new JsonSerializerOptions
       {
-        WriteIndented = true
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
       }
     ) + "\n";
     if (
@@ -2191,7 +2230,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   private sealed record CodexLocalModelMetadata(
     string Slug,
     int ContextWindowTokens,
-    bool SupportsImages
+    bool SupportsImages,
+    bool SupportsReasoning
   );
 
   private sealed record CodexTurnFailure(

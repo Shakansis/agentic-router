@@ -3289,6 +3289,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsTrue(first.Any(item =>
       item["type"]!.GetValue<string>() == "harness.claude-code-native-event-preserved"
     ));
+    Assert.IsTrue(first.Any(item =>
+      item["type"]!.GetValue<string>() == "harness.claude-code-effort.prompt-guided"
+      && item["message"]!.GetValue<string>().Contains("medium effort", StringComparison.Ordinal)
+    ));
     var exactUsage = first.Last(item =>
       item["type"]!.GetValue<string>() == "context.usage"
       && item["contextUsage"]!["accuracy"]!.GetValue<string>() == "exact"
@@ -3319,6 +3323,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         .EnumerateArray().Select(item => item.GetString()).ToArray();
       CollectionAssert.Contains(arguments, "stream-json");
       CollectionAssert.Contains(arguments, "--strict-mcp-config");
+      CollectionAssert.DoesNotContain(arguments, "--effort");
       CollectionAssert.Contains(arguments, "Read,Glob,Grep,Edit,Write,WebSearch,WebFetch");
       Assert.DoesNotContain("Bash", arguments);
       Assert.IsTrue(arguments.Any(argument => argument?.Contains(
@@ -3333,6 +3338,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         StringComparison.Ordinal
       ));
     }
+    StringAssert.Contains(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-claude-prompt.txt")),
+      "Host effort target for this turn: medium"
+    );
 
     var second = await ExecuteHarnessStreamAsync(
       HarnessIds.ClaudeCode,
@@ -3735,6 +3744,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToContainTextAsync("exact");
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(assistant.Locator("[data-event-type=\"harness.opencode-effort.applied\"]"))
+      .ToContainTextAsync("medium effort");
     var capabilityProjection = assistant.Locator(
       "[data-event-type=\"execution-capability-profile-projected\"]"
     );
@@ -3780,10 +3791,33 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     StringAssert.Contains(config, "\"websearch\": \"allow\"");
     StringAssert.Contains(config, "\"agentic_router\"");
     StringAssert.Contains(config, "\"agentic_router_*\": \"allow\"");
+    StringAssert.Contains(config, "\"reasoning_effort\": \"medium\"");
+    using (var configDocument = JsonDocument.Parse(config))
+    {
+      var variants = configDocument.RootElement.GetProperty("provider")
+        .GetProperty("agentic-router-ollama")
+        .GetProperty("models")
+        .GetProperty("qwen3.8:27b-gpu0")
+        .GetProperty("variants");
+      Assert.AreEqual(JsonValueKind.Object, variants.ValueKind);
+      CollectionAssert.AreEqual(
+        new[] { "low", "medium", "high" },
+        variants.EnumerateObject().Select(item => item.Name).ToArray()
+      );
+      foreach (var effort in new[] { "low", "medium", "high" })
+      {
+        Assert.AreEqual(
+          effort,
+          variants.GetProperty(effort).GetProperty("body")
+            .GetProperty("reasoning_effort").GetString()
+        );
+      }
+    }
 
     using var firstPrompt = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-opencode-prompt.json"))
     );
+    Assert.AreEqual("medium", firstPrompt.RootElement.GetProperty("variant").GetString());
     var firstSessionId = firstPrompt.RootElement.GetProperty("sessionId").GetString();
     await SendMessageAsync("opencode second deterministic turn");
     using var secondPrompt = JsonDocument.Parse(
@@ -4134,6 +4168,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       );
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(assistant.Locator("[data-event-type=\"harness.qwen-code-effort.applied\"]"))
+      .ToContainTextAsync("medium effort");
     var capabilityProjection = assistant.Locator(
       "[data-event-type=\"execution-capability-profile-projected\"]"
     );
@@ -4275,6 +4311,17 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       settings.RootElement.GetProperty("memory")
         .GetProperty("enableManagedAutoMemory").GetBoolean()
     );
+    using (var effort = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-effort.json"))
+    ))
+    {
+      Assert.AreEqual("reasoning_effort", effort.RootElement.GetProperty("configId").GetString());
+      Assert.AreEqual("medium", effort.RootElement.GetProperty("value").GetString());
+      Assert.AreEqual(
+        assignedClientId,
+        effort.RootElement.GetProperty("clientId").GetString()
+      );
+    }
 
     using var firstPrompt = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"))
@@ -4874,7 +4921,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       ),
       "Known Qwen state updates must not leak into the activity timeline."
     );
-    Assert.IsLessThan(
+    Assert.IsLessThanOrEqualTo(
       40,
       events.Count(),
       "The Host stream must stay bounded even when Qwen emits thousands of frames."
@@ -4930,6 +4977,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(
       firstAssistant.Locator(".activity")
     ).ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(firstAssistant.Locator("[data-event-type=\"harness.codex-effort.prompt-guided\"]"))
+      .ToContainTextAsync("medium effort");
     var capabilityProjection = firstAssistant.Locator(
       "[data-event-type=\"execution-capability-profile-projected\"]"
     );
@@ -5023,6 +5072,19 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Assert.AreEqual(32_768, alphaMetadata.GetProperty("max_context_window").GetInt32());
       Assert.AreEqual(100, alphaMetadata.GetProperty("effective_context_window_percent").GetInt32());
       Assert.AreEqual("shell_command", alphaMetadata.GetProperty("shell_type").GetString());
+      Assert.IsFalse(alphaMetadata.TryGetProperty("default_reasoning_level", out _));
+      Assert.HasCount(
+        0,
+        alphaMetadata.GetProperty("supported_reasoning_levels").EnumerateArray().ToArray()
+      );
+    }
+    using (var turnRequest = JsonDocument.Parse(
+      await File.ReadAllTextAsync(
+        Path.Combine(codexRuntime, "fake-app-server-turn-request.json")
+      )
+    ))
+    {
+      Assert.AreEqual(JsonValueKind.Null, turnRequest.RootElement.GetProperty("effort").ValueKind);
     }
     var codexTurnInput = await File.ReadAllTextAsync(
       Path.Combine(codexRuntime, "fake-app-server-turn-input.txt")
@@ -5063,6 +5125,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
     Assert.AreEqual("response.completed", events.Single(IsTerminalStreamEvent)["type"]!.GetValue<string>());
+    Assert.IsTrue(events.Any(item =>
+      item["type"]?.GetValue<string>() == "harness.codex-effort.applied"
+      && item["message"]?.GetValue<string>().Contains("medium effort", StringComparison.Ordinal) == true
+    ));
     var codexRuntime = Path.Combine(_environment.DataDirectory, "codex-runtime");
     using var threadRequest = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(codexRuntime, "fake-app-server-thread-request.json"))
@@ -5085,12 +5151,22 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual(resolvedContext, metadata.GetProperty("max_context_window").GetInt32());
     Assert.AreEqual(100, metadata.GetProperty("effective_context_window_percent").GetInt32());
     Assert.IsTrue(metadata.GetProperty("supported_in_api").GetBoolean());
+    Assert.AreEqual("medium", metadata.GetProperty("default_reasoning_level").GetString());
+    CollectionAssert.AreEqual(
+      new[] { "low", "medium", "high" },
+      metadata.GetProperty("supported_reasoning_levels").EnumerateArray()
+        .Select(item => item.GetProperty("effort").GetString()).ToArray()
+    );
     CollectionAssert.Contains(
       metadata.GetProperty("input_modalities").EnumerateArray()
         .Select(item => item.GetString())
         .ToArray(),
       "text"
     );
+    using var turnRequest = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(codexRuntime, "fake-app-server-turn-request.json"))
+    );
+    Assert.AreEqual("medium", turnRequest.RootElement.GetProperty("effort").GetString());
   }
 
   [TestMethod]
@@ -5363,6 +5439,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToContainTextAsync("prompt-guided");
+    var nativeRequests = _environment.FakeOllama.Requests
+      .Where(request => request.Model == "qwen3-coder:30b")
+      .ToArray();
+    Assert.IsNotEmpty(nativeRequests);
+    Assert.IsTrue(nativeRequests.All(request => request.Think is null));
   }
 
   [TestMethod]
@@ -5775,7 +5858,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var timelineItems = assistant.Locator(
       ".assistant-work > [data-timeline-kind]"
     );
-    await Expect(timelineItems).ToHaveCountAsync(5);
+    await Expect(timelineItems).ToHaveCountAsync(6);
     var timelineKinds = await timelineItems.EvaluateAllAsync<string[]>(
       "nodes => nodes.map(node => node.dataset.timelineKind)"
     );
@@ -5785,6 +5868,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         "thinking",
         "response",
         "thinking",
+        "action",
         "response",
         "response"
       },

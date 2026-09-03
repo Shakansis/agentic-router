@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Providers;
 
 namespace AgenticRouter.Api.Chat;
 
@@ -18,7 +19,8 @@ public sealed record ExecutionSpecialistTurnInvocation(
   ExecutionTurnToolScope? ToolScopeOverride = null,
   bool UseMinimalToolInventory = false,
   Action<string>? CaptureRoleResult = null,
-  IExecutionActionJournal? ActionJournal = null
+  IExecutionActionJournal? ActionJournal = null,
+  string RequestedEffort = ModelEffortLevels.Medium
 )
 {
   public static ExecutionSpecialistTurnInvocation Direct { get; } = new(

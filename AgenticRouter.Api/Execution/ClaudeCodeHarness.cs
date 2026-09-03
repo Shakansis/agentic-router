@@ -360,6 +360,11 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       hostRelay = RelayHostEventsAsync(hostTurn.Events, active, cancellationToken);
 
       active.Write(Event(active, "turn.started", message: $"Claude Code session {session.NativeSessionId} started."));
+      active.Write(Event(
+        active,
+        "effort.prompt-guided",
+        message: $"Ollama's Anthropic-compatible route does not expose a reviewed native effort field; {request.RequestedEffort} effort is prompt-guided for this Claude Code turn."
+      ));
       await WriteAsync(
         process.StandardInput,
         new
@@ -1266,6 +1271,16 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
   )
   {
     var text = SyntheticAssistantText(payload);
+    if (
+      text?.StartsWith("API Error:", StringComparison.OrdinalIgnoreCase) == true
+      && text.Contains("output token maximum", StringComparison.OrdinalIgnoreCase)
+    )
+    {
+      return Failure(
+        "claude-code-output-token-limit",
+        $"Claude Code reported that the selected local provider model '{request.Model}' exceeded its configured output-token limit."
+      );
+    }
     if (
       text?.StartsWith("API Error:", StringComparison.OrdinalIgnoreCase) == true
       && text.Contains("timed out", StringComparison.OrdinalIgnoreCase)

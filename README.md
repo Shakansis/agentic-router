@@ -2,14 +2,14 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.10.0_alpha - project-scoped AnythingLLM retrieval, direct selected-specialist routing, supervised Execute, improved project/session navigation, and Windows/Linux x64 portable releases from one shared core. This remains evaluation software.
+**Current Status**: v0.11.0_alpha - explicit Auto, Direct, Supervisor, and Autonomous Execute strategies, Host-owned phase effort, durable local supervision, and stronger effect/recovery evidence. Windows and Linux x64 portable releases are built from one shared core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.10.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-win-x64.zip.sha256) |
-| `v0.10.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.10.0_alpha/AgenticRouter-0.10.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.11.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-win-x64.zip.sha256) |
+| `v0.11.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -18,7 +18,7 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.10.0_alpha` is a pre-release intended for evaluation. The package is
+`0.11.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
@@ -91,12 +91,31 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - **Same-turn Steering**: Queued items can steer the exact active Codex or Qwen Code turn; Claude Code and OpenCode remain queue-only and the disabled queued-item action explains that distinction
 - **Context Accounting**: Live context usage remains fixed directly above the composer as backgroundless text, outside the prompt panel, while retaining its detailed usage popover
 
-### Durable Supervised Execute
+### Execute strategy on the Send button
 
-For a larger local task, start the Execute prompt with `/supervisor`. Agentic Router
-then keeps one Host-owned durable run while the selected local `model × harness`
-alternates serially between a focused supervisor context and recoverable worker
-contexts. It does not create concurrent agents or delegate recursively.
+In Execute mode, the Send button becomes a split control. Click its small right-hand
+segment—the current `A`, `D`, `S`, or `∞` indicator—to choose the strategy for the
+next request, then use the main Send segment or Enter normally:
+
+| Strategy | Use it when | Behavior |
+| --- | --- | --- |
+| **Auto (`A`)** | You want the Host to choose the smallest adequate execution path. | Keeps bounded work in Direct; a structured objective or accepted plan above the configured direct-plan limit uses Supervisor. |
+| **Direct (`D`)** | The request is focused and should stay in one execution context. | Runs the selected model + harness directly, without the durable supervisor queue. |
+| **Supervisor (`S`)** | The task benefits from decomposition and independent verification. | Creates one durable local run with serial supervisor/worker contexts and uses the selected approval policy. |
+| **Autonomous (`∞`)** | You explicitly want an eligible local task to continue without discretionary approval pauses. | Uses the same durable supervisor flow and delegates every decision the user could approve for that run. Hard Host boundaries still apply. |
+
+The strategy is part of the request, not a global default. `/direct` and
+`/supervisor` remain input aliases. Autonomous is deliberately available only
+through the explicit `∞` selection: it does not turn the approval selector into a
+general unrestricted policy, cannot escape the trusted workspace, and cannot bypass
+process, Git, provider, capability, validation, or recovery limits.
+
+### Durable supervised and autonomous execution
+
+Supervisor and Autonomous keep one Host-owned durable run while the selected local
+`model × harness` alternates serially between a focused supervisor context and
+recoverable worker contexts. They do not create concurrent agents or delegate
+recursively.
 
 - The supervisor decomposes a bounded queue, verifies current Host evidence against
   explicit criteria, rejects discrepancies, and sends a focused correction back to
@@ -104,6 +123,9 @@ contexts. It does not create concurrent agents or delegate recursively.
 - The model, digest, Ollama endpoint, harness/version, workspace, and approval policy
   are fixed for the run. Supervision rejects cloud routes and never falls back or
   switches route silently.
+- Autonomous disables the ordinary approval selector for that request and authorizes
+  only actions that the user could otherwise approve. Hard rejections remain hard
+  rejections, and ambiguous or unsafe actions do not become permitted.
 - The Host persists sanitized checkpoints and a write-ahead action ledger when local
   history is enabled. Hidden reasoning, raw provider payloads, secrets, and full file
   contents are not checkpointed.
@@ -112,7 +134,30 @@ contexts. It does not create concurrent agents or delegate recursively.
 - Restart policy is explicit: `manual` waits for Resume; `auto-safe` continues only
   from a proven committed boundary. Route drift, workspace drift, pending approval,
   or ambiguous action state waits for the user instead of replaying blindly.
-- Direct Execute remains the default and has no supervision/checkpoint overhead.
+- Direct Execute remains available explicitly and has no supervision/checkpoint
+  overhead.
+
+### Effort by supervised phase
+
+Open **Settings > General** to configure `low`, `medium`, or `high` effort for each
+supervised phase. These are reasoning-effort levels—not Benchmark scoring weights—and
+they never change permissions, available tools, the selected route, trusted-workspace
+boundaries, validation criteria, or recovery budgets.
+
+| Phase | Default | Where it influences the run | Why this default |
+| --- | --- | --- | --- |
+| **Plan** | `high` | Decomposition, criteria, and bounded work queue. | Early planning errors propagate through every later step. |
+| **Work** | `medium` | Each focused worker implementation turn. | Balances execution quality with repeated-turn cost and latency. |
+| **Verify** | `medium` | Review of current Host-observed artifacts and criteria. | Verification needs care but starts from concrete evidence. |
+| **Complete** | `low` | Final synthesis after the Host has accepted the work. | Completion should summarize proven facts, not re-solve the task. |
+| **Recovery** | `high` | A materially different correction after failure or discrepancy. | Recovery is the phase most likely to need deeper diagnosis. |
+
+The Host records the requested level and each harness maps it to its reviewed native
+control when available. Native Ollama, Codex, OpenCode, and Qwen Code receive their
+protocol-specific effort setting; Claude Code through Ollama uses explicit prompt
+guidance because that compatibility path has no reviewed effort field. Unsupported
+native controls fall back visibly to prompt guidance. `low` never means disabled
+reasoning, and unknown values are rejected atomically when settings are saved.
 
 **Available Tools:**
 - `list_files` - List directory contents
@@ -312,6 +357,8 @@ Configuration is stored in a local JSON file in the `data/` directory. The appli
 - System prompt per intent
 - Slow-request warning threshold (`T`, with a stronger warning at `2T`); warnings do not cancel an active turn
 - Heartbeat interval for long-running streams
+- Auto-to-Supervisor direct-plan limit (default `5` accepted structured steps)
+- Per-phase supervised reasoning effort for Plan, Work, Verify, Complete, and Recovery
 
 Default intents include:
 - `general-chat`
@@ -347,6 +394,13 @@ models:
   review-and-testing:
     primary: devstral-small-2
     fallback: gemma4:12b
+execution:
+  max_direct_plan_steps: 5
+  plan_effort: high
+  work_effort: medium
+  verify_effort: medium
+  complete_effort: low
+  recovery_effort: high
 ```
 
 Unsupported roles and keys are rejected with field and line diagnostics; the
@@ -466,6 +520,7 @@ The application provides a clean, dark-themed interface with real-time status mo
 - **Sidebar Status**: Shows Ollama connection status, available local models, detected graphics devices, trusted workspace, authoritative Git state, token usage, and clickable cloud usage
 - **Chat Workspace**: Main conversation area with streaming responses
 - **Model Selector**: Choose "Auto" for intent-based routing or select a specific model
+- **Execute Send Strategy**: In Execute, use the split Send control to select Auto, Direct, Supervisor, or Autonomous per request
 - **Projects and conversations**: Groups bounded conversation history by project, provides direct new-chat and project-edit actions, and keeps the active workspace explicit
 - **Focused project settings**: Shows profile, optional AnythingLLM Knowledge/RAG, local history, and validation settings for only the selected project
 - **Collapsible Activity**: Routing and inference details in expandable panels
@@ -480,7 +535,7 @@ Click the "Configurações" button to access the configuration interface:
 
 **Configuration Options:**
 - **Section Navigation**: Uses a near-full-viewport desktop menu and a compact selector on narrow screens
-- **General Settings**: Ollama URL, default model, default GPU, runtime limits, and local-resource preferences
+- **General Settings**: Ollama URL, default model/GPU, Auto direct-plan limit, supervised phase effort, runtime limits, and local-resource preferences
 - **Intent Configuration**: Per-intent model overrides, device preferences, and system prompts
 - **Model Selection**: Choose from installed Ollama models for each intent
 - **Workspace and Git Summaries**: Opens the trusted-workspace, project Knowledge/RAG, history, validation, and read-only Git configuration surfaces
@@ -489,12 +544,12 @@ Click the "Configurações" button to access the configuration interface:
 ### Sending a Message
 
 1. Type your message in the composer at the bottom
-2. Press **Enter** to send (Shift+Enter for line break)
-3. While a response is active, Send or Enter adds the draft to the browser-only queue; use the separate upper-right control to cancel the active response
-4. Edit, delete, or—on Codex and Qwen Code—steer a queued item with its inline icon actions
-5. The router classifies your intent
-6. The appropriate expert model is selected based on configuration precedence
-7. Response streams in real-time with routing activity visible in collapsible details
+2. In Execute, click the small strategy segment on the right side of Send and choose `A`, `D`, `S`, or `∞`; Chat does not show this control
+3. Press **Enter** or the main Send segment to send (Shift+Enter for line break)
+4. While a response is active, Send or Enter adds the draft to the browser-only queue; use the separate upper-right control to cancel the active response
+5. Edit, delete, or—on Codex and Qwen Code—steer a queued item with its inline icon actions
+6. The router resolves the requested model, harness, and execution strategy
+7. Response streams in real-time with routing and Host activity visible in collapsible details
 
 ### Model Resolution Precedence
 

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers;
 
@@ -7,6 +8,8 @@ namespace AgenticRouter.Api.Supervision;
 
 public static class SupervisionExecutionStrategies
 {
+  public const string Auto = "auto";
+  public const string Autonomous = "autonomous";
   public const string Direct = "direct";
   public const string Supervised = "supervised";
 }
@@ -55,11 +58,19 @@ public static class SupervisionEventTypeIds
   public const string SupervisorStarted = "supervision.supervisor-started";
   public const string WorkQueued = "supervision.work-queued";
   public const string WorkerStarted = "supervision.worker-started";
+  public const string TurnReasoning = "supervision.turn-reasoning";
+  public const string TurnCommentary = "supervision.turn-commentary";
+  public const string TurnStatus = "supervision.turn-status";
   public const string WorkerClaimed = "supervision.worker-claimed";
   public const string VerificationStarted = "supervision.verification-started";
   public const string WorkRejected = "supervision.work-rejected";
   public const string WorkAccepted = "supervision.work-accepted";
   public const string RetryStarted = "supervision.retry-started";
+  public const string TurnSlowWarning = "supervision.turn-slow-warning";
+  public const string TurnSlowCritical = "supervision.turn-slow-critical";
+  public const string TurnWatchdogRecovery = "supervision.turn-watchdog-recovery";
+  public const string TurnCanonicalRecovery = "supervision.turn-canonical-recovery";
+  public const string TurnHarnessRecovery = "supervision.turn-harness-recovery";
   public const string NoProgress = "supervision.no-progress";
   public const string RecoveryEligible = "supervision.recovery-eligible";
   public const string ReconciliationRequired = "supervision.reconciliation-required";
@@ -87,7 +98,9 @@ public sealed record PrepareSupervisionRunRequest(
   string? ClientRunId = null,
   bool AutoModelHarness = false,
   IReadOnlyList<ChatMessage>? History = null,
-  IReadOnlyList<ChatImageAttachment>? Images = null
+  IReadOnlyList<ChatImageAttachment>? Images = null,
+  SupervisionTakeoverSnapshot? Takeover = null,
+  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised
 );
 
 public sealed record ResumeSupervisionRunRequest(
@@ -115,7 +128,12 @@ public sealed record SupervisionRunEvent(
   string? ContextId = null,
   string? WorkItemId = null,
   int? CompletedItems = null,
-  int? TotalItems = null
+  int? TotalItems = null,
+  SlowRequestStatusView? SlowRequest = null,
+  [property: JsonIgnore]
+  ContextUsageView? ContextUsage = null,
+  [property: JsonIgnore]
+  LocalActionEvent? LocalAction = null
 );
 
 public static class SupervisionWorkItemStates
@@ -264,6 +282,26 @@ public sealed record SupervisionRecoverySnapshot(
   bool ImagesPending = false
 );
 
+public sealed record SupervisionTakeoverFileSnapshot(
+  string RelativePath,
+  string Operation,
+  string FinalHash,
+  bool Verified
+);
+
+public sealed record SupervisionTakeoverSnapshot(
+  string Trigger,
+  string DirectExecutionSessionId,
+  int DetectedPlanSteps,
+  int MaximumDirectPlanSteps,
+  bool AfterVerifiedMutation,
+  ExecutionPlanView? Plan,
+  IReadOnlyList<SupervisionTakeoverFileSnapshot> Files,
+  string DirectCompletionStatus,
+  string? ValidationStatus,
+  DateTimeOffset CapturedAt
+);
+
 public sealed record DurableSupervisionCheckpoint(
   int SchemaVersion,
   string RunId,
@@ -287,10 +325,12 @@ public sealed record DurableSupervisionCheckpoint(
   string IntegritySha256,
   SupervisionRuntimeView? Runtime = null,
   SupervisionRecoverySnapshot? Recovery = null,
-  string? WaitCode = null
+  string? WaitCode = null,
+  SupervisionTakeoverSnapshot? Takeover = null,
+  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised
 )
 {
-  public const int CurrentSchemaVersion = 2;
+  public const int CurrentSchemaVersion = 4;
 }
 
 public sealed record DurableSupervisionRunView(
@@ -313,7 +353,9 @@ public sealed record DurableSupervisionRunView(
   DateTimeOffset UpdatedAt,
   SupervisionRuntimeView? Runtime = null,
   SupervisionRecoverySnapshot? Recovery = null,
-  string? WaitCode = null
+  string? WaitCode = null,
+  SupervisionTakeoverSnapshot? Takeover = null,
+  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised
 );
 
 public sealed record SupervisionRunListView(
@@ -346,12 +388,27 @@ public sealed record SupervisionResumeEligibility(
 public sealed record SupervisionRequestResolution(
   string Strategy,
   string ResumePolicy,
-  string Objective
+  string Objective,
+  string RequestedStrategy,
+  string ActivationReason,
+  int? EstimatedStepCount = null
 )
 {
   public bool Supervised => string.Equals(
     Strategy,
     SupervisionExecutionStrategies.Supervised,
+    StringComparison.Ordinal
+  );
+
+  public bool Automatic => string.Equals(
+    RequestedStrategy,
+    SupervisionExecutionStrategies.Auto,
+    StringComparison.Ordinal
+  );
+
+  public bool Autonomous => string.Equals(
+    RequestedStrategy,
+    SupervisionExecutionStrategies.Autonomous,
     StringComparison.Ordinal
   );
 }
@@ -384,22 +441,55 @@ public sealed class SupervisionException : Exception
 
 public static class SupervisionRequestPolicy
 {
-  private const string Directive = "/supervisor";
+  private const string DirectDirective = "/direct";
+  private const string SupervisorDirective = "/supervisor";
 
-  public static SupervisionRequestResolution Resolve(ChatRequest request)
+  public static SupervisionRequestResolution Resolve(
+    ChatRequest request,
+    int maximumDirectPlanSteps = 5
+  )
   {
-    var strategy = NormalizeStrategy(
+    var requestedStrategy = NormalizeStrategy(
       request.ExecutionStrategy
     );
     var objective = request.Message.Trim();
-    var directive = HasDirective(
-      objective
-    );
+    var activationReason = "explicit-direct";
 
-    if (directive)
+    if (HasDirective(objective, SupervisorDirective))
+    {
+      requestedStrategy = SupervisionExecutionStrategies.Supervised;
+      objective = objective[SupervisorDirective.Length..].TrimStart();
+      activationReason = "supervisor-directive";
+    }
+    else if (HasDirective(objective, DirectDirective))
+    {
+      requestedStrategy = SupervisionExecutionStrategies.Direct;
+      objective = objective[DirectDirective.Length..].TrimStart();
+      activationReason = "direct-directive";
+    }
+
+    var estimatedStepCount = EstimateStructuredStepCount(objective);
+    var strategy = requestedStrategy;
+    if (string.Equals(
+      requestedStrategy,
+      SupervisionExecutionStrategies.Autonomous,
+      StringComparison.Ordinal
+    ))
     {
       strategy = SupervisionExecutionStrategies.Supervised;
-      objective = objective[Directive.Length..].TrimStart();
+      activationReason = "explicit-autonomous";
+    }
+    else if (string.Equals(requestedStrategy, SupervisionExecutionStrategies.Auto, StringComparison.Ordinal))
+    {
+      strategy = string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal)
+        && estimatedStepCount > maximumDirectPlanSteps
+          ? SupervisionExecutionStrategies.Supervised
+          : SupervisionExecutionStrategies.Direct;
+      activationReason = strategy == SupervisionExecutionStrategies.Supervised
+        ? "automatic-objective-step-limit"
+        : string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal)
+          ? "automatic-direct-within-step-limit"
+          : "chat-direct";
     }
 
     if (
@@ -424,6 +514,23 @@ public static class SupervisionRequestPolicy
     }
 
     if (
+      string.Equals(request.ApprovalPolicy, "autonomous", StringComparison.Ordinal)
+      && !string.Equals(
+        requestedStrategy,
+        SupervisionExecutionStrategies.Autonomous,
+        StringComparison.Ordinal
+      )
+    )
+    {
+      throw new SupervisionException(
+        "autonomous-approval-requires-supervision",
+        "supervision-request",
+        "Autonomous approval authority is available only through the Autonomous supervision strategy.",
+        false
+      );
+    }
+
+    if (
       string.Equals(
         strategy,
         SupervisionExecutionStrategies.Supervised,
@@ -444,11 +551,35 @@ public static class SupervisionRequestPolicy
 
     return new SupervisionRequestResolution(
       strategy,
-      NormalizeResumePolicy(
-        request.SupervisionResumePolicy
-      ),
-      objective
+      string.Equals(
+        requestedStrategy,
+        SupervisionExecutionStrategies.Autonomous,
+        StringComparison.Ordinal
+      )
+        ? SupervisionResumePolicies.Manual
+        : NormalizeResumePolicy(request.SupervisionResumePolicy),
+      objective,
+      requestedStrategy,
+      activationReason,
+      estimatedStepCount == 0
+        ? null
+        : estimatedStepCount
     );
+  }
+
+  public static SupervisionRequestResolution Promote(
+    SupervisionRequestResolution current,
+    string reason,
+    int detectedStepCount
+  )
+  {
+    return current with
+    {
+      Strategy = SupervisionExecutionStrategies.Supervised,
+      RequestedStrategy = SupervisionExecutionStrategies.Auto,
+      ActivationReason = reason,
+      EstimatedStepCount = detectedStepCount
+    };
   }
 
   public static string NormalizeResumePolicy(string? value)
@@ -530,16 +661,18 @@ public static class SupervisionRequestPolicy
     var normalized = string.IsNullOrWhiteSpace(
       value
     )
-      ? SupervisionExecutionStrategies.Direct
+      ? SupervisionExecutionStrategies.Auto
       : value.Trim().ToLowerInvariant();
 
-    if (normalized is not SupervisionExecutionStrategies.Direct
+    if (normalized is not SupervisionExecutionStrategies.Auto
+      and not SupervisionExecutionStrategies.Autonomous
+      and not SupervisionExecutionStrategies.Direct
       and not SupervisionExecutionStrategies.Supervised)
     {
       throw new SupervisionException(
         "execution-strategy-invalid",
         "supervision-request",
-        "Execution strategy must be direct or supervised.",
+        "Execution strategy must be auto, autonomous, direct, or supervised.",
         true
       );
     }
@@ -547,18 +680,72 @@ public static class SupervisionRequestPolicy
     return normalized;
   }
 
-  private static bool HasDirective(string message)
+  private static bool HasDirective(string message, string directive)
   {
     return message.StartsWith(
-      Directive,
+      directive,
       StringComparison.OrdinalIgnoreCase
     ) && (
-      message.Length == Directive.Length
+      message.Length == directive.Length
       || char.IsWhiteSpace(
-        message[Directive.Length]
+        message[directive.Length]
       )
     );
   }
+
+  private static int EstimateStructuredStepCount(string objective)
+  {
+    return objective.Split('\n').Count(line => IsStructuredStep(line.Trim()));
+  }
+
+  private static bool IsStructuredStep(string line)
+  {
+    if (line.Length < 2)
+    {
+      return false;
+    }
+
+    if ((line[0] is '-' or '*' or '+') && char.IsWhiteSpace(line[1]))
+    {
+      return true;
+    }
+
+    var index = 0;
+    while (index < line.Length && char.IsAsciiDigit(line[index]))
+    {
+      index++;
+    }
+    return index > 0
+      && index + 1 < line.Length
+      && line[index] is '.' or ')'
+      && char.IsWhiteSpace(line[index + 1]);
+  }
+}
+
+public sealed class SupervisionTakeoverRequiredException : Exception
+{
+  public SupervisionTakeoverRequiredException(
+    string executionSessionId,
+    ExecutionPlanView plan,
+    int maximumDirectPlanSteps,
+    bool afterVerifiedMutation
+  ) : base(
+    $"The accepted Host plan contains {plan.Steps.Count} steps, above the configured direct limit of {maximumDirectPlanSteps}."
+  )
+  {
+    ExecutionSessionId = executionSessionId;
+    Plan = plan;
+    MaximumDirectPlanSteps = maximumDirectPlanSteps;
+    AfterVerifiedMutation = afterVerifiedMutation;
+  }
+
+  public string ExecutionSessionId { get; }
+
+  public ExecutionPlanView Plan { get; }
+
+  public int MaximumDirectPlanSteps { get; }
+
+  public bool AfterVerifiedMutation { get; }
 }
 
 internal static class SupervisionViewFactory
@@ -590,7 +777,9 @@ internal static class SupervisionViewFactory
       checkpoint.UpdatedAt,
       runtime ?? checkpoint.Runtime,
       checkpoint.Recovery,
-      checkpoint.WaitCode
+      checkpoint.WaitCode,
+      checkpoint.Takeover,
+      checkpoint.ExecutionStrategy
     );
   }
 }

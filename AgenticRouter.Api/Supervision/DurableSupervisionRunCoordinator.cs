@@ -277,9 +277,17 @@ public sealed class DurableSupervisionRunCoordinator
     var approvalPolicy = SupervisionRequestPolicy.NormalizeApprovalPolicy(
       request.ApprovalPolicy
     );
-    var resumePolicy = SupervisionRequestPolicy.NormalizeResumePolicy(
-      request.ResumePolicy
+    var executionStrategy = request.ExecutionStrategy.Trim().ToLowerInvariant();
+    var autonomous = string.Equals(
+      executionStrategy,
+      SupervisionExecutionStrategies.Autonomous,
+      StringComparison.Ordinal
     );
+    var resumePolicy = autonomous
+      ? resolution.HistoryEnabled
+        ? SupervisionResumePolicies.AutoSafe
+        : SupervisionResumePolicies.Manual
+      : SupervisionRequestPolicy.NormalizeResumePolicy(request.ResumePolicy);
     var now = DateTimeOffset.UtcNow;
     var initialRuntime = SupervisionRuntimeView.Empty();
     var initialEvent = new SupervisionRunEvent(
@@ -289,8 +297,16 @@ public sealed class DurableSupervisionRunCoordinator
       now,
       DurableSupervisionRunStates.Prepared,
       resolution.HistoryEnabled
-        ? "Durable supervised run prepared and checkpointed with one fixed local route."
-        : "Volatile supervised run prepared; local history is disabled and restart recovery is unavailable."
+        ? autonomous
+          ? "Durable autonomous supervision prepared with full user-delegated approval authority inside the trusted workspace."
+          : request.Takeover is null
+          ? "Durable supervised run prepared and checkpointed with one fixed local route."
+          : "Durable supervised takeover prepared with the prior direct plan and verified Host effects."
+        : autonomous
+          ? "Volatile autonomous supervision prepared; restart recovery is unavailable because local history is disabled."
+          : request.Takeover is null
+          ? "Volatile supervised run prepared; local history is disabled and restart recovery is unavailable."
+          : "Volatile supervised takeover prepared; restart recovery is unavailable because local history is disabled."
     );
     var checkpoint = new DurableSupervisionCheckpoint(
       DurableSupervisionCheckpoint.CurrentSchemaVersion,
@@ -315,7 +331,9 @@ public sealed class DurableSupervisionRunCoordinator
       now,
       now,
       string.Empty,
-      initialRuntime
+      initialRuntime,
+      Takeover: request.Takeover,
+      ExecutionStrategy: executionStrategy
     );
 
     if (checkpoint.Durable)
@@ -838,7 +856,8 @@ public sealed class DurableSupervisionRunCoordinator
         state.Runtime,
         state.History,
         state.Images,
-        new DurableExecutionActionJournal(this, state)
+        new DurableExecutionActionJournal(this, state),
+        new DurableSupervisionTurnProgressSink(this, state)
       );
       await foreach (var update in engine.ExecuteAsync(
         input,
@@ -859,7 +878,8 @@ public sealed class DurableSupervisionRunCoordinator
           runtime: update.Runtime,
           role: update.Role,
           contextId: update.ContextId,
-          workItemId: update.WorkItemId
+          workItemId: update.WorkItemId,
+          waitCode: update.WaitCode
         );
       }
     }
@@ -915,6 +935,48 @@ public sealed class DurableSupervisionRunCoordinator
       request.History,
       "supervision-prepare"
     );
+    var executionStrategy = request.ExecutionStrategy?.Trim().ToLowerInvariant();
+    if (executionStrategy is not SupervisionExecutionStrategies.Auto
+      and not SupervisionExecutionStrategies.Autonomous
+      and not SupervisionExecutionStrategies.Supervised)
+    {
+      throw new SupervisionException(
+        "supervision-strategy-invalid",
+        "supervision-prepare",
+        "A supervised run must use auto, autonomous, or supervised execution strategy.",
+        false
+      );
+    }
+    if (
+      request.Takeover is { } takeover
+      && (
+        takeover.Trigger is not { Length: > 0 and <= 128 }
+        || takeover.DirectExecutionSessionId is not { Length: > 0 and <= 64 }
+        || takeover.DetectedPlanSteps < 0
+        || (
+          takeover.Plan is null
+            ? takeover.DetectedPlanSteps != 0
+            : takeover.Plan.Steps.Count != takeover.DetectedPlanSteps
+        )
+        || takeover.Files is not { Count: <= 64 }
+        || takeover.Files.Any(file =>
+          file.RelativePath is not { Length: > 0 and <= 1_024 }
+          || file.Operation is not { Length: > 0 and <= 64 }
+          || file.FinalHash is not { Length: > 0 and <= 128 }
+          || !file.Verified
+        )
+        || takeover.DirectCompletionStatus is not { Length: <= 128 }
+        || takeover.ValidationStatus?.Length > 128
+      )
+    )
+    {
+      throw new SupervisionException(
+        "supervision-takeover-invalid",
+        "supervision-prepare",
+        "The automatic supervision takeover snapshot is invalid.",
+        false
+      );
+    }
   }
 
   private static void ValidateHistoryInput(
@@ -955,7 +1017,8 @@ public sealed class DurableSupervisionRunCoordinator
     string? workItemId = null,
     SupervisionRecoverySnapshot? recovery = null,
     string? waitCode = null,
-    bool captureRecovery = true
+    bool captureRecovery = true,
+    SlowRequestStatusView? slowRequest = null
   )
   {
     await state.TransitionGate.WaitAsync(
@@ -975,7 +1038,7 @@ public sealed class DurableSupervisionRunCoordinator
         );
       }
 
-      var nextSequence = current.Events.LastOrDefault()?.Sequence + 1 ?? 1;
+      var nextSequence = state.NextSequence();
       var now = DateTimeOffset.UtcNow;
       var effectiveRuntime = runtime ?? state.Runtime;
       var progressEvent = new SupervisionRunEvent(
@@ -990,7 +1053,8 @@ public sealed class DurableSupervisionRunCoordinator
         contextId,
         workItemId,
         effectiveRuntime.CompletedItems,
-        effectiveRuntime.TotalItems
+        effectiveRuntime.TotalItems,
+        slowRequest
       );
       var next = current with
       {
@@ -1212,6 +1276,11 @@ public sealed class DurableSupervisionRunCoordinator
       ExecutionActionJournalPhases.Rejected => SupervisionEventTypeIds.ActionRejected,
       _ => SupervisionEventTypeIds.ActionFailed
     };
+    var actionRole = runtime.Contexts.FirstOrDefault(context => string.Equals(
+      context.Id,
+      entry.ContextId,
+      StringComparison.Ordinal
+    ))?.Role ?? runtime.ActiveRole ?? "worker";
     await TransitionAsync(
       state,
       checkpoint.State,
@@ -1224,11 +1293,55 @@ public sealed class DurableSupervisionRunCoordinator
       browserSessionId: null,
       cancellationToken,
       runtime,
-      role: "worker",
+      role: actionRole,
       contextId: entry.ContextId,
       workItemId: entry.WorkItemId,
       recovery,
       captureRecovery: false
+    );
+  }
+
+  private Task RecordTurnProgressAsync(
+    LiveRunState state,
+    SupervisionTurnProgress progress,
+    CancellationToken cancellationToken
+  )
+  {
+    if (progress.Transient
+      || progress.EventType is SupervisionEventTypeIds.TurnReasoning
+      or SupervisionEventTypeIds.TurnStatus
+      or "context.usage")
+    {
+      state.PublishTransient(progress);
+      return Task.CompletedTask;
+    }
+    var checkpoint = state.Checkpoint;
+    return TransitionAsync(
+      state,
+      checkpoint.State,
+      checkpoint.Phase,
+      progress.EventType,
+      progress.Message,
+      terminal: false,
+      autoResumeEligible: false,
+      waitReason: null,
+      browserSessionId: null,
+      cancellationToken,
+      state.Runtime,
+      role: progress.Role,
+      contextId: progress.ContextId,
+      workItemId: progress.WorkItemId,
+      slowRequest: progress.SlowRequest
+    );
+  }
+
+  private static bool CanRetryTurnAfterInactivity(LiveRunState state)
+  {
+    return !(state.Checkpoint.Recovery?.Actions ?? []).Any(action =>
+      action.Phase is SupervisionActionPhases.Prepared
+        or SupervisionActionPhases.AwaitingApproval
+        or SupervisionActionPhases.InFlight
+        or SupervisionActionPhases.Ambiguous
     );
   }
 
@@ -1263,12 +1376,37 @@ public sealed class DurableSupervisionRunCoordinator
     }
   }
 
+  private sealed class DurableSupervisionTurnProgressSink(
+    DurableSupervisionRunCoordinator owner,
+    LiveRunState state
+  ) : ISupervisionTurnProgressSink
+  {
+    public Task ReportAsync(
+      SupervisionTurnProgress progress,
+      CancellationToken cancellationToken
+    )
+    {
+      return owner.RecordTurnProgressAsync(
+        state,
+        progress,
+        cancellationToken
+      );
+    }
+
+    public bool CanRetryAfterInactivity()
+    {
+      return CanRetryTurnAfterInactivity(state);
+    }
+  }
+
   private sealed class LiveRunState
   {
     private readonly object _gate = new();
     private readonly int _maximumEvents;
     private DurableSupervisionCheckpoint _checkpoint;
     private SupervisionRuntimeView _runtime;
+    private IReadOnlyList<SupervisionRunEvent> _transientEvents = [];
+    private long _eventSequence;
     private TaskCompletionSource _changed = NewSignal();
     private readonly CancellationTokenSource _cancellation = new();
     private bool _executionReserved;
@@ -1285,6 +1423,7 @@ public sealed class DurableSupervisionRunCoordinator
       _checkpoint = checkpoint;
       _maximumEvents = maximumEvents;
       _runtime = runtime;
+      _eventSequence = checkpoint.Events.LastOrDefault()?.Sequence ?? 0;
       History = history;
       Images = images;
     }
@@ -1338,8 +1477,10 @@ public sealed class DurableSupervisionRunCoordinator
       lock (_gate)
       {
         return new LiveReadBatch(
-          _checkpoint.Events.Where(
+          _checkpoint.Events.Concat(_transientEvents).Where(
             item => item.Sequence > afterSequence
+          ).OrderBy(
+            item => item.Sequence
           ).TakeLast(
             _maximumEvents
           ).ToArray(),
@@ -1361,6 +1502,49 @@ public sealed class DurableSupervisionRunCoordinator
       {
         _checkpoint = checkpoint;
         _runtime = runtime ?? _runtime;
+        signal = _changed;
+        _changed = NewSignal();
+      }
+      signal.TrySetResult();
+    }
+
+    public long NextSequence()
+    {
+      lock (_gate)
+      {
+        return checked(++_eventSequence);
+      }
+    }
+
+    public void PublishTransient(SupervisionTurnProgress progress)
+    {
+      TaskCompletionSource signal;
+      lock (_gate)
+      {
+        if (DurableSupervisionRunStates.IsTerminal(_checkpoint.State))
+        {
+          return;
+        }
+        var runtime = _runtime;
+        _transientEvents = _transientEvents.Append(
+          new SupervisionRunEvent(
+            _checkpoint.RunId,
+            checked(++_eventSequence),
+            progress.EventType,
+            DateTimeOffset.UtcNow,
+            _checkpoint.State,
+            progress.Message,
+            false,
+            progress.Role,
+            progress.ContextId,
+            progress.WorkItemId,
+            runtime.CompletedItems,
+            runtime.TotalItems,
+            progress.SlowRequest,
+            progress.ContextUsage,
+            progress.LocalAction
+          )
+        ).TakeLast(64).ToArray();
         signal = _changed;
         _changed = NewSignal();
       }

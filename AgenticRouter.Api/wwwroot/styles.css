@@ -1605,14 +1605,18 @@ p {
   font-size: 12px;
 }
 
-.work-action-file {
+.work-action-file,
+.work-action-target {
   min-width: 0;
   color: var(--text);
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.work-action-file {
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--muted) 62%, transparent);
   text-underline-offset: 3px;
-  overflow-wrap: anywhere;
 }
 
 .work-action-file:hover,
@@ -1907,6 +1911,12 @@ p {
 
 .execution-plan[open] > summary {
   border-bottom: 1px solid var(--border-strong);
+}
+
+.execution-plan[open] .execution-plan-body {
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .execution-plan-body ol {
@@ -3086,6 +3096,94 @@ p {
   align-items: center;
   align-self: center;
   margin-left: auto;
+}
+
+.send-strategy-control {
+  position: relative;
+  display: inline-flex;
+  gap: 0;
+  align-items: center;
+}
+
+.send-strategy-control.strategy-visible #send-button {
+  border-right: 0;
+  border-radius: 999px 0 0 999px;
+}
+
+.send-strategy-toggle {
+  display: inline-flex;
+  width: 22px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--accent);
+  border-left-color: rgba(255, 255, 255, 0.28);
+  border-radius: 0 999px 999px 0;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  color: white;
+  background: var(--accent);
+  font-size: 18px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.send-strategy-toggle:hover,
+.send-strategy-toggle[aria-expanded="true"] {
+  color: white;
+  border-color: var(--accent-hover);
+  border-left-color: rgba(255, 255, 255, 0.34);
+  background: var(--accent-hover);
+}
+
+.send-strategy-toggle[hidden] {
+  display: none;
+}
+
+.send-strategy-menu {
+  position: absolute;
+  z-index: 80;
+  right: 0;
+  bottom: calc(100% + 6px);
+  width: min(248px, calc(100vw - 24px));
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--panel-raised);
+  box-shadow: 0 12px 28px rgb(0 0 0 / 48%);
+}
+
+.send-strategy-menu button {
+  display: grid;
+  width: 100%;
+  padding: 6px 7px;
+  border: 0;
+  border-radius: 7px;
+  gap: 1px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.send-strategy-menu strong {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.send-strategy-menu button:hover,
+.send-strategy-menu button:focus-visible {
+  outline: 0;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-raised));
+}
+
+.send-strategy-menu button[aria-checked="true"] {
+  background: var(--accent-soft);
+}
+
+.send-strategy-menu span {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.3;
 }
 
 .edit-cancel-button {
@@ -5564,6 +5662,33 @@ textarea.terminal-command-input {
   gap: 6px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.phase-effort-settings {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.phase-effort-settings legend {
+  padding: 0 5px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.phase-effort-settings > small {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--subtle);
+}
+
+.phase-effort-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 10px;
 }
 
 .settings-grid input,

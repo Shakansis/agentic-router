@@ -10,7 +10,7 @@ Milestone 4 implementation and authorized real-local acceptance are complete.
 
 ## Outcome
 
-Add an opt-in Execute strategy for large local tasks that combines two properties:
+Add an automatically selected, explicitly overridable Execute strategy for large local tasks that combines two properties:
 
 - **Durable Execute** keeps a user-started execution owned by the Host rather than by
   an HTTP/SSE connection, persists safe boundaries, and reconstructs state after a
@@ -67,7 +67,7 @@ This is a product boundary, not a cost estimate or preference.
 
 ### Useful later
 
-- an automatic recommendation that a large goal use supervision;
+- measured per-model × harness recommendations for the direct-plan threshold;
 - user reordering of pending work;
 - measured native-session/KV-cache optimizations;
 - a dedicated operating-system service or application watchdog.
@@ -91,16 +91,31 @@ This is a product boundary, not a cost estimate or preference.
 Add an additive request field:
 
 ```text
-executionStrategy: direct | supervised
+executionStrategy: auto | direct | supervised | autonomous
 ```
 
-- `direct` is the compatibility default.
+- `auto` is the Execute default; Chat remains direct.
+- `direct` is an explicit override and `/direct` is its convenience alias.
+- `autonomous` is an explicit full-auto Supervisor override for unattended work. It
+  delegates every approval the user could grant to the Supervisor, but it cannot
+  cross trusted-workspace escapes, protected paths, stale conflicts, or any other
+  hard Host boundary.
 - An exact `/supervisor` prefix at the beginning of an Execute message is a convenience
   alias for `executionStrategy=supervised`.
 - The directive is removed from the objective sent to the specialist.
 - `/supervisor` in Chat returns a typed error and never silently switches to Execute.
 - Supervised activation and its fixed route are visible in activity and review.
-- Version 1 does not silently infer that an objective is large.
+- `execution.maxDirectPlanSteps` is validated and configurable in Settings > General;
+  its default is 5, so six or more structured/accepted plan steps activate supervision.
+- Auto may select supervision before inference from an explicit structured objective,
+  after the Host accepts or revises an oversized specialist plan, or at a verified
+  recovery boundary after context/resource starvation.
+- A late takeover persists a bounded Host snapshot of the accepted plan, verified file
+  effects, completion state, and validation state. The supervisor inspects current
+  artifacts, preserves useful verified work, and may replace the plan with smaller work.
+- Autonomous never waits for a discretionary user decision. If a supervisor response
+  asks the user, the Host performs one bounded corrective decision turn; a repeated
+  request is a typed blocked result rather than an unattended pause.
 
 ### Restart policy
 
@@ -113,6 +128,9 @@ resumePolicy: manual | auto-safe
 - `manual` is the default.
 - `auto-safe` is an explicit unattended/overnight authorization for this bounded local
   run.
+- Autonomous selects `auto-safe` whenever durable history is enabled. Without durable
+  history it remains a volatile run that can survive client disconnects, but not a Host
+  restart.
 - Both policies allow the run to continue when the browser/SSE disconnects while the
   Host process remains alive.
 - After a Host process restart, `manual` waits for the user.
@@ -125,6 +143,12 @@ The existing approval policy remains authoritative inside the run:
 - `auto` permits validated mutations without duplicate confirmation;
 - `ask` pauses whenever a covered mutation requires approval;
 - neither policy crosses trusted-workspace or hard security boundaries.
+
+Autonomous adds a run-internal approval authority, not a public general-purpose
+approval policy. It skips every approval wait that the user could resolve, including
+process, deletion, and mutable Git approvals, only after the same Host validation and
+effect-boundary checks have passed. A direct or ordinary supervised request cannot
+inject this authority through `approvalPolicy`.
 
 The run persists the approval policy selected at creation because unattended restart
 needs a bounded authority contract. It cannot be changed silently on resume.
@@ -360,6 +384,13 @@ Raw tool chatter, unrestricted process output, full file contents, hidden prompt
 hidden reasoning are not copied into the durable checkpoint. During verification the
 supervisor reads bounded current artifacts directly through the Host.
 
+Declared evidence paths are bounded by the existing configurable
+`execution.maxTrackedFilesPerSession` value rather than a separate fixed item limit.
+Every declared path is retained; additional review-only paths fill remaining capacity,
+and any omitted review-path count is explicit in the evidence envelope. File-content
+inlining remains bounded to 32 KiB per file and 96,000 characters total so increasing
+the path count does not create an unbounded model-context payload.
+
 ## Retry, watchdog, and no-progress rules
 
 Failures are classified before retry:
@@ -388,9 +419,37 @@ Failures are classified before retry:
 - identical strategy with no new fact;
 - exhausted budget.
 
+A malformed supervisor decision is not replayed unchanged. The Host may make exactly
+one bounded canonical-output recovery turn that explicitly forbids tools, repeated
+analysis, prose, and Markdown fences, and asks for the already-established decision as
+one final JSON object. The recovery is emitted as
+`supervision.turn-canonical-recovery`. If that materially different turn is also
+malformed, the run blocks. Hidden reasoning is never promoted into an authoritative
+decision, even when it happens to contain JSON.
+
+A typed recoverable harness failure during a supervisor turn receives exactly one
+materially different retry in a fresh provider-native session. The retry preserves the
+logical context, committed Host effects, and budgets, requires concise canonical output,
+and is emitted as `supervision.turn-harness-recovery`. Repetition blocks with the
+original typed harness code retained as the run wait code and terminal diagnostic code.
+
 The watchdog measures progress by new Host facts, acceptance coverage, validation
 state, or a materially different recovery strategy. Stream tokens and fluent worker
 prose do not count as progress.
+
+While a turn remains active, the Host emits bounded transient role updates through the
+ordinary Execute narrative surface. The cadence is the smaller of 30 seconds or one
+third of `runtime.generationTimeoutSeconds` and is driven by a Host timer independent
+of provider/harness frames. These messages describe the current
+Supervisor/Worker activity but do not reset the watchdog or enter the durable
+checkpoint. Reasoning remains transient and continuously streamed for the full turn;
+the in-memory tail is bounded without imposing a user-visible publication cutoff.
+
+In Autonomous, the first critical inactivity event at `2T` interrupts only the active
+model turn. If no governed action is unresolved, the Supervisor retries once with an
+explicit materially different recovery brief. A repeated stall, or any prepared,
+awaiting, in-flight, or ambiguous governed action, blocks replay instead of weakening
+Host safety. Other execution strategies keep the existing warning-only behavior.
 
 Repeated no-progress returns control to the supervisor. The supervisor may narrow the
 item, issue a focused correction, reconstruct a worker context, replace pending work,
@@ -499,8 +558,9 @@ SSE is terminal whenever the run state is terminal, including when the terminal 
 is replayed. A reconnect first receives retained events after its cursor and then waits
 for new events.
 
-Intermediate supervisor/worker prose is activity evidence and never visible assistant
-answer content. Exactly one final answer and one terminal event are emitted.
+Intermediate Supervisor/Worker prose and bounded reasoning are transient presentation
+events, not visible assistant-answer content and not durable checkpoint state. Exactly
+one final answer and one terminal event are emitted.
 
 ## Startup and `auto-safe` recovery
 
@@ -570,11 +630,22 @@ machine. The coordinator invokes the turn runner serially.
 
 ## User-visible behavior
 
-- `/supervisor` or explicit strategy activation in Execute;
+- one compact, visually continuous split-button next to Send with Auto / Direct /
+  Supervisor / Autonomous strategies, plus `/direct` and `/supervisor` aliases;
 - explicit `manual` / `auto-safe` restart choice;
 - local-only route disclosure;
 - active role, item, completed/total count, context count, checkpoint durability, and
   run state in activity/review;
+- reuse of the ordinary Execute surfaces: the existing `Plan execution` panel for the
+  Supervisor queue, the existing work narrative for periodic role updates, existing
+  action cards and inactivity alert, and existing reasoning blocks;
+- the existing execution-session header shows the fixed model, harness, strategy,
+  active role, queue progress, phase, and approval policy for supervised runs;
+- visible plan bullets use one short bounded clause while retaining the complete work
+  objective as hover text and as the unchanged worker input; an open docked plan has a
+  viewport-bounded scrolling body and collapses when the user clicks outside it;
+- reasoning remains available in every Execute strategy; blocks created under active
+  supervision start collapsed, while Direct keeps its existing open/close behavior;
 - browser reload/reconnect attaches to the existing run;
 - styled Resume/Discard UI for manual or unsafe restart cases;
 - explicit Cancel independent from SSE;
@@ -658,8 +729,15 @@ No cloud request is permitted in any milestone.
 
 ### Compatibility and local-only
 
-- direct Chat/Execute remain unchanged;
-- no strategy means no durable supervised state;
+- direct Chat and explicitly forced Direct Execute remain unchanged;
+- no Execute strategy means Auto; up to the configured step limit remains direct;
+- Autonomous always creates a supervised run and never pauses for an approvable action
+  or discretionary supervisor question;
+- Autonomous destructive/process/Git actions still pass through the ordinary Host
+  validators, and a hard workspace or policy rejection remains terminal or recoverable
+  only through a materially different permitted action;
+- structured or accepted plans above the limit create one visible supervised run;
+- late takeover preserves and exposes prior verified Host effects;
 - cloud-qualified supervised routes are rejected before run creation;
 - Auto Model × Harness uses only available local candidates;
 - every role turn preserves exact local model/digest/endpoint/harness/workspace;

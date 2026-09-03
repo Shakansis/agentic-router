@@ -228,7 +228,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
-    bool toolOutput = true
+    bool toolOutput = true,
+    string? requestedEffort = null
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -247,7 +248,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         cancellationToken,
         onThinkingDelta,
         onContentDelta,
-        toolOutput
+        toolOutput,
+        requestedEffort
       );
     }
 

@@ -4482,7 +4482,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await Expect(
       Page.Locator(
-        "[data-event-type=\"action.output\"]"
+        ".activity-row[data-event-type=\"action.output\"]"
       )
     ).ToContainTextAsync(
       "list_files"
@@ -5018,7 +5018,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync("execute create file");
 
     var assistant = Page.Locator(".message.assistant").Last;
-    var originalVisibleText = await assistant.InnerTextAsync();
+    await Expect(
+      assistant.Locator("[data-event-type=\"response.completed\"]")
+    ).ToHaveCountAsync(
+      1,
+      new() { Timeout = 20_000 }
+    );
     var originalSummary = await assistant.Locator(
       ".activity > summary"
     ).InnerTextAsync();
@@ -5120,9 +5125,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       $"#recent-sessions .session-entry[data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
     assistant = Page.Locator(".message.assistant").Last;
-    Assert.AreEqual(
-      originalVisibleText,
-      await assistant.InnerTextAsync()
+    await Expect(assistant.Locator(".activity")).Not.ToHaveAttributeAsync(
+      "open",
+      string.Empty,
+      new() { Timeout = 20_000 }
     );
     Assert.AreEqual(
       originalSummary,

@@ -312,8 +312,15 @@ while (await Console.In.ReadLineAsync() is { } line)
           .First(item => item.GetProperty("type").GetString() == "text")
           .GetProperty("text")
           .GetString() ?? string.Empty;
+        var effort = parameters.TryGetProperty("effort", out var effortElement)
+          ? effortElement.GetString()
+          : null;
         if (!string.IsNullOrWhiteSpace(codexHome))
         {
+          await File.WriteAllTextAsync(
+            Path.Combine(codexHome, "fake-app-server-turn-request.json"),
+            JsonSerializer.Serialize(new { threadId, effort })
+          );
           await File.WriteAllTextAsync(
             Path.Combine(codexHome, "fake-app-server-turn-input.txt"),
             input
@@ -525,11 +532,23 @@ static bool TryValidateModelCatalog(
   var modalities = entry.GetProperty("input_modalities").EnumerateArray()
     .Select(item => item.GetString())
     .ToArray();
+  var efforts = entry.GetProperty("supported_reasoning_levels").EnumerateArray()
+    .Select(item => item.GetProperty("effort").GetString())
+    .ToArray();
+  var exposesReasoning = entry.TryGetProperty(
+    "default_reasoning_level",
+    out var defaultReasoningLevel
+  );
+  var validReasoning = exposesReasoning
+    ? string.Equals(defaultReasoningLevel.GetString(), "medium", StringComparison.Ordinal)
+      && efforts.SequenceEqual(new[] { "low", "medium", "high" }, StringComparer.Ordinal)
+    : efforts.Length == 0;
   var valid = entry.GetProperty("context_window").GetInt32() == contextWindowTokens
     && entry.GetProperty("max_context_window").GetInt32() == contextWindowTokens
     && entry.GetProperty("effective_context_window_percent").GetInt32() == 100
     && string.Equals(entry.GetProperty("shell_type").GetString(), "shell_command", StringComparison.Ordinal)
     && entry.GetProperty("supported_in_api").GetBoolean()
+    && validReasoning
     && modalities.Contains("text", StringComparer.Ordinal)
     && !string.IsNullOrWhiteSpace(entry.GetProperty("base_instructions").GetString());
   if (valid)

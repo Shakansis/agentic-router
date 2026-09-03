@@ -42,7 +42,7 @@ function Invoke-GitHubCli {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.10.0_alpha.'
+  throw 'VersionLabel must use the form 0.11.0_alpha.'
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'Repository must use the OWNER/NAME form.'
@@ -153,6 +153,7 @@ $publicFiles = @{
 foreach ($screenshotName in @(
   '01-first-run-setup.png',
   '02-local-resources-ready.png',
+  '03-execute-strategies.png',
   '04-initialize-git.png',
   '05-git-ready.png',
   '06-chat-with-images.png',
@@ -279,6 +280,18 @@ Portable Windows x64 and Linux x64 release.
 - Linux x64: download the `linux-x64.tar.gz` archive, verify it with the matching
   `.sha256` file, extract it, and run `./run-agentic-router.sh`. Apply
   `chmod +x AgenticRouter run-agentic-router.sh` if required.
+
+## What's new
+
+- Choose Auto, Direct, Supervisor, or explicit Autonomous from the split Send
+  button for each Execute request.
+- Continue eligible local work through a durable serial supervisor/worker run
+  with current-artifact verification, bounded checkpoints, and safe reattach or
+  restart reconciliation.
+- Configure low, medium, or high model effort separately for Plan, Work, Verify,
+  Complete, and Recovery under Settings > General.
+- Preserve hard Host security, trusted-workspace, process, Git, validation, and
+  recovery boundaries in every strategy, including Autonomous.
 
 Ollama and models are installed separately. Linux AMD setup offers an explicit
 Vulkan or ROCm profile and never installs GPU drivers automatically. Linux ARM64,

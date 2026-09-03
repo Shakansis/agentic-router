@@ -13,6 +13,7 @@ const state = {
   conversationVersion: 0,
   modelDiagnostics: null,
   interactionMode: "chat",
+  executionStrategy: "auto",
   harness: "native",
   harnesses: [],
   approvalPolicy: "auto",
@@ -183,6 +184,10 @@ function bindElements() {
     "harness-selector",
     "send-button",
     "send-button-label",
+    "send-strategy-control",
+    "send-strategy-toggle",
+    "send-strategy-indicator",
+    "send-strategy-menu",
     "cancel-request",
     "cancel-message-edit",
     "active-agent-label",
@@ -304,6 +309,12 @@ function bindElements() {
     "default-context-tokens",
     "provider-context-tokens",
     "reserved-response-tokens",
+    "max-direct-plan-steps",
+    "phase-effort-plan",
+    "phase-effort-work",
+    "phase-effort-verify",
+    "phase-effort-complete",
+    "phase-effort-recovery",
     "max-tool-output-tokens",
     "generation-timeout-seconds",
     "max-conversation-messages",
@@ -642,6 +653,11 @@ function bindEvents() {
   elements.composer.addEventListener("click", handleComposerClick);
   elements.cancelMessageEdit.addEventListener("click", cancelMessageEdit);
   elements.cancelRequest.addEventListener("click", cancelActiveRequest);
+  elements.sendStrategyToggle.addEventListener("click", toggleSendStrategyMenu);
+  elements.sendStrategyMenu.addEventListener("click", selectSendStrategy);
+  document.addEventListener("click", closeSendStrategyMenuFromOutside);
+  document.addEventListener("click", collapseExecutionPlansFromOutside);
+  document.addEventListener("keydown", handleSendStrategyKeyDown);
   elements.messageBufferRun.addEventListener("click", resumeMessageQueue);
   elements.messageInput.addEventListener("keydown", handleComposerKeyDown);
   elements.messageInput.addEventListener("input", resizeComposer);
@@ -4264,6 +4280,7 @@ async function resetConversationForWorkspaceChange() {
   state.conversationSessionId = null;
   state.latestExecutionSessionId = null;
   state.interactionMode = "chat";
+  state.executionStrategy = "auto";
   state.approvalPolicy = "auto";
   state.harness = "native";
   elements.modelSelector.value = "auto";
@@ -5650,6 +5667,8 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
         state.interactionMode = supervisionRun
           ? "execute"
           : session.lastInteractionMode ?? "chat";
+        state.executionStrategy = supervisionRun?.executionStrategy
+          ?? (supervisionRun ? "supervised" : "auto");
         state.approvalPolicy = supervisionRun?.approvalPolicy
           ?? session.lastApprovalPolicy
           ?? "auto";
@@ -5721,6 +5740,7 @@ async function openSessionReadOnly(id, workspaceId) {
     );
     state.conversationState = session.state;
     state.interactionMode = session.lastInteractionMode ?? "chat";
+    state.executionStrategy = "auto";
     state.approvalPolicy = session.lastApprovalPolicy ?? "auto";
     state.harness = session.selectedHarness ?? "native";
     restoreSelectValue(
@@ -8042,6 +8062,13 @@ function renderSettings() {
   elements.defaultContextTokens.value = state.settings.context.defaultContextTokens;
   elements.providerContextTokens.value = state.settings.context.providerContextTokens;
   elements.reservedResponseTokens.value = state.settings.context.reservedResponseTokens;
+  elements.maxDirectPlanSteps.value = state.settings.execution.maxDirectPlanSteps ?? 5;
+  const phaseEffort = state.settings.execution.phaseEffort ?? {};
+  elements.phaseEffortPlan.value = phaseEffort.plan ?? "high";
+  elements.phaseEffortWork.value = phaseEffort.work ?? "medium";
+  elements.phaseEffortVerify.value = phaseEffort.verify ?? "medium";
+  elements.phaseEffortComplete.value = phaseEffort.complete ?? "low";
+  elements.phaseEffortRecovery.value = phaseEffort.recovery ?? "high";
   elements.maxToolOutputTokens.value = state.settings.execution.maxToolOutputTokens;
   elements.generationTimeoutSeconds.value = state.settings.runtime.generationTimeoutSeconds;
   elements.maxConversationMessages.value = state.settings.context.maxConversationMessages;
@@ -9576,6 +9603,14 @@ async function saveSettings(event) {
     ollamaRuntime: collectOllamaRuntimeSettings(),
     execution: {
       ...state.settings.execution,
+      maxDirectPlanSteps: Number(elements.maxDirectPlanSteps.value),
+      phaseEffort: {
+        plan: elements.phaseEffortPlan.value,
+        work: elements.phaseEffortWork.value,
+        verify: elements.phaseEffortVerify.value,
+        complete: elements.phaseEffortComplete.value,
+        recovery: elements.phaseEffortRecovery.value
+      },
       maxToolOutputTokens: Number(elements.maxToolOutputTokens.value)
     },
     projectAwareness: state.settings.projectAwareness,
@@ -9709,6 +9744,12 @@ function markSettingsValidationErrors(errors) {
         "context.providerContextTokens": elements.providerContextTokens,
         "context.reservedResponseTokens": elements.reservedResponseTokens,
         "context.maxConversationMessages": elements.maxConversationMessages,
+        "execution.maxDirectPlanSteps": elements.maxDirectPlanSteps,
+        "execution.phaseEffort.plan": elements.phaseEffortPlan,
+        "execution.phaseEffort.work": elements.phaseEffortWork,
+        "execution.phaseEffort.verify": elements.phaseEffortVerify,
+        "execution.phaseEffort.complete": elements.phaseEffortComplete,
+        "execution.phaseEffort.recovery": elements.phaseEffortRecovery,
         "execution.maxToolOutputTokens": elements.maxToolOutputTokens,
         "runtime.generationTimeoutSeconds": elements.generationTimeoutSeconds,
         defaultGpu: elements.defaultGpu,
@@ -10088,6 +10129,8 @@ function setSettingsSection(section, moveFocus) {
 function navigateToSettingsError(field) {
   const section = !field
     ? "general"
+    : field === "execution.maxDirectPlanSteps" || field.startsWith("execution.phaseEffort")
+      ? "general"
     : field.startsWith("ollama")
       ? "general"
       : field.startsWith("router") || field.startsWith("intentions")
@@ -10758,6 +10801,92 @@ function handleApprovalPolicyChange() {
   updateComposerStatus();
 }
 
+const sendStrategyLabels = {
+  auto: { label: "Auto", indicator: "A" },
+  direct: { label: "Direct", indicator: "D" },
+  supervised: { label: "Supervisor", indicator: "S" },
+  autonomous: { label: "Autonomous", indicator: "∞" }
+};
+
+function renderSendStrategy() {
+  const selected = sendStrategyLabels[state.executionStrategy]
+    ?? sendStrategyLabels.auto;
+  elements.sendStrategyIndicator.textContent = selected.indicator;
+  elements.sendStrategyToggle.setAttribute(
+    "aria-label",
+    `Choose Execute send strategy. Current: ${selected.label}`
+  );
+  elements.sendStrategyToggle.title = `Execute strategy · ${selected.label}`;
+  elements.sendButton.setAttribute(
+    "aria-label",
+    state.interactionMode === "execute"
+      ? `Send message using ${selected.label} execution strategy`
+      : "Send message"
+  );
+  elements.sendButton.title = state.interactionMode === "execute"
+    ? `Send message · ${selected.label}`
+    : "Send message";
+  elements.sendStrategyMenu.querySelectorAll("[data-send-strategy]").forEach(
+    item => item.setAttribute(
+      "aria-checked",
+      String(item.dataset.sendStrategy === state.executionStrategy)
+    )
+  );
+}
+
+function setSendStrategyMenu(open, focusFirst = false) {
+  elements.sendStrategyMenu.hidden = !open;
+  elements.sendStrategyToggle.setAttribute("aria-expanded", String(open));
+  if (open && focusFirst) {
+    elements.sendStrategyMenu.querySelector(
+      `[data-send-strategy="${state.executionStrategy}"]`
+    )?.focus();
+  }
+}
+
+function toggleSendStrategyMenu() {
+  setSendStrategyMenu(elements.sendStrategyMenu.hidden, true);
+}
+
+function selectSendStrategy(event) {
+  const item = event.target.closest("[data-send-strategy]");
+  if (!item) {
+    return;
+  }
+  state.executionStrategy = item.dataset.sendStrategy;
+  updateInteractionControls();
+  setSendStrategyMenu(false);
+  elements.sendButton.focus();
+}
+
+function closeSendStrategyMenuFromOutside(event) {
+  if (!elements.sendStrategyControl.contains(event.target)) {
+    setSendStrategyMenu(false);
+  }
+}
+
+function handleSendStrategyKeyDown(event) {
+  if (event.key === "Escape" && !elements.sendStrategyMenu.hidden) {
+    event.preventDefault();
+    setSendStrategyMenu(false);
+    elements.sendStrategyToggle.focus();
+    return;
+  }
+  if (elements.sendStrategyMenu.hidden || !["ArrowDown", "ArrowUp"].includes(event.key)) {
+    return;
+  }
+  const items = Array.from(
+    elements.sendStrategyMenu.querySelectorAll("[data-send-strategy]")
+  );
+  const current = items.indexOf(document.activeElement);
+  const direction = event.key === "ArrowDown" ? 1 : -1;
+  const next = current < 0
+    ? 0
+    : (current + direction + items.length) % items.length;
+  event.preventDefault();
+  items[next].focus();
+}
+
 function updateInteractionControls() {
   const isStreaming = Boolean(state.requestController);
   const disabled = isStreaming
@@ -10772,9 +10901,17 @@ function updateInteractionControls() {
       button.disabled = disabled;
     }
   );
+  const autonomous = state.interactionMode === "execute"
+    && state.executionStrategy === "autonomous";
   elements.approvalPolicy.value = state.approvalPolicy;
   elements.approvalPolicy.disabled =
-    disabled || onboardingBlocked || state.interactionMode !== "execute";
+    disabled
+    || onboardingBlocked
+    || state.interactionMode !== "execute"
+    || autonomous;
+  elements.approvalPolicy.title = autonomous
+    ? "Autonomous supervision approves every action the user could permit; hard Host boundaries remain enforced."
+    : "";
   elements.messageInput.disabled =
     state.conversationTransitioning
     || onboardingBlocked
@@ -10783,6 +10920,17 @@ function updateInteractionControls() {
     state.conversationTransitioning
     || onboardingBlocked
     || state.readOnlyConversation;
+  const executeStrategyAvailable = state.interactionMode === "execute";
+  elements.sendStrategyControl.classList.toggle(
+    "strategy-visible",
+    executeStrategyAvailable
+  );
+  elements.sendStrategyToggle.hidden = !executeStrategyAvailable;
+  elements.sendStrategyToggle.disabled = disabled || onboardingBlocked;
+  if (!executeStrategyAvailable || elements.sendStrategyToggle.disabled) {
+    setSendStrategyMenu(false);
+  }
+  renderSendStrategy();
   elements.attachImage.disabled = disabled || onboardingBlocked;
   elements.imageInput.disabled = disabled || onboardingBlocked;
   elements.composer.classList.toggle(
@@ -12191,12 +12339,41 @@ async function steerBufferedMessage(id) {
   }
 }
 
-function cancelActiveRequest() {
-  if (!state.requestController) {
+async function cancelActiveRequest() {
+  const controller = state.requestController;
+  if (!controller) {
     return;
   }
   state.messageQueuePaused = true;
-  state.requestController.abort();
+  const assistant = state.activeAssistant;
+  const supervisionRunId = assistant?.supervisionProgress?.runId
+    ?? assistant?.supervisionRunId
+    ?? null;
+  const durableSupervisionStarted = Boolean(assistant?.supervisionProgress);
+  const durableSupervisionRequested = assistant?.requestedExecutionStrategy === "supervised"
+    || assistant?.requestedExecutionStrategy === "autonomous";
+
+  if (supervisionRunId && (durableSupervisionStarted || durableSupervisionRequested)) {
+    elements.cancelRequest.disabled = true;
+    try {
+      const response = await fetch(
+        `/api/supervision/runs/${encodeURIComponent(supervisionRunId)}/cancel`,
+        { method: "POST" }
+      );
+      if (response.ok) {
+        return;
+      }
+      if (response.status !== 404) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+    } catch (error) {
+      elements.cancelRequest.disabled = false;
+      showToast(`Could not cancel the supervised run: ${error.message}`);
+      return;
+    }
+  }
+
+  controller.abort();
 }
 
 function appendSteeredMessage(message, assistant, harnessId, sentAt) {
@@ -12388,6 +12565,13 @@ async function handleComposerSubmit(event) {
       ? "agent"
       : "user"
   });
+  const supervisionRunId = requestInteractionMode === "execute"
+    ? globalThis.crypto?.randomUUID?.() ?? createSessionId()
+    : null;
+  assistant.supervisionRunId = supervisionRunId;
+  assistant.requestedExecutionStrategy = requestInteractionMode === "execute"
+    ? state.executionStrategy
+    : "auto";
   state.activeAssistant = assistant;
   if (!queuedMessage) {
     elements.messageInput.value = "";
@@ -12425,9 +12609,13 @@ async function handleComposerSubmit(event) {
           images: requestAttachments,
           compactContext: hiddenUserMessage ? false : compactContext,
           autoModelHarness,
+          executionStrategy: requestInteractionMode === "execute"
+            ? state.executionStrategy
+            : "auto",
           diagnosticTraceId,
           replaceFromMessageIndex,
-          hideUserMessage: hiddenUserMessage
+          hideUserMessage: hiddenUserMessage,
+          supervisionRunId
         }),
         signal: controller.signal
       }
@@ -12468,6 +12656,12 @@ async function handleComposerSubmit(event) {
       && state.conversationVersion === conversationVersion
     ) {
       state.conversationState = "failed";
+      await refreshSessions();
+    } else if (
+      outcome.terminalState === "cancelled"
+      && state.conversationVersion === conversationVersion
+    ) {
+      state.conversationState = "cancelled";
       await refreshSessions();
     }
   } catch (error) {
@@ -12807,6 +13001,7 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
     answer,
     modelNotice,
     progress,
+    supervisionProgress: null,
     activeReasoning: null,
     activeResponse: null,
     hasReasoning: false,
@@ -12894,15 +13089,250 @@ function renderAssistantSources(assistant, citations) {
 function startElapsedClock(assistant) {
   const update = timestamp => {
     if (timestamp - assistant.lastClockUpdate >= 250) {
-      assistant.progress.textContent =
-        `${assistant.activeReasoning ? "Thinking" : "Thinking…"} · `
-        + formatElapsed(elapsedSince(assistant));
+      if (
+        assistant.supervisionProgress
+        && !["completed", "blocked", "cancelled"].includes(
+          assistant.supervisionProgress.state
+        )
+      ) {
+        const strategy = assistant.supervisionProgress.executionStrategy === "autonomous"
+          ? "Autonomous"
+          : "Supervisor";
+        assistant.progress.textContent =
+          `${strategy} · ${supervisionPhaseLabel(assistant.supervisionProgress.phase)} · `
+          + formatElapsed(elapsedSince(assistant));
+      } else {
+        assistant.progress.textContent =
+          `${assistant.activeReasoning ? "Thinking" : "Thinking…"} · `
+          + formatElapsed(elapsedSince(assistant));
+      }
       assistant.lastClockUpdate = timestamp;
     }
 
     assistant.clockFrame = requestAnimationFrame(update);
   };
   assistant.clockFrame = requestAnimationFrame(update);
+}
+
+function supervisionPhaseLabel(phase) {
+  return {
+    foundation: "Starting",
+    recovery: "Recovering",
+    decomposing: "Planning work",
+    working: "Executing work",
+    verifying: "Verifying results",
+    completing: "Final review"
+  }[phase] ?? "Working";
+}
+
+function supervisionEventIsMeaningful(type) {
+  return type?.startsWith("supervision.")
+    && type !== "supervision.turn-slow-warning"
+    && type !== "supervision.turn-slow-critical"
+    && type !== "supervision.turn-status";
+}
+
+function renderSupervisionExecutionPlan(assistant, supervision) {
+  if (!supervision.workItems?.length) {
+    if (!assistant.executionSession?.plan) {
+      assistant.planPanel.hidden = true;
+      assistant.planPanel.classList.remove("docked");
+      assistant.planBody.replaceChildren();
+    }
+    return;
+  }
+  renderExecutionPlan(
+    assistant,
+    {
+      state: supervision.state,
+      changedFileCount: 0,
+      planSource: "supervisor",
+      supervisionPhase: supervision.phase,
+      plan: {
+        objective: supervision.objective,
+        steps: supervision.workItems.map(item => ({
+          id: item.id,
+          title: item.objective,
+          status: item.status === "active" || item.status === "verifying"
+            ? "in-progress"
+            : item.status,
+          dependencies: []
+        })),
+        currentStepId: supervision.workItemId,
+        completedStepCount: supervision.completedItems,
+        revisionCount: supervision.eventSequence
+      }
+    }
+  );
+}
+
+function compactPlanText(value, maximumLength = 72) {
+  let normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "Untitled work item";
+  }
+
+  const labelBoundary = normalized.indexOf(":");
+  if (labelBoundary >= 12 && labelBoundary <= 56) {
+    const label = normalized.slice(0, labelBoundary).trim();
+    const detail = normalized.slice(labelBoundary + 1).trim();
+    const beginsWithAction = /^(add|build|complete|configure|create|fix|implement|inspect|plan|prepare|review|test|update|validate|verify|adicionar|completar|configurar|corrigir|criar|implementar|inspecionar|planejar|preparar|revisar|testar|validar|verificar)\b/i.test(label);
+    if (detail && !beginsWithAction) {
+      const detailBoundary = detail.search(/;|[.!?](?:\s|$)|\s[—–]\s/);
+      const action = (detailBoundary >= 8
+        ? detail.slice(0, detailBoundary)
+        : detail).replace(/[.,]+$/, "");
+      normalized = `${label} · ${action}`;
+    }
+  }
+  const clauseBoundary = normalized.search(/[:;]|\s[—–]\s/);
+  const clause = clauseBoundary >= 12
+    ? normalized.slice(0, clauseBoundary)
+    : normalized;
+  if (clause.length <= maximumLength) {
+    return clause.replace(/[.,]+$/, "");
+  }
+  const candidate = clause.slice(0, maximumLength + 1);
+  const wordBoundary = candidate.lastIndexOf(" ");
+  return `${candidate.slice(0, wordBoundary >= 32 ? wordBoundary : maximumLength).trim()}…`;
+}
+
+function renderSupervisionSessionHeader(assistant, supervision) {
+  assistant.sessionHeader.hidden = false;
+  assistant.sessionHeader.replaceChildren();
+  const stateLabel = document.createElement("strong");
+  stateLabel.textContent = supervision.state;
+  const route = document.createElement("span");
+  const strategy = supervision.executionStrategy === "autonomous"
+    ? "Autonomous"
+    : "Supervisor";
+  route.textContent =
+    `Target: ${supervision.model || "unavailable"} · `
+    + `Harness: ${supervision.harness || "unavailable"} · ${strategy}`;
+  route.title = [
+    `Run: ${supervision.runId}`,
+    supervision.approvalPolicy
+      ? `Approval: ${supervision.approvalPolicy}`
+      : null
+  ].filter(Boolean).join("\n");
+  const role = supervision.role === "worker"
+    ? "Worker"
+    : supervision.role === "supervisor"
+      ? "Supervisor"
+      : "Host";
+  const counts = document.createElement("span");
+  counts.textContent = [
+    role,
+    supervision.totalItems > 0
+      ? `${supervision.completedItems}/${supervision.totalItems} items`
+      : "building queue",
+    supervisionPhaseLabel(supervision.phase),
+    supervision.approvalPolicy
+      ? `approval ${supervision.approvalPolicy}`
+      : null
+  ].filter(Boolean).join(" · ");
+  assistant.sessionHeader.append(stateLabel, route, counts);
+}
+
+function supervisionProgressMessage(streamEvent, supervision) {
+  const action = /^Host action [^(]+ \(([^)]+)\) entered durable phase ([^.]+)\.$/.exec(
+    streamEvent.message ?? ""
+  );
+  if (action) {
+    const [, tool, phase] = action;
+    return phase === "in-flight"
+      ? `Host is executing ${tool}.`
+      : phase === "committed"
+        ? `Host completed and recorded ${tool}.`
+        : phase === "rejected"
+          ? `Host rejected ${tool}.`
+          : `${tool}: ${phase}.`;
+  }
+  const workItem = supervision.workItems?.find(
+    item => item.id === supervision.workItemId
+  );
+  const itemTitle = compactPlanText(workItem?.objective ?? supervision.objective);
+  if (streamEvent.type === "supervision.turn-status") {
+    if (supervision.role === "worker") {
+      return `Working on: ${itemTitle}. No new Host-observed result yet.`;
+    }
+    if (supervision.phase === "verifying") {
+      return `Verifying: ${itemTitle}. No new Host-observed result yet.`;
+    }
+    if (supervision.phase === "completing") {
+      return "Reviewing accepted work and current Host evidence.";
+    }
+    return `Planning the work queue for: ${itemTitle}.`;
+  }
+  if (streamEvent.type === "supervision.worker-started") {
+    return `Executing: ${itemTitle}.`;
+  }
+  if (streamEvent.type === "supervision.verification-started") {
+    return `Verifying: ${itemTitle}.`;
+  }
+  if (streamEvent.type === "supervision.work-queued") {
+    return `Plan ready with ${supervision.totalItems} work item(s).`;
+  }
+  return streamEvent.message ?? "Supervision state updated.";
+}
+
+function supervisionProgressSource(streamEvent) {
+  return streamEvent.supervisionProgress.role === "worker"
+    ? "Worker"
+    : streamEvent.type.startsWith("supervision.action-")
+      ? "Host"
+      : "Supervisor";
+}
+
+function renderSupervisionProgress(assistant, streamEvent) {
+  const supervision = streamEvent.supervisionProgress;
+  if (!supervision) {
+    return;
+  }
+
+  assistant.supervisionProgress = supervision;
+  renderSupervisionSessionHeader(
+    assistant,
+    supervision
+  );
+  if (assistant.modelNotice.hidden && supervision.model) {
+    renderModelSelection(
+      assistant,
+      supervision.model,
+      assistant.modelSelectionOrigin
+    );
+  }
+  renderSupervisionExecutionPlan(
+    assistant,
+    supervision
+  );
+  if (streamEvent.message) {
+    assistant.workActivity.hidden = false;
+    ensureWorkNarrative(
+      assistant,
+      `${supervisionProgressSource(streamEvent)}: ${supervisionProgressMessage(streamEvent, supervision)}`,
+      true
+    );
+  }
+  if (streamEvent.slowRequest) {
+    renderSlowRequestAlert(
+      assistant,
+      streamEvent,
+      false
+    );
+  }
+  const terminal = ["completed", "blocked", "cancelled"].includes(
+    supervision.state
+  );
+  assistant.progress.hidden = terminal;
+  if (!terminal) {
+    const strategy = supervision.executionStrategy === "autonomous"
+      ? "Autonomous"
+      : "Supervisor";
+    assistant.progress.textContent =
+      `${strategy} · ${supervisionPhaseLabel(supervision.phase)} · `
+      + formatElapsed(elapsedSince(assistant));
+  }
 }
 
 function renderModelSelection(assistant, model, origin) {
@@ -12938,7 +13368,7 @@ function appendAssistantReasoning(assistant, delta, contentBlockId = null) {
     if (contentBlockId) {
       details.dataset.contentBlockId = contentBlockId;
     }
-    details.open = true;
+    details.open = !assistant.supervisionProgress;
     const summary = document.createElement("summary");
     summary.textContent = "Thinking";
     summary.setAttribute("aria-label", "Reasoning provided by the model");
@@ -13088,27 +13518,54 @@ function ensureWorkNarrative(assistant, text, replace = false) {
 }
 
 function isVisibleWorkAction(action) {
+  const tool = action?.tool?.trim().toLowerCase();
+  return Boolean(tool)
+    && !tool.startsWith("mcp__agentic_router__");
+}
+
+function canonicalActionTool(tool) {
+  const normalized = tool?.trim().toLowerCase() ?? "";
+  const separator = normalized.lastIndexOf("__");
+  return separator >= 0 ? normalized.slice(separator + 2) : normalized;
+}
+
+function isReviewableWorkAction(action) {
   return new Set([
     "create_file",
     "create_files",
     "write_file",
+    "write",
     "replace_text",
+    "edit",
     "apply_patch",
+    "patch",
     "delete_paths",
     "create_directory"
-  ]).has(action?.tool);
+  ]).has(canonicalActionTool(action?.tool));
 }
 
 function actionDisplayLabel(tool) {
+  const normalized = canonicalActionTool(tool);
   return {
     create_file: "Create",
     create_files: "Create files",
     write_file: "Escrever",
+    write: "Write",
     replace_text: "Edit",
+    edit: "Edit",
     apply_patch: "Apply patch",
+    patch: "Apply patch",
     delete_paths: "Delete",
-    create_directory: "Create folder"
-  }[tool] ?? tool;
+    create_directory: "Create folder",
+    read: "Read",
+    read_file: "Read",
+    list_files: "List files",
+    search_text: "Search",
+    get_file_info: "Inspect",
+    run_process: "Run",
+    git_status: "Git status",
+    web_search: "Search web"
+  }[normalized] ?? (normalized.replaceAll("_", " ") || tool);
 }
 
 function actionTarget(action) {
@@ -13200,6 +13657,7 @@ function upsertWorkAction(assistant, streamEvent) {
   assistant.progress.textContent =
     `Executing… · ${formatElapsed(elapsedSince(assistant))}`;
   const relativePath = actionTarget(action);
+  const reviewable = isReviewableWorkAction(action);
   let item = assistant.actionItems.get(action.actionId);
 
   if (!item) {
@@ -13207,7 +13665,9 @@ function upsertWorkAction(assistant, streamEvent) {
     details.className = "work-action";
     details.dataset.timelineKind = "action";
     details.dataset.actionId = action.actionId;
-    details.dataset.eventType = streamEvent.type;
+    if (reviewable) {
+      details.dataset.eventType = streamEvent.type;
+    }
     const summary = document.createElement("summary");
     const icon = document.createElement("span");
     icon.className = "work-action-icon";
@@ -13216,11 +13676,13 @@ function upsertWorkAction(assistant, streamEvent) {
     const label = document.createElement("span");
     label.className = "work-action-label";
     label.textContent = actionDisplayLabel(action.tool);
-    const link = document.createElement("a");
-    link.className = "work-action-file";
-    link.href = "#";
+    const link = document.createElement(reviewable ? "a" : "span");
+    link.className = reviewable ? "work-action-file" : "work-action-target";
     link.textContent = relativePath;
-    link.setAttribute("aria-label", `Open review for ${relativePath}`);
+    if (reviewable) {
+      link.href = "#";
+      link.setAttribute("aria-label", `Open review for ${relativePath}`);
+    }
     const status = document.createElement("span");
     status.className = "work-action-status";
     const body = document.createElement("div");
@@ -13244,32 +13706,36 @@ function upsertWorkAction(assistant, streamEvent) {
       preview
     };
     assistant.actionItems.set(action.actionId, item);
-    details.addEventListener(
-      "toggle",
-      () => {
-        if (details.open) {
-          void hydrateWorkActionPath(
-            assistant,
-            item,
+    if (reviewable) {
+      details.addEventListener(
+        "toggle",
+        () => {
+          if (details.open) {
+            void hydrateWorkActionPath(
+              assistant,
+              item,
+              relativePath
+            );
+          }
+        }
+      );
+      link.addEventListener(
+        "click",
+        event => {
+          event.preventDefault();
+          event.stopPropagation();
+          void openChangeReview(
+            assistant.executionSession?.id,
             relativePath
           );
         }
-      }
-    );
-    link.addEventListener(
-      "click",
-      event => {
-        event.preventDefault();
-        event.stopPropagation();
-        void openChangeReview(
-          assistant.executionSession?.id,
-          relativePath
-        );
-      }
-    );
+      );
+    }
   }
 
-  item.details.dataset.eventType = streamEvent.type;
+  if (reviewable) {
+    item.details.dataset.eventType = streamEvent.type;
+  }
   item.details.dataset.state = action.state;
   item.status.textContent = actionStateLabel(action.state);
   item.icon.textContent = action.state === "completed"
@@ -13406,6 +13872,12 @@ async function consumeEventStream(stream, assistant, options = {}) {
         streamEvent.executionSession,
         updateVisibleState
       );
+      if (streamEvent.supervisionProgress) {
+        renderSupervisionProgress(
+          assistant,
+          streamEvent
+        );
+      }
 
       if (
         (
@@ -13773,6 +14245,7 @@ function isMeaningfulRequestActivity(streamEvent, observedOutputTokens = 0) {
   return type.startsWith("action.")
     || type.startsWith("execution.")
     || type.startsWith("execution-")
+    || supervisionEventIsMeaningful(type)
     || (
       type.startsWith("harness.")
       && !type.endsWith("-selected")
@@ -14220,7 +14693,8 @@ function renderExecutionPlan(assistant, session) {
   icon.textContent = complete ? "✓" : failed ? "!" : "●";
   const title = document.createElement("span");
   title.className = "execution-plan-title";
-  title.textContent = `Plan · ${plan.objective}`;
+  title.textContent = `Plan · ${compactPlanText(plan.objective, 84)}`;
+  title.title = plan.objective;
   titleArea.append(icon, title);
 
   const meta = document.createElement("span");
@@ -14269,7 +14743,10 @@ function renderExecutionPlan(assistant, session) {
       "in-progress": "●"
     }[step.status] ?? "○";
     const title = document.createElement("span");
-    title.textContent = step.title;
+    title.textContent = compactPlanText(step.title);
+    if (title.textContent !== step.title) {
+      title.title = step.title;
+    }
     const status = document.createElement("small");
     status.textContent = step.status;
     if (step.dependencies?.length) {
@@ -14287,11 +14764,23 @@ function renderExecutionPlan(assistant, session) {
     : Math.min(plan.completedStepCount + 1, plan.steps.length);
   const footer = document.createElement("p");
   footer.className = "execution-plan-progress";
-  footer.textContent = `${session.changedFileCount} changed files`;
+  footer.textContent = session.planSource === "supervisor"
+    ? `Supervisor-managed queue · ${supervisionPhaseLabel(session.supervisionPhase)}`
+    : `${session.changedFileCount} changed files`;
   footer.title = plan.completedStepCount === plan.steps.length
     ? `Steps ${plan.steps.length}/${plan.steps.length}`
     : `Step ${displayedStep}/${plan.steps.length}`;
   assistant.planBody.append(list, footer);
+}
+
+function collapseExecutionPlansFromOutside(event) {
+  document.querySelectorAll(".execution-plan.docked[open]").forEach(
+    panel => {
+      if (!panel.contains(event.target)) {
+        panel.open = false;
+      }
+    }
+  );
 }
 
 function undockExecutionPlans() {
@@ -16178,6 +16667,7 @@ function setStreamingState(isStreaming) {
   elements.sendButton.title = elements.sendButton.getAttribute("aria-label");
   elements.sendButton.classList.remove("cancel");
   elements.cancelRequest.hidden = !isStreaming;
+  elements.cancelRequest.disabled = false;
   elements.composer.classList.toggle("streaming", isStreaming);
   elements.attachImage.disabled = isStreaming;
   elements.imageInput.disabled = isStreaming;

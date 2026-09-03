@@ -17,6 +17,7 @@ using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.Supervision;
 using AgenticRouter.Api.Usage;
 using AgenticRouter.Api.WorkspaceProfiles;
 
@@ -971,6 +972,15 @@ public sealed class ChatStreamService
           );
         }
 
+        yield return Event(
+          requestId,
+          "execution-effort-requested",
+          $"Host requested {invocation.RequestedEffort} effort for this {invocation.Role.ToString().ToLowerInvariant()} turn.",
+          stopwatch,
+          selectedModel,
+          intention
+        );
+
         var execution = new AgentHarnessExecution<ChatStreamEvent>(
           nativeCancellationToken => ExecuteNativeHarnessSelectionAsync(
             request,
@@ -992,6 +1002,7 @@ public sealed class ChatStreamService
             invocation.Role == ExecutionContextRole.Supervisor,
             invocation.CaptureRoleResult,
             invocation.ActionJournal,
+            invocation.RequestedEffort,
             stopwatch,
             nativeCancellationToken
           ),
@@ -1014,6 +1025,7 @@ public sealed class ChatStreamService
               invocation.UseMinimalToolInventory,
               invocation.CaptureRoleResult,
               invocation.ActionJournal,
+              invocation.RequestedEffort,
               stopwatch,
               externalCancellationToken
             )
@@ -1348,6 +1360,7 @@ public sealed class ChatStreamService
     bool useMinimalToolInventory,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
+    string requestedEffort,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -1423,6 +1436,8 @@ public sealed class ChatStreamService
       useMinimalToolInventory,
       captureRoleResult,
       actionJournal,
+      requestedEffort,
+      capabilities.Reasoning,
       stopwatch,
       cancellationToken
     ))
@@ -1451,6 +1466,7 @@ public sealed class ChatStreamService
     bool allowReadOnlyCompletion,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
+    string requestedEffort,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -1463,6 +1479,12 @@ public sealed class ChatStreamService
           rootInstructions,
           executionToolScope
         )
+      )
+    ).ToArray();
+    messages = messages.Prepend(
+      new ChatMessage(
+        "system",
+        CreateEffortGuidance(requestedEffort)
       )
     ).ToArray();
 
@@ -1480,6 +1502,19 @@ public sealed class ChatStreamService
     );
     var selectedReference = ProviderModelReference.Parse(
       selectedModel
+    );
+    var nativeEffortSupported = selectedReference.IsLocal && capabilities.Reasoning;
+    yield return Event(
+      requestId,
+      nativeEffortSupported
+        ? "execution-effort-applied"
+        : "execution-effort-prompt-guided",
+      nativeEffortSupported
+        ? $"Applied {requestedEffort} effort through Ollama's native think control and Host guidance."
+        : $"The selected model route has no reviewed native effort control; {requestedEffort} effort is prompt-guided for this turn.",
+      stopwatch,
+      selectedModel,
+      intention
     );
     var toolingProfile = _toolingProfiles.Resolve(
       new SpecialistToolingIdentity(
@@ -1533,7 +1568,13 @@ public sealed class ChatStreamService
       visibleMessages: context.VisibleMessages,
       omittedMessages: context.OmittedMessages,
       manualCompactionRequested: request.CompactContext,
-      providerOptions: providerOptions
+      providerOptions: providerOptions with
+      {
+        RequestedEffort = nativeEffortSupported
+          ? requestedEffort
+          : null
+      },
+      requestedEffort: requestedEffort
     );
 
     await foreach (var streamEvent in ExecuteActionsAsync(
@@ -1635,6 +1676,16 @@ public sealed class ChatStreamService
     );
   }
 
+  private static string CreateEffortGuidance(string requestedEffort)
+  {
+    return requestedEffort switch
+    {
+      ModelEffortLevels.High => "Host effort target: high. Reason carefully about dependencies and risks before acting, then execute the bounded objective.",
+      ModelEffortLevels.Low => "Host effort target: low. Use established facts, avoid unnecessary analysis, and complete the bounded objective directly.",
+      _ => "Host effort target: medium. Use only the reasoning needed for a reliable result and proceed to action without repeated analysis."
+    };
+  }
+
   private static HarnessConversationContext CreateHarnessConversationContext(
     ConversationContextResult context
   )
@@ -1676,6 +1727,8 @@ public sealed class ChatStreamService
     bool useMinimalToolInventory,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
+    string requestedEffort,
+    bool modelSupportsReasoning,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -1702,6 +1755,7 @@ public sealed class ChatStreamService
     );
     var answer = new StringBuilder();
     var responseSegment = new StringBuilder();
+    var roleResultSegment = new StringBuilder();
     string? activeResponseItemId = null;
     var approvedDeletionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var approvedNativeMutation = false;
@@ -1782,7 +1836,9 @@ public sealed class ChatStreamService
       ).ToArray(),
       ManagedContext: string.IsNullOrWhiteSpace(managedContext)
         ? null
-        : [managedContext]
+        : [managedContext],
+      RequestedEffort: requestedEffort,
+      ModelSupportsReasoning: modelSupportsReasoning
     );
     var automaticContinuationAttempts = 0;
   StartHarnessTurn:
@@ -1875,6 +1931,7 @@ public sealed class ChatStreamService
             }
             answer.Append(harnessEvent.Delta);
             responseSegment.Append(harnessEvent.Delta);
+            roleResultSegment.Append(harnessEvent.Delta);
             yield return new ChatStreamEvent(
               requestId,
               "response.delta",
@@ -1897,6 +1954,7 @@ public sealed class ChatStreamService
         case "tool.completed":
         case "tool.failed":
           responseSegment.Clear();
+          roleResultSegment.Clear();
           activeResponseItemId = null;
           yield return HarnessActionEvent(
             requestId,
@@ -1937,6 +1995,7 @@ public sealed class ChatStreamService
           break;
         case "host-tool.requested":
           responseSegment.Clear();
+          roleResultSegment.Clear();
           activeResponseItemId = null;
           await foreach (var hostToolEvent in ExecuteHarnessHostToolAsync(
             harness,
@@ -1949,6 +2008,7 @@ public sealed class ChatStreamService
             session,
             harnessEvent,
             approvedDeletionPaths,
+            executionSettings,
             projectAwareness,
             observer,
             actionJournal,
@@ -1965,6 +2025,7 @@ public sealed class ChatStreamService
         case "approval.requested":
           {
             responseSegment.Clear();
+            roleResultSegment.Clear();
             activeResponseItemId = null;
             if (harnessEvent.ApprovalId is null)
             {
@@ -2122,7 +2183,7 @@ public sealed class ChatStreamService
             );
 
             if (
-              string.Equals(request.ApprovalPolicy, "auto", StringComparison.Ordinal)
+              request.ApprovalPolicy is "auto" or "autonomous"
             )
             {
               await harness.ResolveApprovalAsync(
@@ -2232,6 +2293,18 @@ public sealed class ChatStreamService
             intention
           );
           break;
+        case "effort.applied":
+        case "effort.prompt-guided":
+          yield return Event(
+            requestId,
+            $"harness.{harnessDefinition.Id}-{harnessEvent.Type}",
+            harnessEvent.Message
+              ?? $"{harnessDefinition.DisplayName} processed the Host effort target.",
+            stopwatch,
+            model,
+            intention
+          );
+          break;
         case "turn.failed":
         case "turn.timed-out":
           terminalFailure = harnessEvent;
@@ -2325,6 +2398,7 @@ public sealed class ChatStreamService
 
       answer.Clear();
       responseSegment.Clear();
+      roleResultSegment.Clear();
       activeResponseItemId = null;
       liveContextBase = latestContextUsage;
       liveOutputCharacters = 0;
@@ -2459,7 +2533,7 @@ public sealed class ChatStreamService
     );
     session.RefreshCompletionGate();
     session.Complete("completed-with-warnings");
-    captureRoleResult?.Invoke(answer.ToString());
+    captureRoleResult?.Invoke(roleResultSegment.ToString());
     var summary = session.CreateSummary();
     var responseTail = CreateAuthoritativeStatus(summary.CompletionStatus);
     var visibleAnswer = string.IsNullOrWhiteSpace(answer.ToString())
@@ -2696,6 +2770,7 @@ public sealed class ChatStreamService
     ExecutionSession session,
     HarnessEvent harnessEvent,
     ISet<string> approvedDeletionPaths,
+    ExecutionSettings executionSettings,
     ProjectAwarenessSettings projectAwareness,
     HarnessWorkspaceObserver observer,
     IExecutionActionJournal? actionJournal,
@@ -3004,6 +3079,12 @@ public sealed class ChatStreamService
         stopwatch,
         model,
         intention
+      );
+      ThrowIfAutomaticSupervisionRequired(
+        request,
+        session,
+        plan!,
+        executionSettings.MaxDirectPlanSteps
       );
       yield break;
     }
@@ -3473,6 +3554,14 @@ public sealed class ChatStreamService
       "tool.completed" => "action.completed",
       _ => "action.failed"
     };
+    var actionState = harnessEvent.State switch
+    {
+      "running" => "executing",
+      "error" => "failed",
+      null when type == "action.completed" => "completed",
+      null when type == "action.failed" => "failed",
+      _ => harnessEvent.State ?? "executing"
+    };
     return new ChatStreamEvent(
       requestId,
       type,
@@ -3489,7 +3578,7 @@ public sealed class ChatStreamService
         harnessEvent.Tool ?? $"{harnessDefinition.Id}_tool",
         harnessEvent.Message ?? $"{harnessDefinition.DisplayName} tool activity",
         null,
-        harnessEvent.State ?? "running",
+        actionState,
         false,
         executionSessionId,
         ResultOutput: harnessEvent.Output ?? harnessEvent.Delta
@@ -3916,7 +4005,8 @@ public sealed class ChatStreamService
                     ) => reasoning.Writer.WriteAsync(
                       delta,
                       token
-                    )
+                    ),
+                    requestedEffort: progress.ProviderOptions.RequestedEffort
                   )
               );
             }
@@ -5083,6 +5173,15 @@ public sealed class ChatStreamService
             );
             progress.RecoveryAttemptCount = 0;
             planHandled = true;
+            if (_executionSession is not null)
+            {
+              ThrowIfAutomaticSupervisionRequired(
+                request,
+                _executionSession,
+                plan!,
+                settings.MaxDirectPlanSteps
+              );
+            }
             break;
           }
 
@@ -6315,6 +6414,11 @@ public sealed class ChatStreamService
     var lastActivityAt = startedAt;
     var warningSent = false;
     var criticalSent = false;
+    var heartbeatInterval = TimeSpan.FromSeconds(Math.Clamp(
+      warningAfter.TotalSeconds / 3,
+      1,
+      30
+    ));
     var selectedModel = string.IsNullOrWhiteSpace(request.Model)
       ? "auto"
       : request.Model;
@@ -6328,6 +6432,7 @@ public sealed class ChatStreamService
     );
     var warningDelay = Task.Delay(warningAfter, activityLifetime.Token);
     var criticalDelay = Task.Delay(criticalAfter, activityLifetime.Token);
+    var heartbeatDelay = Task.Delay(heartbeatInterval, activityLifetime.Token);
     var safetyDelay = Task.Delay(ExtremeInactivityCeiling, activityLifetime.Token);
 
     try
@@ -6336,7 +6441,7 @@ public sealed class ChatStreamService
       var moveNext = enumerator.MoveNextAsync().AsTask();
       while (true)
       {
-        var candidates = new List<Task> { moveNext, safetyDelay };
+        var candidates = new List<Task> { moveNext, heartbeatDelay, safetyDelay };
         if (!warningSent)
         {
           candidates.Add(warningDelay);
@@ -6346,6 +6451,21 @@ public sealed class ChatStreamService
           candidates.Add(criticalDelay);
         }
         var completed = await Task.WhenAny(candidates);
+        if (
+          completed == heartbeatDelay
+          && heartbeatDelay.Status == TaskStatus.RanToCompletion
+        )
+        {
+          yield return Event(
+            requestId,
+            "request.heartbeat",
+            null,
+            stopwatch,
+            selectedModel
+          );
+          heartbeatDelay = Task.Delay(heartbeatInterval, activityLifetime.Token);
+          continue;
+        }
         if (
           completed == warningDelay
           && warningDelay.Status == TaskStatus.RanToCompletion
@@ -6449,6 +6569,7 @@ public sealed class ChatStreamService
           );
           warningDelay = Task.Delay(warningAfter, activityLifetime.Token);
           criticalDelay = Task.Delay(criticalAfter, activityLifetime.Token);
+          heartbeatDelay = Task.Delay(heartbeatInterval, activityLifetime.Token);
           safetyDelay = Task.Delay(
             ExtremeInactivityCeiling,
             activityLifetime.Token
@@ -9182,11 +9303,16 @@ public sealed class ChatStreamService
         "auto",
         StringComparison.Ordinal
       )
+      && !string.Equals(
+        request.ApprovalPolicy,
+        "autonomous",
+        StringComparison.Ordinal
+      )
     )
     {
       throw new ChatStageException(
         "request-validation",
-        "Approval policy must be ask or auto.",
+        "Approval policy must be ask, auto, or autonomous.",
         $"Unsupported approval policy: {request.ApprovalPolicy}.",
         request.Model,
         null,
@@ -10110,6 +10236,34 @@ public sealed class ChatStreamService
       ?? throw new InvalidOperationException(
         "A recovery checkpoint requires an active execution session."
       );
+    if (string.Equals(
+      executionSession.ApprovalPolicy,
+      "autonomous",
+      StringComparison.Ordinal
+    ))
+    {
+      var failure = new ChatStageException(
+        "autonomous-recovery",
+        "The autonomous worker reached a bounded recovery boundary and returned control to the supervisor.",
+        reason,
+        model,
+        intention,
+        409,
+        true
+      );
+      return new RecoveryCheckpoint(
+        Event(
+          requestId,
+          "action.autonomous-recovery-escalated",
+          "The autonomous worker returned a typed recovery failure to the supervisor instead of waiting for user input.",
+          stopwatch,
+          model,
+          intention
+        ),
+        Task.FromException<string>(failure),
+        reason
+      );
+    }
     var checkpointId = Guid.NewGuid().ToString(
       "N"
     );
@@ -11028,6 +11182,45 @@ public sealed class ChatStreamService
 
   }
 
+  private void ThrowIfAutomaticSupervisionRequired(
+    ChatRequest request,
+    ExecutionSession session,
+    ExecutionPlanView plan,
+    int maximumDirectPlanSteps
+  )
+  {
+    _logger.LogInformation(
+      "Automatic supervision evaluated accepted plan for execution session {ExecutionSessionId}: strategy {Strategy}, steps {StepCount}, direct limit {DirectLimit}.",
+      session.Id,
+      request.ExecutionStrategy,
+      plan.Steps.Count,
+      maximumDirectPlanSteps
+    );
+    if (
+      !string.Equals(
+        request.ExecutionStrategy,
+        SupervisionExecutionStrategies.Auto,
+        StringComparison.Ordinal
+      )
+      || plan.Steps.Count <= maximumDirectPlanSteps
+    )
+    {
+      return;
+    }
+
+    var afterVerifiedMutation = session.HasVerifiedMutation;
+    session.AddWarning(
+      $"Automatic supervision takeover requested because the accepted plan contains {plan.Steps.Count} steps; the configured direct limit is {maximumDirectPlanSteps}."
+    );
+    session.Complete("handed-off-to-supervision");
+    throw new SupervisionTakeoverRequiredException(
+      session.Id,
+      plan,
+      maximumDirectPlanSteps,
+      afterVerifiedMutation
+    );
+  }
+
   private sealed class ExecutionProgress
   {
     public ExecutionProgress(
@@ -11039,7 +11232,8 @@ public sealed class ChatStreamService
       int visibleMessages = 0,
       int omittedMessages = 0,
       bool manualCompactionRequested = false,
-      ProviderChatOptions? providerOptions = null
+      ProviderChatOptions? providerOptions = null,
+      string requestedEffort = ModelEffortLevels.Medium
     )
     {
       Messages = messages;
@@ -11054,6 +11248,7 @@ public sealed class ChatStreamService
         ToToolMessage
       ).ToList();
       ProviderOptions = providerOptions ?? ProviderChatOptions.Empty;
+      RequestedEffort = requestedEffort;
       if (ProviderOptions.Images.Count > 0)
       {
         var lastUserIndex = ToolMessages.FindLastIndex(
@@ -11077,6 +11272,8 @@ public sealed class ChatStreamService
     public List<OllamaToolMessage> ToolMessages { get; }
 
     public ProviderChatOptions ProviderOptions { get; }
+
+    public string RequestedEffort { get; }
 
     public SpecialistToolingProfile ToolingProfile { get; }
 

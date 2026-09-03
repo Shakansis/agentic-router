@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using AgenticRouter.Api.Chat;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Markdown;
@@ -32,6 +33,7 @@ public sealed class ChatController : ControllerBase
   private readonly ITraceContext _trace;
   private readonly IPersistentSessionService _persistentSessions;
   private readonly IDurableSupervisionRunCoordinator _supervisionRuns;
+  private readonly ISettingsStore _settings;
   private readonly IMarkdownRenderer _markdown;
   private string? _executionSessionId;
   private string? _conversationSessionId;
@@ -47,6 +49,7 @@ public sealed class ChatController : ControllerBase
     IPersistentSessionService persistentSessions,
     IImageAttachmentValidator imageValidator,
     IDurableSupervisionRunCoordinator supervisionRuns,
+    ISettingsStore settings,
     IMarkdownRenderer markdown,
     IIncidentJournal incidents,
     ITraceContext trace,
@@ -58,6 +61,7 @@ public sealed class ChatController : ControllerBase
     _persistentSessions = persistentSessions;
     _imageValidator = imageValidator;
     _supervisionRuns = supervisionRuns;
+    _settings = settings;
     _markdown = markdown;
     _incidents = incidents;
     _trace = trace;
@@ -102,10 +106,14 @@ public sealed class ChatController : ControllerBase
     }
 
     SupervisionRequestResolution supervision;
+    var maximumDirectPlanSteps = 5;
     try
     {
+      var settings = await _settings.GetAsync(cancellationToken);
+      maximumDirectPlanSteps = settings.Execution.MaxDirectPlanSteps;
       supervision = SupervisionRequestPolicy.Resolve(
-        request
+        request,
+        maximumDirectPlanSteps
       );
     }
     catch (SupervisionException exception)
@@ -207,105 +215,163 @@ public sealed class ChatController : ControllerBase
       var contentBlocks = new List<ChatMessageContentBlock>();
       var normalizedRequest = request with
       {
-        ConversationSessionId = _conversationSessionId
+        ConversationSessionId = _conversationSessionId,
+        Message = supervision.Objective,
+        ExecutionStrategy = supervision.RequestedStrategy
       };
-      var stream = supervision.Supervised
-        ? StreamSupervisedAsync(
-          normalizedRequest,
-          supervision,
-          requestId,
-          cancellationToken
-        )
-        : _chatStreamService.StreamAsync(
-          normalizedRequest,
-          requestId,
-          cancellationToken
-        );
-      await foreach (var streamEvent in stream)
+      SupervisionTakeoverSnapshot? takeover = null;
+      while (true)
       {
-        CaptureContentBlock(
-          contentBlocks,
-          streamEvent
-        );
-        _executionSessionId = streamEvent.ExecutionSession?.Id
-          ?? _executionSessionId;
-        _trace.Link("executionSessionId", _executionSessionId);
-        await PersistExecutionCheckpointAsync(
-          streamEvent
-        );
-        if (streamEvent.Type == "response.delta")
-        {
-          answer.Append(
-            streamEvent.Delta
+        var stream = supervision.Supervised
+          ? StreamSupervisedAsync(
+            normalizedRequest,
+            supervision,
+            requestId,
+            takeover,
+            cancellationToken
+          )
+          : _chatStreamService.StreamAsync(
+            normalizedRequest,
+            requestId,
+            cancellationToken
           );
-        }
-
-        if (streamEvent.Type == "response.completed")
+        try
         {
-          try
+          await foreach (var streamEvent in stream)
           {
-            var review = string.IsNullOrWhiteSpace(
-              _executionSessionId
-            )
-              ? null
-              : _executionSessions.GetReview(
-                _executionSessionId
-              );
-            var persisted = await _persistentSessions.CompleteTurnAsync(
-              _conversationSessionId,
-              requestId,
-              answer.ToString(),
-              request.InteractionMode,
-              streamEvent.SelectedModel,
-              review,
-              cancellationToken,
-              new TraceDiagnosticReference(
-                _trace.TraceId,
-                "completed"
-              ),
+            CaptureContentBlock(
               contentBlocks,
-              _presentationTimeline
+              streamEvent
             );
-            if (persisted is not null)
+            _executionSessionId = streamEvent.ExecutionSession?.Id
+              ?? _executionSessionId;
+            _trace.Link("executionSessionId", _executionSessionId);
+            await PersistExecutionCheckpointAsync(
+              streamEvent
+            );
+            if (streamEvent.Type == "response.delta")
             {
-              await WriteEventAsync(
-                SessionEvent(
-                  requestId,
-                  "session-persisted",
-                  "Completed conversation turn persisted locally."
-                ),
-                cancellationToken
+              answer.Append(
+                streamEvent.Delta
               );
             }
-          }
-          catch (WorkspaceProfileException exception)
-          {
-            await WriteEventAsync(
-              PersistenceEvent(
-                requestId,
-                exception
-              ),
+
+            if (streamEvent.Type == "response.completed")
+            {
+              try
+              {
+                var review = string.IsNullOrWhiteSpace(
+                  _executionSessionId
+                )
+                  ? null
+                  : _executionSessions.GetReview(
+                    _executionSessionId
+                  );
+                var persisted = await _persistentSessions.CompleteTurnAsync(
+                  _conversationSessionId,
+                  requestId,
+                  answer.ToString(),
+                  request.InteractionMode,
+                  streamEvent.SelectedModel,
+                  review,
+                  cancellationToken,
+                  new TraceDiagnosticReference(
+                    _trace.TraceId,
+                    "completed"
+                  ),
+                  contentBlocks,
+                  _presentationTimeline
+                );
+                if (persisted is not null)
+                {
+                  await WriteEventAsync(
+                    SessionEvent(
+                      requestId,
+                      "session-persisted",
+                      "Completed conversation turn persisted locally."
+                    ),
+                    cancellationToken
+                  );
+                }
+              }
+              catch (WorkspaceProfileException exception)
+              {
+                await WriteEventAsync(
+                  PersistenceEvent(
+                    requestId,
+                    exception
+                  ),
+                  cancellationToken
+                );
+              }
+            }
+
+            var writtenEvent = await WriteEventAsync(
+              streamEvent with
+              {
+                ConversationSessionId = _conversationSessionId
+              },
               cancellationToken
             );
+            if (writtenEvent.Type == "error")
+            {
+              await PersistFailureMessageAsync(
+                writtenEvent
+              );
+            }
+            else if (writtenEvent.Type == "request.cancelled")
+            {
+              await MarkPersistentTerminalAsync(
+                "cancelled"
+              );
+            }
+            else if (writtenEvent.Type == "action.awaiting-approval")
+            {
+              await PersistPresentationTimelineAsync(requestId);
+            }
           }
+          break;
         }
-
-        var writtenEvent = await WriteEventAsync(
-          streamEvent with
-          {
-            ConversationSessionId = _conversationSessionId
-          },
-          cancellationToken
-        );
-        if (writtenEvent.Type == "error")
+        catch (SupervisionTakeoverRequiredException exception) when (
+          supervision.Automatic
+          && !supervision.Supervised
+        )
         {
-          await PersistFailureMessageAsync(
-            writtenEvent
+          takeover = CreateTakeoverSnapshot(
+            exception,
+            "accepted-plan-step-limit"
           );
+          supervision = SupervisionRequestPolicy.Promote(
+            supervision,
+            "automatic-plan-step-limit",
+            exception.Plan.Steps.Count
+          );
+          normalizedRequest = normalizedRequest with
+          {
+            ExecutionStrategy = SupervisionExecutionStrategies.Supervised
+          };
+          answer.Clear();
         }
-        else if (writtenEvent.Type == "action.awaiting-approval")
+        catch (Exception exception) when (
+          TryCreateFailureTakeoverSnapshot(
+            exception,
+            supervision,
+            maximumDirectPlanSteps,
+            out var failureTakeover
+          )
+        )
         {
-          await PersistPresentationTimelineAsync(requestId);
+          takeover = failureTakeover;
+          supervision = SupervisionRequestPolicy.Promote(
+            supervision,
+            "automatic-resource-starvation-takeover",
+            takeover.DetectedPlanSteps
+          );
+          normalizedRequest = normalizedRequest with
+          {
+            ExecutionStrategy = SupervisionExecutionStrategies.Supervised
+          };
+          answer.Clear();
         }
       }
     }
@@ -672,6 +738,7 @@ public sealed class ChatController : ControllerBase
     ChatRequest request,
     SupervisionRequestResolution supervision,
     string requestId,
+    SupervisionTakeoverSnapshot? takeover,
     [System.Runtime.CompilerServices.EnumeratorCancellation]
     CancellationToken cancellationToken
   )
@@ -689,9 +756,12 @@ public sealed class ChatController : ControllerBase
           request.ConversationSessionId,
           request.ApprovalPolicy,
           supervision.ResumePolicy,
+          ClientRunId: request.SupervisionRunId,
           AutoModelHarness: request.AutoModelHarness,
           History: request.History,
-          Images: request.Images
+          Images: request.Images,
+          Takeover: takeover,
+          ExecutionStrategy: supervision.RequestedStrategy
         ),
         cancellationToken
       );
@@ -732,6 +802,45 @@ public sealed class ChatController : ControllerBase
     }
 
     var stopwatch = Stopwatch.StartNew();
+    if (supervision.Autonomous)
+    {
+      yield return new ChatStreamEvent(
+        requestId,
+        "supervision.autonomous-selected",
+        DateTimeOffset.UtcNow,
+        "Host started fully autonomous supervision. The supervisor may approve every user-permittable action inside the trusted workspace; hard Host boundaries remain enforced.",
+        null,
+        startedView.Route.Model,
+        null,
+        stopwatch.ElapsedMilliseconds,
+        null,
+        null,
+        SupervisionProgress: CreateSupervisionProgress(startedView)
+      );
+    }
+    else if (supervision.Automatic)
+    {
+      yield return new ChatStreamEvent(
+        requestId,
+        "supervision.auto-selected",
+        DateTimeOffset.UtcNow,
+        takeover is null
+          ? $"Host selected supervised execution because the objective exposes {supervision.EstimatedStepCount} structured steps, above the configured direct limit."
+          : string.Equals(
+            takeover.Trigger,
+            "accepted-plan-step-limit",
+            StringComparison.Ordinal
+          )
+            ? $"Host promoted the direct execution to supervised mode at a verified boundary after accepting a {takeover.DetectedPlanSteps}-step plan; the configured direct limit is {takeover.MaximumDirectPlanSteps}."
+            : $"Host promoted the direct execution to supervised mode after recoverable resource failure '{takeover.Trigger}' at a verified boundary; {takeover.Files.Count} verified file effect(s) were preserved for reconciliation.",
+        null,
+        startedView.Route.Model,
+        null,
+        stopwatch.ElapsedMilliseconds,
+        null,
+        null
+      );
+    }
     yield return new ChatStreamEvent(
       requestId,
       "supervision.run-started",
@@ -742,7 +851,8 @@ public sealed class ChatController : ControllerBase
       null,
       stopwatch.ElapsedMilliseconds,
       null,
-      null
+      null,
+      SupervisionProgress: CreateSupervisionProgress(startedView)
     );
 
     await foreach (var streamEvent in StreamExistingSupervisedAsync(
@@ -757,6 +867,131 @@ public sealed class ChatController : ControllerBase
     }
   }
 
+  private SupervisionTakeoverSnapshot CreateTakeoverSnapshot(
+    SupervisionTakeoverRequiredException exception,
+    string trigger
+  )
+  {
+    var review = _executionSessions.GetReview(
+      exception.ExecutionSessionId
+    );
+    var files = (review?.Files ?? []).Where(file => file.Verified).DistinctBy(
+      file => file.RelativePath,
+      StringComparer.OrdinalIgnoreCase
+    ).Take(64).Select(file => new SupervisionTakeoverFileSnapshot(
+      file.RelativePath,
+      file.Operation,
+      file.FinalHash,
+      file.Verified
+    )).ToArray();
+    return new SupervisionTakeoverSnapshot(
+      trigger,
+      exception.ExecutionSessionId,
+      exception.Plan.Steps.Count,
+      exception.MaximumDirectPlanSteps,
+      exception.AfterVerifiedMutation,
+      exception.Plan,
+      files,
+      review?.Summary.CompletionStatus ?? "handed-off-to-supervision",
+      review?.Validation?.State,
+      DateTimeOffset.UtcNow
+    );
+  }
+
+  private bool TryCreateFailureTakeoverSnapshot(
+    Exception exception,
+    SupervisionRequestResolution supervision,
+    int maximumDirectPlanSteps,
+    out SupervisionTakeoverSnapshot takeover
+  )
+  {
+    takeover = null!;
+    if (
+      !supervision.Automatic
+      || supervision.Supervised
+      || !IsResourceStarvationFailure(exception)
+      || string.IsNullOrWhiteSpace(_executionSessionId)
+    )
+    {
+      return false;
+    }
+
+    var review = _executionSessions.GetReview(_executionSessionId);
+    if (review is null)
+    {
+      return false;
+    }
+    var files = review.Files.Where(file => file.Verified).DistinctBy(
+      file => file.RelativePath,
+      StringComparer.OrdinalIgnoreCase
+    ).Take(64).Select(file => new SupervisionTakeoverFileSnapshot(
+      file.RelativePath,
+      file.Operation,
+      file.FinalHash,
+      file.Verified
+    )).ToArray();
+    var plan = review.Summary.Plan;
+    if (files.Length == 0 && plan is null)
+    {
+      return false;
+    }
+
+    takeover = new SupervisionTakeoverSnapshot(
+      FailureTrigger(exception),
+      review.Summary.Id,
+      plan?.Steps.Count ?? 0,
+      maximumDirectPlanSteps,
+      files.Length > 0,
+      plan,
+      files,
+      review.Summary.CompletionStatus,
+      review.Validation?.State,
+      DateTimeOffset.UtcNow
+    );
+    return true;
+  }
+
+  private static bool IsResourceStarvationFailure(Exception exception)
+  {
+    return exception switch
+    {
+      HarnessException harness => harness.Recoverable
+        && (
+          harness.Code.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+          || harness.Code.Contains("context", StringComparison.OrdinalIgnoreCase)
+          || harness.Code.Contains("output-token", StringComparison.OrdinalIgnoreCase)
+        ),
+      OllamaProviderException provider => provider.Recoverable
+        && (
+          provider.IsMemoryPressure
+          || provider.InnerException is TimeoutException
+          || provider.Stage.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+          || provider.TechnicalMessage.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+        ),
+      OllamaRuntimeProfileException runtime => runtime.Error.Retryable
+        && runtime.Error.Code is "request-context-does-not-fit" or "context-item-too-large",
+      ChatStageException stage => stage.Recoverable
+        && (
+          stage.Stage.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+          || stage.TechnicalMessage.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+          || stage.TechnicalMessage.Contains("context", StringComparison.OrdinalIgnoreCase)
+        ),
+      _ => false
+    };
+  }
+
+  private static string FailureTrigger(Exception exception)
+  {
+    return exception switch
+    {
+      HarnessException harness => harness.Code,
+      OllamaProviderException provider => provider.Stage,
+      OllamaRuntimeProfileException runtime => runtime.Error.Code,
+      ChatStageException stage => stage.Stage,
+      _ => "resource-starvation"
+    };
+  }
+
   private async IAsyncEnumerable<ChatStreamEvent> StreamExistingSupervisedAsync(
     string runId,
     string requestId,
@@ -767,6 +1002,7 @@ public sealed class ChatController : ControllerBase
   )
   {
     var stopwatch = Stopwatch.StartNew();
+    ContextUsageView? latestContextUsage = null;
     await foreach (var progressEvent in _supervisionRuns.SubscribeAsync(
       runId,
       afterSequence,
@@ -774,17 +1010,41 @@ public sealed class ChatController : ControllerBase
       cancellationToken
     ))
     {
+      var progressView = _supervisionRuns.TryGetView(runId, out var liveView)
+        ? liveView
+        : startedView;
+      latestContextUsage = progressEvent.ContextUsage ?? latestContextUsage;
+      var isReasoning = progressEvent.Type == SupervisionEventTypeIds.TurnReasoning;
       yield return new ChatStreamEvent(
         requestId,
-        progressEvent.Type,
+        isReasoning ? "reasoning.delta" : progressEvent.Type,
         progressEvent.Timestamp,
-        progressEvent.Message,
+        isReasoning ? null : progressEvent.Message,
         null,
         startedView.Route.Model,
         null,
         stopwatch.ElapsedMilliseconds,
         null,
-        null
+        null,
+        LocalAction: CreateSupervisionLocalAction(
+          progressView,
+          progressEvent
+        ),
+        ReasoningDelta: isReasoning ? progressEvent.Message : null,
+        ContentBlockId: isReasoning
+          ? $"supervision:{progressEvent.ContextId ?? progressEvent.Role ?? "turn"}:reasoning"
+          : null,
+        SlowRequest: CreateSupervisionSlowRequest(
+          progressView,
+          progressEvent
+        ),
+        SupervisionProgress: progressEvent.Type == "context.usage"
+          ? null
+          : CreateSupervisionProgress(
+            progressView,
+            progressEvent
+          ),
+        ContextUsage: progressEvent.ContextUsage
       );
 
       if (!progressEvent.Terminal)
@@ -829,7 +1089,8 @@ public sealed class ChatController : ControllerBase
           null,
           stopwatch.ElapsedMilliseconds,
           _markdown.Render(finalAnswer),
-          null
+          null,
+          ContextUsage: latestContextUsage
         );
         yield return new ChatStreamEvent(
           requestId,
@@ -841,7 +1102,8 @@ public sealed class ChatController : ControllerBase
           null,
           stopwatch.ElapsedMilliseconds,
           _markdown.Render(finalAnswer),
-          null
+          null,
+          ContextUsage: latestContextUsage
         );
         yield break;
       }
@@ -858,7 +1120,8 @@ public sealed class ChatController : ControllerBase
           null,
           stopwatch.ElapsedMilliseconds,
           null,
-          null
+          null,
+          ContextUsage: latestContextUsage
         );
         yield break;
       }
@@ -885,15 +1148,147 @@ public sealed class ChatController : ControllerBase
           false,
           new Dictionary<string, string?>
           {
-            ["code"] = "supervision-blocked",
+            ["code"] = view.WaitCode ?? "supervision-blocked",
             ["runId"] = view.RunId,
             ["workItemId"] = view.Runtime?.ActiveWorkItemId
           },
-          "supervision-blocked"
-        )
+          view.WaitCode ?? "supervision-blocked"
+        ),
+        ContextUsage: latestContextUsage
       );
       yield break;
     }
+  }
+
+  private static SupervisionProgressView CreateSupervisionProgress(
+    DurableSupervisionRunView view,
+    SupervisionRunEvent? progressEvent = null
+  )
+  {
+    return new SupervisionProgressView(
+      view.RunId,
+      view.Objective,
+      view.ExecutionStrategy,
+      view.State,
+      view.Phase,
+      progressEvent?.Role ?? view.Runtime?.ActiveRole,
+      progressEvent?.WorkItemId ?? view.Runtime?.ActiveWorkItemId,
+      progressEvent?.CompletedItems ?? view.Runtime?.CompletedItems ?? 0,
+      progressEvent?.TotalItems ?? view.Runtime?.TotalItems ?? 0,
+      progressEvent?.Sequence ?? view.LastSequence,
+      view.Recovery?.TurnInFlight == true,
+      (view.Runtime?.WorkItems ?? []).Select(item =>
+        new SupervisionWorkItemProgressView(
+          item.Id,
+          item.Objective,
+          item.Status,
+          item.AttemptCount
+        )
+      ).ToArray(),
+      view.Route.Model,
+      view.Route.Harness,
+      view.ApprovalPolicy,
+      progressEvent?.ContextId
+    );
+  }
+
+  private static LocalActionEvent? CreateSupervisionLocalAction(
+    DurableSupervisionRunView view,
+    SupervisionRunEvent progressEvent
+  )
+  {
+    if (progressEvent.LocalAction is not null)
+    {
+      return progressEvent.LocalAction;
+    }
+    if (!progressEvent.Type.StartsWith("supervision.action-", StringComparison.Ordinal))
+    {
+      return null;
+    }
+    var actionId = ExtractSupervisionActionId(progressEvent.Message);
+    if (actionId is null)
+    {
+      return null;
+    }
+    var action = view.Recovery?.Actions.FirstOrDefault(candidate => string.Equals(
+      candidate.ActionId,
+      actionId,
+      StringComparison.Ordinal
+    ));
+    if (action is null)
+    {
+      return null;
+    }
+    var target = action.FileEffects.Count == 0
+      ? action.Tool
+      : string.Join(
+        ", ",
+        action.FileEffects.Select(effect => effect.RelativePath).Distinct(StringComparer.Ordinal)
+      );
+    var state = action.Phase switch
+    {
+      SupervisionActionPhases.Prepared => "proposed",
+      SupervisionActionPhases.AwaitingApproval => "proposed",
+      SupervisionActionPhases.InFlight => "executing",
+      SupervisionActionPhases.Committed => "completed",
+      SupervisionActionPhases.Rejected => "rejected",
+      _ => "failed"
+    };
+    return new LocalActionEvent(
+      action.ActionId,
+      action.Tool,
+      $"{action.Tool}: {target}",
+      null,
+      state,
+      action.RequiresApproval,
+      OriginalTool: action.Tool,
+      Code: progressEvent.Type
+    );
+  }
+
+  private static string? ExtractSupervisionActionId(string? message)
+  {
+    const string prefix = "Host action ";
+    if (string.IsNullOrWhiteSpace(message) || !message.StartsWith(prefix, StringComparison.Ordinal))
+    {
+      return null;
+    }
+    var end = message.IndexOf(' ', prefix.Length);
+    return end > prefix.Length
+      ? message[prefix.Length..end]
+      : null;
+  }
+
+  private static SlowRequestStatusView? CreateSupervisionSlowRequest(
+    DurableSupervisionRunView view,
+    SupervisionRunEvent progressEvent
+  )
+  {
+    if (progressEvent.Type is not SupervisionEventTypeIds.TurnSlowWarning
+      and not SupervisionEventTypeIds.TurnSlowCritical)
+    {
+      return null;
+    }
+    if (progressEvent.SlowRequest is not null)
+    {
+      return progressEvent.SlowRequest;
+    }
+    var lastActivityAt = view.Runtime?.Contexts.FirstOrDefault(context => string.Equals(
+      context.Id,
+      progressEvent.ContextId,
+      StringComparison.Ordinal
+    ))?.UpdatedAt ?? view.CreatedAt;
+    return new SlowRequestStatusView(
+      progressEvent.Type == SupervisionEventTypeIds.TurnSlowCritical
+        ? "critical"
+        : "warning",
+      view.CreatedAt,
+      lastActivityAt,
+      Math.Max(0, (long)(progressEvent.Timestamp - view.CreatedAt).TotalMilliseconds),
+      Math.Max(0, (long)(progressEvent.Timestamp - lastActivityAt).TotalMilliseconds),
+      view.Route.Harness,
+      view.Route.Model
+    );
   }
 
   private async Task PersistExecutionCheckpointAsync(

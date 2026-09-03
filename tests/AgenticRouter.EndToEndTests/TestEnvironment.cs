@@ -360,6 +360,9 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   public async Task ResetSettingsAsync()
   {
+    _fakeOllama.Reset();
+    _fakeCloud.Reset();
+
     var modelOrganizationPath = Path.Combine(
       DataDirectory,
       "model-organization.json"
@@ -540,8 +543,6 @@ internal sealed class TestEnvironment : IAsyncDisposable
       "api/usage?confirmed=true"
     );
     purgedUsage.EnsureSuccessStatusCode();
-    _fakeOllama.Reset();
-    _fakeCloud.Reset();
   }
 
   private async Task RemoveWorkspaceProfileForResetAsync(

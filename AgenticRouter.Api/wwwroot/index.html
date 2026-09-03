@@ -95,7 +95,7 @@
       <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
     </section>
 
-    <span class="app-version sidebar-expanded-only">v0.10.0_alpha</span>
+    <span class="app-version sidebar-expanded-only">v0.11.0_alpha</span>
   </aside>
 
   <div
@@ -420,16 +420,45 @@
               title="Cancel editing (Esc)"
               hidden
             >×</button>
-            <button
-              id="send-button"
-              class="primary-button"
-              type="submit"
-              aria-label="Send message"
-              title="Send message"
-            >
-              <span id="send-button-label">Send</span>
-              <span class="button-icon send-icon" aria-hidden="true">↑</span>
-            </button>
+            <div id="send-strategy-control" class="send-strategy-control">
+              <button
+                id="send-button"
+                class="primary-button"
+                type="submit"
+                aria-label="Send message using Auto execution strategy"
+                title="Send message · Auto"
+              >
+                <span id="send-button-label">Send</span>
+                <span class="button-icon send-icon" aria-hidden="true">↑</span>
+              </button>
+              <button
+                id="send-strategy-toggle"
+                class="send-strategy-toggle"
+                type="button"
+                aria-label="Choose Execute send strategy. Current: Auto"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="send-strategy-menu"
+                title="Execute strategy · Auto"
+                hidden
+              >
+                <span id="send-strategy-indicator" aria-hidden="true">A</span>
+              </button>
+              <div id="send-strategy-menu" class="send-strategy-menu" role="menu" aria-label="Execute send strategy" hidden>
+                <button type="button" role="menuitemradio" data-send-strategy="auto" aria-checked="true">
+                  <strong>Auto</strong><span>Use Direct for up to the configured plan limit, then Supervisor.</span>
+                </button>
+                <button type="button" role="menuitemradio" data-send-strategy="direct" aria-checked="false">
+                  <strong>Direct</strong><span>Keep this request in one direct execution context.</span>
+                </button>
+                <button type="button" role="menuitemradio" data-send-strategy="supervised" aria-checked="false">
+                  <strong>Supervisor</strong><span>Decompose, execute, and verify bounded work items.</span>
+                </button>
+                <button type="button" role="menuitemradio" data-send-strategy="autonomous" aria-checked="false">
+                  <strong>Autonomous</strong><span>Decide and approve every permitted action without waiting for you.</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </form>
@@ -762,6 +791,66 @@
                 <span>Default GPU</span>
                 <select id="default-gpu" name="defaultGpu"></select>
               </label>
+              <label>
+                <span>Direct execution plan limit</span>
+                <input
+                  id="max-direct-plan-steps"
+                  name="maxDirectPlanSteps"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  required
+                  aria-describedby="max-direct-plan-steps-help"
+                >
+                <small id="max-direct-plan-steps-help">Auto uses the Supervisor when a structured objective or accepted plan exceeds this number of steps.</small>
+              </label>
+              <fieldset class="phase-effort-settings">
+                <legend>Effort by supervised phase</legend>
+                <small>Controls how much reasoning the selected model should spend in each phase. Unsupported native controls fall back to explicit prompt guidance.</small>
+                <div class="phase-effort-grid">
+                  <label>
+                    <span>Plan</span>
+                    <select id="phase-effort-plan" name="phaseEffortPlan">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Work</span>
+                    <select id="phase-effort-work" name="phaseEffortWork">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Verify</span>
+                    <select id="phase-effort-verify" name="phaseEffortVerify">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Complete</span>
+                    <select id="phase-effort-complete" name="phaseEffortComplete">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Recovery</span>
+                    <select id="phase-effort-recovery" name="phaseEffortRecovery">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                </div>
+              </fieldset>
             </div>
           </section>
 
@@ -1002,8 +1091,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.10.0."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.10.0."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.11.0."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.11.0."
                 >i</button>
               </div>
             </div>
@@ -1455,8 +1544,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.10.0."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.10.0. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.11.0."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.11.0. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>

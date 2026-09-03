@@ -155,6 +155,14 @@ if (prompt.Contains("synthetic timeout", StringComparison.OrdinalIgnoreCase))
   return;
 }
 
+if (prompt.Contains("synthetic output limit", StringComparison.OrdinalIgnoreCase))
+{
+  await EmitSyntheticApiErrorAsync(
+    "API Error: Claude's response exceeded the 32000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."
+  );
+  return;
+}
+
 if (prompt.Contains("claude envelope storm", StringComparison.OrdinalIgnoreCase))
 {
   for (var index = 0; index < 1_000; index++)
@@ -192,8 +200,225 @@ if (prompt.Contains("claude live context usage", StringComparison.OrdinalIgnoreC
   await Task.Delay(1_500);
 }
 var finalText = "Claude Code streamed with " + model;
+var suppressFinalText = false;
 
-if (prompt.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))
+if (
+  prompt.Contains(
+    "claude supervision recovers output ceiling",
+    StringComparison.OrdinalIgnoreCase
+  )
+  || prompt.Contains(
+    "claude supervision repeats output ceiling",
+    StringComparison.OrdinalIgnoreCase
+  )
+)
+{
+  var repeatedFailure = prompt.Contains(
+    "claude supervision repeats output ceiling",
+    StringComparison.OrdinalIgnoreCase
+  );
+  if (prompt.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
+  {
+    finalText = JsonSerializer.Serialize(new
+    {
+      decision = "dispatch_work",
+      items = new[]
+      {
+        new
+        {
+          objective = prompt.Contains(
+            "claude supervision repeats output ceiling",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? "claude supervision repeats output ceiling; create output-recovery.txt"
+            : "claude supervision recovers output ceiling; create output-recovery.txt",
+          acceptanceCriteria = new[]
+          {
+            "output-recovery.txt must contain the exact text recovered"
+          },
+          evidencePaths = new[] { "output-recovery.txt" }
+        }
+      }
+    });
+  }
+  else if (prompt.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal))
+  {
+    var result = await InvokeHostToolAsync(
+      "create_files",
+      new
+      {
+        files = new[]
+        {
+          new { path = "output-recovery.txt", content = "recovered" }
+        }
+      }
+    );
+    await EmitToolAsync(
+      "claude-output-recovery-create",
+      "mcp__agentic_router__create_files",
+      result
+    );
+    finalText = "Created output-recovery.txt with the exact requested content.";
+  }
+  else if (
+    prompt.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+    || prompt.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)
+  )
+  {
+    var recovery = prompt.Contains(
+      "SUPERVISION_HARNESS_RECOVERY_V1",
+      StringComparison.Ordinal
+    );
+    if (!recovery || repeatedFailure)
+    {
+      await EmitSyntheticApiErrorAsync(
+        "API Error: Claude's response exceeded the 32000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."
+      );
+      return;
+    }
+    await WriteMarkerAsync("fake-claude-harness-recovery.json", new
+    {
+      resumed = resume is not null,
+      nativeSessionId,
+      promptContainsRecoveryMarker = true
+    });
+    finalText = JsonSerializer.Serialize(new
+    {
+      decision = "accept_work",
+      evidenceRevision = 1,
+      coveredCriteria = new[]
+      {
+        "output-recovery.txt must contain the exact text recovered"
+      },
+      summary = "The bounded Host evidence confirms the exact content."
+    });
+  }
+  else if (prompt.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
+  {
+    finalText = JsonSerializer.Serialize(new
+    {
+      decision = "complete_goal",
+      finalAnswer = "Recovered from the output-token limit and verified output-recovery.txt."
+    });
+  }
+}
+else if (
+  prompt.Contains(
+    "claude supervision canonical after tool preamble",
+    StringComparison.OrdinalIgnoreCase
+  )
+  && prompt.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+  && !prompt.Contains("SUPERVISION_CANONICAL_RECOVERY_V1", StringComparison.Ordinal)
+)
+{
+  suppressFinalText = true;
+}
+else if (
+  prompt.Contains(
+    "claude supervision canonical after tool preamble",
+    StringComparison.OrdinalIgnoreCase
+  )
+  && prompt.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+  && prompt.Contains("SUPERVISION_CANONICAL_RECOVERY_V1", StringComparison.Ordinal)
+)
+{
+  finalText = JsonSerializer.Serialize(new
+  {
+    decision = "dispatch_work",
+    items = new[]
+    {
+      new
+      {
+        objective = "claude supervision canonical after tool preamble; create file hello.txt with content hello world today",
+        acceptanceCriteria = new[]
+        {
+          "hello.txt must contain the exact text hello world today."
+        },
+        evidencePaths = new[] { "hello.txt" }
+      }
+    }
+  });
+}
+else if (
+  prompt.Contains(
+    "claude supervision canonical after tool preamble",
+    StringComparison.OrdinalIgnoreCase
+  )
+  && prompt.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal)
+)
+{
+  var result = await InvokeHostToolAsync(
+    "create_files",
+    new
+    {
+      files = new[]
+      {
+        new
+        {
+          path = "hello.txt",
+          content = "hello world today"
+        }
+      }
+    }
+  );
+  await EmitToolAsync(
+    "claude-supervision-create",
+    "mcp__agentic_router__create_files",
+    result
+  );
+  finalText = "Created hello.txt with the requested exact content.";
+}
+else if (
+  prompt.Contains(
+    "claude supervision canonical after tool preamble",
+    StringComparison.OrdinalIgnoreCase
+  )
+  && (
+    prompt.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+    || prompt.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)
+  )
+)
+{
+  await EmitStreamDeltaAsync(
+    "text_delta",
+    "text",
+    "I will inspect the Host evidence before returning the canonical decision."
+  );
+  var result = await InvokeHostToolAsync(
+    "read_file",
+    new { path = "hello.txt" }
+  );
+  await EmitToolAsync(
+    "claude-supervision-read",
+    "mcp__agentic_router__read_file",
+    result
+  );
+  finalText = JsonSerializer.Serialize(new
+  {
+    decision = "accept_work",
+    evidenceRevision = 1,
+    coveredCriteria = new[]
+    {
+      "hello.txt must contain the exact text hello world today."
+    },
+    summary = "The Host evidence confirms the exact requested content."
+  });
+}
+else if (
+  prompt.Contains(
+    "claude supervision canonical after tool preamble",
+    StringComparison.OrdinalIgnoreCase
+  )
+  && prompt.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal)
+)
+{
+  finalText = JsonSerializer.Serialize(new
+  {
+    decision = "complete_goal",
+    finalAnswer = "Created hello.txt and verified its exact content."
+  });
+}
+else if (prompt.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))
 {
   var directory = Path.Combine(cwd, "benchmark-data");
   Directory.CreateDirectory(directory);
@@ -404,19 +629,22 @@ else if (prompt.Contains("claude git failure recovery", StringComparison.Ordinal
   );
 }
 
-await EmitStreamDeltaAsync("text_delta", "text", finalText);
-await EmitAsync(new
+if (!suppressFinalText)
 {
-  type = "assistant",
-  message = new
+  await EmitStreamDeltaAsync("text_delta", "text", finalText);
+  await EmitAsync(new
   {
-    role = "assistant",
-    content = new object[] { new { type = "text", text = finalText } }
-  },
-  uuid = Guid.NewGuid().ToString(),
-  session_id = nativeSessionId,
-  parent_tool_use_id = (string?)null
-});
+    type = "assistant",
+    message = new
+    {
+      role = "assistant",
+      content = new object[] { new { type = "text", text = finalText } }
+    },
+    uuid = Guid.NewGuid().ToString(),
+    session_id = nativeSessionId,
+    parent_tool_use_id = (string?)null
+  });
+}
 await EmitAsync(new
 {
   type = "future_claude_event",
@@ -534,6 +762,25 @@ async Task EmitStreamDeltaAsync(string deltaType, string property, string value)
       index = property == "thinking" ? 0 : 1,
       delta
     },
+    session_id = nativeSessionId,
+    parent_tool_use_id = (string?)null
+  });
+}
+
+async Task EmitSyntheticApiErrorAsync(string text)
+{
+  await EmitAsync(new
+  {
+    type = "assistant",
+    message = new
+    {
+      role = "assistant",
+      model = "<synthetic>",
+      stop_reason = "stop_sequence",
+      usage = new { input_tokens = 0, output_tokens = 0 },
+      content = new object[] { new { type = "text", text } }
+    },
+    uuid = Guid.NewGuid().ToString(),
     session_id = nativeSessionId,
     parent_tool_use_id = (string?)null
   });

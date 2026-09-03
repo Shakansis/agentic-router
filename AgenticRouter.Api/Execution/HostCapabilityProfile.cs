@@ -27,11 +27,11 @@ public sealed record HostCapabilityProfile(
     string approvalPolicy
   )
   {
-    if (approvalPolicy is not "auto" and not "ask")
+    if (approvalPolicy is not "auto" and not "ask" and not "autonomous")
     {
       throw new LocalActionException(
         "approval-policy",
-        "Approval policy must be ask or auto."
+        "Approval policy must be ask, auto, or autonomous."
       );
     }
     return new HostCapabilityProfile(toolScope, approvalPolicy);
