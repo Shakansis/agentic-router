@@ -364,8 +364,11 @@ builder.Services.AddSingleton<IBenchmarkTestDefinition, ConvergenceBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, TerminalityBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, StaleConflictBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, TruthfulReportBenchmark>();
+builder.Services.AddSingleton<IBenchmarkBrowserValidator, BenchmarkBrowserValidator>();
+builder.Services.AddSingleton<IBenchmarkTestDefinition, MissingGameBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestRegistry, BenchmarkTestRegistry>();
 builder.Services.AddScoped<IBenchmarkNativeExecutor, BenchmarkNativeExecutor>();
+builder.Services.AddSingleton<IBenchmarkProductionExecuteRunner, BenchmarkProductionExecuteRunner>();
 builder.Services.AddSingleton<IBenchmarkScorer, BenchmarkScorer>();
 builder.Services.AddSingleton<IBenchmarkScoringProfileStore>(services =>
   new JsonBenchmarkScoringProfileStore(
@@ -424,7 +427,8 @@ builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
     services.GetRequiredService<IOllamaClient>(),
     services.GetRequiredService<IModelRequestTracker>(),
     services.GetRequiredService<IGpuMemoryMetricsProvider>(),
-    services.GetRequiredService<ISystemMemoryMetricsProvider>()
+    services.GetRequiredService<ISystemMemoryMetricsProvider>(),
+    services.GetRequiredService<IOllamaManagedServerManager>()
   )
 );
 builder.Services.AddSingleton<IModelRequestTracker, ModelRequestTracker>();

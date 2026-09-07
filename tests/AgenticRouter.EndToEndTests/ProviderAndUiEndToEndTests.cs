@@ -4496,6 +4496,62 @@ baselineTotal!.Value
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AcceptsRocmAndCombinedVulkanGpuSelections()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["defaultGpu"] = "rocm:0";
+    using var rocmSaved = await PutSettingsJsonAsync(settings);
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      rocmSaved.StatusCode,
+      await rocmSaved.Content.ReadAsStringAsync()
+    );
+
+    _environment.FakeOllama.Reset();
+    await PostChatStreamAsync(
+      "Use the configured AMD device.",
+      "alpha:latest",
+      "browser-rocm-affinity"
+    );
+    Assert.AreEqual(
+      0,
+      _environment.FakeOllama.Requests.Last(request => request.Stream).MainGpu
+    );
+
+    settings["defaultGpu"] = "vulkan:all";
+    using var vulkanSaved = await PutSettingsJsonAsync(settings);
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      vulkanSaved.StatusCode,
+      await vulkanSaved.Content.ReadAsStringAsync()
+    );
+
+    _environment.FakeOllama.Reset();
+    await PostChatStreamAsync(
+      "Use the configured combined Vulkan devices.",
+      "alpha:latest",
+      "browser-vulkan-affinity"
+    );
+    Assert.IsNull(
+      _environment.FakeOllama.Requests.Last(request => request.Stream).MainGpu
+    );
+
+    settings["defaultGpu"] = "vulkan:prefer:cuda:0";
+    using var preferredSaved = await PutSettingsJsonAsync(settings);
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      preferredSaved.StatusCode,
+      await preferredSaved.Content.ReadAsStringAsync()
+    );
+    var persisted = await GetSettingsJsonAsync();
+    Assert.AreEqual(
+      "vulkan:prefer:cuda:0",
+      persisted["defaultGpu"]?.GetValue<string>()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ExplicitConformanceBenchmarkUsesInstalledDigestAndTypedFailure()
   {
     using var passingResponse = await _environment.HttpClient.PostAsJsonAsync(

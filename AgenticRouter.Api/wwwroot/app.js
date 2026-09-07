@@ -1,4 +1,7 @@
 const { t } = window.AgenticRouterI18n;
+const browserSessionStorageKey = "agentic-router.browser-session-id";
+const benchmarkLiveRunStorageKey = "agentic-router-benchmark-live-run";
+const benchmarkBatchStorageKey = "agentic-router-benchmark-batch";
 
 const state = {
   models: [],
@@ -28,7 +31,7 @@ const state = {
   persistenceStatus: "Unsaved",
   pendingConversationAction: null,
   conversationTransitioning: false,
-  browserSessionId: createSessionId(),
+  browserSessionId: restoreBrowserSessionId(),
   git: null,
   activeGitView: "current-session",
   activeGitDiff: null,
@@ -75,6 +78,14 @@ const state = {
   openCloudProviders: new Set(),
   gitConfigurationEditing: false,
   benchmark: null,
+  benchmarkUi: {
+    tab: "results",
+    selectedCell: null,
+    liveCards: new Map(),
+    liveOptions: new Map(),
+    resultSelection: null
+  },
+  benchmarkBatch: restoreBenchmarkBatch(),
   activeBenchmarkRunId: null,
   benchmarkEventSource: null,
   benchmarkElapsedTimer: null,
@@ -229,6 +240,7 @@ function bindElements() {
     "benchmark-suite",
     "benchmark-suite-list",
     "benchmark-timeout",
+    "benchmark-repetitions",
     "benchmark-history",
     "benchmark-history-model-filter",
     "benchmark-history-harness-filter",
@@ -261,6 +273,25 @@ function bindElements() {
     "benchmark-score-context",
     "benchmark-ranking-note",
     "benchmark-live-dashboard",
+    "benchmark-progress-title",
+    "benchmark-batch-progress",
+    "benchmark-current-combination",
+    "benchmark-follow-active",
+    "benchmark-queue-summary",
+    "benchmark-combination-picker",
+    "benchmark-combination-select",
+    "benchmark-combination-position",
+    "benchmark-previous-combination",
+    "benchmark-next-combination",
+    "benchmark-execution-empty",
+    "benchmark-models-count",
+    "benchmark-harnesses-count",
+    "benchmark-tests-count",
+    "benchmark-selection-summary",
+    "benchmark-selection-total",
+    "benchmark-recommendation-preview-title",
+    "benchmark-recommendation-preview-summary",
+    "benchmark-view-recommendation",
     "benchmark-matrix",
     "benchmark-ranking-scope",
     "benchmark-results-body",
@@ -613,6 +644,27 @@ function bindEvents() {
   elements.composer.addEventListener("submit", handleComposerSubmit);
   elements.openBenchmarks.addEventListener("click", openBenchmarks);
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
+  elements.benchmarkForm.addEventListener("change", renderBenchmarkSelectionSummary);
+  elements.benchmarkRepetitions.addEventListener("input", renderBenchmarkSelectionSummary);
+  for (const tab of elements.benchmarkView.querySelectorAll("[data-benchmark-tab]")) {
+    tab.addEventListener("click", () => showBenchmarkTab(tab.dataset.benchmarkTab));
+    tab.addEventListener("keydown", handleBenchmarkTabKeyDown);
+  }
+  elements.benchmarkViewRecommendation.addEventListener("click", () => showBenchmarkTab("recommendation", true));
+  elements.benchmarkCombinationSelect.addEventListener("change", () => {
+    state.benchmarkUi.selectedCell = elements.benchmarkCombinationSelect.value;
+    renderBenchmarkLive();
+  });
+  elements.benchmarkPreviousCombination.addEventListener("click", () => stepBenchmarkCombination(-1));
+  elements.benchmarkNextCombination.addEventListener("click", () => stepBenchmarkCombination(1));
+  elements.benchmarkFollowActive.addEventListener("click", () => {
+    const current = Object.values(state.benchmark?.live?.cells ?? {}).find(isBenchmarkCellActive);
+    if (current) {
+      state.benchmarkUi.selectedCell = current.id;
+      renderBenchmarkLive();
+      showBenchmarkTab("execution", true);
+    }
+  });
   elements.benchmarkSuite.addEventListener("change", updateBenchmarkSuiteSelection);
   elements.benchmarkView.addEventListener("pointerover", handleBenchmarkTooltipShow);
   elements.benchmarkView.addEventListener("pointerout", handleBenchmarkTooltipHide);
@@ -1449,14 +1501,22 @@ async function openBenchmarks() {
     renderBenchmarkControls();
     renderBenchmarkHistory();
     renderBenchmarkRecommendationControls();
-    const storedRunId = sessionStorage.getItem("agentic-router-benchmark-live-run");
+    const storedRunId = sessionStorage.getItem(benchmarkLiveRunStorageKey);
     if (retainedLive && state.activeBenchmarkRunId) {
       renderBenchmarkLive();
       setBenchmarkRunning(true);
       connectBenchmarkEvents(state.activeBenchmarkRunId, retainedLive.lastSequence);
     } else if (storedRunId) {
       await resumeLiveBenchmark(storedRunId);
+    } else if (
+      state.benchmarkBatch
+      && !state.benchmarkBatch.cancelRequested
+      && state.benchmarkBatch.started < state.benchmarkBatch.total
+    ) {
+      setBenchmarkRunning(true);
+      await startNextBenchmarkRun();
     } else {
+      clearBenchmarkBatch();
       await rescoreBenchmarkResult();
       await generateGeneralBenchmarkRecommendation();
       if (!state.benchmark?.live?.terminal) {
@@ -1596,7 +1656,7 @@ function renderBenchmarkControls() {
     const text = document.createElement("span");
     text.className = "benchmark-switch-identity";
     const name = document.createElement("strong");
-    name.textContent = suite.id === "basic-crud" ? "CRUD" : "Agent Behavior";
+    name.textContent = benchmarkSuiteLabel(suite.id);
     input.setAttribute("aria-label", `Run tests ${name.textContent}`);
     const detail = document.createElement("small");
     detail.textContent = `${suite.tests.length} tests`;
@@ -1657,13 +1717,14 @@ function renderBenchmarkControls() {
       { value: "", label: "All suites" },
       ...suites.map(suite => ({
         value: suite.id,
-        label: suite.id === "basic-crud" ? "CRUD" : "Agent Behavior"
+        label: benchmarkSuiteLabel(suite.id)
       }))
     ],
     elements.benchmarkHistorySuiteFilter.value
   );
   renderBenchmarkScoringProfile();
   updateBenchmarkSuiteSelection();
+  renderBenchmarkSelectionSummary();
 }
 
 function selectedBenchmarkModels() {
@@ -1882,8 +1943,11 @@ function benchmarkSuiteLabel(suiteId) {
   if (suiteId === "agent-behavior") {
     return "Agent Behavior";
   }
+  if (suiteId === "real-life-problem") {
+    return "Real Life Problem";
+  }
   if (suiteId === "combined") {
-    return "CRUD + Agent Behavior";
+    return "Multiple suites";
   }
   return suiteId || "Tests";
 }
@@ -2089,7 +2153,6 @@ async function generateBenchmarkRecommendation(includeExternalEvidence) {
   }
   elements.generateBenchmarkRecommendation.disabled = true;
   elements.researchBenchmarkRecommendation.disabled = true;
-  renderBenchmarkRecommendation(null);
   elements.benchmarkRecommendationStatus.textContent = includeExternalEvidence
     ? "Explicitly researching external sources; local data will not be sent."
     : "Calculating recommendation using persisted local evidence only.";
@@ -2125,6 +2188,32 @@ async function generateGeneralBenchmarkRecommendation() {
 }
 
 function renderBenchmarkRecommendation(recommendation) {
+  preserveBenchmarkDisclosures(elements.benchmarkRecommendationResults, () =>
+    renderBenchmarkRecommendationContent(recommendation));
+  const best = recommendation?.candidates?.[0];
+  elements.benchmarkRecommendationPreviewTitle.textContent = best
+    ? `${best.model} × ${benchmarkHarnessLabel(best.harness)}` : "No recommendation loaded.";
+  elements.benchmarkRecommendationPreviewSummary.textContent = best
+    ? `Score ${Number(best.score).toFixed(2)} / 100 · ${best.confidence} confidence · independent of the current run ranking.`
+    : "Independent of the current run ranking.";
+}
+
+function preserveBenchmarkDisclosures(container, render) {
+  const key = details => details.dataset.disclosureKey
+    ?? `${details.className}:${details.querySelector(":scope > summary")?.textContent}`;
+  const previous = new Map([...container.querySelectorAll("details")].map(details => [key(details), details.open]));
+  const focused = document.activeElement?.closest("details");
+  const focusKey = focused && container.contains(focused) && document.activeElement === focused.querySelector(":scope > summary")
+    ? key(focused) : null;
+  render();
+  for (const details of container.querySelectorAll("details")) {
+    const id = key(details);
+    if (previous.has(id)) details.open = previous.get(id);
+    if (id === focusKey) details.querySelector("summary")?.focus({ preventScroll: true });
+  }
+}
+
+function renderBenchmarkRecommendationContent(recommendation) {
   const container = elements.benchmarkRecommendationResults;
   container.hidden = !recommendation;
   container.replaceChildren();
@@ -2133,6 +2222,7 @@ function renderBenchmarkRecommendation(recommendation) {
   }
   const trace = document.createElement("details");
   trace.className = "benchmark-recommendation-trace";
+  trace.dataset.disclosureKey = "recommendation-trace";
   const traceSummary = document.createElement("summary");
   traceSummary.textContent = "Recommendation details";
   const traceBody = document.createElement("p");
@@ -2157,8 +2247,17 @@ function renderBenchmarkRecommendation(recommendation) {
     heading.append(title, label);
     const summary = document.createElement("p");
     summary.className = "benchmark-recommendation-card-summary";
-    summary.textContent = `Score ${Number(candidate.score).toFixed(2)} · ${candidate.confidence} · `
-      + `${candidate.evidenceStrength} · ${candidate.comparableHistoricalRunCount} comparable · `
+    const score = document.createElement("strong");
+    score.textContent = `${Number(candidate.score).toFixed(2)} / 100`;
+    const confidence = document.createElement("span");
+    confidence.className = "benchmark-recommendation-confidence";
+    confidence.textContent = `${candidate.confidence} confidence`;
+    const provenance = document.createElement("span");
+    provenance.textContent = candidate.evidenceStrength;
+    summary.append(score, confidence, provenance);
+    const comparability = document.createElement("p");
+    comparability.className = "benchmark-recommendation-card-summary";
+    comparability.textContent = `${candidate.comparableHistoricalRunCount} comparable historical runs · `
       + `${candidate.partialHistoricalRunCount} partial · ${candidate.incompatibleHistoricalRunCount} incompatible`;
     card.append(heading, summary);
     card.append(
@@ -2166,6 +2265,7 @@ function renderBenchmarkRecommendation(recommendation) {
       recommendationList("Limitations", candidate.weaknesses, "weaknesses")
     );
     const evidence = document.createElement("details");
+    evidence.dataset.disclosureKey = benchmarkCellKey(candidate.model, candidate.harness);
     const evidenceSummary = document.createElement("summary");
     evidenceSummary.textContent = `Local evidence (${candidate.evidence.length})`;
     const links = document.createElement("div");
@@ -2179,7 +2279,7 @@ function renderBenchmarkRecommendation(recommendation) {
         + `${item.source} · ${item.comparability} · ${Number(item.categoryScore).toFixed(2)}`;
       links.append(button);
     }
-    evidence.append(evidenceSummary, links);
+    evidence.append(evidenceSummary, comparability, links);
     card.append(evidence);
     if (candidate.rank === 1) {
       container.append(card);
@@ -2187,6 +2287,7 @@ function renderBenchmarkRecommendation(recommendation) {
       if (!alternatives) {
         alternatives = document.createElement("details");
         alternatives.className = "benchmark-recommendation-alternatives";
+        alternatives.dataset.disclosureKey = "recommendation-alternatives";
         const alternativesSummary = document.createElement("summary");
         alternativesSummary.textContent =
           `Ranked alternatives (${recommendation.candidates.length - 1})`;
@@ -2208,6 +2309,7 @@ function renderBenchmarkRecommendation(recommendation) {
   if (recommendation.missingEvidence.length > 0) {
     const missing = document.createElement("details");
     missing.className = "benchmark-recommendation-missing";
+    missing.dataset.disclosureKey = "recommendation-missing";
     const summary = document.createElement("summary");
     summary.textContent = `Evidence that would most increase confidence (${recommendation.missingEvidence.length})`;
     const list = document.createElement("ul");
@@ -2280,6 +2382,7 @@ async function openBenchmarkRecommendationEvidence(event) {
     state.benchmark.scoringProjection = null;
     elements.benchmarkHistory.value = runId;
     await rescoreBenchmarkResult();
+    showBenchmarkTab("results");
     elements.benchmarkResultDetail.scrollIntoView({ behavior: "smooth", block: "start" });
     elements.benchmarkStatus.textContent = "Supporting local evidence opened.";
   } catch (error) {
@@ -2304,18 +2407,67 @@ async function runBenchmarkSuite(event) {
     elements.benchmarkStatus.textContent = "Select at least one installed local model.";
     return;
   }
-  const clientRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
   const suites = selectedBenchmarkSuites();
   if (suites.length === 0) {
-    elements.benchmarkStatus.textContent = "Select CRUD, Agent Behavior, or both.";
+    elements.benchmarkStatus.textContent = "Select at least one test suite.";
     return;
   }
-  state.activeBenchmarkRunId = clientRunId;
-  sessionStorage.setItem("agentic-router-benchmark-live-run", clientRunId);
+  const repetitions = Number(elements.benchmarkRepetitions.value);
+  if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 20) {
+    elements.benchmarkStatus.textContent = "Sequential runs must be between 1 and 20.";
+    return;
+  }
+  state.benchmarkBatch = {
+    total: repetitions,
+    started: 0,
+    completed: 0,
+    runIds: [],
+    cancelRequested: false,
+    request: {
+      model: models[0],
+      models,
+      harnesses,
+      suiteId: suites[0].id,
+      suiteVersion: suites[0].version,
+      suites: suites.map(suite => ({ id: suite.id, version: suite.version })),
+      timeoutSeconds: Number(elements.benchmarkTimeout.value),
+      scoringProfileId: elements.benchmarkScoringProfileChoice.value,
+      scoreWeights: elements.benchmarkScoringProfileChoice.value === "custom"
+        ? benchmarkWeightsFromInputs()
+        : state.benchmark.catalog.scoreWeights
+    }
+  };
+  persistBenchmarkBatch();
   setBenchmarkRunning(true);
-  initializeBenchmarkLive(clientRunId, models, harnesses, suites);
-  elements.benchmarkStatus.textContent = "Starting live dashboard…";
+  showBenchmarkTab("execution");
   elements.benchmarkResultsBody.replaceChildren();
+  await startNextBenchmarkRun();
+}
+
+async function startNextBenchmarkRun() {
+  const batch = state.benchmarkBatch;
+  if (
+    !batch
+    || batch.cancelRequested
+    || batch.started >= batch.total
+  ) {
+    return;
+  }
+
+  const clientRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
+  const iteration = batch.started + 1;
+  batch.started = iteration;
+  persistBenchmarkBatch();
+  state.activeBenchmarkRunId = clientRunId;
+  sessionStorage.setItem(benchmarkLiveRunStorageKey, clientRunId);
+  initializeBenchmarkLive(
+    clientRunId,
+    batch.request.models,
+    batch.request.harnesses,
+    batch.request.suites
+  );
+  elements.benchmarkStatus.textContent =
+    `Starting benchmark loop ${iteration}/${batch.total}…`;
   renderBenchmarkLive();
 
   try {
@@ -2323,33 +2475,19 @@ async function runBenchmarkSuite(event) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: models[0],
-        models,
-        harnesses,
-        suiteId: suites[0].id,
-        suiteVersion: suites[0].version,
-        suites: suites.map(suite => ({ id: suite.id, version: suite.version })),
-        timeoutSeconds: Number(elements.benchmarkTimeout.value),
-        scoringProfileId: elements.benchmarkScoringProfileChoice.value,
-        scoreWeights: elements.benchmarkScoringProfileChoice.value === "custom"
-          ? benchmarkWeightsFromInputs()
-          : state.benchmark.catalog.scoreWeights,
+        ...batch.request,
         modelExecutionPermissionGranted: true,
         clientRunId
       })
     });
     state.activeBenchmarkRunId = started.runId;
-    sessionStorage.setItem("agentic-router-benchmark-live-run", started.runId);
+    sessionStorage.setItem(benchmarkLiveRunStorageKey, started.runId);
     state.benchmark.live.runId = started.runId;
-    elements.benchmarkStatus.textContent = "Benchmark running; events connected.";
+    elements.benchmarkStatus.textContent =
+      `Benchmark loop ${iteration}/${batch.total} running; events connected.`;
     connectBenchmarkEvents(started.runId, 0, started.eventsUrl);
   } catch (error) {
-    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
-    clearBenchmarkLiveConnection();
-    state.activeBenchmarkRunId = null;
-    state.benchmark.live = null;
-    sessionStorage.removeItem("agentic-router-benchmark-live-run");
-    setBenchmarkRunning(false);
+    failBenchmarkLive(benchmarkErrorMessage(error));
   }
 }
 
@@ -2420,9 +2558,10 @@ async function resumeLiveBenchmark(runId) {
       renderBenchmarkLive();
     }
   } catch (error) {
-    sessionStorage.removeItem("agentic-router-benchmark-live-run");
+    sessionStorage.removeItem(benchmarkLiveRunStorageKey);
     state.activeBenchmarkRunId = null;
     state.benchmark.live = null;
+    clearBenchmarkBatch();
     setBenchmarkRunning(false);
     renderBenchmarkResult(state.benchmark.result);
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
@@ -2447,7 +2586,10 @@ function connectBenchmarkEvents(runId, afterSequence = 0, eventsUrl = null) {
   });
   source.onopen = () => {
     if (state.activeBenchmarkRunId) {
-      elements.benchmarkStatus.textContent = "Benchmark running; events connected.";
+      const batch = state.benchmarkBatch;
+      elements.benchmarkStatus.textContent = batch
+        ? `Benchmark loop ${batch.started}/${batch.total} running; events connected.`
+        : "Benchmark running; events connected.";
     }
   };
   source.onerror = () => {
@@ -2605,92 +2747,246 @@ function applyBenchmarkProgress(progressEvent, render = true) {
   }
 }
 
+function showBenchmarkTab(name, focus = false) {
+  const tabs = [...elements.benchmarkView.querySelectorAll("[data-benchmark-tab]")];
+  if (!tabs.some(tab => tab.dataset.benchmarkTab === name)) return;
+  state.benchmarkUi.tab = name;
+  for (const tab of tabs) {
+    const active = tab.dataset.benchmarkTab === name;
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    document.getElementById(tab.getAttribute("aria-controls")).hidden = !active;
+    if (active && focus) tab.focus();
+  }
+}
+
+function handleBenchmarkTabKeyDown(event) {
+  const tabs = [...elements.benchmarkView.querySelectorAll("[data-benchmark-tab]")];
+  const index = tabs.indexOf(event.currentTarget);
+  const next = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+  if (next !== undefined) {
+    event.preventDefault();
+    showBenchmarkTab(tabs[next].dataset.benchmarkTab, true);
+  }
+}
+
+function renderBenchmarkSelectionSummary() {
+  const models = selectedBenchmarkModels().length;
+  const harnesses = elements.benchmarkHarnessList.querySelectorAll('input:checked[data-available="true"]').length;
+  // Disabled controls remain selected while a run is active.
+  const selectedModels = state.activeBenchmarkRunId
+    ? elements.benchmarkModelList.querySelectorAll("input:checked").length : models;
+  const tests = new Set(selectedBenchmarkSuites().flatMap(suite => suite.tests.map(test => test.id))).size;
+  const repeats = Number(elements.benchmarkRepetitions.value);
+  elements.benchmarkModelsCount.textContent = `${selectedModels} selected`;
+  elements.benchmarkHarnessesCount.textContent = `${harnesses} selected`;
+  elements.benchmarkTestsCount.textContent = `${tests} tests`;
+  elements.benchmarkSelectionSummary.textContent = `${selectedModels * harnesses} combinations × ${tests} tests`;
+  elements.benchmarkSelectionTotal.textContent = Number.isInteger(repeats) && repeats >= 1 && repeats <= 20
+    ? `${repeats} repetition(s) · ${(selectedModels * harnesses * tests * repeats).toLocaleString("en-US")} planned tests`
+    : "Choose 1–20 sequential runs.";
+}
+
+function isBenchmarkCellActive(cell) {
+  return ["running", "validating", "harness-completed"].includes(cell.state);
+}
+
+function benchmarkCellGroup(cell) {
+  if (isBenchmarkCellActive(cell) || cell.state === "cancelling") return "Active";
+  return cell.state === "pending" ? "Queued" : "Finished";
+}
+
+function benchmarkTestLabel(id) {
+  return {
+    "FS-CREATE-001": "Create a file", "FS-READ-001": "Read a file",
+    "FS-UPDATE-001": "Update a file", "FS-DELETE-001": "Delete a file",
+    "CONTINUITY-001": "Keep context across turns", "SCOPE-RETENTION-001": "Stay within task scope",
+    "RECOVERY-001": "Recover from a failure", "CONVERGENCE-001": "Converge on a solution",
+    "TERMINALITY-001": "Finish the task clearly", "STALE-CONFLICT-001": "Handle conflicting changes",
+    "TRUTHFUL-REPORT-001": "Report the outcome accurately", "MISSING-GAME-001": "Complete a browser game collection"
+  }[id] ?? id;
+}
+
+function benchmarkStateLabel(value) {
+  return { pending: "Queued", running: "Running", validating: "Validating", "harness-completed": "Validating outcome", passed: "Passed", failed: "Failed", "timed-out": "Timed out", completed: "Completed", cancelling: "Cancelling", cancelled: "Cancelled", unavailable: "Unavailable", unsupported: "Unsupported" }[value] ?? value;
+}
+
+function updateBenchmarkText(element, text) {
+  if (element.textContent !== text) element.textContent = text;
+}
+
+function stepBenchmarkCombination(offset) {
+  const select = elements.benchmarkCombinationSelect;
+  const option = select.options[select.selectedIndex + offset];
+  if (option) {
+    state.benchmarkUi.selectedCell = option.value;
+    renderBenchmarkLive();
+  }
+}
+
 function renderBenchmarkLive() {
   const live = state.benchmark?.live;
-  if (!live) {
-    return;
-  }
-  elements.benchmarkLiveDashboard.hidden = false;
-  elements.benchmarkRankingNote.hidden = false;
+  if (!live) return;
+  const ui = state.benchmarkUi;
   const cells = Object.values(live.cells);
-  const terminalStates = new Set(["completed", "cancelled", "failed", "timed-out", "unsupported", "unavailable"]);
-  const completedCells = cells.filter(cell => terminalStates.has(cell.state)).length;
-  const currentCell = cells.find(cell => ["running", "validating", "harness-completed"].includes(cell.state));
-  elements.benchmarkRunSummary.textContent =
-    `Live run · ${completedCells}/${cells.length} cell(s) · `
-    + `${currentCell ? `current ${currentCell.model} × ${benchmarkHarnessLabel(currentCell.harness)}` : "no active cell"} · `
-    + `${Math.max(0, cells.length - completedCells)} remaining · sequential local run`;
-  elements.benchmarkLiveDashboard.replaceChildren();
-  for (const harness of cells) {
-    const card = document.createElement("article");
-    card.className = "benchmark-live-harness";
-    card.dataset.state = harness.state;
-    const elapsed = harness.startedAt && !["completed", "cancelled"].includes(harness.state)
-      ? Date.now() - new Date(harness.startedAt).getTime()
-      : harness.elapsedMilliseconds;
-    const heading = document.createElement("h4");
-    heading.textContent = `${harness.model} · ${benchmarkHarnessLabel(harness.harness)}`;
-    const summary = document.createElement("p");
-    summary.className = "benchmark-live-summary";
-    summary.textContent = `${harness.state} · ${harness.completed}/${harness.total} · `
-      + `${harness.passed} passed · score* ${harness.score === null ? "—" : Number(harness.score).toFixed(2)} · `
-      + `terminality ${harness.terminality}% · ${formatBenchmarkDuration(Math.max(0, elapsed || 0))}`;
-    const current = document.createElement("p");
-    current.className = "benchmark-live-current";
-    current.textContent = harness.currentTest
-      ? `Current: ${harness.currentTest} · ${harness.tests[harness.currentTest]?.state ?? harness.state}`
-        + (harness.tests[harness.currentTest]?.currentTurn
-          ? ` · turn ${harness.tests[harness.currentTest].currentTurn}/${harness.tests[harness.currentTest].totalTurns}`
-          : "")
-      : "No active test.";
-    card.append(heading, summary, current);
-    for (const test of Object.values(harness.tests)) {
-      const details = document.createElement("details");
-      details.className = "benchmark-live-test";
-      const testSummary = document.createElement("summary");
-      testSummary.textContent = `${test.id} · ${test.state}`;
-      details.append(testSummary);
-      if (test.activities.length) {
-        const list = document.createElement("ul");
-        for (const activity of test.activities) {
-          const item = document.createElement("li");
-          item.textContent = activity.turnNumber
-            ? `Turn ${activity.turnNumber}/${activity.totalTurns} · ${activity.kind}: ${activity.message}`
-            : `${activity.kind}: ${activity.message}`;
-          list.append(item);
-        }
-        details.append(list);
-      }
-      if (Object.keys(test.checks).length) {
-        const checks = document.createElement("dl");
-        checks.className = "benchmark-live-checks";
-        for (const [name, value] of Object.entries(test.checks)) {
-          const term = document.createElement("dt");
-          term.textContent = name;
-          const definition = document.createElement("dd");
-          definition.textContent = String(value);
-          checks.append(term, definition);
-        }
-        details.append(checks);
-      }
-      card.append(details);
-    }
-    elements.benchmarkLiveDashboard.append(card);
+  const current = cells.find(isBenchmarkCellActive);
+  const completed = cells.filter(cell => benchmarkCellGroup(cell) === "Finished").length;
+  const active = cells.filter(cell => benchmarkCellGroup(cell) === "Active").length;
+  const queued = cells.filter(cell => cell.state === "pending").length;
+  const batch = state.benchmarkBatch;
+  elements.benchmarkLiveDashboard.hidden = cells.length === 0;
+  elements.benchmarkCombinationPicker.hidden = cells.length === 0;
+  elements.benchmarkExecutionEmpty.hidden = cells.length > 0;
+  elements.benchmarkRankingNote.hidden = live.terminal;
+  elements.benchmarkFollowActive.hidden = !current || live.terminal;
+  updateBenchmarkText(elements.benchmarkProgressTitle, live.terminal ? "Run finished" : batch ? `Repetition ${batch.started} of ${batch.total}` : "Benchmark in progress");
+  if (!live.terminal) {
+    updateBenchmarkText(elements.benchmarkRunSummary, `${completed}/${cells.length} combinations finished · ${active} active · ${queued} queued · sequential local run`);
   }
-  renderProvisionalBenchmarkRanking(live.ranking);
-  elements.benchmarkResultDetail.textContent =
-    "Expand a test in the card to view useful activity and validation facts. The final result will replace this state.";
+  updateBenchmarkText(elements.benchmarkQueueSummary, `${cells.length} combinations · ${active} active · ${completed} finished · ${queued} queued`);
+  updateBenchmarkText(elements.benchmarkCurrentCombination, current && !live.terminal
+    ? `${current.model} × ${benchmarkHarnessLabel(current.harness)}${current.currentTest ? ` · ${benchmarkTestLabel(current.currentTest)}` : ""}` : "No active combination.");
+  elements.benchmarkBatchProgress.hidden = !batch || batch.total < 2;
+  if (batch) {
+    const progress = elements.benchmarkBatchProgress;
+    while (progress.children.length < batch.total) progress.append(document.createElement("span"));
+    while (progress.children.length > batch.total) progress.lastChild.remove();
+    [...progress.children].forEach((bar, i) => { bar.dataset.state = i < batch.completed ? "completed" : i < batch.started ? "running" : "pending"; });
+    progress.setAttribute("role", "img");
+    progress.setAttribute("aria-label", `${batch.completed} of ${batch.total} repetitions completed`);
+  }
+  const keys = new Set(cells.map(cell => cell.id));
+  for (const [key, option] of ui.liveOptions) {
+    if (!keys.has(key)) { option.remove(); ui.liveOptions.delete(key); ui.liveCards.delete(key); }
+  }
+  const select = elements.benchmarkCombinationSelect;
+  for (const groupName of ["Active", "Finished", "Queued"]) {
+    let group = [...select.children].find(item => item.dataset.group === groupName);
+    if (!group) { group = document.createElement("optgroup"); group.dataset.group = groupName; select.append(group); }
+    const members = cells.filter(cell => benchmarkCellGroup(cell) === groupName);
+    group.label = `${groupName} (${members.length})`;
+    group.disabled = members.length === 0;
+    for (const cell of members) {
+      let option = ui.liveOptions.get(cell.id);
+      if (!option) { option = document.createElement("option"); option.value = cell.id; ui.liveOptions.set(cell.id, option); }
+      updateBenchmarkText(option, `${cell.model} × ${benchmarkHarnessLabel(cell.harness)} — ${benchmarkStateLabel(cell.state)} · ${cell.completed}/${cell.total} finished · ${cell.passed} passed`);
+      if (option.parentElement !== group) group.append(option);
+    }
+  }
+  if (!keys.has(ui.selectedCell)) ui.selectedCell = current?.id ?? cells[0]?.id ?? null;
+  select.value = ui.selectedCell ?? "";
+  elements.benchmarkPreviousCombination.disabled = select.selectedIndex <= 0;
+  elements.benchmarkNextCombination.disabled = select.selectedIndex < 0 || select.selectedIndex >= select.options.length - 1;
+  updateBenchmarkText(elements.benchmarkCombinationPosition, cells.length ? `${select.selectedIndex + 1} of ${cells.length} combinations` : "No combinations");
+  const selected = live.cells[ui.selectedCell];
+  if (selected) renderBenchmarkLiveCell(selected);
+  if (!live.terminal) {
+    renderProvisionalBenchmarkRanking(live.ranking);
+    elements.benchmarkScoreContext.textContent = "Provisional scores use the active profile. Finished tests include failures; terminality is a separate metric.";
+  }
+}
+
+function renderBenchmarkLiveCell(cell) {
+  const cards = state.benchmarkUi.liveCards;
+  let view = cards.get(cell.id);
+  if (!view) {
+    const card = document.createElement("article"); card.className = "benchmark-live-harness";
+    const heading = document.createElement("h4");
+    const summary = document.createElement("p"); summary.className = "benchmark-live-summary";
+    const counts = document.createElement("p"); counts.className = "benchmark-live-counts";
+    const progress = document.createElement("div"); progress.className = "benchmark-live-progress";
+    const current = document.createElement("p"); current.className = "benchmark-live-current";
+    const tests = document.createElement("div");
+    card.append(heading, summary, counts, progress, current, tests);
+    view = { card, heading, summary, counts, progress, current, tests, testViews: new Map() };
+    cards.set(cell.id, view);
+  }
+  if (elements.benchmarkLiveDashboard.firstElementChild !== view.card) elements.benchmarkLiveDashboard.replaceChildren(view.card);
+  view.card.dataset.state = cell.state;
+  const elapsed = cell.startedAt && isBenchmarkCellActive(cell) && !state.benchmark.live.terminal
+    ? Date.now() - new Date(cell.startedAt).getTime() : cell.elapsedMilliseconds;
+  updateBenchmarkText(view.heading, `${cell.model} × ${benchmarkHarnessLabel(cell.harness)}`);
+  updateBenchmarkText(view.summary, `${benchmarkStateLabel(cell.state)} · ${cell.completed}/${cell.total} finished · ${cell.passed} passed · score* ${cell.score == null ? "—" : Number(cell.score).toFixed(2)} · terminality ${cell.state === "pending" ? "—" : `${cell.terminality}%`} · ${cell.state === "pending" ? "Not started" : formatBenchmarkDuration(Math.max(0, elapsed || 0))}`);
+  const tests = Object.values(cell.tests);
+  const failed = tests.filter(test => ["failed", "timed-out"].includes(test.state)).length;
+  updateBenchmarkText(view.counts, `${failed} failed or timed out · ${tests.filter(test => isBenchmarkCellActive(test)).length} active · ${tests.filter(test => test.state === "pending").length} queued`);
+  const activeTest = cell.tests[cell.currentTest];
+  const inProgress = activeTest && isBenchmarkCellActive(activeTest);
+  updateBenchmarkText(view.current, inProgress
+    ? `Now: ${benchmarkTestLabel(activeTest.id)} · ${activeTest.id} · ${benchmarkStateLabel(activeTest.state)}${activeTest.currentTurn ? ` · turn ${activeTest.currentTurn}/${activeTest.totalTurns}` : ""}`
+    : "No active test in this combination.");
+  view.current.hidden = !inProgress;
+  for (const [id, testView] of view.testViews) {
+    if (!cell.tests[id]) { testView.details.remove(); testView.bar.remove(); view.testViews.delete(id); }
+  }
+  for (const test of tests) {
+    let item = view.testViews.get(test.id);
+    if (!item) {
+      const details = document.createElement("details"); details.className = "benchmark-live-test"; details.dataset.testId = test.id;
+      const summary = document.createElement("summary");
+      const name = document.createElement("span"); name.textContent = benchmarkTestLabel(test.id);
+      const code = document.createElement("small"); code.textContent = test.id; name.append(code);
+      const status = document.createElement("span"); status.className = "benchmark-test-state";
+      summary.append(name, status);
+      const activities = document.createElement("ul");
+      const checks = document.createElement("dl"); checks.className = "benchmark-live-checks";
+      const message = document.createElement("p");
+      details.append(summary, message, activities, checks);
+      const bar = document.createElement("span"); view.progress.append(bar);
+      view.tests.append(details);
+      item = { details, status, activities, checks, message, bar, activityText: "", checkText: "" };
+      view.testViews.set(test.id, item);
+    }
+    item.details.dataset.state = test.state;
+    item.bar.dataset.state = test.state;
+    item.bar.title = `${test.id} · ${benchmarkStateLabel(test.state)}`;
+    updateBenchmarkText(item.status, benchmarkStateLabel(test.state));
+    const activityText = test.activities.map(activity => activity.turnNumber
+      ? `Turn ${activity.turnNumber}/${activity.totalTurns} · ${activity.kind}: ${activity.message}`
+      : `${activity.kind}: ${activity.message}`);
+    const signature = JSON.stringify(activityText);
+    if (item.activityText !== signature) {
+      item.activities.replaceChildren(...activityText.map(text => { const li = document.createElement("li"); li.textContent = text; return li; }));
+      item.activityText = signature;
+    }
+    item.activities.hidden = !activityText.length;
+    const checks = Object.entries(test.checks);
+    const checkText = JSON.stringify(checks);
+    if (item.checkText !== checkText) {
+      item.checks.replaceChildren(...checks.flatMap(([name, value]) => { const dt = document.createElement("dt"); dt.textContent = name; const dd = document.createElement("dd"); dd.textContent = String(value); return [dt, dd]; }));
+      item.checkText = checkText;
+    }
+    item.checks.hidden = !checks.length;
+    const error = test.result?.rawResult?.error;
+    updateBenchmarkText(item.message, error ? `${error.code}: ${error.message}` : test.state === "pending" ? "Waiting for this test to start." : "Activity and Host validation are shown below when available.");
+  }
+  view.progress.setAttribute("role", "img");
+  view.progress.setAttribute("aria-label", `${cell.completed} of ${cell.total} tests finished; ${cell.passed} passed; ${failed} failed or timed out`);
+}
+
+function renderBenchmarkPairIdentity(element, rank, model, harness) {
+  element.classList.add("benchmark-pair-identity");
+  const name = document.createElement("strong");
+  name.textContent = `${rank ? `#${rank}` : "—"} ${model ?? ""}`;
+  const label = document.createElement("small");
+  label.textContent = benchmarkHarnessLabel(harness);
+  element.append(name, label);
 }
 
 function renderProvisionalBenchmarkRanking(ranking) {
   elements.benchmarkResultsBody.replaceChildren();
   for (const entry of ranking) {
     const row = document.createElement("tr");
+    const identity = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "benchmark-result-link";
+    button.dataset.liveCell = benchmarkCellKey(entry.model, entry.harness);
+    renderBenchmarkPairIdentity(button, entry.rank, entry.model, entry.harness);
+    identity.append(button);
+    row.append(identity);
     for (const value of [
-      entry.rank
-        ? `#${entry.rank} ${entry.model ?? ""} × ${benchmarkHarnessLabel(entry.harness)}`
-        : `— ${entry.model ?? ""} × ${benchmarkHarnessLabel(entry.harness)}`,
-      entry.state,
+      benchmarkStateLabel(entry.state),
       `${entry.passed}/${entry.total}`,
       entry.score === null ? "—" : `${Number(entry.score).toFixed(2)}*`,
       formatBenchmarkDuration(entry.durationMilliseconds),
@@ -2711,17 +3007,38 @@ function finishBenchmarkLive(result) {
   state.benchmark.live.terminal = true;
   clearBenchmarkLiveConnection();
   state.activeBenchmarkRunId = null;
-  sessionStorage.removeItem("agentic-router-benchmark-live-run");
-  setBenchmarkRunning(false);
+  sessionStorage.removeItem(benchmarkLiveRunStorageKey);
   state.benchmark.result = result;
   renderBenchmarkResult(result);
-  refreshBenchmarkHistory({ selectRunId: result.runId });
-  rescoreBenchmarkResult().catch(error => {
-    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
-  });
-  generateGeneralBenchmarkRecommendation().catch(error => {
-    elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
-  });
+  const batch = state.benchmarkBatch;
+  if (batch) {
+    batch.completed += 1;
+    batch.runIds.push(result.runId);
+    persistBenchmarkBatch();
+    if (batch.cancelRequested || result.terminalState === "cancelled") {
+      completeBenchmarkBatch(
+        `Benchmark batch canceled after ${batch.completed}/${batch.total} loop(s); completed evidence was persisted.`,
+        result.runId
+      );
+      return;
+    }
+    if (batch.started < batch.total) {
+      elements.benchmarkStatus.textContent =
+        `Benchmark loop ${batch.completed}/${batch.total} persisted; starting the next loop…`;
+      void startNextBenchmarkRun();
+      return;
+    }
+    completeBenchmarkBatch(
+      batch.total === 1
+        ? "Benchmark completed and persisted."
+        : `Benchmark batch completed: ${batch.completed}/${batch.total} independent run(s) persisted.`,
+      result.runId
+    );
+    return;
+  }
+
+  setBenchmarkRunning(false);
+  refreshCompletedBenchmark(result.runId);
   elements.benchmarkStatus.textContent = result.terminalState === "cancelled"
     ? "Run canceled with a persisted final result."
     : "Benchmark completed and persisted.";
@@ -2733,9 +3050,27 @@ function failBenchmarkLive(message) {
   }
   clearBenchmarkLiveConnection();
   state.activeBenchmarkRunId = null;
-  sessionStorage.removeItem("agentic-router-benchmark-live-run");
+  sessionStorage.removeItem(benchmarkLiveRunStorageKey);
+  clearBenchmarkBatch();
   setBenchmarkRunning(false);
   elements.benchmarkStatus.textContent = message ?? "The live benchmark failed before the final result.";
+}
+
+function completeBenchmarkBatch(message, selectedRunId) {
+  clearBenchmarkBatch();
+  setBenchmarkRunning(false);
+  refreshCompletedBenchmark(selectedRunId);
+  elements.benchmarkStatus.textContent = message;
+}
+
+function refreshCompletedBenchmark(selectedRunId) {
+  refreshBenchmarkHistory({ selectRunId: selectedRunId });
+  rescoreBenchmarkResult().catch(error => {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  });
+  generateGeneralBenchmarkRecommendation().catch(error => {
+    elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
+  });
 }
 
 function clearBenchmarkLiveConnection() {
@@ -2752,6 +3087,10 @@ function clearBenchmarkLiveConnection() {
 async function cancelBenchmarkSuite() {
   if (!state.activeBenchmarkRunId) {
     return;
+  }
+  if (state.benchmarkBatch) {
+    state.benchmarkBatch.cancelRequested = true;
+    persistBenchmarkBatch();
   }
   elements.benchmarkStatus.textContent = "Requesting clean cancellation…";
   for (const harness of Object.values(state.benchmark?.live?.cells ?? {})) {
@@ -2779,6 +3118,7 @@ function setBenchmarkRunning(running) {
   }
   elements.benchmarkScoringProfileChoice.disabled = running;
   elements.benchmarkTimeout.disabled = running;
+  elements.benchmarkRepetitions.disabled = running;
   for (const input of elements.benchmarkSuiteList.querySelectorAll("input")) {
     input.disabled = running;
   }
@@ -2796,6 +3136,7 @@ function setBenchmarkRunning(running) {
   for (const input of elements.benchmarkHarnessList.querySelectorAll("input")) {
     input.disabled = running || input.dataset.available === "false";
   }
+  renderBenchmarkSelectionSummary();
 }
 
 async function openPersistedBenchmark() {
@@ -2833,13 +3174,27 @@ async function openPersistedBenchmark() {
 }
 
 function renderBenchmarkResult(result) {
-  elements.benchmarkLiveDashboard.hidden = true;
+  preserveBenchmarkDisclosures(elements.benchmarkResultDetail, () => renderBenchmarkResultContent(result));
+}
+
+function renderBenchmarkResultContent(result) {
+  const retainedLive = state.benchmark?.live;
+  const keepLive = retainedLive && (state.activeBenchmarkRunId || retainedLive.runId === result?.runId);
+  elements.benchmarkLiveDashboard.hidden = !keepLive;
+  elements.benchmarkCombinationPicker.hidden = !keepLive;
+  elements.benchmarkExecutionEmpty.hidden = Boolean(keepLive);
+  if (keepLive) renderBenchmarkLive();
+  else {
+    elements.benchmarkProgressTitle.textContent = result ? "Saved result" : "Ready to benchmark";
+    elements.benchmarkCurrentCombination.textContent = "No active combination.";
+    elements.benchmarkFollowActive.hidden = true;
+    elements.benchmarkBatchProgress.hidden = true;
+  }
   elements.benchmarkRankingNote.hidden = true;
   elements.benchmarkMatrix.hidden = true;
   elements.benchmarkResultsBody.replaceChildren();
   elements.benchmarkResultDetail.replaceChildren();
   elements.benchmarkRawEvidence.hidden = !result;
-  elements.benchmarkRawEvidence.open = false;
   elements.benchmarkRawEvidenceContent.textContent = result
     ? JSON.stringify(result, null, 2)
     : "";
@@ -2866,7 +3221,9 @@ function renderBenchmarkResult(result) {
   if ((result.cells ?? []).length > 0) {
     renderBenchmarkMatrix(result, projection);
     renderBenchmarkRankings(result, projection);
-    const first = (projection?.pairRanking ?? result.pairRanking ?? [])[0];
+    const selection = state.benchmarkUi.resultSelection;
+    const ranking = projection?.pairRanking ?? result.pairRanking ?? [];
+    const first = ranking.find(entry => selection?.runId === result.runId && entry.model === selection.model && entry.harness === selection.harness) ?? ranking[0];
     if (first) {
       renderBenchmarkMatrixCellDetail(first.model, first.harness);
     }
@@ -2904,7 +3261,9 @@ function renderBenchmarkResult(result) {
     row.prepend(harnessCell);
     elements.benchmarkResultsBody.append(row);
   }
-  const firstHarness = ranking[0]?.harness;
+  const selection = state.benchmarkUi.resultSelection;
+  const firstHarness = selection?.runId === result.runId && byHarness.has(selection.harness)
+    ? selection.harness : ranking[0]?.harness;
   if (firstHarness) {
     renderBenchmarkHarnessDetail(byHarness.get(firstHarness), scoreByHarness.get(firstHarness));
   }
@@ -3002,7 +3361,7 @@ function renderBenchmarkRankings(result, projection) {
     button.className = "benchmark-result-link";
     button.dataset.model = entry.model;
     button.dataset.harness = entry.harness;
-    button.textContent = `#${entry.rank} ${entry.model} × ${benchmarkHarnessLabel(entry.harness)}`;
+    renderBenchmarkPairIdentity(button, entry.rank, entry.model, entry.harness);
     identity.append(button);
     row.append(identity);
     for (const value of [
@@ -3028,6 +3387,7 @@ function openBenchmarkMatrixCell(event) {
 }
 
 function renderBenchmarkMatrixCellDetail(model, harnessId) {
+  state.benchmarkUi.resultSelection = { runId: state.benchmark?.result?.runId, model, harness: harnessId };
   const cell = state.benchmark?.result?.cells?.find(item =>
     item.model === model && item.harness === harnessId
   );
@@ -3047,6 +3407,13 @@ function renderBenchmarkMatrixCellDetail(model, harnessId) {
 }
 
 function openBenchmarkHarnessResult(event) {
+  const liveButton = event.target.closest("[data-live-cell]");
+  if (liveButton && state.benchmark?.live?.cells[liveButton.dataset.liveCell]) {
+    state.benchmarkUi.selectedCell = liveButton.dataset.liveCell;
+    renderBenchmarkLive();
+    showBenchmarkTab("execution", true);
+    return;
+  }
   const button = event.target.closest("[data-harness]");
   if (!button) {
     return;
@@ -3065,6 +3432,7 @@ function openBenchmarkHarnessResult(event) {
 }
 
 function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
+  state.benchmarkUi.resultSelection = { runId: state.benchmark?.result?.runId, model, harness: harness?.harness };
   elements.benchmarkResultDetail.replaceChildren();
   if (!harness) {
     elements.benchmarkResultDetail.textContent = "Harness result unavailable.";
@@ -3102,6 +3470,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
   for (const test of harness.tests) {
     const details = document.createElement("details");
     details.className = "benchmark-test-detail";
+    details.dataset.disclosureKey = `${model ?? ""}:${harness.harness}:${test.run.testId}`;
     const summary = document.createElement("summary");
     const calculatedTest = calculated?.tests?.find(item => item.runId === test.run.runId);
     summary.textContent = `${test.run.testId} · ${test.rawResult.status} · calculated score ${Number(calculatedTest?.score?.total ?? test.score?.total ?? 0).toFixed(2)}`;
@@ -3110,6 +3479,27 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     facts.className = "benchmark-evidence-grid";
     const evidenceHeading = document.createElement("strong");
     evidenceHeading.textContent = "Measured evidence";
+    const operational = test.rawResult.operationalDiagnostics;
+    const operationalEvidence = operational ? [
+      ["Operational · Strategy", `${operational.requestedStrategy} → ${operational.resolvedStrategy}`],
+      ["Operational · Tool calls", operational.toolCalls ?? "Unavailable"],
+      ["Operational · Failed tool calls", operational.failedToolCalls ?? "Unavailable"],
+      ["Operational · Tool validation errors", operational.toolValidationErrors ?? "Unavailable"],
+      ["Operational · Repeated tool calls", operational.repeatedToolCalls ?? "Unavailable"],
+      ["Operational · Repeated identical actions", operational.repeatedIdenticalActions ?? "Unavailable"],
+      ["Operational · Recovery attempts", operational.recoveryAttempts ?? "Unavailable"],
+      ["Operational · Execution turns", operational.executionTurns ?? "Unavailable"],
+      ["Operational · Terminal reason", operational.terminalReason],
+      ["Operational · Execute duration", formatBenchmarkDuration(operational.executionDurationMilliseconds)],
+      ["Operational · Host setup", formatBenchmarkDuration(operational.setupDurationMilliseconds)],
+      ["Operational · Browser validation", formatBenchmarkDuration(operational.browserValidationDurationMilliseconds)],
+      ["Operational · Tokens", operational.inputTokens === null || operational.inputTokens === undefined
+        ? "Unavailable"
+        : `${operational.inputTokens} in / ${operational.outputTokens ?? 0} out · ${operational.tokenProvenance}`],
+      ["Operational · Files written", (operational.filesWritten ?? []).join(", ") || "none"],
+      ["Operational · Files modified", (operational.filesModified ?? []).join(", ") || "none"],
+      ["Operational · Unavailable metrics", (operational.unavailableMetrics ?? []).join(", ") || "none"]
+    ] : [];
     const evidence = [
       ["Terminal", test.rawResult.executionStatus],
       ["Exactness", `${test.rawResult.exactness}%`],
@@ -3119,8 +3509,8 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       ["Workspace id", test.run.workspaceId],
       ["Fixture fingerprint", test.run.fixtureFingerprint],
       ["Workspace cleaned", test.workspaceCleanedUp],
-      ["Tool calls", test.rawResult.toolCallCount ?? "n/d"],
-      ["Errors / recovered", `${test.rawResult.surfacedErrorCount ?? "n/d"} / ${test.rawResult.recoveredErrorCount ?? "n/d"}`],
+      ["Tool calls", test.rawResult.toolCallCount ?? "Unavailable"],
+      ["Errors / recovered", `${test.rawResult.surfacedErrorCount ?? "Unavailable"} / ${test.rawResult.recoveredErrorCount ?? "Unavailable"}`],
       ["Changed files", (test.rawResult.changedFiles ?? []).join(", ") || "none"],
       ["Unexpected", (test.rawResult.unexpectedFiles ?? []).join(", ") || "none"],
       ["Turns", `${test.rawResult.behaviorMetrics?.successfulTerminalTurns ?? 0}/${test.rawResult.behaviorMetrics?.totalTurns ?? 0}`],
@@ -3130,7 +3520,8 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       ["Convergence", benchmarkMetric(test.rawResult.behaviorMetrics?.convergence)],
       ["Hygiene", benchmarkMetric(test.rawResult.behaviorMetrics?.hygiene)],
       ["Truthful report", benchmarkMetric(test.rawResult.behaviorMetrics?.truthfulFinalReport)],
-      ["Narration", test.rawResult.behaviorMetrics?.narrationClassification ?? "n/d"],
+      ["Narration", test.rawResult.behaviorMetrics?.narrationClassification ?? "Unavailable"],
+      ...operationalEvidence,
       ...Object.entries(test.rawResult.validationFacts ?? {}).map(
         ([key, value]) => [`Validation · ${key}`, value]
       )
@@ -3185,7 +3576,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
 }
 
 function benchmarkMetric(value) {
-  return value === null || value === undefined ? "n/d" : `${value}%`;
+  return value === null || value === undefined ? "Unavailable" : `${value}%`;
 }
 
 function benchmarkHarnessLabel(harnessId) {
@@ -4277,6 +4668,7 @@ async function resetConversationForWorkspaceChange() {
   await resetCloudImagePrivacy(state.browserSessionId);
   clearConversationUi();
   state.browserSessionId = createSessionId();
+  persistBrowserSessionId(state.browserSessionId);
   state.conversationSessionId = null;
   state.latestExecutionSessionId = null;
   state.interactionMode = "chat";
@@ -5615,7 +6007,10 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
   await requestConversationTransition(
     async () =>
     {
-      const nextBrowserSessionId = createSessionId();
+      const activeSupervisionRun = findAttachableSupervisionRun(id);
+      const nextBrowserSessionId = activeSupervisionRun?.state === "running"
+        ? state.browserSessionId
+        : createSessionId();
 
       try {
         if (workspaceId && workspaceId !== activeWorkspaceProfile()?.id) {
@@ -5647,6 +6042,7 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
         await resetCloudImagePrivacy(state.browserSessionId);
         clearConversationUi();
         state.browserSessionId = nextBrowserSessionId;
+        persistBrowserSessionId(state.browserSessionId);
         state.conversationSessionId = session.id;
         state.history = session.messages.map(
           message => ({
@@ -7127,7 +7523,7 @@ function compactRuntimeMeter(label, percent, kind) {
 }
 
 function compactDeviceName(name) {
-  const match = name.match(/(?:RTX|GTX)\s*(\d{3,4})/i);
+  const match = name.match(/(?:RTX|GTX|RX)\s*(\d{3,4}(?:\s*XT[X]?)?)/i);
   return match?.[1] ?? name.replace(/^NVIDIA\s+/i, "");
 }
 
@@ -7204,21 +7600,31 @@ function renderLoadedModels(runtime) {
     groups.get(identity.key).models.push(model);
   }
   for (const device of runtime.devices) {
-    if (device.ollamaIndex == null) {
-      continue;
-    }
-    const key = `gpu-${device.ollamaIndex}`;
-    const label = `GPU ${device.ollamaIndex} · ${device.name}`;
+    const key = `device-${device.id}`;
+    const label = runtimeDeviceLabel(device);
     if (!groups.has(key)) {
       groups.set(key, {
         key,
-        gpuIndex: Number(device.ollamaIndex),
+        deviceId: device.id,
+        gpuIndex: device.backendIndex == null
+          ? null
+          : Number(device.backendIndex),
         label,
-        order: Number(device.ollamaIndex),
+        order: runtimeDeviceOrder(device),
         models: []
       });
     } else {
-      groups.get(key).label = label;
+      const existing = groups.get(key);
+      Object.assign(existing, {
+        deviceId: device.id,
+        gpuIndex: existing.gpuIndex ?? (device.backendIndex == null
+          ? null
+          : Number(device.backendIndex)),
+        label: existing.models.length > 0
+          ? existing.label
+          : label,
+        order: runtimeDeviceOrder(device)
+      });
     }
   }
 
@@ -7271,17 +7677,23 @@ function renderLoadedModels(runtime) {
 }
 
 function loadedModelGpuIdentity(model) {
-  if (model.gpuIndex != null) {
+  if (model.observedGpuId) {
     return {
-      key: `gpu-${model.gpuIndex}`,
-      gpuIndex: Number(model.gpuIndex),
-      label: `GPU ${model.gpuIndex}${model.gpuName ? ` · ${model.gpuName}` : ""}`,
-      order: Number(model.gpuIndex)
+      key: `device-${model.observedGpuId}`,
+      deviceId: model.observedGpuId,
+      gpuIndex: model.observedBackendIndex == null
+        ? null
+        : Number(model.observedBackendIndex),
+      label: observedModelPlacementLabel(model),
+      order: model.observedBackendIndex == null
+        ? Number.MAX_SAFE_INTEGER - 4
+        : Number(model.observedBackendIndex)
     };
   }
   if (model.processor === "cpu") {
     return {
       key: "cpu",
+      deviceId: null,
       gpuIndex: null,
       label: t("memory.cpu"),
       order: Number.MAX_SAFE_INTEGER - 2
@@ -7289,23 +7701,65 @@ function loadedModelGpuIdentity(model) {
   }
   if (model.processor === "gpu" || model.processor === "hybrid") {
     return {
-      key: "auto",
+      key: `backend-${model.observedBackend ?? "unknown"}`,
+      deviceId: null,
       gpuIndex: null,
-      label: t("memory.gpu_auto"),
+      label: model.observedBackend
+        ? `${runtimeBackendLabel(model.observedBackend)} · exact device not observed`
+        : t("memory.gpu_unknown"),
       order: Number.MAX_SAFE_INTEGER - 1
     };
   }
   return {
     key: "unknown",
+    deviceId: null,
     gpuIndex: null,
     label: t("memory.gpu_unknown"),
     order: Number.MAX_SAFE_INTEGER
   };
 }
 
+function runtimeDeviceLabel(device) {
+  const backend = device.backend
+    ? runtimeBackendLabel(device.backend)
+    : null;
+  const index = device.backendIndex == null
+    ? ""
+    : ` ${device.backendIndex}`;
+  return `${backend ? `${backend}${index} · ` : ""}${device.name}`;
+}
+
+function runtimeDeviceOrder(device) {
+  const backendOrder = {
+    cuda: 0,
+    rocm: 1,
+    vulkan: 2
+  }[device.backend] ?? 3;
+  return backendOrder * 1000 + Number(device.backendIndex ?? 999);
+}
+
+function runtimeBackendLabel(backend) {
+  return {
+    cuda: "CUDA",
+    rocm: "ROCm",
+    vulkan: "Vulkan"
+  }[backend] ?? backend;
+}
+
+function observedModelPlacementLabel(model) {
+  const backend = model.observedBackend
+    ? runtimeBackendLabel(model.observedBackend)
+    : "GPU";
+  const index = model.observedBackendIndex == null
+    ? ""
+    : ` ${model.observedBackendIndex}`;
+  return `${backend}${index}${model.gpuName ? ` · ${model.gpuName}` : ""}`;
+}
+
 function loadedModelGpuCard(group, devices, loadedModelsStatus) {
   const card = document.createElement("article");
   card.className = "loaded-model-gpu-card";
+  card.dataset.deviceId = group.deviceId ?? group.key;
   const header = document.createElement("header");
   const title = document.createElement("strong");
   title.textContent = group.label;
@@ -7330,9 +7784,9 @@ function loadedModelGpuCard(group, devices, loadedModelsStatus) {
     (total, value) => total + Number(value),
     0
   );
-  const device = group.gpuIndex == null
+  const device = group.deviceId == null
     ? null
-    : devices.find(item => item.ollamaIndex === group.gpuIndex);
+    : devices.find(item => item.id === group.deviceId);
   const modelTelemetryAvailable = loadedModelsStatus === "available";
   const modelVramKnown = modelTelemetryAvailable
     && modelVramValues.length === group.models.length;
@@ -7415,8 +7869,42 @@ function loadedModelDetailRow(model) {
     + `${formatGiB(model.estimatedRamSizeBytes)} RAM · `
     + `${formatInteger(model.actualContextTokens)} tokens · `
     + `${contextRuntimeBytes == null ? "n/d" : `~${formatGiB(contextRuntimeBytes)}`} context/runtime`;
-  row.append(name, allocation);
+  const placement = document.createElement("span");
+  placement.className = "loaded-model-placement";
+  placement.textContent = `Observed: ${observedModelPlacementLabel(model)} · `
+    + `Configured: ${configuredModelPlacementLabel(model)}`;
+  placement.title = model.placementDiagnostic ?? "";
+  row.append(name, allocation, placement);
   return row;
+}
+
+function configuredModelPlacementLabel(model) {
+  if (model.configuredGpu === "auto") {
+    return "Auto";
+  }
+  if (model.configuredGpu === "vulkan:all") {
+    return "Vulkan combined · all GPUs";
+  }
+  if (String(model.configuredGpu).startsWith("vulkan:prefer:")) {
+    const [, , preferredBackend, preferredIndex] = model.configuredGpu.split(":");
+    const preferredDevice = state.devices.find(
+      device => device.backend === preferredBackend
+        && Number(device.backendIndex) === Number(preferredIndex)
+    );
+    return `Vulkan combined · prioritize ${preferredDevice?.name
+      ?? `${runtimeBackendLabel(preferredBackend)} ${preferredIndex}`}`;
+  }
+  const [selectionBackend, selectionIndex] = String(
+    model.configuredGpu ?? "auto"
+  ).split(":");
+  const backend = selectionBackend === "ollama"
+    ? "cuda"
+    : selectionBackend;
+  if (model.configuredGpuIndex == null && selectionIndex == null) {
+    return "Auto";
+  }
+  return `${runtimeBackendLabel(backend)} ${model.configuredGpuIndex ?? selectionIndex}`
+    + `${model.configuredGpuName ? ` · ${model.configuredGpuName}` : ""}`;
 }
 
 function loadedModelEmptyDetail() {
@@ -7638,7 +8126,10 @@ function renderRuntimeDevicePolicies(memory) {
         device.id
       );
       const name = document.createElement("span");
-      name.textContent = device.name;
+      name.textContent = runtimeDeviceLabel(device);
+      if (!device.affinitySelectable) {
+        name.title = "Detected for monitoring; exact Ollama affinity remains Auto.";
+      }
       enabledLabel.append(enabled, name);
 
       const fields = document.createElement("div");
@@ -9297,26 +9788,57 @@ function gpuOptions(includeDefault, selected = null) {
     : [];
 
   for (const device of state.devices) {
-    if (!device.isAuto && device.ollamaIndex == null) {
+    if (!device.isAuto && !device.affinitySelectable) {
       continue;
     }
 
+    const backend = device.backend ?? "cuda";
+    const index = device.backendIndex ?? device.ollamaIndex;
     options.push({
-      value: device.isAuto ? "auto" : `ollama:${device.ollamaIndex}`,
+      value: device.isAuto
+        ? "auto"
+        : backend === "cuda"
+          ? `ollama:${index}`
+          : `${backend}:${index}`,
       label: device.isAuto
         ? "Auto"
-        : `CUDA ${device.ollamaIndex} · ${device.name}`
+        : `${runtimeBackendLabel(backend)} ${index} · ${device.name}`
     });
+  }
+
+  const selectableDevices = state.devices.filter(
+    device => !device.isAuto && device.affinitySelectable
+  );
+  if (selectableDevices.length >= 2) {
+    options.push({
+      value: "vulkan:all",
+      label: "Vulkan combined · all GPUs (experimental)"
+    });
+    for (const device of selectableDevices) {
+      options.push({
+        value: `vulkan:prefer:${device.backend}:${device.backendIndex}`,
+        label: `Vulkan combined · prioritize ${device.name}`
+      });
+    }
   }
 
   if (
     selected
-    && /^ollama:\d+$/.test(selected)
+    && /^(?:(?:ollama|rocm|vulkan):(?:\d+|all)|vulkan:prefer:(?:cuda|rocm):\d+)$/.test(selected)
     && !options.some(option => option.value === selected)
   ) {
+    if (selected.startsWith("vulkan:prefer:")) {
+      const [, , preferredBackend, preferredIndex] = selected.split(":");
+      options.push({
+        value: selected,
+        label: `Vulkan combined · prioritize ${runtimeBackendLabel(preferredBackend)} ${preferredIndex} · configured, unavailable`
+      });
+      return options;
+    }
+    const [backend, index] = selected.split(":");
     options.push({
       value: selected,
-      label: `CUDA ${selected.slice("ollama:".length)} · configured, unavailable`
+      label: `${runtimeBackendLabel(backend === "ollama" ? "cuda" : backend)} ${index} · configured, unavailable`
     });
   }
 
@@ -11181,6 +11703,7 @@ async function beginEmptyConversation() {
   const previousBrowserSessionId = state.browserSessionId;
   clearConversationUi();
   state.browserSessionId = nextBrowserSessionId;
+  persistBrowserSessionId(state.browserSessionId);
   state.conversationSessionId = identity.sessionId;
   state.conversationState = "completed";
   state.latestExecutionSessionId = null;
@@ -16193,6 +16716,23 @@ async function decideAction(
 
     approval.open = approved;
   } catch (error) {
+    if (error.status === 404) {
+      status.textContent = "Expired · no longer actionable";
+      approval.classList.add("historical-approval");
+      approval.querySelector(".approval-controls")?.remove();
+      if (input) {
+        input.readOnly = true;
+        input.disabled = false;
+      }
+      if (!approval.querySelector(".historical-approval-notice")) {
+        const notice = document.createElement("p");
+        notice.className = "historical-approval-notice";
+        notice.textContent = error.message;
+        approval.querySelector(".action-approval-content")?.append(notice);
+      }
+      showToast(error.message);
+      return;
+    }
     status.textContent = approved && input
       ? "Invalid change"
       : error.message;
@@ -17077,9 +17617,11 @@ async function fetchJson(url, options) {
     const error = new Error(
       payload?.message
       ?? payload?.detail
+      ?? payload?.diagnostic
       ?? `HTTP ${response.status}`
     );
     error.payload = payload;
+    error.status = response.status;
     throw error;
   }
 
@@ -17107,9 +17649,86 @@ async function fetchText(url, options) {
   return payload;
 }
 
+function restoreBenchmarkBatch() {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(benchmarkBatchStorageKey));
+    if (
+      !stored
+      || !Number.isInteger(stored.total)
+      || stored.total < 1
+      || stored.total > 20
+      || !Number.isInteger(stored.started)
+      || stored.started < 0
+      || stored.started > stored.total
+      || !Number.isInteger(stored.completed)
+      || stored.completed < 0
+      || stored.completed > stored.started
+      || !Array.isArray(stored.runIds)
+      || !stored.request
+      || !Array.isArray(stored.request.models)
+      || !Array.isArray(stored.request.harnesses)
+      || !Array.isArray(stored.request.suites)
+    ) {
+      sessionStorage.removeItem(benchmarkBatchStorageKey);
+      return null;
+    }
+    return stored;
+  } catch {
+    try {
+      sessionStorage.removeItem(benchmarkBatchStorageKey);
+    } catch {
+      // Session storage is optional; the active page still owns the batch.
+    }
+    return null;
+  }
+}
+
+function persistBenchmarkBatch() {
+  try {
+    if (state.benchmarkBatch) {
+      sessionStorage.setItem(
+        benchmarkBatchStorageKey,
+        JSON.stringify(state.benchmarkBatch)
+      );
+    } else {
+      sessionStorage.removeItem(benchmarkBatchStorageKey);
+    }
+  } catch {
+    // Session storage is optional; the active page still owns the batch.
+  }
+}
+
+function clearBenchmarkBatch() {
+  state.benchmarkBatch = null;
+  persistBenchmarkBatch();
+}
+
 function createSessionId() {
   return globalThis.crypto?.randomUUID?.()
     ?? `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function restoreBrowserSessionId() {
+  try {
+    const stored = sessionStorage.getItem(browserSessionStorageKey);
+    if (stored && stored.length <= 128) {
+      return stored;
+    }
+  } catch {
+    // Browser storage is optional; a page-local identity remains valid.
+  }
+
+  const created = createSessionId();
+  persistBrowserSessionId(created);
+  return created;
+}
+
+function persistBrowserSessionId(browserSessionId) {
+  try {
+    sessionStorage.setItem(browserSessionStorageKey, browserSessionId);
+  } catch {
+    // Browser storage is optional; a page-local identity remains valid.
+  }
 }
 
 function toCamelCase(value) {

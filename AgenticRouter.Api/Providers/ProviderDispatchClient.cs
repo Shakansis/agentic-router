@@ -691,6 +691,30 @@ public sealed class ProviderDispatchClient : IOllamaClient
       : Task.CompletedTask;
   }
 
+  public Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    int? mainGpu,
+    string? gpuSelection,
+    CancellationToken cancellationToken
+  )
+  {
+    var reference = ProviderModelReference.Parse(model);
+    return reference.IsLocal
+      ? _ollama.SetModelResidencyAsync(
+        baseUri,
+        reference.ModelId,
+        keepAlive,
+        contextTokens,
+        mainGpu,
+        gpuSelection,
+        cancellationToken
+      )
+      : Task.CompletedTask;
+  }
+
   public async IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(
     Uri baseUri,
     string model,

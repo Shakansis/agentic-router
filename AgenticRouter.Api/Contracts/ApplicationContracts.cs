@@ -56,7 +56,10 @@ public sealed record GraphicsDevice(
   long? MemoryBytes,
   bool Available,
   bool IsAuto,
-  int? OllamaIndex = null
+  int? OllamaIndex = null,
+  string? Backend = null,
+  int? BackendIndex = null,
+  bool AffinitySelectable = false
 );
 
 public sealed record DevicesResponse(
@@ -656,7 +659,10 @@ public sealed record LocalActionEvent(
   string? EditableText = null,
   string? ResultOutput = null,
   bool CanRememberApproval = false,
-  string? Code = null
+  string? Code = null,
+  string? ArgumentsSha256 = null,
+  string? ActionFingerprint = null,
+  IReadOnlyList<string>? RelativePaths = null
 );
 
 public sealed record ToolNameResolutionEvidence(

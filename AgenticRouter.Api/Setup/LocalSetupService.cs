@@ -5,6 +5,7 @@ using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Recovery;
+using AgenticRouter.Api.Runtime;
 
 namespace AgenticRouter.Api.Setup;
 
@@ -70,6 +71,7 @@ public sealed class LocalSetupService : ILocalSetupService
   private readonly ISetupInstallerLauncher _installerLauncher;
   private readonly IOllamaInstallationProfileStore _installationProfiles;
   private readonly IOllamaBackendEvidenceService _backendEvidence;
+  private readonly IOllamaManagedServerManager _managedOllamaServers;
   private readonly IHostApplicationLifetime _applicationLifetime;
   private readonly ILogger<LocalSetupService> _logger;
   private readonly ConcurrentDictionary<string, SetupJobState> _jobs = new(
@@ -85,6 +87,7 @@ public sealed class LocalSetupService : ILocalSetupService
     ISetupInstallerLauncher installerLauncher,
     IOllamaInstallationProfileStore installationProfiles,
     IOllamaBackendEvidenceService backendEvidence,
+    IOllamaManagedServerManager managedOllamaServers,
     IHostApplicationLifetime applicationLifetime,
     ILogger<LocalSetupService> logger
   )
@@ -97,6 +100,7 @@ public sealed class LocalSetupService : ILocalSetupService
     _installerLauncher = installerLauncher;
     _installationProfiles = installationProfiles;
     _backendEvidence = backendEvidence;
+    _managedOllamaServers = managedOllamaServers;
     _applicationLifetime = applicationLifetime;
     _logger = logger;
   }
@@ -115,8 +119,14 @@ public sealed class LocalSetupService : ILocalSetupService
 
     try
     {
-      ollamaVersion = await _ollama.GetVersionAsync(baseUri, cancellationToken);
-      installedModels = await _ollama.GetModelsAsync(baseUri, cancellationToken);
+      var runtimeUri = (await _managedOllamaServers.ResolveAsync(
+        baseUri,
+        settings.DefaultGpu,
+        settings.DefaultGpu,
+        cancellationToken
+      )).Endpoint;
+      ollamaVersion = await _ollama.GetVersionAsync(runtimeUri, cancellationToken);
+      installedModels = await _ollama.GetModelsAsync(runtimeUri, cancellationToken);
     }
     catch (OllamaProviderException exception)
     {

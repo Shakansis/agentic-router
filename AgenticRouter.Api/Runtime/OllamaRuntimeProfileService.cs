@@ -26,6 +26,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
   private readonly IModelRequestTracker _requestTracker;
   private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly ISystemMemoryMetricsProvider _systemMemory;
+  private readonly IOllamaManagedServerManager _managedOllamaServers;
   private readonly SemaphoreSlim _measurementGate = new(
     1,
     1
@@ -37,7 +38,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     IOllamaClient ollamaClient,
     IModelRequestTracker requestTracker,
     IGpuMemoryMetricsProvider gpuMemory,
-    ISystemMemoryMetricsProvider systemMemory
+    ISystemMemoryMetricsProvider systemMemory,
+    IOllamaManagedServerManager managedOllamaServers
   )
   {
     _storePath = Path.Combine(
@@ -50,6 +52,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     _requestTracker = requestTracker;
     _gpuMemory = gpuMemory;
     _systemMemory = systemMemory;
+    _managedOllamaServers = managedOllamaServers;
   }
 
   public async Task<OllamaRuntimeProfilesView> GetAsync(
@@ -67,12 +70,14 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       baseUri,
       cancellationToken
     );
-    var running = await _ollamaClient.GetRunningModelsAsync(
+    var defaultRuntimeUri = (await _managedOllamaServers.ResolveAsync(
       baseUri,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
       cancellationToken
-    );
+    )).Endpoint;
     var version = await _ollamaClient.GetVersionAsync(
-      baseUri,
+      defaultRuntimeUri,
       cancellationToken
     );
     var hardwareSignature = HardwareSignature(
@@ -101,6 +106,17 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       {
         continue;
       }
+
+      var roleRuntimeUri = (await _managedOllamaServers.ResolveAsync(
+        baseUri,
+        GpuSelectionForRole(settings, configured.Role),
+        settings.DefaultGpu,
+        cancellationToken
+      )).Endpoint;
+      var running = await _ollamaClient.GetRunningModelsAsync(
+        roleRuntimeUri,
+        cancellationToken
+      );
 
       var metadata = await TryGetMetadataAsync(
         baseUri,
@@ -132,6 +148,14 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       ).Distinct(
         StringComparer.Ordinal
       ).Count() > 1
+        && group.Select(
+          entry => EffectiveGpuSelection(
+            GpuSelectionForRole(settings, entry.Role),
+            settings.DefaultGpu
+          )
+        ).Distinct(
+          StringComparer.Ordinal
+        ).Count() == 1
     ))
     {
       var exact = installed.FirstOrDefault(
@@ -224,8 +248,14 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       settings.OllamaUrl,
       UriKind.Absolute
     );
-    var runningBefore = await _ollamaClient.GetRunningModelsAsync(
+    var runtimeUri = (await _managedOllamaServers.ResolveAsync(
       baseUri,
+      GpuSelectionForRole(settings, role),
+      settings.DefaultGpu,
+      cancellationToken
+    )).Endpoint;
+    var runningBefore = await _ollamaClient.GetRunningModelsAsync(
+      runtimeUri,
       cancellationToken
     );
     var installed = await RequireInstalledAsync(
@@ -241,7 +271,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       cancellationToken
     );
     var version = await _ollamaClient.GetVersionAsync(
-      baseUri,
+      runtimeUri,
       cancellationToken
     );
     var records = await ReadRecordsAsync(
@@ -261,7 +291,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       0
     );
     var runningAfter = await _ollamaClient.GetRunningModelsAsync(
-      baseUri,
+      runtimeUri,
       cancellationToken
     );
 
@@ -360,6 +390,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         settings,
         role
       );
+      var gpuSelection = GpuSelectionForRole(settings, role);
       var baseUri = new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
@@ -443,12 +474,18 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         );
       }
 
-      var version = await _ollamaClient.GetVersionAsync(
+      var runtimeUri = (await _managedOllamaServers.ResolveAsync(
         baseUri,
+        gpuSelection,
+        settings.DefaultGpu,
+        cancellationToken
+      )).Endpoint;
+      var version = await _ollamaClient.GetVersionAsync(
+        runtimeUri,
         cancellationToken
       );
       var beforeRunning = await _ollamaClient.GetRunningModelsAsync(
-        baseUri,
+        runtimeUri,
         cancellationToken
       );
       var priorTarget = FindRunning(
@@ -473,9 +510,12 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         )
         {
           await _ollamaClient.SetModelResidencyAsync(
-            baseUri,
+            runtimeUri,
             installed.Name,
             0,
+            null,
+            null,
+            gpuSelection,
             cancellationToken
           );
         }
@@ -483,19 +523,20 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         if (priorTarget?.ContextLength != candidate)
         {
           await _ollamaClient.SetModelResidencyAsync(
-            baseUri,
+            runtimeUri,
             installed.Name,
             role == OllamaRuntimeRoleIds.ResidentCoordinator
               ? -1
               : roleProfile.KeepAlive,
             candidate,
             mainGpu,
+            gpuSelection,
             cancellationToken
           );
         }
 
         var afterLoad = await _ollamaClient.GetRunningModelsAsync(
-          baseUri,
+          runtimeUri,
           cancellationToken
         );
         measured = FindRunning(
@@ -524,7 +565,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         {
           var requestStopwatch = Stopwatch.StartNew();
           await _ollamaClient.GenerateTextAsync(
-            baseUri,
+            runtimeUri,
             installed.Name,
             [
               new ChatMessage(
@@ -618,9 +659,12 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
           )
           {
             await _ollamaClient.SetModelResidencyAsync(
-              baseUri,
+              runtimeUri,
               installed.Name,
               0,
+              null,
+              null,
+              gpuSelection,
               CancellationToken.None
             );
           }
@@ -631,19 +675,23 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
           )
           {
             await _ollamaClient.SetModelResidencyAsync(
-              baseUri,
+              runtimeUri,
               installed.Name,
               0,
+              null,
+              null,
+              gpuSelection,
               CancellationToken.None
             );
             await _ollamaClient.SetModelResidencyAsync(
-              baseUri,
+              runtimeUri,
               installed.Name,
               priorTarget.ExpiresAt is null
                 ? -1
                 : roleProfile.KeepAlive,
               priorTarget.ContextLength,
               mainGpu,
+              gpuSelection,
               CancellationToken.None
             );
           }
@@ -698,6 +746,20 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       OllamaRuntimeRoleIds.ResidentCoordinator => settings.ActionGpu,
       _ => settings.DefaultGpu
     };
+  }
+
+  private static string EffectiveGpuSelection(
+    string selection,
+    string defaultSelection
+  )
+  {
+    return string.Equals(
+      selection,
+      OllamaGpuSelection.Default,
+      StringComparison.Ordinal
+    )
+      ? defaultSelection
+      : selection;
   }
 
   public async Task<IReadOnlyDictionary<string, string[]>> ValidateOverridesAsync(

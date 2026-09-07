@@ -941,8 +941,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         "execute",
         checkpoint.Route.Harness,
         approvalPolicy,
-        $"sup-{checkpoint.RunId[..12]}-{context.Id}"
-          + (harnessRecoveryAttempted ? "-harness-recovery-1" : string.Empty),
+        checkpoint.BrowserSessionId,
         checkpoint.ConversationSessionId,
         Images: images,
         ExecutionStrategy: SupervisionExecutionStrategies.Direct

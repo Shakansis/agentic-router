@@ -1242,7 +1242,10 @@ public sealed class ChatController : ControllerBase
       state,
       action.RequiresApproval,
       OriginalTool: action.Tool,
-      Code: progressEvent.Type
+      Code: progressEvent.Type,
+      ArgumentsSha256: action.ArgumentsSha256,
+      ActionFingerprint: HostActionFingerprint.Action(action.Tool, action.ArgumentsSha256),
+      RelativePaths: action.FileEffects.Select(effect => effect.RelativePath).ToArray()
     );
   }
 

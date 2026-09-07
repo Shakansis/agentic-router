@@ -28,7 +28,10 @@ public sealed class LinuxGpuDiscoveryService : IGpuDiscoveryService
       null,
       true,
       true,
-      null
+      null,
+      null,
+      null,
+      true
     );
     if (!OperatingSystem.IsLinux())
     {
@@ -223,7 +226,10 @@ public sealed class LinuxGpuDiscoveryService : IGpuDiscoveryService
           memory,
           true,
           false,
-          index
+          index,
+          "cuda",
+          index,
+          true
         )
       );
     }
@@ -306,6 +312,7 @@ public sealed class LinuxGpuDiscoveryService : IGpuDiscoveryService
           ),
           true,
           false,
+          null,
           null
         )
       );

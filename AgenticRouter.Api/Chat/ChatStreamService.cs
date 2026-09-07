@@ -82,6 +82,7 @@ public sealed class ChatStreamService
   private readonly IHarnessRegistry _harnesses;
   private readonly IExecutionContextTurnRunner _contextTurns;
   private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
+  private readonly IOllamaManagedServerManager _managedOllamaServers;
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
   private ExecutionSession? _executionSession;
@@ -126,6 +127,7 @@ public sealed class ChatStreamService
     IHarnessRegistry harnesses,
     IExecutionContextTurnRunner contextTurns,
     IAutoModelHarnessRoutingService autoModelHarnessRouter,
+    IOllamaManagedServerManager managedOllamaServers,
     ITraceContext trace,
     ILogger<ChatStreamService> logger
   )
@@ -161,6 +163,7 @@ public sealed class ChatStreamService
     _harnesses = harnesses;
     _contextTurns = contextTurns;
     _autoModelHarnessRouter = autoModelHarnessRouter;
+    _managedOllamaServers = managedOllamaServers;
     _trace = trace;
     _logger = logger;
   }
@@ -1417,6 +1420,12 @@ public sealed class ChatStreamService
       ContextUsage: contextUsage
     );
 
+    var harnessEndpoint = await _managedOllamaServers.ResolveAsync(
+      baseUri,
+      _usageGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    );
     await foreach (var streamEvent in ExecuteExternalHarnessAsync(
       harness,
       harnessDefinition,
@@ -1424,7 +1433,7 @@ public sealed class ChatStreamService
       requestId,
       selectedModel,
       intention,
-      baseUri,
+      harnessEndpoint.Endpoint,
       workspacePath,
       settings.Execution,
       settings.ProjectAwareness,
@@ -9507,10 +9516,38 @@ public sealed class ChatStreamService
           "action.awaiting-approval" => HostActionCodes.ApprovalPending,
           "action.rejected" => HostActionCodes.ApprovalRejected,
           _ => null
-        }
+        },
+        HostActionFingerprint.ArgumentsSha256(action.Arguments),
+        HostActionFingerprint.Action(action.Tool, action.Arguments),
+        RelativeActionPaths(action)
       ),
       _executionSession?.CreateSummary()
     );
+  }
+
+  private IReadOnlyList<string> RelativeActionPaths(ValidatedLocalAction action)
+  {
+    var paths = (action.PendingFileChanges ?? [])
+      .Select(change => change.RelativePath)
+      .Concat(action.PendingFileChange is null ? [] : [action.PendingFileChange.RelativePath])
+      .ToList();
+    if (paths.Count == 0
+      && action.TargetPath is not null
+      && _executionSession is not null)
+    {
+      var relative = Path.GetRelativePath(_executionSession.WorkspacePath, action.TargetPath);
+      if (!Path.IsPathRooted(relative)
+        && relative != ".."
+        && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+        && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+      {
+        paths.Add(BenchmarkWorkspaceFactory.NormalizeRelative(relative));
+      }
+    }
+    return paths
+      .Distinct(BenchmarkWorkspaceFactory.PathComparer)
+      .OrderBy(path => path, StringComparer.Ordinal)
+      .ToArray();
   }
 
   private static bool IsEditableApprovalAction(

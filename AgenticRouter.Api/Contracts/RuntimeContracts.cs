@@ -31,7 +31,10 @@ public sealed record GpuMemoryStatus(
   double? UsedPercent,
   string Status,
   string? Diagnostic,
-  int? OllamaIndex = null
+  int? OllamaIndex = null,
+  string? Manufacturer = null,
+  string? Backend = null,
+  int? BackendIndex = null
 );
 
 public sealed record LoadedModelStatus(
@@ -49,7 +52,15 @@ public sealed record LoadedModelStatus(
   string ProfileStatus,
   bool SharedAcrossRoles,
   int? GpuIndex = null,
-  string? GpuName = null
+  string? GpuName = null,
+  string? ConfiguredGpu = null,
+  int? ConfiguredGpuIndex = null,
+  string? ConfiguredGpuName = null,
+  string? ObservedGpuId = null,
+  string? ObservedBackend = null,
+  int? ObservedBackendIndex = null,
+  string PlacementStatus = "unavailable",
+  string? PlacementDiagnostic = null
 );
 
 public sealed record ResidentModelStatus(

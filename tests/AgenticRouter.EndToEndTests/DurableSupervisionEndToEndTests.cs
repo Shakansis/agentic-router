@@ -1346,6 +1346,82 @@ public sealed class DurableSupervisionEndToEndTests
   [TestMethod]
   [DoNotParallelize]
   [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task BrowserReloadPreservesPendingApprovalAuthorityForActiveSupervision()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    _ = await EnableHistoryAsync();
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("ask");
+    await Page.Locator("#message-input").FillAsync(
+      "/supervisor supervision restart boundary"
+    );
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(
+      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
+    ).ToBeVisibleAsync(new() { Timeout = 30_000 });
+
+    using var runsResponse = await _environment.HttpClient.GetAsync(
+      "api/supervision/runs"
+    );
+    runsResponse.EnsureSuccessStatusCode();
+    var run = JsonNode.Parse(
+      await runsResponse.Content.ReadAsStringAsync()
+    )!["runs"]!.AsArray().Select(item => item!.AsObject()).Single(item =>
+      item["objective"]!.GetValue<string>() == "supervision restart boundary"
+      && item["state"]!.GetValue<string>() == "running"
+    );
+    var conversationSessionId = run["conversationSessionId"]!.GetValue<string>();
+    var browserSessionId = await Page.EvaluateAsync<string>(
+      "sessionStorage.getItem('agentic-router.browser-session-id')"
+    );
+    Assert.IsFalse(string.IsNullOrWhiteSpace(browserSessionId));
+
+    await Page.ReloadAsync();
+    Assert.AreEqual(
+      browserSessionId,
+      await Page.EvaluateAsync<string>(
+        "sessionStorage.getItem('agentic-router.browser-session-id')"
+      )
+    );
+    var sessionButton = Page.Locator(
+      $".session-entry[data-session-id=\"{conversationSessionId}\"] .session-entry-content"
+    );
+    await Expect(sessionButton).ToBeVisibleAsync(new() { Timeout = 10_000 });
+    await sessionButton.ClickAsync();
+
+    var approval = Page.Locator(
+      "[data-event-type=\"action.awaiting-approval\"]"
+    ).Last;
+    var reject = approval.GetByRole(
+      AriaRole.Button,
+      new()
+      {
+        Name = "Reject",
+        Exact = true
+      }
+    );
+    await Expect(reject).ToBeEnabledAsync(new() { Timeout = 10_000 });
+    var decisionResponseTask = Page.WaitForResponseAsync(response =>
+      response.Url.Contains("/api/actions/", StringComparison.Ordinal)
+      && response.Url.EndsWith("/decision", StringComparison.Ordinal)
+      && response.Request.Method == "POST"
+    );
+    await reject.ClickAsync();
+    var decisionResponse = await decisionResponseTask;
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      (HttpStatusCode)decisionResponse.Status,
+      await decisionResponse.TextAsync()
+    );
+    await Expect(Page.Locator(".app-toast[data-tone=\"error\"]"))
+      .ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
   public async Task ExplicitCancelTerminatesAutonomousCheckpointBeforeEditedPromptRestarts()
   {
     _environment.FakeOllama.Reset();

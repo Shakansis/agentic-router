@@ -437,6 +437,7 @@ AgenticRouter.Api/data/codex-runtime/
 AgenticRouter.Api/data/claude-code-runtime/
 AgenticRouter.Api/data/opencode-runtime/
 AgenticRouter.Api/data/qwen-code-runtime/
+AgenticRouter.Api/data/ollama-managed-servers/
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 # General

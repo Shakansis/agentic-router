@@ -160,6 +160,9 @@ public sealed class LinuxGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
             ),
             "available",
             "Adapter-wide dedicated-memory usage reported by NVIDIA SMI.",
+            index,
+            "NVIDIA",
+            "cuda",
             index
           )
         );
@@ -267,7 +270,10 @@ public sealed class LinuxGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
             : "partial",
           complete
             ? "Adapter-wide VRAM usage reported by the Linux DRM driver."
-            : "The Linux DRM driver did not expose complete adapter-wide VRAM usage."
+            : "The Linux DRM driver did not expose complete adapter-wide VRAM usage.",
+          null,
+          manufacturer,
+          null
         )
       );
     }

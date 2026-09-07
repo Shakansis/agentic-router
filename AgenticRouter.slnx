@@ -4,6 +4,7 @@
     <Project Path="tests/FakeCodexAppServer/FakeCodexAppServer.csproj" />
     <Project Path="tests/FakeClaudeCodeCli/FakeClaudeCodeCli.csproj" />
     <Project Path="tests/FakeOpenCodeServer/FakeOpenCodeServer.csproj" />
+    <Project Path="tests/FakeOllamaCli/FakeOllamaCli.csproj" />
     <Project Path="tests/FakeQwenCodeServer/FakeQwenCodeServer.csproj" />
   </Folder>
   <Project Path="AgenticRouter.Api/AgenticRouter.Api.csproj" />

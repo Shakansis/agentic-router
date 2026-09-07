@@ -11,6 +11,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
   private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
+  private readonly IOllamaGpuPlacementProvider _gpuPlacement;
+  private readonly IOllamaManagedServerManager _managedServers;
   private readonly ILogger<RuntimeStatusService> _logger;
 
   public RuntimeStatusService(
@@ -18,6 +20,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     IGpuMemoryMetricsProvider gpuMemory,
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
+    IOllamaGpuPlacementProvider gpuPlacement,
+    IOllamaManagedServerManager managedServers,
     ILogger<RuntimeStatusService> logger
   )
   {
@@ -25,6 +29,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     _gpuMemory = gpuMemory;
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
+    _gpuPlacement = gpuPlacement;
+    _managedServers = managedServers;
     _logger = logger;
   }
 
@@ -59,20 +65,55 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
       var settings = await _settingsStore.GetAsync(
         cancellationToken
       );
-      var running = await _ollamaClient.GetRunningModelsAsync(
-        new Uri(
-          settings.OllamaUrl,
-          UriKind.Absolute
-        ),
-        cancellationToken
+      var ollamaEndpoint = new Uri(
+        settings.OllamaUrl,
+        UriKind.Absolute
       );
-      loadedModels = running.Select(
-        model => MapModel(
-          model,
-          settings,
-          gpuMemory.Devices
-        )
-      ).ToArray();
+      var managed = _managedServers.GetActiveServers();
+      if (managed.Count == 0)
+      {
+        var running = await _ollamaClient.GetRunningModelsAsync(
+          ollamaEndpoint,
+          cancellationToken
+        );
+        var placement = _gpuPlacement.GetStatus(ollamaEndpoint);
+        loadedModels = running.Select(
+          model => MapModel(
+            model,
+            settings,
+            gpuMemory.Devices,
+            placement
+          )
+        ).ToArray();
+      }
+      else
+      {
+        var mapped = new List<LoadedModelStatus>();
+        foreach (var server in managed)
+        {
+          var running = await _ollamaClient.GetRunningModelsAsync(
+            server.Endpoint,
+            cancellationToken
+          );
+          var placement = new OllamaGpuPlacementSnapshot(
+            server.Backend,
+            "managed",
+            $"Agentic Router owns PID {server.ProcessId} at {server.Endpoint} and forced the {BackendLabel(server.Backend)} backend for '{server.Selection}'."
+          );
+          mapped.AddRange(
+            running.Select(
+              model => MapModel(
+                model,
+                settings,
+                gpuMemory.Devices,
+                placement,
+                server.Selection
+              )
+            )
+          );
+        }
+        loadedModels = mapped;
+      }
 
       foreach (var model in loadedModels)
       {
@@ -89,6 +130,23 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
           warnings.Add(
             $"{model.Name} is shared across configured roles; one Ollama runner may use "
             + "the largest active role context."
+          );
+        }
+
+        if (
+          model.ConfiguredGpu is not null
+          && model.ObservedBackend is not null
+          && OllamaGpuSelection.ResolveTarget(
+            model.ConfiguredGpu,
+            settings.DefaultGpu
+          ) is { } configuredTarget
+          && configuredTarget.Backend != model.ObservedBackend
+        )
+        {
+          warnings.Add(
+            $"{model.Name} is configured for {BackendLabel(configuredTarget.Backend)}, "
+            + $"but the local Ollama runner is observed on {BackendLabel(model.ObservedBackend)}. "
+            + "The configured backend and observed runner do not match."
           );
         }
 
@@ -179,7 +237,9 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
   private static LoadedModelStatus MapModel(
     OllamaRunningModel model,
     ApplicationSettings settings,
-    IReadOnlyList<GpuMemoryStatus> devices
+    IReadOnlyList<GpuMemoryStatus> devices,
+    OllamaGpuPlacementSnapshot placement,
+    string? configuredGpuOverride = null
   )
   {
     long? estimatedRam = null;
@@ -234,15 +294,57 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
             ? "overridden"
             : "inherited"
           : "context-mismatch";
-    var gpuIndex = OllamaGpuSelection.Resolve(
-      settings.DefaultGpu,
+    var configuredGpu = configuredGpuOverride ?? settings.DefaultGpu;
+    var configuredGpuIndex = OllamaGpuSelection.Resolve(
+      configuredGpu,
       settings.DefaultGpu
     );
-    var gpuName = gpuIndex is null
+    var configuredTarget = OllamaGpuSelection.ResolveTarget(
+      configuredGpu,
+      settings.DefaultGpu
+    );
+    var configuredGpuName = configuredGpuIndex is null
       ? null
       : devices.FirstOrDefault(
-        device => device.OllamaIndex == gpuIndex
+        device => device.BackendIndex == configuredGpuIndex
+          && (configuredTarget is null
+            || MatchesBackend(device, configuredTarget.Backend))
       )?.Name;
+    var backendDevices = placement.Backend is null
+      ? []
+      : devices.Where(
+        device => MatchesBackend(
+          device,
+          placement.Backend
+        )
+      ).ToArray();
+    var observedDevice = configuredGpuOverride is not null
+      && configuredTarget is { AllDevices: false }
+        ? devices.FirstOrDefault(
+          device => device.BackendIndex == configuredTarget.Index
+            && MatchesBackend(device, configuredTarget.Backend)
+        )
+        : backendDevices.Length == 1
+          ? backendDevices[0]
+          : null;
+    int? observedBackendIndex = observedDevice?.BackendIndex
+      ?? (observedDevice is not null && placement.Backend == "rocm"
+        ? 0
+        : null);
+    var placementStatus = processor == "cpu"
+      ? "cpu"
+      : observedDevice is not null
+        ? placement.Status
+        : placement.Backend is not null
+          ? "partial"
+          : placement.Status;
+    var placementDiagnostic = processor == "cpu"
+      ? "Ollama reports zero VRAM allocation for this model."
+      : observedDevice is not null
+        ? placement.Diagnostic
+        : placement.Backend is not null && backendDevices.Length > 1
+          ? $"{placement.Diagnostic} Multiple {BackendLabel(placement.Backend)} adapters were detected, so the exact device is not observable."
+          : placement.Diagnostic;
 
     return new LoadedModelStatus(
       model.Name,
@@ -258,8 +360,43 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
       false,
       profileStatus,
       configuredRoles.Length > 1,
-      gpuIndex,
-      gpuName
+      observedBackendIndex,
+      observedDevice?.Name,
+      configuredGpu,
+      configuredGpuIndex,
+      configuredGpuName,
+      observedDevice?.Id,
+      placement.Backend,
+      observedBackendIndex,
+      placementStatus,
+      placementDiagnostic
     );
+  }
+
+  private static string BackendLabel(
+    string backend
+  )
+  {
+    return backend switch
+    {
+      "cuda" => "CUDA",
+      "rocm" => "ROCm",
+      "vulkan" => "Vulkan",
+      _ => backend
+    };
+  }
+
+  private static bool MatchesBackend(
+    GpuMemoryStatus device,
+    string backend
+  )
+  {
+    return backend switch
+    {
+      "cuda" => device.Manufacturer == "NVIDIA",
+      "rocm" => device.Manufacturer == "AMD",
+      "vulkan" => false,
+      _ => false
+    };
   }
 }

@@ -3817,10 +3817,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     using var runtimeDocument = JsonDocument.Parse(
       await runtimeResponse.Content.ReadAsStringAsync()
     );
-    var detectedOllamaGpuCount = runtimeDocument.RootElement
+    var runtimeDevices = runtimeDocument.RootElement
       .GetProperty("devices")
       .EnumerateArray()
-      .Count(device => device.GetProperty("ollamaIndex").ValueKind != JsonValueKind.Null);
+      .Select(
+        device => new
+        {
+          Id = device.GetProperty("id").GetString() ?? string.Empty,
+          Name = device.GetProperty("name").GetString() ?? string.Empty
+        }
+      ).ToArray();
     await Expect(
       Page.Locator(
         "#runtime-summary"
@@ -3860,16 +3866,25 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#runtime-model-list .loaded-model-gpu-card"
       ).First
     ).ToBeVisibleAsync();
-    await Expect(
-      Page.Locator("#runtime-model-list .loaded-model-gpu-card")
-    ).ToHaveCountAsync(Math.Max(1, detectedOllamaGpuCount));
-    await Expect(
-      Page.Locator(
+    Assert.IsGreaterThanOrEqualTo(
+      Math.Max(
+        1,
+        runtimeDevices.Length
+      ),
+      await Page.Locator(
         "#runtime-model-list .loaded-model-gpu-card"
-      ).First
-    ).ToContainTextAsync(
-      "GPU 0"
+      ).CountAsync()
     );
+    foreach (var device in runtimeDevices)
+    {
+      await Expect(
+        Page.Locator(
+          $"#runtime-model-list .loaded-model-gpu-card[data-device-id=\"{device.Id}\"]"
+        )
+      ).ToHaveCountAsync(
+        1
+      );
+    }
     await Expect(
       Page.Locator(
         "#runtime-model-list .loaded-model-gpu-card"
@@ -3920,13 +3935,57 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "Total Context Window"
     );
-    if (detectedOllamaGpuCount > 1)
+    if (
+      runtimeDocument.RootElement.GetProperty(
+        "loadedModels"
+      ).GetArrayLength() > 0
+    )
     {
-      await Page.Locator(
-        "#runtime-model-list .loaded-model-details > summary"
-      ).Last.ClickAsync();
       await Expect(
-        Page.Locator("#runtime-model-list .loaded-model-details-content").Last
+        Page.Locator(
+          "#runtime-model-list .loaded-model-placement"
+        ).First
+      ).ToContainTextAsync(
+        "Observed:"
+      );
+      await Expect(
+        Page.Locator(
+          "#runtime-model-list .loaded-model-placement"
+        ).First
+      ).ToContainTextAsync(
+        "Configured:"
+      );
+    }
+    var placedDeviceIds = runtimeDocument.RootElement.GetProperty(
+      "loadedModels"
+    ).EnumerateArray().Select(
+      model => model.GetProperty(
+        "observedGpuId"
+      ).GetString()
+    ).Where(
+      id => !string.IsNullOrWhiteSpace(
+        id
+      )
+    ).ToHashSet(
+      StringComparer.Ordinal
+    );
+    var emptyDevice = runtimeDevices.FirstOrDefault(
+      device => !placedDeviceIds.Contains(
+        device.Id
+      )
+    );
+    if (emptyDevice is not null)
+    {
+      var emptyCard = Page.Locator(
+        $"#runtime-model-list .loaded-model-gpu-card[data-device-id=\"{emptyDevice.Id}\"]"
+      );
+      await emptyCard.Locator(
+        ".loaded-model-details > summary"
+      ).ClickAsync();
+      await Expect(
+        emptyCard.Locator(
+          ".loaded-model-details-content"
+        )
       ).ToContainTextAsync("No loaded model reported by Ollama.");
     }
     await Expect(
@@ -4016,6 +4075,238 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           && request.Messages.Count == 0
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RendersMixedNvidiaAndAmdTelemetryWithObservedPlacement()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#runtime-summary"
+    ).ClickAsync();
+    await Page.EvaluateAsync(
+      "runtime => renderRuntimeStatus(runtime)",
+      new
+      {
+        systemMemory = new
+        {
+          totalBytes = 80L * 1024 * 1024 * 1024,
+          usedBytes = 24L * 1024 * 1024 * 1024,
+          usedPercent = 30d,
+          status = "available",
+          diagnostic = (string?)null
+        },
+        devices = new object[]
+        {
+          new
+          {
+            id = "GPU-nvidia-fixture",
+            name = "NVIDIA GeForce RTX 4090",
+            manufacturer = "NVIDIA",
+            totalDedicatedMemoryBytes = 24L * 1024 * 1024 * 1024,
+            usedDedicatedMemoryBytes = 600L * 1024 * 1024,
+            usedPercent = 2.44d,
+            status = "available",
+            diagnostic = "NVIDIA SMI fixture.",
+            ollamaIndex = 0,
+            backend = "cuda",
+            backendIndex = 0
+          },
+          new
+          {
+            id = "dxgi-amd-fixture",
+            name = "AMD Radeon RX 7900 XTX",
+            manufacturer = "AMD",
+            totalDedicatedMemoryBytes = 24L * 1024 * 1024 * 1024,
+            usedDedicatedMemoryBytes = 18_500L * 1024 * 1024,
+            usedPercent = 75.28d,
+            status = "available",
+            diagnostic = "Windows GPU performance counter fixture.",
+            ollamaIndex = (int?)null,
+            backend = "rocm",
+            backendIndex = 0
+          }
+        },
+        devicesStatus = "available",
+        devicesDiagnostic = (string?)null,
+        loadedModels = new object[]
+        {
+          new
+          {
+            name = "mixed-vendor-model",
+            totalSizeBytes = 20L * 1024 * 1024 * 1024,
+            vramSizeBytes = 20L * 1024 * 1024 * 1024,
+            estimatedRamSizeBytes = 0,
+            processor = "gpu",
+            actualContextTokens = 131_072,
+            gpuName = "AMD Radeon RX 7900 XTX",
+            configuredGpu = "ollama:0",
+            configuredGpuIndex = 0,
+            configuredGpuName = "NVIDIA GeForce RTX 4090",
+            observedGpuId = "dxgi-amd-fixture",
+            observedBackend = "rocm",
+            observedBackendIndex = 0,
+            placementStatus = "observed",
+            placementDiagnostic = "Local Ollama runner modules identify the ROCm backend."
+          }
+        },
+        loadedModelsStatus = "available",
+        loadedModelsDiagnostic = (string?)null,
+        warnings = Array.Empty<string>()
+      }
+    );
+
+    await Expect(
+      Page.Locator(
+        "#runtime-memory-list .runtime-row.gpu"
+      )
+    ).ToHaveCountAsync(
+      2
+    );
+    var amdCard = Page.Locator(
+      "#runtime-model-list .loaded-model-gpu-card[data-device-id=\"dxgi-amd-fixture\"]"
+    );
+    await Expect(
+      amdCard
+    ).ToContainTextAsync(
+      "ROCm 0"
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-gpu-card[data-device-id=\"GPU-nvidia-fixture\"]"
+      )
+    ).ToContainTextAsync(
+      "CUDA 0"
+    );
+    await amdCard.Locator(
+      ".loaded-model-details > summary"
+    ).ClickAsync();
+    await Expect(
+      amdCard.Locator(
+        ".loaded-model-placement"
+      )
+    ).ToContainTextAsync(
+      "Observed: ROCm 0 · AMD Radeon RX 7900 XTX"
+    );
+    await Expect(
+      amdCard.Locator(
+        ".loaded-model-placement"
+      )
+    ).ToContainTextAsync(
+      "Configured: CUDA 0 · NVIDIA GeForce RTX 4090"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OffersGenericPerDeviceCombinedVulkanSelections()
+  {
+    await Page.GotoAsync("/");
+    var options = await Page.EvaluateAsync<JsonElement>(
+      """
+      () => {
+        const previous = state.devices;
+        try {
+          state.devices = [
+            {
+              id: "auto",
+              name: "Auto",
+              isAuto: true,
+              available: true,
+              affinitySelectable: true
+            },
+            {
+              id: "GPU-nvidia-fixture",
+              name: "NVIDIA GeForce RTX 4090",
+              isAuto: false,
+              available: true,
+              affinitySelectable: true,
+              ollamaIndex: 0,
+              backend: "cuda",
+              backendIndex: 0
+            },
+            {
+              id: "dxgi-amd-fixture",
+              name: "AMD Radeon RX 7900 XTX",
+              isAuto: false,
+              available: true,
+              affinitySelectable: true,
+              backend: "rocm",
+              backendIndex: 0
+            }
+          ];
+          return gpuOptions(false, "rocm:0");
+        } finally {
+          state.devices = previous;
+        }
+      }
+      """
+    );
+    var values = options.EnumerateArray().Select(
+      option => option.GetProperty("value").GetString()
+    ).ToArray();
+    CollectionAssert.Contains(values, "ollama:0");
+    CollectionAssert.Contains(values, "rocm:0");
+    CollectionAssert.Contains(values, "vulkan:all");
+    CollectionAssert.Contains(values, "vulkan:prefer:cuda:0");
+    CollectionAssert.Contains(values, "vulkan:prefer:rocm:0");
+    Assert.IsTrue(
+      options.EnumerateArray().Any(
+        option => option.GetProperty("label").GetString()
+          == "ROCm 0 · AMD Radeon RX 7900 XTX"
+      )
+    );
+    Assert.IsTrue(
+      options.EnumerateArray().Any(
+        option => option.GetProperty("label").GetString()
+          == "Vulkan combined · prioritize NVIDIA GeForce RTX 4090"
+      )
+    );
+    Assert.IsTrue(
+      options.EnumerateArray().Any(
+        option => option.GetProperty("label").GetString()
+          == "Vulkan combined · prioritize AMD Radeon RX 7900 XTX"
+      )
+    );
+
+    var sameBackendValues = await Page.EvaluateAsync<string[]>(
+      """
+      () => {
+        const previous = state.devices;
+        try {
+          state.devices = [
+            {
+              id: "GPU-first",
+              name: "First Vulkan-capable GPU",
+              isAuto: false,
+              available: true,
+              affinitySelectable: true,
+              backend: "cuda",
+              backendIndex: 0
+            },
+            {
+              id: "GPU-second",
+              name: "Second Vulkan-capable GPU",
+              isAuto: false,
+              available: true,
+              affinitySelectable: true,
+              backend: "cuda",
+              backendIndex: 1
+            }
+          ];
+          return gpuOptions(false).map(option => option.value);
+        } finally {
+          state.devices = previous;
+        }
+      }
+      """
+    );
+    CollectionAssert.Contains(sameBackendValues, "vulkan:all");
+    CollectionAssert.Contains(sameBackendValues, "vulkan:prefer:cuda:0");
+    CollectionAssert.Contains(sameBackendValues, "vulkan:prefer:cuda:1");
   }
 
   [TestMethod]

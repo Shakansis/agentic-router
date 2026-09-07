@@ -52,11 +52,32 @@ The system follows a **Mixture of Experts (MoE)** approach and is **completely G
 
 ### Multiple-GPU scope
 
-The application detects multiple adapters and preserves provider-managed device
-selection. NVIDIA indices are exposed only when `nvidia-smi` provides an
-authoritative Ollama/CUDA order; AMD and Intel identities are not coerced into
-that index space. Coordinated heterogeneous AMD + NVIDIA scheduling is a
-separate future feature and is not claimed by this release.
+The application detects and monitors mixed-vendor adapters. On Windows, NVIDIA
+telemetry comes from `nvidia-smi`; AMD and other adapters are merged from DXGI
+and Windows GPU performance counters. An explicit local GPU selection uses an
+Agentic Router-owned headless Ollama server: `ollama:N` isolates CUDA N,
+`rocm:N` isolates a single authoritatively indexed AMD adapter, and
+`vulkan:all` opts into an experimental Vulkan server with scheduler spreading
+across all Vulkan devices. A `Vulkan combined · prioritize <device>` option is
+generated for every selectable physical GPU; it keeps all Vulkan devices
+available while placing the chosen GPU first in the managed server's Vulkan
+order. The saved preference identifies the discovered device/backend index,
+not a hardcoded model name, and is remapped to Vulkan enumeration whenever the
+server starts. `auto` preserves the configured user-managed Ollama endpoint.
+
+Each managed server uses a separate loopback endpoint and a forced Ollama
+backend. The Host verifies backend discovery before routing a request and never
+falls back from an explicit selection to a different backend. On Windows all
+owned servers share a Job Object with `KILL_ON_JOB_CLOSE`; persisted leases let
+the next startup collect a prior orphan only when PID, start time, executable,
+and listening-port ownership all match. External Ollama tray or service
+processes are never stopped.
+
+Combined Vulkan uses both VRAM pools by splitting model data; it does not create
+physically unified memory. Heterogeneous Vulkan remains opt-in because current
+Ollama allocation can be slower or less stable than native CUDA or ROCm. A
+preferred Vulkan device is a scheduler priority hint, not a guarantee that it
+will be filled completely before another visible device is used.
 
 ### Execution Pipeline
 
@@ -71,7 +92,11 @@ The application follows a flexible pipeline that adapts to available hardware:
 7. **Inference**: Provider processes the request and streams the response
 8. **Response Streaming**: Response streams in real-time to the UI with routing activity visible
 
-**Key Point**: Local GPU selection is an Ollama preference. Cloud providers own their remote hardware allocation and require an explicitly saved protected API key (Windows DPAPI or Linux Secret Service).
+**Key Point**: On the standard local Windows endpoint, explicit GPU selection is
+Host-enforced through an isolated managed Ollama process. Custom/remote Ollama
+endpoints remain user-managed. Cloud providers own their remote hardware
+allocation and require an explicitly saved protected API key (Windows DPAPI or
+Linux Secret Service).
 
 ### Execute Mode
 
@@ -250,6 +275,7 @@ Execute mode includes a safe Git workflow for committing changes:
     Contracts/                 # Typed request/response contracts
     Runtime/                   # GPU/memory metrics, request tracking, context profiles
       OllamaRuntimeProfileService.cs
+      OllamaManagedServerManager.cs
       ModelRequestTracker.cs
       RuntimeStatusService.cs
     Usage/                     # Token usage analytics, pricing, reconciliation
@@ -275,6 +301,7 @@ Execute mode includes a safe Git workflow for committing changes:
       FakeOllamaServer.cs      # Test double for Ollama
       FakeCloudProviderServer.cs # Test double for cloud providers
       TestEnvironment.cs       # Test setup utilities
+    FakeOllamaCli/             # Managed-process lifecycle/backend test double
   docs/                        # Decision documents and benchmarks
   tools/
     diagnostics/               # Maintainer diagnostics scripts
@@ -569,7 +596,11 @@ The device preference is resolved in this order:
 4. Global default device
 5. `auto`, delegated to the provider
 
-**Important**: The application discovers available GPUs and presents them as options. However, the final GPU allocation is handled by the provider (Ollama). If Ollama cannot honor per-request device binding in the active runtime, the application reports this limitation clearly and uses the provider's configured default behavior.
+**Important**: `Auto` delegates allocation to the configured Ollama endpoint.
+On Windows with the standard local endpoint, CUDA, ROCm, and combined Vulkan
+choices are enforced by Agentic Router-owned headless servers. Startup fails
+explicitly when the requested backend cannot be verified; an exact selection
+never silently degrades to another GPU or CPU.
 
 ### Configuration UI
 
@@ -588,6 +619,16 @@ Press **Escape** to close the configuration dialog.
 ```bash
 dotnet test tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj
 ```
+
+### Repeat Benchmark Lab runs
+
+The Benchmark Lab **Sequential runs** control accepts 1–20 repetitions. The
+browser starts the complete selected Model × Harness matrix again only after
+the preceding run reaches a terminal state. Every repetition receives its own
+run ID and immutable history record, so repeated measurements remain available
+for comparison and recommendation analysis instead of being collapsed into a
+single averaged result. Canceling the active run prevents remaining repetitions
+from starting.
 
 ### Run the real Ollama protocol benchmark
 
@@ -664,7 +705,8 @@ The current product deliberately excludes:
 - background schedulers or distributed execution;
 - automatic model downloads without an explicit user action;
 - authentication, billing, telemetry platforms, installers, and auto-update;
-- custom GPU scheduling beyond provider-managed device selection;
+- cross-host or utilization-aware GPU scheduling beyond the managed local
+  CUDA, ROCm, and Vulkan profiles;
 - frontend frameworks and JavaScript build pipelines;
 - destructive Git history rewriting.
 
@@ -678,9 +720,11 @@ behavior and are therefore not listed as non-goals.
 
 The application is built to be completely hardware-agnostic:
 
-- **GPU Discovery**: `WindowsGpuDiscoveryService` uses Windows SetupAPI to detect available graphics devices, but gracefully degrades on non-Windows systems or when discovery fails
+- **GPU Discovery**: `WindowsGpuDiscoveryService` combines NVIDIA SMI with DXGI, uses SetupAPI as a fallback, and gracefully degrades when a telemetry source is unavailable
 - **Always Available "Auto" Option**: The `auto` device is always present, delegating hardware selection to the provider
-- **Provider Delegation**: The app passes device preferences to the provider (Ollama) but doesn't enforce GPU allocation - the provider handles final hardware binding
+- **Managed Local Affinity**: explicit Windows selections route to Host-owned,
+  backend-forced Ollama servers; `Auto` and custom/remote endpoints remain
+  provider-managed
 
 ### HTTP-Based Provider Architecture
 

@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
 using AgenticRouter.Api.Contracts;
-using Vortice.DXGI;
 
 namespace AgenticRouter.Api.Runtime;
 
@@ -20,14 +19,49 @@ public sealed class WindowsGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
       );
     }
 
-    var nvidiaSnapshot = TryGetNvidiaStatus();
-
-    if (nvidiaSnapshot is not null)
+    try
     {
-      return nvidiaSnapshot;
-    }
+      var nvidiaDevices = TryGetNvidiaStatus()?.Devices ?? [];
+      IReadOnlyList<GpuMemoryStatus> dxgiDevices;
+      try
+      {
+        dxgiDevices = GetDxgiStatus(
+          includeNvidia: nvidiaDevices.Count == 0
+        );
+      }
+      catch (Exception exception) when (nvidiaDevices.Count > 0)
+      {
+        return new GpuMemoryMetricsSnapshot(
+          nvidiaDevices,
+          "partial",
+          $"NVIDIA telemetry is available, but additional Windows adapters could not be enumerated: {exception.Message}"
+        );
+      }
+      var devices = nvidiaDevices.Concat(
+        dxgiDevices
+      ).ToArray();
+      var partial = devices.Any(
+        device => device.Status != "available"
+      );
 
-    return GetDxgiFallbackStatus();
+      return new GpuMemoryMetricsSnapshot(
+        devices,
+        partial
+          ? "partial"
+          : "available",
+        partial
+          ? "At least one Windows graphics adapter did not expose complete adapter-wide VRAM usage."
+          : null
+      );
+    }
+    catch (Exception exception)
+    {
+      return new GpuMemoryMetricsSnapshot(
+        [],
+        "unavailable",
+        $"Windows GPU telemetry is unavailable: {exception.Message}"
+      );
+    }
   }
 
   private static GpuMemoryMetricsSnapshot? TryGetNvidiaStatus()
@@ -47,7 +81,7 @@ public sealed class WindowsGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
         }
       };
       process.StartInfo.ArgumentList.Add(
-        "--query-gpu=index,name,pci.bus_id,memory.total,memory.used"
+        "--query-gpu=index,uuid,name,memory.total,memory.used"
       );
       process.StartInfo.ArgumentList.Add(
         "--format=csv,noheader,nounits"
@@ -111,8 +145,8 @@ public sealed class WindowsGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
         );
         devices.Add(
           new GpuMemoryStatus(
-            $"nvidia-{values[2]}",
             values[1],
+            values[2],
             totalBytes,
             usedBytes,
             Math.Clamp(
@@ -129,6 +163,16 @@ public sealed class WindowsGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
               out var ollamaIndex
             )
               ? ollamaIndex
+              : null,
+            "NVIDIA",
+            "cuda",
+            int.TryParse(
+              values[0],
+              NumberStyles.Integer,
+              CultureInfo.InvariantCulture,
+              out var backendIndex
+            )
+              ? backendIndex
               : null
           )
         );
@@ -154,80 +198,51 @@ public sealed class WindowsGpuMemoryMetricsProvider : IGpuMemoryMetricsProvider
     }
   }
 
-  private static GpuMemoryMetricsSnapshot GetDxgiFallbackStatus()
+  private static IReadOnlyList<GpuMemoryStatus> GetDxgiStatus(
+    bool includeNvidia
+  )
   {
-    try
-    {
-      using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
-      var devices = new List<GpuMemoryStatus>();
+    var adapters = WindowsGraphicsAdapterInventory.GetAdapters();
 
-      for (uint index = 0; ; index++)
+    return adapters.Where(
+      adapter => includeNvidia || adapter.Manufacturer != "NVIDIA"
+    ).Select(
+      adapter =>
       {
-        var result = factory.EnumAdapters1(
-          index,
-          out var adapter
-        );
-
-        if (result.Failure)
-        {
-          break;
-        }
-
-        using (adapter)
-        {
-          var description = adapter.Description1;
-
-          if ((description.Flags & AdapterFlags.Software) != 0)
-          {
-            continue;
-          }
-
-          var id = $"{description.Luid.HighPart:x8}{description.Luid.LowPart:x8}";
-          var totalValue = description.DedicatedVideoMemory.Value.ToUInt64();
-          long? total = totalValue <= long.MaxValue
-            ? (long)totalValue
-            : null;
-          var hasDedicatedTotal = total is > 0;
-
-          devices.Add(
-            new GpuMemoryStatus(
-              id,
-              description.Description.Trim(),
-              hasDedicatedTotal
-                ? total
-                : null,
-              null,
-              null,
-              "partial",
-              hasDedicatedTotal
-                ? "Total dedicated memory reported by DXGI; current "
-                  + "adapter-wide usage is unavailable for this device."
-                : "The adapter did not report total dedicated memory, and "
-                  + "adapter-wide current usage is unavailable."
+        var complete = adapter.TotalDedicatedMemoryBytes is > 0
+          && adapter.UsedDedicatedMemoryBytes is >= 0
+          && adapter.UsedDedicatedMemoryBytes
+            <= adapter.TotalDedicatedMemoryBytes;
+        return new GpuMemoryStatus(
+          adapter.Id,
+          adapter.Name,
+          adapter.TotalDedicatedMemoryBytes,
+          complete
+            ? adapter.UsedDedicatedMemoryBytes
+            : null,
+          complete
+            ? Math.Clamp(
+              adapter.UsedDedicatedMemoryBytes!.Value * 100d
+                / adapter.TotalDedicatedMemoryBytes!.Value,
+              0,
+              100
             )
-          );
-        }
+            : null,
+          complete
+            ? "available"
+            : "partial",
+          complete
+            ? "Adapter-wide dedicated-memory usage reported by Windows GPU performance counters."
+            : adapter.TotalDedicatedMemoryBytes is > 0
+              ? "Total dedicated memory was reported by DXGI; adapter-wide current usage is unavailable."
+              : "DXGI did not report dedicated memory for this adapter.",
+          null,
+          adapter.Manufacturer,
+          null,
+          null
+        );
       }
-
-      return new GpuMemoryMetricsSnapshot(
-        devices,
-        devices.Count == 0
-          ? "available"
-          : "partial",
-        devices.Count == 0
-          ? null
-          : "DXGI fallback enumerated the adapters, but could not report "
-            + "adapter-wide current usage."
-      );
-    }
-    catch (Exception exception)
-    {
-      return new GpuMemoryMetricsSnapshot(
-        [],
-        "unavailable",
-        $"DXGI adapter enumeration is unavailable: {exception.Message}"
-      );
-    }
+    ).ToArray();
   }
 
   private static void TryStop(

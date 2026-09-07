@@ -14,6 +14,20 @@ internal static class PlatformServiceCollectionExtensions
     string dataDirectory
   )
   {
+    services.AddSingleton(
+      provider => new OllamaManagedServerManager(
+        dataDirectory,
+        provider.GetRequiredService<IHttpClientFactory>(),
+        provider.GetRequiredService<ILogger<OllamaManagedServerManager>>(),
+        provider.GetRequiredService<IGpuDiscoveryService>()
+      )
+    );
+    services.AddSingleton<IOllamaManagedServerManager>(
+      provider => provider.GetRequiredService<OllamaManagedServerManager>()
+    );
+    services.AddHostedService(
+      provider => provider.GetRequiredService<OllamaManagedServerManager>()
+    );
     services.AddSingleton<IOllamaInstallationProfileStore>(
       new OllamaInstallationProfileStore(
         dataDirectory
@@ -41,6 +55,7 @@ internal static class PlatformServiceCollectionExtensions
       services.AddSingleton<IFolderLauncherService, WindowsFolderLauncherService>();
       services.AddSingleton<ISystemMemoryMetricsProvider, WindowsSystemMemoryMetricsProvider>();
       services.AddSingleton<IGpuMemoryMetricsProvider, WindowsGpuMemoryMetricsProvider>();
+      services.AddSingleton<IOllamaGpuPlacementProvider, WindowsOllamaGpuPlacementProvider>();
       services.AddSingleton<ISetupInstallerLauncher, WindowsSetupInstallerLauncher>();
       services.AddSingleton<IOllamaBackendEvidenceService, NoOpOllamaBackendEvidenceService>();
       return services;
@@ -54,6 +69,7 @@ internal static class PlatformServiceCollectionExtensions
       services.AddSingleton<IFolderLauncherService, LinuxFolderLauncherService>();
       services.AddSingleton<ISystemMemoryMetricsProvider, LinuxSystemMemoryMetricsProvider>();
       services.AddSingleton<IGpuMemoryMetricsProvider, LinuxGpuMemoryMetricsProvider>();
+      services.AddSingleton<IOllamaGpuPlacementProvider, NoOpOllamaGpuPlacementProvider>();
       services.AddSingleton<ISetupInstallerLauncher>(
         provider => new LinuxSetupInstallerLauncher(
           dataDirectory,

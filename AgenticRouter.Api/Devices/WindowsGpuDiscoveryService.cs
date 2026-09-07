@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Runtime;
 
 namespace AgenticRouter.Api.Devices;
 
@@ -38,7 +39,10 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
       null,
       true,
       true,
-      null
+      null,
+      null,
+      null,
+      true
     );
 
     if (!OperatingSystem.IsWindows())
@@ -54,9 +58,47 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
       var nvidiaDevices = await DiscoverNvidiaDevicesAsync(
         cancellationToken
       );
+      var windowsDevices = new List<GraphicsDevice>();
+      try
+      {
+        windowsDevices = DiscoverDxgiDevices();
+      }
+      catch (Exception exception)
+      {
+        _logger.LogDebug(
+          exception,
+          "DXGI graphics adapter discovery was unavailable."
+        );
+      }
+      if (windowsDevices.Count == 0)
+      {
+        try
+        {
+          windowsDevices = DiscoverWindowsDevices();
+        }
+        catch (Exception exception)
+        {
+          _logger.LogDebug(
+            exception,
+            "SetupAPI graphics adapter discovery was unavailable."
+          );
+        }
+      }
+
+      var supplementalDevices = windowsDevices.Where(
+        device => !nvidiaDevices.Any(
+          nvidia => SameAdapter(
+            nvidia,
+            device
+          )
+        )
+      ).ToList();
 
       if (nvidiaDevices.Count > 0)
       {
+        nvidiaDevices.AddRange(
+          supplementalDevices
+        );
         nvidiaDevices.Insert(
           0,
           auto
@@ -67,8 +109,10 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
         var diagnostic = string.IsNullOrWhiteSpace(
           visibility
         )
-          ? "CUDA device order and UUIDs were read from nvidia-smi."
-          : "CUDA device order was read from nvidia-smi, but CUDA_VISIBLE_DEVICES is set for this process. The Ollama daemon must expose every selected GPU.";
+          ? supplementalDevices.Count == 0
+            ? "CUDA device order and UUIDs were read from nvidia-smi."
+            : "CUDA devices were read from nvidia-smi; AMD devices were read from DXGI and can use Agentic Router-owned ROCm or combined Vulkan servers."
+          : "CUDA device order was read from nvidia-smi, but CUDA_VISIBLE_DEVICES is set for this process. AMD devices use independent managed ROCm indices.";
 
         return new DevicesResponse(
           nvidiaDevices,
@@ -76,17 +120,16 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
         );
       }
 
-      var devices = DiscoverWindowsDevices();
-      devices.Insert(
+      windowsDevices.Insert(
         0,
         auto
       );
 
       return new DevicesResponse(
-        devices,
-        devices.Count == 1
+        windowsDevices,
+        windowsDevices.Count == 1
           ? "Windows did not report a graphics device through SetupAPI."
-          : "Windows reported graphics adapters, but no authoritative Ollama CUDA index was available. Exact affinity remains on Auto."
+          : "Windows reported graphics adapters, but no authoritative Ollama runtime index was available. Exact affinity remains on Auto."
       );
     }
     catch (Exception exception)
@@ -235,7 +278,10 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
           memoryBytes,
           true,
           false,
-          index
+          index,
+          "cuda",
+          index,
+          true
         )
       );
     }
@@ -245,6 +291,61 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
         device => device.OllamaIndex
       )
       .ToList();
+  }
+
+  private static List<GraphicsDevice> DiscoverDxgiDevices()
+  {
+    var adapters = WindowsGraphicsAdapterInventory.GetAdapters();
+    var amdAdapters = adapters.Count(
+      adapter => string.Equals(
+        adapter.Manufacturer,
+        "AMD",
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    var amdIndex = 0;
+
+    return adapters.Select(
+      adapter =>
+      {
+        var isAmd = string.Equals(
+          adapter.Manufacturer,
+          "AMD",
+          StringComparison.OrdinalIgnoreCase
+        );
+        var backendIndex = isAmd && amdAdapters == 1
+          ? amdIndex++
+          : (int?)null;
+        return new GraphicsDevice(
+          adapter.Id,
+          adapter.Name,
+          adapter.Manufacturer,
+          adapter.TotalDedicatedMemoryBytes,
+          true,
+          false,
+          null,
+          isAmd ? "rocm" : null,
+          backendIndex,
+          isAmd && backendIndex is not null
+        );
+      }
+    ).ToList();
+  }
+
+  private static bool SameAdapter(
+    GraphicsDevice left,
+    GraphicsDevice right
+  )
+  {
+    return string.Equals(
+      left.Name,
+      right.Name,
+      StringComparison.OrdinalIgnoreCase
+    ) && string.Equals(
+      left.Manufacturer,
+      right.Manufacturer,
+      StringComparison.OrdinalIgnoreCase
+    );
   }
 
   private static List<GraphicsDevice> DiscoverWindowsDevices()

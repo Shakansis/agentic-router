@@ -27,18 +27,21 @@ public sealed class OllamaClient : IOllamaClient
   private readonly ISettingsStore _settingsStore;
   private readonly ITokenEstimator _tokenEstimator;
   private readonly IUsageRecorder _usageRecorder;
+  private readonly IOllamaManagedServerManager _managedServers;
 
   public OllamaClient(
     HttpClient httpClient,
     ISettingsStore settingsStore,
     ITokenEstimator tokenEstimator,
-    IUsageRecorder usageRecorder
+    IUsageRecorder usageRecorder,
+    IOllamaManagedServerManager managedServers
   )
   {
     _httpClient = httpClient;
     _settingsStore = settingsStore;
     _tokenEstimator = tokenEstimator;
     _usageRecorder = usageRecorder;
+    _managedServers = managedServers;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -46,6 +49,13 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    baseUri = (await _managedServers.ResolveAsync(
+      baseUri,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    )).Endpoint;
     using var request = new HttpRequestMessage(
       HttpMethod.Get,
       new Uri(
@@ -98,6 +108,13 @@ public sealed class OllamaClient : IOllamaClient
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    baseUri = (await _managedServers.ResolveAsync(
+      baseUri,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    )).Endpoint;
     var payload = JsonSerializer.Serialize(
       new
       {
@@ -329,7 +346,7 @@ public sealed class OllamaClient : IOllamaClient
         requestedEffort: requestedEffort
       );
       using var response = await SendChatAsync(
-        baseUri,
+        policy.Endpoint,
         payload,
         stage,
         cancellationToken,
@@ -633,7 +650,7 @@ public sealed class OllamaClient : IOllamaClient
         requestedEffort: options.RequestedEffort
       );
       using var response = await SendChatAsync(
-        baseUri,
+        policy.Endpoint,
         payload,
         stage,
         cancellationToken,
@@ -1092,7 +1109,34 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
+    await SetModelResidencyAsync(
+      baseUri,
+      model,
+      keepAlive,
+      contextTokens,
+      mainGpu,
+      null,
+      cancellationToken
+    );
+  }
+
+  public async Task SetModelResidencyAsync(
+    Uri baseUri,
+    string model,
+    int keepAlive,
+    int? contextTokens,
+    int? mainGpu,
+    string? gpuSelection,
+    CancellationToken cancellationToken
+  )
+  {
     var settings = await _settingsStore.GetAsync(
+      cancellationToken
+    );
+    var endpoint = await _managedServers.ResolveAsync(
+      baseUri,
+      gpuSelection ?? settings.DefaultGpu,
+      settings.DefaultGpu,
       cancellationToken
     );
     var payload = CreateRequest(
@@ -1106,12 +1150,12 @@ public sealed class OllamaClient : IOllamaClient
           0,
           contextTokens,
           null,
-          mainGpu
+          endpoint.Managed ? endpoint.MainGpu : mainGpu
         ),
       keepAlive
     );
     using var response = await SendChatAsync(
-      baseUri,
+      endpoint.Endpoint,
       payload,
       keepAlive == 0
         ? "model-unload"
@@ -1180,7 +1224,7 @@ public sealed class OllamaClient : IOllamaClient
     }
 
     await using var enumerator = StreamChatCoreAsync(
-      baseUri,
+      policy.Endpoint,
       model,
       messages,
       policy,
@@ -1512,12 +1556,19 @@ public sealed class OllamaClient : IOllamaClient
     var requestedOutput = toolOutput
       ? settings.Execution.MaxToolOutputTokens
       : settings.Context.ReservedResponseTokens;
+    var gpuSelection = ResolveGpuSelection(settings, usageContext);
+    var endpoint = await _managedServers.ResolveAsync(
+      baseUri,
+      gpuSelection,
+      settings.DefaultGpu,
+      cancellationToken
+    );
     OllamaModelMetadata metadata;
 
     try
     {
       metadata = await GetModelMetadataAsync(
-        baseUri,
+        endpoint.Endpoint,
         model,
         cancellationToken
       );
@@ -1603,30 +1654,23 @@ public sealed class OllamaClient : IOllamaClient
     return new GenerationPolicy(
       resolution,
       resolution.OutputTokenLimit,
-      ResolveMainGpu(
-        settings,
-        usageContext
-      )
+      endpoint.MainGpu,
+      endpoint.Endpoint
     );
   }
 
-  private static int? ResolveMainGpu(
+  private static string ResolveGpuSelection(
     ApplicationSettings settings,
     ProviderCallContext usageContext
   )
   {
-    var selection = usageContext.ModelRole switch
+    return usageContext.ModelRole switch
     {
       UsageModelRoles.Router => settings.RouterGpu,
       UsageModelRoles.Action => settings.ActionGpu,
       UsageModelRoles.Coordinator => settings.CoordinatorGpu,
       _ => usageContext.Gpu ?? settings.DefaultGpu
     };
-
-    return OllamaGpuSelection.Resolve(
-      selection,
-      settings.DefaultGpu
-    );
   }
 
   private static OllamaProviderException ProviderTimeout(
@@ -2046,7 +2090,8 @@ public sealed class OllamaClient : IOllamaClient
   private sealed record GenerationPolicy(
     OllamaContextResolution Resolution,
     int OutputTokens,
-    int? MainGpu
+    int? MainGpu,
+    Uri Endpoint
   );
 
   private sealed record StreamingToolResponse(

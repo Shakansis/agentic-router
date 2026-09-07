@@ -298,6 +298,18 @@ public sealed class SettingsValidator : ISettingsValidator
     ApplicationSettings settings
   )
   {
+    if (
+      OperatingSystem.IsWindows()
+      && Uri.TryCreate(settings.OllamaUrl, UriKind.Absolute, out var endpoint)
+      && endpoint.IsLoopback
+      && endpoint.Port == 11_434
+    )
+    {
+      // Explicit GPU selections use isolated Agentic Router-owned Ollama
+      // servers, so one model may safely be resident on different backends.
+      return;
+    }
+
     var assignments = new Dictionary<
       string,
       List<(string Gpu, string Field)>
@@ -450,8 +462,8 @@ public sealed class SettingsValidator : ISettingsValidator
       errors,
       field,
       allowDefault
-        ? "GPU selection must be default, auto, or an exact Ollama GPU index."
-        : "GPU selection must be auto or an exact Ollama GPU index."
+        ? "GPU selection must be default, auto, an exact CUDA/ROCm/Vulkan index, or combined Vulkan."
+        : "GPU selection must be auto, an exact CUDA/ROCm/Vulkan index, or combined Vulkan."
     );
   }
 

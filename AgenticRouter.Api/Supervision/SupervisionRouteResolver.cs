@@ -5,6 +5,7 @@ using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Routing;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Supervision;
@@ -36,6 +37,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
   private readonly IAutoModelHarnessRoutingService _autoRoutes;
   private readonly IIntentionRouter _intentionRouter;
   private readonly IModelResolver _modelResolver;
+  private readonly IOllamaManagedServerManager _managedOllamaServers;
 
   public SupervisionRouteResolver(
     IWorkspaceProfileService workspaces,
@@ -44,7 +46,8 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     IHarnessRegistry harnesses,
     IAutoModelHarnessRoutingService autoRoutes,
     IIntentionRouter intentionRouter,
-    IModelResolver modelResolver
+    IModelResolver modelResolver,
+    IOllamaManagedServerManager managedOllamaServers
   )
   {
     _workspaces = workspaces;
@@ -54,6 +57,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     _autoRoutes = autoRoutes;
     _intentionRouter = intentionRouter;
     _modelResolver = modelResolver;
+    _managedOllamaServers = managedOllamaServers;
   }
 
   public async Task<SupervisionRouteResolution> ResolveAsync(
@@ -299,6 +303,12 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       Path.DirectorySeparatorChar,
       Path.AltDirectorySeparatorChar
     );
+    var managedEndpoint = await _managedOllamaServers.ResolveAsync(
+      ollamaEndpoint,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    );
 
     return new SupervisionRouteResolution(
       active.Id,
@@ -311,7 +321,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         harness.Definition.Id,
         harness.Availability.Version,
         NormalizeEndpoint(
-          ollamaEndpoint
+          managedEndpoint.Endpoint
         ),
         SupervisionRequestPolicy.Hash(
           OperatingSystem.IsWindows()
@@ -407,9 +417,15 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         settings.OllamaUrl,
         UriKind.Absolute
       );
+      var managedEndpoint = await _managedOllamaServers.ResolveAsync(
+        endpoint,
+        settings.DefaultGpu,
+        settings.DefaultGpu,
+        cancellationToken
+      );
       if (!string.Equals(
         NormalizeEndpoint(
-          endpoint
+          managedEndpoint.Endpoint
         ),
         checkpoint.Route.OllamaEndpoint,
         StringComparison.OrdinalIgnoreCase

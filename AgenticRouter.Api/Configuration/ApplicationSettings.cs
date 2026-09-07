@@ -229,42 +229,68 @@ public static class OllamaGpuSelection
   public const string Auto = "auto";
   public const string Default = "default";
   public const string RuntimePrefix = "ollama:";
+  public const string RocmPrefix = "rocm:";
+  public const string VulkanPrefix = "vulkan:";
+  public const string VulkanAll = "vulkan:all";
+  public const string VulkanPreferPrefix = "vulkan:prefer:";
 
   public static int? Resolve(
     string? selection,
     string defaultSelection
   )
   {
-    var effective = string.IsNullOrWhiteSpace(
-      selection
-    ) || string.Equals(
-      selection,
-      Default,
-      StringComparison.Ordinal
-    )
-      ? defaultSelection
-      : selection;
+    var target = ResolveTarget(selection, defaultSelection);
+    return target is { AllDevices: false }
+      ? target.Index
+      : null;
+  }
 
-    if (string.Equals(
-      effective,
-      Auto,
-      StringComparison.Ordinal
-    ))
+  public static OllamaGpuTarget? ResolveTarget(
+    string? selection,
+    string defaultSelection
+  )
+  {
+    var effective = string.IsNullOrWhiteSpace(selection)
+      || string.Equals(selection, Default, StringComparison.Ordinal)
+        ? defaultSelection
+        : selection;
+    if (string.Equals(effective, Auto, StringComparison.Ordinal))
     {
       return null;
     }
-
-    return effective.StartsWith(
-      RuntimePrefix,
-      StringComparison.Ordinal
-    ) && int.TryParse(
-      effective.AsSpan(
-        RuntimePrefix.Length
-      ),
-      out var index
-    ) && index >= 0
-      ? index
-      : null;
+    if (string.Equals(effective, VulkanAll, StringComparison.Ordinal))
+    {
+      return new OllamaGpuTarget(VulkanAll, "vulkan", 0, true, null);
+    }
+    if (
+      effective.StartsWith(VulkanPreferPrefix, StringComparison.Ordinal)
+      && TryReadPreferredDevice(
+        effective.AsSpan(VulkanPreferPrefix.Length),
+        out var preferredDevice
+      )
+    )
+    {
+      return new OllamaGpuTarget(
+        effective,
+        "vulkan",
+        0,
+        true,
+        preferredDevice
+      );
+    }
+    if (TryReadIndex(effective, RuntimePrefix, out var cudaIndex))
+    {
+      return new OllamaGpuTarget(effective, "cuda", cudaIndex, false, null);
+    }
+    if (TryReadIndex(effective, RocmPrefix, out var rocmIndex))
+    {
+      return new OllamaGpuTarget(effective, "rocm", rocmIndex, false, null);
+    }
+    if (TryReadIndex(effective, VulkanPrefix, out var vulkanIndex))
+    {
+      return new OllamaGpuTarget(effective, "vulkan", vulkanIndex, false, null);
+    }
+    return null;
   }
 
   public static bool IsValid(
@@ -293,20 +319,65 @@ public static class OllamaGpuSelection
       return true;
     }
 
+    return string.Equals(selection, VulkanAll, StringComparison.Ordinal)
+      || (selection is not null
+        && selection.StartsWith(VulkanPreferPrefix, StringComparison.Ordinal)
+        && TryReadPreferredDevice(
+          selection.AsSpan(VulkanPreferPrefix.Length),
+          out _
+        ))
+      || TryReadIndex(selection, RuntimePrefix, out _)
+      || TryReadIndex(selection, RocmPrefix, out _)
+      || TryReadIndex(selection, VulkanPrefix, out _);
+  }
+
+  private static bool TryReadIndex(
+    string? selection,
+    string prefix,
+    out int index
+  )
+  {
+    index = 0;
     return selection is not null
-      && selection.StartsWith(
-        RuntimePrefix,
-        StringComparison.Ordinal
-      )
-      && int.TryParse(
-        selection.AsSpan(
-          RuntimePrefix.Length
-        ),
-        out var index
-      )
+      && selection.StartsWith(prefix, StringComparison.Ordinal)
+      && int.TryParse(selection.AsSpan(prefix.Length), out index)
       && index >= 0;
   }
+
+  private static bool TryReadPreferredDevice(
+    ReadOnlySpan<char> selection,
+    out OllamaGpuPreference preference
+  )
+  {
+    preference = null!;
+    var separator = selection.IndexOf(':');
+    if (separator <= 0)
+    {
+      return false;
+    }
+    var backend = selection[..separator];
+    if (
+      backend is not "cuda" and not "rocm"
+      || !int.TryParse(selection[(separator + 1)..], out var index)
+      || index < 0
+    )
+    {
+      return false;
+    }
+    preference = new OllamaGpuPreference(backend.ToString(), index);
+    return true;
+  }
 }
+
+public sealed record OllamaGpuPreference(string Backend, int Index);
+
+public sealed record OllamaGpuTarget(
+  string Selection,
+  string Backend,
+  int Index,
+  bool AllDevices,
+  OllamaGpuPreference? PreferredDevice
+);
 
 public sealed record ContextSettings
 {

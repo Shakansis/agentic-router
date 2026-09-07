@@ -90,6 +90,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private string? _evictOnNextRemovedModel;
   private bool _hideInstalledModels;
   private int _nextModelTestDelayMilliseconds;
+  private string? _realLifeProblemFailureMode;
   private Task? _listenTask;
 
   private FakeOllamaServer(
@@ -138,10 +139,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     _evictOnNextLoadedModel = null;
     _evictOnNextRemovedModel = null;
     _hideInstalledModels = false;
+    _realLifeProblemFailureMode = null;
     Interlocked.Exchange(
       ref _nextModelTestDelayMilliseconds,
       0
     );
+  }
+
+  public void SetRealLifeProblemFailureMode(string? mode)
+  {
+    _realLifeProblemFailureMode = mode;
   }
 
   public void DelayNextModelTestResponse(
@@ -2693,6 +2700,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (
       hasPlan
+      && current.Contains(
+        "browser-game collection containing tic-tac-toe, hangman-game, and snake-game",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      plan = CreateMissingGameAction(actionResults.Length, _realLifeProblemFailureMode);
+    }
+    else if (
+      hasPlan
       && ForkGameExecutionFixture.Matches(current)
     )
     {
@@ -3798,6 +3815,75 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         cancellationToken
       );
     }
+  }
+
+  private static object CreateMissingGameAction(int completedActions, string? failureMode)
+  {
+    const string validHtml = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Snake Game</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Snake Game</h1><p id=\"score\">Score: 0</p><canvas id=\"game\" width=\"320\" height=\"320\"></canvas><button id=\"start\" type=\"button\">Start game</button></main><script src=\"app.js\"></script></body></html>";
+    const string css = "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111827;color:#f8fafc;font-family:system-ui}main{text-align:center}canvas{display:block;background:#0f172a;border:2px solid #7c9cff;border-radius:12px;margin:1rem auto}button{padding:.7rem 1rem;border:0;border-radius:999px;background:#7c9cff;color:#07111f;font-weight:700}";
+    const string script = "const canvas=document.querySelector('#game');const context=canvas.getContext('2d');let x=8;function draw(){context.clearRect(0,0,320,320);context.fillStyle='#7c9cff';context.fillRect(x*16,8*16,16,16)}document.querySelector('#start').addEventListener('click',()=>{x=(x+1)%20;draw()});draw();";
+    var html = string.Equals(failureMode, "missing-asset", StringComparison.Ordinal)
+      ? validHtml.Replace("<main>", "<img src=\"missing-board.png\" alt=\"Board\"><main>", StringComparison.Ordinal)
+      : validHtml;
+    return completedActions switch
+    {
+      0 => new
+      {
+        tool = (string?)"list_files",
+        arguments = (object)new { path = ".", recursive = true },
+        explanation = "Inspect the existing game collection before deciding what is missing."
+      },
+      1 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "tic-tac-toe/index.html" },
+        explanation = "Confirm the existing tic-tac-toe entry point."
+      },
+      2 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "hangman-game/index.html" },
+        explanation = "Confirm the existing hangman entry point."
+      },
+      3 => new
+      {
+        tool = (string?)"create_files",
+        arguments = (object)new
+        {
+          files = new[]
+          {
+            new { path = "snake-game/index.html", content = html },
+            new { path = "snake-game/styles.css", content = css },
+            new { path = "snake-game/app.js", content = script }
+          }
+        },
+        explanation = "Create only the missing Snake game with local vanilla assets."
+      },
+      4 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "snake-game/index.html" },
+        explanation = "Review the generated Snake entry point."
+      },
+      5 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "snake-game/styles.css" },
+        explanation = "Review the generated Snake stylesheet."
+      },
+      6 => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "snake-game/app.js" },
+        explanation = "Review the generated Snake script."
+      },
+      _ => new
+      {
+        tool = (string?)null,
+        arguments = (object)new { },
+        explanation = "The missing game is complete and the existing collection remains unchanged."
+      }
+    };
   }
 
   private static string ExtractCompletionReviewPath(string content)

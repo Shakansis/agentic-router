@@ -12,6 +12,10 @@ public static class BenchmarkSuiteIds
   public const int AgentBehaviorVersion = 2;
   public const string AgentBehaviorFixtureId = "agent-behavior-fixture";
   public const int AgentBehaviorFixtureVersion = 1;
+  public const string RealLifeProblem = "real-life-problem";
+  public const int RealLifeProblemVersion = 1;
+  public const string RealLifeProblemFixtureId = "browser-games-fixture";
+  public const int RealLifeProblemFixtureVersion = 1;
   public const string Combined = "combined";
   public const int CombinedVersion = 1;
   public const string CombinedFixtureId = "multiple-versioned-fixtures";
@@ -31,6 +35,7 @@ public static class BenchmarkIds
   public const string Terminality001 = "TERMINALITY-001";
   public const string StaleConflict001 = "STALE-CONFLICT-001";
   public const string TruthfulReport001 = "TRUTHFUL-REPORT-001";
+  public const string MissingGame001 = "MISSING-GAME-001";
 }
 
 public static class BenchmarkHarnessCapabilityIds
@@ -248,7 +253,38 @@ public sealed record BenchmarkRawResult(
   BenchmarkBehaviorMetrics? BehaviorMetrics = null,
   IReadOnlyList<BenchmarkTurnEvidence>? Turns = null,
   IReadOnlyList<BenchmarkHostEvent>? HostEvents = null,
-  IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null
+  IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null,
+  BenchmarkOperationalDiagnostics? OperationalDiagnostics = null
+);
+
+public sealed record BenchmarkOperationalDiagnostics(
+  string MetricsVersion,
+  int? ToolCalls,
+  int? FailedToolCalls,
+  int? ToolValidationErrors,
+  int? RepeatedToolCalls,
+  int? RepeatedIdenticalActions,
+  int? RecoveryAttempts,
+  IReadOnlyList<string> FilesRead,
+  IReadOnlyList<string> FilesWritten,
+  IReadOnlyList<string> FilesModified,
+  IReadOnlyList<string> FilesCreated,
+  IReadOnlyList<string> FilesDeleted,
+  int? ExecutionTurns,
+  int? DirectTurns,
+  int? SupervisorTurns,
+  int? WorkerTurns,
+  string TerminalReason,
+  long ExecutionDurationMilliseconds,
+  long SetupDurationMilliseconds,
+  long BrowserValidationDurationMilliseconds,
+  long? InputTokens,
+  long? OutputTokens,
+  string TokenProvenance,
+  string RequestedStrategy,
+  string ResolvedStrategy,
+  IReadOnlyList<string> ValidationErrorCodes,
+  IReadOnlyList<string> UnavailableMetrics
 );
 
 public sealed record BenchmarkBehaviorMetrics(
@@ -974,6 +1010,12 @@ public sealed class BenchmarkTestRegistry : IBenchmarkTestRegistry
         StringComparison.OrdinalIgnoreCase
       ) && version == BenchmarkSuiteIds.AgentBehaviorVersion
         ? 7
+        : string.Equals(
+          suiteId,
+          BenchmarkSuiteIds.RealLifeProblem,
+          StringComparison.OrdinalIgnoreCase
+        ) && version == BenchmarkSuiteIds.RealLifeProblemVersion
+          ? 1
         : 0;
     if (expectedCount == 0 || matching.Length == 0)
     {
@@ -1005,7 +1047,15 @@ public sealed class BenchmarkTestRegistry : IBenchmarkTestRegistry
         matching[0].Metadata.Suite,
         BenchmarkSuiteIds.BasicCrud,
         StringComparison.OrdinalIgnoreCase
-      ) ? "Basic filesystem CRUD" : "Agent behavior v2",
+      )
+        ? "Basic filesystem CRUD"
+        : string.Equals(
+          matching[0].Metadata.Suite,
+          BenchmarkSuiteIds.AgentBehavior,
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? "Agent behavior v2"
+          : "Real life problem",
       fixtureId,
       fixtureVersion,
       tests.Select(test => test.Metadata).ToArray()
@@ -1022,7 +1072,15 @@ public sealed class BenchmarkTestRegistry : IBenchmarkTestRegistry
         item.Suite,
         BenchmarkSuiteIds.BasicCrud,
         StringComparison.OrdinalIgnoreCase
-      ) ? 0 : 1)
+      )
+        ? 0
+        : string.Equals(
+          item.Suite,
+          BenchmarkSuiteIds.AgentBehavior,
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? 1
+          : 2)
       .ThenBy(item => item.Suite, StringComparer.Ordinal)
       .ThenBy(item => item.SuiteVersion)
       .ToArray();
@@ -1066,7 +1124,8 @@ public sealed record BenchmarkHarnessEvidence(
   long? OutputTokens,
   IReadOnlyList<BenchmarkTurnEvidence>? Turns = null,
   IReadOnlyList<BenchmarkHostEvent>? HostEvents = null,
-  IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null
+  IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null,
+  BenchmarkOperationalDiagnostics? OperationalDiagnostics = null
 )
 {
   public static BenchmarkHarnessEvidence FromTerminal(

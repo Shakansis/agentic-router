@@ -8,6 +8,7 @@ using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 
 namespace AgenticRouter.Api.Benchmarking;
 
@@ -58,10 +59,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
   private readonly IBenchmarkNativeExecutor _nativeExecutor;
+  private readonly IBenchmarkProductionExecuteRunner _productionExecute;
   private readonly IBenchmarkScorer _scorer;
   private readonly IBenchmarkResultStore _results;
   private readonly IBenchmarkRunCancellationRegistry _cancellations;
   private readonly IBenchmarkEnvironmentSnapshotProvider _environmentSnapshots;
+  private readonly IOllamaManagedServerManager _managedOllamaServers;
 
   public BenchmarkEngine(
     IBenchmarkTestRegistry tests,
@@ -70,10 +73,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
     IBenchmarkNativeExecutor nativeExecutor,
+    IBenchmarkProductionExecuteRunner productionExecute,
     IBenchmarkScorer scorer,
     IBenchmarkResultStore results,
     IBenchmarkRunCancellationRegistry cancellations,
-    IBenchmarkEnvironmentSnapshotProvider environmentSnapshots
+    IBenchmarkEnvironmentSnapshotProvider environmentSnapshots,
+    IOllamaManagedServerManager managedOllamaServers
   )
   {
     _tests = tests;
@@ -82,10 +87,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
     _nativeExecutor = nativeExecutor;
+    _productionExecute = productionExecute;
     _scorer = scorer;
     _results = results;
     _cancellations = cancellations;
     _environmentSnapshots = environmentSnapshots;
+    _managedOllamaServers = managedOllamaServers;
   }
 
   public async Task<BenchmarkRunResult> RunAsync(
@@ -112,6 +119,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       providerEndpoint,
       cancellationToken
     );
+    providerEndpoint = (await _managedOllamaServers.ResolveAsync(
+      providerEndpoint,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    )).Endpoint;
     var harness = await ResolveHarnessAsync(request.Harness, cancellationToken);
     return await RunTestAsync(
       test,
@@ -173,6 +186,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       providerEndpoint,
       cancellationToken
     );
+    providerEndpoint = (await _managedOllamaServers.ResolveAsync(
+      providerEndpoint,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    )).Endpoint;
     var models = requestedModels.Select(name => new ResolvedBenchmarkModel(
       name,
       installedModels.FirstOrDefault(candidate =>
@@ -607,11 +626,16 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(
         runCancellationToken
       );
-      var effectiveTimeout = string.Equals(
+      var metadataBoundedTimeout = string.Equals(
         test.Metadata.Suite,
         BenchmarkSuiteIds.AgentBehavior,
         StringComparison.OrdinalIgnoreCase
-      )
+      ) || string.Equals(
+        test.Metadata.Suite,
+        BenchmarkSuiteIds.RealLifeProblem,
+        StringComparison.OrdinalIgnoreCase
+      );
+      var effectiveTimeout = metadataBoundedTimeout
         ? TimeSpan.FromSeconds(Math.Min(
           timeout.TotalSeconds,
           test.Metadata.TimeoutSeconds
@@ -621,16 +645,30 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       BenchmarkHarnessEvidence evidence;
       try
       {
-        evidence = await ExecuteHarnessAsync(
-          harness,
-          test,
-          model,
-          providerEndpoint,
-          workspace,
-          settings,
-          timeoutSource.Token,
-          progress
-        );
+        evidence = string.Equals(
+          test.Metadata.Suite,
+          BenchmarkSuiteIds.RealLifeProblem,
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? await _productionExecute.ExecuteAsync(
+            test.CreateTask(),
+            model.Name,
+            harness.Definition.Id,
+            settings,
+            workspace,
+            progress,
+            timeoutSource.Token
+          )
+          : await ExecuteHarnessAsync(
+            harness,
+            test,
+            model,
+            providerEndpoint,
+            workspace,
+            settings,
+            timeoutSource.Token,
+            progress
+          );
       }
       catch (OperationCanceledException)
       {

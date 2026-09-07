@@ -2,6 +2,7 @@ using System.Diagnostics;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Models;
@@ -23,14 +24,17 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
 {
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
+  private readonly IOllamaManagedServerManager _managedOllamaServers;
 
   public ModelDiagnosticService(
     ISettingsStore settingsStore,
-    IOllamaClient ollamaClient
+    IOllamaClient ollamaClient,
+    IOllamaManagedServerManager managedOllamaServers
   )
   {
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
+    _managedOllamaServers = managedOllamaServers;
   }
 
   public async Task<ModelDiagnosticsResponse> GetAsync(
@@ -48,12 +52,18 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
       baseUri,
       cancellationToken
     );
+    var runtimeUri = (await _managedOllamaServers.ResolveAsync(
+      baseUri,
+      settings.DefaultGpu,
+      settings.DefaultGpu,
+      cancellationToken
+    )).Endpoint;
     IReadOnlyList<OllamaRunningModel> loaded;
 
     try
     {
       loaded = await _ollamaClient.GetRunningModelsAsync(
-        baseUri,
+        runtimeUri,
         cancellationToken
       );
     }
