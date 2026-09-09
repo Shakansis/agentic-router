@@ -183,7 +183,7 @@ public sealed class BenchmarksController : ControllerBase
       harnesses,
       defaultTimeoutSeconds = 120,
       minimumTimeoutSeconds = 5,
-      maximumTimeoutSeconds = 600,
+      maximumTimeoutSeconds = 1600,
       scoreWeights = BenchmarkScoreWeights.Default
     });
   }

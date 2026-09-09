@@ -146,11 +146,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var resolvedSuites = ResolveSuites(request);
     var suite = resolvedSuites.Metadata;
     var tests = resolvedSuites.Tests;
-    if (request.TimeoutSeconds is < 5 or > 600)
+    if (request.TimeoutSeconds is < 5 or > 1600)
     {
       throw new BenchmarkRequestException(
         "benchmark-timeout-invalid",
-        "Benchmark test timeout must be between 5 and 600 seconds.",
+        "Benchmark test timeout must be between 5 and 1600 seconds.",
         "timeoutSeconds"
       );
     }

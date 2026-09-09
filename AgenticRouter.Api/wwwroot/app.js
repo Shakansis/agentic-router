@@ -1667,7 +1667,7 @@ function renderBenchmarkControls() {
   }
   elements.benchmarkTimeout.value = String(catalog?.defaultTimeoutSeconds ?? 120);
   elements.benchmarkTimeout.min = String(catalog?.minimumTimeoutSeconds ?? 5);
-  elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 600);
+  elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 1600);
   elements.benchmarkHarnessList.replaceChildren();
   for (const status of catalog?.harnesses ?? []) {
     const label = document.createElement("label");
@@ -1761,7 +1761,7 @@ function updateBenchmarkSuiteSelection() {
       .map(test => Number(test.timeoutSeconds || 120))
   );
   elements.benchmarkTimeout.value = String(Math.min(
-    Number(elements.benchmarkTimeout.max || 600),
+    Number(elements.benchmarkTimeout.max || 1600),
     scenarioTimeout
   ));
   elements.runBenchmark.textContent = "Run benchmark";
