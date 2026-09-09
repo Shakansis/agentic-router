@@ -1241,7 +1241,11 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         approvalMode = "default",
         core = useMinimalToolInventory
           ? MinimalCoreTools(hostProfile)
-          : DefaultCoreTools
+          : DefaultCoreTools,
+        computerUse = new
+        {
+          enabled = false
+        }
       },
       ["permissions"] = new
       {

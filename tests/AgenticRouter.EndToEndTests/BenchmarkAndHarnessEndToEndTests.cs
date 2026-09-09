@@ -488,7 +488,12 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   public async Task AutomatedBenchmarkCrudSuiteRunsAllSupportedHarnessesAndPersistsResults()
   {
     var clientRunId = Guid.NewGuid().ToString("N");
-    using var response = await _environment.HttpClient.PostAsJsonAsync(
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.HttpClient.BaseAddress,
+      Timeout = TimeSpan.FromSeconds(80)
+    };
+    using var response = await client.PostAsJsonAsync(
       "api/benchmarks/suite-runs",
       new BenchmarkSuiteRunRequest(
         "alpha:latest",
@@ -1008,6 +1013,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsNotNull(historyPanelBox);
     Assert.IsNotNull(persistedSelectBox);
     Assert.IsLessThanOrEqualTo(historyPanelBox.Width, persistedSelectBox.Width);
+    await Expect(Page.Locator("#benchmark-history")).ToHaveAttributeAsync("size", "8");
+    Assert.AreEqual(
+      "none",
+      await Page.Locator("#benchmark-history").EvaluateAsync<string>(
+        "element => getComputedStyle(element).scrollbarWidth"
+      )
+    );
     await Page.Locator("#compare-benchmark-runs").ClickAsync();
     await Expect(Page.Locator("#benchmark-comparison")).ToContainTextAsync("Comparable");
     await Expect(Page.Locator("#benchmark-comparison")).ToContainTextAsync("PASS changed");
@@ -2438,11 +2450,16 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       && node["version"]!.GetValue<int>() == BenchmarkSuiteIds.RealLifeProblemVersion
       && node["tests"]!.AsArray().Count == 1));
 
-    using var response = await _environment.HttpClient.PostAsJsonAsync(
+    using var client = new HttpClient
+    {
+      BaseAddress = _environment.HttpClient.BaseAddress,
+      Timeout = TimeSpan.FromSeconds(80)
+    };
+    using var response = await client.PostAsJsonAsync(
       "api/benchmarks/suite-runs",
       new BenchmarkSuiteRunRequest(
         "alpha:latest",
-        [HarnessIds.Native],
+        [HarnessIds.Codex],
         BenchmarkSuiteIds.AgentBehavior,
         BenchmarkSuiteIds.AgentBehaviorVersion,
         TimeoutSeconds: 20,
@@ -2458,7 +2475,21 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual(BenchmarkSuiteIds.AgentBehaviorFixtureVersion, result.FixtureVersion);
     var harness = result.HarnessResults.Single();
     Assert.AreEqual(7, harness.Total);
-    Assert.AreEqual(7, harness.Passed);
+    Assert.AreEqual(
+      7,
+      harness.Passed,
+      JsonSerializer.Serialize(harness.Tests.Select(test => new
+      {
+        test.Run.TestId,
+        test.RawResult.Status,
+        test.RawResult.ExecutionStatus,
+        test.RawResult.Error,
+        test.RawResult.ValidationFacts,
+        test.RawResult.ToolCalls,
+        test.RawResult.OperationalDiagnostics,
+        test.RawResult.FinalHarnessReport
+      }))
+    );
     Assert.AreEqual(100, harness.Terminality);
     Assert.IsTrue(harness.Tests.All(test => test.WorkspaceCleanedUp));
     Assert.IsTrue(harness.Tests.All(test => test.Run.SuiteId == BenchmarkSuiteIds.AgentBehavior));
@@ -2487,8 +2518,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
     var stale = harness.Tests.Single(test => test.Run.TestId == BenchmarkIds.StaleConflict001);
     Assert.HasCount(2, stale.RawResult.Turns!);
-    Assert.HasCount(1, stale.RawResult.HostEvents!);
-    Assert.AreEqual("external-file-mutation", stale.RawResult.HostEvents![0].Type);
+    Assert.HasCount(
+      1,
+      stale.RawResult.HostEvents!.Where(item => item.Type == "external-file-mutation")
+    );
+    Assert.HasCount(
+      2,
+      stale.RawResult.HostEvents!.Where(item => item.Type == "production-execute")
+    );
     Assert.AreEqual("True", stale.RawResult.ValidationFacts!["externalChangePreserved"]);
 
     var truthful = harness.Tests.Single(test => test.Run.TestId == BenchmarkIds.TruthfulReport001);
@@ -2496,7 +2533,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.AreEqual(100, truthful.RawResult.BehaviorMetrics.TruthfulFinalReport);
     Assert.IsGreaterThan(0, truthful.RawResult.SurfacedErrorCount ?? 0);
 
-    var persisted = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+    var persisted = await client.GetFromJsonAsync<BenchmarkSuiteRunResult>(
       $"api/benchmarks/suite-runs/{result.RunId}"
     );
     Assert.IsNotNull(persisted);
@@ -2504,7 +2541,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       JsonSerializer.Serialize(result),
       JsonSerializer.Serialize(persisted)
     );
-    using var rescoreResponse = await _environment.HttpClient.PostAsync(
+    using var rescoreResponse = await client.PostAsync(
       $"api/benchmarks/suite-runs/{result.RunId}/rescore",
       null
     );
@@ -2564,7 +2601,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       $"{JsonSerializer.Serialize(test.RawResult)} Requests: {productionRequests.Length}. {productionTrace}"
     );
     Assert.IsTrue(test.RawResult.ObjectiveAchieved);
-    Assert.IsTrue(test.WorkspaceCleanedUp);
+    Assert.IsFalse(test.WorkspaceCleanedUp, JsonSerializer.Serialize(test));
+    Assert.IsTrue(test.WorkspaceRetained);
+    Assert.IsTrue(Directory.Exists(test.Run.WorkspacePath));
     Assert.AreEqual("passed", test.RawResult.ValidationFacts!["browserValidation"]);
     Assert.AreEqual("true", test.RawResult.ValidationFacts["existingFilesUnchanged"]);
     Assert.AreEqual("0", test.RawResult.ValidationFacts["unrelatedFilesCreated"]);
@@ -2593,11 +2632,155 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       ))));
     Assert.IsFalse(_environment.FakeOllama.Requests.Any(request =>
       request.Messages.Any(message => message.Content.Contains(
-        BenchmarkNativeExecutor.PromptMarker,
+        "BENCHMARK_NATIVE_CRUD_V1",
         StringComparison.Ordinal
       ))));
     Assert.AreEqual(settingsBefore, await client.GetStringAsync("api/settings"));
+    var workspaceStatus = await client.GetFromJsonAsync<BenchmarkWorkspaceStatus>(
+      $"api/benchmarks/suite-runs/{result.RunId}/workspaces/{test.Run.WorkspaceId}"
+    );
+    Assert.IsNotNull(workspaceStatus);
+    Assert.IsTrue(workspaceStatus.Available);
+    Assert.AreEqual(test.Run.WorkspacePath, workspaceStatus.WorkspacePath);
+    using var unrelatedWorkspace = await client.PostAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/workspaces/{Guid.NewGuid():N}/open-folder",
+      null
+    );
+    Assert.AreEqual(HttpStatusCode.NotFound, unrelatedWorkspace.StatusCode);
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status")).ToHaveTextAsync("Ready.");
+    await Page.Locator("#benchmark-tab-results").ClickAsync();
+    await Expect(Page.Locator("#benchmark-pane-results")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-results-body .benchmark-result-link"))
+      .ToHaveCountAsync(1);
+    await Page.Locator("#benchmark-results-body .benchmark-result-link").ClickAsync();
+    await Page.Locator(".benchmark-test-detail > summary").ClickAsync();
+    var viewFolder = Page.Locator("[data-benchmark-view-workspace]");
+    await Expect(viewFolder).ToHaveTextAsync("View folder");
+    await Expect(viewFolder).ToBeEnabledAsync();
+    await Expect(Page.Locator(".benchmark-final-report strong").First)
+      .ToContainTextAsync("Authoritative execution status");
+    await Expect(Page.Locator(".benchmark-persisted-turn .benchmark-markdown strong").First)
+      .ToContainTextAsync("Authoritative execution status");
+
+    using var deleteWorkspace = await client.DeleteAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/workspaces/{test.Run.WorkspaceId}?confirmed=true"
+    );
+    deleteWorkspace.EnsureSuccessStatusCode();
+    Assert.IsFalse(Directory.Exists(test.Run.WorkspacePath));
+    var persistedAfterWorkspaceDelete = await client.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+      $"api/benchmarks/suite-runs/{result.RunId}"
+    );
+    Assert.IsNotNull(persistedAfterWorkspaceDelete);
+    using var deleteResult = await client.DeleteAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}?confirmed=true"
+    );
+    deleteResult.EnsureSuccessStatusCode();
+    using var missingResult = await client.GetAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}"
+    );
+    Assert.AreEqual(HttpStatusCode.NotFound, missingResult.StatusCode);
     _environment.FakeOllama.RemoveLoadedModel("qwen3-coder:30b");
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task RealLifeProblemKeepsUsefulExtraCollectionFilesAsScoredScopeEvidence()
+  {
+    _environment.FakeOllama.Reset();
+    _environment.FakeOllama.SetRealLifeProblemFailureMode("extra-collection-files");
+    try
+    {
+      using var client = new HttpClient
+      {
+        BaseAddress = _environment.HttpClient.BaseAddress,
+        Timeout = TimeSpan.FromSeconds(110)
+      };
+      using var response = await client.PostAsJsonAsync(
+        "api/benchmarks/suite-runs",
+        new BenchmarkSuiteRunRequest(
+          "qwen3-coder:30b",
+          [HarnessIds.Native],
+          BenchmarkSuiteIds.RealLifeProblem,
+          BenchmarkSuiteIds.RealLifeProblemVersion,
+          TimeoutSeconds: 75,
+          ModelExecutionPermissionGranted: true
+        )
+      );
+      response.EnsureSuccessStatusCode();
+      var result = await response.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+      Assert.IsNotNull(result);
+      var test = result.HarnessResults.Single().Tests.Single();
+      Assert.AreEqual(
+        BenchmarkResultStatusIds.Pass,
+        test.RawResult.Status,
+        JsonSerializer.Serialize(test.RawResult)
+      );
+      Assert.IsTrue(test.RawResult.ObjectiveAchieved);
+      Assert.AreEqual(0, test.RawResult.ContainmentAccuracy);
+      CollectionAssert.AreEquivalent(
+        new[] { "README.md", "index.html", "styles.css" },
+        test.RawResult.UnexpectedCreatedFiles.ToArray()
+      );
+      Assert.AreEqual("3", test.RawResult.ValidationFacts!["unrelatedFilesCreated"]);
+      Assert.IsNotNull(test.Score);
+      Assert.IsLessThan(100, test.Score.Total);
+      Assert.IsFalse(test.WorkspaceCleanedUp);
+      Assert.IsTrue(test.WorkspaceRetained);
+      using var deleteWorkspace = await client.DeleteAsync(
+        $"api/benchmarks/suite-runs/{result.RunId}/workspaces/{test.Run.WorkspaceId}?confirmed=true"
+      );
+      deleteWorkspace.EnsureSuccessStatusCode();
+    }
+    finally
+    {
+      _environment.FakeOllama.Reset();
+    }
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task BenchmarkResultsCanBeDeletedTogetherOnDemand()
+  {
+    _environment.FakeOllama.Reset();
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "alpha:latest",
+        [HarnessIds.Native],
+        BenchmarkSuiteIds.BasicCrud,
+        BenchmarkSuiteIds.BasicCrudVersion,
+        TimeoutSeconds: 20,
+        ModelExecutionPermissionGranted: true
+      )
+    );
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(result);
+
+    using var unconfirmed = await _environment.HttpClient.DeleteAsync(
+      "api/benchmarks/suite-runs"
+    );
+    Assert.AreEqual(HttpStatusCode.BadRequest, unconfirmed.StatusCode);
+
+    using var deleteAll = await _environment.HttpClient.DeleteAsync(
+      "api/benchmarks/suite-runs?confirmed=true"
+    );
+    deleteAll.EnsureSuccessStatusCode();
+    using var missing = await _environment.HttpClient.GetAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}"
+    );
+    Assert.AreEqual(HttpStatusCode.NotFound, missing.StatusCode);
+    var history = await _environment.HttpClient.GetFromJsonAsync<BenchmarkHistorySummary[]>(
+      "api/benchmarks/history?limit=100"
+    );
+    Assert.IsNotNull(history);
+    Assert.IsEmpty(history);
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
   }
 
   [TestMethod]
@@ -2640,7 +2823,12 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Assert.AreEqual("real-life-validation-failed", test.RawResult.Error!.Code);
       Assert.IsGreaterThan(0, int.Parse(test.RawResult.ValidationFacts["browserErrors"]));
       StringAssert.Contains(test.RawResult.Error.Message, "Request failed");
-      Assert.IsTrue(test.WorkspaceCleanedUp);
+      Assert.IsFalse(test.WorkspaceCleanedUp);
+      Assert.IsTrue(test.WorkspaceRetained);
+      using var deleteWorkspace = await client.DeleteAsync(
+        $"api/benchmarks/suite-runs/{result.RunId}/workspaces/{test.Run.WorkspaceId}?confirmed=true"
+      );
+      deleteWorkspace.EnsureSuccessStatusCode();
     }
     finally
     {
@@ -2772,8 +2960,11 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         test.Run.SuiteId == BenchmarkSuiteIds.AgentBehavior
         && test.Run.SuiteVersion == BenchmarkSuiteIds.AgentBehaviorVersion));
     }
-    Assert.IsTrue(result.HarnessResults.All(harness =>
-      harness.Tests.Any(test => test.RawResult.Status != BenchmarkResultStatusIds.Pass)),
+    var codex = result.HarnessResults.Single(harness => harness.Harness == HarnessIds.Codex);
+    Assert.IsTrue(codex.Tests.All(test => test.RawResult.Status == BenchmarkResultStatusIds.Pass));
+    Assert.IsTrue(result.HarnessResults
+      .Where(harness => harness.Harness != HarnessIds.Codex)
+      .All(harness => harness.Tests.Any(test => test.RawResult.Status != BenchmarkResultStatusIds.Pass)),
       "Fake external harness failures must remain per-scenario evidence without aborting the suite.");
     _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
   }
@@ -2787,7 +2978,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "api/benchmarks/suite-runs/live",
       new BenchmarkSuiteRunRequest(
         "unused:latest",
-        [HarnessIds.Native],
+        [HarnessIds.Codex],
         BenchmarkSuiteIds.AgentBehavior,
         BenchmarkSuiteIds.AgentBehaviorVersion,
         TimeoutSeconds: 5,
@@ -2829,6 +3020,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var tests = final.HarnessResults.Single().Tests;
     Assert.AreEqual(BenchmarkResultStatusIds.Error, tests.Single(test =>
       test.Run.TestId == BenchmarkIds.Convergence001).RawResult.Status);
+    var timedOut = tests.Single(test =>
+      test.Run.TestId == BenchmarkIds.Convergence001).RawResult;
+    Assert.IsNotNull(timedOut.OperationalDiagnostics);
+    Assert.IsGreaterThan(0, timedOut.OperationalDiagnostics.ToolCalls ?? 0);
+    var partialReadPreserved = timedOut.ToolCalls?.Any(call =>
+      call.Tool == "read_file" && call.Path == "fixture/converge.txt") ?? false;
+    Assert.IsTrue(partialReadPreserved);
     Assert.AreEqual(BenchmarkResultStatusIds.Pass, tests.Single(test =>
       test.Run.TestId == BenchmarkIds.Terminality001).RawResult.Status);
     Assert.AreEqual(BenchmarkResultStatusIds.Pass, tests.Single(test =>
@@ -3184,7 +3382,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToContainTextAsync(BenchmarkIds.FileSystemRead001, new() { Timeout = 15_000 });
     await Page.Locator(".benchmark-live-test[data-test-id=\"FS-CREATE-001\"] > summary").ClickAsync();
     await Expect(Page.Locator("#benchmark-live-dashboard"))
-      .ToContainTextAsync("file-create", new() { Timeout = 15_000 });
+      .ToContainTextAsync("host-validation", new() { Timeout = 15_000 });
 
     await Page.Locator("#close-benchmarks").ClickAsync();
     await Expect(Page.Locator("#benchmark-view")).ToBeHiddenAsync();
@@ -3225,9 +3423,21 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-pane-execution")).ToBeVisibleAsync();
     var picker = Page.Locator("#benchmark-combination-select");
     await Expect(picker.Locator("option")).ToHaveCountAsync(30);
+    CollectionAssert.AreEqual(
+      new[]
+      {
+        "benchmark-previous-combination",
+        "benchmark-current-combination-button",
+        "benchmark-next-combination"
+      },
+      await Page.Locator(".benchmark-combination-navigation > div > button")
+        .EvaluateAllAsync<string[]>("buttons => buttons.map(button => button.id)")
+    );
     await Expect(Page.Locator(".benchmark-live-harness")).ToHaveCountAsync(1);
     await Expect(Page.Locator(".benchmark-live-test[data-test-id=\"FS-READ-001\"]"))
       .ToHaveAttributeAsync("data-state", "running", new() { Timeout = 15_000 });
+    await Expect(Page.Locator("#benchmark-live-dashboard"))
+      .Not.ToContainTextAsync("estimated input");
     var created = Page.Locator(".benchmark-live-test[data-test-id=\"FS-CREATE-001\"]");
     await created.Locator("summary").ClickAsync();
     await Page.EvaluateAsync("window.benchmarkReadingNode = document.querySelector('.benchmark-live-test[open]')");
@@ -3254,7 +3464,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-setup-models")).Not.ToHaveAttributeAsync("open", "");
     await Expect(Page.Locator(".benchmark-scoring-advanced")).ToHaveAttributeAsync("open", "");
 
-    await Page.Locator("#benchmark-follow-active").ClickAsync();
+    await Page.Locator("#benchmark-current-combination-button").ClickAsync();
+    await Expect(picker.Locator("option:checked")).ToContainTextAsync("Running");
     await Expect(created).ToHaveAttributeAsync("open", "");
     Assert.IsTrue(await Page.EvaluateAsync<bool>(
       "window.benchmarkReadingNode === document.querySelector('.benchmark-live-test[open]')"
@@ -3589,7 +3800,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       item["type"]!.GetValue<string>() == "harness.claude-code-native-event-preserved"
     ));
     Assert.IsTrue(first.Any(item =>
-      item["type"]!.GetValue<string>() == "harness.claude-code-effort.prompt-guided"
+      item["type"]!.GetValue<string>() == "harness.claude-code-effort.applied"
       && item["message"]!.GetValue<string>().Contains("medium effort", StringComparison.Ordinal)
     ));
     var exactUsage = first.Last(item =>
@@ -3622,7 +3833,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         .EnumerateArray().Select(item => item.GetString()).ToArray();
       CollectionAssert.Contains(arguments, "stream-json");
       CollectionAssert.Contains(arguments, "--strict-mcp-config");
-      CollectionAssert.DoesNotContain(arguments, "--effort");
+      var effortIndex = Array.IndexOf(arguments, "--effort");
+      Assert.IsGreaterThanOrEqualTo(0, effortIndex);
+      Assert.AreEqual("medium", arguments[effortIndex + 1]);
       CollectionAssert.Contains(arguments, "Read,Glob,Grep,Edit,Write,WebSearch,WebFetch");
       Assert.DoesNotContain("Bash", arguments);
       Assert.IsTrue(arguments.Any(argument => argument?.Contains(
@@ -3758,6 +3971,39 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
     );
     Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DirectExecutePromptsSteerableHarnessOnceAfterSustainedInactivity()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["runtime"]!["generationTimeoutSeconds"] = 1;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.Codex,
+      "long codex turn",
+      $"browser-codex-inactivity-{Guid.NewGuid():N}"
+    );
+
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>() == "request.inactivity-recovery"));
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>() == "response.completed"));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    using var evidence = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(
+      _environment.DataDirectory,
+      "codex-runtime",
+      "fake-app-server-steer.json"
+    )));
+    StringAssert.StartsWith(
+      evidence.RootElement.GetProperty("message").GetString(),
+      "Host recovery: no meaningful progress"
+    );
   }
 
   [TestMethod]
@@ -4575,6 +4821,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .EnumerateArray()
       .Select(item => item.GetString())
       .ToArray();
+    Assert.IsFalse(
+      settings.RootElement.GetProperty("tools").GetProperty("computerUse")
+        .GetProperty("enabled").GetBoolean()
+    );
     Assert.HasCount(3, coreTools);
     CollectionAssert.DoesNotContain(coreTools, "read_file");
     CollectionAssert.DoesNotContain(coreTools, "list_directory");
@@ -5247,6 +5497,52 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.HasCount(
       0,
       events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexCompletedAgentMessageSuppliesTheFinalAnswerWithoutDeltaNotifications()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.Codex,
+      "codex completed item only",
+      $"browser-codex-completed-item-{Guid.NewGuid():N}",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var response = string.Concat(events
+      .Where(item => item["type"]!.GetValue<string>() == "response.delta")
+      .Select(item => item["delta"]?.GetValue<string>() ?? string.Empty));
+    StringAssert.Contains(response, "Codex streamed with qwen3.8:27b-gpu0");
+    Assert.HasCount(
+      1,
+      events.Where(item => item["type"]!.GetValue<string>() == "response.delta")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexCompletedReasoningSummarySuppliesTheFinalAnswerWhenAgentMessageIsMissing()
+  {
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.Codex,
+      "codex completed reasoning only",
+      $"browser-codex-completed-reasoning-{Guid.NewGuid():N}",
+      "qwen3.8:27b-gpu0"
+    );
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    var response = string.Concat(events
+      .Where(item => item["type"]!.GetValue<string>() == "response.delta")
+      .Select(item => item["delta"]?.GetValue<string>() ?? string.Empty));
+    StringAssert.Contains(response, "Codex streamed with qwen3.8:27b-gpu0");
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "harness.codex-answer-fallback"
+      )
     );
   }
 

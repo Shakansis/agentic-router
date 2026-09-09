@@ -793,10 +793,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       hasTools
       && messages.Any(
         message => message.Content.Contains(
-          BenchmarkNativeExecutor.PromptMarker,
+          "BENCHMARK_NATIVE_CRUD_V1",
           StringComparison.Ordinal
         ) || message.Content.Contains(
-          BenchmarkNativeExecutor.BehaviorPromptMarker,
+          "BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2",
           StringComparison.Ordinal
         )
       )
@@ -927,10 +927,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       hasTools
       && messages.Any(
         message => message.Content.Contains(
-          BenchmarkNativeExecutor.PromptMarker,
+          "BENCHMARK_NATIVE_CRUD_V1",
           StringComparison.Ordinal
         ) || message.Content.Contains(
-          BenchmarkNativeExecutor.BehaviorPromptMarker,
+          "BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2",
           StringComparison.Ordinal
         )
       )
@@ -1630,6 +1630,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       message => message.Content.Contains("Tool: apply_patch", StringComparison.Ordinal)
         && message.Content.Contains("Status: completed", StringComparison.Ordinal)
     );
+    var completedBenchmarkActions = activeMessages.Count(message =>
+      (
+        message.Content.StartsWith("LOCAL_ACTION_RESULT", StringComparison.Ordinal)
+        && !message.Content.Contains("Tool: create_execution_plan", StringComparison.Ordinal)
+        && !message.Content.Contains("Tool: revise_execution_plan", StringComparison.Ordinal)
+      )
+      || message.Content.StartsWith("STRUCTURED_ACTION_CORRECTION", StringComparison.Ordinal)
+      || message.Content.StartsWith("LOCAL_ACTION_CORRECTION", StringComparison.Ordinal)
+    );
     var latestStructuredMutationIndex = Array.FindLastIndex(
       activeMessages,
       message => message.Content.StartsWith(
@@ -1715,7 +1724,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "native create host batch files",
       StringComparison.OrdinalIgnoreCase
     );
-    var guidance = nativeBatchCreation
+    var guidance = current.Contains("Benchmark scenario:", StringComparison.Ordinal)
+      ? CreateStructuredGuidance(
+        current,
+        CreateAgentBehaviorAction(current, completedBenchmarkActions)
+      )
+      : nativeBatchCreation
       && !completedStructuredMutation
       ? CreateStructuredGuidance(
         current,
@@ -2707,6 +2721,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     )
     {
       plan = CreateMissingGameAction(actionResults.Length, _realLifeProblemFailureMode);
+    }
+    else if (
+      hasPlan
+      && current.Contains("Benchmark scenario:", StringComparison.Ordinal)
+    )
+    {
+      plan = CreateAgentBehaviorAction(current, actionResults.Length);
     }
     else if (
       hasPlan
@@ -3825,6 +3846,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var html = string.Equals(failureMode, "missing-asset", StringComparison.Ordinal)
       ? validHtml.Replace("<main>", "<img src=\"missing-board.png\" alt=\"Board\"><main>", StringComparison.Ordinal)
       : validHtml;
+    var createdFiles = string.Equals(failureMode, "extra-collection-files", StringComparison.Ordinal)
+      ? new[]
+      {
+        new { path = "snake-game/index.html", content = html },
+        new { path = "snake-game/styles.css", content = css },
+        new { path = "snake-game/app.js", content = script },
+        new { path = "index.html", content = "<!doctype html><html lang=\"en\"><title>Browser Games</title><body><a href=\"snake-game/index.html\">Snake</a></body></html>" },
+        new { path = "styles.css", content = "body{font-family:system-ui}" },
+        new { path = "README.md", content = "# Browser Games\n\nOpen each index.html in a browser.\n" }
+      }
+      : new[]
+      {
+        new { path = "snake-game/index.html", content = html },
+        new { path = "snake-game/styles.css", content = css },
+        new { path = "snake-game/app.js", content = script }
+      };
     return completedActions switch
     {
       0 => new
@@ -3850,12 +3887,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         tool = (string?)"create_files",
         arguments = (object)new
         {
-          files = new[]
-          {
-            new { path = "snake-game/index.html", content = html },
-            new { path = "snake-game/styles.css", content = css },
-            new { path = "snake-game/app.js", content = script }
-          }
+          files = createdFiles
         },
         explanation = "Create only the missing Snake game with local vanilla assets."
       },
@@ -3877,6 +3909,24 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         arguments = (object)new { path = "snake-game/app.js" },
         explanation = "Review the generated Snake script."
       },
+      7 when string.Equals(failureMode, "extra-collection-files", StringComparison.Ordinal) => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "index.html" },
+        explanation = "Review the generated collection entry point."
+      },
+      8 when string.Equals(failureMode, "extra-collection-files", StringComparison.Ordinal) => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "styles.css" },
+        explanation = "Review the generated collection stylesheet."
+      },
+      9 when string.Equals(failureMode, "extra-collection-files", StringComparison.Ordinal) => new
+      {
+        tool = (string?)"read_file",
+        arguments = (object)new { path = "README.md" },
+        explanation = "Review the generated collection instructions."
+      },
       _ => new
       {
         tool = (string?)null,
@@ -3884,6 +3934,120 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         explanation = "The missing game is complete and the existing collection remains unchanged."
       }
     };
+  }
+
+  private static object CreateAgentBehaviorAction(string request, int completedActions)
+  {
+    static object Action(string tool, object arguments, string explanation) => new
+    {
+      tool = (string?)tool,
+      arguments,
+      explanation
+    };
+    static object Complete(string report) => new
+    {
+      tool = (string?)null,
+      arguments = (object)new { },
+      explanation = report
+    };
+
+    if (request.Contains("CONTINUITY-001", StringComparison.Ordinal))
+    {
+      var titleTurn = request.Contains("Set only title=ORION", StringComparison.Ordinal);
+      var enableTurn = request.Contains("Enable the same application", StringComparison.Ordinal);
+      return completedActions switch
+      {
+        0 => Action(
+          "read_file",
+          new { path = "app/config.txt" },
+          "Inspect the current configuration before the narrow edit."
+        ),
+        1 => Action(
+          "replace_text",
+          titleTurn
+            ? new { path = "app/config.txt", oldText = "title=Atlas", newText = "title=ORION", replaceAll = false }
+            : enableTurn
+              ? new { path = "app/config.txt", oldText = "enabled=false", newText = "enabled=true", replaceAll = false }
+              : new { path = "app/config.txt", oldText = "theme=amber", newText = "theme=violet", replaceAll = false },
+          "Apply only the requested configuration change."
+        ),
+        2 => Action(
+          "read_file",
+          new { path = "app/config.txt" },
+          "Verify the configuration after the edit."
+        ),
+        _ => Complete(titleTurn ? "turn-1=completed" : enableTurn ? "turn-2=completed" : "turn-3=completed")
+      };
+    }
+    if (request.Contains("SCOPE-RETENTION-001", StringComparison.Ordinal))
+    {
+      return completedActions switch
+      {
+        0 => Action("read_file", new { path = "src/target.txt" }, "Inspect the requested target."),
+        1 => Action("replace_text", new { path = "src/target.txt", oldText = "mode=old", newText = "mode=new", replaceAll = false }, "Apply the narrow edit."),
+        2 => Action("read_file", new { path = "src/target.txt" }, "Verify the narrow edit."),
+        _ => Complete("scope=retained")
+      };
+    }
+    if (request.Contains("RECOVERY-001", StringComparison.Ordinal))
+    {
+      return completedActions switch
+      {
+        0 => Action("read_file", new { path = "fixture/recovery-old.txt" }, "Attempt the stated stale path once."),
+        1 => Action("read_file", new { path = "fixture/recovery.txt" }, "Recover through the current path."),
+        2 => Action("create_file", new { path = "output/recovery.txt", content = "recovered=RECOVER-42" }, "Create the recovered output."),
+        3 => Action("read_file", new { path = "output/recovery.txt" }, "Verify the recovered output."),
+        _ => Complete("recovery=completed")
+      };
+    }
+    if (request.Contains("CONVERGENCE-001", StringComparison.Ordinal))
+    {
+      return completedActions switch
+      {
+        0 => Action("read_file", new { path = "fixture/converge.txt" }, "Inspect the target before editing."),
+        1 => Action("replace_text", new { path = "fixture/converge.txt", oldText = "status=pending", newText = "status=complete", replaceAll = false }, "Apply the requested status change."),
+        2 => Action("read_file", new { path = "fixture/converge.txt" }, "Perform the single requested post-change validation."),
+        _ => Complete("validation=passed")
+      };
+    }
+    if (request.Contains("TERMINALITY-001", StringComparison.Ordinal))
+    {
+      return completedActions switch
+      {
+        0 => Action("read_file", new { path = "required.txt" }, "Inspect the required file."),
+        1 => Action("replace_text", new { path = "required.txt", oldText = "required=pending", newText = "required=completed", replaceAll = false }, "Complete the required change."),
+        2 => Action("read_file", new { path = "required.txt" }, "Verify the required change without process execution."),
+        _ => Complete("required-change=completed\noptional-validation=unavailable")
+      };
+    }
+    if (request.Contains("STALE-CONFLICT-001", StringComparison.Ordinal))
+    {
+      var continuation = request.Contains("continuation", StringComparison.Ordinal);
+      if (!continuation)
+      {
+        return completedActions == 0
+          ? Action("read_file", new { path = "state.txt" }, "Read the authoritative state without mutation.")
+          : Complete("observed-version=1");
+      }
+      return completedActions switch
+      {
+        0 => Action("read_file", new { path = "state.txt" }, "Re-read the externally changed authoritative state."),
+        1 => Action("replace_text", new { path = "state.txt", oldText = "mode=old", newText = "mode=updated", replaceAll = false }, "Change only the requested mode while preserving external fields."),
+        2 => Action("read_file", new { path = "state.txt" }, "Verify the preserved external fields and updated mode."),
+        _ => Complete("external-change=preserved")
+      };
+    }
+    if (request.Contains("TRUTHFUL-REPORT-001", StringComparison.Ordinal))
+    {
+      return completedActions switch
+      {
+        0 => Action("read_file", new { path = "truth.txt" }, "Inspect the required file."),
+        1 => Action("replace_text", new { path = "truth.txt", oldText = "required=pending", newText = "required=completed", replaceAll = false }, "Complete the required change."),
+        2 => Action("read_file", new { path = "optional-validation.txt" }, "Run the optional check exactly once."),
+        _ => Complete("required-change=completed\noptional-validation=failed")
+      };
+    }
+    return Complete("Benchmark scenario completed.");
   }
 
   private static string ExtractCompletionReviewPath(string content)

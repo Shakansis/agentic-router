@@ -98,6 +98,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IApprovalCoordinator _approvals;
   private readonly IRecoveryDecisionCoordinator _recoveryDecisions;
+  private readonly IWorkspaceExecutionContextAccessor _executionContext;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
@@ -108,7 +109,8 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
     ISettingsStore settings,
     IExecutionSessionStore executionSessions,
     IApprovalCoordinator approvals,
-    IRecoveryDecisionCoordinator recoveryDecisions
+    IRecoveryDecisionCoordinator recoveryDecisions,
+    IWorkspaceExecutionContextAccessor executionContext
   )
   {
     _store = store;
@@ -116,6 +118,7 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
     _executionSessions = executionSessions;
     _approvals = approvals;
     _recoveryDecisions = recoveryDecisions;
+    _executionContext = executionContext;
   }
 
   public async Task InitializeAsync(
@@ -212,6 +215,11 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
     CancellationToken cancellationToken
   )
   {
+    var scoped = _executionContext.Current;
+    if (scoped is not null)
+    {
+      return scoped;
+    }
     await InitializeAsync(
       cancellationToken
     );
@@ -608,6 +616,13 @@ public sealed class WorkspaceProfileService : IWorkspaceProfileService
 
     if (active is not null)
     {
+      if (_executionContext.TryUpdate(
+        active.Id,
+        current => current with { ProjectProfile = profile }
+      ))
+      {
+        return;
+      }
       await UpdateAsync(
         active.Id,
         current => current with

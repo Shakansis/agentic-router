@@ -1231,6 +1231,24 @@ async Task RunTurnAsync(
       await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
     }
     if (
+      currentRequest.Contains("Benchmark scenario: CONVERGENCE-001", StringComparison.Ordinal)
+      && string.Equals(model, "unused:latest", StringComparison.Ordinal)
+    )
+    {
+      await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "read_file",
+        new { path = "fixture/converge.txt" },
+        90_000L + int.Parse(
+          turnId["fake-turn-".Length..],
+          System.Globalization.CultureInfo.InvariantCulture
+        ),
+        cancellationToken
+      );
+      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+    }
+    if (
       currentRequest.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal)
       && string.Equals(model, "structured-failure:latest", StringComparison.Ordinal)
     )
@@ -1252,6 +1270,7 @@ async Task RunTurnAsync(
       });
       return;
     }
+    string? benchmarkReport = null;
     if (currentRequest.Contains("Benchmark test: FS-", StringComparison.Ordinal))
     {
       await PrepareBenchmarkOutcomeAsync(cwd, model, currentRequest, cancellationToken);
@@ -1261,21 +1280,15 @@ async Task RunTurnAsync(
         @params = new { threadId, turnId, diff = "benchmark fixture outcome prepared" }
       });
     }
-    else if (currentRequest.Contains("Benchmark scenario: CONTINUITY-001", StringComparison.Ordinal))
+    else if (currentRequest.Contains("Benchmark scenario:", StringComparison.Ordinal))
     {
-      var path = Path.Combine(cwd, "app", "config.txt");
-      var content = await File.ReadAllTextAsync(path, cancellationToken);
-      content = currentRequest.Contains("Set only title=ORION", StringComparison.Ordinal)
-        ? content.Replace("title=Atlas", "title=ORION", StringComparison.Ordinal)
-        : currentRequest.Contains("Enable the same application", StringComparison.Ordinal)
-          ? content.Replace("enabled=false", "enabled=true", StringComparison.Ordinal)
-          : content.Replace("theme=amber", "theme=violet", StringComparison.Ordinal);
-      await File.WriteAllTextAsync(path, content, cancellationToken);
-      await SendAsync(new
-      {
-        method = "turn/diff/updated",
-        @params = new { threadId, turnId, diff = "continuity fixture updated" }
-      });
+      benchmarkReport = await RunAgentBehaviorBenchmarkAsync(
+        threadId,
+        turnId,
+        cwd,
+        currentRequest,
+        cancellationToken
+      );
     }
     else if (currentRequest.Contains("create codex file", StringComparison.OrdinalIgnoreCase))
     {
@@ -1314,20 +1327,50 @@ async Task RunTurnAsync(
         item = new { type = "commandExecution", id = itemId, command, cwd, status = "completed", aggregatedOutput = "fake output\n", exitCode = 0, durationMs = 5 }
       }
     });
-    var finalReport = currentRequest.Contains("Benchmark scenario: CONTINUITY-001", StringComparison.Ordinal)
-      ? (currentRequest.Contains("theme to violet", StringComparison.Ordinal)
-        ? "turn-3=completed"
-        : currentRequest.Contains("Enable the same application", StringComparison.Ordinal)
-          ? "turn-2=completed"
-          : "turn-1=completed") + $" on {threadId}"
-      : currentRequest.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+    var finalReport = benchmarkReport
+      ?? (currentRequest.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
       ? string.Equals(model, "beta:code", StringComparison.Ordinal)
         ? "codename=ORBIT-41"
         : "codename=ORBIT-41\nverification-word=marigold"
-      : $"Codex streamed with {model} on {threadId}. Ação concluída.";
-    await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = finalReport[..Math.Min(finalReport.Length, 20)] } });
-    await Task.Delay(200, cancellationToken);
-    await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"answer-{turnId}", delta = finalReport[Math.Min(finalReport.Length, 20)..] } });
+      : $"Codex streamed with {model} on {threadId}. Ação concluída.");
+    var answerItemId = $"answer-{turnId}";
+    if (currentRequest.Contains("codex completed reasoning only", StringComparison.OrdinalIgnoreCase))
+    {
+      await SendAsync(new
+      {
+        method = "item/completed",
+        @params = new
+        {
+          threadId,
+          turnId,
+          item = new
+          {
+            type = "reasoning",
+            id = $"reason-final-{turnId}",
+            summary = new[] { finalReport }
+          }
+        }
+      });
+    }
+    else
+    {
+      if (!currentRequest.Contains("codex completed item only", StringComparison.OrdinalIgnoreCase))
+      {
+        await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = answerItemId, delta = finalReport[..Math.Min(finalReport.Length, 20)] } });
+        await Task.Delay(200, cancellationToken);
+        await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = answerItemId, delta = finalReport[Math.Min(finalReport.Length, 20)..] } });
+      }
+      await SendAsync(new
+      {
+        method = "item/completed",
+        @params = new
+        {
+          threadId,
+          turnId,
+          item = new { type = "agentMessage", id = answerItemId, text = finalReport }
+        }
+      });
+    }
     turns.TryRemove(turnId, out _);
     steerMessages.TryRemove(turnId, out _);
     await SendAsync(new
@@ -1477,6 +1520,132 @@ async Task<(bool Success, string Text)> CallDynamicToolAsync(
     }
   });
   return result;
+}
+
+async Task<string> RunAgentBehaviorBenchmarkAsync(
+  string threadId,
+  string turnId,
+  string cwd,
+  string request,
+  CancellationToken cancellationToken
+)
+{
+  var requestId = 60_000L
+    + int.Parse(
+      turnId["fake-turn-".Length..],
+      System.Globalization.CultureInfo.InvariantCulture
+    ) * 100;
+  async Task CallAsync(string tool, object arguments)
+  {
+    requestId++;
+    await CallDynamicToolAsync(
+      threadId,
+      turnId,
+      tool,
+      arguments,
+      requestId,
+      cancellationToken
+    );
+  }
+
+  if (request.Contains("CONTINUITY-001", StringComparison.Ordinal))
+  {
+    var titleTurn = request.Contains("Set only title=ORION", StringComparison.Ordinal);
+    var enableTurn = request.Contains("Enable the same application", StringComparison.Ordinal);
+    await CallAsync("read_file", new { path = "app/config.txt" });
+    await CallAsync(
+      "replace_text",
+      titleTurn
+        ? (object)new { path = "app/config.txt", oldText = "title=Atlas", newText = "title=ORION", replaceAll = false }
+        : enableTurn
+          ? new { path = "app/config.txt", oldText = "enabled=false", newText = "enabled=true", replaceAll = false }
+          : new { path = "app/config.txt", oldText = "theme=amber", newText = "theme=violet", replaceAll = false }
+    );
+    await CallAsync("read_file", new { path = "app/config.txt" });
+    var outcome = titleTurn ? "turn-1=completed" : enableTurn ? "turn-2=completed" : "turn-3=completed";
+    return $"{outcome} {threadId}.";
+  }
+  if (request.Contains("SCOPE-RETENTION-001", StringComparison.Ordinal))
+  {
+    await CallAsync("read_file", new { path = "src/target.txt" });
+    await CallAsync("replace_text", new { path = "src/target.txt", oldText = "mode=old", newText = "mode=new", replaceAll = false });
+    await CallAsync("read_file", new { path = "src/target.txt" });
+    return "scope=retained";
+  }
+  if (request.Contains("RECOVERY-001", StringComparison.Ordinal))
+  {
+    await CallAsync("read_file", new { path = "fixture/recovery-old.txt" });
+    await CallAsync("read_file", new { path = "fixture/recovery.txt" });
+    Directory.CreateDirectory(Path.Combine(cwd, "output"));
+    await File.WriteAllTextAsync(
+      Path.Combine(cwd, "output", "recovery.txt"),
+      "recovered=RECOVER-42",
+      cancellationToken
+    );
+    await CallAsync("read_file", new { path = "output/recovery.txt" });
+    return "recovery=completed";
+  }
+  if (request.Contains("CONVERGENCE-001", StringComparison.Ordinal))
+  {
+    await ReplaceFileTextAsync(
+      Path.Combine(cwd, "fixture", "converge.txt"),
+      "status=pending",
+      "status=complete",
+      cancellationToken
+    );
+    await CallAsync("read_file", new { path = "fixture/converge.txt" });
+    return "validation=passed";
+  }
+  if (request.Contains("TERMINALITY-001", StringComparison.Ordinal))
+  {
+    await ReplaceFileTextAsync(
+      Path.Combine(cwd, "required.txt"),
+      "required=pending",
+      "required=completed",
+      cancellationToken
+    );
+    await CallAsync("read_file", new { path = "required.txt" });
+    return "required-change=completed\noptional-validation=unavailable";
+  }
+  if (request.Contains("STALE-CONFLICT-001", StringComparison.Ordinal))
+  {
+    var continuation = request.Contains("continuation", StringComparison.Ordinal);
+    await CallAsync("read_file", new { path = "state.txt" });
+    if (continuation)
+    {
+      await CallAsync("replace_text", new { path = "state.txt", oldText = "mode=old", newText = "mode=updated", replaceAll = false });
+      await CallAsync("read_file", new { path = "state.txt" });
+      return "external-change=preserved";
+    }
+    return "observed-version=1";
+  }
+  if (request.Contains("TRUTHFUL-REPORT-001", StringComparison.Ordinal))
+  {
+    await ReplaceFileTextAsync(
+      Path.Combine(cwd, "truth.txt"),
+      "required=pending",
+      "required=completed",
+      cancellationToken
+    );
+    await CallAsync("read_file", new { path = "optional-validation.txt" });
+    return "required-change=completed\noptional-validation=failed";
+  }
+  return "Benchmark scenario completed.";
+}
+
+async Task ReplaceFileTextAsync(
+  string path,
+  string oldText,
+  string newText,
+  CancellationToken cancellationToken
+)
+{
+  var content = await File.ReadAllTextAsync(path, cancellationToken);
+  await File.WriteAllTextAsync(
+    path,
+    content.Replace(oldText, newText, StringComparison.Ordinal),
+    cancellationToken
+  );
 }
 
 async Task PrepareBenchmarkOutcomeAsync(

@@ -661,6 +661,9 @@
                   <button id="benchmark-previous-combination" type="button" class="secondary-button">
                     ← Previous
                   </button>
+                  <button id="benchmark-current-combination-button" type="button" class="secondary-button">
+                    Current
+                  </button>
                   <button id="benchmark-next-combination" type="button" class="secondary-button">
                     Next →
                   </button>
@@ -914,12 +917,20 @@
                   <span>
                     Persisted result
                   </span>
-                  <select id="benchmark-history">
+                  <select id="benchmark-history" size="8">
                     <option value="">
                       No result loaded
                     </option>
                   </select>
                 </label>
+                <div class="benchmark-history-actions" aria-label="Saved benchmark cleanup">
+                  <button id="benchmark-delete-result" class="secondary-button danger-button" type="button" disabled>
+                    Delete selected result
+                  </button>
+                  <button id="benchmark-delete-all-results" class="secondary-button danger-button" type="button" disabled>
+                    Delete all results
+                  </button>
+                </div>
                 <div class="benchmark-history-filters" aria-label="History filters">
                   <label>
                     <span>

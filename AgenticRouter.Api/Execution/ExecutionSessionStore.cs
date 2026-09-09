@@ -1798,7 +1798,11 @@ public sealed class ExecutionSession
         var info = new DirectoryInfo(candidate);
         return $"directory:{relativePath}:{info.LastWriteTimeUtc.Ticks}:{observation}";
       }
-      return $"absent:{relativePath}:{observation}";
+      var parent = Path.GetDirectoryName(candidate);
+      var parentState = parent is not null && Directory.Exists(parent)
+        ? $"parent-directory:{new DirectoryInfo(parent).LastWriteTimeUtc.Ticks}"
+        : "parent-absent";
+      return $"absent:{relativePath}:{observation}:{parentState}";
     }
     catch (Exception exception) when (
       exception is ArgumentException
@@ -3047,11 +3051,19 @@ public sealed class ExecutionSession
 
   private bool RequiresMutationUnsafe()
   {
-    return new[]
-    {
-      "implement", "change", "edit", "update", "fix", "create", "delete", "remove",
-      "alter", "corrig", "criar", "excluir", "apagar", "adicionar", "remover"
-    }.Any(fragment => Objective.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+    var affirmativeObjective = System.Text.RegularExpressions.Regex.Replace(
+      Objective,
+      @"\b(?:do\s+not|don't|never|without|n[aã]o)\b[^.!?;\r\n]*",
+      string.Empty,
+      System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+    );
+    return System.Text.RegularExpressions.Regex.IsMatch(
+      affirmativeObjective,
+      @"\b(?:implement(?:s|ed|ing|ation)?|chang(?:e|es|ed|ing)|edit(?:s|ed|ing)?|updat(?:e|es|ed|ing)|fix(?:es|ed|ing)?|creat(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|modif(?:y|ies|ied|ying|ication)|alter(?:s|ed|ing)?|corrig\w*|criar|cri(?:e|a|em|ando)|exclu\w*|apag\w*|adicion\w*)\b",
+      System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+    );
   }
 
   private bool HasVerifiedMutationUnsafe()

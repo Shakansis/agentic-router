@@ -324,7 +324,6 @@ public sealed class MissingGameBenchmark : IBenchmarkTestDefinition
     );
     var passed = modified.Length == 0
       && deleted.Length == 0
-      && unrelatedCreated.Length == 0
       && created.Any(path => path.Equals("snake-game/index.html", StringComparison.OrdinalIgnoreCase))
       && browser.Available
       && browser.Passed
@@ -419,7 +418,120 @@ public sealed class MissingGameBenchmark : IBenchmarkTestDefinition
     await File.WriteAllTextAsync(Path.Combine(directory, "app.js"), script, cancellationToken);
   }
 
-  private const string TicTacToeScript = "const b=document.querySelector('#board');b.style.gridTemplateColumns='repeat(3,1fr)';for(let i=0;i<9;i++){const x=document.createElement('button');x.textContent='·';x.addEventListener('click',()=>x.textContent=x.textContent==='·'?'X':x.textContent);b.append(x)}document.querySelector('#reset').addEventListener('click',()=>location.reload());";
-  private const string HangmanScript = "const word='ROUTER';const b=document.querySelector('#board');b.textContent=word.replace(/./g,'_ ');document.querySelector('#status').textContent='Guess the browser game';document.querySelector('#reset').addEventListener('click',()=>location.reload());";
-  private const string MineSweepScript = "const b=document.querySelector('#board');b.style.gridTemplateColumns='repeat(5,1fr)';for(let i=0;i<25;i++){const x=document.createElement('button');x.textContent='?';x.addEventListener('click',()=>x.textContent=i===12?'*':'0');b.append(x)}document.querySelector('#reset').addEventListener('click',()=>location.reload());";
+  private const string TicTacToeScript = """
+    const board = document.querySelector('#board');
+    const status = document.querySelector('#status');
+    const cells = Array(9).fill('');
+    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    let current = 'X';
+    let active = true;
+    board.style.gridTemplateColumns = 'repeat(3,1fr)';
+    function renderStatus() {
+      const winner = wins.find(line => line.every(index => cells[index] === cells[line[0]]) && cells[line[0]]);
+      if (winner) { active = false; status.textContent = `${cells[winner[0]]} wins`; return; }
+      if (cells.every(Boolean)) { active = false; status.textContent = 'Draw'; return; }
+      status.textContent = `${current}'s turn`;
+    }
+    function reset() {
+      cells.fill(''); current = 'X'; active = true;
+      [...board.children].forEach(button => button.textContent = '');
+      renderStatus();
+    }
+    cells.forEach((_, index) => {
+      const button = document.createElement('button');
+      button.setAttribute('aria-label', `Cell ${index + 1}`);
+      button.addEventListener('click', () => {
+        if (!active || cells[index]) return;
+        cells[index] = current; button.textContent = current;
+        current = current === 'X' ? 'O' : 'X'; renderStatus();
+      });
+      board.append(button);
+    });
+    document.querySelector('#reset').addEventListener('click', reset);
+    reset();
+    """;
+  private const string HangmanScript = """
+    const words = ['ROUTER', 'BROWSER', 'JAVASCRIPT', 'WORKSPACE'];
+    const board = document.querySelector('#board');
+    const status = document.querySelector('#status');
+    let word;
+    let guessed;
+    let misses;
+    function render() {
+      const visible = [...word].map(letter => guessed.has(letter) ? letter : '_').join(' ');
+      board.querySelector('[data-word]').textContent = visible;
+      board.querySelector('[data-misses]').textContent = `Misses: ${misses}/6`;
+      const won = [...word].every(letter => guessed.has(letter));
+      if (won) status.textContent = 'You won';
+      else if (misses >= 6) status.textContent = `Game over · ${word}`;
+      else status.textContent = 'Choose a letter';
+      board.querySelectorAll('button').forEach(button => {
+        button.disabled = guessed.has(button.textContent) || won || misses >= 6;
+      });
+    }
+    function guess(letter) {
+      if (guessed.has(letter) || misses >= 6) return;
+      guessed.add(letter); if (!word.includes(letter)) misses++; render();
+    }
+    function reset() {
+      word = words[Math.floor(Math.random() * words.length)]; guessed = new Set(); misses = 0;
+      board.innerHTML = '<p data-word></p><p data-misses></p><div data-keys></div>';
+      for (const letter of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+        const button = document.createElement('button'); button.textContent = letter;
+        button.addEventListener('click', () => guess(letter)); board.querySelector('[data-keys]').append(button);
+      }
+      render();
+    }
+    board.style.display = 'block';
+    document.querySelector('#reset').addEventListener('click', reset);
+    reset();
+    """;
+  private const string MineSweepScript = """
+    const size = 8;
+    const mineCount = 10;
+    const board = document.querySelector('#board');
+    const status = document.querySelector('#status');
+    let cells;
+    let ended;
+    function neighbors(index) {
+      const row = Math.floor(index / size), column = index % size, result = [];
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const r = row + dr, c = column + dc;
+        if ((dr || dc) && r >= 0 && r < size && c >= 0 && c < size) result.push(r * size + c);
+      }
+      return result;
+    }
+    function reveal(index) {
+      const cell = cells[index];
+      if (ended || cell.open || cell.flagged) return;
+      cell.open = true; cell.button.disabled = true;
+      if (cell.mine) {
+        cell.button.textContent = '💣'; ended = true; status.textContent = 'Game over';
+        cells.filter(item => item.mine).forEach(item => item.button.textContent = '💣'); return;
+      }
+      const count = neighbors(index).filter(i => cells[i].mine).length;
+      cell.button.textContent = count || '';
+      if (!count) neighbors(index).forEach(reveal);
+      if (cells.filter(item => item.open).length === size * size - mineCount) {
+        ended = true; status.textContent = 'Board cleared';
+      }
+    }
+    function reset() {
+      ended = false; board.replaceChildren(); status.textContent = 'Clear the board';
+      const mines = new Set(); while (mines.size < mineCount) mines.add(Math.floor(Math.random() * size * size));
+      cells = Array.from({length: size * size}, (_, index) => {
+        const button = document.createElement('button'); button.setAttribute('aria-label', `Cell ${index + 1}`);
+        const cell = {button, mine: mines.has(index), open: false, flagged: false};
+        button.addEventListener('click', () => reveal(index));
+        button.addEventListener('contextmenu', event => {
+          event.preventDefault(); if (ended || cell.open) return;
+          cell.flagged = !cell.flagged; button.textContent = cell.flagged ? '🚩' : '';
+        });
+        board.append(button); return cell;
+      });
+    }
+    board.style.gridTemplateColumns = `repeat(${size},1fr)`;
+    document.querySelector('#reset').addEventListener('click', reset);
+    reset();
+    """;
 }

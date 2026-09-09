@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Markdown;
 
 namespace AgenticRouter.Api.Benchmarking;
 
@@ -458,6 +459,17 @@ public interface IBenchmarkResultStore
     int limit,
     CancellationToken cancellationToken
   );
+
+  Task<IReadOnlyList<BenchmarkSuiteRunResult>> ListAllAsync(
+    CancellationToken cancellationToken
+  );
+
+  Task<bool> DeleteAsync(
+    string runId,
+    CancellationToken cancellationToken
+  );
+
+  Task<int> DeleteAllAsync(CancellationToken cancellationToken);
 }
 
 public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
@@ -469,10 +481,16 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
   };
   private readonly string _directory;
   private readonly SemaphoreSlim _gate = new(1, 1);
+  private readonly BenchmarkScorer _legacyScorer = new();
+  private readonly IMarkdownRenderer _markdown;
 
-  public JsonBenchmarkResultStore(string dataDirectory)
+  public JsonBenchmarkResultStore(
+    string dataDirectory,
+    IMarkdownRenderer markdown
+  )
   {
     _directory = Path.Combine(Path.GetFullPath(dataDirectory), "benchmark-results");
+    _markdown = markdown;
   }
 
   public async Task SaveAsync(
@@ -533,7 +551,10 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
         return null;
       }
       var json = await File.ReadAllTextAsync(path, cancellationToken);
-      return JsonSerializer.Deserialize<BenchmarkSuiteRunResult>(json, JsonOptions);
+      var result = JsonSerializer.Deserialize<BenchmarkSuiteRunResult>(json, JsonOptions);
+      return result is null
+        ? null
+        : RenderNarrativeMarkdown(NormalizeLegacyCleanupFailure(result));
     }
     finally
     {
@@ -569,7 +590,7 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
           );
           if (result is not null)
           {
-            results.Add(result);
+            results.Add(NormalizeLegacyCleanupFailure(result));
           }
         }
         catch (JsonException)
@@ -579,6 +600,91 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
       return results
         .OrderByDescending(result => result.StartedAt)
         .ToArray();
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
+  public async Task<IReadOnlyList<BenchmarkSuiteRunResult>> ListAllAsync(
+    CancellationToken cancellationToken
+  )
+  {
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (!Directory.Exists(_directory))
+      {
+        return [];
+      }
+      var results = new List<BenchmarkSuiteRunResult>();
+      foreach (var path in Directory.EnumerateFiles(_directory, "*.json"))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+          var json = await File.ReadAllTextAsync(path, cancellationToken);
+          var result = JsonSerializer.Deserialize<BenchmarkSuiteRunResult>(
+            json,
+            JsonOptions
+          );
+          if (result is not null)
+          {
+            results.Add(NormalizeLegacyCleanupFailure(result));
+          }
+        }
+        catch (JsonException)
+        {
+        }
+      }
+      return results.OrderByDescending(result => result.StartedAt).ToArray();
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
+  public async Task<bool> DeleteAsync(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    var path = Resolve(runId);
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (!File.Exists(path))
+      {
+        return false;
+      }
+      File.Delete(path);
+      return true;
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
+  public async Task<int> DeleteAllAsync(CancellationToken cancellationToken)
+  {
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (!Directory.Exists(_directory))
+      {
+        return 0;
+      }
+      var deleted = 0;
+      foreach (var path in Directory.EnumerateFiles(_directory, "*.json"))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        File.Delete(path);
+        deleted++;
+      }
+      return deleted;
     }
     finally
     {
@@ -598,6 +704,181 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
     }
     var normalized = parsed.ToString("N");
     return Path.Combine(_directory, normalized + ".json");
+  }
+
+  private BenchmarkSuiteRunResult NormalizeLegacyCleanupFailure(
+    BenchmarkSuiteRunResult result
+  )
+  {
+    static bool IsLegacyCleanupFailure(BenchmarkRunResult test) => string.Equals(
+      test.RawResult.Error?.Code,
+      "benchmark-cleanup-failed",
+      StringComparison.Ordinal
+    );
+
+    if (!result.HarnessResults.SelectMany(harness => harness.Tests)
+      .Concat((result.Cells ?? []).SelectMany(cell => cell.Result?.Tests ?? []))
+      .Any(IsLegacyCleanupFailure))
+    {
+      return result;
+    }
+
+    BenchmarkRunResult NormalizeTest(BenchmarkRunResult test)
+    {
+      if (!IsLegacyCleanupFailure(test))
+      {
+        return test;
+      }
+      var executionStatus = test.RawResult.ValidationFacts is not null
+        && test.RawResult.ValidationFacts.TryGetValue("executeTerminal", out var terminal)
+        && !string.IsNullOrWhiteSpace(terminal)
+          ? terminal
+          : BenchmarkExecutionStatusIds.Completed;
+      var status = test.RawResult.ObjectiveAchieved
+        ? BenchmarkResultStatusIds.Pass
+        : BenchmarkResultStatusIds.Fail;
+      var raw = test.RawResult with
+      {
+        Status = status,
+        ExecutionStatus = executionStatus,
+        HostValidationResult = test.RawResult.ObjectiveAchieved ? "pass" : "fail",
+        Error = null
+      };
+      return test with
+      {
+        Run = test.Run with { ExecutionStatus = executionStatus },
+        RawResult = raw,
+        WorkspaceCleanedUp = false,
+        WorkspaceRetained = true,
+        Score = _legacyScorer.Score(raw, result.ScoreWeights)
+      };
+    }
+
+    static BenchmarkHarnessResult RebuildHarness(
+      BenchmarkHarnessResult harness,
+      IReadOnlyList<BenchmarkRunResult> tests
+    )
+    {
+      var divisor = Math.Max(1, harness.Total);
+      var terminality = tests.Sum(test => test.RawResult.BehaviorMetrics?.Terminality
+        ?? (test.RawResult.ExecutionStatus == BenchmarkExecutionStatusIds.Completed ? 100 : 0));
+      return harness with
+      {
+        Tests = tests,
+        Passed = tests.Count(test => test.RawResult.Status == BenchmarkResultStatusIds.Pass),
+        Score = decimal.Round(
+          tests.Sum(test => test.Score?.Total ?? 0m) / divisor,
+          2,
+          MidpointRounding.AwayFromZero
+        ),
+        Terminality = (int)Math.Round(
+          terminality / (decimal)divisor,
+          MidpointRounding.AwayFromZero
+        )
+      };
+    }
+
+    BenchmarkHarnessResult NormalizeHarness(BenchmarkHarnessResult harness)
+    {
+      var tests = harness.Tests.Select(NormalizeTest).ToArray();
+      return RebuildHarness(harness, tests);
+    }
+
+    var harnesses = result.HarnessResults.Select(NormalizeHarness).ToArray();
+    var cells = (result.Cells ?? []).Select(cell =>
+    {
+      if (cell.Result is null)
+      {
+        return cell;
+      }
+      var hadLegacyCleanupFailure = cell.Result.Tests.Any(IsLegacyCleanupFailure);
+      var harness = NormalizeHarness(cell.Result);
+      return cell with
+      {
+        Result = harness,
+        Status = hadLegacyCleanupFailure
+          ? BenchmarkMatrixCellStatusIds.Completed
+          : cell.Status,
+        Passed = harness.Passed,
+        Score = harness.Score,
+        Terminality = harness.Terminality
+      };
+    }).ToArray();
+    var ranking = harnesses
+      .OrderByDescending(harness => harness.Score)
+      .ThenByDescending(harness => harness.Passed)
+      .ThenBy(harness => harness.DurationMilliseconds)
+      .Select((harness, index) => new BenchmarkRankingEntry(
+        index + 1,
+        harness.Harness,
+        harness.Passed,
+        harness.Score,
+        harness.DurationMilliseconds,
+        harness.Terminality
+      )).ToArray();
+    var pairRanking = cells
+      .OrderByDescending(cell => cell.Score)
+      .ThenByDescending(cell => cell.Passed)
+      .ThenBy(cell => cell.DurationMilliseconds)
+      .Select((cell, index) => new BenchmarkMatrixRankingEntry(
+        index + 1,
+        cell.Model,
+        cell.Harness,
+        cell.Passed,
+        cell.Score,
+        cell.DurationMilliseconds,
+        cell.Terminality,
+        cell.Status
+      )).ToArray();
+    var allPassed = cells.Length > 0
+      ? cells.All(cell => cell.Result is not null && cell.Passed == cell.Total)
+      : harnesses.Length > 0 && harnesses.All(harness => harness.Passed == harness.Total);
+    return result with
+    {
+      FinalStatus = allPassed ? BenchmarkRunStatusIds.Passed : result.FinalStatus,
+      HarnessResults = harnesses,
+      Ranking = ranking,
+      Cells = cells,
+      PairRanking = pairRanking
+    };
+  }
+
+  private BenchmarkSuiteRunResult RenderNarrativeMarkdown(
+    BenchmarkSuiteRunResult result
+  )
+  {
+    BenchmarkRunResult RenderTest(BenchmarkRunResult test)
+    {
+      var raw = test.RawResult;
+      return test with
+      {
+        RawResult = raw with
+        {
+          FinalHarnessReportHtml = string.IsNullOrWhiteSpace(raw.FinalHarnessReport)
+            ? string.Empty
+            : _markdown.Render(raw.FinalHarnessReport),
+          Turns = raw.Turns?.Select(turn => turn with
+          {
+            FinalReportHtml = string.IsNullOrWhiteSpace(turn.FinalReport)
+              ? string.Empty
+              : _markdown.Render(turn.FinalReport)
+          }).ToArray()
+        }
+      };
+    }
+
+    BenchmarkHarnessResult RenderHarness(BenchmarkHarnessResult harness) => harness with
+    {
+      Tests = harness.Tests.Select(RenderTest).ToArray()
+    };
+
+    return result with
+    {
+      HarnessResults = result.HarnessResults.Select(RenderHarness).ToArray(),
+      Cells = result.Cells?.Select(cell => cell.Result is null
+        ? cell
+        : cell with { Result = RenderHarness(cell.Result) }).ToArray()
+    };
   }
 }
 

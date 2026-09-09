@@ -254,7 +254,8 @@ public sealed record BenchmarkRawResult(
   IReadOnlyList<BenchmarkTurnEvidence>? Turns = null,
   IReadOnlyList<BenchmarkHostEvent>? HostEvents = null,
   IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null,
-  BenchmarkOperationalDiagnostics? OperationalDiagnostics = null
+  BenchmarkOperationalDiagnostics? OperationalDiagnostics = null,
+  string? FinalHarnessReportHtml = null
 );
 
 public sealed record BenchmarkOperationalDiagnostics(
@@ -317,7 +318,8 @@ public sealed record BenchmarkTurnEvidence(
   int? ToolCallCount,
   int? SurfacedErrorCount,
   int? RecoveredErrorCount,
-  long DurationMilliseconds
+  long DurationMilliseconds,
+  string? FinalReportHtml = null
 );
 
 public sealed record BenchmarkHostEvent(
@@ -389,7 +391,8 @@ public sealed record BenchmarkRunResult(
   BenchmarkRawResult RawResult,
   bool WorkspaceCleanedUp,
   BenchmarkScore? Score = null,
-  long DurationMilliseconds = 0
+  long DurationMilliseconds = 0,
+  bool WorkspaceRetained = false
 );
 
 public sealed record BenchmarkHarnessResult(

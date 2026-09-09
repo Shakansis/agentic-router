@@ -160,7 +160,8 @@ public abstract class AgentBehaviorBenchmark : IBenchmarkTestDefinition
       metrics,
       evidence?.Turns,
       evidence?.HostEvents,
-      evidence?.ToolCalls
+      evidence?.ToolCalls,
+      evidence?.OperationalDiagnostics
     );
   }
 

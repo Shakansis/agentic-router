@@ -1,11 +1,9 @@
-using System.Diagnostics;
-using System.Net;
 using System.Net.Http.Json;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
-using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace AgenticRouter.Api.Benchmarking;
 
@@ -15,8 +13,9 @@ public interface IBenchmarkProductionExecuteRunner
     string prompt,
     string model,
     string harness,
-    ApplicationSettings sourceSettings,
     BenchmarkWorkspace workspace,
+    int turnNumber,
+    string turnName,
     BenchmarkProgressContext? progress,
     CancellationToken cancellationToken
   );
@@ -28,10 +27,21 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
   {
     WriteIndented = true
   };
+  private readonly IHttpClientFactory _httpClients;
+  private readonly IServer _server;
+  private readonly IBenchmarkExecutionScopeRegistry _scopes;
   private readonly ILogger<BenchmarkProductionExecuteRunner> _logger;
 
-  public BenchmarkProductionExecuteRunner(ILogger<BenchmarkProductionExecuteRunner> logger)
+  public BenchmarkProductionExecuteRunner(
+    IHttpClientFactory httpClients,
+    IServer server,
+    IBenchmarkExecutionScopeRegistry scopes,
+    ILogger<BenchmarkProductionExecuteRunner> logger
+  )
   {
+    _httpClients = httpClients;
+    _server = server;
+    _scopes = scopes;
     _logger = logger;
   }
 
@@ -39,98 +49,71 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     string prompt,
     string model,
     string harness,
-    ApplicationSettings sourceSettings,
     BenchmarkWorkspace workspace,
+    int turnNumber,
+    string turnName,
     BenchmarkProgressContext? progress,
     CancellationToken cancellationToken
   )
   {
     var setupStartedAt = DateTimeOffset.UtcNow;
-    var dataDirectory = Path.Combine(workspace.RunDirectory, "production-host-data");
-    var nestedBenchmarkDirectory = Path.Combine(workspace.RunDirectory, "production-host-benchmarks");
-    Directory.CreateDirectory(dataDirectory);
-    Directory.CreateDirectory(nestedBenchmarkDirectory);
-    var isolatedSettings = sourceSettings with
+    _logger.LogInformation(
+      "Benchmark turn {TurnNumber} ({TurnName}) is entering production Execute with {Model} and {Harness}.",
+      turnNumber,
+      turnName,
+      model,
+      harness
+    );
+    using var scope = _scopes.Register(workspace, model);
+    using var client = _httpClients.CreateClient();
+    client.BaseAddress = ResolveLoopbackAddress();
+    client.Timeout = Timeout.InfiniteTimeSpan;
+    client.DefaultRequestHeaders.Add(BenchmarkExecutionScopeRegistry.HeaderName, scope.Token);
+    var setupDuration = Elapsed(setupStartedAt);
+    progress?.Publish(
+      BenchmarkProgressTypeIds.Activity,
+      BenchmarkLiveStateIds.Running,
+      "The scenario entered the production Execute pipeline with a disposable trusted workspace.",
+      BenchmarkActivityKindIds.HostValidation
+    );
+    var browserSessionId = $"benchmark-{workspace.Id}";
+    var request = new ChatRequest(
+      prompt,
+      model,
+      [],
+      InteractionMode: "execute",
+      Harness: harness,
+      ApprovalPolicy: "auto",
+      BrowserSessionId: browserSessionId,
+      AutoModelHarness: false,
+      ExecutionStrategy: "auto",
+      SupervisionResumePolicy: "manual"
+    );
+    using var content = new StringContent(
+      JsonSerializer.Serialize(request, JsonOptions),
+      Encoding.UTF8,
+      "application/json"
+    );
+    var executionStartedAt = DateTimeOffset.UtcNow;
+    using var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
     {
-      TrustedWorkspacePath = workspace.WorkspacePath,
-      DefaultModel = model,
-      CoordinatorModel = model,
-      ActionModel = model,
-      ValidationProfile = null,
-      CloudProviders = new CloudProvidersSettings(),
-      WebSearch = new WebSearchSettings(),
-      KnowledgeProviders = new KnowledgeProvidersSettings(),
-      Incidents = sourceSettings.Incidents with { Enabled = false }
+      Content = content
     };
-    await File.WriteAllTextAsync(
-      Path.Combine(dataDirectory, "settings.json"),
-      JsonSerializer.Serialize(isolatedSettings, JsonOptions),
+    using var response = await client.SendAsync(
+      requestMessage,
+      HttpCompletionOption.ResponseHeadersRead,
       cancellationToken
     );
-
-    var port = ReserveLoopbackPort();
-    var endpoint = new Uri($"http://127.0.0.1:{port}");
-    using var process = StartProductionHost(
-      endpoint,
-      dataDirectory,
-      nestedBenchmarkDirectory
-    );
-    var output = new BoundedProcessOutput();
-    process.OutputDataReceived += (_, args) => output.Add(args.Data);
-    process.ErrorDataReceived += (_, args) => output.Add(args.Data);
-    process.BeginOutputReadLine();
-    process.BeginErrorReadLine();
-
+    response.EnsureSuccessStatusCode();
+    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+    using var reader = new StreamReader(stream);
+    var collector = new ProductionEvidenceCollector(setupDuration, turnNumber, turnName, prompt);
     try
     {
-      using var client = new HttpClient
-      {
-        BaseAddress = endpoint,
-        Timeout = Timeout.InfiniteTimeSpan
-      };
-      await WaitUntilReadyAsync(client, process, cancellationToken);
-      var setupDuration = Elapsed(setupStartedAt);
-      progress?.Publish(
-        BenchmarkProgressTypeIds.Activity,
-        BenchmarkLiveStateIds.Running,
-        "Production Execute host started with an isolated trusted workspace.",
-        BenchmarkActivityKindIds.HostValidation
-      );
-      var request = new ChatRequest(
-        prompt,
-        model,
-        [],
-        InteractionMode: "execute",
-        Harness: harness,
-        ApprovalPolicy: "auto",
-        BrowserSessionId: $"benchmark-{workspace.Id}",
-        AutoModelHarness: false,
-        ExecutionStrategy: "auto",
-        SupervisionResumePolicy: "manual"
-      );
-      using var content = new StringContent(
-        JsonSerializer.Serialize(request, JsonOptions),
-        Encoding.UTF8,
-        "application/json"
-      );
-      var executionStartedAt = DateTimeOffset.UtcNow;
-      using var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/api/chat/stream")
-      {
-        Content = content
-      };
-      using var response = await client.SendAsync(
-        requestMessage,
-        HttpCompletionOption.ResponseHeadersRead,
-        cancellationToken
-      );
-      response.EnsureSuccessStatusCode();
-      await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-      using var reader = new StreamReader(stream);
-      var collector = new ProductionEvidenceCollector(setupDuration);
       while (true)
       {
         cancellationToken.ThrowIfCancellationRequested();
-        var line = await reader.ReadLineAsync(cancellationToken);
+        var line = await reader.ReadLineAsync().WaitAsync(cancellationToken);
         if (line is null)
         {
           break;
@@ -144,114 +127,150 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
         {
           continue;
         }
+        var recoveriesBefore = collector.RecoveryCount;
         collector.Observe(streamEvent);
-        Publish(progress, streamEvent);
-      }
-      collector.SetExecutionDuration(Elapsed(executionStartedAt));
-      if (!string.IsNullOrWhiteSpace(collector.ExecutionSessionId))
-      {
-        try
+        if (collector.RecoveryCount > recoveriesBefore)
         {
-          var review = await client.GetFromJsonAsync<ExecutionSessionReview>(
-            $"/api/execution-sessions/{Uri.EscapeDataString(collector.ExecutionSessionId)}/review",
-            JsonOptions,
+          progress?.Publish(
+            BenchmarkProgressTypeIds.Activity,
+            BenchmarkLiveStateIds.Running,
+            "The production Host observed a successful action after a surfaced tool failure.",
+            BenchmarkActivityKindIds.RecoveredError
+          );
+        }
+        Publish(progress, streamEvent);
+        if (streamEvent.RecoveryDecision is not null)
+        {
+          collector.MarkAwaitingUserRecovery(streamEvent.RecoveryDecision);
+          break;
+        }
+        if (ShouldApproveBenchmarkDeletion(streamEvent.LocalAction, workspace))
+        {
+          await DecideAsync(
+            client,
+            browserSessionId,
+            streamEvent.LocalAction!,
+            approved: true,
             cancellationToken
           );
-          collector.Observe(review);
         }
-        catch (HttpRequestException exception)
+        else if (IsPendingApproval(streamEvent.LocalAction))
         {
-          _logger.LogDebug(exception, "Benchmark production execution review was unavailable.");
+          await DecideAsync(
+            client,
+            browserSessionId,
+            streamEvent.LocalAction!,
+            approved: false,
+            cancellationToken
+          );
         }
       }
-      return collector.CreateEvidence();
     }
-    finally
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
-      await StopOwnedProcessAsync(process);
+      collector.MarkCancelled();
+      response.Dispose();
     }
-  }
-
-  private static Process StartProductionHost(
-    Uri endpoint,
-    string dataDirectory,
-    string benchmarkDirectory
-  )
-  {
-    var applicationAssembly = typeof(BenchmarkProductionExecuteRunner).Assembly;
-    var applicationName = applicationAssembly.GetName().Name;
-    var currentExecutable = Environment.ProcessPath;
-    var runningApplicationExecutable = !string.IsNullOrWhiteSpace(currentExecutable)
-      && string.Equals(
-        Path.GetFileNameWithoutExtension(currentExecutable),
-        applicationName,
-        OperatingSystem.IsWindows()
-          ? StringComparison.OrdinalIgnoreCase
-          : StringComparison.Ordinal
-      );
-    var start = new ProcessStartInfo
+    collector.SetExecutionDuration(Elapsed(executionStartedAt));
+    _logger.LogInformation(
+      "Benchmark turn {TurnNumber} ({TurnName}) left production Execute after {DurationMilliseconds} ms.",
+      turnNumber,
+      turnName,
+      Elapsed(executionStartedAt)
+    );
+    if (!string.IsNullOrWhiteSpace(collector.ExecutionSessionId))
     {
-      FileName = runningApplicationExecutable
-        ? currentExecutable!
-        : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
-      WorkingDirectory = AppContext.BaseDirectory,
-      UseShellExecute = false,
-      RedirectStandardOutput = true,
-      RedirectStandardError = true,
-      CreateNoWindow = true
-    };
-    if (!runningApplicationExecutable)
-    {
-      if (string.IsNullOrWhiteSpace(applicationAssembly.Location))
+      try
       {
-        throw new InvalidOperationException("The production application entry point is unavailable.");
+        var review = await client.GetFromJsonAsync<ExecutionSessionReview>(
+          $"/api/execution-sessions/{Uri.EscapeDataString(collector.ExecutionSessionId)}/review",
+          JsonOptions,
+          cancellationToken.IsCancellationRequested
+            ? CancellationToken.None
+            : cancellationToken
+        );
+        collector.Observe(review);
       }
-      start.ArgumentList.Add(applicationAssembly.Location);
+      catch (HttpRequestException exception)
+      {
+        _logger.LogDebug(exception, "Benchmark production execution review was unavailable.");
+      }
     }
-    start.ArgumentList.Add("--urls");
-    start.ArgumentList.Add(endpoint.ToString().TrimEnd('/'));
-    start.Environment["AgenticRouter__DataDirectory"] = dataDirectory;
-    start.Environment["AgenticRouter__Benchmarking__RootDirectory"] = benchmarkDirectory;
-    start.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
-    return Process.Start(start)
-      ?? throw new InvalidOperationException("The isolated production Execute host could not be started.");
+    return collector.CreateEvidence();
   }
 
-  private static async Task WaitUntilReadyAsync(
+  private Uri ResolveLoopbackAddress()
+  {
+    var addresses = _server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [];
+    foreach (var address in addresses)
+    {
+      if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp)
+      {
+        continue;
+      }
+      if (uri.Host is "127.0.0.1" or "localhost" or "[::1]" or "::1")
+      {
+        return uri;
+      }
+    }
+    throw new InvalidOperationException("The production Host has no active HTTP loopback endpoint.");
+  }
+
+  private static bool ShouldApproveBenchmarkDeletion(
+    LocalActionEvent? action,
+    BenchmarkWorkspace workspace
+  ) => action is
+  {
+    Tool: "delete_paths",
+    State: "awaiting-approval",
+    RequiresApproval: true,
+    ExecutionSessionId: not null,
+    RelativePaths: { Count: > 0 }
+  } && action.RelativePaths.All(path => IsSafeRelativePath(workspace.WorkspacePath, path));
+
+  private static bool IsPendingApproval(LocalActionEvent? action) => action is
+  {
+    State: "awaiting-approval",
+    RequiresApproval: true,
+    ExecutionSessionId: not null
+  };
+
+  private static bool IsSafeRelativePath(string workspacePath, string relativePath)
+  {
+    if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathFullyQualified(relativePath))
+    {
+      return false;
+    }
+    var root = Path.GetFullPath(workspacePath);
+    var candidate = Path.GetFullPath(relativePath, root);
+    return candidate.StartsWith(
+      root + Path.DirectorySeparatorChar,
+      OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal
+    );
+  }
+
+  private static async Task DecideAsync(
     HttpClient client,
-    Process process,
+    string browserSessionId,
+    LocalActionEvent action,
+    bool approved,
     CancellationToken cancellationToken
   )
   {
-    var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
-    while (DateTimeOffset.UtcNow < deadline)
-    {
-      cancellationToken.ThrowIfCancellationRequested();
-      if (process.HasExited)
-      {
-        throw new InvalidOperationException(
-          $"The isolated production Execute host exited with code {process.ExitCode}."
-        );
-      }
-      try
-      {
-        using var response = await client.GetAsync("/api/settings", cancellationToken);
-        if (response.StatusCode is HttpStatusCode.OK or HttpStatusCode.BadRequest)
-        {
-          return;
-        }
-      }
-      catch (HttpRequestException)
-      {
-      }
-      await Task.Delay(100, cancellationToken);
-    }
-    throw new TimeoutException("The isolated production Execute host did not become ready.");
+    using var response = await client.PostAsJsonAsync(
+      $"/api/actions/{Uri.EscapeDataString(action.ActionId)}/decision",
+      new ApprovalDecisionRequest(approved, browserSessionId, action.ExecutionSessionId!),
+      JsonOptions,
+      cancellationToken
+    );
+    response.EnsureSuccessStatusCode();
   }
 
   private static void Publish(BenchmarkProgressContext? progress, ChatStreamEvent streamEvent)
   {
-    if (progress is null)
+    if (progress is null || !ShouldPublishLiveActivity(streamEvent))
     {
       return;
     }
@@ -272,6 +291,55 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     );
   }
 
+  private static bool ShouldPublishLiveActivity(ChatStreamEvent streamEvent)
+  {
+    if (streamEvent.LocalAction is { } action)
+    {
+      return action.State is "completed"
+        or "failed"
+        or "rejected"
+        or "denied"
+        or "awaiting-approval";
+    }
+    if (streamEvent.Error is not null)
+    {
+      return true;
+    }
+    if (
+      streamEvent.ContextUsage is not null
+      || streamEvent.Type is "context.usage"
+        or "request.heartbeat"
+        or "response.delta"
+        or "response.completed"
+        or "reasoning.delta"
+    )
+    {
+      return false;
+    }
+    if (streamEvent.Type.StartsWith("request.slow-", StringComparison.Ordinal)
+      || streamEvent.Type.StartsWith("action.", StringComparison.Ordinal)
+      || streamEvent.Type.Contains("recovery", StringComparison.OrdinalIgnoreCase))
+    {
+      return true;
+    }
+    if (
+      streamEvent.Type.StartsWith("execution", StringComparison.Ordinal)
+      && (streamEvent.Type.Contains("completed", StringComparison.OrdinalIgnoreCase)
+        || streamEvent.Type.Contains("failed", StringComparison.OrdinalIgnoreCase)
+        || streamEvent.Type.Contains("blocked", StringComparison.OrdinalIgnoreCase)
+        || streamEvent.Type.Contains("cancel", StringComparison.OrdinalIgnoreCase))
+    )
+    {
+      return true;
+    }
+    return streamEvent.Type.StartsWith("supervision.", StringComparison.Ordinal)
+      && streamEvent.Type is not (
+        "supervision.turn-reasoning"
+        or "supervision.turn-commentary"
+        or "supervision.turn-status"
+      );
+  }
+
   private static string ActivityKind(string tool) => tool switch
   {
     "read_file" or "list_files" or "search_text" => BenchmarkActivityKindIds.FileRead,
@@ -282,69 +350,22 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     _ => BenchmarkActivityKindIds.Tool
   };
 
-  private static int ReserveLoopbackPort()
-  {
-    var listener = new TcpListener(IPAddress.Loopback, 0);
-    listener.Start();
-    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-    listener.Stop();
-    return port;
-  }
-
-  private static async Task StopOwnedProcessAsync(Process process)
-  {
-    if (!process.HasExited)
-    {
-      try
-      {
-        process.Kill(entireProcessTree: true);
-      }
-      catch (InvalidOperationException)
-      {
-      }
-    }
-    try
-    {
-      await process.WaitForExitAsync();
-    }
-    catch (InvalidOperationException)
-    {
-    }
-  }
-
   private static long Elapsed(DateTimeOffset startedAt) =>
     Math.Max(0, (long)(DateTimeOffset.UtcNow - startedAt).TotalMilliseconds);
-
-  private sealed class BoundedProcessOutput
-  {
-    private readonly Queue<string> _lines = new();
-
-    public void Add(string? line)
-    {
-      if (string.IsNullOrWhiteSpace(line))
-      {
-        return;
-      }
-      lock (_lines)
-      {
-        _lines.Enqueue(line);
-        while (_lines.Count > 20)
-        {
-          _lines.Dequeue();
-        }
-      }
-    }
-  }
 
   private sealed class ProductionEvidenceCollector
   {
     private readonly long _setupDuration;
+    private readonly int _turnNumber;
+    private readonly string _turnName;
+    private readonly string _prompt;
     private readonly Dictionary<string, LocalActionEvent> _actions = new(StringComparer.Ordinal);
     private readonly HashSet<string> _toolSignatures = new(StringComparer.Ordinal);
     private readonly HashSet<string> _actionFingerprints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ContextUsageView> _usage = new(StringComparer.Ordinal);
     private readonly HashSet<string> _turns = new(StringComparer.Ordinal);
     private readonly HashSet<string> _recoveryEvents = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _pendingFailedActions = new(StringComparer.Ordinal);
     private readonly HashSet<string> _supervisorTurns = new(StringComparer.Ordinal);
     private readonly HashSet<string> _workerTurns = new(StringComparer.Ordinal);
     private readonly List<BenchmarkToolCallEvidence> _toolTrace = [];
@@ -361,15 +382,38 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     private ExecutionSessionReview? _review;
     private string _resolvedStrategy = "direct";
     private string _terminalReason = "stream-ended-without-terminal";
+    private string? _terminalMessage;
 
-    public ProductionEvidenceCollector(long setupDuration)
+    public ProductionEvidenceCollector(
+      long setupDuration,
+      int turnNumber,
+      string turnName,
+      string prompt
+    )
     {
       _setupDuration = setupDuration;
+      _turnNumber = turnNumber;
+      _turnName = turnName;
+      _prompt = prompt;
     }
 
     public string? ExecutionSessionId { get; private set; }
 
+    public int RecoveryCount => _recoveries;
+
     public void SetExecutionDuration(long value) => _executionDuration = value;
+
+    public void MarkAwaitingUserRecovery(RecoveryDecisionEvent recovery)
+    {
+      _terminalReason = "awaiting-user-recovery";
+      _terminalMessage = recovery.Reason;
+    }
+
+    public void MarkCancelled()
+    {
+      _cancelled = true;
+      _terminalReason = "request.cancelled";
+    }
 
     public void Observe(ChatStreamEvent streamEvent)
     {
@@ -384,6 +428,10 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       {
         _completed = true;
         _terminalReason = streamEvent.ExecutionSession?.CompletionStatus ?? "response.completed";
+        if (_report.Length == 0 && !string.IsNullOrWhiteSpace(streamEvent.ResponseTail))
+        {
+          _report.Append(streamEvent.ResponseTail);
+        }
       }
       else if (streamEvent.Type == "request.cancelled")
       {
@@ -509,7 +557,9 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
         ? null
         : new BenchmarkError(
           _error?.Code ?? _terminalReason,
-          _error?.Message ?? "Production Execute ended without a successful terminal result.",
+          _error?.Message
+            ?? _terminalMessage
+            ?? "Production Execute ended without a successful terminal result.",
           _error?.Stage ?? "production-execute",
           _error?.Recoverable ?? true
         );
@@ -524,9 +574,9 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
         diagnostics.OutputTokens,
         [
           new BenchmarkTurnEvidence(
-            1,
-            "Production Execute",
-            MissingGameBenchmark.Prompt,
+            _turnNumber,
+            _turnName,
+            _prompt,
             executionStatus,
             _report.ToString(),
             latestActions.Length,
@@ -537,7 +587,7 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
         ],
         [
           new BenchmarkHostEvent(
-            1,
+            _turnNumber,
             "production-execute",
             "The scenario ran through the production Execute endpoint.",
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -563,15 +613,47 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       {
         _validationCodes.Add(action.Code);
       }
-      if (_toolStates.Add($"{action.ActionId}:{action.State}"))
+      var canonicalState = action.State switch
+      {
+        "executing" or "running" => "started",
+        "completed" => "completed",
+        "failed" or "rejected" => "failed",
+        _ => null
+      };
+      if (canonicalState is "failed"
+        && _toolStates.Add($"{action.ActionId}:started"))
       {
         _toolTrace.Add(new BenchmarkToolCallEvidence(
           _toolTrace.Count + 1,
-          1,
+          _turnNumber,
           action.Tool,
-          action.State,
+          "started",
+          Path: SinglePath(action)
+        ));
+      }
+      if (canonicalState is not null
+        && _toolStates.Add($"{action.ActionId}:{canonicalState}"))
+      {
+        _toolTrace.Add(new BenchmarkToolCallEvidence(
+          _toolTrace.Count + 1,
+          _turnNumber,
+          action.Tool,
+          canonicalState,
+          Path: SinglePath(action),
           ErrorCode: action.Code
         ));
+      }
+      if (canonicalState == "failed" && IsSemanticAction(action.Tool))
+      {
+        _pendingFailedActions.Add(action.ActionId);
+      }
+      else if (canonicalState == "completed"
+        && IsSemanticAction(action.Tool)
+        && _pendingFailedActions.Count > 0
+        && !_pendingFailedActions.Contains(action.ActionId))
+      {
+        _recoveries++;
+        _pendingFailedActions.Clear();
       }
       if (!firstObservation)
       {
@@ -593,6 +675,11 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       }
     }
 
+    private static string? SinglePath(LocalActionEvent action) =>
+      action.RelativePaths is { Count: 1 }
+        ? BenchmarkWorkspaceFactory.NormalizeRelative(action.RelativePaths[0])
+        : null;
+
     private void ObserveUsage(ChatStreamEvent streamEvent)
     {
       if (streamEvent.ContextUsage is null)
@@ -608,6 +695,11 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     private static bool IsMutation(string tool) => tool is
       "create_file" or "create_files" or "write_file" or "replace_text"
       or "delete_paths" or "move_path" or "rename_path";
+
+    private static bool IsSemanticAction(string tool) => !tool.StartsWith(
+      "codex_",
+      StringComparison.OrdinalIgnoreCase
+    );
 
     private static bool IsValidationCode(string? code) =>
       code?.Contains("validation", StringComparison.OrdinalIgnoreCase) == true

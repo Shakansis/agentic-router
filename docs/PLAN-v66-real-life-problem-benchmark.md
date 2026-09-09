@@ -7,7 +7,8 @@ project, do only the necessary work, and finish through production Execute.
 
 Add an independently selectable third suite, `real-life-problem` v1, containing
 one scenario: `MISSING-GAME-001`. Preserve CRUD v1, Agent Behavior v2, their
-prompts, execution paths, historical evidence, and scoring semantics.
+prompts, historical evidence, and scoring semantics. All three suites execute
+through the production Host path.
 
 The suite is implemented as an additive benchmark. Deterministic browser/API
 validation covers the successful production Execute path and rejection of a
@@ -36,10 +37,6 @@ If the production default or strategy-resolution behavior changes, record its
 version/configuration fingerprint so historical comparability is explicit.
 Separate fixed-strategy benchmarks are outside this v1 scope.
 
-The existing `BenchmarkNativeExecutor` is a dedicated eight-round filesystem
-loop with a restricted tool inventory. Do not route this scenario through it or
-extend it into another approximation of Execute.
-
 > Benchmark may isolate configuration and workspace.
 > Benchmark must not implement an alternative execution runtime.
 
@@ -55,12 +52,13 @@ Never temporarily switch the interactive user's active project or settings to th
 benchmark fixture. A benchmark-scoped trusted workspace must remain confined to
 its canonical disposable root and preserve production boundary enforcement.
 
-Prefer an existing production-supported isolation mechanism. If an additional
-process is necessary, it must run the identical production application/runtime,
-with isolated configuration and data. Its adapter may only start the application,
-submit the normal Execute request, observe production events, forward cancellation,
-and clean up processes it owns. It must not implement execution reasoning or
-change production recovery/tool availability to make the benchmark pass.
+The benchmark submits its turns to the active application's normal local
+`/api/chat/stream` endpoint. An opaque, loopback-only internal scope selects the
+disposable benchmark workspace for that request without changing the user's
+persisted active workspace, settings, permissions, or provider configuration.
+There is no child Host, benchmark-specific agent loop, reduced tool registry, or
+second managed Ollama server. CRUD, Agent Behavior, and Real Life Problem all use
+this same path.
 
 Measure setup/host-startup and external-validation time separately from execution
 duration. Record the effective execution settings and budgets for comparison.

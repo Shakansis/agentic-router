@@ -496,6 +496,37 @@ public sealed class ExecutionEffectTests
           out _
         )
       );
+
+      using var createArguments = JsonDocument.Parse(
+        "{\"path\":\"nested/item.txt\",\"content\":\"created\"}"
+      );
+      var createFailure = HostActionResultAdapter.FromLegacy(
+        "The parent directory does not exist.",
+        false,
+        "ACTION_EXECUTION",
+        session,
+        retryUnchanged: false,
+        evidenceId: "call-2"
+      );
+      session.RecordDeterministicFailure(
+        "create_file",
+        createArguments.RootElement,
+        createFailure.Code,
+        "call-2",
+        "Create the parent directory.",
+        createFailure
+      );
+      Assert.IsTrue(session.TryGetDeterministicRepeat(
+        "create_file",
+        createArguments.RootElement,
+        out _
+      ));
+      Directory.CreateDirectory(Path.Combine(workspace, "nested"));
+      Assert.IsFalse(session.TryGetDeterministicRepeat(
+        "create_file",
+        createArguments.RootElement,
+        out _
+      ));
     }
     finally
     {
@@ -522,7 +553,7 @@ public sealed class ExecutionEffectTests
         null!
       );
       using var createArguments = JsonDocument.Parse(
-        "{\"path\":\"item.txt\",\"content\":\"alpha beta\"}"
+        "{\"path\":\"nested/item.txt\",\"content\":\"alpha beta\"}"
       );
       var createProposal = new LocalActionProposal(
         "create_file",
@@ -545,7 +576,7 @@ public sealed class ExecutionEffectTests
       Assert.IsFalse(secondCreate.Changed);
       Assert.IsTrue(secondCreate.PostconditionSatisfied);
 
-      using var readArguments = JsonDocument.Parse("{\"path\":\"item.txt\"}");
+      using var readArguments = JsonDocument.Parse("{\"path\":\"nested/item.txt\"}");
       var readProposal = new LocalActionProposal(
         "read_file",
         readArguments.RootElement.Clone(),
@@ -557,7 +588,7 @@ public sealed class ExecutionEffectTests
         CancellationToken.None
       );
       using var replaceArguments = JsonDocument.Parse(
-        "{\"path\":\"item.txt\",\"oldText\":\"beta\",\"newText\":\"gamma\",\"replaceAll\":false}"
+        "{\"path\":\"nested/item.txt\",\"oldText\":\"beta\",\"newText\":\"gamma\",\"replaceAll\":false}"
       );
       var replaceProposal = new LocalActionProposal(
         "replace_text",
@@ -577,7 +608,10 @@ public sealed class ExecutionEffectTests
       Assert.AreEqual("replace_text_completed", firstReplace.Code);
       Assert.AreEqual(HostActionOutcomes.NoOp, secondReplace.Outcome);
       Assert.AreEqual("already_applied", secondReplace.Code);
-      Assert.AreEqual("alpha gamma", await File.ReadAllTextAsync(Path.Combine(root, "item.txt")));
+      Assert.AreEqual(
+        "alpha gamma",
+        await File.ReadAllTextAsync(Path.Combine(root, "nested", "item.txt"))
+      );
     }
     finally
     {
@@ -1040,6 +1074,20 @@ public sealed class ExecutionEffectTests
     var review = session.CreateReview();
     Assert.AreEqual("blocked", review.Summary.State);
     Assert.AreEqual("blocked-mutation-not-performed", review.Summary.CompletionStatus);
+  }
+
+  [TestMethod]
+  public void NegatedMutationInstructionsKeepReadOnlyObjectiveInspectionOnly()
+  {
+    var session = CreateSession(
+      "Read fixture/read-primary.txt. Do not create, modify, or delete any file."
+    );
+
+    session.Complete("completed");
+
+    var review = session.CreateReview();
+    Assert.AreEqual("completed", review.Summary.State);
+    Assert.AreEqual("inspected-no-files-changed", review.Summary.CompletionStatus);
   }
 
   [TestMethod]

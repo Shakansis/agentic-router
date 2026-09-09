@@ -438,6 +438,9 @@ AgenticRouter.Api/data/claude-code-runtime/
 AgenticRouter.Api/data/opencode-runtime/
 AgenticRouter.Api/data/qwen-code-runtime/
 AgenticRouter.Api/data/ollama-managed-servers/
+AgenticRouter.Api/data/benchmark-results/
+AgenticRouter.Api/data/benchmark-recommendations/
+/.artifacts/
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 # General

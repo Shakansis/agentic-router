@@ -362,8 +362,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       active.Write(Event(active, "turn.started", message: $"Claude Code session {session.NativeSessionId} started."));
       active.Write(Event(
         active,
-        "effort.prompt-guided",
-        message: $"Ollama's Anthropic-compatible route does not expose a reviewed native effort field; {request.RequestedEffort} effort is prompt-guided for this Claude Code turn."
+        "effort.applied",
+        message: $"Applied {request.RequestedEffort} effort through the Claude Code CLI."
       ));
       await WriteAsync(
         process.StandardInput,
@@ -549,6 +549,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       "--include-partial-messages",
       "--permission-prompt-tool", "stdio",
       "--model", request.Model,
+      "--effort", request.RequestedEffort,
       "--bare",
       "--disable-slash-commands",
       "--no-chrome",

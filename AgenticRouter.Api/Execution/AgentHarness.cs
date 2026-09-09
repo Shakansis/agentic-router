@@ -1236,15 +1236,12 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       case "turn/started":
         break;
       case "item/agentMessage/delta":
-        active.Events.Writer.TryWrite(CreateEvent(
+        HandleAgentMessageDelta(
           active,
-          new HarnessEvent(
-            "assistant.delta",
-            delta: GetString(parameters, "delta"),
-            itemId: GetString(parameters, "itemId")
-          ),
+          GetString(parameters, "itemId"),
+          GetString(parameters, "delta"),
           root
-        ));
+        );
         break;
       case "item/reasoning/summaryTextDelta":
       case "item/reasoning/textDelta":
@@ -1386,6 +1383,32 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     {
       active.Items[itemId] = item.Clone();
     }
+    if (type == "agentMessage")
+    {
+      if (!completed)
+      {
+        return;
+      }
+      var text = GetString(item, "text");
+      var emitted = itemId is null
+        ? string.Empty
+        : active.AgentMessages.GetValueOrDefault(itemId, string.Empty);
+      var missing = text is not null && text.StartsWith(emitted, StringComparison.Ordinal)
+        ? text[emitted.Length..]
+        : emitted.Length == 0
+          ? text
+          : null;
+      HandleAgentMessageDelta(active, itemId, missing, root);
+      return;
+    }
+    if (type == "reasoning")
+    {
+      if (completed)
+      {
+        active.LastCompletedReasoningSummary = ReadReasoningSummary(item);
+      }
+      return;
+    }
     if (type is not "commandExecution" and not "fileChange")
     {
       return;
@@ -1410,6 +1433,32 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     ));
   }
 
+  private static void HandleAgentMessageDelta(
+    ActiveHarnessTurn active,
+    string? itemId,
+    string? delta,
+    JsonElement root
+  )
+  {
+    if (string.IsNullOrEmpty(delta))
+    {
+      return;
+    }
+    if (itemId is not null)
+    {
+      active.AgentMessages.AddOrUpdate(itemId, delta, (_, current) => current + delta);
+    }
+    active.Events.Writer.TryWrite(CreateEvent(
+      active,
+      new HarnessEvent(
+        "assistant.delta",
+        delta: delta,
+        itemId: itemId
+      ),
+      root
+    ));
+  }
+
   private static void CompleteTurn(
     ActiveHarnessTurn active,
     JsonElement parameters,
@@ -1418,6 +1467,25 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   {
     var status = GetString(parameters, "turn", "status") ?? "failed";
     var failure = ReadCodexFailure(parameters);
+    if (status == "completed"
+      && active.AgentMessages.IsEmpty
+      && !string.IsNullOrWhiteSpace(active.LastCompletedReasoningSummary))
+    {
+      active.Events.Writer.TryWrite(CreateEvent(
+        active,
+        new HarnessEvent(
+          "answer.fallback",
+          "Codex completed without an agent message; the final public reasoning summary supplied the answer."
+        ),
+        root
+      ));
+      HandleAgentMessageDelta(
+        active,
+        itemId: null,
+        active.LastCompletedReasoningSummary,
+        root
+      );
+    }
     var result = status switch
     {
       "completed" => new HarnessEvent(
@@ -2119,6 +2187,29 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     return Truncate(labels.Length == 0 ? "Codex file change" : string.Join(", ", labels));
   }
 
+  private static string? ReadReasoningSummary(JsonElement item)
+  {
+    foreach (var propertyName in new[] { "summary", "summaryText", "summary_text" })
+    {
+      if (!item.TryGetProperty(propertyName, out var summary)
+        || summary.ValueKind != JsonValueKind.Array)
+      {
+        continue;
+      }
+      var parts = summary.EnumerateArray().Select(part => part.ValueKind switch
+      {
+        JsonValueKind.String => part.GetString(),
+        JsonValueKind.Object => GetString(part, "text"),
+        _ => null
+      }).Where(part => !string.IsNullOrWhiteSpace(part)).ToArray();
+      if (parts.Length > 0)
+      {
+        return string.Join("\n", parts);
+      }
+    }
+    return null;
+  }
+
   private static string? ReadCodexErrorCode(JsonElement parameters)
   {
     return ReadCodexFailure(parameters).Code;
@@ -2273,6 +2364,10 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     });
 
     public ConcurrentDictionary<string, JsonElement> Items { get; } = new(StringComparer.Ordinal);
+
+    public ConcurrentDictionary<string, string> AgentMessages { get; } = new(StringComparer.Ordinal);
+
+    public string? LastCompletedReasoningSummary { get; set; }
 
     public int UnsupportedApprovalCount { get; set; }
 

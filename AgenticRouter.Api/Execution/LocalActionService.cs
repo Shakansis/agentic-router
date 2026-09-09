@@ -2372,17 +2372,30 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
-    EnsureParentExists(
-      target
-    );
-    await File.WriteAllTextAsync(
-      target,
-      content,
-      new UTF8Encoding(
-        false
-      ),
-      cancellationToken
-    );
+    var createdDirectories = new HashSet<string>(FileSystemPathSemantics.Comparer);
+    try
+    {
+      TrackAndCreateParents(target, createdDirectories);
+      await File.WriteAllTextAsync(
+        target,
+        content,
+        new UTF8Encoding(
+          false
+        ),
+        cancellationToken
+      );
+    }
+    catch
+    {
+      foreach (var directory in createdDirectories.OrderByDescending(path => path.Length))
+      {
+        if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
+        {
+          Directory.Delete(directory);
+        }
+      }
+      throw;
+    }
 
     return new LocalActionResult(
       $"Created {Path.GetFileName(target)} ({content.Length} characters).",

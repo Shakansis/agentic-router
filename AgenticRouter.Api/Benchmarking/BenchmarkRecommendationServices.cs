@@ -17,6 +17,13 @@ public interface IBenchmarkRecommendationStore
     BenchmarkRecommendationResult result,
     CancellationToken cancellationToken
   );
+
+  Task<int> DeleteReferencingRunAsync(
+    string runId,
+    CancellationToken cancellationToken
+  );
+
+  Task<int> DeleteAllAsync(CancellationToken cancellationToken);
 }
 
 public sealed class JsonBenchmarkRecommendationStore : IBenchmarkRecommendationStore
@@ -95,6 +102,76 @@ public sealed class JsonBenchmarkRecommendationStore : IBenchmarkRecommendationS
           File.Delete(temporary);
         }
       }
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
+  public async Task<int> DeleteReferencingRunAsync(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (!Directory.Exists(_directory))
+      {
+        return 0;
+      }
+      var deleted = 0;
+      foreach (var path in Directory.EnumerateFiles(_directory, "*.json"))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+          var json = await File.ReadAllTextAsync(path, cancellationToken);
+          var result = JsonSerializer.Deserialize<BenchmarkRecommendationResult>(
+            json,
+            JsonOptions
+          );
+          if (result?.Candidates.SelectMany(candidate => candidate.Evidence).Any(
+            evidence => string.Equals(
+              evidence.RunId,
+              runId,
+              StringComparison.OrdinalIgnoreCase
+            )) == true)
+          {
+            File.Delete(path);
+            deleted++;
+          }
+        }
+        catch (JsonException)
+        {
+        }
+      }
+      return deleted;
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
+  public async Task<int> DeleteAllAsync(CancellationToken cancellationToken)
+  {
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (!Directory.Exists(_directory))
+      {
+        return 0;
+      }
+      var deleted = 0;
+      foreach (var path in Directory.EnumerateFiles(_directory, "*.json"))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        File.Delete(path);
+        deleted++;
+      }
+      return deleted;
     }
     finally
     {

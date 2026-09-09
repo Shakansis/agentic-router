@@ -51,13 +51,13 @@ current documentation relies on that evidence.
 ### 2. Seed benchmark history
 
 `AgenticRouter.Api/data/benchmark-results/` and
-`AgenticRouter.Api/data/benchmark-recommendations/` contain 13 tracked files
-(about 1.80 MB). Unlike ordinary runtime residue, these files can affect the
+`AgenticRouter.Api/data/benchmark-recommendations/` previously contained tracked
+runtime evidence. Unlike ordinary runtime residue, these files can affect the
 initial Auto model/harness ranking.
 
-Decision: intentionally ship this baseline evidence, replace it with an explicit
-seed catalog, or start installations with no historical recommendation. Removing
-it changes user-visible routing behavior.
+Decision resolved on 2026-09-07: keep benchmark results and derived
+recommendations local and ignored. Fresh installations start without historical
+benchmark evidence and build recommendations from benchmarks run on that host.
 
 ### 3. Plans and experiment reports
 

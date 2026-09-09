@@ -1,11 +1,10 @@
 using System.Collections.Concurrent;
-using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
@@ -33,38 +32,18 @@ public interface IBenchmarkEngine
 
 public sealed class BenchmarkEngine : IBenchmarkEngine
 {
-  private static readonly HostCapabilityProfile BenchmarkHostCapabilities =
-    HostCapabilityProfile.Create(
-      new ExecutionTurnToolScope(
-        [
-          "read_file",
-          "create_file",
-          "create_files",
-          "write_file",
-          "replace_text",
-          "delete_paths"
-        ],
-        ProcessExecutionAllowed: false,
-        ManualValidationRequested: false,
-        ValidationProfileAvailable: false,
-        GitToolsAvailable: false,
-        DirectoryCreationAvailable: false,
-        DeletionAvailable: true
-      ),
-      "auto"
-    );
   private readonly IBenchmarkTestRegistry _tests;
   private readonly IBenchmarkWorkspaceFactory _workspaces;
   private readonly IHarnessRegistry _harnesses;
   private readonly ISettingsStore _settingsStore;
   private readonly IOllamaClient _ollamaClient;
-  private readonly IBenchmarkNativeExecutor _nativeExecutor;
   private readonly IBenchmarkProductionExecuteRunner _productionExecute;
   private readonly IBenchmarkScorer _scorer;
   private readonly IBenchmarkResultStore _results;
   private readonly IBenchmarkRunCancellationRegistry _cancellations;
   private readonly IBenchmarkEnvironmentSnapshotProvider _environmentSnapshots;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
+  private readonly IMarkdownRenderer _markdown;
 
   public BenchmarkEngine(
     IBenchmarkTestRegistry tests,
@@ -72,13 +51,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IHarnessRegistry harnesses,
     ISettingsStore settingsStore,
     IOllamaClient ollamaClient,
-    IBenchmarkNativeExecutor nativeExecutor,
     IBenchmarkProductionExecuteRunner productionExecute,
     IBenchmarkScorer scorer,
     IBenchmarkResultStore results,
     IBenchmarkRunCancellationRegistry cancellations,
     IBenchmarkEnvironmentSnapshotProvider environmentSnapshots,
-    IOllamaManagedServerManager managedOllamaServers
+    IOllamaManagedServerManager managedOllamaServers,
+    IMarkdownRenderer markdown
   )
   {
     _tests = tests;
@@ -86,13 +65,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _harnesses = harnesses;
     _settingsStore = settingsStore;
     _ollamaClient = ollamaClient;
-    _nativeExecutor = nativeExecutor;
     _productionExecute = productionExecute;
     _scorer = scorer;
     _results = results;
     _cancellations = cancellations;
     _environmentSnapshots = environmentSnapshots;
     _managedOllamaServers = managedOllamaServers;
+    _markdown = markdown;
   }
 
   public async Task<BenchmarkRunResult> RunAsync(
@@ -614,6 +593,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var fingerprint = string.Empty;
     BenchmarkRunResult? result = null;
     var cleanedUp = false;
+    var retainWorkspace = string.Equals(
+      test.Metadata.Suite,
+      BenchmarkSuiteIds.RealLifeProblem,
+      StringComparison.OrdinalIgnoreCase
+    );
 
     try
     {
@@ -645,30 +629,35 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       BenchmarkHarnessEvidence evidence;
       try
       {
-        evidence = string.Equals(
-          test.Metadata.Suite,
-          BenchmarkSuiteIds.RealLifeProblem,
-          StringComparison.OrdinalIgnoreCase
-        )
-          ? await _productionExecute.ExecuteAsync(
-            test.CreateTask(),
-            model.Name,
-            harness.Definition.Id,
-            settings,
-            workspace,
-            progress,
-            timeoutSource.Token
-          )
-          : await ExecuteHarnessAsync(
-            harness,
-            test,
-            model,
-            providerEndpoint,
-            workspace,
-            settings,
-            timeoutSource.Token,
-            progress
+        evidence = await ExecuteHarnessAsync(
+          harness,
+          test,
+          model,
+          workspace,
+          timeoutSource.Token,
+          progress
+        );
+        if (!runCancellationToken.IsCancellationRequested
+          && timeoutSource.IsCancellationRequested
+          && evidence.ExecutionStatus == BenchmarkExecutionStatusIds.Cancelled)
+        {
+          evidence = evidence with
+          {
+            ExecutionStatus = BenchmarkExecutionStatusIds.TimedOut,
+            Error = new BenchmarkError(
+              "benchmark-timeout",
+              $"The harness exceeded the configured {effectiveTimeout.TotalSeconds:0}-second scenario timeout.",
+              "harness-execution",
+              true
+            )
+          };
+          progress?.Publish(
+            BenchmarkProgressTypeIds.Activity,
+            BenchmarkLiveStateIds.TimedOut,
+            evidence.Error.Message,
+            BenchmarkActivityKindIds.Timeout
           );
+        }
       }
       catch (OperationCanceledException)
       {
@@ -759,6 +748,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         ),
         CancellationToken.None
       );
+      raw = RenderNarrativeMarkdown(raw);
       PublishValidation(progress, raw);
       var endedAt = DateTimeOffset.UtcNow;
       result = new BenchmarkRunResult(
@@ -835,7 +825,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     {
       try
       {
-        cleanedUp = await _workspaces.CleanupAsync(workspace, CancellationToken.None);
+        cleanedUp = !retainWorkspace
+          && await _workspaces.CleanupAsync(workspace, CancellationToken.None);
       }
       catch (Exception) when (result is not null)
       {
@@ -850,7 +841,24 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       );
     }
     BenchmarkRunResult finalResult;
-    if (!cleanedUp)
+    if (retainWorkspace)
+    {
+      var validationFacts = result.RawResult.ValidationFacts is null
+        ? new Dictionary<string, string>(StringComparer.Ordinal)
+        : new Dictionary<string, string>(
+          result.RawResult.ValidationFacts,
+          StringComparer.Ordinal
+        );
+      validationFacts["workspaceRetention"] = "retained-for-human-review";
+      var raw = result.RawResult with { ValidationFacts = validationFacts };
+      finalResult = result with
+      {
+        RawResult = raw,
+        WorkspaceCleanedUp = false,
+        WorkspaceRetained = true
+      };
+    }
+    else if (!cleanedUp)
     {
       var validationFacts = result.RawResult.ValidationFacts is null
         ? new Dictionary<string, string>(StringComparer.Ordinal)
@@ -859,61 +867,51 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           StringComparer.Ordinal
         );
       validationFacts["workspaceCleanup"] = "failed";
-      var raw = result.RawResult.Error is null
-        ? result.RawResult with
-        {
-          Status = BenchmarkResultStatusIds.Error,
-          ExecutionStatus = BenchmarkExecutionStatusIds.Failed,
-          HostValidationResult = "error",
-          Error = new BenchmarkError(
-            "benchmark-cleanup-failed",
-            "The benchmark result was captured, but the disposable workspace could not be removed.",
-            "workspace-cleanup",
-            true
-          ),
-          ValidationFacts = validationFacts
-        }
-        : result.RawResult with
-        {
-          ValidationFacts = validationFacts
-        };
+      var raw = result.RawResult with { ValidationFacts = validationFacts };
       finalResult = result with
       {
-        Run = result.Run with
-        {
-          ExecutionStatus = BenchmarkExecutionStatusIds.Failed,
-          EndedAt = DateTimeOffset.UtcNow
-        },
         RawResult = raw,
         WorkspaceCleanedUp = false,
-        Score = _scorer.Score(raw, scoreWeights)
+        WorkspaceRetained = true
       };
     }
     else
     {
-      finalResult = result with { WorkspaceCleanedUp = true };
+      finalResult = result with
+      {
+        WorkspaceCleanedUp = true,
+        WorkspaceRetained = false
+      };
     }
     PublishTestTerminal(progress, finalResult);
     return finalResult;
+  }
+
+  private BenchmarkRawResult RenderNarrativeMarkdown(BenchmarkRawResult raw)
+  {
+    return raw with
+    {
+      FinalHarnessReportHtml = string.IsNullOrWhiteSpace(raw.FinalHarnessReport)
+        ? string.Empty
+        : _markdown.Render(raw.FinalHarnessReport),
+      Turns = raw.Turns?.Select(turn => turn with
+      {
+        FinalReportHtml = string.IsNullOrWhiteSpace(turn.FinalReport)
+          ? string.Empty
+          : _markdown.Render(turn.FinalReport)
+      }).ToArray()
+    };
   }
 
   private async Task<BenchmarkHarnessEvidence> ExecuteHarnessAsync(
     IAgentHarness harness,
     IBenchmarkTestDefinition test,
     InstalledModel model,
-    Uri providerEndpoint,
     BenchmarkWorkspace workspace,
-    ApplicationSettings settings,
     CancellationToken cancellationToken,
     BenchmarkProgressContext? progress
   )
   {
-    int? contextTokens = settings.OllamaRuntime.RoleDefaults.TryGetValue(
-      OllamaRuntimeRoleIds.Benchmark,
-      out var benchmarkRuntime
-    )
-      ? benchmarkRuntime.TargetContextTokens
-      : null;
     var turns = test.CreateTurns().OrderBy(turn => turn.Order).ToArray();
     if (
       turns.Length != test.Metadata.TurnBudget
@@ -925,7 +923,6 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         $"Benchmark scenario '{test.Metadata.Id}' does not match its ordered turn budget."
       );
     }
-    var nativeSession = new BenchmarkNativeSession();
     var toolTrace = new BenchmarkToolTrace();
     var turnEvidence = new List<BenchmarkTurnEvidence>(turns.Length);
     var hostEvents = new List<BenchmarkHostEvent>();
@@ -945,19 +942,21 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       var turnStarted = DateTimeOffset.UtcNow;
       var outcome = await ExecuteHarnessTurnAsync(
         harness,
-        test,
         turn,
-        turn.Order == turns.Length,
-        nativeSession,
-        toolTrace,
         model,
-        providerEndpoint,
         workspace,
-        contextTokens,
         progress,
         cancellationToken
       );
       outcomes.Add(outcome);
+      if (outcome.ToolCalls is { Count: > 0 })
+      {
+        toolTrace.AddRange(outcome.ToolCalls);
+      }
+      if (outcome.HostEvents is { Count: > 0 })
+      {
+        hostEvents.AddRange(outcome.HostEvents);
+      }
       turnEvidence.Add(new BenchmarkTurnEvidence(
         turn.Order,
         turn.Name,
@@ -1006,388 +1005,30 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       SumLong(outcomes, outcome => outcome.OutputTokens),
       turnEvidence,
       hostEvents,
-      toolTrace.Events
+      toolTrace.Events,
+      AggregateOperationalDiagnostics(outcomes)
     );
   }
 
   private async Task<BenchmarkHarnessEvidence> ExecuteHarnessTurnAsync(
     IAgentHarness harness,
-    IBenchmarkTestDefinition test,
     BenchmarkScenarioTurn turn,
-    bool releaseWorkspaceAfterTurn,
-    BenchmarkNativeSession nativeSession,
-    BenchmarkToolTrace toolTrace,
     InstalledModel model,
-    Uri providerEndpoint,
     BenchmarkWorkspace workspace,
-    int? contextTokens,
     BenchmarkProgressContext? progress,
     CancellationToken cancellationToken
   )
   {
-    var execution = new AgentHarnessExecution<BenchmarkHarnessEvidence>(
-      nativeCancellationToken => _nativeExecutor.ExecuteAsync(
-        test,
-        turn,
-        nativeSession,
-        model,
-        providerEndpoint,
-        workspace,
-        contextTokens,
-        progress,
-        nativeCancellationToken
-      ),
-      (transport, transportCancellationToken) => ExecuteExternalHarnessAsync(
-        transport,
-        _nativeExecutor,
-        test,
-        turn,
-        releaseWorkspaceAfterTurn,
-        toolTrace,
-        model,
-        providerEndpoint,
-        workspace,
-        contextTokens,
-        progress,
-        transportCancellationToken
-      )
+    return await _productionExecute.ExecuteAsync(
+      turn.Prompt,
+      model.Name,
+      harness.Definition.Id,
+      workspace,
+      turn.Order,
+      turn.Name,
+      progress,
+      cancellationToken
     );
-    BenchmarkHarnessEvidence? outcome = null;
-    await foreach (var current in harness.ExecuteAsync(execution, cancellationToken))
-    {
-      if (outcome is not null)
-      {
-        throw new InvalidOperationException(
-          "The benchmark harness returned more than one terminal outcome."
-        );
-      }
-      outcome = current;
-    }
-    if (
-      string.Equals(harness.Definition.Id, HarnessIds.Native, StringComparison.OrdinalIgnoreCase)
-      && outcome?.ToolCalls is { Count: > 0 }
-    )
-    {
-      toolTrace.AddRange(outcome.ToolCalls);
-    }
-    return outcome ?? FailureEvidence(
-      "benchmark-terminal-missing",
-      "The harness stream ended without a terminal outcome.",
-      true
-    );
-  }
-
-  private static async IAsyncEnumerable<BenchmarkHarnessEvidence> ExecuteExternalHarnessAsync(
-    IAgentHarnessTransport harness,
-    IBenchmarkNativeExecutor toolExecutor,
-    IBenchmarkTestDefinition test,
-    BenchmarkScenarioTurn turn,
-    bool releaseWorkspaceAfterTurn,
-    BenchmarkToolTrace toolTrace,
-    InstalledModel model,
-    Uri providerEndpoint,
-    BenchmarkWorkspace workspace,
-    int? contextTokens,
-    BenchmarkProgressContext? progress,
-    [EnumeratorCancellation] CancellationToken cancellationToken
-  )
-  {
-    HarnessEvent? terminal = null;
-    var report = new StringBuilder();
-    var toolIds = new HashSet<string>(StringComparer.Ordinal);
-    var anonymousToolCalls = 0;
-    var surfacedErrors = 0;
-    long? inputTokens = null;
-    try
-    {
-      await foreach (var harnessEvent in harness.StartTurnAsync(
-        new HarnessTurnRequest(
-          harness.Definition.Id,
-          workspace.Id,
-          model.Name,
-          ModelProviderIds.OllamaLocal,
-          workspace.WorkspacePath,
-          turn.Prompt,
-          "auto",
-          providerEndpoint,
-          ContextWindowTokens: contextTokens,
-          HostCapabilities: BenchmarkHostCapabilities,
-          UseMinimalToolInventory: true,
-          ReleaseWorkspaceAfterTurn: releaseWorkspaceAfterTurn,
-          ReleaseWorkspaceOnCancellation: true
-        ),
-        cancellationToken
-      ))
-      {
-        if (!string.Equals(
-          harnessEvent.HarnessId,
-          harness.Definition.Id,
-          StringComparison.OrdinalIgnoreCase
-        ))
-        {
-          throw new HarnessException(
-            "benchmark-harness-identity-mismatch",
-            "The harness returned an event with an invalid identity.",
-            $"Expected '{harness.Definition.Id}', received '{harnessEvent.HarnessId}'.",
-            false,
-            harnessId: harness.Definition.Id
-          );
-        }
-        if (string.Equals(harnessEvent.Type, "assistant.delta", StringComparison.Ordinal))
-        {
-          report.Append(harnessEvent.Delta);
-        }
-        if (string.Equals(harnessEvent.Type, "tool.started", StringComparison.Ordinal))
-        {
-          if (harnessEvent.ItemId is null)
-          {
-            anonymousToolCalls++;
-          }
-          else
-          {
-            toolIds.Add(harnessEvent.ItemId);
-          }
-          toolTrace.Start(
-            turn.Order,
-            harnessEvent.ItemId ?? $"anonymous-{anonymousToolCalls}",
-            harnessEvent.Tool ?? "unknown",
-            ToolPath(harnessEvent.Arguments, harnessEvent.Paths, workspace.WorkspacePath)
-          );
-          progress?.Publish(
-            BenchmarkProgressTypeIds.Activity,
-            BenchmarkLiveStateIds.Running,
-            harnessEvent.Tool is null
-              ? "Harness tool execution started."
-              : $"Executing {harnessEvent.Tool}.",
-            BenchmarkNativeExecutor.ActivityKind(harnessEvent.Tool ?? string.Empty)
-          );
-        }
-        if (
-          string.Equals(harnessEvent.Type, "tool.completed", StringComparison.Ordinal)
-          || string.Equals(harnessEvent.Type, "tool.succeeded", StringComparison.Ordinal)
-        )
-        {
-          toolTrace.Complete(
-            turn.Order,
-            harnessEvent.ItemId ?? harnessEvent.ToolCallId,
-            harnessEvent.Tool ?? "unknown",
-            ToolPath(harnessEvent.Arguments, harnessEvent.Paths, workspace.WorkspacePath)
-          );
-        }
-        if (
-          string.Equals(harnessEvent.Type, "error", StringComparison.Ordinal)
-          || string.Equals(harnessEvent.Type, "tool.failed", StringComparison.Ordinal)
-          || (!harnessEvent.IsTerminal && harnessEvent.ErrorCode is not null)
-        )
-        {
-          surfacedErrors++;
-          toolTrace.Fail(
-            turn.Order,
-            harnessEvent.ItemId ?? harnessEvent.ToolCallId,
-            harnessEvent.Tool ?? "unknown",
-            ToolPath(harnessEvent.Arguments, harnessEvent.Paths, workspace.WorkspacePath),
-            harnessEvent.ErrorCode
-          );
-          progress?.Publish(
-            BenchmarkProgressTypeIds.Activity,
-            BenchmarkLiveStateIds.Running,
-            harnessEvent.ErrorCode is null
-              ? "Harness surfaced a recoverable execution error."
-              : $"{harnessEvent.ErrorCode}: {harnessEvent.Message}",
-            BenchmarkActivityKindIds.Tool
-          );
-        }
-        if (harnessEvent.ContextInputTokens.HasValue)
-        {
-          inputTokens = Math.Max(inputTokens ?? 0, harnessEvent.ContextInputTokens.Value);
-        }
-        if (
-          string.Equals(harnessEvent.Type, "approval.requested", StringComparison.Ordinal)
-          && harnessEvent.ApprovalId is not null
-        )
-        {
-          progress?.Publish(
-            BenchmarkProgressTypeIds.Activity,
-            BenchmarkLiveStateIds.Running,
-            "Harness requested approval; Host policy resolved it.",
-            BenchmarkActivityKindIds.Approval
-          );
-          await harness.ResolveApprovalAsync(
-            harnessEvent.ApprovalId,
-            CanApprove(test, workspace.WorkspacePath, harnessEvent),
-            cancellationToken
-          );
-        }
-        else if (
-          string.Equals(harnessEvent.Type, "host-tool.requested", StringComparison.Ordinal)
-          && harnessEvent.ToolCallId is not null
-        )
-        {
-          var path = ToolPath(
-            harnessEvent.Arguments,
-            harnessEvent.Paths,
-            workspace.WorkspacePath
-          );
-          toolTrace.Start(
-            turn.Order,
-            harnessEvent.ToolCallId,
-            harnessEvent.Tool ?? "unknown",
-            path
-          );
-          try
-          {
-            if (harnessEvent.Tool is null || harnessEvent.Arguments is null)
-            {
-              throw new BenchmarkNativeToolException(
-                "benchmark-host-tool-invalid",
-                "The harness omitted the structured Host tool name or arguments."
-              );
-            }
-            progress?.Publish(
-              BenchmarkProgressTypeIds.Activity,
-              BenchmarkLiveStateIds.Running,
-              $"Executing Host tool {harnessEvent.Tool}.",
-              BenchmarkNativeExecutor.ActivityKind(harnessEvent.Tool)
-            );
-            var output = await toolExecutor.ExecuteToolAsync(
-              workspace.WorkspacePath,
-              harnessEvent.Tool,
-              harnessEvent.Arguments.Value,
-              cancellationToken
-            );
-            await harness.ResolveToolCallAsync(
-              harnessEvent.ToolCallId,
-              true,
-              output,
-              cancellationToken
-            );
-            toolTrace.Complete(
-              turn.Order,
-              harnessEvent.ToolCallId,
-              harnessEvent.Tool,
-              path
-            );
-          }
-          catch (BenchmarkNativeToolException exception)
-          {
-            surfacedErrors++;
-            progress?.Publish(
-              BenchmarkProgressTypeIds.Activity,
-              BenchmarkLiveStateIds.Running,
-              $"{exception.Code}: {exception.Message}",
-              BenchmarkActivityKindIds.Tool
-            );
-            await harness.ResolveToolCallAsync(
-              harnessEvent.ToolCallId,
-              false,
-              $"{exception.Code}: {exception.Message}",
-              cancellationToken
-            );
-            toolTrace.Fail(
-              turn.Order,
-              harnessEvent.ToolCallId,
-              harnessEvent.Tool ?? "unknown",
-              path,
-              exception.Code
-            );
-          }
-        }
-        if (harnessEvent.IsTerminal)
-        {
-          terminal = harnessEvent;
-          progress?.Publish(
-            BenchmarkProgressTypeIds.Activity,
-            BenchmarkLiveStateIds.HarnessCompleted,
-            $"Harness terminal state: {harnessEvent.TerminalState}.",
-            BenchmarkActivityKindIds.HarnessTerminal
-          );
-        }
-      }
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      await harness.CancelTurnAsync(workspace.Id, CancellationToken.None);
-      throw;
-    }
-
-    if (terminal is null)
-    {
-      yield return FailureEvidence(
-        "benchmark-terminal-missing",
-        "The harness stream ended without a terminal event.",
-        true
-      );
-      yield break;
-    }
-    if (surfacedErrors > 0 && terminal.TerminalState == HarnessTerminalState.Completed)
-    {
-      progress?.Publish(
-        BenchmarkProgressTypeIds.Activity,
-        BenchmarkLiveStateIds.HarnessCompleted,
-        $"Harness recovered after {surfacedErrors} surfaced error(s).",
-        BenchmarkActivityKindIds.RecoveredError
-      );
-    }
-    yield return BenchmarkHarnessEvidence.FromTerminal(
-      terminal,
-      report.ToString().Trim(),
-      toolIds.Count + anonymousToolCalls,
-      surfacedErrors,
-      inputTokens,
-      null,
-      ToolCalls: toolTrace.Events.Where(item => item.Turn == turn.Order).ToArray()
-    );
-  }
-
-  private static bool CanApprove(
-    IBenchmarkTestDefinition test,
-    string workspacePath,
-    HarnessEvent harnessEvent
-  )
-  {
-    if (!harnessEvent.ApprovalCanBeMapped)
-    {
-      return false;
-    }
-    if (!harnessEvent.Destructive)
-    {
-      return true;
-    }
-    if (
-      !string.Equals(test.Metadata.Id, BenchmarkIds.FileSystemDelete001, StringComparison.Ordinal)
-      || harnessEvent.Paths is not { Count: > 0 }
-    )
-    {
-      return false;
-    }
-    try
-    {
-      var root = Path.GetFullPath(workspacePath);
-      return harnessEvent.Paths.All(path =>
-      {
-        var full = Path.IsPathRooted(path)
-          ? Path.GetFullPath(path)
-          : Path.GetFullPath(Path.Combine(root, path));
-        var relative = BenchmarkWorkspaceFactory.NormalizeRelative(
-          Path.GetRelativePath(root, full)
-        );
-        return string.Equals(
-          relative,
-          "fixture/delete.txt",
-          OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal
-        );
-      });
-    }
-    catch (Exception exception) when (
-      exception is ArgumentException
-        or NotSupportedException
-        or PathTooLongException
-    )
-    {
-      return false;
-    }
   }
 
   private static string AggregateExecutionStatus(
@@ -1438,80 +1079,74 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     return values.Length == 0 ? null : values.Sum(value => value!.Value);
   }
 
-  private static string? ToolPath(
-    JsonElement? arguments,
-    IReadOnlyList<string>? paths,
-    string workspacePath
+  private static BenchmarkOperationalDiagnostics? AggregateOperationalDiagnostics(
+    IReadOnlyList<BenchmarkHarnessEvidence> outcomes
   )
   {
-    if (paths is { Count: 1 })
-    {
-      return NormalizeToolPath(paths[0], workspacePath);
-    }
-    if (arguments is not { ValueKind: JsonValueKind.Object } value)
+    var values = outcomes
+      .Select(outcome => outcome.OperationalDiagnostics)
+      .Where(diagnostics => diagnostics is not null)
+      .Cast<BenchmarkOperationalDiagnostics>()
+      .ToArray();
+    if (values.Length == 0)
     {
       return null;
     }
-    if (
-      value.TryGetProperty("path", out var path)
-      && path.ValueKind == JsonValueKind.String
-    )
+    var last = values[^1];
+    return last with
     {
-      return NormalizeToolPath(path.GetString(), workspacePath);
-    }
-    if (
-      value.TryGetProperty("paths", out var pathList)
-      && pathList.ValueKind == JsonValueKind.Array
-      && pathList.GetArrayLength() == 1
-    )
-    {
-      return NormalizeToolPath(pathList[0].GetString(), workspacePath);
-    }
-    if (
-      value.TryGetProperty("files", out var files)
-      && files.ValueKind == JsonValueKind.Array
-      && files.GetArrayLength() == 1
-      && files[0].TryGetProperty("path", out var filePath)
-    )
-    {
-      return NormalizeToolPath(filePath.GetString(), workspacePath);
-    }
-    return null;
+      ToolCalls = SumDiagnostics(values, value => value.ToolCalls),
+      FailedToolCalls = SumDiagnostics(values, value => value.FailedToolCalls),
+      ToolValidationErrors = SumDiagnostics(values, value => value.ToolValidationErrors),
+      RepeatedToolCalls = SumDiagnostics(values, value => value.RepeatedToolCalls),
+      RepeatedIdenticalActions = SumDiagnostics(values, value => value.RepeatedIdenticalActions),
+      RecoveryAttempts = SumDiagnostics(values, value => value.RecoveryAttempts),
+      FilesRead = DistinctDiagnostics(values.SelectMany(value => value.FilesRead)),
+      FilesWritten = DistinctDiagnostics(values.SelectMany(value => value.FilesWritten)),
+      FilesModified = DistinctDiagnostics(values.SelectMany(value => value.FilesModified)),
+      FilesCreated = DistinctDiagnostics(values.SelectMany(value => value.FilesCreated)),
+      FilesDeleted = DistinctDiagnostics(values.SelectMany(value => value.FilesDeleted)),
+      ExecutionTurns = SumDiagnostics(values, value => value.ExecutionTurns),
+      DirectTurns = SumDiagnostics(values, value => value.DirectTurns),
+      SupervisorTurns = SumDiagnostics(values, value => value.SupervisorTurns),
+      WorkerTurns = SumDiagnostics(values, value => value.WorkerTurns),
+      ExecutionDurationMilliseconds = values.Sum(value => value.ExecutionDurationMilliseconds),
+      SetupDurationMilliseconds = values.Sum(value => value.SetupDurationMilliseconds),
+      BrowserValidationDurationMilliseconds = values.Sum(value => value.BrowserValidationDurationMilliseconds),
+      InputTokens = SumLongDiagnostics(values, value => value.InputTokens),
+      OutputTokens = SumLongDiagnostics(values, value => value.OutputTokens),
+      TokenProvenance = values.All(value => value.TokenProvenance == BenchmarkEvidenceStatusIds.Measured)
+        ? BenchmarkEvidenceStatusIds.Measured
+        : values.Any(value => value.TokenProvenance != BenchmarkEvidenceStatusIds.Unavailable)
+          ? "estimated"
+          : BenchmarkEvidenceStatusIds.Unavailable,
+      ValidationErrorCodes = DistinctDiagnostics(values.SelectMany(value => value.ValidationErrorCodes)),
+      UnavailableMetrics = DistinctDiagnostics(values.SelectMany(value => value.UnavailableMetrics))
+    };
   }
 
-  private static string? NormalizeToolPath(string? path, string workspacePath)
+  private static int? SumDiagnostics(
+    IReadOnlyList<BenchmarkOperationalDiagnostics> values,
+    Func<BenchmarkOperationalDiagnostics, int?> selector
+  )
   {
-    if (string.IsNullOrWhiteSpace(path))
-    {
-      return null;
-    }
-    try
-    {
-      if (Path.IsPathRooted(path))
-      {
-        var relative = Path.GetRelativePath(
-          Path.GetFullPath(workspacePath),
-          Path.GetFullPath(path)
-        );
-        if (
-          !Path.IsPathRooted(relative)
-          && relative != ".."
-          && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-          && !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
-        )
-        {
-          path = relative;
-        }
-      }
-    }
-    catch (Exception exception) when (
-      exception is ArgumentException or NotSupportedException or PathTooLongException
-    )
-    {
-      return null;
-    }
-    return path.Replace('\\', '/');
+    var present = values.Select(selector).Where(value => value.HasValue).ToArray();
+    return present.Length == 0 ? null : present.Sum(value => value!.Value);
   }
+
+  private static long? SumLongDiagnostics(
+    IReadOnlyList<BenchmarkOperationalDiagnostics> values,
+    Func<BenchmarkOperationalDiagnostics, long?> selector
+  )
+  {
+    var present = values.Select(selector).Where(value => value.HasValue).ToArray();
+    return present.Length == 0 ? null : present.Sum(value => value!.Value);
+  }
+
+  private static string[] DistinctDiagnostics(IEnumerable<string> values) => values
+    .Distinct(BenchmarkWorkspaceFactory.PathComparer)
+    .OrderBy(value => value, StringComparer.Ordinal)
+    .ToArray();
 
   private async Task<ResolvedBenchmarkHarness> ResolveHarnessAsync(
     string harnessId,

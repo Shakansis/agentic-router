@@ -245,6 +245,8 @@ function bindElements() {
     "benchmark-history-model-filter",
     "benchmark-history-harness-filter",
     "benchmark-history-suite-filter",
+    "benchmark-delete-result",
+    "benchmark-delete-all-results",
     "benchmark-compare-baseline",
     "benchmark-compare-candidate",
     "compare-benchmark-runs",
@@ -282,6 +284,7 @@ function bindElements() {
     "benchmark-combination-select",
     "benchmark-combination-position",
     "benchmark-previous-combination",
+    "benchmark-current-combination-button",
     "benchmark-next-combination",
     "benchmark-execution-empty",
     "benchmark-models-count",
@@ -656,15 +659,9 @@ function bindEvents() {
     renderBenchmarkLive();
   });
   elements.benchmarkPreviousCombination.addEventListener("click", () => stepBenchmarkCombination(-1));
+  elements.benchmarkCurrentCombinationButton.addEventListener("click", followCurrentBenchmarkCombination);
   elements.benchmarkNextCombination.addEventListener("click", () => stepBenchmarkCombination(1));
-  elements.benchmarkFollowActive.addEventListener("click", () => {
-    const current = Object.values(state.benchmark?.live?.cells ?? {}).find(isBenchmarkCellActive);
-    if (current) {
-      state.benchmarkUi.selectedCell = current.id;
-      renderBenchmarkLive();
-      showBenchmarkTab("execution", true);
-    }
-  });
+  elements.benchmarkFollowActive.addEventListener("click", followCurrentBenchmarkCombination);
   elements.benchmarkSuite.addEventListener("change", updateBenchmarkSuiteSelection);
   elements.benchmarkView.addEventListener("pointerover", handleBenchmarkTooltipShow);
   elements.benchmarkView.addEventListener("pointerout", handleBenchmarkTooltipHide);
@@ -677,6 +674,8 @@ function bindEvents() {
   elements.cancelBenchmark.addEventListener("click", cancelBenchmarkSuite);
   elements.closeBenchmarks.addEventListener("click", closeBenchmarks);
   elements.benchmarkHistory.addEventListener("change", openPersistedBenchmark);
+  elements.benchmarkDeleteResult.addEventListener("click", deleteSelectedBenchmarkResult);
+  elements.benchmarkDeleteAllResults.addEventListener("click", deleteAllBenchmarkResults);
   elements.benchmarkHistoryModelFilter.addEventListener("input", scheduleBenchmarkHistoryRefresh);
   elements.benchmarkHistoryHarnessFilter.addEventListener("change", refreshBenchmarkHistory);
   elements.benchmarkHistorySuiteFilter.addEventListener("change", refreshBenchmarkHistory);
@@ -694,6 +693,7 @@ function bindEvents() {
   }
   elements.resetBenchmarkWeights.addEventListener("click", resetBenchmarkScoringProfile);
   elements.benchmarkResultsBody.addEventListener("click", openBenchmarkHarnessResult);
+  elements.benchmarkResultDetail.addEventListener("click", handleBenchmarkResultDetailClick);
   elements.benchmarkMatrix.addEventListener("click", openBenchmarkMatrixCell);
   elements.benchmarkRankingScope.addEventListener("change", () => {
     if ((state.benchmark?.result?.cells ?? []).length > 0) {
@@ -1925,6 +1925,63 @@ function renderBenchmarkHistory() {
     previousCandidate || history[0]?.runId || ""
   );
   elements.compareBenchmarkRuns.disabled = history.length < 2;
+  elements.benchmarkDeleteResult.disabled = Boolean(state.activeBenchmarkRunId)
+    || !elements.benchmarkHistory.value;
+  elements.benchmarkDeleteAllResults.disabled = Boolean(state.activeBenchmarkRunId)
+    || history.length === 0;
+}
+
+async function deleteSelectedBenchmarkResult() {
+  const runId = elements.benchmarkHistory.value;
+  if (!runId || !await showAppConfirm(
+    "Delete this saved benchmark result and any retained workspaces that belong to it?",
+    { title: "Delete benchmark result", confirmLabel: "Delete result", tone: "danger" }
+  )) {
+    return;
+  }
+  try {
+    await fetchJson(
+      `/api/benchmarks/suite-runs/${encodeURIComponent(runId)}?confirmed=true`,
+      { method: "DELETE" }
+    );
+    if (state.benchmark.result?.runId === runId) {
+      state.benchmark.result = null;
+      state.benchmark.scoringProjection = null;
+      renderBenchmarkResult(null);
+    }
+    state.benchmark.comparison = null;
+    renderBenchmarkComparison(null);
+    await refreshBenchmarkHistory();
+    elements.benchmarkHistory.value = "";
+    renderBenchmarkHistory();
+    elements.benchmarkStatus.textContent = "Benchmark result, retained workspaces, and derived recommendations deleted.";
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
+}
+
+async function deleteAllBenchmarkResults() {
+  if ((state.benchmark?.history?.length ?? 0) === 0 || !await showAppConfirm(
+    "Delete all saved benchmark results and their retained workspaces?",
+    { title: "Delete all benchmark results", confirmLabel: "Delete all", tone: "danger" }
+  )) {
+    return;
+  }
+  try {
+    const outcome = await fetchJson(
+      "/api/benchmarks/suite-runs?confirmed=true",
+      { method: "DELETE" }
+    );
+    state.benchmark.result = null;
+    state.benchmark.scoringProjection = null;
+    state.benchmark.comparison = null;
+    renderBenchmarkResult(null);
+    renderBenchmarkComparison(null);
+    await refreshBenchmarkHistory();
+    elements.benchmarkStatus.textContent = `${outcome.deleted} benchmark result${outcome.deleted === 1 ? "" : "s"} and ${outcome.recommendationsDeleted} derived recommendation${outcome.recommendationsDeleted === 1 ? "" : "s"} deleted.`;
+  } catch (error) {
+    elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+  }
 }
 
 function benchmarkHistoryRunLabel(result) {
@@ -2816,11 +2873,21 @@ function updateBenchmarkText(element, text) {
 }
 
 function stepBenchmarkCombination(offset) {
-  const select = elements.benchmarkCombinationSelect;
-  const option = select.options[select.selectedIndex + offset];
-  if (option) {
-    state.benchmarkUi.selectedCell = option.value;
+  const cells = Object.values(state.benchmark?.live?.cells ?? {});
+  const selectedIndex = cells.findIndex(cell => cell.id === state.benchmarkUi.selectedCell);
+  const target = cells[selectedIndex + offset];
+  if (target) {
+    state.benchmarkUi.selectedCell = target.id;
     renderBenchmarkLive();
+  }
+}
+
+function followCurrentBenchmarkCombination() {
+  const current = Object.values(state.benchmark?.live?.cells ?? {}).find(isBenchmarkCellActive);
+  if (current) {
+    state.benchmarkUi.selectedCell = current.id;
+    renderBenchmarkLive();
+    showBenchmarkTab("execution", true);
   }
 }
 
@@ -2875,9 +2942,11 @@ function renderBenchmarkLive() {
   }
   if (!keys.has(ui.selectedCell)) ui.selectedCell = current?.id ?? cells[0]?.id ?? null;
   select.value = ui.selectedCell ?? "";
-  elements.benchmarkPreviousCombination.disabled = select.selectedIndex <= 0;
-  elements.benchmarkNextCombination.disabled = select.selectedIndex < 0 || select.selectedIndex >= select.options.length - 1;
-  updateBenchmarkText(elements.benchmarkCombinationPosition, cells.length ? `${select.selectedIndex + 1} of ${cells.length} combinations` : "No combinations");
+  const selectedIndex = cells.findIndex(cell => cell.id === ui.selectedCell);
+  elements.benchmarkPreviousCombination.disabled = selectedIndex <= 0;
+  elements.benchmarkCurrentCombinationButton.disabled = !current || current.id === ui.selectedCell;
+  elements.benchmarkNextCombination.disabled = selectedIndex < 0 || selectedIndex >= cells.length - 1;
+  updateBenchmarkText(elements.benchmarkCombinationPosition, cells.length ? `${selectedIndex + 1} of ${cells.length} combinations` : "No combinations");
   const selected = live.cells[ui.selectedCell];
   if (selected) renderBenchmarkLiveCell(selected);
   if (!live.terminal) {
@@ -3130,6 +3199,9 @@ function setBenchmarkRunning(running) {
   elements.benchmarkCompareCandidate.disabled = running;
   elements.compareBenchmarkRuns.disabled = running
     || (state.benchmark?.history?.length ?? 0) < 2;
+  elements.benchmarkDeleteResult.disabled = running || !elements.benchmarkHistory.value;
+  elements.benchmarkDeleteAllResults.disabled = running
+    || (state.benchmark?.history?.length ?? 0) === 0;
   elements.generateBenchmarkRecommendation.disabled = running;
   elements.researchBenchmarkRecommendation.disabled = running
     || !state.benchmark?.recommendationCatalog?.externalResearchAvailable;
@@ -3164,6 +3236,7 @@ async function openPersistedBenchmark() {
     }
     await rescoreBenchmarkResult();
     await generateGeneralBenchmarkRecommendation();
+    renderBenchmarkHistory();
     elements.benchmarkStatus.textContent = selected
       ? `Persisted result loaded: ${benchmarkSuiteLabel(selected.suiteId)} · ${selected.runId.slice(0, 8)}.`
       : "No persisted result loaded.";
@@ -3540,14 +3613,21 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       error.textContent = `${test.rawResult.error.code}: ${test.rawResult.error.message}`;
       details.append(error);
     }
+    appendBenchmarkWorkspaceReview(test, details);
     const promptLabel = document.createElement("strong");
     promptLabel.textContent = "Canonical prompt";
     const prompt = document.createElement("pre");
     prompt.textContent = test.run.prompt;
     const reportLabel = document.createElement("strong");
     reportLabel.textContent = "Final harness report";
-    const report = document.createElement("pre");
-    report.textContent = test.rawResult.finalHarnessReport || "(no report)";
+    const report = document.createElement("div");
+    report.className = "benchmark-markdown benchmark-final-report";
+    renderBenchmarkMarkdown(
+      report,
+      test.rawResult.finalHarnessReportHtml,
+      test.rawResult.finalHarnessReport,
+      "(no report)"
+    );
     details.append(promptLabel, prompt, reportLabel, report);
     if ((test.rawResult.turns ?? []).length > 0) {
       const turnsLabel = document.createElement("strong");
@@ -3555,7 +3635,19 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       const turns = document.createElement("ol");
       for (const turn of test.rawResult.turns) {
         const item = document.createElement("li");
-        item.textContent = `${turn.order}. ${turn.name} · ${turn.executionStatus} · ${turn.durationMilliseconds} ms · ${turn.finalReport || "(no report)"}`;
+        item.className = "benchmark-persisted-turn";
+        const metadata = document.createElement("div");
+        metadata.className = "benchmark-turn-metadata";
+        metadata.textContent = `${turn.name} · ${turn.executionStatus} · ${turn.durationMilliseconds} ms`;
+        const narrative = document.createElement("div");
+        narrative.className = "benchmark-markdown";
+        renderBenchmarkMarkdown(
+          narrative,
+          turn.finalReportHtml,
+          turn.finalReport,
+          "(no report)"
+        );
+        item.append(metadata, narrative);
         turns.append(item);
       }
       details.append(turnsLabel, turns);
@@ -3572,6 +3664,121 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       details.append(hostLabel, hostEvents);
     }
     elements.benchmarkResultDetail.append(details);
+  }
+}
+
+function renderBenchmarkMarkdown(container, renderedHtml, markdown, fallback) {
+  if (!renderedHtml) {
+    container.textContent = markdown || fallback;
+    return;
+  }
+  const content = document.createElement("div");
+  content.innerHTML = renderedHtml;
+  container.replaceChildren(content);
+  secureRenderedLinks(container);
+  enhanceCodeBlocks(container, markdown ?? "");
+}
+
+function appendBenchmarkWorkspaceReview(test, details) {
+  if (test.workspaceCleanedUp) {
+    return;
+  }
+  const runId = state.benchmark?.result?.runId;
+  if (!runId || !test.run?.workspaceId) {
+    return;
+  }
+  const section = document.createElement("section");
+  section.className = "benchmark-workspace-review";
+  section.dataset.runId = runId;
+  section.dataset.workspaceId = test.run.workspaceId;
+  const heading = document.createElement("strong");
+  heading.textContent = "Workspace for human review";
+  const status = document.createElement("p");
+  status.className = "benchmark-workspace-status";
+  status.textContent = "Checking retained workspace…";
+  const path = document.createElement("code");
+  path.textContent = test.run.workspacePath;
+  const actions = document.createElement("div");
+  actions.className = "benchmark-workspace-actions";
+  const view = document.createElement("button");
+  view.type = "button";
+  view.className = "secondary-button";
+  view.dataset.benchmarkViewWorkspace = "true";
+  view.textContent = "View folder";
+  view.disabled = true;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "secondary-button danger-button";
+  remove.dataset.benchmarkDeleteWorkspace = "true";
+  remove.textContent = "Delete workspace";
+  remove.disabled = true;
+  actions.append(view, remove);
+  section.append(heading, status, path, actions);
+  details.append(section);
+  refreshBenchmarkWorkspaceStatus(section);
+}
+
+async function refreshBenchmarkWorkspaceStatus(section) {
+  try {
+    const workspace = await fetchJson(
+      `/api/benchmarks/suite-runs/${encodeURIComponent(section.dataset.runId)}/workspaces/${encodeURIComponent(section.dataset.workspaceId)}`
+    );
+    if (!section.isConnected) {
+      return;
+    }
+    section.querySelector("code").textContent = workspace.workspacePath;
+    section.querySelector(".benchmark-workspace-status").textContent = workspace.available
+      ? "Retained locally and available for inspection."
+      : "This workspace has been deleted.";
+    section.querySelector("[data-benchmark-view-workspace]").disabled = !workspace.available;
+    section.querySelector("[data-benchmark-delete-workspace]").disabled = !workspace.available;
+    section.dataset.available = String(workspace.available);
+  } catch (error) {
+    if (section.isConnected) {
+      section.querySelector(".benchmark-workspace-status").textContent = benchmarkErrorMessage(error);
+    }
+  }
+}
+
+async function handleBenchmarkResultDetailClick(event) {
+  const section = event.target.closest(".benchmark-workspace-review");
+  if (!section) {
+    return;
+  }
+  const view = event.target.closest("[data-benchmark-view-workspace]");
+  if (view) {
+    view.disabled = true;
+    try {
+      await fetchJson(
+        `/api/benchmarks/suite-runs/${encodeURIComponent(section.dataset.runId)}/workspaces/${encodeURIComponent(section.dataset.workspaceId)}/open-folder`,
+        { method: "POST" }
+      );
+      section.querySelector(".benchmark-workspace-status").textContent = "Folder opened in Explorer.";
+    } catch (error) {
+      section.querySelector(".benchmark-workspace-status").textContent = benchmarkErrorMessage(error);
+    } finally {
+      view.disabled = section.dataset.available !== "true";
+    }
+    return;
+  }
+  const remove = event.target.closest("[data-benchmark-delete-workspace]");
+  if (!remove || !await showAppConfirm(
+    "Delete this retained benchmark workspace? The saved benchmark result will remain available.",
+    { title: "Delete retained workspace", confirmLabel: "Delete workspace", tone: "danger" }
+  )) {
+    return;
+  }
+  remove.disabled = true;
+  try {
+    await fetchJson(
+      `/api/benchmarks/suite-runs/${encodeURIComponent(section.dataset.runId)}/workspaces/${encodeURIComponent(section.dataset.workspaceId)}?confirmed=true`,
+      { method: "DELETE" }
+    );
+    section.dataset.available = "false";
+    section.querySelector(".benchmark-workspace-status").textContent = "Workspace deleted. The benchmark result was preserved.";
+  } catch (error) {
+    remove.disabled = false;
+    section.querySelector(".benchmark-workspace-status").textContent = benchmarkErrorMessage(error);
   }
 }
 

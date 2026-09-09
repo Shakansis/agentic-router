@@ -20,6 +20,9 @@ public sealed class BenchmarksController : ControllerBase
   private readonly IBenchmarkScoringProfileStore _scoringProfiles;
   private readonly IBenchmarkHistoryService _history;
   private readonly IBenchmarkRecommendationService _recommendations;
+  private readonly IBenchmarkWorkspaceFactory _workspaces;
+  private readonly IBenchmarkRecommendationStore _recommendationStore;
+  private readonly IFolderLauncherService _folderLauncher;
 
   public BenchmarksController(
     IBenchmarkEngine engine,
@@ -31,7 +34,10 @@ public sealed class BenchmarksController : ControllerBase
     IBenchmarkScorer scorer,
     IBenchmarkScoringProfileStore scoringProfiles,
     IBenchmarkHistoryService history,
-    IBenchmarkRecommendationService recommendations
+    IBenchmarkRecommendationService recommendations,
+    IBenchmarkWorkspaceFactory workspaces,
+    IBenchmarkRecommendationStore recommendationStore,
+    IFolderLauncherService folderLauncher
   )
   {
     _engine = engine;
@@ -44,6 +50,9 @@ public sealed class BenchmarksController : ControllerBase
     _scoringProfiles = scoringProfiles;
     _history = history;
     _recommendations = recommendations;
+    _workspaces = workspaces;
+    _recommendationStore = recommendationStore;
+    _folderLauncher = folderLauncher;
   }
 
   [HttpGet("scoring-profile")]
@@ -293,6 +302,179 @@ public sealed class BenchmarksController : ControllerBase
     }
   }
 
+  [HttpGet("suite-runs/{runId}/workspaces/{workspaceId}")]
+  public async Task<IActionResult> GetWorkspace(
+    string runId,
+    string workspaceId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null || !OwnsWorkspace(result, workspaceId))
+      {
+        return NotFound();
+      }
+      return Ok(await _workspaces.GetStatusAsync(workspaceId, cancellationToken));
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpDelete("suite-runs/{runId}/workspaces/{workspaceId}")]
+  public async Task<IActionResult> DeleteWorkspace(
+    string runId,
+    string workspaceId,
+    [FromQuery] bool confirmed = false,
+    CancellationToken cancellationToken = default
+  )
+  {
+    if (!confirmed)
+    {
+      return BadRequest(new { message = "Workspace deletion must be confirmed." });
+    }
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null || !OwnsWorkspace(result, workspaceId))
+      {
+        return NotFound();
+      }
+      var before = await _workspaces.GetStatusAsync(workspaceId, cancellationToken);
+      var deleted = await _workspaces.CleanupAsync(workspaceId, cancellationToken);
+      return deleted
+        ? Ok(new
+        {
+          workspaceId = before.WorkspaceId,
+          workspacePath = before.WorkspacePath,
+          available = false,
+          deleted = before.Available
+        })
+        : Conflict(new { message = "The retained workspace could not be deleted." });
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+    catch (Exception exception) when (
+      exception is IOException
+        or UnauthorizedAccessException
+        or InvalidOperationException
+    )
+    {
+      return Conflict(new { message = exception.Message });
+    }
+  }
+
+  [HttpPost("suite-runs/{runId}/workspaces/{workspaceId}/open-folder")]
+  public async Task<IActionResult> OpenWorkspaceFolder(
+    string runId,
+    string workspaceId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null || !OwnsWorkspace(result, workspaceId))
+      {
+        return NotFound();
+      }
+      var workspace = await _workspaces.GetStatusAsync(workspaceId, cancellationToken);
+      if (!workspace.Available)
+      {
+        return BadRequest(new { message = "The retained workspace is no longer available." });
+      }
+      var opened = await _folderLauncher.OpenAsync(
+        workspace.WorkspacePath,
+        cancellationToken
+      );
+      return opened.Opened
+        ? Ok(opened)
+        : BadRequest(new
+        {
+          message = opened.Error ?? "The retained workspace folder could not be opened."
+        });
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpDelete("suite-runs/{runId}")]
+  public async Task<IActionResult> DeleteResult(
+    string runId,
+    [FromQuery] bool confirmed = false,
+    CancellationToken cancellationToken = default
+  )
+  {
+    if (!confirmed)
+    {
+      return BadRequest(new { message = "Benchmark result deletion must be confirmed." });
+    }
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null)
+      {
+        return NotFound();
+      }
+      await DeleteOwnedWorkspacesAsync([result], cancellationToken);
+      var deleted = await _results.DeleteAsync(runId, cancellationToken);
+      var recommendationsDeleted = await _recommendationStore.DeleteReferencingRunAsync(
+        runId,
+        cancellationToken
+      );
+      return Ok(new { runId = result.RunId, deleted, recommendationsDeleted });
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+    catch (Exception exception) when (
+      exception is IOException
+        or UnauthorizedAccessException
+        or InvalidOperationException
+    )
+    {
+      return Conflict(new { message = exception.Message });
+    }
+  }
+
+  [HttpDelete("suite-runs")]
+  public async Task<IActionResult> DeleteAllResults(
+    [FromQuery] bool confirmed = false,
+    CancellationToken cancellationToken = default
+  )
+  {
+    if (!confirmed)
+    {
+      return BadRequest(new { message = "Deleting all benchmark results must be confirmed." });
+    }
+    try
+    {
+      var results = await _results.ListAllAsync(cancellationToken);
+      await DeleteOwnedWorkspacesAsync(results, cancellationToken);
+      var deleted = await _results.DeleteAllAsync(cancellationToken);
+      var recommendationsDeleted = await _recommendationStore.DeleteAllAsync(
+        cancellationToken
+      );
+      return Ok(new { deleted, recommendationsDeleted });
+    }
+    catch (Exception exception) when (
+      exception is IOException
+        or UnauthorizedAccessException
+        or InvalidOperationException
+    )
+    {
+      return Conflict(new { message = exception.Message });
+    }
+  }
+
   [HttpGet("suite-runs/{runId}/live")]
   public IActionResult GetLive(string runId)
   {
@@ -387,6 +569,42 @@ public sealed class BenchmarksController : ControllerBase
       "runId"
     ));
     return false;
+  }
+
+  private static bool OwnsWorkspace(
+    BenchmarkSuiteRunResult result,
+    string workspaceId
+  )
+  {
+    return result.HarnessResults
+      .SelectMany(harness => harness.Tests)
+      .Any(test => string.Equals(
+        test.Run.WorkspaceId,
+        workspaceId,
+        StringComparison.OrdinalIgnoreCase
+      ));
+  }
+
+  private async Task DeleteOwnedWorkspacesAsync(
+    IEnumerable<BenchmarkSuiteRunResult> results,
+    CancellationToken cancellationToken
+  )
+  {
+    var workspaceIds = results
+      .SelectMany(result => result.HarnessResults)
+      .SelectMany(harness => harness.Tests)
+      .Where(test => !test.WorkspaceCleanedUp)
+      .Select(test => test.Run.WorkspaceId)
+      .Distinct(StringComparer.OrdinalIgnoreCase);
+    foreach (var workspaceId in workspaceIds)
+    {
+      if (!await _workspaces.CleanupAsync(workspaceId, cancellationToken))
+      {
+        throw new IOException(
+          $"Retained workspace '{workspaceId}' could not be deleted."
+        );
+      }
+    }
   }
 
   private BadRequestObjectResult InvalidRequest(BenchmarkRequestException exception)

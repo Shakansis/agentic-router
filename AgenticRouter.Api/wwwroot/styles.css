@@ -8137,6 +8137,17 @@ textarea[readonly] {
   text-overflow: ellipsis;
 }
 
+#benchmark-history {
+  min-height: 13rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+#benchmark-history::-webkit-scrollbar {
+  display: none;
+}
+
 .benchmark-history-control span {
   color: var(--muted);
   font-size: 0.74rem;
@@ -8173,6 +8184,17 @@ textarea[readonly] {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.65rem;
+}
+
+.benchmark-history-actions,
+.benchmark-workspace-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.benchmark-history-actions button {
+  flex: 1 1 12rem;
 }
 
 .benchmark-history-filters label,
@@ -8675,9 +8697,85 @@ textarea[readonly] {
   font-size: 0.76rem;
 }
 
+.benchmark-markdown {
+  min-width: 0;
+  margin: 0.35rem 0 0.75rem;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.benchmark-markdown > div > :first-child {
+  margin-top: 0;
+}
+
+.benchmark-markdown > div > :last-child {
+  margin-bottom: 0;
+}
+
+.benchmark-markdown table {
+  display: block;
+  max-width: 100%;
+  margin: 0.6rem 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.benchmark-markdown th,
+.benchmark-markdown td {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.benchmark-markdown code:not(pre code) {
+  padding: 0.08rem 0.3rem;
+  border-radius: 0.3rem;
+  background: var(--background);
+}
+
+.benchmark-markdown .code-block {
+  margin: 0.55rem 0;
+}
+
+.benchmark-persisted-turn + .benchmark-persisted-turn {
+  margin-top: 0.8rem;
+}
+
+.benchmark-turn-metadata {
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
 .benchmark-validation-error {
   color: var(--danger);
   overflow-wrap: anywhere;
+}
+
+.benchmark-workspace-review {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--accent-soft) 35%, transparent);
+}
+
+.benchmark-workspace-review p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.benchmark-workspace-review code {
+  padding: 0.55rem 0.65rem;
+  overflow-wrap: anywhere;
+  border-radius: 0.5rem;
+  background: var(--background);
+  user-select: all;
 }
 
 @media (max-width: 1200px) {
@@ -8818,7 +8916,7 @@ textarea[readonly] {
 .benchmark-combination-picker label { display: block; margin-bottom: .5rem; color: var(--muted); font-size: .78rem; }
 .benchmark-combination-picker select { width: 100%; min-width: 0; min-height: 38px; padding: .5rem .65rem; border: 1px solid var(--border-strong); border-radius: .5rem; color: var(--text); background: var(--bg); text-overflow: ellipsis; font-size: .8rem; }
 .benchmark-combination-navigation { display: flex; justify-content: space-between; align-items: center; gap: .7rem; margin-top: .7rem; }
-.benchmark-combination-navigation > div { display: flex; gap: .4rem; }
+.benchmark-combination-navigation > div { display: grid; grid-template-columns: repeat(3, auto); gap: .4rem; }
 .benchmark-combination-navigation small { color: var(--muted); }
 .benchmark-combination-navigation button { font-size: .75rem; padding: .4rem .65rem; }
 .benchmark-live-dashboard { display: block; }

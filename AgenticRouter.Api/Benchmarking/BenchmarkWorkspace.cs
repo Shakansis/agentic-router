@@ -19,6 +19,12 @@ public sealed record BenchmarkWorkspace(
   string RootDirectory
 );
 
+public sealed record BenchmarkWorkspaceStatus(
+  string WorkspaceId,
+  string WorkspacePath,
+  bool Available
+);
+
 public interface IBenchmarkWorkspaceFactory
 {
   Task<BenchmarkWorkspace> CreateAsync(
@@ -33,6 +39,16 @@ public interface IBenchmarkWorkspaceFactory
 
   Task<bool> CleanupAsync(
     BenchmarkWorkspace workspace,
+    CancellationToken cancellationToken
+  );
+
+  Task<BenchmarkWorkspaceStatus> GetStatusAsync(
+    string workspaceId,
+    CancellationToken cancellationToken
+  );
+
+  Task<bool> CleanupAsync(
+    string workspaceId,
     CancellationToken cancellationToken
   );
 }
@@ -204,6 +220,48 @@ public sealed class BenchmarkWorkspaceFactory : IBenchmarkWorkspaceFactory
 
     DeleteOwnedTree(runDirectory, root);
     return Task.FromResult(!Directory.Exists(runDirectory));
+  }
+
+  public Task<BenchmarkWorkspaceStatus> GetStatusAsync(
+    string workspaceId,
+    CancellationToken cancellationToken
+  )
+  {
+    cancellationToken.ThrowIfCancellationRequested();
+    var workspace = Resolve(workspaceId);
+    return Task.FromResult(new BenchmarkWorkspaceStatus(
+      workspace.Id,
+      workspace.WorkspacePath,
+      Directory.Exists(workspace.RunDirectory)
+    ));
+  }
+
+  public Task<bool> CleanupAsync(
+    string workspaceId,
+    CancellationToken cancellationToken
+  )
+  {
+    return CleanupAsync(Resolve(workspaceId), cancellationToken);
+  }
+
+  private BenchmarkWorkspace Resolve(string workspaceId)
+  {
+    if (!Guid.TryParse(workspaceId, out var parsed))
+    {
+      throw new InvalidOperationException("The benchmark workspace id is invalid.");
+    }
+    var normalized = parsed.ToString("N");
+    var runDirectory = Path.GetFullPath(Path.Combine(_rootDirectory, normalized));
+    if (!IsDirectChild(_rootDirectory, runDirectory))
+    {
+      throw new InvalidOperationException("The benchmark workspace path is unsafe.");
+    }
+    return new BenchmarkWorkspace(
+      normalized,
+      runDirectory,
+      Path.Combine(runDirectory, "workspace"),
+      _rootDirectory
+    );
   }
 
   public static StringComparer PathComparer => OperatingSystem.IsWindows()

@@ -189,6 +189,7 @@ builder.Services.AddSingleton<IWorkspaceProfileStore>(
     dataDirectory
   )
 );
+builder.Services.AddSingleton<IWorkspaceExecutionContextAccessor, WorkspaceExecutionContextAccessor>();
 builder.Services.AddSingleton<IWorkspaceProfileService, WorkspaceProfileService>();
 builder.Services.AddSingleton<IKnowledgeProvider, AnythingLlmKnowledgeProvider>();
 builder.Services.AddSingleton<IKnowledgeProviderRegistry, KnowledgeProviderRegistry>();
@@ -353,6 +354,7 @@ builder.Services.AddSingleton(
   )
 );
 builder.Services.AddSingleton<IBenchmarkWorkspaceFactory, BenchmarkWorkspaceFactory>();
+builder.Services.AddSingleton<IBenchmarkExecutionScopeRegistry, BenchmarkExecutionScopeRegistry>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemCreateBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemReadBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemUpdateBenchmark>();
@@ -367,7 +369,6 @@ builder.Services.AddSingleton<IBenchmarkTestDefinition, TruthfulReportBenchmark>
 builder.Services.AddSingleton<IBenchmarkBrowserValidator, BenchmarkBrowserValidator>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, MissingGameBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestRegistry, BenchmarkTestRegistry>();
-builder.Services.AddScoped<IBenchmarkNativeExecutor, BenchmarkNativeExecutor>();
 builder.Services.AddSingleton<IBenchmarkProductionExecuteRunner, BenchmarkProductionExecuteRunner>();
 builder.Services.AddSingleton<IBenchmarkScorer, BenchmarkScorer>();
 builder.Services.AddSingleton<IBenchmarkScoringProfileStore>(services =>
@@ -376,8 +377,11 @@ builder.Services.AddSingleton<IBenchmarkScoringProfileStore>(services =>
     services.GetRequiredService<IBenchmarkScorer>()
   )
 );
-builder.Services.AddSingleton<IBenchmarkResultStore>(
-  new JsonBenchmarkResultStore(dataDirectory)
+builder.Services.AddSingleton<IBenchmarkResultStore>(services =>
+  new JsonBenchmarkResultStore(
+    dataDirectory,
+    services.GetRequiredService<IMarkdownRenderer>()
+  )
 );
 builder.Services.AddSingleton<IBenchmarkHistoryService, BenchmarkHistoryService>();
 builder.Services.AddSingleton<IBenchmarkRecommendationStore>(
@@ -447,6 +451,7 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseMiddleware<TraceContextMiddleware>();
 app.UseMiddleware<SafeModeMiddleware>();
+app.UseMiddleware<BenchmarkExecutionScopeMiddleware>();
 app.UseAuthorization();
 app.MapControllers();
 

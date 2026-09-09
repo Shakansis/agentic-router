@@ -223,6 +223,7 @@ public sealed class ChatStreamService
       requestId,
       warningAfter,
       requestLifetime,
+      invocation.Role,
       cancellationToken
     ))
     {
@@ -2309,6 +2310,17 @@ public sealed class ChatStreamService
             $"harness.{harnessDefinition.Id}-{harnessEvent.Type}",
             harnessEvent.Message
               ?? $"{harnessDefinition.DisplayName} processed the Host effort target.",
+            stopwatch,
+            model,
+            intention
+          );
+          break;
+        case "answer.fallback":
+          yield return Event(
+            requestId,
+            $"harness.{harnessDefinition.Id}-answer-fallback",
+            harnessEvent.Message
+              ?? $"{harnessDefinition.DisplayName} supplied its answer through a protocol fallback.",
             stopwatch,
             model,
             intention
@@ -6412,6 +6424,7 @@ public sealed class ChatStreamService
     string requestId,
     TimeSpan warningAfter,
     CancellationTokenSource requestLifetime,
+    ExecutionContextRole executionRole,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -6423,6 +6436,7 @@ public sealed class ChatStreamService
     var lastActivityAt = startedAt;
     var warningSent = false;
     var criticalSent = false;
+    var inactivityRecoveryAttempted = false;
     var heartbeatInterval = TimeSpan.FromSeconds(Math.Clamp(
       warningAfter.TotalSeconds / 3,
       1,
@@ -6492,6 +6506,50 @@ public sealed class ChatStreamService
             lastActivityAt,
             stopwatch.ElapsedMilliseconds
           );
+          if (
+            !inactivityRecoveryAttempted
+            && activeTool is null
+            && TryResolveInactivitySteering(
+              request,
+              selectedHarness,
+              executionRole,
+              out var steering,
+              out var steeringSessionId
+            )
+          )
+          {
+            inactivityRecoveryAttempted = true;
+            HarnessSteerResult? result = null;
+            try
+            {
+              result = await steering.SteerTurnAsync(
+                new HarnessSteerRequest(
+                  steeringSessionId,
+                  "Host recovery: no meaningful progress crossed the Host boundary within the configured interval. Re-check the current objective and workspace state, then take the next concrete permitted action. Do not repeat completed actions. If progress is impossible, report the exact blocker and finish truthfully.",
+                  $"host-inactivity-{Guid.NewGuid():N}"
+                ),
+                requestLifetime.Token
+              );
+            }
+            catch (HarnessException exception)
+            {
+              _logger.LogDebug(
+                exception,
+                "Harness {Harness} could not accept the bounded inactivity recovery prompt.",
+                selectedHarness
+              );
+            }
+            if (result?.Accepted == true)
+            {
+              yield return Event(
+                requestId,
+                "request.inactivity-recovery",
+                $"The Host prompted {selectedHarness} to continue after sustained inactivity.",
+                stopwatch,
+                selectedModel
+              );
+            }
+          }
           continue;
         }
         if (
@@ -6595,6 +6653,41 @@ public sealed class ChatStreamService
       activityLifetime.Cancel();
       activityLifetime.Dispose();
     }
+  }
+
+  private bool TryResolveInactivitySteering(
+    ChatRequest request,
+    string harnessId,
+    ExecutionContextRole executionRole,
+    out IAgentHarnessSteeringTransport steering,
+    out string sessionId
+  )
+  {
+    steering = null!;
+    sessionId = string.Empty;
+    if (
+      executionRole != ExecutionContextRole.Direct
+      || !string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal)
+      || request.ApprovalPolicy is not ("auto" or "autonomous")
+    )
+    {
+      return false;
+    }
+    sessionId = request.BrowserSessionId
+      ?? request.ConversationSessionId
+      ?? string.Empty;
+    if (
+      string.IsNullOrWhiteSpace(sessionId)
+      || !_harnesses.TryGetDefinition(harnessId, out var definition)
+      || !definition.Capabilities.SupportsSteering
+      || !_harnesses.TryGetAdapter(harnessId, out var adapter)
+      || adapter is not IAgentHarnessSteeringTransport supportedSteering
+    )
+    {
+      return false;
+    }
+    steering = supportedSteering;
+    return true;
   }
 
   private ChatStreamEvent SlowRequestEvent(
