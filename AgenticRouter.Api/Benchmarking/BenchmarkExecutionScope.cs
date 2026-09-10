@@ -6,7 +6,12 @@ namespace AgenticRouter.Api.Benchmarking;
 
 public interface IBenchmarkExecutionScopeRegistry
 {
-  BenchmarkExecutionScopeLease Register(BenchmarkWorkspace workspace, string model);
+  BenchmarkExecutionScopeLease Register(
+    BenchmarkWorkspace workspace,
+    string model,
+    int contextTokens,
+    string gpu
+  );
 
   bool TryEnter(string token, out IDisposable? scope);
 }
@@ -14,15 +19,25 @@ public interface IBenchmarkExecutionScopeRegistry
 public sealed class BenchmarkExecutionScopeRegistry : IBenchmarkExecutionScopeRegistry
 {
   public const string HeaderName = "X-AgenticRouter-Benchmark-Scope";
-  private readonly ConcurrentDictionary<string, WorkspaceProfileData> _profiles = new(StringComparer.Ordinal);
+  private readonly ConcurrentDictionary<string, BenchmarkExecutionScopeData> _profiles = new(StringComparer.Ordinal);
   private readonly IWorkspaceExecutionContextAccessor _contexts;
+  private readonly IBenchmarkExecutionContextAccessor _benchmarkContexts;
 
-  public BenchmarkExecutionScopeRegistry(IWorkspaceExecutionContextAccessor contexts)
+  public BenchmarkExecutionScopeRegistry(
+    IWorkspaceExecutionContextAccessor contexts,
+    IBenchmarkExecutionContextAccessor benchmarkContexts
+  )
   {
     _contexts = contexts;
+    _benchmarkContexts = benchmarkContexts;
   }
 
-  public BenchmarkExecutionScopeLease Register(BenchmarkWorkspace workspace, string model)
+  public BenchmarkExecutionScopeLease Register(
+    BenchmarkWorkspace workspace,
+    string model,
+    int contextTokens,
+    string gpu
+  )
   {
     var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
     var now = DateTimeOffset.UtcNow;
@@ -39,7 +54,11 @@ public sealed class BenchmarkExecutionScopeRegistry : IBenchmarkExecutionScopeRe
       ValidationProfile = null,
       ProcessPermissions = []
     };
-    if (!_profiles.TryAdd(token, profile))
+    var data = new BenchmarkExecutionScopeData(
+      profile,
+      new BenchmarkExecutionContext(model, contextTokens, gpu)
+    );
+    if (!_profiles.TryAdd(token, data))
     {
       throw new InvalidOperationException("The benchmark execution scope could not be registered.");
     }
@@ -48,13 +67,88 @@ public sealed class BenchmarkExecutionScopeRegistry : IBenchmarkExecutionScopeRe
 
   public bool TryEnter(string token, out IDisposable? scope)
   {
-    if (_profiles.TryGetValue(token, out var profile))
+    if (_profiles.TryGetValue(token, out var data))
     {
-      scope = _contexts.Push(profile);
+      scope = new CompositeScope(
+        _contexts.Push(data.Workspace),
+        _benchmarkContexts.Push(data.Benchmark)
+      );
       return true;
     }
     scope = null;
     return false;
+  }
+
+  private sealed record BenchmarkExecutionScopeData(
+    WorkspaceProfileData Workspace,
+    BenchmarkExecutionContext Benchmark
+  );
+
+  private sealed class CompositeScope(
+    IDisposable workspace,
+    IDisposable benchmark
+  ) : IDisposable
+  {
+    private int _disposed;
+
+    public void Dispose()
+    {
+      if (Interlocked.Exchange(ref _disposed, 1) != 0)
+      {
+        return;
+      }
+      benchmark.Dispose();
+      workspace.Dispose();
+    }
+  }
+}
+
+public sealed record BenchmarkExecutionContext(
+  string Model,
+  int ContextTokens,
+  string Gpu
+);
+
+public interface IBenchmarkExecutionContextAccessor
+{
+  BenchmarkExecutionContext? Current { get; }
+
+  IDisposable Push(BenchmarkExecutionContext context);
+}
+
+public sealed class BenchmarkExecutionContextAccessor : IBenchmarkExecutionContextAccessor
+{
+  private readonly AsyncLocal<Scope?> _current = new();
+
+  public BenchmarkExecutionContext? Current => _current.Value?.Context;
+
+  public IDisposable Push(BenchmarkExecutionContext context)
+  {
+    ArgumentNullException.ThrowIfNull(context);
+    var previous = _current.Value;
+    var current = new Scope(context);
+    _current.Value = current;
+    return new PopScope(this, current, previous);
+  }
+
+  private sealed record Scope(BenchmarkExecutionContext Context);
+
+  private sealed class PopScope(
+    BenchmarkExecutionContextAccessor owner,
+    Scope current,
+    Scope? previous
+  ) : IDisposable
+  {
+    private int _disposed;
+
+    public void Dispose()
+    {
+      if (Interlocked.Exchange(ref _disposed, 1) == 0
+        && ReferenceEquals(owner._current.Value, current))
+      {
+        owner._current.Value = previous;
+      }
+    }
   }
 }
 

@@ -241,6 +241,9 @@ function bindElements() {
     "benchmark-suite-list",
     "benchmark-timeout",
     "benchmark-repetitions",
+    "benchmark-context-tokens",
+    "benchmark-context-presets",
+    "benchmark-default-gpu",
     "benchmark-history",
     "benchmark-history-model-filter",
     "benchmark-history-harness-filter",
@@ -649,6 +652,7 @@ function bindEvents() {
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
   elements.benchmarkForm.addEventListener("change", renderBenchmarkSelectionSummary);
   elements.benchmarkRepetitions.addEventListener("input", renderBenchmarkSelectionSummary);
+  elements.benchmarkContextTokens.addEventListener("input", renderBenchmarkSelectionSummary);
   for (const tab of elements.benchmarkView.querySelectorAll("[data-benchmark-tab]")) {
     tab.addEventListener("click", () => showBenchmarkTab(tab.dataset.benchmarkTab));
     tab.addEventListener("keydown", handleBenchmarkTabKeyDown);
@@ -1468,13 +1472,15 @@ async function openBenchmarks() {
       history,
       modelsResponse,
       scoringProfile,
-      recommendationCatalog
+      recommendationCatalog,
+      liveRuns
     ] = await Promise.all([
       fetchJson("/api/benchmarks/catalog"),
       fetchJson("/api/benchmarks/history?limit=100"),
       fetchJson("/api/models"),
       fetchJson("/api/benchmarks/scoring-profile"),
-      fetchJson("/api/benchmarks/recommendation-catalog")
+      fetchJson("/api/benchmarks/recommendation-catalog"),
+      fetchJson("/api/benchmarks/suite-runs/live")
     ]);
     state.models = modelsResponse.models;
     const retainedLive = state.benchmark?.live?.terminal
@@ -1501,7 +1507,12 @@ async function openBenchmarks() {
     renderBenchmarkControls();
     renderBenchmarkHistory();
     renderBenchmarkRecommendationControls();
-    const storedRunId = sessionStorage.getItem(benchmarkLiveRunStorageKey);
+    const storedRunId = sessionStorage.getItem(benchmarkLiveRunStorageKey)
+      ?? liveRuns.find(run => !run.terminal)?.runId
+      ?? null;
+    if (storedRunId) {
+      sessionStorage.setItem(benchmarkLiveRunStorageKey, storedRunId);
+    }
     if (retainedLive && state.activeBenchmarkRunId) {
       renderBenchmarkLive();
       setBenchmarkRunning(true);
@@ -1668,6 +1679,18 @@ function renderBenchmarkControls() {
   elements.benchmarkTimeout.value = String(catalog?.defaultTimeoutSeconds ?? 120);
   elements.benchmarkTimeout.min = String(catalog?.minimumTimeoutSeconds ?? 5);
   elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 1600);
+  const selectedContext = state.benchmarkBatch?.request?.contextTokens
+    ?? catalog?.defaultContextTokens
+    ?? 32768;
+  elements.benchmarkContextTokens.min = String(catalog?.minimumContextTokens ?? 4096);
+  elements.benchmarkContextTokens.max = String(catalog?.maximumContextTokens ?? 131072);
+  elements.benchmarkContextTokens.value = String(selectedContext);
+  elements.benchmarkContextPresets.replaceChildren(...(catalog?.contextPresets ?? []).map(value => {
+    const option = document.createElement("option");
+    option.value = String(value);
+    return option;
+  }));
+  elements.benchmarkDefaultGpu.value = catalog?.defaultGpu ?? "Unavailable";
   elements.benchmarkHarnessList.replaceChildren();
   for (const status of catalog?.harnesses ?? []) {
     const label = document.createElement("label");
@@ -2474,6 +2497,16 @@ async function runBenchmarkSuite(event) {
     elements.benchmarkStatus.textContent = "Sequential runs must be between 1 and 20.";
     return;
   }
+  const contextTokens = Number(elements.benchmarkContextTokens.value);
+  const minimumContext = Number(elements.benchmarkContextTokens.min);
+  const maximumContext = Number(elements.benchmarkContextTokens.max);
+  if (!Number.isInteger(contextTokens)
+    || contextTokens < minimumContext
+    || contextTokens > maximumContext) {
+    elements.benchmarkStatus.textContent =
+      `Context window must be between ${minimumContext} and ${maximumContext} tokens.`;
+    return;
+  }
   state.benchmarkBatch = {
     total: repetitions,
     started: 0,
@@ -2488,6 +2521,7 @@ async function runBenchmarkSuite(event) {
       suiteVersion: suites[0].version,
       suites: suites.map(suite => ({ id: suite.id, version: suite.version })),
       timeoutSeconds: Number(elements.benchmarkTimeout.value),
+      contextTokens,
       scoringProfileId: elements.benchmarkScoringProfileChoice.value,
       scoreWeights: elements.benchmarkScoringProfileChoice.value === "custom"
         ? benchmarkWeightsFromInputs()
@@ -2835,12 +2869,14 @@ function renderBenchmarkSelectionSummary() {
     ? elements.benchmarkModelList.querySelectorAll("input:checked").length : models;
   const tests = new Set(selectedBenchmarkSuites().flatMap(suite => suite.tests.map(test => test.id))).size;
   const repeats = Number(elements.benchmarkRepetitions.value);
+  const contextTokens = Number(elements.benchmarkContextTokens.value);
+  const gpu = state.benchmark?.catalog?.defaultGpu ?? "Unavailable";
   elements.benchmarkModelsCount.textContent = `${selectedModels} selected`;
   elements.benchmarkHarnessesCount.textContent = `${harnesses} selected`;
   elements.benchmarkTestsCount.textContent = `${tests} tests`;
   elements.benchmarkSelectionSummary.textContent = `${selectedModels * harnesses} combinations × ${tests} tests`;
   elements.benchmarkSelectionTotal.textContent = Number.isInteger(repeats) && repeats >= 1 && repeats <= 20
-    ? `${repeats} repetition(s) · ${(selectedModels * harnesses * tests * repeats).toLocaleString("en-US")} planned tests`
+    ? `${repeats} repetition(s) · ${(selectedModels * harnesses * tests * repeats).toLocaleString("en-US")} planned tests · ${Number.isInteger(contextTokens) ? contextTokens.toLocaleString("en-US") : "invalid"} ctx · ${gpu}`
     : "Choose 1–20 sequential runs.";
 }
 
@@ -3188,6 +3224,7 @@ function setBenchmarkRunning(running) {
   elements.benchmarkScoringProfileChoice.disabled = running;
   elements.benchmarkTimeout.disabled = running;
   elements.benchmarkRepetitions.disabled = running;
+  elements.benchmarkContextTokens.disabled = running;
   for (const input of elements.benchmarkSuiteList.querySelectorAll("input")) {
     input.disabled = running;
   }
@@ -3288,9 +3325,12 @@ function renderBenchmarkResultContent(result) {
     `${modelSummary} · ${benchmarkSuiteLabel(result.suiteId)} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)}`;
   const originalScore = benchmarkAggregateOriginalScore(result);
   const currentScore = benchmarkAggregateCurrentScore(projection, result);
+  const executionConfiguration = result.configuration
+    ? ` · ${Number(result.configuration.contextTokens ?? result.environment?.configuredContextTokens ?? 0).toLocaleString("en-US")} ctx · ${result.configuration.gpu ?? "GPU unavailable"}`
+    : "";
   elements.benchmarkScoreContext.textContent = profile
-    ? `Measured evidence unchanged · Original score ${originalScore.toFixed(2)} · Current-profile score ${currentScore.toFixed(2)} with ${profile.displayName} v${profile.version}`
-    : "Measured evidence and Calculated score are presented separately.";
+    ? `Measured evidence unchanged · Original score ${originalScore.toFixed(2)} · Current-profile score ${currentScore.toFixed(2)} with ${profile.displayName} v${profile.version}${executionConfiguration}`
+    : `Measured evidence and Calculated score are presented separately.${executionConfiguration}`;
   if ((result.cells ?? []).length > 0) {
     renderBenchmarkMatrix(result, projection);
     renderBenchmarkRankings(result, projection);
@@ -3553,6 +3593,24 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     const evidenceHeading = document.createElement("strong");
     evidenceHeading.textContent = "Measured evidence";
     const operational = test.rawResult.operationalDiagnostics;
+    const runtime = test.rawResult.runtimeEvidence;
+    const runtimeEvidence = runtime ? [
+      ["Runtime · GPU selection", runtime.gpuSelection],
+      ["Runtime · Backend", runtime.backend ?? "Unavailable"],
+      ["Runtime · Context", `${runtime.requestedContextTokens} requested / ${runtime.actualContextTokens ?? "not observed"} observed · ${runtime.contextStatus}`],
+      ["Runtime · Processor", runtime.processor],
+      ["Runtime · Model / VRAM / RAM", `${formatGiB(runtime.modelSizeBytes)} / ${formatGiB(runtime.vramSizeBytes)} / ${formatGiB(runtime.estimatedRamSizeBytes)}`],
+      ["Runtime · Prompt tokens/s", runtime.promptTokensPerSecond ?? "Unavailable"],
+      ["Runtime · Output tokens/s", runtime.outputTokensPerSecond ?? "Unavailable"],
+      ["Runtime · Timeout phase", runtime.timeoutPhase ?? "n/a"],
+      ["Runtime · Last progress", runtime.lastProgress ?? "Unavailable"],
+      ["Runtime · System RAM sample", runtime.deviceMemory?.systemMemory
+        ? `${formatGiB(runtime.deviceMemory.systemMemory.usedBytes)} / ${formatGiB(runtime.deviceMemory.systemMemory.totalBytes)} · ${runtime.deviceMemory.systemMemory.usedPercent ?? "n/d"}%`
+        : "Unavailable"],
+      ["Runtime · GPU VRAM samples", (runtime.deviceMemory?.gpus ?? []).map(device =>
+        `${device.name}: ${formatGiB(device.usedDedicatedMemoryBytes)} / ${formatGiB(device.totalDedicatedMemoryBytes)} · ${device.usedPercent ?? "n/d"}%`
+      ).join("; ") || "Unavailable"]
+    ] : [];
     const operationalEvidence = operational ? [
       ["Operational · Strategy", `${operational.requestedStrategy} → ${operational.resolvedStrategy}`],
       ["Operational · Tool calls", operational.toolCalls ?? "Unavailable"],
@@ -3575,6 +3633,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     ] : [];
     const evidence = [
       ["Terminal", test.rawResult.executionStatus],
+      ["Failure category", test.rawResult.failureCategory ?? "unknown"],
       ["Exactness", `${test.rawResult.exactness}%`],
       ["Workspace", `${test.rawResult.containmentAccuracy}%`],
       ["Host validation", test.rawResult.hostValidationResult],
@@ -3594,6 +3653,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       ["Hygiene", benchmarkMetric(test.rawResult.behaviorMetrics?.hygiene)],
       ["Truthful report", benchmarkMetric(test.rawResult.behaviorMetrics?.truthfulFinalReport)],
       ["Narration", test.rawResult.behaviorMetrics?.narrationClassification ?? "Unavailable"],
+      ...runtimeEvidence,
       ...operationalEvidence,
       ...Object.entries(test.rawResult.validationFacts ?? {}).map(
         ([key, value]) => [`Validation · ${key}`, value]

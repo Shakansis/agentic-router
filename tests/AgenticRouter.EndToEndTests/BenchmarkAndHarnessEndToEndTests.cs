@@ -1813,7 +1813,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var result = view.Events.Single(item => item.Type == BenchmarkProgressTypeIds.RunCompleted)
       .FinalResult;
     Assert.IsNotNull(result);
-    Assert.AreEqual(4, result.SchemaVersion);
+    Assert.AreEqual(5, result.SchemaVersion);
     Assert.HasCount(1, result.SelectedSuites!);
     Assert.AreEqual(BenchmarkScoringProfileIds.Custom, result.ScoringProfileId);
     Assert.AreEqual(100, result.ScoreWeights.Correctness);
@@ -1840,7 +1840,21 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsTrue(completed.All(cell =>
       cell.Status == BenchmarkMatrixCellStatusIds.Completed
       && cell.Compatibility == BenchmarkMatrixCellStatusIds.Available
-      && cell.Result is not null));
+      && cell.Result is not null), JsonSerializer.Serialize(completed.Select(cell => new
+      {
+        cell.Model,
+        cell.Harness,
+        cell.Status,
+        cell.Message,
+        Tests = cell.Result?.Tests.Select(test => new
+        {
+          test.Run.TestId,
+          test.RawResult.Status,
+          test.RawResult.ExecutionStatus,
+          test.RawResult.FailureCategory,
+          test.RawResult.Error
+        })
+      })));
     Assert.IsTrue(completed.All(cell => cell.Result!.Tests.All(test =>
       test.Run.Model == cell.Model
       && test.Run.ModelDigest == $"digest-{cell.Model}"
@@ -1961,6 +1975,90 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       test.Run.Model == "alpha:latest" && test.WorkspaceCleanedUp));
     _environment.FakeOllama.RemoveLoadedModel("structured-failure:latest");
     _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task BenchmarkFreezesDefaultGpuAndSelectedContextAtProviderBoundary()
+  {
+    _environment.FakeOllama.Reset();
+    var settings = await GetSettingsJsonAsync();
+    var expectedGpu = settings["defaultGpu"]!.GetValue<string>();
+    const int contextTokens = 40_960;
+    var runId = Guid.NewGuid().ToString("N");
+
+    var catalog = await _environment.HttpClient.GetFromJsonAsync<JsonObject>(
+      "api/benchmarks/catalog"
+    );
+    Assert.IsNotNull(catalog);
+    Assert.AreEqual(expectedGpu, catalog["defaultGpu"]!.GetValue<string>());
+    Assert.IsGreaterThanOrEqualTo(
+      catalog["minimumContextTokens"]!.GetValue<int>(),
+      contextTokens
+    );
+    Assert.IsLessThanOrEqualTo(
+      catalog["maximumContextTokens"]!.GetValue<int>(),
+      contextTokens
+    );
+
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs/live",
+      new BenchmarkSuiteRunRequest(
+        "alpha:latest",
+        [HarnessIds.Native],
+        TimeoutSeconds: 20,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: runId,
+        ContextTokens: contextTokens
+      )
+    );
+    Assert.AreEqual(HttpStatusCode.Accepted, response.StatusCode);
+
+    BenchmarkLiveRunView? view = null;
+    for (var attempt = 0; attempt < 600; attempt++)
+    {
+      view = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{runId}/live"
+      );
+      if (view?.Terminal == true)
+      {
+        break;
+      }
+      await Task.Delay(100);
+    }
+    Assert.IsNotNull(view);
+    Assert.IsTrue(view.Terminal);
+    var result = view.Events.Single(item => item.Type == BenchmarkProgressTypeIds.RunCompleted)
+      .FinalResult;
+    Assert.IsNotNull(result);
+    Assert.AreEqual(contextTokens, result.Configuration!.ContextTokens);
+    Assert.AreEqual(expectedGpu, result.Configuration.Gpu);
+    Assert.AreEqual("benchmark", result.Configuration.ModelRole);
+    Assert.AreEqual(contextTokens, result.Environment!.ConfiguredContextTokens);
+    foreach (var test in result.Cells!.Single().Result!.Tests)
+    {
+      var runtime = test.RawResult.RuntimeEvidence;
+      Assert.IsNotNull(runtime, test.Run.TestId);
+      Assert.AreEqual(contextTokens, runtime.RequestedContextTokens, test.Run.TestId);
+      Assert.AreEqual(contextTokens, runtime.ActualContextTokens, test.Run.TestId);
+      Assert.AreEqual("matched", runtime.ContextStatus, test.Run.TestId);
+      Assert.IsNotNull(runtime.DeviceMemory, test.Run.TestId);
+      Assert.IsGreaterThan(
+        0,
+        runtime.OutputTokensPerSecond ?? 0,
+        $"{test.Run.TestId}: {JsonSerializer.Serialize(runtime)}"
+      );
+    }
+    var providerRequests = _environment.FakeOllama.Requests
+      .Where(request => request.Model == "alpha:latest")
+      .ToArray();
+    Assert.IsGreaterThan(0, providerRequests.Length);
+    Assert.IsTrue(providerRequests.All(request => request.ContextTokens == contextTokens));
+    var liveRuns = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView[]>(
+      "api/benchmarks/suite-runs/live"
+    );
+    Assert.IsTrue(liveRuns!.Any(run => run.RunId == runId));
   }
 
   [TestMethod]
@@ -2332,6 +2430,72 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsNotEmpty(replayIds);
     Assert.IsTrue(replayIds.All(sequence => sequence > replayAfter));
     Assert.AreEqual(view.LastSequence, replayIds[^1]);
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task CompletedLiveBenchmarkRecoversFromPersistedResultAfterApplicationRestart()
+  {
+    var clientRunId = Guid.NewGuid().ToString("N");
+    using var startResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs/live",
+      new BenchmarkSuiteRunRequest(
+        "alpha:latest",
+        [HarnessIds.Native],
+        TimeoutSeconds: 20,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: clientRunId
+      )
+    );
+    Assert.AreEqual(HttpStatusCode.Accepted, startResponse.StatusCode);
+
+    BenchmarkLiveRunView? completedView = null;
+    for (var attempt = 0; attempt < 300; attempt++)
+    {
+      completedView = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{clientRunId}/live"
+      );
+      if (completedView?.Terminal == true)
+      {
+        break;
+      }
+      await Task.Delay(100);
+    }
+    Assert.IsNotNull(completedView);
+    Assert.IsTrue(completedView.Terminal);
+    var persistedResult = completedView.Events.Single(item =>
+      item.Type == BenchmarkProgressTypeIds.RunCompleted).FinalResult;
+    Assert.IsNotNull(persistedResult);
+
+    await _environment.RestartApplicationAsync();
+
+    var recoveredView = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+      $"api/benchmarks/suite-runs/{clientRunId}/live"
+    );
+    Assert.IsNotNull(recoveredView);
+    Assert.IsTrue(recoveredView.Terminal);
+    Assert.IsFalse(recoveredView.CancellationRequested);
+    Assert.HasCount(1, recoveredView.Events);
+    var recoveredEvent = recoveredView.Events[0];
+    Assert.AreEqual(BenchmarkProgressTypeIds.RunCompleted, recoveredEvent.Type);
+    Assert.AreEqual(clientRunId, recoveredEvent.RunId);
+    Assert.IsNotNull(recoveredEvent.FinalResult);
+    Assert.AreEqual(persistedResult.RunId, recoveredEvent.FinalResult.RunId);
+    Assert.AreEqual(persistedResult.TerminalState, recoveredEvent.FinalResult.TerminalState);
+    Assert.AreEqual(persistedResult.FinalStatus, recoveredEvent.FinalResult.FinalStatus);
+    Assert.AreEqual(persistedResult.EndedAt, recoveredEvent.FinalResult.EndedAt);
+
+    const long previousSequence = 37;
+    using var replayResponse = await _environment.HttpClient.GetAsync(
+      $"api/benchmarks/suite-runs/{clientRunId}/events?after={previousSequence}"
+    );
+    replayResponse.EnsureSuccessStatusCode();
+    var replay = await replayResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(replay, $"id: {previousSequence + 1}");
+    StringAssert.Contains(replay, "event: benchmark");
+    StringAssert.Contains(replay, "\"type\":\"run.completed\"");
+    StringAssert.Contains(replay, $"\"runId\":\"{clientRunId}\"");
     _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
   }
 
@@ -2863,7 +3027,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     response.EnsureSuccessStatusCode();
     var result = await response.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
     Assert.IsNotNull(result);
-    Assert.AreEqual(4, result.SchemaVersion);
+    Assert.AreEqual(5, result.SchemaVersion);
     Assert.AreEqual(BenchmarkSuiteIds.Combined, result.SuiteId);
     Assert.HasCount(2, result.SelectedSuites!);
     Assert.HasCount(11, result.HarnessResults.Single().Tests);
@@ -3022,6 +3186,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       test.Run.TestId == BenchmarkIds.Convergence001).RawResult.Status);
     var timedOut = tests.Single(test =>
       test.Run.TestId == BenchmarkIds.Convergence001).RawResult;
+    Assert.AreEqual(BenchmarkFailureCategoryIds.Timeout, timedOut.FailureCategory);
+    Assert.IsNotNull(timedOut.RuntimeEvidence);
+    Assert.AreEqual("harness-execution", timedOut.RuntimeEvidence.TimeoutPhase);
+    Assert.IsFalse(string.IsNullOrWhiteSpace(timedOut.RuntimeEvidence.LastProgress));
     Assert.IsNotNull(timedOut.OperationalDiagnostics);
     Assert.IsGreaterThan(0, timedOut.OperationalDiagnostics.ToolCalls ?? 0);
     var partialReadPreserved = timedOut.ToolCalls?.Any(call =>
@@ -3357,8 +3525,20 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task LiveBenchmarkUiRendersProgressReopensAndSettlesCancellation()
   {
+    var settings = await GetSettingsJsonAsync();
+    var defaultContext = settings["ollamaRuntime"]!["roleDefaults"]!["benchmark"]![
+      "targetContextTokens"
+    ]!.GetValue<int>();
+    var defaultGpu = settings["defaultGpu"]!.GetValue<string>();
     await Page.GotoAsync("/");
     await Page.Locator("#open-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#benchmark-context-tokens")).ToHaveValueAsync(
+      defaultContext.ToString()
+    );
+    await Expect(Page.Locator("#benchmark-default-gpu")).ToHaveValueAsync(defaultGpu);
+    await Page.Locator("#benchmark-context-tokens").FillAsync("40960");
+    await Expect(Page.Locator("#benchmark-selection-total")).ToContainTextAsync("40,960 ctx");
+    await Expect(Page.Locator("#benchmark-selection-total")).ToContainTextAsync(defaultGpu);
     await SelectBenchmarkModelsAsync("docs:latest");
     await Page.Locator("#benchmark-suite-list input[value=\"basic-crud\"]")
       .CheckAsync();
@@ -3372,6 +3552,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#benchmark-harness-list input[value=\"claude-code\"]").UncheckAsync();
     await Page.Locator("#benchmark-timeout").FillAsync("60");
     await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-context-tokens")).ToBeDisabledAsync();
 
     await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
     await Page.Locator("#benchmark-tab-results").ClickAsync();

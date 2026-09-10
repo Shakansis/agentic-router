@@ -8,6 +8,7 @@ using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Benchmarking;
 
@@ -43,6 +44,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private readonly IBenchmarkRunCancellationRegistry _cancellations;
   private readonly IBenchmarkEnvironmentSnapshotProvider _environmentSnapshots;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
+  private readonly ISystemMemoryMetricsProvider _systemMemory;
+  private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly IMarkdownRenderer _markdown;
 
   public BenchmarkEngine(
@@ -57,6 +60,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IBenchmarkRunCancellationRegistry cancellations,
     IBenchmarkEnvironmentSnapshotProvider environmentSnapshots,
     IOllamaManagedServerManager managedOllamaServers,
+    ISystemMemoryMetricsProvider systemMemory,
+    IGpuMemoryMetricsProvider gpuMemory,
     IMarkdownRenderer markdown
   )
   {
@@ -71,6 +76,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _cancellations = cancellations;
     _environmentSnapshots = environmentSnapshots;
     _managedOllamaServers = managedOllamaServers;
+    _systemMemory = systemMemory;
+    _gpuMemory = gpuMemory;
     _markdown = markdown;
   }
 
@@ -92,6 +99,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     }
     RequirePermission(request.ModelExecutionPermissionGranted);
     var settings = await _settingsStore.GetAsync(cancellationToken);
+    var contextTokens = ResolveBenchmarkContextTokens(settings, null);
+    var gpu = settings.DefaultGpu;
     var providerEndpoint = new Uri(settings.OllamaUrl, UriKind.Absolute);
     var model = await ResolveModelAsync(
       request.Model,
@@ -100,8 +109,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     );
     providerEndpoint = (await _managedOllamaServers.ResolveAsync(
       providerEndpoint,
-      settings.DefaultGpu,
-      settings.DefaultGpu,
+      gpu,
+      gpu,
       cancellationToken
     )).Endpoint;
     var harness = await ResolveHarnessAsync(request.Harness, cancellationToken);
@@ -114,7 +123,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       settings,
       TimeSpan.FromSeconds(test.Metadata.TimeoutSeconds),
       BenchmarkScoreWeights.Default,
-      cancellationToken
+      cancellationToken,
+      contextTokens,
+      gpu,
+      true
     );
   }
 
@@ -160,6 +172,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _scorer.Validate(scoreWeights);
     var scoringProfileId = NormalizeScoringProfileId(request.ScoringProfileId);
     var settings = await _settingsStore.GetAsync(cancellationToken);
+    var contextTokens = ResolveBenchmarkContextTokens(settings, request.ContextTokens);
+    var gpu = settings.DefaultGpu;
     var providerEndpoint = new Uri(settings.OllamaUrl, UriKind.Absolute);
     var installedModels = await _ollamaClient.GetModelsAsync(
       providerEndpoint,
@@ -167,8 +181,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     );
     providerEndpoint = (await _managedOllamaServers.ResolveAsync(
       providerEndpoint,
-      settings.DefaultGpu,
-      settings.DefaultGpu,
+      gpu,
+      gpu,
       cancellationToken
     )).Endpoint;
     var models = requestedModels.Select(name => new ResolvedBenchmarkModel(
@@ -177,6 +191,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase)
         && string.Equals(candidate.Provider, ModelProviderIds.OllamaLocal, StringComparison.Ordinal))
     )).ToArray();
+    await ValidateModelContextLimitsAsync(
+      models,
+      providerEndpoint,
+      contextTokens,
+      cancellationToken
+    );
     var harnesses = new List<ResolvedBenchmarkHarness>(requestedHarnesses.Count);
     foreach (var harnessId in requestedHarnesses)
     {
@@ -292,6 +312,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           settings,
           request.TimeoutSeconds,
           scoreWeights,
+          contextTokens,
+          gpu,
           lease.Token,
           progressSink,
           liveResults
@@ -350,7 +372,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var identities = await CreateModelIdentitiesAsync(
       models,
       providerEndpoint,
-      settings,
+      contextTokens,
       cancellationToken
     );
     string? runtimeVersion;
@@ -365,15 +387,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     {
       runtimeVersion = null;
     }
-    int? configuredContext = settings.OllamaRuntime.RoleDefaults.TryGetValue(
-      OllamaRuntimeRoleIds.Benchmark,
-      out var benchmarkRuntime
-    ) ? benchmarkRuntime.TargetContextTokens : null;
     var environment = _environmentSnapshots.Capture(
       "ollama-local",
       runtimeVersion,
       true,
-      configuredContext
+      contextTokens
     );
     var harnessIdentities = harnesses.Select(harness => new BenchmarkHarnessIdentity(
       harness.Adapter.Definition.Id,
@@ -400,7 +418,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       scoreWeights,
       harnessResults,
       ranking,
-      SchemaVersion: 4,
+      SchemaVersion: 5,
       ScoringProfileId: scoringProfileId,
       SelectedModels: requestedModels,
       SelectedHarnesses: requestedHarnesses,
@@ -422,8 +440,12 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           request.TimeoutSeconds,
           requestedModels,
           requestedHarnesses,
-          configuredContext
-        )
+          contextTokens,
+          gpu
+        ),
+        contextTokens,
+        gpu,
+        UsageModelRoles.Benchmark
       ),
       ScoringProfileVersion: BenchmarkScoringProfileIds.DefaultVersion,
       RawMeasurementsStatus: BenchmarkEvidenceStatusIds.Measured,
@@ -450,6 +472,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     ApplicationSettings settings,
     int timeoutSeconds,
     BenchmarkScoreWeights scoreWeights,
+    int contextTokens,
+    string gpu,
     CancellationToken cancellationToken,
     IBenchmarkProgressSink? progressSink,
     ConcurrentDictionary<string, BenchmarkHarnessResult> liveResults
@@ -514,6 +538,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         TimeSpan.FromSeconds(timeoutSeconds),
         scoreWeights,
         cancellationToken,
+        contextTokens,
+        gpu,
+        false,
         progressSink is null
           ? null
           : new BenchmarkProgressContext(
@@ -551,6 +578,31 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       PublishRanking(runId, progressSink, liveResults, harnessId, model.Name);
     }
 
+    var observedRuntime = await ObserveRunningModelAsync(
+      providerEndpoint,
+      model.Name,
+      cancellationToken
+    );
+    var deviceMemory = CaptureDeviceMemorySample();
+    for (var index = 0; index < testResults.Count; index++)
+    {
+      var testResult = testResults[index];
+      if (testResult.RawResult.RuntimeEvidence is not null)
+      {
+        testResults[index] = testResult with
+        {
+          RawResult = testResult.RawResult with
+          {
+            RuntimeEvidence = WithRuntimeObservation(
+              testResult.RawResult.RuntimeEvidence,
+              observedRuntime,
+              deviceMemory
+            )
+          }
+        };
+      }
+    }
+
     var final = CreateHarnessResult(
       harness,
       tests.Count,
@@ -580,6 +632,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     TimeSpan timeout,
     BenchmarkScoreWeights scoreWeights,
     CancellationToken runCancellationToken,
+    int contextTokens,
+    string gpu,
+    bool observeRuntime,
     BenchmarkProgressContext? progress = null
   )
   {
@@ -634,6 +689,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           test,
           model,
           workspace,
+          contextTokens,
+          gpu,
           timeoutSource.Token,
           progress
         );
@@ -748,6 +805,19 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         ),
         CancellationToken.None
       );
+      raw = raw with { FailureCategory = ClassifyFailure(raw) };
+      raw = raw with
+      {
+        RuntimeEvidence = await CaptureRuntimeEvidenceAsync(
+          providerEndpoint,
+          model.Name,
+          contextTokens,
+          gpu,
+          raw,
+          runCancellationToken,
+          observeRuntime
+        )
+      };
       raw = RenderNarrativeMarkdown(raw);
       PublishValidation(progress, raw);
       var endedAt = DateTimeOffset.UtcNow;
@@ -903,11 +973,242 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     };
   }
 
+  private async Task<BenchmarkRuntimeEvidence> CaptureRuntimeEvidenceAsync(
+    Uri providerEndpoint,
+    string model,
+    int requestedContextTokens,
+    string gpu,
+    BenchmarkRawResult raw,
+    CancellationToken cancellationToken,
+    bool observeRuntime
+  )
+  {
+    var running = observeRuntime
+      ? await ObserveRunningModelAsync(providerEndpoint, model, cancellationToken)
+      : null;
+
+    var diagnostics = raw.OperationalDiagnostics;
+    var modelSize = running?.SizeBytes;
+    var vramSize = running?.VramSizeBytes;
+    long? ramSize = modelSize.HasValue && vramSize.HasValue
+      ? Math.Max(0, modelSize.Value - vramSize.Value)
+      : null;
+    var gpuPercent = modelSize is > 0 && vramSize.HasValue
+      ? Math.Clamp((int)Math.Round(
+        100d * vramSize.Value / modelSize.Value,
+        MidpointRounding.AwayFromZero
+      ), 0, 100)
+      : (int?)null;
+    var target = OllamaGpuSelection.ResolveTarget(gpu, gpu);
+    var promptTokensPerSecond = TokensPerSecond(
+      diagnostics?.InputTokens,
+      diagnostics?.PromptEvalDurationNanoseconds
+    );
+    var outputTokensPerSecond = TokensPerSecond(
+      diagnostics?.OutputTokens,
+      diagnostics?.EvalDurationNanoseconds
+    );
+    var lastProgress = diagnostics?.LastProgressType is null
+      ? null
+      : string.IsNullOrWhiteSpace(diagnostics.LastProgressMessage)
+        ? diagnostics.LastProgressType
+        : $"{diagnostics.LastProgressType}: {diagnostics.LastProgressMessage}";
+
+    return new BenchmarkRuntimeEvidence(
+      DateTimeOffset.UtcNow,
+      gpu,
+      target?.Backend ?? "auto",
+      requestedContextTokens,
+      running?.ContextLength,
+      modelSize,
+      vramSize,
+      ramSize,
+      gpuPercent.HasValue ? $"{gpuPercent.Value}% GPU" : "not-observed",
+      running?.ContextLength is null
+        ? "not-observed"
+        : running.ContextLength == requestedContextTokens
+          ? "matched"
+          : "mismatch",
+      diagnostics?.TotalInferenceDurationNanoseconds,
+      diagnostics?.LoadDurationNanoseconds,
+      diagnostics?.PromptEvalDurationNanoseconds,
+      diagnostics?.EvalDurationNanoseconds,
+      promptTokensPerSecond,
+      outputTokensPerSecond,
+      raw.FailureCategory == BenchmarkFailureCategoryIds.Timeout
+        ? raw.Error?.Stage ?? diagnostics?.TerminalReason ?? "harness-execution"
+        : null,
+      lastProgress,
+      observeRuntime ? CaptureDeviceMemorySample() : null
+    );
+  }
+
+  private async Task<OllamaRunningModel?> ObserveRunningModelAsync(
+    Uri providerEndpoint,
+    string model,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      using var observationTimeout = CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken
+      );
+      observationTimeout.CancelAfter(TimeSpan.FromSeconds(2));
+      var runningModels = await _ollamaClient.GetRunningModelsAsync(
+        providerEndpoint,
+        observationTimeout.Token
+      );
+      return runningModels.FirstOrDefault(candidate => string.Equals(
+        candidate.Name,
+        model,
+        StringComparison.OrdinalIgnoreCase
+      ));
+    }
+    catch (Exception exception) when (exception is OllamaProviderException
+      or OperationCanceledException
+      or HttpRequestException
+      or IOException)
+    {
+      return null;
+    }
+  }
+
+  private static BenchmarkRuntimeEvidence WithRuntimeObservation(
+    BenchmarkRuntimeEvidence runtime,
+    OllamaRunningModel? running,
+    BenchmarkDeviceMemorySample? deviceMemory
+  )
+  {
+    var modelSize = running?.SizeBytes;
+    var vramSize = running?.VramSizeBytes;
+    long? ramSize = modelSize.HasValue && vramSize.HasValue
+      ? Math.Max(0, modelSize.Value - vramSize.Value)
+      : null;
+    var gpuPercent = modelSize is > 0 && vramSize.HasValue
+      ? Math.Clamp((int)Math.Round(
+        100d * vramSize.Value / modelSize.Value,
+        MidpointRounding.AwayFromZero
+      ), 0, 100)
+      : (int?)null;
+    return runtime with
+    {
+      ActualContextTokens = running?.ContextLength,
+      ModelSizeBytes = modelSize,
+      VramSizeBytes = vramSize,
+      EstimatedRamSizeBytes = ramSize,
+      Processor = gpuPercent.HasValue ? $"{gpuPercent.Value}% GPU" : "not-observed",
+      ContextStatus = running?.ContextLength is null
+        ? "not-observed"
+        : running.ContextLength == runtime.RequestedContextTokens
+          ? "matched"
+          : "mismatch",
+      DeviceMemory = deviceMemory
+    };
+  }
+
+  private BenchmarkDeviceMemorySample? CaptureDeviceMemorySample()
+  {
+    try
+    {
+      return new BenchmarkDeviceMemorySample(
+        DateTimeOffset.UtcNow,
+        _systemMemory.GetStatus(),
+        _gpuMemory.GetStatus().Devices
+      );
+    }
+    catch (Exception exception) when (exception is InvalidOperationException
+      or NotSupportedException)
+    {
+      return null;
+    }
+  }
+
+  private static double? TokensPerSecond(long? tokens, long? nanoseconds) =>
+    tokens.HasValue && nanoseconds is > 0
+      ? Math.Round(tokens.Value * 1_000_000_000d / nanoseconds.Value, 3)
+      : null;
+
+  private static string ClassifyFailure(BenchmarkRawResult raw)
+  {
+    if (raw.Status == BenchmarkResultStatusIds.Pass && raw.ObjectiveAchieved)
+    {
+      return BenchmarkFailureCategoryIds.None;
+    }
+    if (raw.ExecutionStatus == BenchmarkExecutionStatusIds.TimedOut)
+    {
+      return BenchmarkFailureCategoryIds.Timeout;
+    }
+    if (raw.ExecutionStatus == BenchmarkExecutionStatusIds.Cancelled)
+    {
+      return BenchmarkFailureCategoryIds.Cancelled;
+    }
+
+    var errorIdentity = $"{raw.Error?.Code} {raw.Error?.Stage}";
+    if (ContainsAny(errorIdentity, "preparation", "fixture"))
+    {
+      return BenchmarkFailureCategoryIds.Preparation;
+    }
+    if (ContainsAny(
+      errorIdentity,
+      "approval",
+      "policy",
+      "workspace",
+      "trusted",
+      "forbidden",
+      "boundary",
+      "not-evaluated",
+      "not-offered",
+      "tool-unavailable",
+      "tool-not-available",
+      "capability"
+    ))
+    {
+      return BenchmarkFailureCategoryIds.HostPolicy;
+    }
+    if (ContainsAny(
+      errorIdentity,
+      "ollama",
+      "provider",
+      "runtime",
+      "context",
+      "generation",
+      "transport",
+      "http"
+    ))
+    {
+      return BenchmarkFailureCategoryIds.ProviderRuntime;
+    }
+    if (ContainsAny(
+      errorIdentity,
+      "harness",
+      "protocol",
+      "qwen",
+      "opencode",
+      "claude",
+      "codex"
+    ))
+    {
+      return BenchmarkFailureCategoryIds.HarnessProtocol;
+    }
+    if (raw.ExecutionStatus is BenchmarkExecutionStatusIds.Completed
+      or BenchmarkExecutionStatusIds.Partial)
+    {
+      return BenchmarkFailureCategoryIds.SemanticValidation;
+    }
+    return BenchmarkFailureCategoryIds.Unknown;
+  }
+
+  private static bool ContainsAny(string value, params string[] candidates) =>
+    candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
+
   private async Task<BenchmarkHarnessEvidence> ExecuteHarnessAsync(
     IAgentHarness harness,
     IBenchmarkTestDefinition test,
     InstalledModel model,
     BenchmarkWorkspace workspace,
+    int contextTokens,
+    string gpu,
     CancellationToken cancellationToken,
     BenchmarkProgressContext? progress
   )
@@ -945,6 +1246,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         turn,
         model,
         workspace,
+        contextTokens,
+        gpu,
         progress,
         cancellationToken
       );
@@ -1015,6 +1318,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     BenchmarkScenarioTurn turn,
     InstalledModel model,
     BenchmarkWorkspace workspace,
+    int contextTokens,
+    string gpu,
     BenchmarkProgressContext? progress,
     CancellationToken cancellationToken
   )
@@ -1024,6 +1329,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       model.Name,
       harness.Definition.Id,
       workspace,
+      contextTokens,
+      gpu,
       turn.Order,
       turn.Name,
       progress,
@@ -1115,6 +1422,22 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       BrowserValidationDurationMilliseconds = values.Sum(value => value.BrowserValidationDurationMilliseconds),
       InputTokens = SumLongDiagnostics(values, value => value.InputTokens),
       OutputTokens = SumLongDiagnostics(values, value => value.OutputTokens),
+      TotalInferenceDurationNanoseconds = SumLongDiagnostics(
+        values,
+        value => value.TotalInferenceDurationNanoseconds
+      ),
+      LoadDurationNanoseconds = SumLongDiagnostics(
+        values,
+        value => value.LoadDurationNanoseconds
+      ),
+      PromptEvalDurationNanoseconds = SumLongDiagnostics(
+        values,
+        value => value.PromptEvalDurationNanoseconds
+      ),
+      EvalDurationNanoseconds = SumLongDiagnostics(
+        values,
+        value => value.EvalDurationNanoseconds
+      ),
       TokenProvenance = values.All(value => value.TokenProvenance == BenchmarkEvidenceStatusIds.Measured)
         ? BenchmarkEvidenceStatusIds.Measured
         : values.Any(value => value.TokenProvenance != BenchmarkEvidenceStatusIds.Unavailable)
@@ -1290,6 +1613,84 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     return normalized;
   }
 
+  private static int ResolveBenchmarkContextTokens(
+    ApplicationSettings settings,
+    int? requestedContextTokens
+  )
+  {
+    if (!settings.OllamaRuntime.RoleDefaults.TryGetValue(
+      OllamaRuntimeRoleIds.Benchmark,
+      out var profile
+    ))
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-context-profile-missing",
+        "The benchmark runtime context profile is unavailable.",
+        "contextTokens"
+      );
+    }
+
+    var contextTokens = requestedContextTokens ?? profile.TargetContextTokens;
+    var minimum = settings.OllamaRuntime.ContextEscalationLadder.Min();
+    var maximum = settings.Context.ProviderContextTokens;
+    if (contextTokens < minimum || contextTokens > maximum)
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-context-invalid",
+        $"Benchmark context must be between {minimum} and {maximum} tokens.",
+        "contextTokens"
+      );
+    }
+
+    return contextTokens;
+  }
+
+  private async Task ValidateModelContextLimitsAsync(
+    IReadOnlyList<ResolvedBenchmarkModel> models,
+    Uri providerEndpoint,
+    int contextTokens,
+    CancellationToken cancellationToken
+  )
+  {
+    foreach (var model in models.Where(model => model.Installed is not null))
+    {
+      OllamaModelMetadata metadata;
+      try
+      {
+        metadata = await _ollamaClient.GetModelMetadataAsync(
+          providerEndpoint,
+          model.Installed!.Name,
+          cancellationToken
+        );
+      }
+      catch (OllamaProviderException exception)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-model-context-unavailable",
+          $"The declared context limit for model '{model.RequestedName}' could not be read: {exception.Message}",
+          "contextTokens"
+        );
+      }
+
+      if (metadata.DeclaredContextTokens is not > 0)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-model-context-unavailable",
+          $"Model '{model.RequestedName}' does not declare a usable context limit.",
+          "contextTokens"
+        );
+      }
+      if (contextTokens > metadata.DeclaredContextTokens.Value)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-context-exceeds-model",
+          $"Benchmark context {contextTokens} exceeds model '{model.RequestedName}' limit {metadata.DeclaredContextTokens.Value}.",
+          "contextTokens"
+        );
+      }
+    }
+  }
+
   private static string NormalizeScoringProfileId(string? profileId)
   {
     var normalized = string.IsNullOrWhiteSpace(profileId)
@@ -1436,14 +1837,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private async Task<IReadOnlyList<BenchmarkModelIdentity>> CreateModelIdentitiesAsync(
     IReadOnlyList<ResolvedBenchmarkModel> models,
     Uri providerEndpoint,
-    ApplicationSettings settings,
+    int configuredContext,
     CancellationToken cancellationToken
   )
   {
-    int? configuredContext = settings.OllamaRuntime.RoleDefaults.TryGetValue(
-      OllamaRuntimeRoleIds.Benchmark,
-      out var benchmarkRuntime
-    ) ? benchmarkRuntime.TargetContextTokens : null;
     IReadOnlyList<OllamaRunningModel> runningModels;
     try
     {
@@ -1502,7 +1899,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     int timeoutSeconds,
     IReadOnlyList<string> models,
     IReadOnlyList<string> harnesses,
-    int? configuredContextTokens
+    int configuredContextTokens,
+    string gpu
   )
   {
     var canonical = string.Join("\n", new[]
@@ -1511,7 +1909,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       $"fixture={suite.FixtureId}:{suite.FixtureVersion}",
       $"tests={string.Join('|', suite.Tests.Select(test => $"{test.Suite}:{test.SuiteVersion}:{test.Id}:{test.Version}"))}",
       $"timeout={timeoutSeconds}",
-      $"context={configuredContextTokens?.ToString() ?? "unavailable"}",
+      $"context={configuredContextTokens}",
+      $"gpu={gpu}",
+      $"modelRole={UsageModelRoles.Benchmark}",
       "sequential=true",
       $"models={string.Join('|', models)}",
       $"harnesses={string.Join('|', harnesses)}"
@@ -2114,7 +2514,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       [],
       status,
       error,
-      HostValidationResult: "error"
+      HostValidationResult: "error",
+      FailureCategory: status == BenchmarkExecutionStatusIds.Cancelled
+        ? BenchmarkFailureCategoryIds.Cancelled
+        : BenchmarkFailureCategoryIds.Preparation
     );
     return new BenchmarkRunResult(
       CreateRun(

@@ -14,6 +14,8 @@ public interface IBenchmarkProductionExecuteRunner
     string model,
     string harness,
     BenchmarkWorkspace workspace,
+    int contextTokens,
+    string gpu,
     int turnNumber,
     string turnName,
     BenchmarkProgressContext? progress,
@@ -50,6 +52,8 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     string model,
     string harness,
     BenchmarkWorkspace workspace,
+    int contextTokens,
+    string gpu,
     int turnNumber,
     string turnName,
     BenchmarkProgressContext? progress,
@@ -64,7 +68,12 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       model,
       harness
     );
-    using var scope = _scopes.Register(workspace, model);
+    using var scope = _scopes.Register(
+      workspace,
+      model,
+      contextTokens,
+      gpu
+    );
     using var client = _httpClients.CreateClient();
     client.BaseAddress = ResolveLoopbackAddress();
     client.Timeout = Timeout.InfiniteTimeSpan;
@@ -144,23 +153,13 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
           collector.MarkAwaitingUserRecovery(streamEvent.RecoveryDecision);
           break;
         }
-        if (ShouldApproveBenchmarkDeletion(streamEvent.LocalAction, workspace))
+        if (IsPendingApproval(streamEvent.LocalAction))
         {
           await DecideAsync(
             client,
             browserSessionId,
             streamEvent.LocalAction!,
             approved: true,
-            cancellationToken
-          );
-        }
-        else if (IsPendingApproval(streamEvent.LocalAction))
-        {
-          await DecideAsync(
-            client,
-            browserSessionId,
-            streamEvent.LocalAction!,
-            approved: false,
             cancellationToken
           );
         }
@@ -216,40 +215,12 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     throw new InvalidOperationException("The production Host has no active HTTP loopback endpoint.");
   }
 
-  private static bool ShouldApproveBenchmarkDeletion(
-    LocalActionEvent? action,
-    BenchmarkWorkspace workspace
-  ) => action is
-  {
-    Tool: "delete_paths",
-    State: "awaiting-approval",
-    RequiresApproval: true,
-    ExecutionSessionId: not null,
-    RelativePaths: { Count: > 0 }
-  } && action.RelativePaths.All(path => IsSafeRelativePath(workspace.WorkspacePath, path));
-
   private static bool IsPendingApproval(LocalActionEvent? action) => action is
   {
     State: "awaiting-approval",
     RequiresApproval: true,
     ExecutionSessionId: not null
   };
-
-  private static bool IsSafeRelativePath(string workspacePath, string relativePath)
-  {
-    if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathFullyQualified(relativePath))
-    {
-      return false;
-    }
-    var root = Path.GetFullPath(workspacePath);
-    var candidate = Path.GetFullPath(relativePath, root);
-    return candidate.StartsWith(
-      root + Path.DirectorySeparatorChar,
-      OperatingSystem.IsWindows()
-        ? StringComparison.OrdinalIgnoreCase
-        : StringComparison.Ordinal
-    );
-  }
 
   private static async Task DecideAsync(
     HttpClient client,
@@ -383,6 +354,9 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     private string _resolvedStrategy = "direct";
     private string _terminalReason = "stream-ended-without-terminal";
     private string? _terminalMessage;
+    private DateTimeOffset? _lastProgressAt;
+    private string? _lastProgressType;
+    private string? _lastProgressMessage;
 
     public ProductionEvidenceCollector(
       long setupDuration,
@@ -417,6 +391,15 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
 
     public void Observe(ChatStreamEvent streamEvent)
     {
+      if (streamEvent.Type is not "response.delta" and not "reasoning.delta")
+      {
+        _lastProgressAt = DateTimeOffset.UtcNow;
+        _lastProgressType = streamEvent.Type;
+        _lastProgressMessage = streamEvent.Message
+          ?? (streamEvent.LocalAction is null
+            ? null
+            : $"{streamEvent.LocalAction.Tool}: {streamEvent.LocalAction.State}");
+      }
       ExecutionSessionId = streamEvent.ExecutionSession?.Id
         ?? streamEvent.LocalAction?.ExecutionSessionId
         ?? ExecutionSessionId;
@@ -551,7 +534,14 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
         "auto",
         _resolvedStrategy,
         _validationCodes.Distinct(StringComparer.Ordinal).ToArray(),
-        unavailableMetrics
+        unavailableMetrics,
+        TotalInferenceDurationNanoseconds: SumUsage(value => value.TotalDurationNanoseconds),
+        LoadDurationNanoseconds: SumUsage(value => value.LoadDurationNanoseconds),
+        PromptEvalDurationNanoseconds: SumUsage(value => value.PromptEvalDurationNanoseconds),
+        EvalDurationNanoseconds: SumUsage(value => value.EvalDurationNanoseconds),
+        LastProgressAt: _lastProgressAt,
+        LastProgressType: _lastProgressType,
+        LastProgressMessage: _lastProgressMessage
       );
       var error = executionStatus == BenchmarkExecutionStatusIds.Completed
         ? null
@@ -690,6 +680,12 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       var key = $"{context}:{streamEvent.ContextUsage.InferenceSequence}";
       _usage[key] = streamEvent.ContextUsage;
       _turns.Add(key);
+    }
+
+    private long? SumUsage(Func<ContextUsageView, long?> selector)
+    {
+      var values = _usage.Values.Select(selector).Where(value => value.HasValue).ToArray();
+      return values.Length == 0 ? null : values.Sum(value => value!.Value);
     }
 
     private static bool IsMutation(string tool) => tool is

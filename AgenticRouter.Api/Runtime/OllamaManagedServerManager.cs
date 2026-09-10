@@ -120,39 +120,6 @@ public sealed class OllamaManagedServerManager :
       );
     }
 
-    lock (_servers)
-    {
-      var active = _servers.Values.FirstOrDefault(
-        server => !server.Process.HasExited
-          && string.Equals(
-            server.Endpoint.AbsoluteUri,
-            configuredEndpoint.AbsoluteUri,
-            StringComparison.OrdinalIgnoreCase
-          )
-      );
-      if (active is not null)
-      {
-        if (!string.Equals(
-          active.Target.Selection,
-          target.Selection,
-          StringComparison.Ordinal
-        ))
-        {
-          throw ManagedFailure(
-            "The requested GPU selection does not match the managed Ollama endpoint.",
-            $"Endpoint {configuredEndpoint} belongs to '{active.Target.Selection}', but '{target.Selection}' was requested."
-          );
-        }
-        return new OllamaEndpointResolution(
-          active.Endpoint,
-          ManagedMainGpu(active.Target),
-          true,
-          active.Target.Backend,
-          active.Target.AllDevices ? null : active.Target.Index
-        );
-      }
-    }
-
     if (!ShouldManage(configuredEndpoint))
     {
       return new OllamaEndpointResolution(
@@ -164,7 +131,11 @@ public sealed class OllamaManagedServerManager :
       );
     }
 
-    var server = await GetOrStartAsync(target, cancellationToken);
+    var server = await GetOrStartAsync(
+      configuredEndpoint,
+      target,
+      cancellationToken
+    );
     return new OllamaEndpointResolution(
       server.Endpoint,
       ManagedMainGpu(target),
@@ -205,6 +176,7 @@ public sealed class OllamaManagedServerManager :
   }
 
   private async Task<ManagedServer> GetOrStartAsync(
+    Uri configuredEndpoint,
     OllamaGpuTarget target,
     CancellationToken cancellationToken
   )
@@ -220,6 +192,7 @@ public sealed class OllamaManagedServerManager :
         );
       }
 
+      ManagedServer[] replaced;
       lock (_servers)
       {
         if (
@@ -229,9 +202,22 @@ public sealed class OllamaManagedServerManager :
         {
           return existing;
         }
+        replaced = _servers.Values.Where(
+          server => !server.Process.HasExited
+        ).ToArray();
+        _servers.Clear();
       }
 
-      return await StartServerAsync(target, cancellationToken);
+      foreach (var server in replaced)
+      {
+        await StopServerAsync(server, cancellationToken);
+      }
+
+      return await StartServerAsync(
+        configuredEndpoint,
+        target,
+        cancellationToken
+      );
     }
     finally
     {
@@ -240,13 +226,14 @@ public sealed class OllamaManagedServerManager :
   }
 
   private async Task<ManagedServer> StartServerAsync(
+    Uri configuredEndpoint,
     OllamaGpuTarget target,
     CancellationToken cancellationToken
   )
   {
     var executable = ResolveOllamaExecutable();
     var library = ResolveLibrary(executable, target.Backend);
-    var port = ResolvePort(target);
+    var port = configuredEndpoint.Port + _portOffset;
     string? vulkanOrder = null;
 
     if (target.PreferredDevice is not null)
@@ -292,7 +279,7 @@ public sealed class OllamaManagedServerManager :
     CancellationToken cancellationToken
   )
   {
-    EnsurePortAvailable(port);
+    await TakeOverPortAsync(port, executable, cancellationToken);
 
     var endpoint = new Uri($"http://127.0.0.1:{port}", UriKind.Absolute);
     var startInfo = new ProcessStartInfo
@@ -811,68 +798,58 @@ public sealed class OllamaManagedServerManager :
       && endpoint.Port == 11_434;
   }
 
-  private int ResolvePort(OllamaGpuTarget target)
-  {
-    if (target.AllDevices)
-    {
-      if (target.PreferredDevice is null)
-      {
-        return 11_700 + _portOffset;
-      }
-      if (target.PreferredDevice.Index is < 0 or > 99)
-      {
-        throw ManagedFailure(
-          "The preferred Vulkan GPU index is outside the managed Ollama range.",
-          $"GPU index {target.PreferredDevice.Index} must be between 0 and 99."
-        );
-      }
-      return target.PreferredDevice.Backend switch
-      {
-        "cuda" => 11_800 + target.PreferredDevice.Index + _portOffset,
-        "rocm" => 11_900 + target.PreferredDevice.Index + _portOffset,
-        _ => throw ManagedFailure(
-          "The preferred Vulkan GPU cannot be managed.",
-          $"Unsupported physical backend '{target.PreferredDevice.Backend}'."
-        )
-      };
-    }
-    if (target.Index is < 0 or > 99)
-    {
-      throw ManagedFailure(
-        "The selected GPU index is outside the managed Ollama range.",
-        $"GPU index {target.Index} must be between 0 and 99."
-      );
-    }
-    return target.Backend switch
-    {
-      "cuda" => 11_500 + target.Index + _portOffset,
-      "rocm" => 11_600 + target.Index + _portOffset,
-      "vulkan" => 11_700 + target.Index + _portOffset,
-      _ => throw ManagedFailure(
-        "The selected GPU backend cannot be managed.",
-        $"Unsupported backend '{target.Backend}'."
-      )
-    };
-  }
-
   private static int? ManagedMainGpu(OllamaGpuTarget target)
   {
-    return target.AllDevices && target.PreferredDevice is null
-      ? null
-      : 0;
+    return target.AllDevices ? null : 0;
   }
 
-  private static void EnsurePortAvailable(int port)
+  private async Task TakeOverPortAsync(
+    int port,
+    string expectedExecutable,
+    CancellationToken cancellationToken
+  )
   {
     var listeners = IPGlobalProperties.GetIPGlobalProperties()
       .GetActiveTcpListeners();
-    if (listeners.Any(listener => listener.Port == port))
+    if (!listeners.Any(listener => listener.Port == port))
+    {
+      return;
+    }
+    if (!WindowsTcpOwner.TryGetOwnerProcessId(port, out var processId))
     {
       throw ManagedFailure(
-        "The isolated port for the selected Ollama GPU server is already in use.",
-        $"Loopback port {port} is occupied; Agentic Router did not attach to or stop the existing listener."
+        "The configured Ollama port is already in use.",
+        $"Loopback port {port} is occupied, but its process identity could not be verified."
       );
     }
+    using var process = Process.GetProcessById(processId);
+    var actualExecutable = process.MainModule?.FileName;
+    if (
+      string.IsNullOrWhiteSpace(actualExecutable)
+      || !string.Equals(
+        Path.GetFullPath(actualExecutable),
+        Path.GetFullPath(expectedExecutable),
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      throw ManagedFailure(
+        "The configured Ollama port belongs to another process.",
+        $"Loopback port {port} belongs to PID {processId}; Agentic Router refused to stop an executable other than '{expectedExecutable}'."
+      );
+    }
+
+    _logger.LogInformation(
+      "Stopping verified Ollama PID {ProcessId} on configured port {Port} before applying managed GPU configuration.",
+      processId,
+      port
+    );
+    process.Kill(entireProcessTree: true);
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+      cancellationToken
+    );
+    timeout.CancelAfter(ShutdownTimeout);
+    await process.WaitForExitAsync(timeout.Token);
   }
 
   private string ResolveOllamaExecutable()
@@ -978,7 +955,7 @@ public sealed class OllamaManagedServerManager :
     }
 
     startInfo.Environment["OLLAMA_VULKAN"] = "1";
-    startInfo.Environment["OLLAMA_SCHED_SPREAD"] = target.PreferredDevice is null
+    startInfo.Environment["OLLAMA_SCHED_SPREAD"] = target.AllDevices
       ? "1"
       : "0";
     if (string.IsNullOrWhiteSpace(vulkanOrder))

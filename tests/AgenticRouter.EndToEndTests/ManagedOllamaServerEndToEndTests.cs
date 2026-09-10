@@ -36,14 +36,18 @@ public sealed class ManagedOllamaServerEndToEndTests
     {
       first = CreateManager(dataDirectory, httpClients, executable);
       await first.StartAsync(CancellationToken.None);
+      using var previous = StartUnmanagedFakeOllama(executable, 12_434);
+      await WaitUntilReadyAsync(12_434);
+      var previousPid = previous.Id;
       var cuda = await first.ResolveAsync(
         new Uri("http://127.0.0.1:11434"),
         "ollama:0",
         "ollama:0",
         CancellationToken.None
       );
+      await AssertProcessExitedAsync(previousPid);
       Assert.IsTrue(cuda.Managed);
-      Assert.AreEqual(12_500, cuda.Endpoint.Port);
+      Assert.AreEqual(12_434, cuda.Endpoint.Port);
       Assert.AreEqual(0, cuda.MainGpu);
       var cudaEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(cuda.Endpoint, "/test/environment")
@@ -71,6 +75,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         "rocm:0",
         CancellationToken.None
       );
+      Assert.AreEqual(12_434, rocm.Endpoint.Port);
       var rocmEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(rocm.Endpoint, "/test/environment")
       );
@@ -84,6 +89,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         "vulkan:all",
         CancellationToken.None
       );
+      Assert.AreEqual(12_434, vulkan.Endpoint.Port);
       var vulkanEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(vulkan.Endpoint, "/test/environment")
       );
@@ -97,7 +103,8 @@ public sealed class ManagedOllamaServerEndToEndTests
         "vulkan:prefer:cuda:0",
         CancellationToken.None
       );
-      Assert.AreEqual(0, preferNvidia.MainGpu);
+      Assert.IsNull(preferNvidia.MainGpu);
+      Assert.AreEqual(12_434, preferNvidia.Endpoint.Port);
       var nvidiaEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(preferNvidia.Endpoint, "/test/environment")
       );
@@ -105,7 +112,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         "0,1",
         nvidiaEnvironment.GetProperty("vulkanVisibleDevices").GetString()
       );
-      Assert.AreEqual("0", nvidiaEnvironment.GetProperty("spread").GetString());
+      Assert.AreEqual("1", nvidiaEnvironment.GetProperty("spread").GetString());
 
       var preferAmd = await second.ResolveAsync(
         new Uri("http://localhost:11434"),
@@ -113,6 +120,8 @@ public sealed class ManagedOllamaServerEndToEndTests
         "vulkan:prefer:rocm:0",
         CancellationToken.None
       );
+      Assert.IsNull(preferAmd.MainGpu);
+      Assert.AreEqual(12_434, preferAmd.Endpoint.Port);
       var amdEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(preferAmd.Endpoint, "/test/environment")
       );
@@ -120,8 +129,8 @@ public sealed class ManagedOllamaServerEndToEndTests
         "1,0",
         amdEnvironment.GetProperty("vulkanVisibleDevices").GetString()
       );
-      Assert.AreEqual("0", amdEnvironment.GetProperty("spread").GetString());
-      Assert.HasCount(4, second.GetActiveServers());
+      Assert.AreEqual("1", amdEnvironment.GetProperty("spread").GetString());
+      Assert.HasCount(1, second.GetActiveServers());
     }
     finally
     {
@@ -159,16 +168,19 @@ public sealed class ManagedOllamaServerEndToEndTests
   private static string CopyFakeOllama(string temporaryRoot)
   {
     var repositoryRoot = FindRepositoryRoot();
-    var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
-      ?? "Debug";
-    var source = Path.Combine(
-      repositoryRoot,
-      "tests",
-      "FakeOllamaCli",
-      "bin",
-      configuration,
-      "net10.0"
+    var configuredExecutable = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_FAKE_OLLAMA_PATH"
     );
+    var source = string.IsNullOrWhiteSpace(configuredExecutable)
+      ? Path.Combine(
+        repositoryRoot,
+        "tests",
+        "FakeOllamaCli",
+        "bin",
+        new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name ?? "Debug",
+        "net10.0"
+      )
+      : Path.GetDirectoryName(Path.GetFullPath(configuredExecutable))!;
     foreach (var path in Directory.EnumerateFiles(source, "FakeOllamaCli*"))
     {
       File.Copy(path, Path.Combine(temporaryRoot, Path.GetFileName(path)));
@@ -199,6 +211,46 @@ public sealed class ManagedOllamaServerEndToEndTests
       await Task.Delay(100);
     }
     Assert.Fail($"Managed Ollama process {processId} remained alive after orphan GC.");
+  }
+
+  private static Process StartUnmanagedFakeOllama(string executable, int port)
+  {
+    var startInfo = new ProcessStartInfo
+    {
+      FileName = executable,
+      UseShellExecute = false,
+      CreateNoWindow = true
+    };
+    startInfo.ArgumentList.Add("serve");
+    startInfo.Environment["OLLAMA_HOST"] = $"127.0.0.1:{port}";
+    startInfo.Environment["OLLAMA_LLM_LIBRARY"] = "cuda_v13";
+    var process = Process.Start(startInfo);
+    return process ?? throw new InvalidOperationException(
+      "The unmanaged fake Ollama process did not start."
+    );
+  }
+
+  private static async Task WaitUntilReadyAsync(int port)
+  {
+    using var client = new HttpClient();
+    for (var attempt = 0; attempt < 50; attempt++)
+    {
+      try
+      {
+        using var response = await client.GetAsync(
+          $"http://127.0.0.1:{port}/api/version"
+        );
+        if (response.IsSuccessStatusCode)
+        {
+          return;
+        }
+      }
+      catch (HttpRequestException)
+      {
+      }
+      await Task.Delay(100);
+    }
+    Assert.Fail($"Fake Ollama did not become ready on port {port}.");
   }
 
   private static string FindRepositoryRoot()

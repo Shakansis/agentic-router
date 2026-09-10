@@ -567,6 +567,25 @@
               </label>
               <label>
                 <span class="field-label-with-help">
+                  Context window (tokens)
+                  <button class="information-button compact-information-button" type="button" aria-label="Context-window information" data-tooltip="Exact context window sent to Ollama and exposed to external harnesses for every test in this run.">
+                    i
+                  </button>
+                </span>
+                <input id="benchmark-context-tokens" type="number" min="4096" max="131072" step="1024" value="32768" list="benchmark-context-presets" required>
+                <datalist id="benchmark-context-presets"></datalist>
+              </label>
+              <label>
+                <span class="field-label-with-help">
+                  Default GPU
+                  <button class="information-button compact-information-button" type="button" aria-label="Default-GPU information" data-tooltip="Benchmark uses the Default GPU selection frozen from Settings when the run starts.">
+                    i
+                  </button>
+                </span>
+                <input id="benchmark-default-gpu" type="text" value="Loading…" readonly aria-readonly="true">
+              </label>
+              <label>
+                <span class="field-label-with-help">
                   Scoring profile
                   <button class="information-button compact-information-button" type="button" aria-label="Scoring-profile information" data-tooltip="Defines the weights used to calculate ranking from measured evidence. Changing the profile does not rerun models.">
                     i
@@ -1045,7 +1064,12 @@
               </label>
               <label>
                 <span>Default GPU</span>
-                <select id="default-gpu" name="defaultGpu"></select>
+                <select
+                  id="default-gpu"
+                  name="defaultGpu"
+                  aria-describedby="default-gpu-help"
+                ></select>
+                <small id="default-gpu-help">Changing GPU configuration stops the Ollama server and any loaded model on the configured port.</small>
               </label>
               <label>
                 <span>Direct execution plan limit</span>

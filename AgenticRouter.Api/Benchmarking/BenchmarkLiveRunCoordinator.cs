@@ -14,6 +14,8 @@ public interface IBenchmarkLiveRunCoordinator
 
   bool TryGetView(string runId, out BenchmarkLiveRunView view);
 
+  IReadOnlyList<BenchmarkLiveRunView> ListViews();
+
   IAsyncEnumerable<BenchmarkProgressEvent> SubscribeAsync(
     string runId,
     long afterSequence,
@@ -106,6 +108,11 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
     view = state.CreateView();
     return true;
   }
+
+  public IReadOnlyList<BenchmarkLiveRunView> ListViews() => _runs.Values
+    .Select(state => state.CreateView())
+    .OrderByDescending(view => view.UpdatedAt)
+    .ToArray();
 
   public async IAsyncEnumerable<BenchmarkProgressEvent> SubscribeAsync(
     string runId,
@@ -337,12 +344,22 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
     {
       lock (_gate)
       {
+        var events = _events.ToArray();
+        var current = events.LastOrDefault(item => item.Model is not null
+          || item.Harness is not null
+          || item.TestId is not null);
+        var last = events.LastOrDefault();
         return new BenchmarkLiveRunView(
           RunId,
           _terminal,
           _cancellationRequested,
           _sequence,
-          _events.ToArray()
+          events,
+          last?.Timestamp,
+          current?.Model,
+          current?.Harness,
+          current?.TestId,
+          last?.State
         );
       }
     }

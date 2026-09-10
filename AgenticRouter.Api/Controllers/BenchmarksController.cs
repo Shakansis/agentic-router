@@ -1,5 +1,6 @@
 using System.Text.Json;
 using AgenticRouter.Api.Benchmarking;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using Microsoft.AspNetCore.Mvc;
@@ -23,6 +24,7 @@ public sealed class BenchmarksController : ControllerBase
   private readonly IBenchmarkWorkspaceFactory _workspaces;
   private readonly IBenchmarkRecommendationStore _recommendationStore;
   private readonly IFolderLauncherService _folderLauncher;
+  private readonly ISettingsStore _settingsStore;
 
   public BenchmarksController(
     IBenchmarkEngine engine,
@@ -37,7 +39,8 @@ public sealed class BenchmarksController : ControllerBase
     IBenchmarkRecommendationService recommendations,
     IBenchmarkWorkspaceFactory workspaces,
     IBenchmarkRecommendationStore recommendationStore,
-    IFolderLauncherService folderLauncher
+    IFolderLauncherService folderLauncher,
+    ISettingsStore settingsStore
   )
   {
     _engine = engine;
@@ -53,6 +56,7 @@ public sealed class BenchmarksController : ControllerBase
     _workspaces = workspaces;
     _recommendationStore = recommendationStore;
     _folderLauncher = folderLauncher;
+    _settingsStore = settingsStore;
   }
 
   [HttpGet("scoring-profile")]
@@ -169,6 +173,12 @@ public sealed class BenchmarksController : ControllerBase
     }
   }
 
+  [HttpGet("suite-runs/live")]
+  public IActionResult ListLiveSuites()
+  {
+    return Ok(_liveRuns.ListViews());
+  }
+
   [HttpGet("catalog")]
   public async Task<IActionResult> Catalog(CancellationToken cancellationToken)
   {
@@ -176,6 +186,10 @@ public sealed class BenchmarksController : ControllerBase
     var suite = suites.Single(item => item.Id == BenchmarkSuiteIds.BasicCrud
       && item.Version == BenchmarkSuiteIds.BasicCrudVersion);
     var harnesses = await _harnesses.DiscoverAsync(cancellationToken);
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    var benchmarkContext = settings.OllamaRuntime.RoleDefaults[
+      OllamaRuntimeRoleIds.Benchmark
+    ];
     return Ok(new
     {
       suite,
@@ -184,6 +198,13 @@ public sealed class BenchmarksController : ControllerBase
       defaultTimeoutSeconds = 120,
       minimumTimeoutSeconds = 5,
       maximumTimeoutSeconds = 1600,
+      defaultContextTokens = benchmarkContext.TargetContextTokens,
+      minimumContextTokens = settings.OllamaRuntime.ContextEscalationLadder.Min(),
+      maximumContextTokens = settings.Context.ProviderContextTokens,
+      contextPresets = settings.OllamaRuntime.ContextEscalationLadder
+        .Where(value => value <= settings.Context.ProviderContextTokens)
+        .ToArray(),
+      defaultGpu = settings.DefaultGpu,
       scoreWeights = BenchmarkScoreWeights.Default
     });
   }
@@ -476,15 +497,36 @@ public sealed class BenchmarksController : ControllerBase
   }
 
   [HttpGet("suite-runs/{runId}/live")]
-  public IActionResult GetLive(string runId)
+  public async Task<IActionResult> GetLive(
+    string runId,
+    CancellationToken cancellationToken = default
+  )
   {
     if (!TryNormalizeRunId(runId, out var normalized, out var invalid))
     {
       return invalid!;
     }
-    return _liveRuns.TryGetView(normalized!, out var view)
-      ? Ok(view)
-      : NotFound();
+    if (_liveRuns.TryGetView(normalized!, out var view))
+    {
+      return Ok(view);
+    }
+    var persisted = await _results.GetAsync(normalized!, cancellationToken);
+    if (persisted is null)
+    {
+      return NotFound();
+    }
+    var completed = CreateRecoveredCompletionEvent(persisted, 1);
+    return Ok(new BenchmarkLiveRunView(
+      persisted.RunId,
+      Terminal: true,
+      CancellationRequested: string.Equals(
+        persisted.TerminalState,
+        BenchmarkRunStatusIds.Cancelled,
+        StringComparison.Ordinal
+      ),
+      LastSequence: completed.Sequence,
+      Events: [completed]
+    ));
   }
 
   [HttpGet("suite-runs/{runId}/events")]
@@ -498,9 +540,15 @@ public sealed class BenchmarksController : ControllerBase
     {
       return invalid!;
     }
-    if (!_liveRuns.TryGetView(normalized!, out _))
+    var live = _liveRuns.TryGetView(normalized!, out _);
+    BenchmarkSuiteRunResult? persisted = null;
+    if (!live)
     {
-      return NotFound();
+      persisted = await _results.GetAsync(normalized!, cancellationToken);
+      if (persisted is null)
+      {
+        return NotFound();
+      }
     }
     if (
       Request.Headers.TryGetValue("Last-Event-ID", out var eventId)
@@ -514,21 +562,59 @@ public sealed class BenchmarksController : ControllerBase
     Response.Headers.CacheControl = "no-cache";
     Response.Headers.Append("X-Accel-Buffering", "no");
     var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+    if (persisted is not null)
+    {
+      var recoveredSequence = after == long.MaxValue
+        ? long.MaxValue
+        : Math.Max(1, after + 1);
+      await WriteBenchmarkEventAsync(
+        CreateRecoveredCompletionEvent(persisted, recoveredSequence),
+        jsonOptions,
+        cancellationToken
+      );
+      return new EmptyResult();
+    }
     await foreach (var progressEvent in _liveRuns.SubscribeAsync(
       normalized!,
       after,
       cancellationToken
     ))
     {
-      await Response.WriteAsync($"id: {progressEvent.Sequence}\n", cancellationToken);
-      await Response.WriteAsync("event: benchmark\n", cancellationToken);
-      await Response.WriteAsync(
-        $"data: {JsonSerializer.Serialize(progressEvent, jsonOptions)}\n\n",
-        cancellationToken
-      );
-      await Response.Body.FlushAsync(cancellationToken);
+      await WriteBenchmarkEventAsync(progressEvent, jsonOptions, cancellationToken);
     }
     return new EmptyResult();
+  }
+
+  private async Task WriteBenchmarkEventAsync(
+    BenchmarkProgressEvent progressEvent,
+    JsonSerializerOptions jsonOptions,
+    CancellationToken cancellationToken
+  )
+  {
+    await Response.WriteAsync($"id: {progressEvent.Sequence}\n", cancellationToken);
+    await Response.WriteAsync("event: benchmark\n", cancellationToken);
+    await Response.WriteAsync(
+      $"data: {JsonSerializer.Serialize(progressEvent, jsonOptions)}\n\n",
+      cancellationToken
+    );
+    await Response.Body.FlushAsync(cancellationToken);
+  }
+
+  private static BenchmarkProgressEvent CreateRecoveredCompletionEvent(
+    BenchmarkSuiteRunResult result,
+    long sequence
+  )
+  {
+    return new BenchmarkProgressEvent(
+      result.RunId,
+      BenchmarkProgressTypeIds.RunCompleted,
+      result.EndedAt,
+      result.TerminalState,
+      Message: "Recovered the persisted benchmark result after the live session ended.",
+      ElapsedMilliseconds: result.DurationMilliseconds,
+      FinalResult: result,
+      Sequence: sequence
+    );
   }
 
   [HttpPost("suite-runs/{runId}/cancel")]

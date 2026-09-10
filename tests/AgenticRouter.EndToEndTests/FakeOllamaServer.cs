@@ -6260,7 +6260,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             : (int?)null,
           eval_count = done
             ? 30
-            : (int?)null
+            : (int?)null,
+          total_duration = done ? 2_000_000_000L : (long?)null,
+          load_duration = done ? 100_000_000L : (long?)null,
+          prompt_eval_duration = done ? 1_200_000_000L : (long?)null,
+          eval_duration = done ? 600_000_000L : (long?)null
         },
         CompactJsonOptions
       ) + "\n"
@@ -6669,7 +6673,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             : (int?)null,
           eval_count = done
             ? 30
-            : (int?)null
+            : (int?)null,
+          total_duration = done ? 2_000_000_000L : (long?)null,
+          load_duration = done ? 100_000_000L : (long?)null,
+          prompt_eval_duration = done ? 1_200_000_000L : (long?)null,
+          eval_duration = done ? 600_000_000L : (long?)null
         },
         CompactJsonOptions
       );
@@ -6739,6 +6747,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       root["prompt_eval_count"] ??= 40;
       root["eval_count"] ??= 8;
+      root["total_duration"] ??= 2_000_000_000L;
+      root["load_duration"] ??= 100_000_000L;
+      root["prompt_eval_duration"] ??= 1_200_000_000L;
+      root["eval_duration"] ??= 600_000_000L;
     }
     var bytes = JsonSerializer.SerializeToUtf8Bytes(
       node,

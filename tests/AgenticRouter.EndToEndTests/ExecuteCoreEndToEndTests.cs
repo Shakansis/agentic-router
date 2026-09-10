@@ -4205,6 +4205,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
   public async Task OffersGenericPerDeviceCombinedVulkanSelections()
   {
     await Page.GotoAsync("/");
+    await Page.Locator("#open-settings").ClickAsync();
+    await Expect(Page.Locator("#default-gpu-help")).ToContainTextAsync(
+      "stops the Ollama server and any loaded model"
+    );
     var options = await Page.EvaluateAsync<JsonElement>(
       """
       () => {

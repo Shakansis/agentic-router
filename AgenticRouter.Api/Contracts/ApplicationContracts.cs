@@ -444,7 +444,11 @@ public sealed record ContextUsageView(
   long? AfterCompactionTokens = null,
   int OmittedBlocks = 0,
   long ActiveContextTokens = 0,
-  long OutputTokens = 0
+  long OutputTokens = 0,
+  long? TotalDurationNanoseconds = null,
+  long? LoadDurationNanoseconds = null,
+  long? PromptEvalDurationNanoseconds = null,
+  long? EvalDurationNanoseconds = null
 );
 
 public sealed record TrustedWorkspaceRequest(

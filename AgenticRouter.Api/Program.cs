@@ -354,6 +354,7 @@ builder.Services.AddSingleton(
   )
 );
 builder.Services.AddSingleton<IBenchmarkWorkspaceFactory, BenchmarkWorkspaceFactory>();
+builder.Services.AddSingleton<IBenchmarkExecutionContextAccessor, BenchmarkExecutionContextAccessor>();
 builder.Services.AddSingleton<IBenchmarkExecutionScopeRegistry, BenchmarkExecutionScopeRegistry>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemCreateBenchmark>();
 builder.Services.AddSingleton<IBenchmarkTestDefinition, FileSystemReadBenchmark>();

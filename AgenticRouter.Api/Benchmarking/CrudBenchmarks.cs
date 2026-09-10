@@ -146,7 +146,11 @@ public abstract class BasicCrudBenchmark : IBenchmarkTestDefinition
       unexpected,
       hostPassed ? "pass" : "fail",
       evidence?.FinalReport ?? string.Empty,
-      validation.Facts
+      validation.Facts,
+      Turns: evidence?.Turns,
+      HostEvents: evidence?.HostEvents,
+      ToolCalls: evidence?.ToolCalls,
+      OperationalDiagnostics: evidence?.OperationalDiagnostics
     );
   }
 

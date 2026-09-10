@@ -1623,10 +1623,25 @@ public sealed class OllamaClient : IOllamaClient
     if (usageContext.RuntimeContextTokens is not null)
     {
       var explicitContext = usageContext.RuntimeContextTokens.Value;
+      var benchmarkOverride = string.Equals(
+        usageContext.ModelRole,
+        UsageModelRoles.Benchmark,
+        StringComparison.Ordinal
+      );
+      var explicitMaximum = benchmarkOverride
+        ? Math.Min(
+          settings.Context.ProviderContextTokens,
+          metadata.DeclaredContextTokens.Value
+        )
+        : resolution.MaximumContextTokens;
+      var explicitMinimum = benchmarkOverride
+        ? settings.OllamaRuntime.ContextEscalationLadder.Min()
+        : resolution.MinimumContextTokens;
 
       if (
         explicitContext < resolution.RequiredContextTokens
-        || explicitContext > resolution.MaximumContextTokens
+        || explicitContext < explicitMinimum
+        || explicitContext > explicitMaximum
       )
       {
         throw new OllamaRuntimeProfileException(
@@ -1639,15 +1654,19 @@ public sealed class OllamaClient : IOllamaClient
           explicitContext,
           null,
           false,
-          $"Required={resolution.RequiredContextTokens}; maximum={resolution.MaximumContextTokens}."
+          $"Required={resolution.RequiredContextTokens}; minimum={explicitMinimum}; maximum={explicitMaximum}."
         );
       }
 
       resolution = resolution with
       {
+        TargetContextTokens = explicitContext,
+        MaximumContextTokens = explicitContext,
         EffectiveContextTokens = explicitContext,
         Escalated = explicitContext > resolution.TargetContextTokens,
-        Reason = $"An explicit bounded runtime context of {explicitContext} tokens was requested."
+        Reason = benchmarkOverride
+          ? $"The Benchmark Lab selected an explicit runtime context of {explicitContext} tokens."
+          : $"An explicit bounded runtime context of {explicitContext} tokens was requested."
       };
     }
 
@@ -1737,7 +1756,11 @@ public sealed class OllamaClient : IOllamaClient
         ? null
         : new ProviderTokenUsage(
           chunk.PromptEvalCount.Value,
-          chunk.EvalCount.Value
+          chunk.EvalCount.Value,
+          TotalDurationNanoseconds: chunk.TotalDurationNanoseconds,
+          LoadDurationNanoseconds: chunk.LoadDurationNanoseconds,
+          PromptEvalDurationNanoseconds: chunk.PromptEvalDurationNanoseconds,
+          EvalDurationNanoseconds: chunk.EvalDurationNanoseconds
         );
   }
 
@@ -2136,7 +2159,11 @@ public sealed class OllamaClient : IOllamaClient
     bool Done,
     string? Error,
     [property: JsonPropertyName("prompt_eval_count")] long? PromptEvalCount,
-    [property: JsonPropertyName("eval_count")] long? EvalCount
+    [property: JsonPropertyName("eval_count")] long? EvalCount,
+    [property: JsonPropertyName("total_duration")] long? TotalDurationNanoseconds,
+    [property: JsonPropertyName("load_duration")] long? LoadDurationNanoseconds,
+    [property: JsonPropertyName("prompt_eval_duration")] long? PromptEvalDurationNanoseconds,
+    [property: JsonPropertyName("eval_duration")] long? EvalDurationNanoseconds
   );
 }
 

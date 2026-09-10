@@ -144,7 +144,11 @@ public sealed record ProviderTokenUsage(
   long OutputTokens,
   long? CachedInputTokens = null,
   long? ReasoningTokens = null,
-  long? MediaTokens = null
+  long? MediaTokens = null,
+  long? TotalDurationNanoseconds = null,
+  long? LoadDurationNanoseconds = null,
+  long? PromptEvalDurationNanoseconds = null,
+  long? EvalDurationNanoseconds = null
 );
 
 public sealed record UsageRecordRequest(

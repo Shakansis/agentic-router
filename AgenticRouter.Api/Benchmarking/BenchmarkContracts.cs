@@ -1,3 +1,4 @@
+using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 
 namespace AgenticRouter.Api.Benchmarking;
@@ -189,7 +190,8 @@ public sealed record BenchmarkSuiteRunRequest(
   IReadOnlyList<string>? Models = null,
   string ScoringProfileId = BenchmarkScoringProfileIds.Default,
   BenchmarkScoreWeights? ScoreWeights = null,
-  IReadOnlyList<BenchmarkSuiteSelection>? Suites = null
+  IReadOnlyList<BenchmarkSuiteSelection>? Suites = null,
+  int? ContextTokens = null
 );
 
 public sealed record BenchmarkSuiteSelection(
@@ -255,7 +257,50 @@ public sealed record BenchmarkRawResult(
   IReadOnlyList<BenchmarkHostEvent>? HostEvents = null,
   IReadOnlyList<BenchmarkToolCallEvidence>? ToolCalls = null,
   BenchmarkOperationalDiagnostics? OperationalDiagnostics = null,
-  string? FinalHarnessReportHtml = null
+  string? FinalHarnessReportHtml = null,
+  string FailureCategory = BenchmarkFailureCategoryIds.None,
+  BenchmarkRuntimeEvidence? RuntimeEvidence = null
+);
+
+public static class BenchmarkFailureCategoryIds
+{
+  public const string None = "none";
+  public const string SemanticValidation = "semantic-validation";
+  public const string HostPolicy = "host-policy";
+  public const string HarnessProtocol = "harness-protocol";
+  public const string ProviderRuntime = "provider-runtime";
+  public const string Timeout = "timeout";
+  public const string Cancelled = "cancelled";
+  public const string Preparation = "preparation";
+  public const string Unknown = "unknown";
+}
+
+public sealed record BenchmarkRuntimeEvidence(
+  DateTimeOffset CapturedAt,
+  string GpuSelection,
+  string? Backend,
+  int RequestedContextTokens,
+  int? ActualContextTokens,
+  long? ModelSizeBytes,
+  long? VramSizeBytes,
+  long? EstimatedRamSizeBytes,
+  string Processor,
+  string ContextStatus,
+  long? TotalInferenceDurationNanoseconds = null,
+  long? LoadDurationNanoseconds = null,
+  long? PromptEvalDurationNanoseconds = null,
+  long? EvalDurationNanoseconds = null,
+  double? PromptTokensPerSecond = null,
+  double? OutputTokensPerSecond = null,
+  string? TimeoutPhase = null,
+  string? LastProgress = null,
+  BenchmarkDeviceMemorySample? DeviceMemory = null
+);
+
+public sealed record BenchmarkDeviceMemorySample(
+  DateTimeOffset CapturedAt,
+  SystemMemoryStatus SystemMemory,
+  IReadOnlyList<GpuMemoryStatus> Gpus
 );
 
 public sealed record BenchmarkOperationalDiagnostics(
@@ -285,7 +330,14 @@ public sealed record BenchmarkOperationalDiagnostics(
   string RequestedStrategy,
   string ResolvedStrategy,
   IReadOnlyList<string> ValidationErrorCodes,
-  IReadOnlyList<string> UnavailableMetrics
+  IReadOnlyList<string> UnavailableMetrics,
+  long? TotalInferenceDurationNanoseconds = null,
+  long? LoadDurationNanoseconds = null,
+  long? PromptEvalDurationNanoseconds = null,
+  long? EvalDurationNanoseconds = null,
+  DateTimeOffset? LastProgressAt = null,
+  string? LastProgressType = null,
+  string? LastProgressMessage = null
 );
 
 public sealed record BenchmarkBehaviorMetrics(
@@ -553,7 +605,10 @@ public sealed record BenchmarkGpuIdentity(
 public sealed record BenchmarkConfigurationIdentity(
   int TimeoutSeconds,
   bool Sequential,
-  string Fingerprint
+  string Fingerprint,
+  int? ContextTokens = null,
+  string? Gpu = null,
+  string ModelRole = "benchmark"
 );
 
 public sealed record BenchmarkSuiteRunResult(
@@ -841,7 +896,12 @@ public sealed record BenchmarkLiveRunView(
   bool Terminal,
   bool CancellationRequested,
   long LastSequence,
-  IReadOnlyList<BenchmarkProgressEvent> Events
+  IReadOnlyList<BenchmarkProgressEvent> Events,
+  DateTimeOffset? UpdatedAt = null,
+  string? CurrentModel = null,
+  string? CurrentHarness = null,
+  string? CurrentTestId = null,
+  string? State = null
 );
 
 public interface IBenchmarkProgressSink

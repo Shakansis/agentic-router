@@ -83,6 +83,7 @@ public sealed class ChatStreamService
   private readonly IExecutionContextTurnRunner _contextTurns;
   private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
+  private readonly IBenchmarkExecutionContextAccessor _benchmarkContexts;
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
   private ExecutionSession? _executionSession;
@@ -90,6 +91,8 @@ public sealed class ChatStreamService
   private string? _usageConversationId;
   private string? _usageTurnId;
   private string? _usageGpu;
+  private string? _usageModelRoleOverride;
+  private int? _usageRuntimeContextTokens;
   private IReadOnlyDictionary<string, string?> _usageModelRevisions =
     new Dictionary<string, string?>(
       StringComparer.OrdinalIgnoreCase
@@ -128,6 +131,7 @@ public sealed class ChatStreamService
     IExecutionContextTurnRunner contextTurns,
     IAutoModelHarnessRoutingService autoModelHarnessRouter,
     IOllamaManagedServerManager managedOllamaServers,
+    IBenchmarkExecutionContextAccessor benchmarkContexts,
     ITraceContext trace,
     ILogger<ChatStreamService> logger
   )
@@ -164,6 +168,7 @@ public sealed class ChatStreamService
     _contextTurns = contextTurns;
     _autoModelHarnessRouter = autoModelHarnessRouter;
     _managedOllamaServers = managedOllamaServers;
+    _benchmarkContexts = benchmarkContexts;
     _trace = trace;
     _logger = logger;
   }
@@ -260,6 +265,11 @@ public sealed class ChatStreamService
       var settings = await _settingsStore.GetAsync(
         cancellationToken
       );
+      var benchmarkContext = _benchmarkContexts.Current;
+      _usageModelRoleOverride = benchmarkContext is null
+        ? null
+        : UsageModelRoles.Benchmark;
+      _usageRuntimeContextTokens = benchmarkContext?.ContextTokens;
       var isAuto = string.IsNullOrWhiteSpace(
         request.Model
       ) || string.Equals(
@@ -465,9 +475,9 @@ public sealed class ChatStreamService
           : UsageModelRoles.Primary;
       }
 
-      _usageGpu = isAuto
+      _usageGpu = benchmarkContext?.Gpu ?? (isAuto
         ? settings.Intentions[intention].Gpu
-        : settings.DefaultGpu;
+        : settings.DefaultGpu);
 
       if (request.AutoModelHarness)
       {
@@ -1405,7 +1415,8 @@ public sealed class ChatStreamService
     var contextUsage = CreateExternalHarnessContextUsage(
       context,
       capabilities,
-      settings
+      settings,
+      _usageRuntimeContextTokens
     );
     yield return new ChatStreamEvent(
       requestId,
@@ -8207,18 +8218,23 @@ public sealed class ChatStreamService
       RequiredContextTokens = required,
       EffectiveLimitTokens = effectiveLimit,
       ActiveContextTokens = activeTokens,
-      OutputTokens = outputTokens
+      OutputTokens = outputTokens,
+      TotalDurationNanoseconds = providerUsage?.TotalDurationNanoseconds,
+      LoadDurationNanoseconds = providerUsage?.LoadDurationNanoseconds,
+      PromptEvalDurationNanoseconds = providerUsage?.PromptEvalDurationNanoseconds,
+      EvalDurationNanoseconds = providerUsage?.EvalDurationNanoseconds
     };
   }
 
   private static ContextUsageView CreateExternalHarnessContextUsage(
     ConversationContextResult context,
     ProviderModelCapabilities capabilities,
-    ApplicationSettings settings
+    ApplicationSettings settings,
+    int? runtimeContextTokens
   )
   {
     var usage = CreateContextUsage(context, capabilities, settings, null);
-    var effectiveLimit = Math.Min(
+    var effectiveLimit = runtimeContextTokens ?? Math.Min(
       usage.ApplicationLimit,
       usage.ProviderMaximumTokens ?? usage.ConfiguredProviderLimit
     );
@@ -8379,7 +8395,11 @@ public sealed class ChatStreamService
       afterCompactionTokens,
       omittedBlocks,
       activeTokens,
-      outputTokens
+      outputTokens,
+      providerUsage?.TotalDurationNanoseconds,
+      providerUsage?.LoadDurationNanoseconds,
+      providerUsage?.PromptEvalDurationNanoseconds,
+      providerUsage?.EvalDurationNanoseconds
     );
   }
 
@@ -9932,16 +9952,17 @@ public sealed class ChatStreamService
   )
   {
     _usageModelRevisions.TryGetValue(model, out var digest);
+    var usageRole = _usageModelRoleOverride ?? CoordinationUsageRole(settings, model);
     var resolution = OllamaRuntimeProfileResolver.Resolve(
       settings,
       model,
       digest,
-      CoordinationUsageRole(settings, model),
+      usageRole,
       null,
       0,
       settings.Execution.MaxToolOutputTokens
     );
-    var effectiveLimit = new[]
+    var effectiveLimit = _usageRuntimeContextTokens ?? new[]
     {
       resolution.MaximumContextTokens,
       settings.Context.DefaultContextTokens,
@@ -9952,10 +9973,12 @@ public sealed class ChatStreamService
       Math.Max(1, effectiveLimit - resolution.OutputTokenLimit),
       effectiveLimit,
       resolution.OutputTokenLimit,
-      Math.Min(
-        resolution.EffectiveContextTokens,
-        effectiveLimit
-      )
+      _usageRuntimeContextTokens is not null
+        ? effectiveLimit
+        : Math.Min(
+          resolution.EffectiveContextTokens,
+          effectiveLimit
+        )
     );
   }
 
@@ -10929,9 +10952,10 @@ public sealed class ChatStreamService
       _usageConversationId,
       _usageTurnId,
       _executionSession?.Id,
-      modelRole,
+      _usageModelRoleOverride ?? modelRole,
       requestPurpose,
       revision,
+      RuntimeContextTokens: _usageRuntimeContextTokens,
       TraceId: _trace.TraceId,
       ProviderAttemptId: Guid.NewGuid().ToString("N"),
       IncidentEventId: Guid.NewGuid().ToString("N"),

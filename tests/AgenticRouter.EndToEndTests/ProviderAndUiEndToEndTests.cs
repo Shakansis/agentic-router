@@ -2306,6 +2306,15 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     ).SelectOptionAsync(
       "alpha:latest"
     );
+    await Expect(Page.Locator("#attach-image")).ToBeEnabledAsync();
+    await Expect(Page.Locator("#attach-image")).ToHaveCSSAsync(
+      "background-color",
+      "rgba(109, 141, 255, 0.14)"
+    );
+    await Expect(Page.Locator("#attach-image")).ToHaveCSSAsync(
+      "border-color",
+      "rgba(109, 141, 255, 0.7)"
+    );
     await Expect(
       Page.Locator(
         "#capability-tags [data-kind=\"local\"]"
