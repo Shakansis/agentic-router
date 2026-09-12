@@ -16,6 +16,36 @@ The evidence supports multiple independent causes. The strongest is a Host conte
 
 There are also genuine cross-run variations: 33 of 180 model × harness × test keys changed outcome across the four repetitions. Several of those changes correlate with Host/harness contract failures rather than model quality alone, especially phase-specific tool rejection, benchmark-owned approval rejection, and Qwen Code loop protection.
 
+## Addendum — combined Vulkan and 256k context, 2026-09-10
+
+Capture window: 2026-09-10 19:23–19:33 America/Sao_Paulo. The sequential benchmark `2f543bc71c3e416d835fc7b0c94a2bd8` remained active and was not cancelled or restarted during collection.
+
+The runtime status and live benchmark evidence exposed a second context-control gap after the benchmark-role propagation fix:
+
+- The active benchmark recorded 32,768 requested context tokens for `gemma4:31b × Qwen Code`.
+- Ollama `/api/ps`, projected by `/api/runtime/status`, reported one `gemma4:31b` runner with 262,144 allocated context tokens.
+- Ollama reported `size == size_vram == 22,053,713,345` bytes and zero estimated model RAM, so this observation does not support CPU layer offload.
+- The managed backend was Vulkan with `vulkan:prefer:cuda:0`; Ollama did not expose the physical split across the RTX 4090 and RX 7900 XTX.
+- Windows independently reported adapter-wide dedicated-memory use. Those physical counters include the model, other processes, and driver allocations and cannot be added to Ollama's 20.5 GiB model allocation.
+
+The root cause is the OpenAI-compatible provider path used by external harnesses. Agentic Router wrote `generationConfig.contextWindowSize`, which constrained Qwen Code's client-side context budget, but the OpenAI API has no request field for Ollama `num_ctx`. On this machine the two 24 GiB-class adapters expose at least 48 GiB aggregate VRAM, for which current Ollama defaults to a 256k context allocation. The runner therefore used 262,144 even though the Host benchmark budget was 32,768.
+
+The corrective implementation now:
+
+1. starts the managed Ollama process with `OLLAMA_CONTEXT_LENGTH` equal to the Host-resolved effective context;
+2. treats GPU selection plus explicit context length as the managed process configuration;
+3. retains the configured port, stops only the verified Ollama process that owns it, and replaces that process when the effective context changes;
+4. records the managed server context in runtime status so requested-versus-allocated comparisons use the active process configuration;
+5. labels Windows values as adapter-wide VRAM, labels Ollama values as model allocation, and identifies combined Vulkan as one aggregate allocation with an unreported physical split;
+6. labels 262,144 as an allocated context window rather than live token occupancy or a context share.
+
+Deterministic validation after the change:
+
+- Release build: zero warnings and zero errors.
+- Managed Ollama E2E: the same port remained in use, `OLLAMA_CONTEXT_LENGTH=32768` was observed, the verified prior PID exited when changed to 65,536, and only one managed server remained.
+- Runtime/Qwen/benchmark focused E2E: six passed; one initial infrastructure invocation used an incomplete copied fake-Qwen output and passed after using the complete isolated fake-server directory.
+- JavaScript syntax, formatting, and intended-diff checks passed.
+
 ## Controlled dataset
 
 All four runs used:

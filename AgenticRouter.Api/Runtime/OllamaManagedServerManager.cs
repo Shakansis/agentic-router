@@ -22,6 +22,14 @@ public interface IOllamaManagedServerManager
     CancellationToken cancellationToken
   );
 
+  Task<OllamaEndpointResolution> ResolveAsync(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection,
+    int contextLength,
+    CancellationToken cancellationToken
+  );
+
   IReadOnlyList<OllamaManagedServerStatus> GetActiveServers();
 }
 
@@ -39,7 +47,8 @@ public sealed record OllamaManagedServerStatus(
   string Backend,
   int? BackendIndex,
   int ProcessId,
-  DateTimeOffset StartedAt
+  DateTimeOffset StartedAt,
+  int? ContextLength
 );
 
 public sealed class OllamaManagedServerManager :
@@ -108,6 +117,48 @@ public sealed class OllamaManagedServerManager :
     CancellationToken cancellationToken
   )
   {
+    return await ResolveCoreAsync(
+      configuredEndpoint,
+      selection,
+      defaultSelection,
+      null,
+      cancellationToken
+    );
+  }
+
+  public async Task<OllamaEndpointResolution> ResolveAsync(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection,
+    int contextLength,
+    CancellationToken cancellationToken
+  )
+  {
+    if (contextLength <= 0)
+    {
+      throw new ArgumentOutOfRangeException(
+        nameof(contextLength),
+        contextLength,
+        "Managed Ollama context length must be positive."
+      );
+    }
+    return await ResolveCoreAsync(
+      configuredEndpoint,
+      selection,
+      defaultSelection,
+      contextLength,
+      cancellationToken
+    );
+  }
+
+  private async Task<OllamaEndpointResolution> ResolveCoreAsync(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection,
+    int? contextLength,
+    CancellationToken cancellationToken
+  )
+  {
     var target = OllamaGpuSelection.ResolveTarget(selection, defaultSelection);
     if (target is null)
     {
@@ -134,6 +185,7 @@ public sealed class OllamaManagedServerManager :
     var server = await GetOrStartAsync(
       configuredEndpoint,
       target,
+      contextLength,
       cancellationToken
     );
     return new OllamaEndpointResolution(
@@ -156,7 +208,8 @@ public sealed class OllamaManagedServerManager :
           server.Target.Backend,
           server.Target.AllDevices ? null : server.Target.Index,
           server.Process.Id,
-          server.StartedAt
+          server.StartedAt,
+          server.ContextLength
         )
       ).ToArray();
     }
@@ -178,6 +231,7 @@ public sealed class OllamaManagedServerManager :
   private async Task<ManagedServer> GetOrStartAsync(
     Uri configuredEndpoint,
     OllamaGpuTarget target,
+    int? contextLength,
     CancellationToken cancellationToken
   )
   {
@@ -198,6 +252,7 @@ public sealed class OllamaManagedServerManager :
         if (
           _servers.TryGetValue(target.Selection, out var existing)
           && !existing.Process.HasExited
+          && (contextLength is null || existing.ContextLength == contextLength)
         )
         {
           return existing;
@@ -216,6 +271,7 @@ public sealed class OllamaManagedServerManager :
       return await StartServerAsync(
         configuredEndpoint,
         target,
+        contextLength,
         cancellationToken
       );
     }
@@ -228,6 +284,7 @@ public sealed class OllamaManagedServerManager :
   private async Task<ManagedServer> StartServerAsync(
     Uri configuredEndpoint,
     OllamaGpuTarget target,
+    int? contextLength,
     CancellationToken cancellationToken
   )
   {
@@ -244,6 +301,7 @@ public sealed class OllamaManagedServerManager :
         library,
         port,
         null,
+        contextLength,
         cancellationToken
       );
       try
@@ -266,6 +324,7 @@ public sealed class OllamaManagedServerManager :
       library,
       port,
       vulkanOrder,
+      contextLength,
       cancellationToken
     );
   }
@@ -276,6 +335,7 @@ public sealed class OllamaManagedServerManager :
     string library,
     int port,
     string? vulkanOrder,
+    int? contextLength,
     CancellationToken cancellationToken
   )
   {
@@ -294,6 +354,12 @@ public sealed class OllamaManagedServerManager :
     startInfo.Environment["OLLAMA_HOST"] = $"127.0.0.1:{port}";
     startInfo.Environment["OLLAMA_LLM_LIBRARY"] = library;
     startInfo.Environment["OLLAMA_NO_CLOUD"] = "1";
+    if (contextLength is not null)
+    {
+      startInfo.Environment["OLLAMA_CONTEXT_LENGTH"] = contextLength.Value.ToString(
+        CultureInfo.InvariantCulture
+      );
+    }
     ApplyDeviceEnvironment(startInfo, target, vulkanOrder);
 
     var process = new Process
@@ -332,6 +398,7 @@ public sealed class OllamaManagedServerManager :
       executable,
       process,
       startedAt,
+      contextLength,
       leasePath,
       output,
       DrainAsync(process.StandardOutput, target.Selection, output),
@@ -1040,6 +1107,7 @@ public sealed class OllamaManagedServerManager :
     string Executable,
     Process Process,
     DateTimeOffset StartedAt,
+    int? ContextLength,
     string LeasePath,
     ConcurrentQueue<string> Output,
     Task StandardOutput,

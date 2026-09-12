@@ -107,7 +107,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
                 settings,
                 gpuMemory.Devices,
                 placement,
-                server.Selection
+                server.Selection,
+                server.ContextLength
               )
             )
           );
@@ -121,7 +122,7 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
         {
           warnings.Add(
             $"{model.Name} is loaded with {model.ActualContextTokens} context tokens, "
-            + $"but its resolved profile requests {model.RequestedContextTokens}."
+            + $"but the active runtime configuration requests {model.RequestedContextTokens}."
           );
         }
 
@@ -239,7 +240,8 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
     ApplicationSettings settings,
     IReadOnlyList<GpuMemoryStatus> devices,
     OllamaGpuPlacementSnapshot placement,
-    string? configuredGpuOverride = null
+    string? configuredGpuOverride = null,
+    int? requestedContextOverride = null
   )
   {
     long? estimatedRam = null;
@@ -285,12 +287,14 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
       // Status remains available even when a saved profile needs correction.
     }
 
-    var profileStatus = resolution is null
+    var requestedContextTokens = requestedContextOverride
+      ?? resolution?.EffectiveContextTokens;
+    var profileStatus = requestedContextTokens is null
       ? "invalid"
       : model.ContextLength is null
         ? "unknown"
-        : model.ContextLength == resolution.EffectiveContextTokens
-          ? resolution.Overridden
+        : model.ContextLength == requestedContextTokens
+          ? requestedContextOverride is not null || resolution!.Overridden
             ? "overridden"
             : "inherited"
           : "context-mismatch";
@@ -350,7 +354,7 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
       model.Name,
       model.Digest,
       role,
-      resolution?.EffectiveContextTokens,
+      requestedContextTokens,
       model.ContextLength,
       model.SizeBytes,
       model.VramSizeBytes,

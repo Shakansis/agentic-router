@@ -6471,7 +6471,8 @@ async function renderRestoredConversation(session, options = {}) {
           const assistant = appendAssistantMessage({
             modelSelectionOrigin: timelineModelSelectionOrigin(
               message.timeline
-            )
+            ),
+            selectedModel: session.selectedModel
           });
           const outcome = await replayConversationTimeline(
             message.timeline,
@@ -6483,7 +6484,8 @@ async function renderRestoredConversation(session, options = {}) {
       } else if (message.role === "assistant") {
         const timeline = message.timeline ?? [];
         const assistant = appendAssistantMessage({
-          modelSelectionOrigin: timelineModelSelectionOrigin(timeline)
+          modelSelectionOrigin: timelineModelSelectionOrigin(timeline),
+          selectedModel: session.selectedModel
         });
         cancelAnimationFrame(assistant.clockFrame);
         assistant.progress.hidden = true;
@@ -6542,7 +6544,8 @@ async function renderRestoredConversation(session, options = {}) {
             terminalActivitySummary(
               failed ? "Failed" : "Completed",
               null,
-              message.diagnostic
+              message.diagnostic,
+              assistant.selectedModel
             ),
             failed
           );
@@ -6629,7 +6632,10 @@ async function attachSupervisionConversation(run) {
   const conversationVersion = state.conversationVersion;
   const controller = new AbortController();
   undockExecutionPlans();
-  const assistant = appendAssistantMessage({ modelSelectionOrigin: "user" });
+  const assistant = appendAssistantMessage({
+    modelSelectionOrigin: "user",
+    selectedModel: run.route?.model
+  });
   state.requestController = controller;
   state.activeAssistant = assistant;
   state.activeHarness = run.route?.harness ?? state.harness;
@@ -6676,7 +6682,16 @@ async function attachSupervisionConversation(run) {
       assistant.answer.textContent ||= "Could not reattach to the supervised run.";
       assistant.answer.classList.add("error");
       assistant.answer.classList.remove("pending");
-      finishActivity(assistant, "Failed", true);
+      finishActivity(
+        assistant,
+        terminalActivitySummary(
+          "Failed",
+          elapsedSince(assistant),
+          null,
+          assistant.selectedModel
+        ),
+        true
+      );
     }
   } finally {
     if (state.requestController === controller) {
@@ -7842,8 +7857,8 @@ function renderLoadedModels(runtime) {
     device => device.usedDedicatedMemoryBytes != null
       && device.totalDedicatedMemoryBytes > 0
   );
-  const usedGpuMemory = availableDevices.reduce(
-    (total, device) => total + device.usedDedicatedMemoryBytes,
+  const allocatedModelVram = runtime.loadedModels.reduce(
+    (total, model) => total + Number(model.vramSizeBytes ?? 0),
     0
   );
   const totalGpuMemory = availableDevices.reduce(
@@ -7851,8 +7866,10 @@ function renderLoadedModels(runtime) {
     0
   );
   elements.runtimeModelSummary.textContent = totalGpuMemory > 0
-    ? `${formatGiB(usedGpuMemory)} / ${formatGiB(totalGpuMemory)} · `
-      + `${formatPercent(usedGpuMemory * 100 / totalGpuMemory)}`
+    ? t("memory.model_gpu_summary", {
+      allocated: formatGiB(allocatedModelVram),
+      capacity: formatGiB(totalGpuMemory)
+    })
     : t("memory.gpu_memory_unavailable");
 
   const groups = new Map();
@@ -7933,7 +7950,7 @@ function renderLoadedModels(runtime) {
       ))
     ),
     loadedModelSummaryItem(
-      t("memory.total_context_window"),
+      t("memory.allocated_context_windows"),
       `${formatInteger(runtime.loadedModels.reduce(
         (total, model) => total + Number(model.actualContextTokens ?? 0),
         0
@@ -7967,12 +7984,17 @@ function loadedModelGpuIdentity(model) {
     };
   }
   if (model.processor === "gpu" || model.processor === "hybrid") {
+    const backend = model.observedBackend
+      ? runtimeBackendLabel(model.observedBackend)
+      : null;
     return {
       key: `backend-${model.observedBackend ?? "unknown"}`,
       deviceId: null,
       gpuIndex: null,
-      label: model.observedBackend
-        ? `${runtimeBackendLabel(model.observedBackend)} · exact device not observed`
+      label: backend === "Vulkan"
+        ? "Vulkan combined allocation · physical split not reported"
+        : backend
+          ? `${backend} model allocation · exact device not reported`
         : t("memory.gpu_unknown"),
       order: Number.MAX_SAFE_INTEGER - 1
     };
@@ -8057,10 +8079,9 @@ function loadedModelGpuCard(group, devices, loadedModelsStatus) {
   const modelTelemetryAvailable = loadedModelsStatus === "available";
   const modelVramKnown = modelTelemetryAvailable
     && modelVramValues.length === group.models.length;
-  const systemDriverVram = device?.usedDedicatedMemoryBytes == null
-    || !modelVramKnown
+  const adapterVram = device?.usedDedicatedMemoryBytes == null
     ? null
-    : Math.max(0, device.usedDedicatedMemoryBytes - modelVram);
+    : Number(device.usedDedicatedMemoryBytes);
   const contextRuntimeValues = group.models
     .map(model => estimatedContextRuntimeBytes(model))
     .filter(value => value != null);
@@ -8073,23 +8094,38 @@ function loadedModelGpuCard(group, devices, loadedModelsStatus) {
     (total, model) => total + Number(model.actualContextTokens ?? 0),
     0
   );
+  const requestedContextValues = group.models
+    .map(model => model.requestedContextTokens)
+    .filter(value => value != null);
+  const requestedContextKnown = group.models.length > 0
+    && requestedContextValues.length === group.models.length;
+  const requestedContextTokens = requestedContextValues.reduce(
+    (total, value) => total + Number(value),
+    0
+  );
   const metrics = document.createElement("div");
   metrics.className = "loaded-model-metrics";
   metrics.append(
     loadedModelMetric(
       "model",
       t("memory.model_vram_used"),
-      modelVramKnown ? formatGiB(modelVram) : "n/d"
+      modelVramKnown ? formatGiB(modelVram) : "n/d",
+      t("memory.model_vram_note")
     ),
     loadedModelMetric(
       "system",
-      t("memory.system_driver_vram"),
-      systemDriverVram == null ? "n/d" : formatGiB(systemDriverVram)
+      t("memory.adapter_vram_used"),
+      adapterVram == null ? "n/d" : formatGiB(adapterVram),
+      t("memory.adapter_vram_note")
     ),
     loadedModelMetric(
       "context",
-      t("memory.context_share"),
-      `${formatInteger(contextTokens)} tokens`
+      t("memory.allocated_context_window"),
+      `${formatInteger(contextTokens)} tokens allocated`
+        + (requestedContextKnown
+          ? ` · ${formatInteger(requestedContextTokens)} requested`
+          : ""),
+      t("memory.allocated_context_note")
     ),
     loadedModelMetric(
       "memory",
@@ -8132,9 +8168,13 @@ function loadedModelDetailRow(model) {
   name.textContent = model.name;
   const allocation = document.createElement("span");
   const contextRuntimeBytes = estimatedContextRuntimeBytes(model);
+  const requestedContext = model.requestedContextTokens == null
+    ? ""
+    : ` · ${formatInteger(model.requestedContextTokens)} requested`;
   allocation.textContent = `${formatGiB(model.vramSizeBytes)} VRAM · `
     + `${formatGiB(model.estimatedRamSizeBytes)} RAM · `
-    + `${formatInteger(model.actualContextTokens)} tokens · `
+    + `${formatInteger(model.actualContextTokens)}-token allocated context`
+    + `${requestedContext} · `
     + `${contextRuntimeBytes == null ? "n/d" : `~${formatGiB(contextRuntimeBytes)}`} context/runtime`;
   const placement = document.createElement("span");
   placement.className = "loaded-model-placement";
@@ -13190,6 +13230,7 @@ function appendSteeredMessage(message, assistant, harnessId, sentAt) {
     appendAssistantMessage(
       {
         modelSelectionOrigin: assistant.modelSelectionOrigin,
+        selectedModel: assistant.selectedModel,
         startedAt: assistant.startedAt,
         rawAnswer: assistant.rawAnswer,
         recovered: assistant.recovered,
@@ -13353,7 +13394,8 @@ async function handleComposerSubmit(event) {
   const assistant = appendAssistantMessage({
     modelSelectionOrigin: selectedModel === "auto"
       ? "agent"
-      : "user"
+      : "user",
+    selectedModel: selectedModel === "auto" ? null : selectedModel
   });
   const supervisionRunId = requestInteractionMode === "execute"
     ? globalThis.crypto?.randomUUID?.() ?? createSessionId()
@@ -13482,7 +13524,8 @@ async function handleComposerSubmit(event) {
         terminalActivitySummary(
           "Canceled",
           elapsedSince(assistant),
-          slowDiagnostic
+          slowDiagnostic,
+          assistant.selectedModel
         ),
         Boolean(slowDiagnostic)
       );
@@ -13507,7 +13550,16 @@ async function handleComposerSubmit(event) {
       assistant.answer.textContent ||= "Could not complete the response.";
       assistant.answer.classList.add("error");
       assistant.answer.classList.remove("pending");
-      finishActivity(assistant, "Failed", true);
+      finishActivity(
+        assistant,
+        terminalActivitySummary(
+          "Failed",
+          elapsedSince(assistant),
+          null,
+          assistant.selectedModel
+        ),
+        true
+      );
     }
   } finally {
     if (state.requestController === controller) {
@@ -13809,6 +13861,7 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
     workNarrative: null,
     actionItems: new Map(),
     modelSelectionOrigin: options.modelSelectionOrigin ?? null,
+    selectedModel: options.selectedModel ?? assistant.selectedModel ?? null,
     activityGroups: new Map(),
     technicalEventCount: 0,
     startedAt: options.startedAt ?? performance.now(),
@@ -14081,6 +14134,7 @@ function renderSupervisionProgress(assistant, streamEvent) {
   }
 
   assistant.supervisionProgress = supervision;
+  assistant.selectedModel = supervision.model ?? assistant.selectedModel;
   renderSupervisionSessionHeader(
     assistant,
     supervision
@@ -14131,6 +14185,7 @@ function renderModelSelection(assistant, model, origin) {
     : origin === "fallback"
       ? `Model ${model} selected as fallback by the Host.`
       : `Model ${model} routed by the agent.`;
+  assistant.selectedModel = model;
   assistant.modelNotice.textContent = message;
   assistant.modelNotice.hidden = false;
 }
@@ -14587,6 +14642,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
       }
 
       const streamEvent = JSON.parse(data);
+      assistant.selectedModel = streamEvent.selectedModel
+        ?? assistant.selectedModel;
       timeline.push(streamEvent);
       const observedOutputTokens = assistant.lastObservedOutputTokens ?? 0;
       if (isMeaningfulRequestActivity(streamEvent, observedOutputTokens)) {
@@ -14755,7 +14812,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
         terminalSummary = terminalActivitySummary(
           assistant.recovered ? "Recovered" : "Completed",
           streamEvent.elapsedMilliseconds,
-          diagnostic
+          diagnostic,
+          assistant.selectedModel
         );
         terminalWarning = assistant.recovered;
         finishActivity(assistant, terminalSummary, terminalWarning);
@@ -14798,7 +14856,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
         terminalSummary = terminalActivitySummary(
           "Failed",
           streamEvent.elapsedMilliseconds,
-          diagnostic
+          diagnostic,
+          assistant.selectedModel
         );
         terminalWarning = true;
         finishActivity(assistant, terminalSummary, terminalWarning);
@@ -14824,7 +14883,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
         terminalSummary = terminalActivitySummary(
           "Canceled",
           streamEvent.elapsedMilliseconds,
-          diagnostic
+          diagnostic,
+          assistant.selectedModel
         );
         if (
           assistant.slowDiagnostic?.persisted === true
@@ -14838,7 +14898,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
           terminalSummary = terminalActivitySummary(
             "Canceled",
             streamEvent.elapsedMilliseconds,
-            diagnostic
+            diagnostic,
+            assistant.selectedModel
           );
         }
         terminalWarning = Boolean(diagnostic?.terminalState
@@ -14968,9 +15029,15 @@ function captureConversationContentBlock(blocks, streamEvent) {
   });
 }
 
-function terminalActivitySummary(label, elapsedMilliseconds, diagnostic) {
+function terminalActivitySummary(
+  label,
+  elapsedMilliseconds,
+  diagnostic,
+  model
+) {
   return [
     label,
+    model ? `Model: ${model}` : null,
     elapsedMilliseconds === null || elapsedMilliseconds === undefined
       ? null
       : formatElapsed(elapsedMilliseconds),

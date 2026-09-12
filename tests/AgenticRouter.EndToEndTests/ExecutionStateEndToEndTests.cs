@@ -7919,6 +7919,22 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     Assert.AreEqual(HttpStatusCode.NotFound, unknown.StatusCode);
     StringAssert.Contains(await unknown.Content.ReadAsStringAsync(), "diagnostic-trace-not-found");
 
+    var repeatedNativeEvents = Enumerable.Range(1, 220).Select(index =>
+    {
+      var item = persisted.DeepClone().AsObject();
+      item["eventId"] = Guid.NewGuid().ToString("N");
+      item["sequence"] = 10_000 + index;
+      item["category"] = "harness";
+      item["stage"] = "harness.opencode-native-event-preserved";
+      item["code"] = "harness.opencode-native-event-preserved";
+      item["status"] = "observed";
+      item["summary"] = new string('n', 512);
+      item["completed"] = false;
+      item["reviewAvailable"] = false;
+      return item.ToJsonString();
+    });
+    await File.AppendAllLinesAsync(incidentFile, repeatedNativeEvents);
+
     using var investigation = await _environment.HttpClient.PostAsJsonAsync(
       "api/chat/stream",
       new
@@ -7944,10 +7960,83 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         item => item["type"]!.GetValue<string>() == "chat.diagnostic-read-completed"
       )
     );
+    Assert.IsTrue(
+      investigationEvents.Any(
+        item => item["type"]!.GetValue<string>() == "chat.diagnostic-context-compacted"
+      )
+    );
     Assert.AreEqual(
       "response.completed",
       investigationEvents.Last()["type"]!.GetValue<string>()
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ChatHistoryIsTrimmedToTheSelectedModelsDeclaredContext()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["context"]!["defaultContextTokens"] = 131_072;
+    settings["context"]!["providerContextTokens"] = 131_072;
+    var primary = settings["ollamaRuntime"]!["roleDefaults"]!["primary"]!.AsObject();
+    primary["targetContextTokens"] = 65_536;
+    primary["maximumContextTokens"] = 131_072;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    const string oldMarker = "OLD-TURN-MUST-BE-OMITTED";
+    const string recentMarker = "RECENT-TURN-MUST-BE-INCLUDED";
+    var history = new object[]
+    {
+      new { role = "user", content = oldMarker + new string('o', 60_000) },
+      new { role = "assistant", content = new string('p', 60_000) },
+      new { role = "user", content = recentMarker + new string('r', 60_000) },
+      new { role = "assistant", content = new string('s', 60_000) }
+    };
+    using (var cleared = await _environment.HttpClient.DeleteAsync("api/workspace"))
+    {
+      cleared.EnsureSuccessStatusCode();
+    }
+    try
+    {
+      _environment.FakeOllama.Reset();
+      using var response = await _environment.HttpClient.PostAsJsonAsync(
+        "api/chat/stream",
+        new
+        {
+          message = "Answer using the retained recent turn.",
+          model = "alpha:latest",
+          history,
+          interactionMode = "chat",
+          approvalPolicy = "auto",
+          browserSessionId = "browser-model-context-trim-v1"
+        }
+      );
+      response.EnsureSuccessStatusCode();
+      var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+      Assert.AreEqual(
+        "response.completed",
+        events.Last()["type"]!.GetValue<string>(),
+        events.Last().ToJsonString()
+      );
+      Assert.IsTrue(events.Any(item => item["type"]!.GetValue<string>() == "context.trimmed"));
+      var providerRequest = _environment.FakeOllama.Requests.Last(request => request.Stream);
+      Assert.IsFalse(providerRequest.Messages.Any(message => message.Content.Contains(oldMarker, StringComparison.Ordinal)));
+      Assert.IsTrue(providerRequest.Messages.Any(message => message.Content.Contains(recentMarker, StringComparison.Ordinal)));
+    }
+    finally
+    {
+      using var restored = await _environment.HttpClient.PutAsJsonAsync(
+        "api/workspace",
+        new
+        {
+          path = _environment.WorkspaceDirectory
+        }
+      );
+      restored.EnsureSuccessStatusCode();
+    }
   }
 
   [TestMethod]
@@ -8049,6 +8138,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
     var assistant = Page.Locator(".message.assistant").Last;
     await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Completed");
+    await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync(
+      "Model: alpha:latest"
+    );
     await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Trace:");
     var traceCopy = assistant.Locator(".activity-trace-copy");
     await Expect(traceCopy).ToBeVisibleAsync();

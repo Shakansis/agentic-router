@@ -208,7 +208,8 @@ public sealed record OllamaModelMetadata(
 public sealed record OllamaModelCapabilities(
   string Model,
   IReadOnlyList<string> Capabilities,
-  bool ToolingConfirmed
+  bool ToolingConfirmed,
+  int? DeclaredContextTokens = null
 );
 
 public class OllamaProviderException : Exception

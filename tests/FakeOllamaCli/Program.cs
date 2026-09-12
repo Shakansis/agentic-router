@@ -92,6 +92,7 @@ while (true)
       ),
       vulkan = Environment.GetEnvironmentVariable("OLLAMA_VULKAN"),
       spread = Environment.GetEnvironmentVariable("OLLAMA_SCHED_SPREAD"),
+      contextLength = Environment.GetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH"),
       noCloud = Environment.GetEnvironmentVariable("OLLAMA_NO_CLOUD")
     }),
     _ => JsonSerializer.Serialize(new { error = "not found" })

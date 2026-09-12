@@ -118,6 +118,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         new Uri("http://localhost:11434"),
         "vulkan:prefer:rocm:0",
         "vulkan:prefer:rocm:0",
+        32_768,
         CancellationToken.None
       );
       Assert.IsNull(preferAmd.MainGpu);
@@ -130,7 +131,29 @@ public sealed class ManagedOllamaServerEndToEndTests
         amdEnvironment.GetProperty("vulkanVisibleDevices").GetString()
       );
       Assert.AreEqual("1", amdEnvironment.GetProperty("spread").GetString());
+      Assert.AreEqual(
+        "32768",
+        amdEnvironment.GetProperty("contextLength").GetString()
+      );
+      var amdPid = amdEnvironment.GetProperty("processId").GetInt32();
+      var largerContext = await second.ResolveAsync(
+        new Uri("http://localhost:11434"),
+        "vulkan:prefer:rocm:0",
+        "vulkan:prefer:rocm:0",
+        65_536,
+        CancellationToken.None
+      );
+      Assert.AreEqual(12_434, largerContext.Endpoint.Port);
+      await AssertProcessExitedAsync(amdPid);
+      var largerContextEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
+        new Uri(largerContext.Endpoint, "/test/environment")
+      );
+      Assert.AreEqual(
+        "65536",
+        largerContextEnvironment.GetProperty("contextLength").GetString()
+      );
       Assert.HasCount(1, second.GetActiveServers());
+      Assert.AreEqual(65_536, second.GetActiveServers().Single().ContextLength);
     }
     finally
     {

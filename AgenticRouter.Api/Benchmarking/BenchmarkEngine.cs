@@ -111,6 +111,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       providerEndpoint,
       gpu,
       gpu,
+      contextTokens,
       cancellationToken
     )).Endpoint;
     var harness = await ResolveHarnessAsync(request.Harness, cancellationToken);
@@ -183,6 +184,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       providerEndpoint,
       gpu,
       gpu,
+      contextTokens,
       cancellationToken
     )).Endpoint;
     var models = requestedModels.Select(name => new ResolvedBenchmarkModel(

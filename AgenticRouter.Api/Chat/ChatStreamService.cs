@@ -699,7 +699,8 @@ public sealed class ChatStreamService
         request,
         settings,
         intention,
-        knowledge.Context
+        knowledge.Context,
+        capabilities.ContextTokens
       );
       ContextUsageView? contextUsage = null;
       if (!string.Equals(
@@ -1436,6 +1437,7 @@ public sealed class ChatStreamService
       baseUri,
       _usageGpu,
       settings.DefaultGpu,
+      contextUsage.EffectiveLimitTokens,
       cancellationToken
     );
     await foreach (var streamEvent in ExecuteExternalHarnessAsync(
@@ -6881,6 +6883,25 @@ public sealed class ChatStreamService
       yield break;
     }
 
+    var diagnosticCharacterBudget = DiagnosticEvidenceCharacterBudget(
+      progress.ContextUsage
+    );
+    var diagnosticOutput = DiagnosticTraceCapability.CompactForModel(
+      execution.Result.Output,
+      diagnosticCharacterBudget
+    );
+    if (diagnosticOutput.Length < execution.Result.Output.Length)
+    {
+      yield return Event(
+        requestId,
+        "chat.diagnostic-context-compacted",
+        $"Diagnostic evidence was compacted from {execution.Result.Output.Length} to {diagnosticOutput.Length} characters to fit the selected model context.",
+        stopwatch,
+        model,
+        intention
+      );
+    }
+
     yield return Event(
       requestId,
       "chat.diagnostic-read-completed",
@@ -6895,7 +6916,7 @@ public sealed class ChatStreamService
         "APPLICATION_OWNED_TRACE_DIAGNOSTIC_V1\n"
           + $"Exact trace: {traceId}\n"
           + "The following JSON is bounded, sanitized Host evidence. Distinguish its facts from inference. Do not retry the objective or change configuration in this investigation turn.\n"
-          + execution.Result.Output
+          + diagnosticOutput
       )
     ).ToArray();
     await foreach (var streamEvent in StreamAttemptAsync(
@@ -6913,6 +6934,24 @@ public sealed class ChatStreamService
     {
       yield return streamEvent;
     }
+  }
+
+  private static int DiagnosticEvidenceCharacterBudget(ContextUsageView? contextUsage)
+  {
+    if (contextUsage is null)
+    {
+      return 48_000;
+    }
+
+    const int framingTokens = 256;
+    var availableTokens = contextUsage.EffectiveLimitTokens
+      - contextUsage.RequiredContextTokens
+      - framingTokens;
+    return checked((int)Math.Clamp(
+      availableTokens * 4L,
+      2_048L,
+      96_000L
+    ));
   }
 
   private async IAsyncEnumerable<ChatStreamEvent> StreamChatWithWorkspaceReadsAsync(

@@ -789,7 +789,8 @@ public sealed class OllamaClient : IOllamaClient
       capabilities.Contains(
         "tools",
         StringComparer.OrdinalIgnoreCase
-      )
+      ),
+      ReadDeclaredContextTokens(payload.ModelInfo)
     );
   }
 
@@ -805,44 +806,7 @@ public sealed class OllamaClient : IOllamaClient
       "model-metadata-inspection",
       cancellationToken
     );
-    int? declaredContext = null;
-
-    if (payload.ModelInfo is not null)
-    {
-      foreach (var pair in payload.ModelInfo)
-      {
-        if (
-          !pair.Key.EndsWith(
-            ".context_length",
-            StringComparison.OrdinalIgnoreCase
-          )
-          && !string.Equals(
-            pair.Key,
-            "context_length",
-            StringComparison.OrdinalIgnoreCase
-          )
-        )
-        {
-          continue;
-        }
-
-        if (
-          pair.Value.ValueKind == JsonValueKind.Number
-          && pair.Value.TryGetInt32(
-            out var context
-          )
-          && context > 0
-        )
-        {
-          declaredContext = declaredContext is null
-            ? context
-            : Math.Max(
-              declaredContext.Value,
-              context
-            );
-        }
-      }
-    }
+    var declaredContext = ReadDeclaredContextTokens(payload.ModelInfo);
 
     return new OllamaModelMetadata(
       model,
@@ -853,6 +817,48 @@ public sealed class OllamaClient : IOllamaClient
       payload.Details?.Family,
       payload.Details?.Families ?? []
     );
+  }
+
+  private static int? ReadDeclaredContextTokens(
+    IReadOnlyDictionary<string, JsonElement>? modelInfo
+  )
+  {
+    int? declaredContext = null;
+    if (modelInfo is null)
+    {
+      return declaredContext;
+    }
+
+    foreach (var pair in modelInfo)
+    {
+      if (
+        !pair.Key.EndsWith(
+          ".context_length",
+          StringComparison.OrdinalIgnoreCase
+        )
+        && !string.Equals(
+          pair.Key,
+          "context_length",
+          StringComparison.OrdinalIgnoreCase
+        )
+      )
+      {
+        continue;
+      }
+
+      if (
+        pair.Value.ValueKind == JsonValueKind.Number
+        && pair.Value.TryGetInt32(out var context)
+        && context > 0
+      )
+      {
+        declaredContext = declaredContext is null
+          ? context
+          : Math.Max(declaredContext.Value, context);
+      }
+    }
+
+    return declaredContext;
   }
 
   private async Task<OllamaShowResponse> GetShowResponseAsync(
@@ -941,7 +947,7 @@ public sealed class OllamaClient : IOllamaClient
       ),
       vision,
       false,
-      null,
+      inspected.DeclaredContextTokens,
       "ollama-api-show",
       true,
       StructuredOutput: chat,

@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Chat;
 
@@ -9,7 +10,8 @@ public interface IConversationContextBuilder
     ChatRequest request,
     ApplicationSettings settings,
     string intention,
-    string? knowledgeContext
+    string? knowledgeContext,
+    int? modelContextTokens
   );
 }
 
@@ -26,11 +28,19 @@ public sealed record ConversationContextResult(
 
 public sealed class ConversationContextBuilder : IConversationContextBuilder
 {
+  private readonly ITokenEstimator _tokenEstimator;
+
+  public ConversationContextBuilder(ITokenEstimator tokenEstimator)
+  {
+    _tokenEstimator = tokenEstimator;
+  }
+
   public ConversationContextResult Build(
     ChatRequest request,
     ApplicationSettings settings,
     string intention,
-    string? knowledgeContext
+    string? knowledgeContext,
+    int? modelContextTokens
   )
   {
     var systemMessages = new List<ChatMessage>
@@ -64,9 +74,15 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
       current
     );
     var fixedTokens = systemInstructionTokens + currentUserMessageTokens;
+    var effectiveContextTokens = Math.Min(
+      settings.Context.DefaultContextTokens,
+      modelContextTokens is > 0
+        ? modelContextTokens.Value
+        : int.MaxValue
+    );
     var historyBudget = Math.Max(
       0,
-      settings.Context.DefaultContextTokens
+      effectiveContextTokens
         - settings.Context.ReservedResponseTokens
         - fixedTokens
     );
@@ -173,15 +189,13 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
     return turns;
   }
 
-  private static int EstimateTokens(
+  private int EstimateTokens(
     ChatMessage message
   )
   {
-    return Math.Max(
-      1,
-      (int)Math.Ceiling(
-        message.Content.Length / 4d
-      ) + 4
-    );
+    return checked((int)Math.Min(
+      int.MaxValue,
+      _tokenEstimator.EstimateMessages([message])
+    ));
   }
 }

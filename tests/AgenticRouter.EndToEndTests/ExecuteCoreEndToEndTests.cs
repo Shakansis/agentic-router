@@ -1783,6 +1783,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "Hello from docs:latest"
     );
     await Expect(
+      activity.Locator("summary").First
+    ).ToContainTextAsync(
+      "Model: docs:latest"
+    );
+    await Expect(
       activity
     ).Not.ToHaveAttributeAsync(
       "open",
@@ -3890,32 +3895,34 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#runtime-model-list .loaded-model-gpu-card"
       ).First
     ).ToContainTextAsync(
-      "Model VRAM Used"
+      "Ollama Model VRAM Allocation"
     );
     await Expect(
       Page.Locator(
         "#runtime-model-list .loaded-model-gpu-card"
       ).First
     ).ToContainTextAsync(
-      "System/Driver VRAM"
+      "Adapter VRAM Used"
     );
     await Expect(
       Page.Locator(
         "#runtime-model-list .loaded-model-gpu-card"
       ).First
     ).ToContainTextAsync(
-      "Context Share"
+      "Allocated Context Window"
     );
     await Expect(
       Page.Locator(
         "#runtime-model-list .loaded-model-gpu-card"
       ).First
     ).ToContainTextAsync(
-      "Context/Runtime Memory"
+      "Estimated Context/Runtime Memory"
     );
     await Expect(
       Page.Locator(
         "#runtime-model-list .loaded-model-metric[title]"
+      ).Filter(
+        new() { HasText = "Estimated Context/Runtime Memory" }
       ).First
     ).ToHaveAttributeAsync(
       "title",
@@ -3933,7 +3940,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#runtime-model-list .loaded-model-summary"
       )
     ).ToContainTextAsync(
-      "Total Context Window"
+      "Allocated Context Windows"
     );
     if (
       runtimeDocument.RootElement.GetProperty(
@@ -4197,6 +4204,130 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       )
     ).ToContainTextAsync(
       "Configured: CUDA 0 · NVIDIA GeForce RTX 4090"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RendersCombinedVulkanAllocationWithoutDoubleCountingAdapterUsage()
+  {
+    const long gib = 1024L * 1024 * 1024;
+    await Page.GotoAsync("/");
+    await Page.Locator("#runtime-summary").ClickAsync();
+    await Page.EvaluateAsync(
+      "runtime => renderRuntimeStatus(runtime)",
+      new
+      {
+        systemMemory = new
+        {
+          totalBytes = 80L * gib,
+          usedBytes = 48L * gib,
+          usedPercent = 60d,
+          status = "available",
+          diagnostic = (string?)null
+        },
+        devices = new object[]
+        {
+          new
+          {
+            id = "GPU-nvidia-vulkan-fixture",
+            name = "NVIDIA GeForce RTX 4090",
+            manufacturer = "NVIDIA",
+            totalDedicatedMemoryBytes = 24L * gib,
+            usedDedicatedMemoryBytes = 35L * gib / 2,
+            usedPercent = 72.92d,
+            status = "available",
+            diagnostic = "Adapter-wide fixture.",
+            ollamaIndex = 0,
+            backend = "cuda",
+            backendIndex = 0
+          },
+          new
+          {
+            id = "dxgi-amd-vulkan-fixture",
+            name = "AMD Radeon RX 7900 XTX",
+            manufacturer = "AMD",
+            totalDedicatedMemoryBytes = 239L * gib / 10,
+            usedDedicatedMemoryBytes = 39L * gib / 2,
+            usedPercent = 81.59d,
+            status = "available",
+            diagnostic = "Adapter-wide fixture.",
+            ollamaIndex = (int?)null,
+            backend = "rocm",
+            backendIndex = 0
+          }
+        },
+        devicesStatus = "available",
+        devicesDiagnostic = (string?)null,
+        loadedModels = new object[]
+        {
+          new
+          {
+            name = "gemma4:31b",
+            totalSizeBytes = 205L * gib / 10,
+            vramSizeBytes = 205L * gib / 10,
+            estimatedRamSizeBytes = 0,
+            processor = "gpu",
+            requestedContextTokens = 131_072,
+            actualContextTokens = 262_144,
+            configuredGpu = "vulkan:prefer:cuda:0",
+            observedGpuId = (string?)null,
+            observedBackend = "vulkan",
+            observedBackendIndex = (int?)null,
+            placementStatus = "partial",
+            placementDiagnostic = "The Vulkan backend was observed; its physical split was not reported."
+          }
+        },
+        loadedModelsStatus = "available",
+        loadedModelsDiagnostic = (string?)null,
+        warnings = Array.Empty<string>()
+      }
+    );
+
+    await Expect(Page.Locator("#runtime-model-summary")).ToHaveTextAsync(
+      "20.5 GB allocated by models · 47.9 GB physical VRAM"
+    );
+    await Expect(Page.Locator("#runtime-model-summary")).Not.ToContainTextAsync(
+      "37.0 GB"
+    );
+    var vulkanCard = Page.Locator(
+      "#runtime-model-list .loaded-model-gpu-card[data-device-id=\"backend-vulkan\"]"
+    );
+    await Expect(vulkanCard).ToContainTextAsync(
+      "Vulkan combined allocation · physical split not reported"
+    );
+    await Expect(vulkanCard).ToContainTextAsync(
+      "Ollama Model VRAM Allocation20.5 GB"
+    );
+    await Expect(vulkanCard).ToContainTextAsync(
+      "Adapter VRAM Usedn/d"
+    );
+    await Expect(vulkanCard).ToContainTextAsync(
+      "Allocated Context Window262,144 tokens allocated · 131,072 requested"
+    );
+    await Expect(
+      vulkanCard.Locator(".loaded-model-metric").Filter(
+        new() { HasText = "Allocated Context Window" }
+      )
+    ).ToHaveAttributeAsync(
+      "title",
+      new Regex("not the number of tokens currently occupied", RegexOptions.IgnoreCase)
+    );
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-gpu-card[data-device-id=\"GPU-nvidia-vulkan-fixture\"]"
+      )
+    ).ToContainTextAsync("Adapter VRAM Used17.5 GB");
+    await Expect(
+      Page.Locator(
+        "#runtime-model-list .loaded-model-gpu-card[data-device-id=\"dxgi-amd-vulkan-fixture\"]"
+      )
+    ).ToContainTextAsync("Adapter VRAM Used19.5 GB");
+    await Expect(Page.Locator("#runtime-model-list")).Not.ToContainTextAsync(
+      "System/Driver VRAM"
+    );
+    await Expect(Page.Locator("#runtime-model-list")).Not.ToContainTextAsync(
+      "Context Share"
     );
   }
 
