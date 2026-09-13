@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
+using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.ProjectAwareness;
@@ -52,18 +54,24 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
   private readonly ITrustedWorkspaceService _workspace;
   private readonly IGitRepositoryService _git;
   private readonly IWorkspaceProfileService _workspaceProfiles;
+  private readonly ProjectAwarenessCache _cache;
+  private readonly IExecutionLatencyTracker _latency;
 
   public ProjectAwarenessService(
     ISettingsStore settingsStore,
     ITrustedWorkspaceService workspace,
     IGitRepositoryService git,
-    IWorkspaceProfileService workspaceProfiles
+    IWorkspaceProfileService workspaceProfiles,
+    ProjectAwarenessCache cache,
+    IExecutionLatencyTracker latency
   )
   {
     _settingsStore = settingsStore;
     _workspace = workspace;
     _git = git;
     _workspaceProfiles = workspaceProfiles;
+    _cache = cache;
+    _latency = latency;
   }
 
   public async Task<ProjectProfile> GetAsync(
@@ -71,7 +79,6 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
     CancellationToken cancellationToken
   )
   {
-    _ = refresh;
     var settings = await _settingsStore.GetAsync(
       cancellationToken
     );
@@ -87,6 +94,38 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
       );
     }
 
+    var activeWorkspace = await _workspaceProfiles.GetActiveDataAsync(
+      cancellationToken
+    );
+    var cacheKey = new ProjectAwarenessCacheKey(
+      activeWorkspace?.Id ?? status.Path,
+      status.Path,
+      settings.ProjectAwareness.MaxProjectMarkers,
+      ValidationSignature(
+        activeWorkspace?.ValidationProfile ?? settings.ValidationProfile
+      )
+    );
+    return await _cache.GetOrCreateAsync(
+      cacheKey,
+      refresh,
+      () => BuildProfileAsync(
+        settings,
+        status.Path,
+        activeWorkspace,
+        cancellationToken
+      ),
+      cancellationToken
+    );
+  }
+
+  private async Task<ProjectProfile> BuildProfileAsync(
+    ApplicationSettings settings,
+    string workspacePath,
+    WorkspaceProfileData? activeWorkspace,
+    CancellationToken cancellationToken
+  )
+  {
+
     var detectedFiles = new List<string>();
     var instructionFiles = new List<string>();
     var diagnostics = new List<string>();
@@ -95,7 +134,7 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
     try
     {
       DiscoverMarkers(
-        status.Path,
+        workspacePath,
         settings.ProjectAwareness.MaxProjectMarkers,
         detectedFiles,
         instructionFiles,
@@ -114,9 +153,12 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
       );
     }
 
-    var repository = await DetectRepositoryAsync(
-      status.Path,
-      cancellationToken
+    _latency.Mark("git-preflight-start");
+    var gitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+    var repository = await DetectRepositoryAsync(workspacePath, cancellationToken);
+    _latency.Mark(
+      "git-preflight-end",
+      (long)System.Diagnostics.Stopwatch.GetElapsedTime(gitStarted).TotalMilliseconds
     );
     var projectTypes = DetectProjectTypes(
       detectedFiles
@@ -124,9 +166,6 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
     var detectedValidation = CreateDetectedValidationProfile(
       detectedFiles,
       projectTypes
-    );
-    var activeWorkspace = await _workspaceProfiles.GetActiveDataAsync(
-      cancellationToken
     );
     var activeValidation = activeWorkspace?.ValidationProfile
       ?? settings.ValidationProfile;
@@ -150,9 +189,9 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
     }
 
     var profile = new ProjectProfile(
-      status.Path,
+      workspacePath,
       Path.GetFileName(
-        status.Path.TrimEnd(
+        workspacePath.TrimEnd(
           Path.DirectorySeparatorChar,
           Path.AltDirectorySeparatorChar
         )
@@ -179,6 +218,15 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
       cancellationToken
     );
     return profile;
+  }
+
+  private static string ValidationSignature(ValidationProfileSettings? profile)
+  {
+    if (profile is null)
+    {
+      return "none";
+    }
+    return $"{profile.Name}|{profile.Source}|{string.Join('|', profile.Steps.Select(step => $"{step.Id}:{step.Executable}:{string.Join(',', step.Arguments)}:{step.WorkingDirectory}:{step.TimeoutSeconds}:{step.Required}"))}";
   }
 
   private static void DiscoverMarkers(
@@ -679,6 +727,169 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
       diagnostic,
       false
     );
+  }
+}
+
+public sealed record ProjectAwarenessCacheKey(
+  string WorkspaceId,
+  string WorkspacePath,
+  int MaximumMarkers,
+  string ValidationSignature
+);
+
+public sealed class ProjectAwarenessCache : IDisposable
+{
+  private readonly ConcurrentDictionary<string, Lazy<Entry>> _entries = new(
+    StringComparer.OrdinalIgnoreCase
+  );
+  private readonly ILogger<ProjectAwarenessCache> _logger;
+
+  public ProjectAwarenessCache(ILogger<ProjectAwarenessCache> logger)
+  {
+    _logger = logger;
+  }
+
+  public async Task<ProjectProfile> GetOrCreateAsync(
+    ProjectAwarenessCacheKey key,
+    bool refresh,
+    Func<Task<ProjectProfile>> factory,
+    CancellationToken cancellationToken
+  )
+  {
+    var canonicalPath = Path.GetFullPath(key.WorkspacePath);
+    var entryKey = $"{key.WorkspaceId}|{canonicalPath}";
+    var entry = _entries.GetOrAdd(
+      entryKey,
+      _ => new Lazy<Entry>(
+        () => new Entry(canonicalPath),
+        LazyThreadSafetyMode.ExecutionAndPublication
+      )
+    ).Value;
+    await entry.Gate.WaitAsync(cancellationToken);
+    try
+    {
+      var signature = $"{canonicalPath}|{key.MaximumMarkers}|{key.ValidationSignature}";
+      if (
+        !refresh
+        && entry.Profile is not null
+        && string.Equals(entry.Signature, signature, StringComparison.Ordinal)
+        && entry.CapturedGeneration == entry.Generation
+      )
+      {
+        _logger.LogInformation(
+          "Project awareness cache hit for workspace {WorkspaceId} at generation {Generation}.",
+          key.WorkspaceId,
+          entry.Generation
+        );
+        return entry.Profile;
+      }
+
+      var generationBeforeBuild = entry.Generation;
+      var profile = await factory();
+      var generationAfterBuild = entry.Generation;
+      entry.Profile = profile;
+      entry.Signature = signature;
+      entry.CapturedGeneration = generationBeforeBuild == generationAfterBuild
+        ? generationAfterBuild
+        : -1;
+      _logger.LogInformation(
+        refresh
+          ? "Project awareness cache forced refresh for workspace {WorkspaceId} at generation {Generation}."
+          : "Project awareness cache rebuilt for workspace {WorkspaceId} at generation {Generation}.",
+        key.WorkspaceId,
+        entry.Generation
+      );
+      return profile;
+    }
+    finally
+    {
+      entry.Gate.Release();
+    }
+  }
+
+  public void Dispose()
+  {
+    foreach (var entry in _entries.Values.Where(entry => entry.IsValueCreated))
+    {
+      entry.Value.Dispose();
+    }
+    _entries.Clear();
+  }
+
+  public void Invalidate(string workspacePath)
+  {
+    var canonical = Path.GetFullPath(workspacePath);
+    foreach (var lazyEntry in _entries.Values.Where(entry => entry.IsValueCreated))
+    {
+      var entry = lazyEntry.Value;
+      if (string.Equals(entry.WorkspacePath, canonical, StringComparison.OrdinalIgnoreCase))
+      {
+        entry.Invalidate();
+      }
+    }
+  }
+
+  private sealed class Entry : IDisposable
+  {
+    private readonly FileSystemWatcher _watcher;
+    private long _generation;
+
+    public Entry(string workspacePath)
+    {
+      WorkspacePath = workspacePath;
+      _watcher = new FileSystemWatcher(workspacePath)
+      {
+        IncludeSubdirectories = true,
+        NotifyFilter = NotifyFilters.FileName
+          | NotifyFilters.DirectoryName
+          | NotifyFilters.LastWrite
+          | NotifyFilters.Size,
+        EnableRaisingEvents = true
+      };
+      _watcher.Changed += Changed;
+      _watcher.Created += Changed;
+      _watcher.Deleted += Changed;
+      _watcher.Renamed += Renamed;
+      _watcher.Error += Error;
+    }
+
+    public SemaphoreSlim Gate { get; } = new(1, 1);
+
+    public string WorkspacePath { get; }
+
+    public ProjectProfile? Profile { get; set; }
+
+    public string? Signature { get; set; }
+
+    public long CapturedGeneration { get; set; } = -1;
+
+    public long Generation => Interlocked.Read(ref _generation);
+
+    public void Dispose()
+    {
+      _watcher.Dispose();
+      Gate.Dispose();
+    }
+
+    public void Invalidate()
+    {
+      Interlocked.Increment(ref _generation);
+    }
+
+    private void Changed(object sender, FileSystemEventArgs eventArgs)
+    {
+      Interlocked.Increment(ref _generation);
+    }
+
+    private void Renamed(object sender, RenamedEventArgs eventArgs)
+    {
+      Interlocked.Increment(ref _generation);
+    }
+
+    private void Error(object sender, ErrorEventArgs eventArgs)
+    {
+      Interlocked.Increment(ref _generation);
+    }
   }
 }
 

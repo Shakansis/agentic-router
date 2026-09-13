@@ -135,7 +135,7 @@ public sealed class ModelsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "The protocol benchmark could not start.",
+          "The protocol conformance probe could not start.",
           new Dictionary<string, string[]>
           {
             ["model"] =
@@ -153,7 +153,7 @@ public sealed class ModelsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "The protocol benchmark could not start.",
+          "The protocol conformance probe could not start.",
           new Dictionary<string, string[]>
           {
             ["profile"] =
@@ -183,12 +183,12 @@ public sealed class ModelsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "The cloud protocol benchmark requires explicit permission.",
+          "The cloud protocol conformance probe requires explicit permission.",
           new Dictionary<string, string[]>
           {
             ["externalProviderPermissionGranted"] =
             [
-              "Confirm that this benchmark may make real provider calls and consume quota."
+              "Confirm that this conformance probe may make real provider calls and consume quota."
             ]
           }
         )
@@ -233,7 +233,7 @@ public sealed class ModelsController : ControllerBase
     {
       return BadRequest(
         new ValidationErrorsResponse(
-          "The protocol benchmark could not start.",
+          "The protocol conformance probe could not start.",
           new Dictionary<string, string[]>
           {
             ["model"] =
@@ -275,7 +275,7 @@ public sealed class ModelsController : ControllerBase
         result.Status,
         result.Provider,
         result.AdapterVersion,
-        result.BenchmarkVersion,
+        result.ProbeVersion,
         result.Identity
       )
     );

@@ -647,6 +647,55 @@ public sealed record RecoveryDecisionEvent(
   IReadOnlyList<RecoveryOptionView> Options
 );
 
+public sealed record UserInputOptionView(
+  string Label,
+  string? Description = null
+);
+
+public sealed record UserInputQuestionView(
+  string Id,
+  string Header,
+  string Question,
+  IReadOnlyList<UserInputOptionView> Options,
+  bool AllowsCustomAnswer = true
+);
+
+public sealed record UserInputAnswerView(
+  string QuestionId,
+  string Answer
+);
+
+public sealed record UserInputRequestView(
+  string Id,
+  string ExecutionSessionId,
+  string Harness,
+  IReadOnlyList<UserInputQuestionView> Questions,
+  int CurrentQuestionIndex,
+  IReadOnlyList<UserInputAnswerView> Answers,
+  bool Resumable = true
+);
+
+public sealed record UserInputDraftRequest(
+  string BrowserSessionId,
+  string ExecutionSessionId,
+  int CurrentQuestionIndex,
+  IReadOnlyList<UserInputAnswerView> Answers
+);
+
+public sealed record UserInputDecisionRequest(
+  string BrowserSessionId,
+  string ExecutionSessionId,
+  IReadOnlyList<UserInputAnswerView> Answers,
+  bool Cancelled = false
+);
+
+public sealed record UserInputDecisionResponse(
+  string UserInputId,
+  bool Accepted,
+  bool Cancelled,
+  string? Diagnostic = null
+);
+
 public sealed record LocalActionEvent(
   string ActionId,
   string Tool,
@@ -906,7 +955,9 @@ public sealed record ChatStreamEvent(
   string? ResponseTailHtml = null,
   TraceDiagnosticReference? Diagnostic = null,
   SlowRequestStatusView? SlowRequest = null,
-  SupervisionProgressView? SupervisionProgress = null
+  SupervisionProgressView? SupervisionProgress = null,
+  string? SpecialistCompletion = null,
+  UserInputRequestView? UserInput = null
 );
 
 public sealed record ValidationErrorsResponse(

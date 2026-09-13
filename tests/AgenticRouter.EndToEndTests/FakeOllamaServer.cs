@@ -613,6 +613,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             ? toolNameElement.GetString()
             : null,
           message.TryGetProperty(
+            "tool_call_id",
+            out var toolCallIdElement
+          )
+            ? toolCallIdElement.GetString()
+            : null,
+          message.TryGetProperty(
             "tool_calls",
             out var toolCallsElement
           ) && toolCallsElement.ValueKind == JsonValueKind.Array
@@ -628,7 +634,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
                     "function"
                   ).GetProperty(
                     "arguments"
-                  ).Clone()
+                  ).Clone(),
+                  call.TryGetProperty(
+                    "id",
+                    out var callIdElement
+                  )
+                    ? callIdElement.GetString()
+                    : null
                 )
               ).ToArray()
             : [],
@@ -664,6 +676,27 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       )
         ? mainGpuElement.GetInt32()
         : null;
+    double? temperature = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty(
+        "temperature",
+        out var temperatureElement
+      )
+        ? temperatureElement.GetDouble()
+        : null;
+    double? topP = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty(
+        "top_p",
+        out var topPElement
+      )
+        ? topPElement.GetDouble()
+        : null;
+    double? repeatPenalty = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty(
+        "repeat_penalty",
+        out var repeatPenaltyElement
+      )
+        ? repeatPenaltyElement.GetDouble()
+        : null;
     var think = document.RootElement.TryGetProperty("think", out var thinkElement)
       && thinkElement.ValueKind == JsonValueKind.String
         ? thinkElement.GetString()
@@ -678,6 +711,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       contextTokens,
       predictTokens,
       mainGpu,
+      temperature,
+      topP,
+      repeatPenalty,
       think
     );
     _requests.Enqueue(
@@ -791,15 +827,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     if (
       hasTools
-      && messages.Any(
-        message => message.Content.Contains(
-          "BENCHMARK_NATIVE_CRUD_V1",
-          StringComparison.Ordinal
-        ) || message.Content.Contains(
-          "BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2",
-          StringComparison.Ordinal
-        )
-      )
+      && IsNativeBenchmarkRequest(messages)
     )
     {
       AddLoadedModel(model, -1, contextTokens);
@@ -807,6 +835,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         context.Response,
         model,
         messages,
+        availableTools,
         true,
         cancellationToken
       );
@@ -925,21 +954,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   {
     if (
       hasTools
-      && messages.Any(
-        message => message.Content.Contains(
-          "BENCHMARK_NATIVE_CRUD_V1",
-          StringComparison.Ordinal
-        ) || message.Content.Contains(
-          "BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2",
-          StringComparison.Ordinal
-        )
-      )
+      && IsNativeBenchmarkRequest(messages)
     )
     {
       await RespondToNativeBenchmarkAsync(
         response,
         model,
         messages,
+        availableTools,
         false,
         cancellationToken
       );
@@ -1068,6 +1090,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     {
       await PrepareExpertGuidanceAsync(
         response,
+        model,
         messages,
         cancellationToken
       );
@@ -1371,6 +1394,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           {
             new
             {
+              id = $"call_{tool}_0001",
               function = new
               {
                 name = tool,
@@ -1418,6 +1442,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           {
             new
             {
+              id = "call_benchmark_edit_0001",
               function = new
               {
                 name = "benchmark_edit",
@@ -1479,6 +1504,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
   private static async Task PrepareExpertGuidanceAsync(
     HttpListenerResponse response,
+    string model,
     IReadOnlyList<RecordedMessage> messages,
     CancellationToken cancellationToken
   )
@@ -1492,6 +1518,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var activeMessages = messages.Skip(
       currentEntry.index + 1
     ).ToArray();
+    if (
+      current.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
+      && model is "unused:latest" or "docs:latest"
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+    }
     if (current.Contains(
       "configurable planner timeout",
       StringComparison.OrdinalIgnoreCase
@@ -1724,7 +1757,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       "native create host batch files",
       StringComparison.OrdinalIgnoreCase
     );
-    var guidance = current.Contains("Benchmark scenario:", StringComparison.Ordinal)
+    var guidance = current.Contains("Benchmark test: FS-", StringComparison.Ordinal)
+      ? CreateStructuredGuidance(
+        current,
+        CreateBasicCrudAction(current, model, activeMessages)
+      )
+      : current.Contains("Benchmark scenario:", StringComparison.Ordinal)
       ? CreateStructuredGuidance(
         current,
         CreateAgentBehaviorAction(current, completedBenchmarkActions)
@@ -2219,10 +2257,18 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       await Task.Delay(TimeSpan.FromSeconds(8), cancellationToken);
     }
     if (
-      current.Contains("supervision stale boundary", StringComparison.OrdinalIgnoreCase)
+      current.Contains("supervision stale becomes correct", StringComparison.OrdinalIgnoreCase)
+      && current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+      && _generationAttempts.TryAdd("supervision:stale-boundary-delay", 1)
+    )
+    {
+      await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+    }
+    if (
+      current.Contains("supervision stale latest wrong", StringComparison.OrdinalIgnoreCase)
       && current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
       && current.Contains("\"content\":\"hello world today\"", StringComparison.Ordinal)
-      && _generationAttempts.TryAdd("supervision:stale-boundary-delay", 1)
+      && _generationAttempts.TryAdd("supervision:stale-latest-wrong-delay", 1)
     )
     {
       await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
@@ -2400,7 +2446,29 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var latestResult = actionResults.LastOrDefault()?.Content;
     object plan;
 
-    if (allContent.Contains(
+    if (
+      current.Contains("global user input native", StringComparison.OrdinalIgnoreCase)
+      && !results.Any(result => result.ToolName == UserInputProtocol.ToolName
+        || result.Content.Contains($"Tool: {UserInputProtocol.ToolName}", StringComparison.Ordinal))
+    )
+    {
+      plan = new
+      {
+        tool = UserInputProtocol.ToolName,
+        arguments = UserInputFixtureQuestions(),
+        explanation = "Ask the bounded atomic question batch before continuing."
+      };
+    }
+    else if (current.Contains("global user input native", StringComparison.OrdinalIgnoreCase))
+    {
+      plan = new
+      {
+        tool = (string?)null,
+        arguments = new { },
+        explanation = "The complete user-input batch was returned by the Host."
+      };
+    }
+    else if (allContent.Contains(
       "planner provider failure",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -3275,6 +3343,45 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (
       hasResult
+      && current.Contains("SUPERVISION_CORRECTION_V1", StringComparison.Ordinal)
+      && current.Contains("supervision incremental correction", StringComparison.OrdinalIgnoreCase)
+    )
+    {
+      var replaceIndex = Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "replace_text"
+          || result.Content.Contains("Tool: replace_text", StringComparison.Ordinal)
+      );
+      var readIndex = Array.FindLastIndex(
+        actionResults,
+        result => result.ToolName == "read_file"
+          || result.Content.Contains("Tool: read_file", StringComparison.Ordinal)
+      );
+      if (replaceIndex < 0)
+      {
+        plan = CreateLocalActionPlan(current);
+      }
+      else if (readIndex < replaceIndex)
+      {
+        plan = new
+        {
+          tool = "read_file",
+          arguments = (object)new { path = "hello.txt" },
+          explanation = "Read the incrementally corrected artifact once."
+        };
+      }
+      else
+      {
+        plan = new
+        {
+          tool = (string?)null,
+          arguments = (object)new { },
+          explanation = "The incremental correction is complete and verified."
+        };
+      }
+    }
+    else if (
+      hasResult
       && current.Contains(
         "SUPERVISION_CORRECTION_V1",
         StringComparison.Ordinal
@@ -4050,6 +4157,151 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     return Complete("Benchmark scenario completed.");
   }
 
+  private static object CreateBasicCrudAction(
+    string request,
+    string model,
+    IReadOnlyList<RecordedMessage> results
+  )
+  {
+    static object Action(string tool, object arguments, string explanation) => new
+    {
+      tool = (string?)tool,
+      arguments,
+      explanation
+    };
+    static object Complete(string report) => new
+    {
+      tool = (string?)null,
+      arguments = (object)new { },
+      explanation = report
+    };
+    static bool Completed(RecordedMessage result) =>
+      result.Content.Contains("Status: completed", StringComparison.Ordinal)
+      || result.Content.Contains("\"status\":\"completed\"", StringComparison.Ordinal);
+    int CompletedCount(string tool) => results.Count(result =>
+      (string.Equals(result.ToolName, tool, StringComparison.Ordinal)
+        || result.Content.Contains($"Tool: {tool}", StringComparison.Ordinal))
+      && Completed(result));
+    int AttemptCount(string tool) => results.Count(result =>
+      string.Equals(result.ToolName, tool, StringComparison.Ordinal)
+      || result.Content.Contains($"Tool: {tool}", StringComparison.Ordinal));
+    int LastCompletedIndex(string tool) => Array.FindLastIndex(
+      results.ToArray(),
+      result => (string.Equals(result.ToolName, tool, StringComparison.Ordinal)
+          || result.Content.Contains($"Tool: {tool}", StringComparison.Ordinal))
+        && Completed(result)
+    );
+    bool HasInspectionAfter(string tool) =>
+      LastCompletedIndex("read_file") > LastCompletedIndex(tool);
+
+    if (request.Contains("FS-CREATE-001", StringComparison.Ordinal))
+    {
+      if (CompletedCount("create_file") == 0)
+      {
+        return Action(
+          "create_file",
+          new
+          {
+            path = "benchmark-data/result.txt",
+            content = string.Equals(model, "beta:code", StringComparison.Ordinal)
+              ? "Agentic Router Benchmark\noperation=create\nresult=success!"
+              : "Agentic Router Benchmark\noperation=create\nresult=success"
+          },
+          "Create the exact benchmark artifact."
+        );
+      }
+      return !HasInspectionAfter("create_file")
+        ? Action(
+          "read_file",
+          new { path = "benchmark-data/result.txt" },
+          "Verify the created benchmark artifact."
+        )
+        : Complete("Create benchmark completed.");
+    }
+    if (request.Contains("FS-READ-001", StringComparison.Ordinal))
+    {
+      return CompletedCount("read_file") switch
+      {
+        0 => Action("read_file", new { path = "fixture/read-primary.txt" }, "Read the primary fixture."),
+        1 => Action("read_file", new { path = "fixture/read-secondary.txt" }, "Read the secondary fixture."),
+        _ => Complete(string.Equals(model, "beta:code", StringComparison.Ordinal)
+          ? "codename=ORBIT-41"
+          : "codename=ORBIT-41\nverification-word=marigold")
+      };
+    }
+    if (request.Contains("FS-UPDATE-001", StringComparison.Ordinal))
+    {
+      if (CompletedCount("read_file") == 0)
+      {
+        return Action("read_file", new { path = "fixture/update.txt" }, "Inspect the update fixture.");
+      }
+      if (
+        string.Equals(model, "structured:latest", StringComparison.Ordinal)
+        && AttemptCount("replace_text") == 0
+      )
+      {
+        return Action(
+          "replace_text",
+          new { path = "fixture/update.txt", oldText = "retries=missing", newText = "retries=3", replaceAll = false },
+          "Exercise one deterministic recoverable edit failure."
+        );
+      }
+      if (CompletedCount("replace_text") == 0)
+      {
+        return Action(
+          "replace_text",
+          new
+          {
+            path = "fixture/update.txt",
+            oldText = "retries=2",
+            newText = string.Equals(model, "beta:code", StringComparison.Ordinal)
+              ? "retries=4"
+              : "retries=3",
+            replaceAll = false
+          },
+          "Apply the exact benchmark edit."
+        );
+      }
+      return !HasInspectionAfter("replace_text")
+        ? Action("read_file", new { path = "fixture/update.txt" }, "Verify the benchmark edit.")
+        : Complete("Update benchmark completed.");
+    }
+    if (request.Contains("FS-DELETE-001", StringComparison.Ordinal))
+    {
+      if (
+        string.Equals(model, "beta:code", StringComparison.Ordinal)
+        && CompletedCount("create_file") == 0
+      )
+      {
+        return Action(
+          "create_file",
+          new { path = "unexpected-delete-result.txt", content = "delete skipped" },
+          "Create an incorrect artifact instead of deleting the requested fixture."
+        );
+      }
+      if (
+        string.Equals(model, "beta:code", StringComparison.Ordinal)
+        && !HasInspectionAfter("create_file")
+      )
+      {
+        return Action(
+          "read_file",
+          new { path = "unexpected-delete-result.txt" },
+          "Inspect the incorrect artifact before stopping."
+        );
+      }
+      return CompletedCount("delete_paths") == 0
+        && !string.Equals(model, "beta:code", StringComparison.Ordinal)
+        ? Action(
+          "delete_paths",
+          new { paths = new[] { "fixture/delete.txt" }, recursive = false },
+          "Delete the exact benchmark fixture."
+        )
+        : Complete("Delete benchmark completed.");
+    }
+    return Complete("Benchmark completed.");
+  }
+
   private static string ExtractCompletionReviewPath(string content)
   {
     const string marker =
@@ -4806,6 +5058,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (current.Contains("global user input native", StringComparison.OrdinalIgnoreCase))
+    {
+      return new
+      {
+        tool = UserInputProtocol.ToolName,
+        arguments = UserInputFixtureQuestions(),
+        explanation = "Ask the bounded atomic question batch before continuing."
+      };
+    }
     if (current.Contains("SUPERVISION_RECOVERY_V1", StringComparison.Ordinal))
     {
       return new
@@ -4824,6 +5085,23 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       StringComparison.Ordinal
     ))
     {
+      if (current.Contains(
+        "supervision incremental correction",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "replace_text",
+          arguments = new
+          {
+            path = "hello.txt",
+            oldText = "wrong",
+            newText = "fixed"
+          },
+          explanation = "Replace only the incorrect fragment while preserving the correct content."
+        };
+      }
       return new
       {
         tool = "write_file",
@@ -4891,6 +5169,41 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             content = "preserved hello.txt verified by automatic supervision"
           },
           explanation = "Record bounded reconciliation evidence without overwriting the preserved direct effect."
+        };
+      }
+
+      if (current.Contains(
+        "supervision incremental correction",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "create_file",
+          arguments = new
+          {
+            path = "hello.txt",
+            content = "keep this\nwrong"
+          },
+          explanation = "Create the initial artifact with one correct and one incorrect fragment."
+        };
+      }
+
+      if (
+        current.Contains("supervision first pass success", StringComparison.OrdinalIgnoreCase)
+        || current.Contains("supervision stale latest wrong", StringComparison.OrdinalIgnoreCase)
+        || current.Contains("atomic redundant decomposition", StringComparison.OrdinalIgnoreCase)
+      )
+      {
+        return new
+        {
+          tool = "create_file",
+          arguments = new
+          {
+            path = "hello.txt",
+            content = "hello world today"
+          },
+          explanation = "Create the complete atomic artifact once."
         };
       }
 
@@ -5502,13 +5815,50 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     };
   }
 
+  private static object UserInputFixtureQuestions()
+  {
+    return new
+    {
+      questions = new[]
+      {
+        new
+        {
+          id = "source",
+          header = "Source",
+          question = "Where should the source come from?",
+          options = new[]
+          {
+            new { label = "New file", description = "Create a new source file." },
+            new { label = "Existing file", description = "Use an existing workspace file." }
+          }
+        },
+        new
+        {
+          id = "format",
+          header = "Format",
+          question = "Which output format should be used?",
+          options = new[]
+          {
+            new { label = "Markdown", description = "Write Markdown." },
+            new { label = "Plain text", description = "Write plain text." }
+          }
+        }
+      }
+    };
+  }
+
   private static bool TryCreateSupervisionDecision(
     string current,
     out string decision
   )
   {
-    const string criterion =
-      "hello.txt must contain the exact text hello world today.";
+    var incremental = current.Contains(
+      "supervision incremental correction",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var criterion = incremental
+      ? "hello.txt must contain keep this followed by fixed."
+      : "hello.txt must contain the exact text hello world today.";
     const string autonomousDeleteCriterion = "obsolete.txt must be absent.";
     var autonomousDelete = current.Contains(
       "autonomous explicit delete",
@@ -5617,6 +5967,41 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     if (current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
     {
       if (current.Contains(
+        "atomic redundant decomposition",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "dispatch_work",
+            items = new[]
+            {
+              new
+              {
+                objective = "atomic redundant decomposition create hello.txt",
+                acceptanceCriteria = new[] { criterion },
+                evidencePaths = new[] { "hello.txt" }
+              },
+              new
+              {
+                objective = "verify hello.txt",
+                acceptanceCriteria = new[] { criterion },
+                evidencePaths = new[] { "hello.txt" }
+              },
+              new
+              {
+                objective = "review and report hello.txt completion",
+                acceptanceCriteria = new[] { criterion },
+                evidencePaths = new[] { "hello.txt" }
+              }
+            }
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
+      if (current.Contains(
         "supervision fourteen evidence paths",
         StringComparison.OrdinalIgnoreCase
       ))
@@ -5680,6 +6065,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               )
                 ? "automatic takeover inspect preserved effect in hello.txt"
                 : current.Contains(
+                  "supervision first pass success",
+                  StringComparison.OrdinalIgnoreCase
+                )
+                  ? "supervision first pass success create file hello.txt with content hello world today"
+                  : current.Contains(
+                    "supervision incremental correction",
+                    StringComparison.OrdinalIgnoreCase
+                  )
+                    ? "supervision incremental correction create hello.txt while preserving correct content"
+                    : current.Contains(
                   "no progress supervision",
                   StringComparison.OrdinalIgnoreCase
                 )
@@ -5690,10 +6085,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
                 )
                   ? "supervision restart boundary create file hello.txt with content hello world today"
                   : current.Contains(
-                    "supervision stale boundary",
+                    "supervision stale becomes correct",
                     StringComparison.OrdinalIgnoreCase
                   )
-                    ? "supervision stale boundary create file hello.txt with content hello world today"
+                    ? "supervision stale becomes correct create file hello.txt with content hello world today"
+                    : current.Contains(
+                      "supervision stale latest wrong",
+                      StringComparison.OrdinalIgnoreCase
+                    )
+                      ? "supervision stale latest wrong create file hello.txt with content hello world today"
                     : current.Contains(
                       "compact supervisor plan title",
                       StringComparison.OrdinalIgnoreCase
@@ -5719,10 +6119,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     )
     {
       var evidenceRevision = ExtractSupervisionEvidenceRevision(current);
-      var accepted = current.Contains(
-        "\"content\":\"hello world today\"",
-        StringComparison.Ordinal
-      );
+      var accepted = incremental
+        ? current.Contains(
+          "\"content\":\"keep this\\nfixed\"",
+          StringComparison.Ordinal
+        )
+        : current.Contains(
+          "\"content\":\"hello world today\"",
+          StringComparison.Ordinal
+        );
       decision = accepted
         ? JsonSerializer.Serialize(
           new
@@ -6345,18 +6750,58 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     HttpListenerResponse response,
     string model,
     IReadOnlyList<RecordedMessage> messages,
+    IReadOnlyList<string> availableTools,
     bool stream,
     CancellationToken cancellationToken
   )
   {
-    var request = messages.Last(message => message.Role == "user").Content;
-    var lastUserIndex = Array.FindLastIndex(
-      messages.ToArray(),
-      message => message.Role == "user"
+    var messageArray = messages.ToArray();
+    var requestIndex = Array.FindLastIndex(
+      messageArray,
+      message => message.Role == "user" && (
+        message.Content.StartsWith("Benchmark test:", StringComparison.Ordinal)
+        || message.Content.StartsWith("Benchmark scenario:", StringComparison.Ordinal)
+        || message.Content.Contains("BENCHMARK_NATIVE_CRUD_V1", StringComparison.Ordinal)
+        || message.Content.Contains("BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2", StringComparison.Ordinal)
+      )
     );
-    var completedTools = messages.Skip(lastUserIndex + 1).Count(
+    if (requestIndex < 0)
+    {
+      requestIndex = Array.FindLastIndex(
+        messageArray,
+        message => message.Role == "user"
+      );
+    }
+    var request = messageArray[requestIndex].Content;
+    var activeMessages = messageArray.Skip(requestIndex + 1).ToArray();
+    var toolResults = activeMessages.Where(
       message => message.Role == "tool"
+    ).ToArray();
+    var actionResults = toolResults.Where(
+      message => message.ToolName != LocalActionPlanner.RequestToolsetTool
+    ).ToArray();
+
+    static bool IsCompleted(RecordedMessage message) =>
+      message.Content.Contains("Status: completed", StringComparison.Ordinal)
+      || message.Content.Contains("\"status\":\"completed\"", StringComparison.Ordinal);
+
+    int CompletedCount(string toolName) => actionResults.Count(
+      message => string.Equals(message.ToolName, toolName, StringComparison.Ordinal)
+        && IsCompleted(message)
     );
+
+    int AttemptCount(string toolName) => actionResults.Count(
+      message => string.Equals(message.ToolName, toolName, StringComparison.Ordinal)
+    );
+
+    int LastCompletedIndex(string toolName) => Array.FindLastIndex(
+      actionResults,
+      message => string.Equals(message.ToolName, toolName, StringComparison.Ordinal)
+        && IsCompleted(message)
+    );
+
+    bool HasInspectionAfter(string toolName) =>
+      LastCompletedIndex("read_file") > LastCompletedIndex(toolName);
     if (
       request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal)
       && model is "unused:latest" or "docs:latest"
@@ -6393,7 +6838,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     object? arguments = null;
     if (request.Contains("Benchmark test: FS-CREATE-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("create_file") == 0)
       {
         tool = "create_file";
         arguments = new
@@ -6404,6 +6849,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             : "Agentic Router Benchmark\noperation=create\nresult=success"
         };
       }
+      else if (!HasInspectionAfter("create_file"))
+      {
+        tool = "read_file";
+        arguments = new { path = "benchmark-data/result.txt" };
+      }
       else
       {
         content = "Create benchmark completed.";
@@ -6411,12 +6861,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark test: FS-READ-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
       {
         tool = "read_file";
         arguments = new { path = "fixture/read-primary.txt" };
       }
-      else if (completedTools == 1)
+      else if (CompletedCount("read_file") == 1)
       {
         tool = "read_file";
         arguments = new { path = "fixture/read-secondary.txt" };
@@ -6430,25 +6880,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark test: FS-UPDATE-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/update.txt" };
+      }
+      else if (
+        string.Equals(model, "structured:latest", StringComparison.Ordinal)
+        && AttemptCount("replace_text") == 0
+      )
       {
         tool = "replace_text";
         arguments = new
         {
           path = "fixture/update.txt",
-          oldText = string.Equals(model, "structured:latest", StringComparison.Ordinal)
-            ? "retries=missing"
-            : "retries=2",
+          oldText = "retries=missing",
           newText = string.Equals(model, "beta:code", StringComparison.Ordinal)
             ? "retries=4"
             : "retries=3",
           replaceAll = false
         };
       }
-      else if (
-        completedTools == 1
-        && string.Equals(model, "structured:latest", StringComparison.Ordinal)
-      )
+      else if (CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = new
@@ -6459,6 +6912,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           replaceAll = false
         };
       }
+      else if (!HasInspectionAfter("replace_text"))
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/update.txt" };
+      }
       else
       {
         content = "Update benchmark completed.";
@@ -6466,7 +6924,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark test: FS-DELETE-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0 && !string.Equals(model, "beta:code", StringComparison.Ordinal))
+      if (CompletedCount("delete_paths") == 0 && !string.Equals(model, "beta:code", StringComparison.Ordinal))
       {
         tool = "delete_paths";
         arguments = new { paths = new[] { "fixture/delete.txt" }, recursive = false };
@@ -6478,7 +6936,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark scenario: CONTINUITY-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "app/config.txt" };
+      }
+      else if (CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = request.Contains("Set only title=ORION", StringComparison.Ordinal)
@@ -6486,6 +6949,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           : request.Contains("Enable the same application", StringComparison.Ordinal)
             ? new { path = "app/config.txt", oldText = "enabled=false", newText = "enabled=true", replaceAll = false }
             : new { path = "app/config.txt", oldText = "theme=amber", newText = "theme=violet", replaceAll = false };
+      }
+      else if (!HasInspectionAfter("replace_text"))
+      {
+        tool = "read_file";
+        arguments = new { path = "app/config.txt" };
       }
       else
       {
@@ -6498,10 +6966,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark scenario: SCOPE-RETENTION-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "src/target.txt" };
+      }
+      else if (CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = new { path = "src/target.txt", oldText = "mode=old", newText = "mode=new", replaceAll = false };
+      }
+      else if (!HasInspectionAfter("replace_text"))
+      {
+        tool = "read_file";
+        arguments = new { path = "src/target.txt" };
       }
       else
       {
@@ -6510,20 +6988,25 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark scenario: RECOVERY-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (AttemptCount("read_file") == 0)
       {
         tool = "read_file";
         arguments = new { path = "fixture/recovery-old.txt" };
       }
-      else if (completedTools == 1)
+      else if (CompletedCount("read_file") == 0)
       {
         tool = "read_file";
         arguments = new { path = "fixture/recovery.txt" };
       }
-      else if (completedTools == 2)
+      else if (CompletedCount("create_file") == 0)
       {
         tool = "create_file";
         arguments = new { path = "output/recovery.txt", content = "recovered=RECOVER-42" };
+      }
+      else if (!HasInspectionAfter("create_file"))
+      {
+        tool = "read_file";
+        arguments = new { path = "output/recovery.txt" };
       }
       else
       {
@@ -6532,12 +7015,17 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark scenario: CONVERGENCE-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "fixture/converge.txt" };
+      }
+      else if (CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = new { path = "fixture/converge.txt", oldText = "status=pending", newText = "status=complete", replaceAll = false };
       }
-      else if (completedTools == 1)
+      else if (!HasInspectionAfter("replace_text"))
       {
         tool = "read_file";
         arguments = new { path = "fixture/converge.txt" };
@@ -6549,10 +7037,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark scenario: TERMINALITY-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "required.txt" };
+      }
+      else if (CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = new { path = "required.txt", oldText = "required=pending", newText = "required=completed", replaceAll = false };
+      }
+      else if (!HasInspectionAfter("replace_text"))
+      {
+        tool = "read_file";
+        arguments = new { path = "required.txt" };
       }
       else
       {
@@ -6562,15 +7060,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     else if (request.Contains("Benchmark scenario: STALE-CONFLICT-001", StringComparison.Ordinal))
     {
       var continuation = request.Contains("continuation", StringComparison.Ordinal);
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
       {
         tool = "read_file";
         arguments = new { path = "state.txt" };
       }
-      else if (continuation && completedTools == 1)
+      else if (continuation && CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = new { path = "state.txt", oldText = "mode=old", newText = "mode=updated", replaceAll = false };
+      }
+      else if (continuation && !HasInspectionAfter("replace_text"))
+      {
+        tool = "read_file";
+        arguments = new { path = "state.txt" };
       }
       else
       {
@@ -6579,22 +7082,50 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
     else if (request.Contains("Benchmark scenario: TRUTHFUL-REPORT-001", StringComparison.Ordinal))
     {
-      if (completedTools == 0)
+      if (CompletedCount("read_file") == 0)
+      {
+        tool = "read_file";
+        arguments = new { path = "truth.txt" };
+      }
+      else if (CompletedCount("replace_text") == 0)
       {
         tool = "replace_text";
         arguments = new { path = "truth.txt", oldText = "required=pending", newText = "required=completed", replaceAll = false };
       }
-      else if (completedTools == 1)
+      else if (!HasInspectionAfter("replace_text"))
+      {
+        tool = "read_file";
+        arguments = new { path = "truth.txt" };
+      }
+      else if (AttemptCount("read_file") == 2)
       {
         tool = "read_file";
         arguments = new { path = "optional-validation.txt" };
       }
       else
       {
-        content = string.Equals(model, "beta:code", StringComparison.Ordinal)
+        content = model is "beta:code" or "gpt-oss:20b"
           ? "required-change=completed\neverything passed"
           : "required-change=completed\noptional-validation=failed";
       }
+    }
+
+    if (
+      tool is not null
+      && !availableTools.Contains(tool, StringComparer.OrdinalIgnoreCase)
+      && availableTools.Contains(
+        LocalActionPlanner.RequestToolsetTool,
+        StringComparer.Ordinal
+      )
+    )
+    {
+      var requestedTool = tool;
+      tool = LocalActionPlanner.RequestToolsetTool;
+      arguments = new
+      {
+        tools = new[] { requestedTool },
+        reason = $"The benchmark specialist needs {requestedTool} to continue."
+      };
     }
 
     object? toolCalls = tool is null
@@ -6603,6 +7134,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       {
         new
         {
+          id = $"call_benchmark_{tool}_{toolResults.Length + 1:D4}",
           function = new
           {
             name = tool,
@@ -6644,6 +7176,30 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         cancellationToken
       );
     }
+  }
+
+  private static bool IsNativeBenchmarkRequest(
+    IReadOnlyList<RecordedMessage> messages
+  )
+  {
+    return messages.Any(
+      message => message.Content.StartsWith(
+          "Benchmark test:",
+          StringComparison.Ordinal
+        )
+        || message.Content.StartsWith(
+          "Benchmark scenario:",
+          StringComparison.Ordinal
+        )
+        || message.Content.Contains(
+          "BENCHMARK_NATIVE_CRUD_V1",
+          StringComparison.Ordinal
+        )
+        || message.Content.Contains(
+          "BENCHMARK_NATIVE_AGENT_BEHAVIOR_V2",
+          StringComparison.Ordinal
+        )
+    );
   }
 
   private static async Task WriteToolChunkAsync(
@@ -6803,6 +7359,9 @@ internal sealed record RecordedChatRequest(
   int? ContextTokens,
   int? PredictTokens,
   int? MainGpu,
+  double? Temperature,
+  double? TopP,
+  double? RepeatPenalty,
   string? Think
 );
 
@@ -6810,11 +7369,13 @@ internal sealed record RecordedMessage(
   string Role,
   string Content,
   string? ToolName,
+  string? ToolCallId,
   IReadOnlyList<RecordedToolCall> ToolCalls,
   int ImageCount
 );
 
 internal sealed record RecordedToolCall(
   string Name,
-  JsonElement Arguments
+  JsonElement Arguments,
+  string? Id
 );

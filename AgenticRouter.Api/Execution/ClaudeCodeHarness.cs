@@ -43,7 +43,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       SupportsSessionDiff: false,
       SupportsNativePermissions: true,
       SupportsSteering: false,
-      SupportsNativeWebSearch: true
+      SupportsNativeWebSearch: true,
+      SupportsUserInput: true
     ),
     ["ollama-local"]
   );
@@ -228,6 +229,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       active?.Dispose();
       if (
         request.ReleaseWorkspaceAfterTurn
+        || active?.TerminalState == HarnessTerminalState.Failed
         || (
           request.ReleaseWorkspaceOnCancellation
           && cancellationToken.IsCancellationRequested

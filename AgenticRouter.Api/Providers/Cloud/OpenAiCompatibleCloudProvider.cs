@@ -226,9 +226,11 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     IReadOnlyList<OllamaToolMessage> messages,
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
+    ProviderGenerationProfile? generationProfile,
     CancellationToken cancellationToken
   )
   {
+    generationProfile ??= ProviderGenerationProfiles.Deterministic;
     object payload = tools.Count == 0
       ? new
       {
@@ -236,7 +238,8 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         messages = ToOpenAiMessages(
           messages
         ),
-        temperature = 0,
+        temperature = generationProfile.Temperature,
+        top_p = generationProfile.TopP,
         stream = false
       }
       : new
@@ -258,7 +261,8 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
           }
         ),
         tool_choice = "auto",
-        temperature = 0,
+        temperature = generationProfile.Temperature,
+        top_p = generationProfile.TopP,
         stream = false
       };
     using var request = CreateJsonRequest(
@@ -340,7 +344,8 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
           messages,
           options.Images
         ),
-        temperature = 0,
+        temperature = options.EffectiveGenerationProfile.Temperature,
+        top_p = options.EffectiveGenerationProfile.TopP,
         stream = true,
         citation_options = options.WebSearchEnabled
           ? "enabled"

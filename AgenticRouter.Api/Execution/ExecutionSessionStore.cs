@@ -1149,7 +1149,7 @@ public sealed class ExecutionSession
     {
       lock (_gate)
       {
-        return State == "running";
+        return State is "running" or "awaiting-user-input";
       }
     }
   }
@@ -2594,6 +2594,22 @@ public sealed class ExecutionSession
     }
   }
 
+  public void MarkAwaitingUserInput()
+  {
+    lock (_gate)
+    {
+      if (State == "running") State = "awaiting-user-input";
+    }
+  }
+
+  public void MarkUserInputResolved()
+  {
+    lock (_gate)
+    {
+      if (State == "awaiting-user-input") State = "running";
+    }
+  }
+
   public void Complete(
     string state,
     string? warning = null
@@ -2601,7 +2617,7 @@ public sealed class ExecutionSession
   {
     lock (_gate)
     {
-      if (State != "running")
+      if (State is not "running" and not "awaiting-user-input")
       {
         return;
       }
@@ -2793,7 +2809,7 @@ public sealed class ExecutionSession
       ConformanceIdentity = snapshot.Review.Summary.ConformanceIdentity;
       HandoffReason = snapshot.Review.Summary.HandoffReason;
       _routingEvidence = snapshot.Review.Summary.RoutingEvidence;
-      State = snapshot.State is "completed" or "completed-with-warnings" or "blocked"
+      State = snapshot.State is "completed" or "completed-with-warnings" or "blocked" or "awaiting-user-input"
         ? snapshot.State
         : "interrupted";
       _completionStatus = snapshot.Review.Summary.CompletionStatus;
@@ -2801,8 +2817,11 @@ public sealed class ExecutionSession
       _planStateRevision = _plan is null
         ? 0
         : Math.Max(1, _plan.RevisionCount + 1);
-      CompletedAt = DateTimeOffset.UtcNow;
-      _stopwatch.Stop();
+      if (State != "awaiting-user-input")
+      {
+        CompletedAt = DateTimeOffset.UtcNow;
+        _stopwatch.Stop();
+      }
     }
   }
 

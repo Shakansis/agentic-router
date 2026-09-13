@@ -126,13 +126,60 @@ public sealed record ProviderImagePayload(
 public sealed record ProviderChatOptions(
   bool WebSearchEnabled,
   IReadOnlyList<ProviderImagePayload> Images,
-  string? RequestedEffort = null
+  string? RequestedEffort = null,
+  ProviderGenerationProfile? GenerationProfile = null
 )
 {
   public static ProviderChatOptions Empty { get; } = new(
     false,
     []
   );
+
+  public ProviderGenerationProfile EffectiveGenerationProfile =>
+    GenerationProfile ?? ProviderGenerationProfiles.Deterministic;
+}
+
+public sealed record ProviderGenerationProfile(
+  string Id,
+  double Temperature,
+  double? TopP = null,
+  double? RepeatPenalty = null,
+  int? MaximumContextTokens = null
+);
+
+public static class ProviderGenerationProfiles
+{
+  public static ProviderGenerationProfile Deterministic { get; } = new(
+    "deterministic",
+    0
+  );
+
+  public static ProviderGenerationProfile RpgStorytelling { get; } = new(
+    "rpg-storytelling",
+    0.8,
+    0.92,
+    1.05,
+    16_384
+  );
+
+  public static ProviderGenerationProfile Resolve(
+    string intention,
+    string interactionMode
+  )
+  {
+    return string.Equals(
+        interactionMode,
+        "chat",
+        StringComparison.Ordinal
+      )
+      && string.Equals(
+        intention,
+        "rpg-storytelling",
+        StringComparison.Ordinal
+      )
+        ? RpgStorytelling
+        : Deterministic;
+  }
 }
 
 public sealed record ProviderCitation(

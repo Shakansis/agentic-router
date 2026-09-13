@@ -464,10 +464,13 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
   private sealed class BridgeClient
   {
     private readonly object _gate = new();
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<BridgeToolResult>> _pending = new(
+    private readonly ConcurrentDictionary<string, PendingBridgeToolCall> _pending = new(
       StringComparer.Ordinal
     );
     private IReadOnlyList<CanonicalToolDefinition> _tools = [];
+    private IReadOnlySet<string> _initialTools = new HashSet<string>(
+      StringComparer.OrdinalIgnoreCase
+    );
     private ActiveBridgeTurn? _active;
 
     public BridgeClient(string harnessId, string token)
@@ -486,7 +489,13 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
       {
         lock (_gate)
         {
-          return _tools;
+          var available = _active is null
+            ? _initialTools
+            : HarnessCapabilityProjection.HostBridgeTools(
+              HarnessId,
+              _active.Profile
+            ).ToHashSet(StringComparer.OrdinalIgnoreCase);
+          return _tools.Where(tool => available.Contains(tool.Name)).ToArray();
         }
       }
     }
@@ -495,7 +504,24 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
     {
       lock (_gate)
       {
-        _tools = tools.ToArray();
+        _initialTools = tools.Select(tool => tool.Name)
+          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var planTools = _initialTools.Any(
+          tool => tool is "create_execution_plan"
+            or "revise_execution_plan"
+            or "get_execution_plan"
+        )
+          ? LocalActionPlanner.GetToolDefinitions(
+            [
+              "create_execution_plan",
+              "revise_execution_plan",
+              "get_execution_plan"
+            ]
+          )
+          : [];
+        _tools = tools.Concat(planTools)
+          .DistinctBy(tool => tool.Name, StringComparer.OrdinalIgnoreCase)
+          .ToArray();
       }
     }
 
@@ -559,7 +585,10 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
       var completion = new TaskCompletionSource<BridgeToolResult>(
         TaskCreationOptions.RunContinuationsAsynchronously
       );
-      if (!_pending.TryAdd(callId, completion))
+      if (!_pending.TryAdd(
+        callId,
+        new PendingBridgeToolCall(tool, completion)
+      ))
       {
         return new BridgeToolResult(false, "The Host could not allocate a unique tool call identifier.");
       }
@@ -590,8 +619,35 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
 
     public bool Resolve(string callId, bool succeeded, string output)
     {
-      return _pending.TryRemove(callId, out var completion)
-        && completion.TrySetResult(new BridgeToolResult(succeeded, output));
+      if (!_pending.TryRemove(callId, out var pending))
+      {
+        return false;
+      }
+      if (
+        succeeded
+        && string.Equals(
+          pending.Tool,
+          "create_execution_plan",
+          StringComparison.OrdinalIgnoreCase
+        )
+      )
+      {
+        lock (_gate)
+        {
+          if (_active is not null)
+          {
+            _active.Profile = _active.Profile with
+            {
+              ToolScope = _active.Profile.ToolScope.WithPlanState(
+                hasExecutionPlan: true
+              )
+            };
+          }
+        }
+      }
+      return pending.Completion.TrySetResult(
+        new BridgeToolResult(succeeded, output)
+      );
     }
 
     public void Dispose()
@@ -624,15 +680,20 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
     {
       foreach (var pending in _pending.ToArray())
       {
-        if (_pending.TryRemove(pending.Key, out var completion))
+        if (_pending.TryRemove(pending.Key, out var call))
         {
-          completion.TrySetResult(new BridgeToolResult(false, message));
+          call.Completion.TrySetResult(new BridgeToolResult(false, message));
         }
       }
     }
   }
 
   private sealed record BridgeToolResult(bool Succeeded, string Output);
+
+  private sealed record PendingBridgeToolCall(
+    string Tool,
+    TaskCompletionSource<BridgeToolResult> Completion
+  );
 
   private sealed class ActiveBridgeTurn(
     string sessionId,
@@ -644,7 +705,7 @@ public sealed class HarnessMcpHostBridge : IAsyncDisposable
 
     public string TurnId { get; } = turnId;
 
-    public HostCapabilityProfile Profile { get; } = profile;
+    public HostCapabilityProfile Profile { get; set; } = profile;
 
     public Channel<HarnessEvent> Events { get; } = Channel.CreateUnbounded<HarnessEvent>(
       new UnboundedChannelOptions

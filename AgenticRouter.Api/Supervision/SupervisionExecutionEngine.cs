@@ -30,6 +30,7 @@ internal sealed record SupervisionTurnProgress(
   SlowRequestStatusView? SlowRequest = null,
   ContextUsageView? ContextUsage = null,
   LocalActionEvent? LocalAction = null,
+  string? RetryReason = null,
   bool Transient = false
 );
 
@@ -54,7 +55,10 @@ internal sealed record SupervisionExecutionUpdate(
   string? Role = null,
   string? ContextId = null,
   string? WorkItemId = null,
-  string? WaitCode = null
+  string? WaitCode = null,
+  string? RejectionReason = null,
+  string? RetryReason = null,
+  long? DurationMilliseconds = null
 );
 
 internal interface ISupervisionExecutionEngine
@@ -163,6 +167,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         contextId: supervisor.Id
       );
 
+      var decompositionTimer = Stopwatch.StartNew();
       var decomposition = await RunTurnAsync(
         checkpoint,
         supervisor,
@@ -180,6 +185,17 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         input.ActionJournal,
         input.ProgressSink,
         cancellationToken
+      );
+      decompositionTimer.Stop();
+      runtime = AddTelemetry(
+        runtime,
+        telemetry => telemetry with
+        {
+          DecompositionDurationMilliseconds = checked(
+            telemetry.DecompositionDurationMilliseconds
+              + decompositionTimer.ElapsedMilliseconds
+          )
+        }
       );
       if (decomposition.Failure is not null)
       {
@@ -218,7 +234,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         yield break;
       }
 
-      var items = decision!.Items!.Select(
+      var normalizedItems = NormalizeDecompositionItems(decision!.Items!);
+      var items = normalizedItems.Select(
         (item, index) => CreateWorkItem(item, index + 1)
       ).ToArray();
       runtime = runtime with
@@ -268,10 +285,12 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         item.Id,
         checkpoint.Revision
       );
+      SupervisorEvidence? correctionEvidence = null;
 
       while (true)
       {
         cancellationToken.ThrowIfCancellationRequested();
+        var workerRetryReason = item.RetryReason;
         item = item with
         {
           Status = SupervisionWorkItemStates.Active,
@@ -284,6 +303,13 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           ActiveRole = "worker",
           ActiveWorkItemId = item.Id
         };
+        runtime = AddTelemetry(
+          runtime,
+          telemetry => telemetry with
+          {
+            RetryReason = workerRetryReason
+          }
+        );
         yield return Update(
           DurableSupervisionRunStates.Running,
           SupervisionRunPhases.Working,
@@ -297,8 +323,10 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
         var workerPrompt = CreateWorkerPrompt(
           item,
-          IsAutonomous(checkpoint)
+          IsAutonomous(checkpoint),
+          correctionEvidence
         );
+        var workerTimer = Stopwatch.StartNew();
         var workerTurn = await RunTurnAsync(
           checkpoint,
           worker,
@@ -312,6 +340,25 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           input.ActionJournal,
           input.ProgressSink,
           cancellationToken
+        );
+        workerTimer.Stop();
+        runtime = AddTelemetry(
+          runtime,
+          telemetry => workerRetryReason is null
+            ? telemetry with
+            {
+              WorkerDurationMilliseconds = checked(
+                telemetry.WorkerDurationMilliseconds
+                  + workerTimer.ElapsedMilliseconds
+              )
+            }
+            : telemetry with
+            {
+              CorrectionDurationMilliseconds = checked(
+                telemetry.CorrectionDurationMilliseconds
+                  + workerTimer.ElapsedMilliseconds
+              )
+            }
         );
         worker = SuspendContext(
           worker,
@@ -338,9 +385,17 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             {
               Status = SupervisionWorkItemStates.Pending,
               LastDiscrepancy = "Recoverable worker failure: "
-                + workerTurn.Failure.Message
+                + workerTurn.Failure.Message,
+              RejectionReason = null,
+              RetryReason = SupervisionRetryReasons.WorkerFailure
             };
-            runtime = Replace(runtime, itemIndex, item, worker);
+            runtime = AddTelemetry(
+              Replace(runtime, itemIndex, item, worker),
+              telemetry => telemetry with
+              {
+                RetryReason = SupervisionRetryReasons.WorkerFailure
+              }
+            );
             yield return Update(
               DurableSupervisionRunStates.Running,
               SupervisionRunPhases.Working,
@@ -349,7 +404,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
               runtime,
               role: "worker",
               contextId: worker.Id,
-              workItemId: item.Id
+              workItemId: item.Id,
+              retryReason: SupervisionRetryReasons.WorkerFailure
             );
             continue;
           }
@@ -417,251 +473,290 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             role: "supervisor",
             workItemId: item.Id
           );
-        }
-
-        if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
-        {
-          yield return Blocked(
-            runtime,
-            "The bounded supervisor transition budget was exhausted.",
-            workItemId: item.Id
-          );
-          yield break;
-        }
-
-        var supervisor = runtime.Contexts.First(
-          context => string.Equals(
-            context.Role,
-            "supervisor",
-            StringComparison.Ordinal
-          )
-        );
-        supervisor = ActivateContext(supervisor, checkpoint.Revision);
-        runtime = ReplaceContext(runtime, supervisor) with
-        {
-          SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
-        };
-        yield return Update(
-          DurableSupervisionRunStates.Running,
-          SupervisionRunPhases.Verifying,
-          SupervisionEventTypeIds.VerificationStarted,
-          $"The supervisor is verifying {item.Id} against evidence revision {evidenceRevision}.",
-          runtime,
-          role: "supervisor",
-          contextId: supervisor.Id,
-          workItemId: item.Id
-        );
-
-        var verification = await RunTurnAsync(
-          checkpoint,
-          supervisor,
-          CreateVerificationPrompt(
-            item,
-            workerTurn.Answer,
-            evidence,
-            autonomous: IsAutonomous(checkpoint)
-          ),
-          input.History,
-          [],
-          validationAvailable,
-          settings.Execution.PhaseEffort.Verify,
-          input.ActionJournal,
-          input.ProgressSink,
-          cancellationToken
-        );
-        if (verification.Failure is not null)
-        {
-          yield return Blocked(
-            runtime,
-            "Supervisor verification failed: " + verification.Failure.Message,
-            supervisor.Id,
-            item.Id,
-            verification.Failure.Code
-          );
-          yield break;
-        }
-
-        SupervisionDecision? verificationDecision = null;
-        SupervisionException? verificationError = null;
-        string? verificationErrorCode = null;
-        try
-        {
-          verificationDecision = ParseDecision(verification.Answer);
-          if (
-            verificationDecision!.Decision == "request_validation"
-            && validationAvailable
-          )
+          if (workerRetryReason is SupervisionRetryReasons.AcceptanceMismatch
+            or SupervisionRetryReasons.ValidationFailure)
           {
-            if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
-            {
-              throw InvalidDecision(
-                "The supervisor transition budget was exhausted before validation."
-              );
-            }
-            runtime = runtime with
-            {
-              SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
-            };
-            verification = await RunTurnAsync(
-              checkpoint,
-              supervisor,
-              CreateVerificationPrompt(
-                item,
-                workerTurn.Answer,
-                evidence,
-                requireValidation: true,
-                autonomous: IsAutonomous(checkpoint)
-              ),
-              input.History,
-              [],
-              validationAvailable,
-              settings.Execution.PhaseEffort.Verify,
-              input.ActionJournal,
-              input.ProgressSink,
-              cancellationToken
-            );
-            if (verification.Failure is not null)
-            {
-              throw InvalidDecision(
-                "The requested Host validation turn failed: "
-                  + verification.Failure.Message
-              );
-            }
-            verificationDecision = ParseDecision(verification.Answer);
-          }
-          if (
-            IsAutonomous(checkpoint)
-            && verificationDecision!.Decision == "await_user"
-          )
-          {
-            if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
-            {
-              throw InvalidDecision(
-                "The supervisor transition budget was exhausted before the autonomous decision correction."
-              );
-            }
-            runtime = runtime with
-            {
-              SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
-            };
-            verification = await RunTurnAsync(
-              checkpoint,
-              supervisor,
-              CreateAutonomousDecisionPrompt(
-                item,
-                workerTurn.Answer,
-                evidence,
-                verificationDecision
-              ),
-              input.History,
-              [],
-              validationAvailable,
-              settings.Execution.PhaseEffort.Recovery,
-              input.ActionJournal,
-              input.ProgressSink,
-              cancellationToken
-            );
-            if (verification.Failure is not null)
-            {
-              throw InvalidDecision(
-                "The autonomous supervisor decision correction failed: "
-                  + verification.Failure.Message
-              );
-            }
-            verificationDecision = ParseDecision(verification.Answer);
-            if (verificationDecision.Decision == "await_user")
-            {
-              throw InvalidDecision(
-                "The autonomous supervisor repeated a forbidden user-decision request."
-              );
-            }
-          }
-          ValidateVerification(
-            verificationDecision,
-            item,
-            maximumEvidencePaths
-          );
-        }
-        catch (SupervisionException exception)
-        {
-          verificationError = exception;
-          verificationErrorCode = exception.Code;
-        }
-        if (verificationError is not null)
-        {
-          yield return Blocked(
-            runtime,
-            verificationError.Message,
-            supervisor.Id,
-            item.Id,
-            verificationErrorCode
-          );
-          yield break;
-        }
-        var currentDecision = verificationDecision!;
-
-        if (currentDecision.Decision is "accept_work" or "replace_pending_work")
-        {
-          var latestEvidenceRevision = checked(runtime.EvidenceRevision + 1);
-          var latestEvidence = await BuildEvidenceAsync(
-            workerTurn.Review,
-            item.EvidencePaths,
-            latestEvidenceRevision,
-            maximumEvidencePaths,
-            cancellationToken
-          );
-          if (!string.Equals(
-            evidence.Sha256,
-            latestEvidence.Sha256,
-            StringComparison.Ordinal
-          ))
-          {
-            const string staleEvidenceMessage =
-              "Host evidence changed while the supervisor was evaluating the completion claim. Inspect the current artifact and correct it before claiming completion again.";
-            supervisor = SuspendContext(
-              supervisor,
-              staleEvidenceMessage,
-              checkpoint.Revision
-            );
-            item = item with
-            {
-              Status = SupervisionWorkItemStates.Pending,
-              EvidenceRevision = latestEvidenceRevision,
-              EvidenceSha256 = latestEvidence.Sha256,
-              LastDiscrepancy = staleEvidenceMessage
-            };
+            item = item with { Status = SupervisionWorkItemStates.Blocked };
             runtime = Replace(runtime, itemIndex, item, worker) with
             {
-              Contexts = ReplaceContext(runtime, supervisor).Contexts,
-              ActiveRole = null,
-              EvidenceRevision = latestEvidenceRevision,
-              NoProgressCount = 0,
-              LastFailure = staleEvidenceMessage
+              LastFailure = "The worker correction produced no meaningful new Host evidence."
             };
-            yield return Update(
-              DurableSupervisionRunStates.Running,
-              SupervisionRunPhases.Verifying,
-              SupervisionEventTypeIds.WorkRejected,
-              $"The Host rejected stale evidence for {item.Id}; the workspace changed during supervisor verification.",
+            yield return Blocked(
               runtime,
-              role: "supervisor",
-              contextId: supervisor.Id,
-              workItemId: item.Id
+              runtime.LastFailure,
+              worker.Id,
+              item.Id,
+              "supervision-correction-no-progress"
             );
-            if (item.AttemptCount >= maximumWorkerAttempts)
-            {
-              item = item with { Status = SupervisionWorkItemStates.Blocked };
-              runtime = Replace(runtime, itemIndex, item, worker);
-              yield return Blocked(
-                runtime,
-                "Worker correction attempts were exhausted after stale evidence invalidated supervisor acceptance.",
-                supervisor.Id,
-                item.Id
-              );
-              yield break;
-            }
-            continue;
+            yield break;
           }
+        }
+
+        SupervisionContextView supervisor;
+        SupervisionDecision currentDecision;
+        var rejectionRetryReason = SupervisionRetryReasons.AcceptanceMismatch;
+        while (true)
+        {
+          if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
+          {
+            yield return Blocked(
+              runtime,
+              "The bounded supervisor transition budget was exhausted while re-verifying current Host evidence.",
+              workItemId: item.Id,
+              waitCode: "supervision-evidence-reverification-exhausted"
+            );
+            yield break;
+          }
+
+          supervisor = runtime.Contexts.First(
+            context => string.Equals(
+              context.Role,
+              "supervisor",
+              StringComparison.Ordinal
+            )
+          );
+          supervisor = ActivateContext(supervisor, checkpoint.Revision);
+          runtime = ReplaceContext(runtime, supervisor) with
+          {
+            SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
+          };
+          yield return Update(
+            DurableSupervisionRunStates.Running,
+            SupervisionRunPhases.Verifying,
+            SupervisionEventTypeIds.VerificationStarted,
+            $"The supervisor is verifying {item.Id} against evidence revision {evidenceRevision}.",
+            runtime,
+            role: "supervisor",
+            contextId: supervisor.Id,
+            workItemId: item.Id
+          );
+
+          var verificationTimer = Stopwatch.StartNew();
+          var validationRequested = false;
+          var verification = await RunTurnAsync(
+            checkpoint,
+            supervisor,
+            CreateVerificationPrompt(
+              item,
+              workerTurn.Answer,
+              evidence,
+              autonomous: IsAutonomous(checkpoint)
+            ),
+            input.History,
+            [],
+            validationAvailable,
+            settings.Execution.PhaseEffort.Verify,
+            input.ActionJournal,
+            input.ProgressSink,
+            cancellationToken
+          );
+          if (verification.Failure is not null)
+          {
+            verificationTimer.Stop();
+            runtime = AddVerificationDuration(runtime, verificationTimer.ElapsedMilliseconds);
+            yield return Blocked(
+              runtime,
+              "Supervisor verification failed: " + verification.Failure.Message,
+              supervisor.Id,
+              item.Id,
+              verification.Failure.Code
+            );
+            yield break;
+          }
+
+          SupervisionDecision? verificationDecision = null;
+          SupervisionException? verificationError = null;
+          string? verificationErrorCode = null;
+          try
+          {
+            verificationDecision = ParseDecision(verification.Answer);
+            if (
+              verificationDecision!.Decision == "request_validation"
+              && validationAvailable
+            )
+            {
+              validationRequested = true;
+              if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
+              {
+                throw InvalidDecision(
+                  "The supervisor transition budget was exhausted before validation."
+                );
+              }
+              runtime = runtime with
+              {
+                SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
+              };
+              verification = await RunTurnAsync(
+                checkpoint,
+                supervisor,
+                CreateVerificationPrompt(
+                  item,
+                  workerTurn.Answer,
+                  evidence,
+                  requireValidation: true,
+                  autonomous: IsAutonomous(checkpoint)
+                ),
+                input.History,
+                [],
+                validationAvailable,
+                settings.Execution.PhaseEffort.Verify,
+                input.ActionJournal,
+                input.ProgressSink,
+                cancellationToken
+              );
+              if (verification.Failure is not null)
+              {
+                throw InvalidDecision(
+                  "The requested Host validation turn failed: "
+                    + verification.Failure.Message
+                );
+              }
+              verificationDecision = ParseDecision(verification.Answer);
+            }
+            if (
+              IsAutonomous(checkpoint)
+              && verificationDecision!.Decision == "await_user"
+            )
+            {
+              if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
+              {
+                throw InvalidDecision(
+                  "The supervisor transition budget was exhausted before the autonomous decision correction."
+                );
+              }
+              runtime = runtime with
+              {
+                SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
+              };
+              verification = await RunTurnAsync(
+                checkpoint,
+                supervisor,
+                CreateAutonomousDecisionPrompt(
+                  item,
+                  workerTurn.Answer,
+                  evidence,
+                  verificationDecision
+                ),
+                input.History,
+                [],
+                validationAvailable,
+                settings.Execution.PhaseEffort.Recovery,
+                input.ActionJournal,
+                input.ProgressSink,
+                cancellationToken
+              );
+              if (verification.Failure is not null)
+              {
+                throw InvalidDecision(
+                  "The autonomous supervisor decision correction failed: "
+                    + verification.Failure.Message
+                );
+              }
+              verificationDecision = ParseDecision(verification.Answer);
+              if (verificationDecision.Decision == "await_user")
+              {
+                throw InvalidDecision(
+                  "The autonomous supervisor repeated a forbidden user-decision request."
+                );
+              }
+            }
+            ValidateVerification(
+              verificationDecision,
+              item,
+              maximumEvidencePaths
+            );
+          }
+          catch (SupervisionException exception)
+          {
+            verificationError = exception;
+            verificationErrorCode = exception.Code;
+          }
+          if (verificationError is not null)
+          {
+            verificationTimer.Stop();
+            runtime = AddVerificationDuration(runtime, verificationTimer.ElapsedMilliseconds);
+            yield return Blocked(
+              runtime,
+              verificationError.Message,
+              supervisor.Id,
+              item.Id,
+              verificationErrorCode
+            );
+            yield break;
+          }
+          currentDecision = verificationDecision!;
+          var validationFailed = validationRequested
+            && verification.Review?.Validation?.State is not (
+              "passed" or "passed-with-warnings"
+            );
+          rejectionRetryReason = validationFailed
+            ? SupervisionRetryReasons.ValidationFailure
+            : SupervisionRetryReasons.AcceptanceMismatch;
+
+          if (currentDecision.Decision is "accept_work"
+            or "replace_pending_work"
+            or "reject_work")
+          {
+            var latestEvidenceRevision = checked(runtime.EvidenceRevision + 1);
+            var latestEvidence = await BuildEvidenceAsync(
+              workerTurn.Review,
+              item.EvidencePaths,
+              latestEvidenceRevision,
+              maximumEvidencePaths,
+              cancellationToken
+            );
+            if (!string.Equals(
+              evidence.Sha256,
+              latestEvidence.Sha256,
+              StringComparison.Ordinal
+            ))
+            {
+              verificationTimer.Stop();
+              runtime = AddVerificationDuration(runtime, verificationTimer.ElapsedMilliseconds);
+              item = item with
+              {
+                Status = SupervisionWorkItemStates.Verifying,
+                EvidenceRevision = latestEvidenceRevision,
+                EvidenceSha256 = latestEvidence.Sha256,
+                LastDiscrepancy = null,
+                RejectionReason = null,
+                RetryReason = null
+              };
+              runtime = AddTelemetry(
+                Replace(runtime, itemIndex, item, worker) with
+                {
+                  ActiveRole = "supervisor",
+                  ActiveWorkItemId = item.Id,
+                  EvidenceRevision = latestEvidenceRevision,
+                  NoProgressCount = 0,
+                  LastFailure = null
+                },
+                telemetry => telemetry with
+                {
+                  RetryReason = SupervisionRetryReasons.StaleEvidenceReverification
+                }
+              );
+              yield return Update(
+                DurableSupervisionRunStates.Running,
+                SupervisionRunPhases.Verifying,
+                SupervisionEventTypeIds.RetryStarted,
+                $"Host evidence changed during verification of {item.Id}; the supervisor is re-verifying the latest revision without returning work to the worker.",
+                runtime,
+                role: "supervisor",
+                contextId: supervisor.Id,
+                workItemId: item.Id,
+                retryReason: SupervisionRetryReasons.StaleEvidenceReverification,
+                durationMilliseconds: verificationTimer.ElapsedMilliseconds
+              );
+              evidence = latestEvidence;
+              evidenceRevision = latestEvidenceRevision;
+              continue;
+            }
+          }
+
+          verificationTimer.Stop();
+          runtime = AddVerificationDuration(runtime, verificationTimer.ElapsedMilliseconds);
+          break;
         }
 
         supervisor = SuspendContext(
@@ -716,13 +811,23 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             Status = SupervisionWorkItemStates.Pending,
             LastDiscrepancy = currentDecision.Discrepancy
               + " Correction: "
-              + currentDecision.CorrectiveBrief
+              + currentDecision.CorrectiveBrief,
+            RejectionReason = rejectionRetryReason,
+            RetryReason = rejectionRetryReason
           };
-          runtime = Replace(runtime, itemIndex, item, worker) with
-          {
-            ActiveRole = null,
-            LastFailure = item.LastDiscrepancy
-          };
+          correctionEvidence = evidence;
+          runtime = AddTelemetry(
+            Replace(runtime, itemIndex, item, worker) with
+            {
+              ActiveRole = null,
+              LastFailure = item.LastDiscrepancy
+            },
+            telemetry => telemetry with
+            {
+              RejectionReason = rejectionRetryReason,
+              RetryReason = rejectionRetryReason
+            }
+          );
           yield return Update(
             DurableSupervisionRunStates.Running,
             SupervisionRunPhases.Verifying,
@@ -731,7 +836,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             runtime,
             role: "supervisor",
             contextId: supervisor.Id,
-            workItemId: item.Id
+            workItemId: item.Id,
+            rejectionReason: rejectionRetryReason
           );
           if (item.AttemptCount >= maximumWorkerAttempts)
           {
@@ -745,13 +851,26 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             );
             yield break;
           }
+          yield return Update(
+            DurableSupervisionRunStates.Running,
+            SupervisionRunPhases.Working,
+            SupervisionEventTypeIds.RetryStarted,
+            $"A bounded worker correction was requested for {item.Id} from current Host evidence.",
+            runtime,
+            role: "worker",
+            contextId: worker.Id,
+            workItemId: item.Id,
+            retryReason: rejectionRetryReason
+          );
           continue;
         }
 
         item = item with
         {
           Status = SupervisionWorkItemStates.Completed,
-          LastDiscrepancy = null
+          LastDiscrepancy = null,
+          RejectionReason = null,
+          RetryReason = null
         };
         worker = CompleteContext(
           worker,
@@ -819,6 +938,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       contextId: finalSupervisor.Id
     );
 
+    var completionTimer = Stopwatch.StartNew();
     var completion = await RunTurnAsync(
       checkpoint,
       finalSupervisor,
@@ -834,6 +954,17 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       input.ActionJournal,
       input.ProgressSink,
       cancellationToken
+    );
+    completionTimer.Stop();
+    runtime = AddTelemetry(
+      runtime,
+      telemetry => telemetry with
+      {
+        FinalCompletionDurationMilliseconds = checked(
+          telemetry.FinalCompletionDurationMilliseconds
+            + completionTimer.ElapsedMilliseconds
+        )
+      }
     );
     if (completion.Failure is not null)
     {
@@ -1216,7 +1347,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
                 "The supervisor omitted parseable final JSON. The Host is making one bounded, materially different canonical-output recovery attempt.",
                 context.Role,
                 context.Id,
-                context.WorkItemId
+                context.WorkItemId,
+                RetryReason: SupervisionRetryReasons.CanonicalRecovery
               ),
               cancellationToken
             );
@@ -1246,7 +1378,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
               $"The supervisor turn hit recoverable harness failure {outcome.Failure.Code}; the Host reset its native session and is retrying once with a concise, materially different brief.",
               context.Role,
               context.Id,
-              context.WorkItemId
+              context.WorkItemId,
+              RetryReason: SupervisionRetryReasons.HarnessRecovery
             ),
             cancellationToken
           );
@@ -1273,7 +1406,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             $"The autonomous supervisor interrupted the inactive {context.Role} turn and is retrying once with an explicit materially different recovery brief.",
             context.Role,
             context.Id,
-            context.WorkItemId
+            context.WorkItemId,
+            RetryReason: SupervisionRetryReasons.WatchdogRecovery
           ),
           cancellationToken
         );
@@ -1611,7 +1745,6 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         files,
         validation,
         conflicts,
-        completion,
         omittedReviewFileCount
       },
       DecisionJson
@@ -1690,12 +1823,14 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       Maximum work items: {{maximumItems}}.
       Maximum declared evidence paths per work item: {{maximumEvidencePaths}}.
       Paths must be relative to the trusted workspace. Keep criteria concrete and observable.
+      Verification, review, and completion reporting are Supervisor/Host responsibilities, not worker items. Return exactly one item when the requested mutation is atomic.
       """;
   }
 
   private static string CreateWorkerPrompt(
     SupervisionWorkItemView item,
-    bool autonomous
+    bool autonomous,
+    SupervisorEvidence? correctionEvidence
   )
   {
     var marker = item.LastDiscrepancy?.StartsWith(
@@ -1715,6 +1850,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       {{string.Join("\n", item.AcceptanceCriteria.Select((criterion, index) => $"{index + 1}. {criterion}"))}}
 
       {{(string.IsNullOrWhiteSpace(item.LastDiscrepancy) ? "" : "Supervisor correction:\n" + item.LastDiscrepancy)}}
+      {{(correctionEvidence is null ? "" : $"Current Host evidence revision {correctionEvidence.Revision}:\n{correctionEvidence.Json}\nInspect this current state, preserve every already-correct effect, and apply only the missing or incorrect delta. Do not replay the original mutation blindly.")}}
       {{(autonomous ? "Autonomous mode is active. Do not ask the user to approve or choose a permitted implementation detail; act through Host-provided capabilities. Hard Host rejections must not be bypassed." : "")}}
       Work only on this item. Use Host-provided capabilities, preserve unrelated changes, and report a concise completion claim.
       """;
@@ -1871,6 +2007,52 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     {
       ValidateDecisionItem(item, maximumEvidencePaths);
     }
+  }
+
+  private static IReadOnlyList<SupervisionDecisionItem> NormalizeDecompositionItems(
+    IReadOnlyList<SupervisionDecisionItem> items
+  )
+  {
+    var normalized = new List<SupervisionDecisionItem>(items.Count);
+    foreach (var item in items)
+    {
+      var paths = item.EvidencePaths!
+        .Select(path => path.Trim().Replace('\\', '/'))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+      var matchingIndex = paths.Length == 0
+        ? -1
+        : normalized.FindIndex(candidate => candidate.EvidencePaths!
+          .Select(path => path.Trim().Replace('\\', '/'))
+          .Distinct(StringComparer.OrdinalIgnoreCase)
+          .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+          .SequenceEqual(paths, StringComparer.OrdinalIgnoreCase));
+      if (matchingIndex < 0)
+      {
+        normalized.Add(item);
+        continue;
+      }
+
+      var existing = normalized[matchingIndex];
+      var objective = existing.Objective.Trim() + Environment.NewLine + item.Objective.Trim();
+      var criteria = existing.AcceptanceCriteria!
+        .Concat(item.AcceptanceCriteria!)
+        .Select(criterion => criterion.Trim())
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+      if (objective.Length > 4_096 || criteria.Length > 12)
+      {
+        normalized.Add(item);
+        continue;
+      }
+      normalized[matchingIndex] = existing with
+      {
+        Objective = objective,
+        AcceptanceCriteria = criteria
+      };
+    }
+    return normalized;
   }
 
   private static void ValidateVerification(
@@ -2103,7 +2285,10 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     string? role = null,
     string? contextId = null,
     string? workItemId = null,
-    string? waitCode = null
+    string? waitCode = null,
+    string? rejectionReason = null,
+    string? retryReason = null,
+    long? durationMilliseconds = null
   )
   {
     return new SupervisionExecutionUpdate(
@@ -2117,8 +2302,38 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       role,
       contextId,
       workItemId,
-      waitCode
+      waitCode,
+      rejectionReason,
+      retryReason,
+      durationMilliseconds
     );
+  }
+
+  private static SupervisionRuntimeView AddVerificationDuration(
+    SupervisionRuntimeView runtime,
+    long durationMilliseconds
+  )
+  {
+    return AddTelemetry(
+      runtime,
+      telemetry => telemetry with
+      {
+        VerificationDurationMilliseconds = checked(
+          telemetry.VerificationDurationMilliseconds + durationMilliseconds
+        )
+      }
+    );
+  }
+
+  private static SupervisionRuntimeView AddTelemetry(
+    SupervisionRuntimeView runtime,
+    Func<SupervisionTelemetryView, SupervisionTelemetryView> update
+  )
+  {
+    return runtime with
+    {
+      Telemetry = update(runtime.Telemetry ?? SupervisionTelemetryView.Empty)
+    };
   }
 
   private static SupervisionExecutionUpdate Blocked(

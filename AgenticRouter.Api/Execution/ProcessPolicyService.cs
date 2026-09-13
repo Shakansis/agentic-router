@@ -6,7 +6,8 @@ public sealed record ValidatedProcessCommand(
   string Executable,
   IReadOnlyList<string> Arguments,
   string WorkingDirectory,
-  bool RequiresExplicitApproval
+  bool RequiresExplicitApproval,
+  bool PermissionGranted
 );
 
 public interface IProcessPolicyService
@@ -246,7 +247,8 @@ public sealed class ProcessPolicyService : IProcessPolicyService
       executable,
       arguments,
       resolvedWorkingDirectory,
-      !safe && !permissionGranted
+      !safe && !permissionGranted,
+      permissionGranted
     );
   }
 

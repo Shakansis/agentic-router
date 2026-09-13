@@ -67,9 +67,9 @@ public sealed class ChatStreamService
   private readonly IExpertExecutionGuidanceService _expertGuidance;
   private readonly ILocalActionService _actionService;
   private readonly IPlanningFailureClassifier _planningFailureClassifier;
-  private readonly IToolProtocolConformanceService _toolConformance;
   private readonly IApprovalPolicyService _approvalPolicy;
   private readonly IApprovalCoordinator _approvalCoordinator;
+  private readonly IUserInputCoordinator _userInput;
   private readonly IRecoveryDecisionCoordinator _recoveryDecisions;
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IProjectAwarenessService _projectAwareness;
@@ -84,6 +84,9 @@ public sealed class ChatStreamService
   private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
   private readonly IBenchmarkExecutionContextAccessor _benchmarkContexts;
+  private readonly HarnessWorkspaceBaselineCache _workspaceBaselines;
+  private readonly IExecutionLatencyTracker _latency;
+  private readonly IHostApplicationLifetime _applicationLifetime;
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
   private ExecutionSession? _executionSession;
@@ -115,9 +118,9 @@ public sealed class ChatStreamService
     IExpertExecutionGuidanceService expertGuidance,
     ILocalActionService actionService,
     IPlanningFailureClassifier planningFailureClassifier,
-    IToolProtocolConformanceService toolConformance,
     IApprovalPolicyService approvalPolicy,
     IApprovalCoordinator approvalCoordinator,
+    IUserInputCoordinator userInput,
     IRecoveryDecisionCoordinator recoveryDecisions,
     IExecutionSessionStore executionSessions,
     IProjectAwarenessService projectAwareness,
@@ -133,6 +136,9 @@ public sealed class ChatStreamService
     IOllamaManagedServerManager managedOllamaServers,
     IBenchmarkExecutionContextAccessor benchmarkContexts,
     ITraceContext trace,
+    HarnessWorkspaceBaselineCache workspaceBaselines,
+    IExecutionLatencyTracker latency,
+    IHostApplicationLifetime applicationLifetime,
     ILogger<ChatStreamService> logger
   )
   {
@@ -152,9 +158,9 @@ public sealed class ChatStreamService
     _expertGuidance = expertGuidance;
     _actionService = actionService;
     _planningFailureClassifier = planningFailureClassifier;
-    _toolConformance = toolConformance;
     _approvalPolicy = approvalPolicy;
     _approvalCoordinator = approvalCoordinator;
+    _userInput = userInput;
     _recoveryDecisions = recoveryDecisions;
     _executionSessions = executionSessions;
     _projectAwareness = projectAwareness;
@@ -170,6 +176,9 @@ public sealed class ChatStreamService
     _managedOllamaServers = managedOllamaServers;
     _benchmarkContexts = benchmarkContexts;
     _trace = trace;
+    _workspaceBaselines = workspaceBaselines;
+    _latency = latency;
+    _applicationLifetime = applicationLifetime;
     _logger = logger;
   }
 
@@ -311,7 +320,14 @@ public sealed class ChatStreamService
         model => model.Digest,
         StringComparer.OrdinalIgnoreCase
       );
-      var intention = GeneralChat;
+      var routedIntention = string.Equals(
+        request.InteractionMode,
+        "chat",
+        StringComparison.Ordinal
+      )
+        ? _intentionRouter.Route(request)
+        : null;
+      var intention = routedIntention?.Decision.Intention ?? GeneralChat;
       var selectedModel = request.Model.Trim();
       var selectedModelRole = UsageModelRoles.Primary;
       var images = _imageValidator.Validate(
@@ -393,7 +409,7 @@ public sealed class ChatStreamService
           $"Classifying request intention with {IntentionRouter.RouterVersion}.",
           stopwatch
         );
-        var routing = _intentionRouter.Route(request);
+        var routing = routedIntention ?? _intentionRouter.Route(request);
         intention = routing.Decision.Intention;
         yield return Event(
           requestId,
@@ -602,7 +618,11 @@ public sealed class ChatStreamService
       );
       var chatOptions = new ProviderChatOptions(
         request.WebSearchEnabled && capabilities.ProviderNativeWebSearch,
-        images
+        images,
+        GenerationProfile: ProviderGenerationProfiles.Resolve(
+          intention,
+          request.InteractionMode
+        )
       );
       yield return Event(
         requestId,
@@ -804,9 +824,15 @@ public sealed class ChatStreamService
           selectedModel,
           intention
         );
+        _latency.Mark("project-awareness-start");
+        var projectAwarenessStarted = Stopwatch.GetTimestamp();
         var project = await _projectAwareness.GetAsync(
           false,
           cancellationToken
+        );
+        _latency.Mark(
+          "project-awareness-end",
+          (long)Stopwatch.GetElapsedTime(projectAwarenessStarted).TotalMilliseconds
         );
         var rootInstructions = await _repositoryInstructions.ResolveAsync(
           null,
@@ -974,6 +1000,7 @@ public sealed class ChatStreamService
         }
 
         var harnessDefinition = GetHarnessDefinition(request.Harness);
+        _latency.SetHarness(harnessDefinition.Id);
         if (!_harnesses.TryGetAdapter(harnessDefinition.Id, out var harness))
         {
           throw new ChatStageException(
@@ -1215,7 +1242,8 @@ public sealed class ChatStreamService
             progress.Failure = null;
             var fallbackChatOptions = new ProviderChatOptions(
               fallbackCapabilities.ProviderNativeWebSearch,
-              images
+              images,
+              GenerationProfile: chatOptions.GenerationProfile
             );
             var fallbackUsesHostReadOnlyTools = images.Count == 0
               && !fallbackCapabilities.ProviderNativeWebSearch;
@@ -1346,7 +1374,13 @@ public sealed class ChatStreamService
     }
     finally
     {
-      if (_executionSession?.IsActive == true)
+      if (
+        _executionSession?.IsActive == true
+        && !(
+          _applicationLifetime.ApplicationStopping.IsCancellationRequested
+          && _executionSession.State == "awaiting-user-input"
+        )
+      )
       {
         _executionSession.Complete(
           cancellationToken.IsCancellationRequested
@@ -1494,6 +1528,7 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    _latency.MarkOnce("harness-turn-start");
     messages = messages.Prepend(
       new ChatMessage(
         "system",
@@ -1695,7 +1730,8 @@ public sealed class ChatStreamService
       Citations: execution.Citations,
       ContextUsage: execution.LatestContextUsage ?? contextUsage,
       ResponseTail: hostResponse,
-      ResponseTailHtml: _markdownRenderer.Render(hostResponse)
+      ResponseTailHtml: _markdownRenderer.Render(hostResponse),
+      SpecialistCompletion: execution.SpecialistCompletion
     );
   }
 
@@ -1770,11 +1806,17 @@ public sealed class ChatStreamService
         400,
         true
       );
-    var observer = await HarnessWorkspaceObserver.CaptureAsync(
+    _latency.Mark("workspace-observer-capture-start");
+    var observerStarted = Stopwatch.GetTimestamp();
+    var observer = await _workspaceBaselines.CaptureAsync(
       workspacePath,
       harnessDefinition.Id,
       executionSettings,
       cancellationToken
+    );
+    _latency.Mark(
+      "workspace-observer-capture-end",
+      (long)Stopwatch.GetElapsedTime(observerStarted).TotalMilliseconds
     );
     var answer = new StringBuilder();
     var responseSegment = new StringBuilder();
@@ -1849,6 +1891,8 @@ public sealed class ChatStreamService
       ContextWindowTokens: initialContextUsage.EffectiveLimitTokens,
       HostCapabilities: hostCapabilities,
       UseMinimalToolInventory: useMinimalToolInventory,
+      ReleaseWorkspaceAfterTurn: _benchmarkContexts.Current is not null,
+      ReleaseWorkspaceOnCancellation: _benchmarkContexts.Current is not null,
       Images: images.Select(
         image => new HarnessImageInput(
           image.Id,
@@ -1866,6 +1910,7 @@ public sealed class ChatStreamService
     var automaticContinuationAttempts = 0;
   StartHarnessTurn:
     terminalFailure = null;
+    _latency.MarkOnce("harness-turn-start");
     await foreach (var harnessEvent in harness.StartTurnAsync(
       harnessTurnRequest,
       cancellationToken
@@ -1917,9 +1962,74 @@ public sealed class ChatStreamService
           );
         }
       }
+      if (harnessEvent.Type == "tool.started")
+      {
+        _latency.MarkOnce("first-tool-request");
+        _latency.MarkOnce("first-tool-start");
+        _latency.MarkOnce("first-real-action-execution-start");
+      }
       switch (harnessEvent.Type)
       {
+        case "user-input.requested":
+          {
+            if (
+              harness is not IAgentHarnessUserInputTransport userInputTransport
+              || string.IsNullOrWhiteSpace(harnessEvent.UserInputId)
+              || harnessEvent.UserInputQuestions is null
+            )
+            {
+              throw new HarnessException(
+                $"{harnessDefinition.Id}-user-input-unsupported",
+                $"{harnessDefinition.DisplayName} emitted a user-input request that its adapter cannot resume.",
+                "The harness adapter did not provide an exact user-input transport identity.",
+                false,
+                harnessId: harnessDefinition.Id
+              );
+            }
+            var pending = await BeginUserInputAsync(
+              request,
+              session,
+              harnessDefinition.Id,
+              harnessEvent.UserInputQuestions,
+              cancellationToken
+            );
+            yield return UserInputEvent(
+              requestId,
+              "user-input.requested",
+              $"Waiting for {pending.Request.Questions.Count} user answer(s).",
+              pending.Request,
+              stopwatch,
+              model,
+              intention,
+              session
+            );
+            var outcome = await AwaitUserInputAsync(pending, cancellationToken);
+            await userInputTransport.ResolveUserInputAsync(
+              harnessEvent.UserInputId,
+              outcome.Answers,
+              outcome.Cancelled,
+              cancellationToken
+            );
+            session.MarkUserInputResolved();
+            yield return UserInputEvent(
+              requestId,
+              outcome.Cancelled ? "user-input.cancelled" : "user-input.submitted",
+              outcome.Cancelled
+                ? "The user cancelled the question batch."
+                : $"Submitted {outcome.Answers.Count} answer(s) to {harnessDefinition.DisplayName}.",
+              ResolvedUserInputRequest(pending.Request, outcome),
+              stopwatch,
+              model,
+              intention,
+              session
+            );
+            break;
+          }
         case "reasoning.delta":
+          _latency.MarkOnce("first-reasoning-delta");
+          var completedResponseHtml = responseSegment.Length == 0
+            ? null
+            : _markdownRenderer.Render(responseSegment.ToString());
           responseSegment.Clear();
           activeResponseItemId = null;
           if (!string.IsNullOrEmpty(harnessEvent.Delta))
@@ -1936,11 +2046,13 @@ public sealed class ChatStreamService
               null,
               null,
               ReasoningDelta: harnessEvent.Delta,
-              ContentBlockId: harnessEvent.ItemId
+              ContentBlockId: harnessEvent.ItemId,
+              ResponseSegmentHtml: completedResponseHtml
             );
           }
           break;
         case "assistant.delta":
+          _latency.MarkOnce("first-assistant-delta");
           if (!string.IsNullOrEmpty(harnessEvent.Delta))
           {
             if (!string.Equals(
@@ -1964,11 +2076,11 @@ public sealed class ChatStreamService
               model,
               intention,
               stopwatch.ElapsedMilliseconds,
-              _markdownRenderer.Render(answer.ToString()),
+              null,
               null,
               ExecutionSession: session.CreateSummary(),
               ContentBlockId: harnessEvent.ItemId,
-              ResponseSegmentHtml: _markdownRenderer.Render(responseSegment.ToString())
+              ResponseSegmentHtml: null
             );
           }
           break;
@@ -1976,6 +2088,9 @@ public sealed class ChatStreamService
         case "tool.output":
         case "tool.completed":
         case "tool.failed":
+          var actionResponseHtml = responseSegment.Length == 0
+            ? null
+            : _markdownRenderer.Render(responseSegment.ToString());
           responseSegment.Clear();
           roleResultSegment.Clear();
           activeResponseItemId = null;
@@ -1987,7 +2102,8 @@ public sealed class ChatStreamService
             intention,
             stopwatch,
             session.Id
-          );
+          ) with
+          { ResponseSegmentHtml = actionResponseHtml };
           break;
         case "usage.updated" when harnessEvent.ContextInputTokens is > 0
         || harnessEvent.ContextTotalTokens is > 0:
@@ -2017,6 +2133,61 @@ public sealed class ChatStreamService
           );
           break;
         case "host-tool.requested":
+          if (string.Equals(harnessEvent.Tool, UserInputProtocol.ToolName, StringComparison.Ordinal))
+          {
+            if (harnessEvent.ToolCallId is null || harnessEvent.Arguments is null)
+            {
+              throw new HarnessException(
+                $"{harnessDefinition.Id}-user-input-invalid",
+                $"{harnessDefinition.DisplayName} sent an incomplete Host user-input request.",
+                "The Host tool request omitted its call id or arguments.",
+                false,
+                harnessId: harnessDefinition.Id
+              );
+            }
+            var batch = UserInputProtocol.Parse(harnessEvent.Arguments.Value);
+            var pending = await BeginUserInputAsync(
+              request,
+              session,
+              harnessDefinition.Id,
+              batch.Questions,
+              cancellationToken
+            );
+            yield return UserInputEvent(
+              requestId,
+              "user-input.requested",
+              $"Waiting for {pending.Request.Questions.Count} user answer(s).",
+              pending.Request,
+              stopwatch,
+              model,
+              intention,
+              session
+            );
+            var outcome = await AwaitUserInputAsync(pending, cancellationToken);
+            await harness.ResolveToolCallAsync(
+              harnessEvent.ToolCallId,
+              true,
+              outcome.Cancelled
+                ? JsonSerializer.Serialize(new { cancelled = true })
+                : UserInputProtocol.SerializeAnswers(outcome.Answers),
+              cancellationToken
+            );
+            session.MarkUserInputResolved();
+            yield return UserInputEvent(
+              requestId,
+              outcome.Cancelled ? "user-input.cancelled" : "user-input.submitted",
+              outcome.Cancelled
+                ? "The user cancelled the question batch."
+                : $"Submitted {outcome.Answers.Count} answer(s) to {harnessDefinition.DisplayName}.",
+              ResolvedUserInputRequest(pending.Request, outcome),
+              stopwatch,
+              model,
+              intention,
+              session
+            );
+            break;
+          }
+          _latency.MarkOnce("first-tool-request");
           responseSegment.Clear();
           roleResultSegment.Clear();
           activeResponseItemId = null;
@@ -2587,8 +2758,12 @@ public sealed class ChatStreamService
       ExecutionSession: summary,
       Citations: webCitations,
       ContextUsage: latestContextUsage,
+      ResponseSegmentHtml: responseSegment.Length == 0
+        ? null
+        : _markdownRenderer.Render(responseSegment.ToString()),
       ResponseTail: responseTail,
-      ResponseTailHtml: _markdownRenderer.Render(responseTail)
+      ResponseTailHtml: _markdownRenderer.Render(responseTail),
+      SpecialistCompletion: answer.ToString()
     );
   }
 
@@ -3571,6 +3746,97 @@ public sealed class ChatStreamService
     );
   }
 
+  private async Task<PendingUserInputHandle> BeginUserInputAsync(
+    ChatRequest request,
+    ExecutionSession session,
+    string harness,
+    IReadOnlyList<UserInputQuestionView> questions,
+    CancellationToken cancellationToken
+  )
+  {
+    var browserSessionId = request.BrowserSessionId
+      ?? throw new ChatStageException(
+        "user-input-session",
+        "User input requires an exact browser session.",
+        "browserSessionId was missing from the active Execute request.",
+        session.SelectedModel,
+        null,
+        409,
+        true
+      );
+    var pending = await _userInput.BeginAsync(
+      browserSessionId,
+      session.Id,
+      harness,
+      questions,
+      cancellationToken
+    );
+    session.MarkAwaitingUserInput();
+    return pending;
+  }
+
+  private async Task<UserInputOutcome> AwaitUserInputAsync(
+    PendingUserInputHandle pending,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return await pending.Completion.WaitAsync(cancellationToken);
+    }
+    catch
+    {
+      if (_applicationLifetime.ApplicationStopping.IsCancellationRequested)
+      {
+        _userInput.AbandonLiveRequest(pending.Request.Id);
+      }
+      else
+      {
+        await _userInput.CancelAsync(pending.Request.Id, CancellationToken.None);
+      }
+      throw;
+    }
+  }
+
+  private static ChatStreamEvent UserInputEvent(
+    string requestId,
+    string type,
+    string message,
+    UserInputRequestView userInput,
+    Stopwatch stopwatch,
+    string model,
+    string intention,
+    ExecutionSession session
+  )
+  {
+    return new ChatStreamEvent(
+      requestId,
+      type,
+      DateTimeOffset.UtcNow,
+      message,
+      null,
+      model,
+      intention,
+      stopwatch.ElapsedMilliseconds,
+      null,
+      null,
+      ExecutionSession: session.CreateSummary(),
+      UserInput: userInput
+    );
+  }
+
+  private static UserInputRequestView ResolvedUserInputRequest(
+    UserInputRequestView request,
+    UserInputOutcome outcome
+  )
+  {
+    return request with
+    {
+      CurrentQuestionIndex = Math.Max(0, request.Questions.Count - 1),
+      Answers = outcome.Answers
+    };
+  }
+
   private static ChatStreamEvent HarnessActionEvent(
     string requestId,
     HarnessEvent harnessEvent,
@@ -4054,13 +4320,18 @@ public sealed class ChatStreamService
           long liveOutputCharacters = 0;
           long lastLiveOutputTokens = 0;
           var lastLiveContextUpdate = TimeSpan.MinValue;
-          await foreach (
-            var delta in reasoning.Reader.ReadAllAsync(
-              cancellationToken
-            )
-          )
+          while (await reasoning.Reader.WaitToReadAsync(cancellationToken))
           {
-            liveOutputCharacters += delta.Length;
+            var presentation = new StringBuilder();
+            while (reasoning.Reader.TryRead(out var delta))
+            {
+              presentation.Append(delta);
+            }
+            if (presentation.Length == 0)
+            {
+              continue;
+            }
+            liveOutputCharacters += presentation.Length;
             var liveOutputTokens = Math.Max(
               1,
               (liveOutputCharacters + 2) / 3
@@ -4101,7 +4372,7 @@ public sealed class ChatStreamService
               intention
             ) with
             {
-              ReasoningDelta = delta
+              ReasoningDelta = presentation.ToString()
             };
           }
 
@@ -4662,9 +4933,9 @@ public sealed class ChatStreamService
           }
 
           _executionSession?.ResetPlanningFailures();
-          captureRoleResult?.Invoke(
-            planningResult.AssistantMessage.Content ?? string.Empty
-          );
+          progress.SpecialistCompletion =
+            planningResult.AssistantMessage.Content ?? string.Empty;
+          captureRoleResult?.Invoke(progress.SpecialistCompletion);
           noActionRequired = true;
           break;
         }
@@ -4873,6 +5144,110 @@ public sealed class ChatStreamService
             model,
             intention
           );
+        }
+
+        if (string.Equals(proposal.Tool, UserInputProtocol.ToolName, StringComparison.Ordinal))
+        {
+          UserInputBatch? batch = null;
+          LocalActionException? userInputFailure = null;
+          try
+          {
+            batch = UserInputProtocol.Parse(proposal.Arguments);
+          }
+          catch (LocalActionException failure)
+          {
+            userInputFailure = failure;
+          }
+          if (userInputFailure is not null)
+          {
+            progress.ToolMessages.Add(
+              NativeToolResultMessage(
+                progress,
+                proposal.Tool,
+                "rejected",
+                userInputFailure.Message,
+                false,
+                code: userInputFailure.Stage,
+                evidenceId: planningResult.CallId
+              )
+            );
+            _executionSession?.RecordToolFailure();
+            yield return Event(
+              requestId,
+              "user-input.cancelled",
+              userInputFailure.Message,
+              stopwatch,
+              model,
+              intention
+            );
+            continue;
+          }
+
+          var session = _executionSession ?? throw new InvalidOperationException(
+            "Native user input requires an active execution session."
+          );
+          var pending = await BeginUserInputAsync(
+            request,
+            session,
+            HarnessIds.Native,
+            batch!.Questions,
+            cancellationToken
+          );
+          yield return UserInputEvent(
+            requestId,
+            "user-input.requested",
+            $"Waiting for {pending.Request.Questions.Count} user answer(s).",
+            pending.Request,
+            stopwatch,
+            model,
+            intention,
+            session
+          );
+          var outcome = await AwaitUserInputAsync(pending, cancellationToken);
+          session.MarkUserInputResolved();
+          var output = outcome.Cancelled
+            ? JsonSerializer.Serialize(new { cancelled = true })
+            : UserInputProtocol.SerializeAnswers(outcome.Answers);
+          progress.ToolMessages.Add(
+            NativeToolResultMessage(
+              progress,
+              proposal.Tool,
+              "completed",
+              output,
+              false,
+              code: outcome.Cancelled ? "USER_INPUT_CANCELLED" : "USER_INPUT_SUBMITTED",
+              evidenceId: planningResult.CallId
+            )
+          );
+          progress.Messages.Add(new ChatMessage(
+            "user",
+            HostActionResultAdapter.LegacyCompatibleMessage(
+              proposal.Tool,
+              "completed",
+              CreateHostActionResult(
+                proposal.Tool,
+                "completed",
+                output,
+                code: outcome.Cancelled ? "USER_INPUT_CANCELLED" : "USER_INPUT_SUBMITTED",
+                effectVerified: false,
+                evidenceId: planningResult.CallId
+              )
+            )
+          ));
+          _executionSession?.RecordToolSuccess();
+          yield return UserInputEvent(
+            requestId,
+            outcome.Cancelled ? "user-input.cancelled" : "user-input.submitted",
+            outcome.Cancelled
+              ? "The user cancelled the question batch."
+              : $"Submitted {outcome.Answers.Count} answer(s) to Native.",
+            ResolvedUserInputRequest(pending.Request, outcome),
+            stopwatch,
+            model,
+            intention,
+            session
+          );
+          continue;
         }
 
         if (
@@ -5154,6 +5529,7 @@ public sealed class ChatStreamService
 
           if (planFailure is null)
           {
+            progress.RefreshPlanManagementTools(hasExecutionPlan: true);
             planningFailures = 0;
             _executionSession?.ResetPlanningFailures();
             yield return Event(
@@ -6507,6 +6883,11 @@ public sealed class ChatStreamService
           && warningDelay.Status == TaskStatus.RanToCompletion
         )
         {
+          if (_userInput.HasPendingForExecution(_executionSession?.Id))
+          {
+            warningDelay = Task.Delay(warningAfter, activityLifetime.Token);
+            continue;
+          }
           warningSent = true;
           yield return SlowRequestEvent(
             requestId,
@@ -6570,6 +6951,11 @@ public sealed class ChatStreamService
           && criticalDelay.Status == TaskStatus.RanToCompletion
         )
         {
+          if (_userInput.HasPendingForExecution(_executionSession?.Id))
+          {
+            criticalDelay = Task.Delay(criticalAfter, activityLifetime.Token);
+            continue;
+          }
           criticalSent = true;
           warningSent = true;
           yield return SlowRequestEvent(
@@ -6590,6 +6976,11 @@ public sealed class ChatStreamService
           && safetyDelay.Status == TaskStatus.RanToCompletion
         )
         {
+          if (_userInput.HasPendingForExecution(_executionSession?.Id))
+          {
+            safetyDelay = Task.Delay(ExtremeInactivityCeiling, activityLifetime.Token);
+            continue;
+          }
           requestLifetime.Cancel();
           throw new ChatStageException(
             "extreme-inactivity-ceiling",
@@ -7142,7 +7533,8 @@ public sealed class ChatStreamService
                 ),
                 token
               ),
-              false
+              false,
+              generationProfile: options.EffectiveGenerationProfile
             ),
             null
           );
@@ -7378,15 +7770,11 @@ public sealed class ChatStreamService
           model,
           intention,
           stopwatch.ElapsedMilliseconds,
-          _markdownRenderer.Render(
-            progress.Answer.ToString()
-          ),
           null,
           null,
           null,
-          ResponseSegmentHtml: _markdownRenderer.Render(
-            progress.ResponseSegment.ToString()
-          )
+          null,
+          ResponseSegmentHtml: null
         );
         yield break;
       }
@@ -7928,15 +8316,11 @@ public sealed class ChatStreamService
         model,
         intention,
         stopwatch.ElapsedMilliseconds,
-        _markdownRenderer.Render(
-          progress.Answer.ToString()
-        ),
+        null,
         null,
         null,
         _executionSession?.CreateSummary(),
-        ResponseSegmentHtml: _markdownRenderer.Render(
-          progress.ResponseSegment.ToString()
-        )
+        ResponseSegmentHtml: null
       );
     }
 
@@ -7962,13 +8346,11 @@ public sealed class ChatStreamService
         model,
         intention,
         stopwatch.ElapsedMilliseconds,
-        _markdownRenderer.Render(progress.Answer.ToString()),
+        null,
         null,
         null,
         _executionSession?.CreateSummary(),
-        ResponseSegmentHtml: _markdownRenderer.Render(
-          progress.ResponseSegment.ToString()
-        )
+        ResponseSegmentHtml: null
       );
     }
   }
@@ -10256,13 +10638,22 @@ public sealed class ChatStreamService
     ExecutionProgress progress
   )
   {
-    if (!IsReadOnlyInspectionTool(proposal.Tool))
+    if (
+      proposal.Tool is not ("read_file" or "get_file_info")
+      || !proposal.Arguments.TryGetProperty("path", out var pathElement)
+      || pathElement.ValueKind != JsonValueKind.String
+      || string.IsNullOrWhiteSpace(pathElement.GetString())
+    )
     {
       return false;
     }
 
     var session = _executionSession;
+    var relativePath = BenchmarkWorkspaceFactory.NormalizeRelative(
+      pathElement.GetString()!
+    );
     return session is not null
+      && session.TryGetObservedFile(relativePath, out _)
       && session.RequiresMutation
       && session.HasVerifiedMutation
       && session.HasReviewedChangedFiles
@@ -11474,9 +11865,34 @@ public sealed class ChatStreamService
 
     public ExpertExecutionGuidance? Guidance { get; set; }
 
-    public ExecutionTurnToolScope ToolScope { get; }
+    public ExecutionTurnToolScope ToolScope { get; private set; }
 
     public HashSet<string> GrantedTools { get; }
+
+    public void RefreshPlanManagementTools(bool hasExecutionPlan)
+    {
+      var planManagementWasGranted = GrantedTools.Contains("create_execution_plan")
+        || GrantedTools.Contains("revise_execution_plan")
+        || GrantedTools.Contains("get_execution_plan");
+      ToolScope = ToolScope.WithPlanState(hasExecutionPlan);
+      GrantedTools.Remove("create_execution_plan");
+      GrantedTools.Remove("revise_execution_plan");
+      GrantedTools.Remove("get_execution_plan");
+      if (!planManagementWasGranted)
+      {
+        return;
+      }
+
+      GrantedTools.Add(
+        hasExecutionPlan
+          ? "revise_execution_plan"
+          : "create_execution_plan"
+      );
+      if (hasExecutionPlan)
+      {
+        GrantedTools.Add("get_execution_plan");
+      }
+    }
 
     public int ToolsetRequestCount { get; set; }
 
@@ -11507,6 +11923,8 @@ public sealed class ChatStreamService
     public bool ContextFailureCompactionAttempted { get; set; }
 
     public bool PartialContextExhausted { get; set; }
+
+    public string? SpecialistCompletion { get; set; }
 
   }
 

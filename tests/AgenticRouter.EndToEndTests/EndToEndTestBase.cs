@@ -426,18 +426,10 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     if (expectProcessExecuted)
     {
       await StartMessageAsync(prompt);
-      await Expect(Page.Locator(".action-approval")).ToBeVisibleAsync();
-      await Page.Locator(".action-approval").Last.GetByRole(
-        AriaRole.Button,
-        new()
-        {
-          Name = "Approve",
-          Exact = true
-        }
-      ).ClickAsync();
       await Expect(
         Page.Locator("[data-event-type=\"action.process-output\"]")
       ).ToContainTextAsync("hello");
+      await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
       await Expect(
         Page.Locator(".message.assistant .activity").Last
       ).ToHaveAttributeAsync(
@@ -480,7 +472,6 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       new[]
       {
         LocalActionPlanner.RequestToolsetTool,
-        "get_execution_plan",
         "list_files",
         "read_file",
         "get_file_info",
@@ -488,6 +479,29 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       },
       firstRequest.AvailableTools.ToArray()
     );
+    var roundTrippedToolResults = toolingRequests.SelectMany(
+      request => request.Messages.Where(
+        message => message.Role == "tool"
+      )
+    ).ToArray();
+    Assert.IsNotEmpty(roundTrippedToolResults);
+    foreach (var toolResult in roundTrippedToolResults)
+    {
+      Assert.IsFalse(string.IsNullOrWhiteSpace(toolResult.ToolCallId));
+      Assert.IsTrue(
+        toolingRequests.SelectMany(request => request.Messages)
+          .SelectMany(message => message.ToolCalls)
+          .Any(call => string.Equals(
+              call.Id,
+              toolResult.ToolCallId,
+              StringComparison.Ordinal
+            ) && string.Equals(
+              call.Name,
+              toolResult.ToolName,
+              StringComparison.Ordinal
+            ))
+      );
+    }
     Assert.AreEqual(
       expectProcessOffered,
       firstRequest.Messages.Any(
@@ -712,6 +726,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     return
     [
       "request_toolset",
+      "request_user_input",
       "create_execution_plan",
       "revise_execution_plan",
       "get_execution_plan",
@@ -925,6 +940,18 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
         50,
         cancellation.Token
       );
+    }
+  }
+
+  private protected static async Task WaitUntilAsync(
+    Func<Task<bool>> condition,
+    TimeSpan timeout
+  )
+  {
+    using var cancellation = new CancellationTokenSource(timeout);
+    while (!await condition())
+    {
+      await Task.Delay(50, cancellation.Token);
     }
   }
 

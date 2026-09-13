@@ -68,6 +68,7 @@ public interface ICloudProviderAdapter
     IReadOnlyList<OllamaToolMessage> messages,
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
+    ProviderGenerationProfile? generationProfile,
     CancellationToken cancellationToken
   );
 

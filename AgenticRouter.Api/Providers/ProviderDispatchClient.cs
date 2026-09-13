@@ -229,7 +229,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
-    string? requestedEffort = null
+    string? requestedEffort = null,
+    ProviderGenerationProfile? generationProfile = null
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -249,7 +250,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         onThinkingDelta,
         onContentDelta,
         toolOutput,
-        requestedEffort
+        requestedEffort,
+        generationProfile
       );
     }
 
@@ -285,6 +287,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
           messages,
           tools,
           stage,
+          generationProfile,
           cancellationToken
         );
         await RecordAsync(

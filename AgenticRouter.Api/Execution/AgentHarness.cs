@@ -25,6 +25,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   private const int MaximumActivityText = 8_192;
   private const string PermissionProfileId = ":workspace";
   private const string HostWebSearchAlias = "agentic_router_web_search";
+  private const string HostUserInputAlias = "agentic_router_request_user_input";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
 
   private static readonly HarnessDefinition AdapterDefinition = new(
@@ -46,7 +47,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       SupportsSessionDiff: true,
       SupportsNativePermissions: true,
       SupportsSteering: true,
-      SupportsNativeWebSearch: true
+      SupportsNativeWebSearch: true,
+      SupportsUserInput: true
     ),
     ["ollama-local"]
   );
@@ -1921,6 +1923,10 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private static string CodexDynamicToolName(string canonicalTool)
   {
+    if (string.Equals(canonicalTool, UserInputProtocol.ToolName, StringComparison.Ordinal))
+    {
+      return HostUserInputAlias;
+    }
     return string.Equals(
       canonicalTool,
       WebSearchCapability.ToolName,
@@ -1932,6 +1938,10 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private static string CanonicalCodexDynamicToolName(string tool)
   {
+    if (string.Equals(tool, HostUserInputAlias, StringComparison.Ordinal))
+    {
+      return UserInputProtocol.ToolName;
+    }
     return string.Equals(
       tool,
       HostWebSearchAlias,

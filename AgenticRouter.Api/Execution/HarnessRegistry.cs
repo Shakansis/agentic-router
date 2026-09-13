@@ -73,27 +73,33 @@ public sealed class HarnessRegistry : IHarnessRegistry
     CancellationToken cancellationToken
   )
   {
-    var statuses = new List<HarnessStatus>(Definitions.Count);
-    foreach (var definition in Definitions)
+    var tasks = Definitions.Select(
+      definition => DiscoverOneAsync(definition, cancellationToken)
+    ).ToArray();
+    return await Task.WhenAll(tasks);
+  }
+
+  private async Task<HarnessStatus> DiscoverOneAsync(
+    HarnessDefinition definition,
+    CancellationToken cancellationToken
+  )
+  {
+    var adapter = _adapters[definition.Id];
+    HarnessAvailability availability;
+    try
     {
-      var adapter = _adapters[definition.Id];
-      HarnessAvailability availability;
-      try
-      {
-        availability = await adapter.GetAvailabilityAsync(cancellationToken);
-      }
-      catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-      {
-        throw;
-      }
-      catch
-      {
-        availability = HarnessAvailability.Missing(
-          $"{definition.DisplayName} availability could not be determined."
-        );
-      }
-      statuses.Add(new HarnessStatus(definition, availability));
+      availability = await adapter.GetAvailabilityAsync(cancellationToken);
     }
-    return statuses;
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch
+    {
+      availability = HarnessAvailability.Missing(
+        $"{definition.DisplayName} availability could not be determined."
+      );
+    }
+    return new HarnessStatus(definition, availability);
   }
 }

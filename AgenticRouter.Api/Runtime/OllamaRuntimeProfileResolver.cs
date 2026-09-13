@@ -13,7 +13,8 @@ public static class OllamaRuntimeProfileResolver
     string usageRole,
     int? declaredModelMaximum,
     long requiredInputTokens,
-    int requestedOutputTokens
+    int requestedOutputTokens,
+    int? generationMaximumContextTokens = null
   )
   {
     var role = NormalizeRole(
@@ -68,7 +69,12 @@ public static class OllamaRuntimeProfileResolver
       profile.TargetContextTokens,
       sharedTarget
     );
-    var providerCeiling = settings.Context.ProviderContextTokens;
+    var providerCeiling = generationMaximumContextTokens is > 0
+      ? Math.Min(
+        settings.Context.ProviderContextTokens,
+        generationMaximumContextTokens.Value
+      )
+      : settings.Context.ProviderContextTokens;
     var maximum = Math.Min(
       sharedMaximum,
       providerCeiling
@@ -165,6 +171,9 @@ public static class OllamaRuntimeProfileResolver
       sharedWarning,
       escalated
         ? $"The request required {required} tokens, so context escalated from {target} to {effective}."
+        : generationMaximumContextTokens is > 0
+          && maximum <= generationMaximumContextTokens.Value
+          ? $"Generation profile capped context at {maximum} tokens."
         : overridden
           ? "The exact model and digest override was applied."
           : "The role default was inherited."

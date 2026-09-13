@@ -87,6 +87,18 @@ public static class SupervisionEventTypeIds
   public const string Cancelled = "supervision.cancelled";
 }
 
+public static class SupervisionRetryReasons
+{
+  public const string WorkerFailure = "worker-failure";
+  public const string AcceptanceMismatch = "acceptance-mismatch";
+  public const string StaleEvidenceReverification = "stale-evidence-reverification";
+  public const string ValidationFailure = "validation-failure";
+  public const string HarnessRecovery = "harness-recovery";
+  public const string WatchdogRecovery = "watchdog-recovery";
+  public const string CanonicalRecovery = "canonical-recovery";
+  public const string CrashRecovery = "crash-recovery";
+}
+
 public sealed record PrepareSupervisionRunRequest(
   string Objective,
   string Model,
@@ -133,7 +145,10 @@ public sealed record SupervisionRunEvent(
   [property: JsonIgnore]
   ContextUsageView? ContextUsage = null,
   [property: JsonIgnore]
-  LocalActionEvent? LocalAction = null
+  LocalActionEvent? LocalAction = null,
+  string? RejectionReason = null,
+  string? RetryReason = null,
+  long? DurationMilliseconds = null
 );
 
 public static class SupervisionWorkItemStates
@@ -163,8 +178,37 @@ public sealed record SupervisionWorkItemView(
   string? WorkerContextId,
   long EvidenceRevision,
   string? LastDiscrepancy,
-  string? EvidenceSha256
+  string? EvidenceSha256,
+  string? RejectionReason = null,
+  string? RetryReason = null
 );
+
+public sealed record SupervisionTelemetryView(
+  long DecompositionDurationMilliseconds,
+  long WorkerDurationMilliseconds,
+  long VerificationDurationMilliseconds,
+  long CorrectionDurationMilliseconds,
+  long FinalCompletionDurationMilliseconds,
+  int WorkerAttemptCount,
+  int SupervisorTransitionCount,
+  string? RejectionReason,
+  string? RetryReason,
+  int ActualWorkspaceMutationCount
+)
+{
+  public static SupervisionTelemetryView Empty { get; } = new(
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    null,
+    null,
+    0
+  );
+}
 
 public sealed record SupervisionContextView(
   string Id,
@@ -190,7 +234,8 @@ public sealed record SupervisionRuntimeView(
   long EvidenceRevision,
   string? FinalAnswer,
   string? LastFailure,
-  bool RecoverableInCurrentProcess
+  bool RecoverableInCurrentProcess,
+  SupervisionTelemetryView? Telemetry = null
 )
 {
   public static SupervisionRuntimeView Empty(bool recoverableInCurrentProcess = true)
@@ -207,7 +252,8 @@ public sealed record SupervisionRuntimeView(
       0,
       null,
       null,
-      recoverableInCurrentProcess
+      recoverableInCurrentProcess,
+      SupervisionTelemetryView.Empty
     );
   }
 }
@@ -330,7 +376,7 @@ public sealed record DurableSupervisionCheckpoint(
   string ExecutionStrategy = SupervisionExecutionStrategies.Supervised
 )
 {
-  public const int CurrentSchemaVersion = 4;
+  public const int CurrentSchemaVersion = 5;
 }
 
 public sealed record DurableSupervisionRunView(
@@ -755,6 +801,23 @@ internal static class SupervisionViewFactory
     SupervisionRuntimeView? runtime = null
   )
   {
+    var effectiveRuntime = runtime ?? checkpoint.Runtime;
+    if (effectiveRuntime is not null)
+    {
+      var telemetry = effectiveRuntime.Telemetry ?? SupervisionTelemetryView.Empty;
+      effectiveRuntime = effectiveRuntime with
+      {
+        Telemetry = telemetry with
+        {
+          WorkerAttemptCount = effectiveRuntime.WorkItems.Sum(item => item.AttemptCount),
+          SupervisorTransitionCount = effectiveRuntime.SupervisorTransitionCount,
+          ActualWorkspaceMutationCount = checkpoint.Recovery?.Actions.Count(action =>
+            !action.ReadOnly
+            && action.Phase == SupervisionActionPhases.Committed
+          ) ?? telemetry.ActualWorkspaceMutationCount
+        }
+      };
+    }
     return new DurableSupervisionRunView(
       checkpoint.RunId,
       checkpoint.WorkspaceId,
@@ -775,7 +838,7 @@ internal static class SupervisionViewFactory
       ),
       checkpoint.CreatedAt,
       checkpoint.UpdatedAt,
-      runtime ?? checkpoint.Runtime,
+      effectiveRuntime,
       checkpoint.Recovery,
       checkpoint.WaitCode,
       checkpoint.Takeover,

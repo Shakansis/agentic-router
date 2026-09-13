@@ -494,6 +494,38 @@ static object? ReadPlanSchema(JsonElement dynamicTools)
   };
 }
 
+static object UserInputFixtureQuestions()
+{
+  return new
+  {
+    questions = new[]
+    {
+      new
+      {
+        id = "source",
+        header = "Source",
+        question = "Where should the source come from?",
+        options = new[]
+        {
+          new { label = "New file", description = "Create a new source file." },
+          new { label = "Existing file", description = "Use an existing workspace file." }
+        }
+      },
+      new
+      {
+        id = "format",
+        header = "Format",
+        question = "Which output format should be used?",
+        options = new[]
+        {
+          new { label = "Markdown", description = "Write Markdown." },
+          new { label = "Plain text", description = "Write plain text." }
+        }
+      }
+    }
+  };
+}
+
 static bool TryValidateModelCatalog(
   string? codexHome,
   string model,
@@ -841,6 +873,10 @@ async Task RunTurnAsync(
       }
     });
     await SendAsync(new { method = "item/commandExecution/outputDelta", @params = new { threadId, turnId, itemId, delta = "fake output\n" } });
+    if (currentRequest.Contains("codex presentation control bypass", StringComparison.OrdinalIgnoreCase))
+    {
+      await Task.Delay(400, cancellationToken);
+    }
 
     if (
       recoveryContinuation
@@ -1059,6 +1095,29 @@ async Task RunTurnAsync(
       {
         await File.WriteAllTextAsync(
           Path.Combine(codexHome, "fake-codex-host-web.json"),
+          JsonSerializer.Serialize(new { succeeded = result.Success, output = result.Text }),
+          cancellationToken
+        );
+      }
+    }
+
+    if (currentRequest.Contains("global user input codex", StringComparison.OrdinalIgnoreCase))
+    {
+      var result = await CallDynamicToolAsync(
+        threadId,
+        turnId,
+        "agentic_router_request_user_input",
+        UserInputFixtureQuestions(),
+        55_000L + int.Parse(
+          turnId["fake-turn-".Length..],
+          System.Globalization.CultureInfo.InvariantCulture
+        ),
+        cancellationToken
+      );
+      if (!string.IsNullOrWhiteSpace(codexHome))
+      {
+        await File.WriteAllTextAsync(
+          Path.Combine(codexHome, "fake-codex-user-input.json"),
           JsonSerializer.Serialize(new { succeeded = result.Success, output = result.Text }),
           cancellationToken
         );
@@ -1685,6 +1744,7 @@ async Task PrepareBenchmarkOutcomeAsync(
   switch (model)
   {
     case "alpha:latest":
+    case "qwen3-coder:30b":
       Directory.CreateDirectory(expectedDirectory);
       await File.WriteAllTextAsync(expectedPath, expected, cancellationToken);
       break;

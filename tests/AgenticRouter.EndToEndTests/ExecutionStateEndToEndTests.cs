@@ -3285,7 +3285,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       new[]
       {
         LocalActionPlanner.RequestToolsetTool,
-        "get_execution_plan",
         "list_files",
         "read_file",
         "get_file_info",
@@ -3306,7 +3305,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         request => request.AvailableTools.SequenceEqual(
           [
             LocalActionPlanner.RequestToolsetTool,
-            "get_execution_plan",
             "list_files",
             "read_file",
             "get_file_info",
@@ -3321,7 +3319,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         request => request.AvailableTools.SequenceEqual(
           [
             LocalActionPlanner.RequestToolsetTool,
-            "get_execution_plan",
             "list_files",
             "read_file",
             "get_file_info",
@@ -3335,7 +3332,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       plannerRequests.All(
         request => request.AvailableTools.All(
           tool => tool is LocalActionPlanner.RequestToolsetTool
-            or "get_execution_plan"
             or "list_files"
             or "get_file_info"
             or "search_text"
@@ -3458,7 +3454,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       new[]
       {
         LocalActionPlanner.RequestToolsetTool,
-        "get_execution_plan",
         "list_files",
         "read_file",
         "get_file_info",
@@ -3510,7 +3505,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       new[]
       {
         LocalActionPlanner.RequestToolsetTool,
-        "get_execution_plan",
         "list_files",
         "read_file",
         "get_file_info",
@@ -4041,26 +4035,18 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task AutoPolicyRequiresExplicitApprovalForUntrustedCommand()
+  public async Task AutoPolicyExecutesValidatedUntrustedCommandWithoutApproval()
   {
     await Page.GotoAsync("/");
     await SetExecuteModeAsync("auto");
     await StartMessageAsync("execute unknown process");
 
     await Expect(
-      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
-    ).ToBeVisibleAsync();
-    await Page.Locator(".action-approval").Last.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Approve",
-        Exact = true
-      }
-    ).ClickAsync();
-    await Expect(
       Page.Locator("[data-event-type=\"action.process-output\"]")
     ).ToContainTextAsync("Exit code: 0");
+    await Expect(
+      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
+    ).ToHaveCountAsync(0);
   }
 
   [TestMethod]
@@ -4068,7 +4054,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   public async Task PowerShellExactPermissionCanBeRememberedAndRevokedPerWorkspace()
   {
     await Page.GotoAsync("/");
-    await SetExecuteModeAsync("auto");
+    await SetExecuteModeAsync("ask");
     await StartMessageAsync("execute powershell process");
 
     var approval = Page.Locator(".action-approval").Last;
@@ -4142,7 +4128,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   public async Task BareExecutableExactPermissionCanBeRemembered()
   {
     await Page.GotoAsync("/");
-    await SetExecuteModeAsync("auto");
+    await SetExecuteModeAsync("ask");
     await StartMessageAsync("execute unknown process");
 
     var approval = Page.Locator(".action-approval").Last;
@@ -4442,19 +4428,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await StartMessageAsync(
       "execute recover failed process"
     );
-    await Expect(
-      Page.Locator(
-        "[data-event-type=\"action.awaiting-approval\"]"
-      )
-    ).ToBeVisibleAsync();
-    await Page.Locator(".action-approval").Last.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Approve",
-        Exact = true
-      }
-    ).ClickAsync();
 
     await Expect(
       Page.Locator(
@@ -4463,6 +4436,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToContainTextAsync(
       "could not be started"
     );
+    await Expect(
+      Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
+    ).ToHaveCountAsync(0);
     await Expect(
       Page.Locator(
         "[data-event-type=\"agent.execution-recovery-started\"]"

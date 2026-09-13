@@ -292,9 +292,11 @@ public sealed class OllamaClient : IOllamaClient
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
-    string? requestedEffort = null
+    string? requestedEffort = null,
+    ProviderGenerationProfile? generationProfile = null
   )
   {
+    generationProfile ??= ProviderGenerationProfiles.Deterministic;
     var stopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateToolMessages(
       messages
@@ -317,6 +319,7 @@ public sealed class OllamaClient : IOllamaClient
         usageContext,
         estimatedInput,
         toolOutput,
+        generationProfile.MaximumContextTokens,
         cancellationToken
       );
       var payload = CreateRequest(
@@ -325,10 +328,12 @@ public sealed class OllamaClient : IOllamaClient
         onThinkingDelta is not null || onContentDelta is not null,
         null,
         new OllamaOptions(
-          0,
+          generationProfile.Temperature,
           policy.Resolution.EffectiveContextTokens,
           policy.OutputTokens,
-          policy.MainGpu
+          policy.MainGpu,
+          generationProfile.TopP,
+          generationProfile.RepeatPenalty
         ),
         null,
         tools.Count == 0
@@ -400,7 +405,8 @@ public sealed class OllamaClient : IOllamaClient
           result.Message?.ToolCalls?.Select(
             call => new OllamaToolCall(
               call.Function.Name,
-              call.Function.Arguments.Clone()
+              call.Function.Arguments.Clone(),
+              call.Id
             )
           ).ToArray() ?? [],
           policy.Resolution
@@ -567,7 +573,8 @@ public sealed class OllamaClient : IOllamaClient
           chunk.Message.ToolCalls.Select(
             call => new OllamaToolCall(
               call.Function.Name,
-              call.Function.Arguments.Clone()
+              call.Function.Arguments.Clone(),
+              call.Id
             )
           )
         );
@@ -632,6 +639,7 @@ public sealed class OllamaClient : IOllamaClient
         usageContext,
         estimatedInput,
         false,
+        options.EffectiveGenerationProfile.MaximumContextTokens,
         cancellationToken
       );
       var payload = CreateRequest(
@@ -640,10 +648,12 @@ public sealed class OllamaClient : IOllamaClient
         false,
         format,
         new OllamaOptions(
-          0,
+          options.EffectiveGenerationProfile.Temperature,
           policy.Resolution.EffectiveContextTokens,
           policy.OutputTokens,
-          policy.MainGpu
+          policy.MainGpu,
+          options.EffectiveGenerationProfile.TopP,
+          options.EffectiveGenerationProfile.RepeatPenalty
         ),
         null,
         images: options.Images,
@@ -941,10 +951,7 @@ public sealed class OllamaClient : IOllamaClient
     return new ProviderModelCapabilities(
       chat,
       chat,
-      capabilities.Contains(
-        "tools",
-        StringComparer.OrdinalIgnoreCase
-      ),
+      inspected.AdvertisedTools,
       vision,
       false,
       inspected.DeclaredContextTokens,
@@ -1211,6 +1218,7 @@ public sealed class OllamaClient : IOllamaClient
           : usageContext,
         estimatedInput,
         false,
+        options.EffectiveGenerationProfile.MaximumContextTokens,
         cancellationToken
       );
     }
@@ -1314,10 +1322,12 @@ public sealed class OllamaClient : IOllamaClient
       true,
       null,
       new OllamaOptions(
-        0,
+        options.EffectiveGenerationProfile.Temperature,
         policy.Resolution.EffectiveContextTokens,
         policy.OutputTokens,
-        policy.MainGpu
+        policy.MainGpu,
+        options.EffectiveGenerationProfile.TopP,
+        options.EffectiveGenerationProfile.RepeatPenalty
       ),
       null,
       images: options.Images,
@@ -1552,6 +1562,7 @@ public sealed class OllamaClient : IOllamaClient
     ProviderCallContext usageContext,
     long estimatedInputTokens,
     bool toolOutput,
+    int? generationMaximumContextTokens,
     CancellationToken cancellationToken
   )
   {
@@ -1623,7 +1634,8 @@ public sealed class OllamaClient : IOllamaClient
       usageContext.ModelRole,
       metadata.DeclaredContextTokens,
       estimatedInputTokens,
-      requestedOutput
+      requestedOutput,
+      generationMaximumContextTokens
     );
 
     if (usageContext.RuntimeContextTokens is not null)
@@ -2025,10 +2037,12 @@ public sealed class OllamaClient : IOllamaClient
               new OllamaApiFunctionCall(
                 call.Name,
                 call.Arguments
-              )
+              ),
+              call.Id
             )
           ).ToArray(),
           message.ToolName,
+          message.ToolCallId,
           Images: message.Images?.Select(
             image => Convert.ToBase64String(image.Bytes)
           ).ToArray()
@@ -2113,7 +2127,9 @@ public sealed class OllamaClient : IOllamaClient
     double? Temperature,
     int? NumCtx,
     int? NumPredict,
-    int? MainGpu
+    int? MainGpu,
+    double? TopP = null,
+    double? RepeatPenalty = null
   );
 
   private sealed record GenerationPolicy(
@@ -2136,6 +2152,8 @@ public sealed class OllamaClient : IOllamaClient
     IReadOnlyList<OllamaApiToolCall>? ToolCalls = null,
     [property: JsonPropertyName("tool_name")]
     string? ToolName = null,
+    [property: JsonPropertyName("tool_call_id")]
+    string? ToolCallId = null,
     IReadOnlyList<string>? Images = null
   );
 
@@ -2152,7 +2170,8 @@ public sealed class OllamaClient : IOllamaClient
 
   private sealed record OllamaApiToolCall(
     string? Type,
-    OllamaApiFunctionCall Function
+    OllamaApiFunctionCall Function,
+    string? Id = null
   );
 
   private sealed record OllamaApiFunctionCall(

@@ -91,6 +91,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "An execution plan is optional. For a task that benefits from visible multi-step tracking, "
     + "you may request and call create_execution_plan with your own objective, titles, steps, and "
     + "dependencies. For a simple task, continue without a plan. The Host never invents plan steps. "
+    + "When genuinely blocked on missing user information, request one atomic batch of 1 to 4 questions through request_user_input. Each question may provide up to 4 predefined options and always permits a custom answer. Wait for the complete batch response before continuing. "
     + "The Host owns approval. Under ask, every mutation waits for approval; under auto, requested in-scope mutations execute after Host validation without a duplicate approval. "
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
@@ -297,7 +298,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   )
   {
     var scope = ExecutionTurnToolPolicy.Resolve(
-      messages.Select(message => (message.Role, message.Content))
+      messages.Select(message => (message.Role, message.Content)),
+      hasExecutionPlan: !planRequired
     );
     var catalogTools = ToolDefinitions.Where(
       tool => scope.Allows(tool.Name)
@@ -679,6 +681,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         },
         []
       ),
+      UserInputProtocol.ToolDefinition,
       Tool(
         "list_files",
         "List bounded entries inside the trusted workspace.",

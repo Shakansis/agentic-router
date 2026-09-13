@@ -164,6 +164,7 @@ builder.Services.AddSingleton<IUsageLedger>(
 builder.Services.AddSingleton<ITokenEstimator, ConservativeTokenEstimator>();
 builder.Services.AddSingleton<IUsageRecorder, UsageRecorder>();
 builder.Services.AddScoped<ITraceContext, TraceContext>();
+builder.Services.AddScoped<IExecutionLatencyTracker, ExecutionLatencyTracker>();
 builder.Services.AddSingleton<IIncidentJournal>(
   services => new JsonlIncidentJournal(
     dataDirectory,
@@ -202,6 +203,7 @@ builder.Services.AddScoped<IIntentionRouter, IntentionRouter>();
 builder.Services.AddScoped<IModelResolver, ModelResolver>();
 builder.Services.AddScoped<IConversationContextBuilder, ConversationContextBuilder>();
 builder.Services.AddScoped<ITrustedWorkspaceService, TrustedWorkspaceService>();
+builder.Services.AddSingleton<ProjectAwarenessCache>();
 builder.Services.AddScoped<IProjectAwarenessService, ProjectAwarenessService>();
 builder.Services.AddScoped<IRepositoryInstructionService, RepositoryInstructionService>();
 builder.Services.AddSingleton<IToolNameResolver, ToolNameResolver>();
@@ -227,8 +229,15 @@ builder.Services.AddSingleton<IToolProtocolConformanceService, ToolProtocolConfo
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
 builder.Services.AddScoped<IExpertExecutionGuidanceService, ExpertExecutionGuidanceService>();
 builder.Services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
+builder.Services.AddSingleton(
+  new UserInputStoreOptions(
+    Path.Combine(dataDirectory, "user-input", "pending.json")
+  )
+);
+builder.Services.AddSingleton<IUserInputCoordinator, UserInputCoordinator>();
 builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
+builder.Services.AddSingleton<HarnessWorkspaceBaselineCache>();
 builder.Services.AddSingleton<HarnessMcpHostBridge>();
 builder.Services.AddSingleton<NativeHarnessAdapter>();
 builder.Services.AddSingleton<IAgentHarness>(

@@ -557,6 +557,20 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   }
   if (text.Contains("host bridge qwen code", StringComparison.Ordinal))
   {
+    if (text.Contains("global user input host bridge qwen code", StringComparison.Ordinal))
+    {
+      var answers = await InvokeHostToolAsync(
+        "request_user_input",
+        UserInputFixtureQuestions()
+      );
+      await WriteMarkerAsync("fake-qwen-user-input.json", new
+      {
+        succeeded = answers.Succeeded,
+        output = answers.Output
+      });
+      await CompleteAsync(session, promptId);
+      return Results.Empty;
+    }
     if (text.Contains("web host bridge qwen code", StringComparison.Ordinal))
     {
       var web = await InvokeHostToolAsync(
@@ -1022,6 +1036,13 @@ async Task CompleteBenchmarkAsync(FakeSession session, string promptId, string r
   {
     await RunBenchmarkToolAsync(
       session,
+      "qwen-benchmark-update-read-before",
+      "read_file",
+      new { path = "fixture/update.txt" },
+      "fixture/update.txt"
+    );
+    await RunBenchmarkToolAsync(
+      session,
       "qwen-benchmark-update",
       "replace_text",
       new
@@ -1031,6 +1052,13 @@ async Task CompleteBenchmarkAsync(FakeSession session, string promptId, string r
         newText = "retries=3",
         replaceAll = false
       },
+      "fixture/update.txt"
+    );
+    await RunBenchmarkToolAsync(
+      session,
+      "qwen-benchmark-update-read-after",
+      "read_file",
+      new { path = "fixture/update.txt" },
       "fixture/update.txt"
     );
   }
@@ -1264,6 +1292,38 @@ async Task<McpToolResult> InvokeHostToolAsync(string tool, object arguments)
     !result.GetProperty("isError").GetBoolean(),
     result.GetProperty("content")[0].GetProperty("text").GetString() ?? string.Empty
   );
+}
+
+object UserInputFixtureQuestions()
+{
+  return new
+  {
+    questions = new[]
+    {
+      new
+      {
+        id = "source",
+        header = "Source",
+        question = "Where should the source come from?",
+        options = new[]
+        {
+          new { label = "New file", description = "Create a new source file." },
+          new { label = "Existing file", description = "Use an existing workspace file." }
+        }
+      },
+      new
+      {
+        id = "format",
+        header = "Format",
+        question = "Which output format should be used?",
+        options = new[]
+        {
+          new { label = "Markdown", description = "Write Markdown." },
+          new { label = "Plain text", description = "Write plain text." }
+        }
+      }
+    }
+  };
 }
 
 async Task RunHostStepAsync(List<McpStepResult> steps, string tool, object arguments)

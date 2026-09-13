@@ -10,7 +10,8 @@ public sealed record ExecutionTurnToolScope(
   bool ValidationProfileAvailable,
   bool GitToolsAvailable,
   bool DirectoryCreationAvailable,
-  bool DeletionAvailable
+  bool DeletionAvailable,
+  bool HasExecutionPlan = false
 )
 {
   public bool Allows(string canonicalTool)
@@ -20,19 +21,40 @@ public sealed record ExecutionTurnToolScope(
       StringComparer.OrdinalIgnoreCase
     );
   }
+
+  public ExecutionTurnToolScope WithPlanState(bool hasExecutionPlan)
+  {
+    var tools = AvailableTools.Where(
+      tool => tool is not "create_execution_plan"
+        and not "revise_execution_plan"
+        and not "get_execution_plan"
+    ).ToList();
+    tools.Add(
+      hasExecutionPlan
+        ? "revise_execution_plan"
+        : "create_execution_plan"
+    );
+    if (hasExecutionPlan)
+    {
+      tools.Add("get_execution_plan");
+    }
+    return this with
+    {
+      AvailableTools = tools,
+      HasExecutionPlan = hasExecutionPlan
+    };
+  }
 }
 
 public static class ExecutionTurnToolPolicy
 {
   private static readonly string[] CoreTools =
   [
-    "create_execution_plan",
-    "revise_execution_plan",
-    "get_execution_plan",
     "list_files",
     "read_file",
     "get_file_info",
     "search_text",
+    UserInputProtocol.ToolName,
     "create_file",
     "create_files",
     "write_file",
@@ -59,7 +81,8 @@ public static class ExecutionTurnToolPolicy
     string objective,
     bool validationProfileAvailable,
     bool webSearchAvailable = false,
-    bool diagnosticTraceAvailable = false
+    bool diagnosticTraceAvailable = false,
+    bool hasExecutionPlan = false
   )
   {
     var normalized = Normalize(objective);
@@ -105,6 +128,12 @@ public static class ExecutionTurnToolPolicy
     const bool deletionAvailable = true;
 
     var tools = new List<string>(CoreTools);
+    tools.Add(
+      hasExecutionPlan
+        ? "revise_execution_plan"
+        : "create_execution_plan"
+    );
+    if (hasExecutionPlan) tools.Add("get_execution_plan");
     if (deletionAvailable) tools.Add("delete_paths");
     if (directoryCreationAvailable) tools.Add("create_directory");
     if (processAllowed) tools.Add("run_process");
@@ -123,12 +152,14 @@ public static class ExecutionTurnToolPolicy
       validationProfileAvailable,
       gitToolsAvailable,
       directoryCreationAvailable,
-      deletionAvailable
+      deletionAvailable,
+      hasExecutionPlan
     );
   }
 
   public static ExecutionTurnToolScope Resolve(
-    IEnumerable<(string Role, string? Content)> messages
+    IEnumerable<(string Role, string? Content)> messages,
+    bool hasExecutionPlan = false
   )
   {
     var materialized = messages.ToArray();
@@ -147,7 +178,11 @@ public static class ExecutionTurnToolPolicy
       "Validation profile: configured",
       StringComparison.Ordinal
     ) == true;
-    return Resolve(objective, validationProfileAvailable);
+    return Resolve(
+      objective,
+      validationProfileAvailable,
+      hasExecutionPlan: hasExecutionPlan
+    );
   }
 
   public static string Describe(ExecutionTurnToolScope scope)
@@ -161,6 +196,9 @@ public static class ExecutionTurnToolPolicy
         ? "A Host validation profile is available through run_validation_profile."
         : "No Host validation profile is configured; do not invent validation commands or a development server.";
     return $"{process}\n{validation}\n"
+      + (scope.HasExecutionPlan
+        ? "An accepted Host plan exists; revise_execution_plan and get_execution_plan are available, while create_execution_plan is not. "
+        : "No Host plan exists; create_execution_plan is available, while revise_execution_plan and get_execution_plan are not. ")
       + "Only tools offered by the Host in the current request are valid. "
       + "The approval selector is authoritative: ask requires approval before every mutation; auto executes a requested in-scope mutation after Host validation without a duplicate prompt. "
       + "create_file and create_files create required parent directories, so do not create a directory solely as a file parent. "

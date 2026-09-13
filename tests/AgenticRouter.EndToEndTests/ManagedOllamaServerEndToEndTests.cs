@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Devices;
+using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -12,6 +13,84 @@ namespace AgenticRouter.EndToEndTests;
 [DoNotParallelize]
 public sealed class ManagedOllamaServerEndToEndTests
 {
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RetriesOnePortBindingRaceAndPreservesOtherStartupEvidence()
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      Assert.Inconclusive("Windows Job Object and TCP-owner validation are Windows-only.");
+    }
+
+    var temporaryRoot = Path.Combine(
+      Path.GetTempPath(),
+      "agentic-router-managed-ollama-e2e",
+      Guid.NewGuid().ToString("N")
+    );
+    Directory.CreateDirectory(temporaryRoot);
+    var executable = CopyFakeOllama(temporaryRoot);
+    var failurePath = Path.ChangeExtension(executable, ".startup-failure");
+    OllamaManagedServerManager? manager = null;
+    try
+    {
+      manager = CreateManager(
+        Path.Combine(temporaryRoot, "data"),
+        new TestHttpClientFactory(),
+        executable
+      );
+      await manager.StartAsync(CancellationToken.None);
+
+      await File.WriteAllTextAsync(
+        failurePath,
+        "listen tcp 127.0.0.1:12434: bind: Only one usage of each socket address is normally permitted"
+      );
+      var recovered = await manager.ResolveAsync(
+        new Uri("http://127.0.0.1:11434"),
+        "ollama:0",
+        "ollama:0",
+        CancellationToken.None
+      );
+      Assert.IsTrue(recovered.Managed);
+      Assert.HasCount(1, manager.GetActiveServers());
+
+      await manager.DisposeAsync();
+      manager = CreateManager(
+        Path.Combine(temporaryRoot, "second-data"),
+        new TestHttpClientFactory(),
+        executable
+      );
+      await manager.StartAsync(CancellationToken.None);
+      await File.WriteAllTextAsync(
+        failurePath,
+        "fatal: deterministic startup fixture"
+      );
+      var exception = await Assert.ThrowsExactlyAsync<OllamaProviderException>(
+        () => manager.ResolveAsync(
+          new Uri("http://127.0.0.1:11434"),
+          "ollama:0",
+          "ollama:0",
+          CancellationToken.None
+        )
+      );
+      StringAssert.Contains(
+        exception.TechnicalMessage,
+        "fatal: deterministic startup fixture"
+      );
+      Assert.IsEmpty(manager.GetActiveServers());
+    }
+    finally
+    {
+      if (manager is not null)
+      {
+        await manager.DisposeAsync();
+      }
+      if (Directory.Exists(temporaryRoot))
+      {
+        Directory.Delete(temporaryRoot, recursive: true);
+      }
+    }
+  }
+
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task OwnsBackendEnvironmentAndCollectsVerifiedOrphan()
@@ -278,6 +357,16 @@ public sealed class ManagedOllamaServerEndToEndTests
 
   private static string FindRepositoryRoot()
   {
+    var configured = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_REPOSITORY_ROOT"
+    );
+    if (
+      !string.IsNullOrWhiteSpace(configured)
+      && File.Exists(Path.Combine(configured, "AgenticRouter.slnx"))
+    )
+    {
+      return Path.GetFullPath(configured);
+    }
     var current = new DirectoryInfo(AppContext.BaseDirectory);
     while (current is not null)
     {

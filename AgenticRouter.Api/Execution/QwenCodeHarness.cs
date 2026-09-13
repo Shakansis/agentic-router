@@ -66,7 +66,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSessionDiff: false,
       SupportsNativePermissions: true,
       SupportsSteering: true,
-      SupportsNativeWebSearch: true
+      SupportsNativeWebSearch: true,
+      SupportsUserInput: true
     ),
     ["ollama-local"]
   );

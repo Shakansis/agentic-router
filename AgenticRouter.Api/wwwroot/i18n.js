@@ -41,6 +41,8 @@
       "memory.adapter_vram_note": "Total dedicated VRAM used on this physical adapter. It can include the Ollama model, other processes, and driver allocations.",
       "memory.allocated_context_window": "Allocated Context Window",
       "memory.allocated_context_note": "Capacity reported by Ollama for the loaded runner, not the number of tokens currently occupied by a prompt.",
+      "memory.requested_context_window": "Requested Context Window",
+      "memory.requested_context_note": "Context capacity requested by Agentic Router for the loaded runner.",
       "memory.context_runtime": "Estimated Context/Runtime Memory",
       "memory.context_runtime_note": "Estimated from loaded allocation minus installed model size; includes KV cache and other runtime buffers.",
       "memory.no_loaded_model": "No loaded model reported by Ollama.",

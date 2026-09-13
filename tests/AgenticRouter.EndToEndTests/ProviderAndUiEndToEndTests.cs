@@ -4104,6 +4104,111 @@ baselineTotal!.Value
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InitialLoadDiscoversModelsAfterSetupCompletes()
+  {
+    var releaseSetup = new TaskCompletionSource(
+      TaskCreationOptions.RunContinuationsAsynchronously
+    );
+    var setupReleased = false;
+    var modelsRequestedAfterSetupReleased = false;
+    await Page.RouteAsync(
+      "**/api/setup/status",
+      async route =>
+      {
+        await releaseSetup.Task;
+        setupReleased = true;
+        await route.ContinueAsync();
+      }
+    );
+    await Page.RouteAsync(
+      "**/api/models",
+      async route =>
+      {
+        modelsRequestedAfterSetupReleased = setupReleased;
+        await route.ContinueAsync();
+      }
+    );
+
+    var navigation = Page.GotoAsync(
+      "/",
+      new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded }
+    );
+    var loader = Page.Locator("#app-loader");
+    await Expect(loader).ToBeVisibleAsync();
+    await Expect(
+      loader.Locator("[data-bootstrap-step=\"providers\"]")
+    ).ToHaveAttributeAsync("data-state", "loading");
+    await Expect(Page.Locator("#composer")).ToBeHiddenAsync();
+
+    releaseSetup.SetResult();
+    await navigation;
+
+    await Expect(
+      Page.Locator("#model-selector option[value=\"alpha:latest\"]")
+    ).ToHaveCountAsync(1);
+    await Expect(loader).ToBeHiddenAsync();
+    await Expect(Page.Locator("body")).Not.ToHaveClassAsync(
+      new Regex("\\bbootstrapping\\b")
+    );
+    Assert.IsTrue(modelsRequestedAfterSetupReleased);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InitialLoadReverifiesChangedOllamaEvidenceBeforeUnlockingUi()
+  {
+    using var setupResponse = await _environment.HttpClient.GetAsync(
+      "api/setup/status"
+    );
+    setupResponse.EnsureSuccessStatusCode();
+    var staleSetup = JsonNode.Parse(
+      await setupResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    staleSetup["coreReady"] = false;
+    var staleOllama = staleSetup["ollama"]!.AsObject();
+    staleOllama["available"] = false;
+    staleOllama["version"] = null;
+    staleOllama["diagnostic"] =
+      "The Agentic Router-owned Ollama server exited during startup.";
+    var setupRequests = 0;
+
+    await Page.RouteAsync(
+      "**/api/setup/status",
+      async route =>
+      {
+        setupRequests++;
+        if (setupRequests == 1)
+        {
+          await route.FulfillAsync(
+            new RouteFulfillOptions
+            {
+              Status = 200,
+              ContentType = "application/json",
+              Body = staleSetup.ToJsonString()
+            }
+          );
+          return;
+        }
+        await route.ContinueAsync();
+      }
+    );
+
+    await Page.GotoAsync("/");
+
+    await Expect(Page.Locator("#app-loader")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#provider-badge")).ToHaveTextAsync("Online");
+    await Expect(
+      Page.Locator("#model-selector option[value=\"alpha:latest\"]")
+    ).ToHaveCountAsync(1);
+    Assert.AreEqual(
+      2,
+      setupRequests,
+      "The stale setup result should be reverified exactly once after newer model evidence succeeds."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task OllamaDiscoveryPublishesHealthyProviderState()
   {
     using (var models = await _environment.HttpClient.GetAsync("api/models"))
@@ -4602,6 +4707,22 @@ baselineTotal!.Value
       _environment.FakeOllama.LoadedModels.ToArray(),
       "router:latest"
     );
+    var loopRequest = _environment.FakeOllama.Requests.Single(
+      request => request.Messages.Any(
+        message => message.Role == "tool"
+          && message.ToolName == "benchmark_read"
+      )
+    );
+    var assistantCall = loopRequest.Messages.Single(
+      message => message.Role == "assistant"
+        && message.ToolCalls.Any(call => call.Name == "benchmark_read")
+    ).ToolCalls.Single(call => call.Name == "benchmark_read");
+    var toolResult = loopRequest.Messages.Single(
+      message => message.Role == "tool"
+        && message.ToolName == "benchmark_read"
+    );
+    Assert.IsFalse(string.IsNullOrWhiteSpace(assistantCall.Id));
+    Assert.AreEqual(assistantCall.Id, toolResult.ToolCallId);
 
     using var failingResponse = await _environment.HttpClient.PostAsJsonAsync(
       "api/models/conformance",

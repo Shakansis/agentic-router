@@ -26,7 +26,7 @@ public sealed class ApprovalPolicyService : IApprovalPolicyService
       StringComparison.Ordinal
     ))
     {
-      return true;
+      return !action.ProcessPermissionGranted;
     }
 
     if (string.Equals(
@@ -50,6 +50,6 @@ public sealed class ApprovalPolicyService : IApprovalPolicyService
       );
     }
 
-    return action.RequiresExplicitApproval;
+    return false;
   }
 }

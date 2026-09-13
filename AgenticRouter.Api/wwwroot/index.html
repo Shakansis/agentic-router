@@ -6,8 +6,48 @@
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/bootstrap.css">
+  <link rel="stylesheet" href="/user-input.css">
 </head>
-<body>
+<body class="bootstrapping">
+  <div
+    id="app-loader"
+    class="app-loader"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="app-loader-title"
+    aria-busy="true"
+  >
+    <section class="app-loader-card" aria-labelledby="app-loader-title">
+      <div class="app-loader-brand" aria-hidden="true">AR</div>
+      <div>
+        <span class="eyebrow">Agentic Router</span>
+        <h1 id="app-loader-title">Preparing your local workspace</h1>
+        <p id="app-loader-detail" role="status" aria-live="polite">Starting the application…</p>
+      </div>
+      <ol class="app-loader-steps" aria-label="Application startup progress">
+        <li data-bootstrap-step="recovery" data-state="pending">
+          <span aria-hidden="true"></span>
+          Restore local state
+        </li>
+        <li data-bootstrap-step="providers" data-state="pending">
+          <span aria-hidden="true"></span>
+          Check Ollama and installed models
+        </li>
+        <li data-bootstrap-step="runtime" data-state="pending">
+          <span aria-hidden="true"></span>
+          Load workspace and runtime status
+        </li>
+        <li data-bootstrap-step="conversation" data-state="pending">
+          <span aria-hidden="true"></span>
+          Prepare the conversation
+        </li>
+      </ol>
+      <button id="app-loader-retry" class="secondary-button" type="button" hidden>
+        Retry startup
+      </button>
+    </section>
+  </div>
   <div id="safe-mode-banner" class="safe-mode-banner" role="status" hidden>
     <strong>Safe mode</strong>
     <span id="safe-mode-reason">Execute, cloud, and configuration changes are disabled.</span>
@@ -271,6 +311,12 @@
           </div>
         </details>
       </div>
+      <section
+        id="user-input-panel"
+        class="user-input-panel"
+        aria-live="polite"
+        hidden
+      ></section>
       <form id="composer" class="composer">
         <button
           id="cancel-request"

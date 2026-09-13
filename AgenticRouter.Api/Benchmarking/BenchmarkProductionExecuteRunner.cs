@@ -346,6 +346,8 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     private int _repeatedToolCalls;
     private int _repeatedActions;
     private int _recoveries;
+    private int _surfacedPlanningErrors;
+    private bool _pendingPlanningRecovery;
     private long _executionDuration;
     private bool _completed;
     private bool _cancelled;
@@ -411,7 +413,14 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       {
         _completed = true;
         _terminalReason = streamEvent.ExecutionSession?.CompletionStatus ?? "response.completed";
-        if (_report.Length == 0 && !string.IsNullOrWhiteSpace(streamEvent.ResponseTail))
+        if (
+          _report.Length == 0
+          && !string.IsNullOrWhiteSpace(streamEvent.SpecialistCompletion)
+        )
+        {
+          _report.Append(streamEvent.SpecialistCompletion);
+        }
+        else if (_report.Length == 0 && !string.IsNullOrWhiteSpace(streamEvent.ResponseTail))
         {
           _report.Append(streamEvent.ResponseTail);
         }
@@ -443,7 +452,16 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
           }
         }
       }
-      if (IsRecoveryAttempt(streamEvent.Type))
+      if (streamEvent.Type == "action.semantic-repair-requested")
+      {
+        var recoveryIdentity = $"{streamEvent.Type}:{streamEvent.Message}";
+        if (_recoveryEvents.Add(recoveryIdentity))
+        {
+          _surfacedPlanningErrors++;
+          _pendingPlanningRecovery = true;
+        }
+      }
+      else if (IsRecoveryAttempt(streamEvent.Type))
       {
         var recoveryIdentity = $"{streamEvent.Type}:{streamEvent.SupervisionProgress?.EventSequence}:{streamEvent.LocalAction?.ActionId}:{streamEvent.Message}";
         if (_recoveryEvents.Add(recoveryIdentity))
@@ -476,11 +494,12 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
           ? BenchmarkExecutionStatusIds.Cancelled
           : BenchmarkExecutionStatusIds.Failed;
       var latestActions = _actions.Values.ToArray();
-      var failed = latestActions.Count(action => action.State is "failed" or "rejected");
+      var failed = latestActions.Count(action => action.State is "failed" or "rejected")
+        + _surfacedPlanningErrors;
       var validationErrors = latestActions
         .Where(action => action.State is "failed" or "rejected")
         .Where(action => IsValidationCode(action.Code))
-        .ToArray();
+        .Count() + _surfacedPlanningErrors;
       var filesWritten = (_review?.Files ?? [])
         .Where(file => file.Operation is "created" or "modified")
         .Select(file => file.RelativePath)
@@ -511,7 +530,7 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
         "real-life-operational-v1",
         latestActions.Length,
         failed,
-        validationErrors.Length,
+        validationErrors,
         _repeatedToolCalls,
         _repeatedActions,
         _recoveries,
@@ -644,6 +663,15 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       {
         _recoveries++;
         _pendingFailedActions.Clear();
+      }
+      if (
+        canonicalState == "completed"
+        && IsSemanticAction(action.Tool)
+        && _pendingPlanningRecovery
+      )
+      {
+        _recoveries++;
+        _pendingPlanningRecovery = false;
       }
       if (!firstObservation)
       {

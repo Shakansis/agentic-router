@@ -6,6 +6,7 @@ using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.Platform;
+using AgenticRouter.Api.ProjectAwareness;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -52,7 +53,8 @@ public sealed record ValidatedLocalAction(
   string? PlanStepId = null,
   string PlanBindingState = HostPlanBindingStates.Unbound,
   string? RequestedPlanStepId = null,
-  PendingRenameChange? PendingRename = null
+  PendingRenameChange? PendingRename = null,
+  bool ProcessPermissionGranted = false
 );
 
 public sealed record LocalActionCorrection(
@@ -116,6 +118,8 @@ public sealed class LocalActionService : ILocalActionService
   private readonly IGitDeliveryService _gitDelivery;
   private readonly IToolNameResolver _toolNames;
   private readonly IIncidentJournal _incidents;
+  private readonly IExecutionLatencyTracker _latency;
+  private readonly ProjectAwarenessCache? _projectAwarenessCache;
 
   public LocalActionService(
     ITrustedWorkspaceService workspace,
@@ -125,7 +129,9 @@ public sealed class LocalActionService : ILocalActionService
     IGitRepositoryService git,
     IGitDeliveryService gitDelivery,
     IToolNameResolver toolNames,
-    IIncidentJournal incidents
+    IIncidentJournal incidents,
+    IExecutionLatencyTracker? latency = null,
+    ProjectAwarenessCache? projectAwarenessCache = null
   )
   {
     _workspace = workspace;
@@ -136,6 +142,8 @@ public sealed class LocalActionService : ILocalActionService
     _gitDelivery = gitDelivery;
     _toolNames = toolNames;
     _incidents = incidents;
+    _latency = latency ?? NullExecutionLatencyTracker.Instance;
+    _projectAwarenessCache = projectAwarenessCache;
   }
 
   public async Task<ValidatedLocalAction> ValidateAsync(
@@ -144,6 +152,7 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
+    _latency.MarkOnce("first-tool-request");
     try
     {
       return await ValidateCoreAsync(
@@ -340,6 +349,8 @@ public sealed class LocalActionService : ILocalActionService
     CancellationToken cancellationToken
   )
   {
+    _latency.MarkOnce("first-tool-start");
+    _latency.MarkOnce("first-real-action-execution-start");
     try
     {
       await ValidatePendingFileStateAsync(
@@ -519,6 +530,15 @@ public sealed class LocalActionService : ILocalActionService
       )
       {
         executionSession.RecordWorkspaceRefresh();
+      }
+
+      if (
+        executionSession is not null
+        && !action.ReadOnly
+        && result.Succeeded
+      )
+      {
+        _projectAwarenessCache?.Invalidate(executionSession.WorkspacePath);
       }
 
       return result;
@@ -1899,7 +1919,8 @@ public sealed class LocalActionService : ILocalActionService
         preview
       ),
       false,
-      command.RequiresExplicitApproval
+      command.RequiresExplicitApproval,
+      ProcessPermissionGranted: command.PermissionGranted
     );
   }
 

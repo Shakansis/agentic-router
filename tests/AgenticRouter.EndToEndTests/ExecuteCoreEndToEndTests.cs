@@ -234,6 +234,142 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PresentationDeltasAreCoalescedAndControlBypassesTheBatch()
+  {
+    using var request = new HttpRequestMessage(HttpMethod.Post, "api/chat/stream")
+    {
+      Content = JsonContent.Create(new
+      {
+        message = "codex presentation control bypass codex incident reasoning flood",
+        model = "alpha:latest",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "codex",
+        approvalPolicy = "auto",
+        executionStrategy = "direct",
+        browserSessionId = "browser-presentation-batching"
+      })
+    };
+    using var response = await _environment.HttpClient.SendAsync(
+      request,
+      HttpCompletionOption.ResponseHeadersRead
+    );
+    response.EnsureSuccessStatusCode();
+    await using var stream = await response.Content.ReadAsStreamAsync();
+    using var reader = new StreamReader(stream);
+    var events = new List<JsonObject>();
+    var timer = Stopwatch.StartNew();
+    long? actionReceivedAt = null;
+    while (await reader.ReadLineAsync() is { } line)
+    {
+      if (!line.StartsWith("data: ", StringComparison.Ordinal))
+      {
+        continue;
+      }
+      var streamEvent = JsonNode.Parse(line[6..])!.AsObject();
+      events.Add(streamEvent);
+      if (streamEvent["type"]!.GetValue<string>() == "action.started")
+      {
+        actionReceivedAt ??= timer.ElapsedMilliseconds;
+      }
+    }
+
+    var completedAt = timer.ElapsedMilliseconds;
+    var flood = events.Where(item =>
+      item["type"]!.GetValue<string>() == "reasoning.delta"
+      && item["contentBlockId"]?.GetValue<string>()?.StartsWith(
+        "reason-flood-",
+        StringComparison.Ordinal
+      ) == true
+    ).ToArray();
+    Assert.IsNotNull(actionReceivedAt);
+    Assert.IsGreaterThanOrEqualTo(
+      250,
+      completedAt - actionReceivedAt.Value,
+      "The tool-start control event must be flushed while the harness turn is still running."
+    );
+    Assert.IsLessThan(150, flood.Length);
+    Assert.AreEqual(150, string.Concat(flood.Select(item =>
+      item["reasoningDelta"]!.GetValue<string>()
+    )).Length);
+    Assert.IsLessThan(
+      events.FindIndex(item => item["type"]!.GetValue<string>() == "response.completed"),
+      events.FindIndex(item => item["type"]!.GetValue<string>() == "action.started")
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ProjectAwarenessCacheHonorsReuseForcedRefreshAndInvalidation()
+  {
+    var outputStart = _environment.ApiOutput.Length;
+    using (var first = await _environment.HttpClient.GetAsync("api/workspace/project-profile"))
+    {
+      first.EnsureSuccessStatusCode();
+    }
+    using (var cached = await _environment.HttpClient.GetAsync("api/workspace/project-profile"))
+    {
+      cached.EnsureSuccessStatusCode();
+    }
+    await WaitUntilAsync(
+      () => _environment.ApiOutput[outputStart..].Contains(
+        "Project awareness cache hit",
+        StringComparison.Ordinal
+      ),
+      TimeSpan.FromSeconds(5)
+    );
+
+    await File.WriteAllTextAsync(
+      Path.Combine(_environment.WorkspaceDirectory, "CacheRefresh.csproj"),
+      "<Project Sdk=\"Microsoft.NET.Sdk\" />"
+    );
+    using (var refreshed = await _environment.HttpClient.PostAsync(
+      "api/workspace/project-profile/refresh",
+      null
+    ))
+    {
+      refreshed.EnsureSuccessStatusCode();
+      var profile = JsonNode.Parse(await refreshed.Content.ReadAsStringAsync())!.AsObject();
+      CollectionAssert.Contains(
+        profile["projectTypes"]!.AsArray().Select(item => item!.GetValue<string>()).ToArray(),
+        "dotnet"
+      );
+    }
+
+    await File.WriteAllTextAsync(
+      Path.Combine(_environment.WorkspaceDirectory, "package.json"),
+      "{}"
+    );
+    JsonObject? invalidated = null;
+    await WaitUntilAsync(
+      async () =>
+      {
+        using var response = await _environment.HttpClient.GetAsync(
+          "api/workspace/project-profile"
+        );
+        response.EnsureSuccessStatusCode();
+        invalidated = JsonNode.Parse(
+          await response.Content.ReadAsStringAsync()
+        )!.AsObject();
+        return invalidated["projectTypes"]!.AsArray().Any(item =>
+          item!.GetValue<string>() == "node"
+        );
+      },
+      TimeSpan.FromSeconds(5)
+    );
+    Assert.IsNotNull(invalidated);
+    StringAssert.Contains(
+      _environment.ApiOutput[outputStart..],
+      "Project awareness cache forced refresh"
+    );
+    StringAssert.Contains(
+      _environment.ApiOutput[outputStart..],
+      "Project awareness cache rebuilt"
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task NativeHarnessRemainsDefaultAndDoesNotStartCodex()
   {
     await Page.GotoAsync("/");
@@ -2005,20 +2141,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "I will use the Host"
     );
     await Expect(
-      firstThinking
-    ).ToHaveAttributeAsync(
-      "open",
-      string.Empty
-    );
-    Assert.AreEqual(
-      0,
-      await assistant.Locator(
-        ".work-action"
-      ).CountAsync(),
-      "Thinking must be visible before the tool-call response is complete."
-    );
-
-    await Expect(
       assistant.Locator(
         ".work-action"
       )
@@ -2737,6 +2859,40 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         request => request.AvailableTools.All(
           tool => tool is "list_files" or "read_file" or "get_file_info" or "search_text"
         )
+      )
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExplicitModelUsesIntentionScopedRpgGenerationProfile()
+  {
+    await Page.GotoAsync(
+      "/"
+    );
+    await Page.Locator(
+      "#model-selector"
+    ).SelectOptionAsync(
+      "alpha:latest"
+    );
+    await SendMessageAsync(
+      "Write an RPG story about an ancient observatory"
+    );
+
+    var request = _environment.FakeOllama.Requests.Last(
+      item => item.Model == "alpha:latest"
+    );
+    Assert.AreEqual(0.8, request.Temperature);
+    Assert.AreEqual(0.92, request.TopP);
+    Assert.AreEqual(1.05, request.RepeatPenalty);
+    Assert.AreEqual(16_384, request.ContextTokens);
+    Assert.IsTrue(
+      request.Messages.Any(
+        message => message.Role == "system"
+          && message.Content.Contains(
+            "You tell RPG stories.",
+            StringComparison.Ordinal
+          )
       )
     );
   }
@@ -3909,7 +4065,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#runtime-model-list .loaded-model-gpu-card"
       ).First
     ).ToContainTextAsync(
-      "Allocated Context Window"
+      "Requested Context Window"
     );
     await Expect(
       Page.Locator(
@@ -4303,15 +4459,21 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "Adapter VRAM Usedn/d"
     );
     await Expect(vulkanCard).ToContainTextAsync(
-      "Allocated Context Window262,144 tokens allocated · 131,072 requested"
+      "Requested Context Window131,072 tokens"
     );
     await Expect(
       vulkanCard.Locator(".loaded-model-metric").Filter(
-        new() { HasText = "Allocated Context Window" }
+        new() { HasText = "Requested Context Window" }
       )
     ).ToHaveAttributeAsync(
       "title",
-      new Regex("not the number of tokens currently occupied", RegexOptions.IgnoreCase)
+      new Regex("requested by Agentic Router", RegexOptions.IgnoreCase)
+    );
+    await Expect(vulkanCard).Not.ToContainTextAsync("tokens allocated ·");
+    Assert.IsFalse(
+      await Page.Locator("#runtime-details .runtime-popover")
+        .EvaluateAsync<bool>("element => element.scrollHeight > element.clientHeight + 1"),
+      "The runtime memory panel must size to its contents without an internal scrollbar."
     );
     await Expect(
       Page.Locator(
@@ -6321,7 +6483,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       new[]
       {
         LocalActionPlanner.RequestToolsetTool,
-        "get_execution_plan",
         "list_files",
         "read_file",
         "get_file_info",

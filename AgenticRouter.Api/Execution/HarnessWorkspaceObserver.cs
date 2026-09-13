@@ -1,28 +1,33 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Platform;
+using AgenticRouter.Api.ProjectAwareness;
 
 namespace AgenticRouter.Api.Execution;
 
 public sealed class HarnessWorkspaceObserver
 {
-  private const int MaximumFiles = 5_000;
+  internal const int MaximumFiles = 5_000;
   private readonly string _root;
   private readonly string _harnessId;
   private readonly int _maximumRollbackBytesPerFile;
   private readonly int _maximumRollbackBytesPerSession;
-  private readonly Dictionary<string, FileSnapshot> _files;
+  private readonly Dictionary<string, HarnessFileSnapshot> _files;
   private readonly Dictionary<string, string> _protectedGit;
+  private readonly HarnessWorkspaceBaselineCache? _baselineCache;
 
-  private HarnessWorkspaceObserver(
+  internal HarnessWorkspaceObserver(
     string root,
     string harnessId,
     int maximumRollbackBytesPerFile,
     int maximumRollbackBytesPerSession,
-    Dictionary<string, FileSnapshot> files,
-    Dictionary<string, string> protectedGit
+    Dictionary<string, HarnessFileSnapshot> files,
+    Dictionary<string, string> protectedGit,
+    HarnessWorkspaceBaselineCache? baselineCache = null,
+    bool baselineReused = false
   )
   {
     _root = root;
@@ -31,7 +36,11 @@ public sealed class HarnessWorkspaceObserver
     _maximumRollbackBytesPerSession = maximumRollbackBytesPerSession;
     _files = files;
     _protectedGit = protectedGit;
+    _baselineCache = baselineCache;
+    BaselineReused = baselineReused;
   }
+
+  public bool BaselineReused { get; }
 
   public static async Task<HarnessWorkspaceObserver> CaptureAsync(
     string workspacePath,
@@ -65,7 +74,17 @@ public sealed class HarnessWorkspaceObserver
     CancellationToken cancellationToken
   )
   {
-    await VerifyProtectedGitUnchangedAsync(cancellationToken);
+    var currentGit = await CaptureProtectedGitAsync(_root, cancellationToken);
+    if (!Equivalent(_protectedGit, currentGit))
+    {
+      throw new HarnessException(
+        $"{_harnessId}-git-boundary-rejected",
+        "The selected harness changed protected Git state.",
+        "A protected .git control path changed during the external harness turn.",
+        false,
+        harnessId: _harnessId
+      );
+    }
 
     var current = await CaptureFilesAsync(
       _root,
@@ -136,6 +155,21 @@ public sealed class HarnessWorkspaceObserver
       ));
     }
 
+    if (_baselineCache is not null)
+    {
+      await _baselineCache.UpdateAsync(
+        _root,
+        _maximumRollbackBytesPerFile,
+        _maximumRollbackBytesPerSession,
+        current,
+        currentGit,
+        cancellationToken
+      );
+      if (changes.Count > 0)
+      {
+        _baselineCache.NotifyWorkspaceChanged(_root);
+      }
+    }
     return changes;
   }
 
@@ -203,7 +237,7 @@ public sealed class HarnessWorkspaceObserver
 
   private async Task RestoreDeletedFileAsync(
     string relativePath,
-    FileSnapshot snapshot,
+    HarnessFileSnapshot snapshot,
     CancellationToken cancellationToken
   )
   {
@@ -222,7 +256,7 @@ public sealed class HarnessWorkspaceObserver
     await File.WriteAllBytesAsync(target, snapshot.Bytes, cancellationToken);
   }
 
-  private static async Task<Dictionary<string, FileSnapshot>> CaptureFilesAsync(
+  internal static async Task<Dictionary<string, HarnessFileSnapshot>> CaptureFilesAsync(
     string root,
     bool includeGit,
     int maximumSnapshotBytes,
@@ -230,7 +264,7 @@ public sealed class HarnessWorkspaceObserver
     CancellationToken cancellationToken
   )
   {
-    var result = new Dictionary<string, FileSnapshot>(FileSystemPathSemantics.Comparer);
+    var result = new Dictionary<string, HarnessFileSnapshot>(FileSystemPathSemantics.Comparer);
     var capturedBytes = 0L;
     var directories = new Stack<string>();
     directories.Push(root);
@@ -291,7 +325,7 @@ public sealed class HarnessWorkspaceObserver
         var hash = bytes is null
           ? await HashFileAsync(info.FullName, cancellationToken)
           : Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        result[relative] = new FileSnapshot(
+        result[relative] = new HarnessFileSnapshot(
           hash,
           info.Length,
           bytes,
@@ -302,7 +336,7 @@ public sealed class HarnessWorkspaceObserver
     return result;
   }
 
-  private static async Task<Dictionary<string, string>> CaptureProtectedGitAsync(
+  internal static async Task<Dictionary<string, string>> CaptureProtectedGitAsync(
     string root,
     CancellationToken cancellationToken
   )
@@ -354,6 +388,51 @@ public sealed class HarnessWorkspaceObserver
       result[relative] = await HashFileAsync(path, cancellationToken);
     }
     return result;
+  }
+
+  internal static async Task<HarnessFileSnapshot> CaptureFileAsync(
+    string root,
+    string path,
+    int maximumSnapshotBytes,
+    int maximumTotalSnapshotBytes,
+    long otherCapturedBytes,
+    CancellationToken cancellationToken
+  )
+  {
+    var info = new FileInfo(path);
+    EnsureConfined(info.FullName, root);
+    var parent = info.Directory;
+    while (
+      parent is not null
+      && !string.Equals(parent.FullName, root, FileSystemPathSemantics.Comparison)
+    )
+    {
+      EnsureNotReparsePoint(parent.FullName);
+      parent = parent.Parent;
+    }
+    if (parent is null)
+    {
+      throw new HarnessException(
+        "codex-workspace-boundary",
+        "An external-harness workspace path escaped the trusted root.",
+        info.FullName,
+        false
+      );
+    }
+    EnsureNotReparsePoint(info.FullName);
+    byte[]? bytes = info.Length <= maximumSnapshotBytes
+      && otherCapturedBytes + info.Length <= maximumTotalSnapshotBytes
+        ? await File.ReadAllBytesAsync(info.FullName, cancellationToken)
+        : null;
+    var hash = bytes is null
+      ? await HashFileAsync(info.FullName, cancellationToken)
+      : Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    return new HarnessFileSnapshot(
+      hash,
+      info.Length,
+      bytes,
+      bytes is not null && IsText(bytes) ? Encoding.UTF8.GetString(bytes) : null
+    );
   }
 
   private static IEnumerable<string> EnumerateFilesWithoutReparsePoints(string root)
@@ -428,10 +507,388 @@ public sealed class HarnessWorkspaceObserver
     }
   }
 
-  private sealed record FileSnapshot(
-    string Hash,
-    long Length,
-    byte[]? Bytes,
-    string? Text
+}
+
+internal sealed record HarnessFileSnapshot(
+  string Hash,
+  long Length,
+  byte[]? Bytes,
+  string? Text
+);
+
+public sealed class HarnessWorkspaceBaselineCache : IDisposable
+{
+  private readonly ConcurrentDictionary<string, Lazy<Entry>> _entries = new(
+    FileSystemPathSemantics.Comparer
+  );
+  private readonly ILogger<HarnessWorkspaceBaselineCache> _logger;
+  private readonly ProjectAwarenessCache _projectAwarenessCache;
+
+  public HarnessWorkspaceBaselineCache(
+    ILogger<HarnessWorkspaceBaselineCache> logger,
+    ProjectAwarenessCache projectAwarenessCache
+  )
+  {
+    _logger = logger;
+    _projectAwarenessCache = projectAwarenessCache;
+  }
+
+  public async Task<HarnessWorkspaceObserver> CaptureAsync(
+    string workspacePath,
+    string harnessId,
+    ExecutionSettings limits,
+    CancellationToken cancellationToken
+  )
+  {
+    var root = Path.GetFullPath(workspacePath);
+    var entry = _entries.GetOrAdd(
+      root,
+      path => new Lazy<Entry>(
+        () => new Entry(path),
+        LazyThreadSafetyMode.ExecutionAndPublication
+      )
+    ).Value;
+    await entry.Gate.WaitAsync(cancellationToken);
+    try
+    {
+      var reusable = entry.Files is not null
+        && entry.ProtectedGit is not null
+        && entry.MaximumRollbackBytesPerFile == limits.MaxRollbackBytesPerFile
+        && entry.MaximumRollbackBytesPerSession == limits.MaxRollbackBytesPerSession
+        && entry.CapturedGeneration == entry.Generation;
+      if (
+        !reusable
+        && entry.Files is not null
+        && entry.ProtectedGit is not null
+        && entry.MaximumRollbackBytesPerFile == limits.MaxRollbackBytesPerFile
+        && entry.MaximumRollbackBytesPerSession == limits.MaxRollbackBytesPerSession
+      )
+      {
+        reusable = await TryRefreshChangedPathsAsync(
+          entry,
+          root,
+          limits,
+          cancellationToken
+        );
+      }
+      if (reusable)
+      {
+        _logger.LogInformation(
+          "Workspace observer baseline reused for {WorkspacePath} at generation {Generation}.",
+          root,
+          entry.Generation
+        );
+        return new HarnessWorkspaceObserver(
+          root,
+          harnessId,
+          limits.MaxRollbackBytesPerFile,
+          limits.MaxRollbackBytesPerSession,
+          Clone(entry.Files!),
+          new Dictionary<string, string>(entry.ProtectedGit!, FileSystemPathSemantics.Comparer),
+          this,
+          true
+        );
+      }
+
+      var files = await HarnessWorkspaceObserver.CaptureFilesAsync(
+        root,
+        false,
+        limits.MaxRollbackBytesPerFile,
+        limits.MaxRollbackBytesPerSession,
+        cancellationToken
+      );
+      var protectedGit = await HarnessWorkspaceObserver.CaptureProtectedGitAsync(
+        root,
+        cancellationToken
+      );
+      Store(entry, limits.MaxRollbackBytesPerFile, limits.MaxRollbackBytesPerSession, files, protectedGit);
+      _logger.LogInformation(
+        "Workspace observer baseline rebuilt for {WorkspacePath} at generation {Generation}.",
+        root,
+        entry.Generation
+      );
+      return new HarnessWorkspaceObserver(
+        root,
+        harnessId,
+        limits.MaxRollbackBytesPerFile,
+        limits.MaxRollbackBytesPerSession,
+        Clone(files),
+        new Dictionary<string, string>(protectedGit, FileSystemPathSemantics.Comparer),
+        this,
+        false
+      );
+    }
+    finally
+    {
+      entry.Gate.Release();
+    }
+  }
+
+  internal async Task UpdateAsync(
+    string root,
+    int maximumRollbackBytesPerFile,
+    int maximumRollbackBytesPerSession,
+    Dictionary<string, HarnessFileSnapshot> files,
+    Dictionary<string, string> protectedGit,
+    CancellationToken cancellationToken
+  )
+  {
+    var canonical = Path.GetFullPath(root);
+    var entry = _entries.GetOrAdd(
+      canonical,
+      path => new Lazy<Entry>(
+        () => new Entry(path),
+        LazyThreadSafetyMode.ExecutionAndPublication
+      )
+    ).Value;
+    await entry.Gate.WaitAsync(cancellationToken);
+    try
+    {
+      Store(
+        entry,
+        maximumRollbackBytesPerFile,
+        maximumRollbackBytesPerSession,
+        files,
+        protectedGit
+      );
+    }
+    finally
+    {
+      entry.Gate.Release();
+    }
+  }
+
+  public void Dispose()
+  {
+    foreach (var entry in _entries.Values.Where(entry => entry.IsValueCreated))
+    {
+      entry.Value.Dispose();
+    }
+    _entries.Clear();
+  }
+
+  internal void NotifyWorkspaceChanged(string workspacePath)
+  {
+    _projectAwarenessCache.Invalidate(workspacePath);
+  }
+
+  private static void Store(
+    Entry entry,
+    int maximumRollbackBytesPerFile,
+    int maximumRollbackBytesPerSession,
+    Dictionary<string, HarnessFileSnapshot> files,
+    Dictionary<string, string> protectedGit
+  )
+  {
+    entry.Files = Clone(files);
+    entry.ProtectedGit = new Dictionary<string, string>(
+      protectedGit,
+      FileSystemPathSemantics.Comparer
+    );
+    entry.MaximumRollbackBytesPerFile = maximumRollbackBytesPerFile;
+    entry.MaximumRollbackBytesPerSession = maximumRollbackBytesPerSession;
+    entry.CapturedGeneration = entry.Generation;
+    entry.ClearChanges();
+  }
+
+  private static async Task<bool> TryRefreshChangedPathsAsync(
+    Entry entry,
+    string root,
+    ExecutionSettings limits,
+    CancellationToken cancellationToken
+  )
+  {
+    var changes = entry.TakeChanges();
+    if (changes.Invalidated || changes.Paths.Count == 0)
+    {
+      return false;
+    }
+
+    var files = Clone(entry.Files!);
+    var protectedGit = new Dictionary<string, string>(
+      entry.ProtectedGit!,
+      FileSystemPathSemantics.Comparer
+    );
+    var refreshGit = false;
+    foreach (var relativePath in changes.Paths)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (
+        relativePath.Equals(".git", FileSystemPathSemantics.Comparison)
+        || relativePath.StartsWith(".git/", FileSystemPathSemantics.Comparison)
+      )
+      {
+        refreshGit = true;
+        continue;
+      }
+
+      var fullPath = Path.GetFullPath(Path.Combine(root, relativePath));
+      var relativeCheck = Path.GetRelativePath(root, fullPath);
+      if (
+        Path.IsPathRooted(relativeCheck)
+        || relativeCheck.Equals("..", StringComparison.Ordinal)
+        || relativeCheck.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+      )
+      {
+        return false;
+      }
+      if (Directory.Exists(fullPath))
+      {
+        return false;
+      }
+      if (!File.Exists(fullPath))
+      {
+        var prefix = relativePath.TrimEnd('/') + "/";
+        if (files.Keys.Any(path => path.StartsWith(prefix, FileSystemPathSemantics.Comparison)))
+        {
+          return false;
+        }
+        files.Remove(relativePath);
+        continue;
+      }
+
+      files.TryGetValue(relativePath, out var prior);
+      var otherCapturedBytes = files.Values.Sum(snapshot => snapshot.Bytes?.LongLength ?? 0)
+        - (prior?.Bytes?.LongLength ?? 0);
+      files[relativePath] = await HarnessWorkspaceObserver.CaptureFileAsync(
+        root,
+        fullPath,
+        limits.MaxRollbackBytesPerFile,
+        limits.MaxRollbackBytesPerSession,
+        otherCapturedBytes,
+        cancellationToken
+      );
+      if (files.Count > HarnessWorkspaceObserver.MaximumFiles)
+      {
+        return false;
+      }
+    }
+    if (refreshGit)
+    {
+      protectedGit = await HarnessWorkspaceObserver.CaptureProtectedGitAsync(
+        root,
+        cancellationToken
+      );
+    }
+
+    entry.Files = files;
+    entry.ProtectedGit = protectedGit;
+    entry.MaximumRollbackBytesPerFile = limits.MaxRollbackBytesPerFile;
+    entry.MaximumRollbackBytesPerSession = limits.MaxRollbackBytesPerSession;
+    entry.CapturedGeneration = changes.Generation;
+    return entry.CapturedGeneration == entry.Generation;
+  }
+
+  private static Dictionary<string, HarnessFileSnapshot> Clone(
+    IReadOnlyDictionary<string, HarnessFileSnapshot> files
+  )
+  {
+    return files.ToDictionary(
+      pair => pair.Key,
+      pair => pair.Value,
+      FileSystemPathSemantics.Comparer
+    );
+  }
+
+  private sealed class Entry : IDisposable
+  {
+    private readonly FileSystemWatcher _watcher;
+    private readonly ConcurrentDictionary<string, byte> _changedPaths = new(
+      FileSystemPathSemantics.Comparer
+    );
+    private long _generation;
+    private int _invalidated;
+    private readonly string _root;
+
+    public Entry(string root)
+    {
+      _root = root;
+      _watcher = new FileSystemWatcher(root)
+      {
+        IncludeSubdirectories = true,
+        NotifyFilter = NotifyFilters.FileName
+          | NotifyFilters.DirectoryName
+          | NotifyFilters.LastWrite
+          | NotifyFilters.Size,
+        EnableRaisingEvents = true
+      };
+      _watcher.Changed += Changed;
+      _watcher.Created += Changed;
+      _watcher.Deleted += Changed;
+      _watcher.Renamed += Renamed;
+      _watcher.Error += Error;
+    }
+
+    public SemaphoreSlim Gate { get; } = new(1, 1);
+
+    public Dictionary<string, HarnessFileSnapshot>? Files { get; set; }
+
+    public Dictionary<string, string>? ProtectedGit { get; set; }
+
+    public int MaximumRollbackBytesPerFile { get; set; }
+
+    public int MaximumRollbackBytesPerSession { get; set; }
+
+    public long CapturedGeneration { get; set; } = -1;
+
+    public long Generation => Interlocked.Read(ref _generation);
+
+    public void Dispose()
+    {
+      _watcher.Dispose();
+      Gate.Dispose();
+    }
+
+    public WorkspaceChanges TakeChanges()
+    {
+      var generation = Generation;
+      var paths = _changedPaths.Keys.ToArray();
+      foreach (var path in paths)
+      {
+        _changedPaths.TryRemove(path, out _);
+      }
+      return new WorkspaceChanges(
+        generation,
+        Interlocked.Exchange(ref _invalidated, 0) != 0,
+        paths
+      );
+    }
+
+    public void ClearChanges()
+    {
+      _changedPaths.Clear();
+      Interlocked.Exchange(ref _invalidated, 0);
+    }
+
+    private void Changed(object sender, FileSystemEventArgs eventArgs)
+    {
+      Record(eventArgs.FullPath);
+      Interlocked.Increment(ref _generation);
+    }
+
+    private void Renamed(object sender, RenamedEventArgs eventArgs)
+    {
+      Record(eventArgs.OldFullPath);
+      Record(eventArgs.FullPath);
+      Interlocked.Increment(ref _generation);
+    }
+
+    private void Error(object sender, ErrorEventArgs eventArgs)
+    {
+      Interlocked.Exchange(ref _invalidated, 1);
+      Interlocked.Increment(ref _generation);
+    }
+
+    private void Record(string path)
+    {
+      var relative = Path.GetRelativePath(_root, path).Replace('\\', '/');
+      _changedPaths[relative] = 0;
+    }
+  }
+
+  private sealed record WorkspaceChanges(
+    long Generation,
+    bool Invalidated,
+    IReadOnlyList<string> Paths
   );
 }

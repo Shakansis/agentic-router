@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Platform;
 using AgenticRouter.Api.Providers;
 
@@ -20,7 +21,7 @@ public sealed record OpenCodeHarnessOptions(
   TimeSpan RequestTimeout
 );
 
-public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport
+public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAgentHarnessUserInputTransport
 {
   private const string ProviderId = "agentic-router-ollama";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
@@ -43,7 +44,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSessionDiff: true,
       SupportsNativePermissions: true,
       SupportsSteering: false,
-      SupportsNativeWebSearch: true
+      SupportsNativeWebSearch: true,
+      SupportsUserInput: true
     ),
     ["ollama-local"]
   );
@@ -57,6 +59,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private readonly SemaphoreSlim _turnGate = new(1, 1);
   private readonly ConcurrentDictionary<string, HarnessSessionState> _sessions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, PendingPermission> _permissions = new(StringComparer.Ordinal);
+  private readonly ConcurrentDictionary<string, PendingUserInput> _userInputs = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, ActiveTurn> _activeTurns = new(StringComparer.Ordinal);
   private Process? _process;
   private Uri? _serverUri;
@@ -324,6 +327,31 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
         switch (type)
         {
+          case "question.asked":
+            {
+              var questionId = String(properties, "id")
+                ?? throw Failure("opencode-user-input-invalid", "OpenCode question omitted its request id.");
+              var questions = ParseQuestions(properties);
+              _userInputs[questionId] = new PendingUserInput(
+                questionId,
+                sessionId,
+                request.WorkingDirectory
+              );
+              yield return Event(
+                "user-input.requested",
+                sessionId,
+                turnId,
+                message: $"OpenCode requested {questions.Count} user answer(s).",
+                native: payload,
+                userInputId: questionId,
+                userInputQuestions: questions
+              );
+              break;
+            }
+          case "question.replied":
+          case "question.rejected":
+            yield return Event("native.event", sessionId, turnId, native: payload);
+            break;
           case "session.next.text.delta":
             yield return Event(
               "assistant.delta",
@@ -443,6 +471,11 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 toolStates[partId] = status;
                 var callId = String(part, "callID") ?? partId;
                 var tool = String(part, "tool");
+                if (string.Equals(tool, "question", StringComparison.Ordinal))
+                {
+                  yield return Event("native.event", sessionId, turnId, native: payload);
+                  break;
+                }
                 switch (status)
                 {
                   case "running":
@@ -563,6 +596,11 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               break;
             }
           case "session.next.tool.called":
+            if (string.Equals(String(properties, "tool"), "question", StringComparison.Ordinal))
+            {
+              yield return Event("native.event", sessionId, turnId, native: payload);
+              break;
+            }
             yield return Event(
               "tool.started",
               sessionId,
@@ -761,6 +799,33 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       toolCallId,
       succeeded,
       output,
+      cancellationToken
+    );
+  }
+
+  public async Task ResolveUserInputAsync(
+    string userInputId,
+    IReadOnlyList<UserInputAnswerView> answers,
+    bool cancelled,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!_userInputs.TryRemove(userInputId, out var pending))
+    {
+      throw Failure("opencode-user-input-stale", "The OpenCode question is no longer pending.");
+    }
+    var path = cancelled
+      ? $"question/{EncodePath(userInputId)}/reject?directory={Encode(pending.WorkingDirectory)}"
+      : $"question/{EncodePath(userInputId)}/reply?directory={Encode(pending.WorkingDirectory)}";
+    await SendAsync(
+      HttpMethod.Post,
+      path,
+      cancelled
+        ? null
+        : new
+        {
+          answers = answers.Select(answer => new[] { answer.Answer }).ToArray()
+        },
       cancellationToken
     );
   }
@@ -1190,6 +1255,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     _configurationKey = null;
     _sessions.Clear();
     _permissions.Clear();
+    _userInputs.Clear();
     _activeTurns.Clear();
     if (process is null)
     {
@@ -1267,6 +1333,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     long? contextInputTokens = null,
     long? contextTotalTokens = null,
     bool readOnlyPermission = false
+    ,
+    string? userInputId = null,
+    IReadOnlyList<UserInputQuestionView>? userInputQuestions = null
   )
   {
     return new HarnessEvent(
@@ -1289,7 +1358,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       nativePayload: native,
       contextInputTokens: contextInputTokens,
       contextTotalTokens: contextTotalTokens,
-      readOnlyPermission: readOnlyPermission
+      readOnlyPermission: readOnlyPermission,
+      userInputId: userInputId,
+      userInputQuestions: userInputQuestions
     );
   }
 
@@ -1437,6 +1508,46 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       .ToArray();
   }
 
+  private static IReadOnlyList<UserInputQuestionView> ParseQuestions(JsonElement properties)
+  {
+    if (
+      !properties.TryGetProperty("questions", out var questionsElement)
+      || questionsElement.ValueKind != JsonValueKind.Array
+    )
+    {
+      throw Failure("opencode-user-input-invalid", "OpenCode question omitted its question batch.");
+    }
+    var nativeQuestions = questionsElement.EnumerateArray().ToArray();
+    if (nativeQuestions.Length is < 1 or > UserInputProtocol.MaximumQuestions)
+    {
+      throw Failure(
+        "opencode-user-input-invalid",
+        $"OpenCode question batch must contain between 1 and {UserInputProtocol.MaximumQuestions} questions."
+      );
+    }
+    return nativeQuestions.Select((question, index) =>
+    {
+      var options = question.TryGetProperty("options", out var optionsElement)
+        && optionsElement.ValueKind == JsonValueKind.Array
+          ? optionsElement.EnumerateArray().Select(option => new UserInputOptionView(
+            String(option, "label") ?? string.Empty,
+            String(option, "description")
+          )).ToArray()
+          : [];
+      if (options.Length > UserInputProtocol.MaximumOptions || options.Any(option => string.IsNullOrWhiteSpace(option.Label)))
+      {
+        throw Failure("opencode-user-input-invalid", "OpenCode question options are invalid or exceed the Host limit.");
+      }
+      return new UserInputQuestionView(
+        $"question-{index + 1}",
+        String(question, "header") ?? $"Question {index + 1}",
+        String(question, "question")
+          ?? throw Failure("opencode-user-input-invalid", "OpenCode question text is missing."),
+        options
+      );
+    }).ToArray();
+  }
+
   private static bool IsDestructiveResource(string resource)
   {
     return resource.Contains("delete", StringComparison.OrdinalIgnoreCase)
@@ -1464,6 +1575,12 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   }
 
   private sealed record PendingPermission(
+    string Id,
+    string SessionId,
+    string WorkingDirectory
+  );
+
+  private sealed record PendingUserInput(
     string Id,
     string SessionId,
     string WorkingDirectory

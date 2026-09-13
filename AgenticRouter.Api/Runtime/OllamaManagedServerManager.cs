@@ -63,6 +63,8 @@ public sealed class OllamaManagedServerManager :
   };
   private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(20);
   private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
+  private static readonly TimeSpan PortHandoffInterval =
+    TimeSpan.FromMilliseconds(100);
 
   private readonly string _leaseDirectory;
   private readonly IHttpClientFactory _httpClients;
@@ -295,7 +297,7 @@ public sealed class OllamaManagedServerManager :
 
     if (target.PreferredDevice is not null)
     {
-      var probe = await StartServerProcessAsync(
+      var probe = await StartServerProcessWithPortRecoveryAsync(
         target,
         executable,
         library,
@@ -318,7 +320,7 @@ public sealed class OllamaManagedServerManager :
       }
     }
 
-    return await StartServerProcessAsync(
+    return await StartServerProcessWithPortRecoveryAsync(
       target,
       executable,
       library,
@@ -327,6 +329,49 @@ public sealed class OllamaManagedServerManager :
       contextLength,
       cancellationToken
     );
+  }
+
+  private async Task<ManagedServer> StartServerProcessWithPortRecoveryAsync(
+    OllamaGpuTarget target,
+    string executable,
+    string library,
+    int port,
+    string? vulkanOrder,
+    int? contextLength,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return await StartServerProcessAsync(
+        target,
+        executable,
+        library,
+        port,
+        vulkanOrder,
+        contextLength,
+        cancellationToken
+      );
+    }
+    catch (OllamaProviderException exception) when (
+      IsPortBindingFailure(exception.TechnicalMessage)
+    )
+    {
+      _logger.LogWarning(
+        "Managed Ollama {Selection} lost the configured port during startup; retrying the verified port handoff once.",
+        target.Selection
+      );
+      await Task.Delay(PortHandoffInterval, cancellationToken);
+      return await StartServerProcessAsync(
+        target,
+        executable,
+        library,
+        port,
+        vulkanOrder,
+        contextLength,
+        cancellationToken
+      );
+    }
   }
 
   private async Task<ManagedServer> StartServerProcessAsync(
@@ -558,9 +603,10 @@ public sealed class OllamaManagedServerManager :
       {
         if (server.Process.HasExited)
         {
+          await AwaitOutputReadersAsync(server);
           throw ManagedFailure(
             $"The Agentic Router-owned Ollama {BackendLabel(server.Target.Backend)} server exited during startup.",
-            $"PID {server.Process.Id} exited with code {server.Process.ExitCode}."
+            $"PID {server.Process.Id} exited with code {server.Process.ExitCode}. {StartupOutputEvidence(server.Output)}"
           );
         }
 
@@ -597,8 +643,72 @@ public sealed class OllamaManagedServerManager :
 
     throw ManagedFailure(
       $"The Agentic Router-owned Ollama {BackendLabel(server.Target.Backend)} server did not become ready.",
-      $"A healthy /api/version response and {BackendLabel(server.Target.Backend)} discovery evidence were not both observed at {server.Endpoint} within {StartupTimeout.TotalSeconds:0} seconds."
+      $"A healthy /api/version response and {BackendLabel(server.Target.Backend)} discovery evidence were not both observed at {server.Endpoint} within {StartupTimeout.TotalSeconds:0} seconds. {StartupOutputEvidence(server.Output)}"
     );
+  }
+
+  private static async Task AwaitOutputReadersAsync(ManagedServer server)
+  {
+    try
+    {
+      await Task.WhenAll(server.StandardOutput, server.StandardError).WaitAsync(
+        TimeSpan.FromMilliseconds(500),
+        CancellationToken.None
+      );
+    }
+    catch (Exception exception) when (
+      exception is TimeoutException or IOException or ObjectDisposedException
+    )
+    {
+    }
+  }
+
+  private static string StartupOutputEvidence(IEnumerable<string> output)
+  {
+    const int maximumCharacters = 2_048;
+    var lines = output.Where(line => !string.IsNullOrWhiteSpace(line))
+      .TakeLast(24)
+      .Select(SanitizeStartupOutput)
+      .ToArray();
+    if (lines.Length == 0)
+    {
+      return "No startup output was captured.";
+    }
+    var evidence = string.Join(" | ", lines);
+    if (evidence.Length > maximumCharacters)
+    {
+      evidence = evidence[^maximumCharacters..];
+    }
+    return $"Startup output: {evidence}";
+  }
+
+  private static string SanitizeStartupOutput(string value)
+  {
+    var sanitized = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+    var userProfile = Environment.GetFolderPath(
+      Environment.SpecialFolder.UserProfile
+    );
+    return string.IsNullOrWhiteSpace(userProfile)
+      ? sanitized
+      : sanitized.Replace(
+        userProfile,
+        "%USERPROFILE%",
+        StringComparison.OrdinalIgnoreCase
+      );
+  }
+
+  private static bool IsPortBindingFailure(string technicalMessage)
+  {
+    return technicalMessage.Contains(
+        "address already in use",
+        StringComparison.OrdinalIgnoreCase
+      )
+      || technicalMessage.Contains(
+        "only one usage of each socket address",
+        StringComparison.OrdinalIgnoreCase
+      )
+      || technicalMessage.Contains("WSAEADDRINUSE", StringComparison.OrdinalIgnoreCase)
+      || technicalMessage.Contains("10048", StringComparison.OrdinalIgnoreCase);
   }
 
   private static bool HasBackendEvidence(ManagedServer server)
@@ -845,6 +955,7 @@ public sealed class OllamaManagedServerManager :
 
   private void HandleExit(ManagedServer server)
   {
+    var ownsLease = false;
     lock (_servers)
     {
       if (
@@ -853,9 +964,13 @@ public sealed class OllamaManagedServerManager :
       )
       {
         _servers.Remove(server.Target.Selection);
+        ownsLease = true;
       }
     }
-    TryDeleteLease(server.LeasePath);
+    if (ownsLease)
+    {
+      TryDeleteLease(server.LeasePath);
+    }
   }
 
   private static bool ShouldManage(Uri endpoint)
@@ -876,47 +991,84 @@ public sealed class OllamaManagedServerManager :
     CancellationToken cancellationToken
   )
   {
-    var listeners = IPGlobalProperties.GetIPGlobalProperties()
-      .GetActiveTcpListeners();
-    if (!listeners.Any(listener => listener.Port == port))
-    {
-      return;
-    }
-    if (!WindowsTcpOwner.TryGetOwnerProcessId(port, out var processId))
-    {
-      throw ManagedFailure(
-        "The configured Ollama port is already in use.",
-        $"Loopback port {port} is occupied, but its process identity could not be verified."
-      );
-    }
-    using var process = Process.GetProcessById(processId);
-    var actualExecutable = process.MainModule?.FileName;
-    if (
-      string.IsNullOrWhiteSpace(actualExecutable)
-      || !string.Equals(
-        Path.GetFullPath(actualExecutable),
-        Path.GetFullPath(expectedExecutable),
-        StringComparison.OrdinalIgnoreCase
-      )
-    )
-    {
-      throw ManagedFailure(
-        "The configured Ollama port belongs to another process.",
-        $"Loopback port {port} belongs to PID {processId}; Agentic Router refused to stop an executable other than '{expectedExecutable}'."
-      );
-    }
-
-    _logger.LogInformation(
-      "Stopping verified Ollama PID {ProcessId} on configured port {Port} before applying managed GPU configuration.",
-      processId,
-      port
-    );
-    process.Kill(entireProcessTree: true);
     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
       cancellationToken
     );
     timeout.CancelAfter(ShutdownTimeout);
-    await process.WaitForExitAsync(timeout.Token);
+    var stoppedProcess = false;
+    try
+    {
+      while (true)
+      {
+        var listeners = IPGlobalProperties.GetIPGlobalProperties()
+          .GetActiveTcpListeners();
+        if (!listeners.Any(listener => listener.Port == port))
+        {
+          if (!stoppedProcess)
+          {
+            return;
+          }
+          await Task.Delay(PortHandoffInterval, timeout.Token);
+          listeners = IPGlobalProperties.GetIPGlobalProperties()
+            .GetActiveTcpListeners();
+          if (!listeners.Any(listener => listener.Port == port))
+          {
+            return;
+          }
+        }
+        if (!WindowsTcpOwner.TryGetOwnerProcessId(port, out var processId))
+        {
+          throw ManagedFailure(
+            "The configured Ollama port is already in use.",
+            $"Loopback port {port} is occupied, but its process identity could not be verified."
+          );
+        }
+        Process process;
+        try
+        {
+          process = Process.GetProcessById(processId);
+        }
+        catch (ArgumentException)
+        {
+          stoppedProcess = true;
+          continue;
+        }
+        using (process)
+        {
+          var actualExecutable = process.MainModule?.FileName;
+          if (
+            string.IsNullOrWhiteSpace(actualExecutable)
+            || !string.Equals(
+              Path.GetFullPath(actualExecutable),
+              Path.GetFullPath(expectedExecutable),
+              StringComparison.OrdinalIgnoreCase
+            )
+          )
+          {
+            throw ManagedFailure(
+              "The configured Ollama port belongs to another process.",
+              $"Loopback port {port} belongs to PID {processId}; Agentic Router refused to stop an executable other than '{expectedExecutable}'."
+            );
+          }
+
+          _logger.LogInformation(
+            "Stopping verified Ollama PID {ProcessId} on configured port {Port} before applying managed GPU configuration.",
+            processId,
+            port
+          );
+          process.Kill(entireProcessTree: true);
+          await process.WaitForExitAsync(timeout.Token);
+          stoppedProcess = true;
+        }
+      }
+    }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+      throw ManagedFailure(
+        "The configured Ollama port did not become available.",
+        $"Loopback port {port} remained occupied after verified Ollama processes were stopped for {ShutdownTimeout.TotalSeconds:0} seconds."
+      );
+    }
   }
 
   private string ResolveOllamaExecutable()

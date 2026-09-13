@@ -604,6 +604,18 @@ else if (prompt.Contains("web host bridge claude code", StringComparison.Ordinal
   );
   finalText = "Claude used the Agentic Router Host web_search tool.";
 }
+else if (prompt.Contains("global user input claude code", StringComparison.OrdinalIgnoreCase))
+{
+  var answers = await InvokeHostToolAsync(
+    "request_user_input",
+    UserInputFixtureQuestions()
+  );
+  await WriteMarkerAsync(
+    "fake-claude-user-input.json",
+    new { succeeded = true, output = answers }
+  );
+  finalText = "Claude received the complete Host user-input batch.";
+}
 else if (prompt.Contains("claude run process", StringComparison.OrdinalIgnoreCase))
 {
   finalText = await InvokeHostToolAsync(
@@ -706,6 +718,38 @@ async Task<string?> RequestPermissionAsync(string tool, object input, string des
   using var response = JsonDocument.Parse(responseLine!);
   return response.RootElement.GetProperty("response").GetProperty("response")
     .GetProperty("behavior").GetString();
+}
+
+object UserInputFixtureQuestions()
+{
+  return new
+  {
+    questions = new[]
+    {
+      new
+      {
+        id = "source",
+        header = "Source",
+        question = "Where should the source come from?",
+        options = new[]
+        {
+          new { label = "New file", description = "Create a new source file." },
+          new { label = "Existing file", description = "Use an existing workspace file." }
+        }
+      },
+      new
+      {
+        id = "format",
+        header = "Format",
+        question = "Which output format should be used?",
+        options = new[]
+        {
+          new { label = "Markdown", description = "Write Markdown." },
+          new { label = "Plain text", description = "Write plain text." }
+        }
+      }
+    }
+  };
 }
 
 async Task<string> InvokeHostToolAsync(string name, object arguments)

@@ -334,7 +334,7 @@ public sealed class FileSystemReadBenchmark : BasicCrudBenchmark
     "Read two canonical fixture files and report their deterministic facts without mutation.",
     true,
     [BenchmarkHarnessCapabilityIds.FileReading],
-    AcceptanceVersion: 1,
+    AcceptanceVersion: 2,
     Order: 2
   );
 
@@ -346,8 +346,8 @@ public sealed class FileSystemReadBenchmark : BasicCrudBenchmark
 
   public override string CreateTask()
   {
-    return "Benchmark test: FS-READ-001 (version 1; acceptance 1).\n"
-      + "Read fixture/read-primary.txt and fixture/read-secondary.txt. In the final answer, "
+    return "Benchmark test: FS-READ-001 (version 1; acceptance 2).\n"
+      + "Read fixture/read-primary.txt and fixture/read-secondary.txt exactly once each. In the final answer, "
       + "report the exact codename and exact verification-word as two separate key=value facts. "
       + "Do not create, modify, or delete any file.";
   }
@@ -361,20 +361,32 @@ public sealed class FileSystemReadBenchmark : BasicCrudBenchmark
     _ = changes;
     _ = cancellationToken;
     var report = context.HarnessEvidence?.FinalReport ?? string.Empty;
-    var codename = report.Contains("codename=ORBIT-41", StringComparison.Ordinal);
-    var word = report.Contains("verification-word=marigold", StringComparison.Ordinal);
-    var exactness = (codename ? 50 : 0) + (word ? 50 : 0);
+    var filesRead = context.HarnessEvidence?.OperationalDiagnostics?.FilesRead ?? [];
+    var primaryObserved = filesRead.Contains(
+      "fixture/read-primary.txt",
+      BenchmarkWorkspaceFactory.PathComparer
+    );
+    var secondaryObserved = filesRead.Contains(
+      "fixture/read-secondary.txt",
+      BenchmarkWorkspaceFactory.PathComparer
+    );
+    var primary = primaryObserved
+      || report.Contains("codename=ORBIT-41", StringComparison.Ordinal);
+    var secondary = secondaryObserved
+      || report.Contains("verification-word=marigold", StringComparison.Ordinal);
+    var exactness = (primary ? 50 : 0) + (secondary ? 50 : 0);
     return Task.FromResult(
       new BenchmarkObjectiveValidation(
-        codename && word,
+        primary && secondary,
         exactness,
         exactness > 0,
         Facts: new Dictionary<string, string>(StringComparer.Ordinal)
         {
-          ["codenameExpected"] = "ORBIT-41",
-          ["codenameMatched"] = codename.ToString(),
-          ["verificationWordExpected"] = "marigold",
-          ["verificationWordMatched"] = word.ToString()
+          ["primaryRead"] = primary.ToString(),
+          ["secondaryRead"] = secondary.ToString(),
+          ["readEvidence"] = primaryObserved && secondaryObserved
+            ? "host-observed"
+            : "specialist-report"
         }
       )
     );

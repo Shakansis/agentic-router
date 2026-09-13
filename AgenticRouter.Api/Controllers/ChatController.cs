@@ -35,6 +35,8 @@ public sealed class ChatController : ControllerBase
   private readonly IDurableSupervisionRunCoordinator _supervisionRuns;
   private readonly ISettingsStore _settings;
   private readonly IMarkdownRenderer _markdown;
+  private readonly IExecutionLatencyTracker _latency;
+  private SsePresentationWriter? _eventWriter;
   private string? _executionSessionId;
   private string? _conversationSessionId;
   private string? _turnId;
@@ -53,6 +55,7 @@ public sealed class ChatController : ControllerBase
     IMarkdownRenderer markdown,
     IIncidentJournal incidents,
     ITraceContext trace,
+    IExecutionLatencyTracker latency,
     ILogger<ChatController> logger
   )
   {
@@ -65,6 +68,7 @@ public sealed class ChatController : ControllerBase
     _markdown = markdown;
     _incidents = incidents;
     _trace = trace;
+    _latency = latency;
     _logger = logger;
   }
 
@@ -84,6 +88,7 @@ public sealed class ChatController : ControllerBase
     );
     _turnId = requestId;
     _trace.Link("requestId", requestId);
+    _latency.Start(requestId);
 
     if (string.IsNullOrWhiteSpace(
       request.Message
@@ -102,6 +107,7 @@ public sealed class ChatController : ControllerBase
         ),
         cancellationToken
       );
+      _latency.Complete();
       return;
     }
 
@@ -136,8 +142,16 @@ public sealed class ChatController : ControllerBase
         ),
         cancellationToken
       );
+      _latency.Complete();
       return;
     }
+
+    _eventWriter = new SsePresentationWriter(
+      Response,
+      JsonOptions,
+      _latency,
+      cancellationToken
+    );
 
     try
     {
@@ -212,7 +226,7 @@ public sealed class ChatController : ControllerBase
       }
 
       var answer = new System.Text.StringBuilder();
-      var contentBlocks = new List<ChatMessageContentBlock>();
+      var contentBlocks = new List<ContentBlockAccumulator>();
       var normalizedRequest = request with
       {
         ConversationSessionId = _conversationSessionId,
@@ -279,7 +293,7 @@ public sealed class ChatController : ControllerBase
                     _trace.TraceId,
                     "completed"
                   ),
-                  contentBlocks,
+                  BuildContentBlocks(contentBlocks),
                   _presentationTimeline
                 );
                 if (persisted is not null)
@@ -597,6 +611,12 @@ public sealed class ChatController : ControllerBase
       await PersistPresentationTimelineAsync(
         requestId
       );
+      if (_eventWriter is not null)
+      {
+        await _eventWriter.DisposeAsync();
+        _eventWriter = null;
+      }
+      _latency.Complete();
     }
   }
 
@@ -614,6 +634,7 @@ public sealed class ChatController : ControllerBase
 
     var requestId = Guid.NewGuid().ToString("N");
     _trace.Link("requestId", requestId);
+    _latency.Start(requestId);
     _trace.Link("supervisionRunId", runId);
     if (!_supervisionRuns.TryGetView(runId, out var view))
     {
@@ -630,14 +651,22 @@ public sealed class ChatController : ControllerBase
         ),
         cancellationToken
       );
+      _latency.Complete();
       return;
     }
+
+    _eventWriter = new SsePresentationWriter(
+      Response,
+      JsonOptions,
+      _latency,
+      cancellationToken
+    );
 
     _conversationSessionId = view.ConversationSessionId;
     _durableSupervisionRunId = runId;
     _trace.Link("conversationId", _conversationSessionId);
     var answer = new System.Text.StringBuilder();
-    var contentBlocks = new List<ChatMessageContentBlock>();
+    var contentBlocks = new List<ContentBlockAccumulator>();
     try
     {
       await WriteEventAsync(
@@ -689,7 +718,7 @@ public sealed class ChatController : ControllerBase
                 _trace.TraceId,
                 "completed"
               ),
-              contentBlocks,
+              BuildContentBlocks(contentBlocks),
               _presentationTimeline
             );
             if (persisted is not null)
@@ -731,6 +760,12 @@ public sealed class ChatController : ControllerBase
       await PersistPresentationTimelineAsync(
         requestId
       );
+      if (_eventWriter is not null)
+      {
+        await _eventWriter.DisposeAsync();
+        _eventWriter = null;
+      }
+      _latency.Complete();
     }
   }
 
@@ -1532,7 +1567,7 @@ public sealed class ChatController : ControllerBase
   }
 
   private static void CaptureContentBlock(
-    List<ChatMessageContentBlock> blocks,
+    List<ContentBlockAccumulator> blocks,
     ChatStreamEvent streamEvent
   )
   {
@@ -1577,20 +1612,24 @@ public sealed class ChatController : ControllerBase
       )
     )
     {
-      blocks[^1] = last with
-      {
-        Content = last.Content + content
-      };
+      last.Append(content);
       return;
     }
 
     blocks.Add(
-      new ChatMessageContentBlock(
+      new ContentBlockAccumulator(
         kind,
-        content,
-        id
+        id,
+        content
       )
     );
+  }
+
+  private static IReadOnlyList<ChatMessageContentBlock> BuildContentBlocks(
+    IReadOnlyList<ContentBlockAccumulator> blocks
+  )
+  {
+    return blocks.Select(block => block.Build()).ToArray();
   }
 
   private async Task PersistPresentationTimelineAsync(
@@ -1647,6 +1686,14 @@ public sealed class ChatController : ControllerBase
     CancellationToken cancellationToken
   )
   {
+    if (streamEvent.Type == "reasoning.delta")
+    {
+      _latency.MarkOnce("first-reasoning-delta");
+    }
+    else if (streamEvent.Type == "response.delta")
+    {
+      _latency.MarkOnce("first-assistant-delta");
+    }
     streamEvent = streamEvent with
     {
       ConversationSessionId = streamEvent.ConversationSessionId ?? _conversationSessionId
@@ -1722,18 +1769,58 @@ public sealed class ChatController : ControllerBase
       streamEvent
     );
 
-    var json = JsonSerializer.Serialize(
-      streamEvent,
-      JsonOptions
-    );
-
-    await Response.WriteAsync(
-      $"data: {json}\n\n",
-      cancellationToken
-    );
-    await Response.Body.FlushAsync(
-      cancellationToken
-    );
+    if (_eventWriter is not null)
+    {
+      await _eventWriter.WriteAsync(streamEvent, cancellationToken);
+    }
+    else
+    {
+      var started = Stopwatch.GetTimestamp();
+      var json = JsonSerializer.Serialize(
+        streamEvent,
+        JsonOptions
+      );
+      await Response.WriteAsync(
+        $"data: {json}\n\n",
+        cancellationToken
+      );
+      _latency.AddSsePresentationTime(
+        Stopwatch.GetElapsedTime(started).Ticks
+      );
+      var flushStarted = Stopwatch.GetTimestamp();
+      await Response.Body.FlushAsync(
+        cancellationToken
+      );
+      _latency.AddSseFlushTime(
+        Stopwatch.GetElapsedTime(flushStarted).Ticks
+      );
+    }
     return streamEvent;
+  }
+
+  private sealed class ContentBlockAccumulator
+  {
+    private readonly System.Text.StringBuilder _content;
+
+    public ContentBlockAccumulator(string kind, string? id, string content)
+    {
+      Kind = kind;
+      Id = id;
+      _content = new System.Text.StringBuilder(content);
+    }
+
+    public string Kind { get; }
+
+    public string? Id { get; }
+
+    public void Append(string content)
+    {
+      _content.Append(content);
+    }
+
+    public ChatMessageContentBlock Build()
+    {
+      return new ChatMessageContentBlock(Kind, _content.ToString(), Id);
+    }
   }
 }

@@ -461,7 +461,7 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
       {
         var legacy = JsonSerializer.Deserialize<DurableSupervisionCheckpointV1>(json, JsonOptions)
           ?? throw InvalidCheckpoint("The supervision checkpoint is empty.");
-        var legacyExpected = ComputeLegacyIntegrity(legacy with { IntegritySha256 = string.Empty });
+        var legacyExpected = ComputeLegacyJsonIntegrity(json);
         if (!string.Equals(legacyExpected, legacy.IntegritySha256, StringComparison.Ordinal))
         {
           throw InvalidCheckpoint("The supervision checkpoint integrity hash is invalid.");
@@ -472,7 +472,7 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
       {
         var legacy = JsonSerializer.Deserialize<DurableSupervisionCheckpointV2>(json, JsonOptions)
           ?? throw InvalidCheckpoint("The supervision checkpoint is empty.");
-        var legacyExpected = ComputeLegacyIntegrity(legacy with { IntegritySha256 = string.Empty });
+        var legacyExpected = ComputeLegacyJsonIntegrity(json);
         if (!string.Equals(legacyExpected, legacy.IntegritySha256, StringComparison.Ordinal))
         {
           throw InvalidCheckpoint("The supervision checkpoint integrity hash is invalid.");
@@ -483,12 +483,23 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
       {
         var legacy = JsonSerializer.Deserialize<DurableSupervisionCheckpointV3>(json, JsonOptions)
           ?? throw InvalidCheckpoint("The supervision checkpoint is empty.");
-        var legacyExpected = ComputeLegacyIntegrity(legacy with { IntegritySha256 = string.Empty });
+        var legacyExpected = ComputeLegacyJsonIntegrity(json);
         if (!string.Equals(legacyExpected, legacy.IntegritySha256, StringComparison.Ordinal))
         {
           throw InvalidCheckpoint("The supervision checkpoint integrity hash is invalid.");
         }
         checkpoint = Migrate(legacy);
+      }
+      else if (schemaVersion == 4)
+      {
+        var legacy = JsonSerializer.Deserialize<DurableSupervisionCheckpoint>(json, JsonOptions)
+          ?? throw InvalidCheckpoint("The supervision checkpoint is empty.");
+        var legacyExpected = ComputeLegacyJsonIntegrity(json);
+        if (!string.Equals(legacyExpected, legacy.IntegritySha256, StringComparison.Ordinal))
+        {
+          throw InvalidCheckpoint("The supervision checkpoint integrity hash is invalid.");
+        }
+        checkpoint = MigrateV4(legacy);
       }
       else
       {
@@ -673,10 +684,26 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
       || recovery.Budgets.MaximumSupervisorTransitions is < 1 or > 256
       || recovery.Budgets.MaximumWorkerAttempts is < 1 or > 64
       || runtime.WorkItems.Count > recovery.Budgets.MaximumWorkItems
+      || runtime.WorkItems.Any(item =>
+        item.RejectionReason?.Length > 128
+        || item.RetryReason?.Length > 128
+      )
       || runtime.Contexts.Count > recovery.Budgets.MaximumWorkItems + 1
       || runtime.CompletedItems < 0
       || runtime.CompletedItems > runtime.TotalItems
       || runtime.TotalItems != runtime.WorkItems.Count
+      || runtime.Telemetry is { } telemetry && (
+        telemetry.DecompositionDurationMilliseconds < 0
+        || telemetry.WorkerDurationMilliseconds < 0
+        || telemetry.VerificationDurationMilliseconds < 0
+        || telemetry.CorrectionDurationMilliseconds < 0
+        || telemetry.FinalCompletionDurationMilliseconds < 0
+        || telemetry.WorkerAttemptCount < 0
+        || telemetry.SupervisorTransitionCount < 0
+        || telemetry.ActualWorkspaceMutationCount < 0
+        || telemetry.RejectionReason?.Length > 128
+        || telemetry.RetryReason?.Length > 128
+      )
     )
     {
       throw InvalidCheckpoint("The supervision recovery ledger is invalid or exceeds its bounds.");
@@ -738,6 +765,16 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
     for (var index = 0; index < checkpoint.Events.Count; index++)
     {
       var progressEvent = checkpoint.Events[index];
+      if (
+        progressEvent.RejectionReason?.Length > 128
+        || progressEvent.RetryReason?.Length > 128
+        || progressEvent.DurationMilliseconds < 0
+      )
+      {
+        throw InvalidCheckpoint(
+          "Supervision event telemetry is invalid or exceeds its bounds."
+        );
+      }
       if (progressEvent.Sequence <= previous)
       {
         throw InvalidCheckpoint(
@@ -788,24 +825,89 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
     );
   }
 
-  private static string ComputeLegacyIntegrity(DurableSupervisionCheckpointV1 checkpoint)
+  private static string ComputeLegacyJsonIntegrity(string json)
   {
-    return SupervisionRequestPolicy.Hash(
-      JsonSerializer.Serialize(checkpoint, IntegrityOptions)
-    );
-  }
+    var source = Encoding.UTF8.GetBytes(json);
+    var reader = new Utf8JsonReader(source);
+    var integrityValueStart = -1;
+    var integrityValueEnd = -1;
 
-  private static string ComputeLegacyIntegrity(DurableSupervisionCheckpointV2 checkpoint)
-  {
-    return SupervisionRequestPolicy.Hash(
-      JsonSerializer.Serialize(checkpoint, IntegrityOptions)
-    );
-  }
+    while (reader.Read())
+    {
+      if (
+        reader.TokenType != JsonTokenType.PropertyName
+        || !reader.ValueTextEquals("integritySha256")
+      )
+      {
+        continue;
+      }
+      if (
+        integrityValueStart >= 0
+        || !reader.Read()
+        || reader.TokenType != JsonTokenType.String
+      )
+      {
+        throw InvalidCheckpoint(
+          "The supervision checkpoint integrity field is invalid."
+        );
+      }
+      integrityValueStart = checked((int)reader.TokenStartIndex);
+      integrityValueEnd = checked((int)reader.BytesConsumed);
+    }
 
-  private static string ComputeLegacyIntegrity(DurableSupervisionCheckpointV3 checkpoint)
-  {
+    if (integrityValueStart < 0 || integrityValueEnd <= integrityValueStart)
+    {
+      throw InvalidCheckpoint(
+        "The supervision checkpoint integrity field is missing."
+      );
+    }
+
+    using var canonical = new MemoryStream(source.Length);
+    var inString = false;
+    var escaped = false;
+    var index = 0;
+    while (index < source.Length)
+    {
+      if (index == integrityValueStart)
+      {
+        canonical.WriteByte((byte)'"');
+        canonical.WriteByte((byte)'"');
+        index = integrityValueEnd;
+        continue;
+      }
+
+      var current = source[index++];
+      if (inString)
+      {
+        canonical.WriteByte(current);
+        if (escaped)
+        {
+          escaped = false;
+        }
+        else if (current == (byte)'\\')
+        {
+          escaped = true;
+        }
+        else if (current == (byte)'"')
+        {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (current == (byte)'"')
+      {
+        inString = true;
+        canonical.WriteByte(current);
+      }
+      else if (current is not (byte)' ' and not (byte)'\t' and not (byte)'\r' and not (byte)'\n')
+      {
+        canonical.WriteByte(current);
+      }
+    }
+
     return SupervisionRequestPolicy.Hash(
-      JsonSerializer.Serialize(checkpoint, IntegrityOptions)
+      Encoding.UTF8.GetString(canonical.ToArray())
     );
   }
 
@@ -903,6 +1005,25 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
       checkpoint.WaitCode,
       checkpoint.Takeover
     );
+    return migrated with { IntegritySha256 = ComputeIntegrity(migrated) };
+  }
+
+  private static DurableSupervisionCheckpoint MigrateV4(
+    DurableSupervisionCheckpoint checkpoint
+  )
+  {
+    var runtime = checkpoint.Runtime is null
+      ? null
+      : checkpoint.Runtime with
+      {
+        Telemetry = checkpoint.Runtime.Telemetry ?? SupervisionTelemetryView.Empty
+      };
+    var migrated = checkpoint with
+    {
+      SchemaVersion = DurableSupervisionCheckpoint.CurrentSchemaVersion,
+      Runtime = runtime,
+      IntegritySha256 = string.Empty
+    };
     return migrated with { IntegritySha256 = ComputeIntegrity(migrated) };
   }
 

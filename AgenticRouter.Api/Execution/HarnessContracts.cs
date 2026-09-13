@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AgenticRouter.Api.Contracts;
 
 namespace AgenticRouter.Api.Execution;
 
@@ -41,7 +42,9 @@ public sealed record HarnessCapabilities(
   bool SupportsSessionDiff,
   bool SupportsNativePermissions,
   bool SupportsSteering,
-  bool SupportsNativeWebSearch
+  bool SupportsNativeWebSearch,
+  bool SupportsUserInput = false,
+  bool SupportsUserInputResume = false
 );
 
 public sealed record HarnessSteerRequest(
@@ -171,7 +174,9 @@ public sealed record HarnessEvent
     long? contextTotalTokens = null,
     long? contextWindowTokens = null,
     bool recoveryExhausted = false,
-    bool readOnlyPermission = false
+    bool readOnlyPermission = false,
+    string? userInputId = null,
+    IReadOnlyList<UserInputQuestionView>? userInputQuestions = null
   )
   {
     Type = type;
@@ -199,6 +204,8 @@ public sealed record HarnessEvent
     ContextInputTokens = contextInputTokens;
     ContextTotalTokens = contextTotalTokens;
     ContextWindowTokens = contextWindowTokens;
+    UserInputId = userInputId;
+    UserInputQuestions = userInputQuestions;
   }
 
   public string Type { get; init; }
@@ -250,6 +257,10 @@ public sealed record HarnessEvent
   public long? ContextTotalTokens { get; init; }
 
   public long? ContextWindowTokens { get; init; }
+
+  public string? UserInputId { get; init; }
+
+  public IReadOnlyList<UserInputQuestionView>? UserInputQuestions { get; init; }
 
   public bool IsTerminal => TerminalState.HasValue;
 }
@@ -305,6 +316,16 @@ public interface IAgentHarnessSteeringTransport
 {
   Task<HarnessSteerResult> SteerTurnAsync(
     HarnessSteerRequest request,
+    CancellationToken cancellationToken
+  );
+}
+
+public interface IAgentHarnessUserInputTransport
+{
+  Task ResolveUserInputAsync(
+    string userInputId,
+    IReadOnlyList<UserInputAnswerView> answers,
+    bool cancelled,
     CancellationToken cancellationToken
   );
 }

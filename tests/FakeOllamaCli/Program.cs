@@ -17,6 +17,18 @@ var prefix = host.StartsWith("http", StringComparison.OrdinalIgnoreCase)
   : $"http://{host}";
 var endpoint = new Uri(prefix, UriKind.Absolute);
 var library = Environment.GetEnvironmentVariable("OLLAMA_LLM_LIBRARY") ?? "unknown";
+var startupFailurePath = Path.ChangeExtension(
+  Environment.ProcessPath!,
+  ".startup-failure"
+);
+if (File.Exists(startupFailurePath))
+{
+  var failure = await File.ReadAllTextAsync(startupFailurePath);
+  File.Delete(startupFailurePath);
+  Console.Error.WriteLine(failure);
+  Environment.ExitCode = 1;
+  return;
+}
 if (string.Equals(library, "vulkan", StringComparison.OrdinalIgnoreCase))
 {
   Console.Error.WriteLine(

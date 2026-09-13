@@ -309,7 +309,8 @@ internal sealed class SupervisionRecoveryService : ISupervisionRecoveryService
         ? item with
         {
           Status = SupervisionWorkItemStates.Pending,
-          LastDiscrepancy = reconciliationMessage
+          LastDiscrepancy = reconciliationMessage,
+          RetryReason = SupervisionRetryReasons.CrashRecovery
         }
         : item
     ).ToArray();
@@ -331,7 +332,11 @@ internal sealed class SupervisionRecoveryService : ISupervisionRecoveryService
       ActiveRole = null,
       ActiveWorkItemId = null,
       LastFailure = null,
-      RecoverableInCurrentProcess = true
+      RecoverableInCurrentProcess = true,
+      Telemetry = (runtime.Telemetry ?? SupervisionTelemetryView.Empty) with
+      {
+        RetryReason = SupervisionRetryReasons.CrashRecovery
+      }
     };
     current = await CaptureAsync(checkpoint, runtime, actions, cancellationToken);
     current = current with { TurnInFlight = false };

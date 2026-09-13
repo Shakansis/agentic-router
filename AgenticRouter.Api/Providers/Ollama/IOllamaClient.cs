@@ -61,7 +61,8 @@ public interface IOllamaClient
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
-    string? requestedEffort = null
+    string? requestedEffort = null,
+    ProviderGenerationProfile? generationProfile = null
   );
 
   Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
@@ -208,7 +209,7 @@ public sealed record OllamaModelMetadata(
 public sealed record OllamaModelCapabilities(
   string Model,
   IReadOnlyList<string> Capabilities,
-  bool ToolingConfirmed,
+  bool AdvertisedTools,
   int? DeclaredContextTokens = null
 );
 

@@ -24,6 +24,7 @@ var subscribers = new ConcurrentDictionary<Guid, Channel<string>>();
 var prompts = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 var selections = new ConcurrentDictionary<string, ModelSelection>(StringComparer.Ordinal);
 var permissions = new ConcurrentDictionary<string, PendingPermission>(StringComparer.Ordinal);
+var questions = new ConcurrentDictionary<string, TaskCompletionSource<string[][]?>>(StringComparer.Ordinal);
 var sessionNumber = 0;
 var password = Environment.GetEnvironmentVariable("OPENCODE_SERVER_PASSWORD") ?? string.Empty;
 var runtime = Directory.GetParent(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? string.Empty)?.FullName;
@@ -175,6 +176,44 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
     },
     time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
   });
+  if (text.Contains("global user input opencode", StringComparison.OrdinalIgnoreCase))
+  {
+    var questionId = $"que_{sessionId}";
+    var completion = new TaskCompletionSource<string[][]?>(
+      TaskCreationOptions.RunContinuationsAsynchronously
+    );
+    questions[questionId] = completion;
+    await EmitAsync("question.asked", new
+    {
+      id = questionId,
+      sessionID = sessionId,
+      questions = new[]
+      {
+        new
+        {
+          header = "Source",
+          question = "Where should the source come from?",
+          options = new[]
+          {
+            new { label = "New file", description = "Create a new source file." },
+            new { label = "Existing file", description = "Use an existing workspace file." }
+          }
+        },
+        new
+        {
+          header = "Format",
+          question = "Which output format should be used?",
+          options = new[]
+          {
+            new { label = "Markdown", description = "Write Markdown." },
+            new { label = "Plain text", description = "Write plain text." }
+          }
+        }
+      }
+    });
+    _ = CompleteQuestionTurnAsync(sessionId, questionId, completion.Task);
+    return;
+  }
   if (text.Contains("SUPERVISION_", StringComparison.Ordinal))
   {
     const string criterion = "opencode-supervised.txt contains the exact text visible native edit";
@@ -839,8 +878,55 @@ app.MapPost("/permission/{requestId}/reply", async (string requestId, HttpContex
   }
   return Results.Json(true);
 });
+app.MapGet("/question", () => Results.Json(questions.Keys.Select(id => new { id }).ToArray()));
+app.MapGet("/question/", () => Results.Json(questions.Keys.Select(id => new { id }).ToArray()));
+app.MapPost("/question/{requestId}/reply", async (string requestId, HttpContext context) =>
+{
+  using var body = await JsonDocument.ParseAsync(context.Request.Body);
+  var answers = body.RootElement.GetProperty("answers").EnumerateArray()
+    .Select(answer => answer.EnumerateArray().Select(value => value.GetString() ?? string.Empty).ToArray())
+    .ToArray();
+  if (!questions.TryRemove(requestId, out var pending))
+  {
+    return Results.NotFound();
+  }
+  pending.TrySetResult(answers);
+  return Results.Json(true);
+});
+app.MapPost("/question/{requestId}/reject", (string requestId) =>
+  questions.TryRemove(requestId, out var pending)
+    && pending.TrySetResult(null)
+      ? Results.Json(true)
+      : Results.NotFound()
+);
 
 await app.RunAsync();
+
+async Task CompleteQuestionTurnAsync(
+  string sessionId,
+  string questionId,
+  Task<string[][]?> completion
+)
+{
+  var answers = await completion;
+  if (runtime is not null)
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(runtime, "fake-opencode-user-input.json"),
+      JsonSerializer.Serialize(new { questionId, answers }),
+      CancellationToken.None
+    );
+  }
+  await EmitAsync(
+    answers is null ? "question.rejected" : "question.replied",
+    new { id = questionId, sessionID = sessionId }
+  );
+  await CompleteAsync(
+    sessionId,
+    answers is null ? "Questions cancelled." : "Questions answered.",
+    includeReadTool: false
+  );
+}
 
 async Task CompleteAsync(
   string sessionId,

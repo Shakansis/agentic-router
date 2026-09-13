@@ -268,9 +268,11 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     IReadOnlyList<OllamaToolMessage> messages,
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
+    ProviderGenerationProfile? generationProfile,
     CancellationToken cancellationToken
   )
   {
+    generationProfile ??= ProviderGenerationProfiles.Deterministic;
     object payload = tools.Count == 0
       ? new
       {
@@ -279,7 +281,8 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
         ),
         generationConfig = new
         {
-          temperature = 0
+          temperature = generationProfile.Temperature,
+          topP = generationProfile.TopP
         }
       }
       : new
@@ -310,7 +313,8 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
         },
         generationConfig = new
         {
-          temperature = 0
+          temperature = generationProfile.Temperature,
+          topP = generationProfile.TopP
         }
       };
     using var request = CreateJsonRequest(
@@ -371,6 +375,11 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
           messages,
           options.Images
         ),
+        generationConfig = new
+        {
+          temperature = options.EffectiveGenerationProfile.Temperature,
+          topP = options.EffectiveGenerationProfile.TopP
+        },
         tools = options.WebSearchEnabled
           ? new object[]
           {

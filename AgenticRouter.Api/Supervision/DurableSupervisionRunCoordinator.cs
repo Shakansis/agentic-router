@@ -233,7 +233,10 @@ public sealed class DurableSupervisionRunCoordinator
           : autoSafe
             ? waitCode
             : "supervision-recovery-manual-required",
-        captureRecovery: false
+        captureRecovery: false,
+        retryReason: autoSafeEligible
+          ? SupervisionRetryReasons.CrashRecovery
+          : null
       );
       if (autoSafeEligible)
       {
@@ -769,7 +772,8 @@ public sealed class DurableSupervisionRunCoordinator
       runtime: reconciliation.Runtime,
       recovery: reconciliation.Recovery,
       waitCode: null,
-      captureRecovery: false
+      captureRecovery: false,
+      retryReason: SupervisionRetryReasons.CrashRecovery
     );
     _ = resumed;
     return await StartAsync(runId, cancellationToken);
@@ -879,7 +883,10 @@ public sealed class DurableSupervisionRunCoordinator
           role: update.Role,
           contextId: update.ContextId,
           workItemId: update.WorkItemId,
-          waitCode: update.WaitCode
+          waitCode: update.WaitCode,
+          rejectionReason: update.RejectionReason,
+          retryReason: update.RetryReason,
+          durationMilliseconds: update.DurationMilliseconds
         );
       }
     }
@@ -1018,7 +1025,10 @@ public sealed class DurableSupervisionRunCoordinator
     SupervisionRecoverySnapshot? recovery = null,
     string? waitCode = null,
     bool captureRecovery = true,
-    SlowRequestStatusView? slowRequest = null
+    SlowRequestStatusView? slowRequest = null,
+    string? rejectionReason = null,
+    string? retryReason = null,
+    long? durationMilliseconds = null
   )
   {
     await state.TransitionGate.WaitAsync(
@@ -1054,7 +1064,10 @@ public sealed class DurableSupervisionRunCoordinator
         workItemId,
         effectiveRuntime.CompletedItems,
         effectiveRuntime.TotalItems,
-        slowRequest
+        slowRequest,
+        RejectionReason: rejectionReason,
+        RetryReason: retryReason,
+        DurationMilliseconds: durationMilliseconds
       );
       var next = current with
       {
@@ -1331,7 +1344,8 @@ public sealed class DurableSupervisionRunCoordinator
       role: progress.Role,
       contextId: progress.ContextId,
       workItemId: progress.WorkItemId,
-      slowRequest: progress.SlowRequest
+      slowRequest: progress.SlowRequest,
+      retryReason: progress.RetryReason
     );
   }
 
@@ -1542,7 +1556,8 @@ public sealed class DurableSupervisionRunCoordinator
             runtime.TotalItems,
             progress.SlowRequest,
             progress.ContextUsage,
-            progress.LocalAction
+            progress.LocalAction,
+            RetryReason: progress.RetryReason
           )
         ).TakeLast(64).ToArray();
         signal = _changed;

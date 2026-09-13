@@ -51,7 +51,7 @@ public sealed record ToolProtocolConformanceResult(
   string Status = CoordinationConformanceProfiles.Unknown,
   string Provider = ModelProviderIds.OllamaLocal,
   string AdapterVersion = ToolProtocolConformanceService.AdapterContractVersion,
-  string BenchmarkVersion = ToolProtocolConformanceService.BenchmarkContractVersion,
+  string ProbeVersion = ToolProtocolConformanceService.ProbeContractVersion,
   string Identity = "",
   bool AdaptiveRepairEligible = false
 );
@@ -75,11 +75,11 @@ public static class CoordinationConformanceProfiles
 
 public sealed class ToolProtocolConformanceService : IToolProtocolConformanceService
 {
-  public const string BenchmarkMarker = "TOOL_PROTOCOL_CONFORMANCE_V1";
-  public const string NativeAdaptiveBenchmarkMarker = "NATIVE_ADAPTIVE_CONFORMANCE_V1";
-  public const string StructuredBenchmarkMarker = "STRUCTURED_ACTION_CONFORMANCE_V1";
+  public const string ProbeMarker = "TOOL_PROTOCOL_CONFORMANCE_V1";
+  public const string NativeAdaptiveProbeMarker = "NATIVE_ADAPTIVE_CONFORMANCE_V1";
+  public const string StructuredProbeMarker = "STRUCTURED_ACTION_CONFORMANCE_V1";
   public const string AdapterContractVersion = "provider-chat-adapter-v1";
-  public const string BenchmarkContractVersion = "coordination-conformance-v3";
+  public const string ProbeContractVersion = "coordination-conformance-v3";
 
   private static readonly OllamaToolDefinition EchoTool = Tool(
     "benchmark_echo",
@@ -324,7 +324,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       else
       {
         throw new InvalidDataException(
-          $"The {profile} benchmark is not implemented by contract {BenchmarkContractVersion}."
+          $"The {profile} conformance probe is not implemented by contract {ProbeContractVersion}."
         );
       }
 
@@ -461,7 +461,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
   {
     return string.Join(
       "|",
-      BenchmarkContractVersion,
+      ProbeContractVersion,
       AdapterContractVersion,
       provider,
       model,
@@ -524,14 +524,15 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
         content = string.Empty
       }
     );
+    const string rejectedCallId = "call_probe_rejected_0001";
     var response = await _ollamaClient.GenerateToolCallAsync(
       baseUri,
       model,
       [
         new OllamaToolMessage(
           "system",
-          NativeAdaptiveBenchmarkMarker
-            + "\nThis is a non-executing protocol benchmark. Return exactly one corrected native tool call and no prose."
+          NativeAdaptiveProbeMarker
+            + "\nThis is a non-executing protocol conformance probe. Return exactly one corrected native tool call and no prose."
         ),
         new OllamaToolMessage(
           "user",
@@ -543,14 +544,16 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
           [
             new OllamaToolCall(
               "benchmark_edit",
-              rejectedArguments
+              rejectedArguments,
+              rejectedCallId
             )
           ]
         ),
         new OllamaToolMessage(
           "tool",
           "{\"status\":\"rejected\",\"field\":\"content\",\"reason\":\"A non-empty string is required.\",\"expected\":\"after\"}",
-          ToolName: "benchmark_edit"
+          ToolName: "benchmark_edit",
+          ToolCallId: rejectedCallId
         )
       ],
       [EditTool],
@@ -591,8 +594,8 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       [
         new(
           "system",
-          StructuredBenchmarkMarker
-            + "\nReturn one structured action proposal. This benchmark never executes the action."
+          StructuredProbeMarker
+            + "\nReturn one structured action proposal. This conformance probe never executes the action."
         ),
         new(
           "user",
@@ -665,7 +668,7 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       revision,
       AdapterContractVersion,
       runtimeVersion,
-      BenchmarkContractVersion,
+      ProbeContractVersion,
       profile
     );
   }
@@ -781,18 +784,22 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
       readCall.Arguments,
       "path"
     );
+    var readCallId = string.IsNullOrWhiteSpace(readCall.Id)
+      ? "call_probe_read_0001"
+      : readCall.Id;
     var loopMessages = initialMessages.Concat(
       [
         new OllamaToolMessage(
           "assistant",
           readResponse.Content,
           readResponse.Thinking,
-          readResponse.ToolCalls
+          [readCall with { Id = readCallId }]
         ),
         new OllamaToolMessage(
           "tool",
           "{\"content\":\"before\"}",
-          ToolName: "benchmark_read"
+          ToolName: "benchmark_read",
+          ToolCallId: readCallId
         )
       ]
     ).ToArray();
@@ -830,8 +837,8 @@ public sealed class ToolProtocolConformanceService : IToolProtocolConformanceSer
     [
       new OllamaToolMessage(
         "system",
-        BenchmarkMarker
-          + "\nThis is a non-executing protocol benchmark. Return exactly one native tool call and no prose."
+        ProbeMarker
+          + "\nThis is a non-executing protocol conformance probe. Return exactly one native tool call and no prose."
       ),
       new OllamaToolMessage(
         "user",

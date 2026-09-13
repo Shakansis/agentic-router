@@ -64,7 +64,8 @@ public sealed class ToolNameResolver : IToolNameResolver
 
   private static readonly string[] MetaTools =
   [
-    LocalActionPlanner.RequestToolsetTool
+    LocalActionPlanner.RequestToolsetTool,
+    UserInputProtocol.ToolName
   ];
 
   private static readonly string[] ActionTools =
@@ -105,6 +106,7 @@ public sealed class ToolNameResolver : IToolNameResolver
     "search_text",
     DiagnosticTraceCapability.ToolName,
     WebSearchCapability.ToolName,
+    UserInputProtocol.ToolName,
     "create_file",
     "create_files",
     "write_file",

@@ -98,12 +98,14 @@ const state = {
   setupOnboardingDismissed: false,
   pendingDiagnosticInvestigation: null,
   readOnlyConversation: false,
-  composerResizeObserver: null
+  composerResizeObserver: null,
+  activeUserInput: null
 };
 
 let benchmarkTooltip = null;
 let benchmarkTooltipTrigger = null;
 let projectMenuAnchor = null;
+let initializationInProgress = false;
 
 const elements = {};
 let resizeObserver;
@@ -164,26 +166,111 @@ async function initialize() {
   initializeScrollFollowing();
   initializeComposerShellMetrics();
 
+  await loadInitialApplicationState();
+}
+
+async function loadInitialApplicationState() {
+  if (initializationInProgress) {
+    return;
+  }
+  initializationInProgress = true;
+  resetApplicationLoader();
+
   try {
+    setApplicationLoaderStep(
+      "recovery",
+      "loading",
+      "Restoring local recovery state…"
+    );
     state.recovery = await fetchJson("/api/recovery/status");
     renderRecoveryState();
+    setApplicationLoaderStep("recovery", "complete");
+    setApplicationLoaderStep(
+      "providers",
+      "loading",
+      "Starting or checking Ollama and discovering models…"
+    );
     await loadApplicationState();
+    await refreshRuntimeStatus();
+    renderRecoveryState();
+    setApplicationLoaderStep("runtime", "complete");
+    setApplicationLoaderStep(
+      "conversation",
+      "loading",
+      "Preparing the active conversation…"
+    );
+    if (!state.recovery?.safeMode) {
+      await ensureConversationIdentity();
+      await restorePendingUserInput();
+    }
+    setApplicationLoaderStep("conversation", "complete");
+    finishApplicationLoader();
+    scheduleRuntimeRefresh();
+    elements.messageInput.focus();
   } catch (error) {
     elements.providerBadge.textContent = "Error";
     elements.providerBadge.className = "badge error";
     elements.runtimeCompactMeters.textContent = error.message;
+    failApplicationLoader(error);
+  } finally {
+    initializationInProgress = false;
   }
+}
 
-  await refreshRuntimeStatus();
-  if (!state.recovery?.safeMode) {
-    await ensureConversationIdentity();
+function resetApplicationLoader() {
+  document.body.classList.add("bootstrapping");
+  elements.appLoader.hidden = false;
+  elements.appLoader.setAttribute("aria-busy", "true");
+  elements.appLoaderRetry.hidden = true;
+  for (const step of elements.appLoader.querySelectorAll("[data-bootstrap-step]")) {
+    step.dataset.state = "pending";
+    step.removeAttribute("aria-current");
   }
-  scheduleRuntimeRefresh();
-  elements.messageInput.focus();
+  elements.appLoaderDetail.textContent = "Starting the application…";
+}
+
+function setApplicationLoaderStep(stepName, status, detail = null) {
+  const step = elements.appLoader.querySelector(
+    `[data-bootstrap-step="${stepName}"]`
+  );
+  if (step) {
+    step.dataset.state = status;
+    if (status === "loading") {
+      step.setAttribute("aria-current", "step");
+    } else {
+      step.removeAttribute("aria-current");
+    }
+  }
+  if (detail) {
+    elements.appLoaderDetail.textContent = detail;
+  }
+}
+
+function finishApplicationLoader() {
+  elements.appLoader.setAttribute("aria-busy", "false");
+  elements.appLoader.hidden = true;
+  document.body.classList.remove("bootstrapping");
+}
+
+function failApplicationLoader(error) {
+  const active = elements.appLoader.querySelector(
+    '[data-bootstrap-step][data-state="loading"]'
+  );
+  if (active) {
+    active.dataset.state = "failed";
+    active.removeAttribute("aria-current");
+  }
+  elements.appLoaderDetail.textContent = error?.message
+    ?? "Application startup failed.";
+  elements.appLoader.setAttribute("aria-busy", "false");
+  elements.appLoaderRetry.hidden = false;
 }
 
 function bindElements() {
   for (const id of [
+    "app-loader",
+    "app-loader-detail",
+    "app-loader-retry",
     "messages",
     "sidebar",
     "sidebar-resizer",
@@ -230,6 +317,7 @@ function bindElements() {
     "message-buffer-list",
     "message-buffer-run",
     "composer-status",
+    "user-input-panel",
     "provider-badge",
     "conversation-view",
     "open-benchmarks",
@@ -647,6 +735,7 @@ function bindElements() {
 }
 
 function bindEvents() {
+  elements.appLoaderRetry.addEventListener("click", loadInitialApplicationState);
   elements.composer.addEventListener("submit", handleComposerSubmit);
   elements.openBenchmarks.addEventListener("click", openBenchmarks);
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
@@ -1376,10 +1465,30 @@ function initializeScrollFollowing() {
 }
 
 async function loadApplicationState() {
+  const providerBootstrapPromise = loadProviderBootstrapState({
+    reportProgress: true
+  }).then(providerBootstrap => {
+    const localModelCount = providerBootstrap.modelsResponse.models.filter(
+      model => model.provider === "ollama-local"
+    ).length;
+    const ollamaVersion = providerBootstrap.setup.ollama.version;
+    setApplicationLoaderStep(
+      "providers",
+      "complete",
+      providerBootstrap.setup.ollama.available
+        ? `Ollama${ollamaVersion ? ` ${ollamaVersion}` : ""} ready · ${localModelCount} local model${localModelCount === 1 ? "" : "s"}`
+        : "Ollama check complete · runtime unavailable"
+    );
+    setApplicationLoaderStep(
+      "runtime",
+      "loading",
+      "Loading workspace and runtime status…"
+    );
+    return providerBootstrap;
+  });
   const [
     settings,
-    setup,
-    modelsResponse,
+    providerBootstrap,
     workspace,
     projectProfile,
     knowledgeProviders,
@@ -1394,8 +1503,7 @@ async function loadApplicationState() {
     runtimeProfiles
   ] = await Promise.all([
     fetchJson("/api/settings"),
-    fetchJson("/api/setup/status"),
-    fetchJson("/api/models"),
+    providerBootstrapPromise,
     fetchJson("/api/workspace"),
     fetchJson("/api/workspace/project-profile"),
     fetchJson("/api/knowledge-providers"),
@@ -1409,7 +1517,11 @@ async function loadApplicationState() {
     fetchJson("/api/model-organization"),
     fetchJson("/api/runtime/profiles")
   ]);
-  const providerHealth = await fetchJson("/api/provider-health");
+  const {
+    setup,
+    modelsResponse,
+    providerHealth
+  } = providerBootstrap;
   const devicesResponse = {
     devices: setup.devices,
     diagnostic: setup.deviceDiagnostic
@@ -1436,7 +1548,7 @@ async function loadApplicationState() {
   state.modelOrganization = modelOrganization;
   state.runtimeProfiles = runtimeProfiles;
   state.setup = setup;
-  updateProviderStatus(modelsResponse);
+  updateProviderStatus(setup.ollama);
   updateDeviceStatus(devicesResponse);
   renderHarnesses();
   renderComposerModels();
@@ -1537,6 +1649,48 @@ async function openBenchmarks() {
   } catch (error) {
     elements.benchmarkStatus.textContent = error.message;
   }
+}
+
+async function loadProviderBootstrapState({ reportProgress = false } = {}) {
+  let setup = await fetchJson("/api/setup/status");
+  let modelsResponse = await fetchJson("/api/models");
+  let providerHealth = await fetchJson("/api/provider-health");
+
+  if (hasContradictoryOllamaEvidence(setup, modelsResponse, providerHealth)) {
+    if (reportProgress) {
+      setApplicationLoaderStep(
+        "providers",
+        "loading",
+        "Ollama changed state during startup · verifying the latest status…"
+      );
+    }
+    setup = await fetchJson("/api/setup/status");
+    modelsResponse = await fetchJson("/api/models");
+    providerHealth = await fetchJson("/api/provider-health");
+  }
+
+  return { setup, modelsResponse, providerHealth };
+}
+
+function hasContradictoryOllamaEvidence(
+  setup,
+  modelsResponse,
+  providerHealth
+) {
+  const localModelsAvailable = modelsResponse.models.some(
+    model => model.provider === "ollama-local"
+  );
+  const localHealth = providerHealth.providers.find(
+    provider => provider.providerId === "ollama-local"
+  );
+  const latestEvidenceAvailable = localModelsAvailable
+    || localHealth?.connectionState === "healthy";
+  const latestEvidenceUnavailable = localHealth?.healthSource === "provider-model-refresh"
+    && (localHealth?.connectionState === "unavailable"
+      || Boolean(localHealth?.currentDiagnostic));
+
+  return !setup.ollama.available && latestEvidenceAvailable
+    || setup.ollama.available && latestEvidenceUnavailable;
 }
 
 function closeBenchmarks() {
@@ -8090,10 +8244,6 @@ function loadedModelGpuCard(group, devices, loadedModelsStatus) {
     : contextRuntimeValues.length === group.models.length
       ? contextRuntimeValues.reduce((total, value) => total + value, 0)
       : null;
-  const contextTokens = group.models.reduce(
-    (total, model) => total + Number(model.actualContextTokens ?? 0),
-    0
-  );
   const requestedContextValues = group.models
     .map(model => model.requestedContextTokens)
     .filter(value => value != null);
@@ -8120,12 +8270,11 @@ function loadedModelGpuCard(group, devices, loadedModelsStatus) {
     ),
     loadedModelMetric(
       "context",
-      t("memory.allocated_context_window"),
-      `${formatInteger(contextTokens)} tokens allocated`
-        + (requestedContextKnown
-          ? ` · ${formatInteger(requestedContextTokens)} requested`
-          : ""),
-      t("memory.allocated_context_note")
+      t("memory.requested_context_window"),
+      requestedContextKnown
+        ? `${formatInteger(requestedContextTokens)} tokens`
+        : "n/d",
+      t("memory.requested_context_note")
     ),
     loadedModelMetric(
       "memory",
@@ -12051,6 +12200,7 @@ function clearConversationUi() {
   elements.modelSelector.value = "auto";
   elements.harnessSelector.value = "native";
   elements.messageInput.value = "";
+  elements.messageInput.readOnly = false;
   resizeComposer();
   elements.composer.classList.remove("editing");
   elements.cancelMessageEdit.hidden = true;
@@ -12204,10 +12354,11 @@ function renderPersistenceStatus() {
 
 async function refreshSetupStatus({ quiet = false } = {}) {
   try {
-    const [setup, modelsResponse] = await Promise.all([
-      fetchJson("/api/setup/status"),
-      fetchJson("/api/models")
-    ]);
+    const {
+      setup,
+      modelsResponse,
+      providerHealth
+    } = await loadProviderBootstrapState();
     state.setup = setup;
     state.harnesses = setup.harnesses.map(harness => ({
       definition: harness.definition,
@@ -12215,7 +12366,8 @@ async function refreshSetupStatus({ quiet = false } = {}) {
     }));
     state.devices = setup.devices;
     state.models = modelsResponse.models;
-    updateProviderStatus(modelsResponse);
+    state.providerHealth = providerHealth;
+    updateProviderStatus(setup.ollama);
     updateDeviceStatus({
       devices: setup.devices,
       diagnostic: setup.deviceDiagnostic
@@ -12773,7 +12925,9 @@ function handleComposerKeyDown(event) {
 
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    if (state.requestController) {
+    if (state.activeUserInput) {
+      elements.composer.requestSubmit();
+    } else if (state.requestController) {
       queueCurrentMessage();
     } else {
       elements.composer.requestSubmit();
@@ -13285,6 +13439,11 @@ async function handleComposerSubmit(event) {
     document.querySelector(
       "#setup-onboarding [data-setup-action=\"continue\"]"
     )?.focus();
+    return;
+  }
+
+  if (state.activeUserInput) {
+    await answerActiveUserInput();
     return;
   }
 
@@ -14225,13 +14384,13 @@ function appendAssistantReasoning(assistant, delta, contentBlockId = null) {
     assistant.activeReasoning = {
       details,
       body,
-      raw: "",
+      chunks: [],
       contentBlockId
     };
   }
 
-  assistant.activeReasoning.raw += delta;
-  assistant.activeReasoning.body.textContent = assistant.activeReasoning.raw;
+  assistant.activeReasoning.chunks.push(delta);
+  assistant.activeReasoning.body.append(document.createTextNode(delta));
   assistant.activeReasoning.body.scrollTop =
     assistant.activeReasoning.body.scrollHeight;
   assistant.activeReasoning.details.dataset.deltaCount = String(
@@ -14292,7 +14451,7 @@ function ensureAssistantResponse(
   assistant.hasResponse = true;
   assistant.activeResponse = {
     body,
-    raw: "",
+    chunks: [],
     contentBlockId
   };
   return assistant.activeResponse;
@@ -14316,17 +14475,22 @@ function appendAssistantResponse(
     contentBlockId,
     promoteLatest
   );
-  response.raw += delta;
+  response.chunks.push(delta);
   response.body.dataset.deltaCount = String(
     Number(response.body.dataset.deltaCount) + 1
   );
-  renderAssistantResponse(
-    assistant,
-    response,
-    renderedHtml,
-    response.raw,
-    aggregateMarkdown
-  );
+  if (renderedHtml) {
+    renderAssistantResponse(
+      assistant,
+      response,
+      renderedHtml,
+      response.chunks.join(""),
+      aggregateMarkdown
+    );
+  } else {
+    response.body.append(document.createTextNode(delta));
+    assistant.copyButton.disabled = false;
+  }
   assistant.progress.hidden = true;
 }
 
@@ -14605,11 +14769,62 @@ function addToolsetRequest(assistant, streamEvent) {
   assistant.workActivity.append(item);
 }
 
+function addUserInputTranscript(assistant, streamEvent) {
+  const request = streamEvent.userInput;
+  if (!request) {
+    return;
+  }
+  const existing = [...assistant.workActivity.querySelectorAll(
+    ".user-input-transcript"
+  )].find(item => item.dataset.userInputId === request.id);
+  if (existing) {
+    return;
+  }
+
+  closeAssistantReasoning(assistant);
+  closeAssistantResponse(assistant);
+  assistant.workActivity.hidden = false;
+  const card = document.createElement("section");
+  card.className = "user-input-transcript";
+  card.dataset.timelineKind = "user-input";
+  card.dataset.eventType = streamEvent.type;
+  card.dataset.userInputId = request.id;
+  const title = document.createElement("strong");
+  title.className = "user-input-transcript-title";
+  title.textContent = request.questions.length === 1
+    ? "Question answered"
+    : `${request.questions.length} questions answered`;
+  card.append(title);
+
+  const answers = new Map(
+    (request.answers ?? []).map(answer => [answer.questionId, answer.answer])
+  );
+  request.questions.forEach(question => {
+    const item = document.createElement("div");
+    item.className = "user-input-transcript-item";
+    const header = document.createElement("span");
+    header.className = "user-input-transcript-header";
+    header.textContent = question.header;
+    const prompt = document.createElement("p");
+    prompt.textContent = question.question;
+    const answer = document.createElement("div");
+    answer.className = "user-input-transcript-answer";
+    const answerLabel = document.createElement("span");
+    answerLabel.textContent = "Answer";
+    const answerText = document.createElement("strong");
+    answerText.textContent = answers.get(question.id) ?? "No answer submitted";
+    answer.append(answerLabel, answerText);
+    item.append(header, prompt, answer);
+    card.append(item);
+  });
+  assistant.workActivity.append(card);
+}
+
 async function consumeEventStream(stream, assistant, options = {}) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let answer = "";
+  let answerChunks = [];
   let completed = false;
   let diagnostic = null;
   let terminalState = null;
@@ -14746,6 +14961,19 @@ async function consumeEventStream(stream, assistant, options = {}) {
         setPersistenceStatus("Save failed");
       }
 
+      if (
+        streamEvent.responseSegmentHtml
+        && assistant.activeResponse
+      ) {
+        renderAssistantResponse(
+          assistant,
+          assistant.activeResponse,
+          streamEvent.responseSegmentHtml,
+          assistant.activeResponse.chunks.join(""),
+          answerChunks.join("")
+        );
+      }
+
       if (isAssistantContentBoundary(streamEvent)) {
         closeAssistantContent(assistant);
       }
@@ -14758,7 +14986,7 @@ async function consumeEventStream(stream, assistant, options = {}) {
         );
       } else if (streamEvent.type === "response.delta") {
         const delta = streamEvent.delta ?? "";
-        answer += delta;
+        answerChunks.push(delta);
         appendAssistantResponse(
           assistant,
           delta,
@@ -14766,15 +14994,17 @@ async function consumeEventStream(stream, assistant, options = {}) {
             ?? streamEvent.renderedHtml
             ?? "",
           streamEvent.contentBlockId ?? null,
-          answer
+          null
         );
       } else if (streamEvent.type === "response.completed") {
         completed = true;
         terminalState = "completed";
         diagnostic = streamEvent.diagnostic ?? null;
-        closeAssistantContent(assistant);
+        closeAssistantReasoning(assistant);
         const responseTail = streamEvent.responseTail ?? "";
+        const answer = answerChunks.join("");
         if (responseTail) {
+          closeAssistantResponse(assistant);
           const aggregateAnswer = answer
             ? `${answer}\n\n---\n${responseTail}`
             : responseTail;
@@ -14788,7 +15018,17 @@ async function consumeEventStream(stream, assistant, options = {}) {
             aggregateAnswer,
             !assistant.hasResponse
           );
-          answer = aggregateAnswer;
+          answerChunks = [aggregateAnswer];
+          closeAssistantResponse(assistant);
+        } else if (assistant.activeResponse && streamEvent.renderedHtml) {
+          const response = assistant.activeResponse;
+          renderAssistantResponse(
+            assistant,
+            response,
+            streamEvent.renderedHtml,
+            answer,
+            answer
+          );
           closeAssistantResponse(assistant);
         } else if (!assistant.hasResponse && streamEvent.renderedHtml) {
           appendAssistantResponse(
@@ -14830,12 +15070,12 @@ async function consumeEventStream(stream, assistant, options = {}) {
         closeAssistantContent(assistant);
         const errorText = `${streamEvent.error.message}\n`
           + `Reference: ${streamEvent.error.traceId}`;
-        answer = errorText;
+        answerChunks = [errorText];
         const response = ensureAssistantResponse(
           assistant,
           `error:${streamEvent.error.traceId}`
         );
-        response.raw = errorText;
+        response.chunks = [errorText];
         response.body.classList.remove("pending");
         response.body.classList.add("error");
         response.body.textContent = errorText;
@@ -14907,6 +15147,24 @@ async function consumeEventStream(stream, assistant, options = {}) {
         finishActivity(assistant, terminalSummary, terminalWarning);
         addTraceDiagnosticActions(assistant, diagnostic);
         stopSlowRequestTimer(assistant);
+      } else if (
+        streamEvent.type === "user-input.requested"
+        && streamEvent.userInput
+      ) {
+        activateUserInput(streamEvent.userInput);
+      } else if (
+        (streamEvent.type === "user-input.submitted"
+          || streamEvent.type === "user-input.cancelled")
+        && streamEvent.userInput
+      ) {
+        if (state.activeUserInput?.id === streamEvent.userInput.id) {
+          clearActiveUserInput();
+        }
+        if (streamEvent.type === "user-input.submitted") {
+          addUserInputTranscript(assistant, streamEvent);
+        } else {
+          addActivity(assistant, streamEvent, false);
+        }
       } else if (
         streamEvent.type === "action.awaiting-approval"
         && streamEvent.localAction
@@ -14986,11 +15244,14 @@ async function consumeEventStream(stream, assistant, options = {}) {
   }
 
   return {
-    answer,
+    answer: answerChunks.join(""),
     completed,
     diagnostic,
     terminalState,
-    contentBlocks,
+    contentBlocks: contentBlocks.map(({ chunks, ...block }) => ({
+      ...block,
+      content: chunks.join("")
+    })),
     timeline
   };
 }
@@ -15018,13 +15279,14 @@ function captureConversationContentBlock(blocks, streamEvent) {
   const last = blocks.at(-1);
 
   if (last?.kind === kind && last.id === id) {
-    last.content += content;
+    last.chunks.push(content);
     return;
   }
 
   blocks.push({
     kind,
     content,
+    chunks: [content],
     id
   });
 }
@@ -16575,6 +16837,283 @@ async function validateChanges() {
   }
 }
 
+async function restorePendingUserInput() {
+  const pending = await fetchJson(
+    `/api/user-input/pending?browserSessionId=${encodeURIComponent(state.browserSessionId)}`
+  );
+  const request = pending.at(-1) ?? null;
+  if (request) {
+    activateUserInput(request);
+  }
+}
+
+function activateUserInput(request) {
+  state.activeUserInput = {
+    ...request,
+    currentQuestionIndex: Math.max(
+      0,
+      Math.min(request.questions.length - 1, request.currentQuestionIndex ?? 0)
+    ),
+    answersByQuestion: Object.fromEntries(
+      (request.answers ?? []).map(answer => [answer.questionId, answer.answer])
+    )
+  };
+  renderActiveUserInput();
+}
+
+function clearActiveUserInput() {
+  state.activeUserInput = null;
+  elements.userInputPanel.hidden = true;
+  elements.userInputPanel.replaceChildren();
+  elements.messageInput.value = "";
+  elements.messageInput.placeholder = "Send a message…";
+  elements.messageInput.readOnly = false;
+  elements.messageInput.removeAttribute("aria-invalid");
+  elements.sendButtonLabel.textContent = "Send";
+  resizeComposer();
+  updateComposerStatus();
+}
+
+function renderActiveUserInput() {
+  const request = state.activeUserInput;
+  if (!request) {
+    clearActiveUserInput();
+    return;
+  }
+  const index = request.currentQuestionIndex;
+  const question = request.questions[index];
+  const panel = elements.userInputPanel;
+  panel.replaceChildren();
+  panel.hidden = false;
+  panel.dataset.userInputId = request.id;
+  panel.dataset.resumable = String(request.resumable !== false);
+
+  const header = document.createElement("header");
+  header.className = "user-input-header";
+  const heading = document.createElement("div");
+  heading.className = "user-input-heading";
+  const label = document.createElement("span");
+  label.className = "user-input-label";
+  label.textContent = question.header;
+  const text = document.createElement("strong");
+  text.textContent = question.question;
+  heading.append(label, text);
+
+  const navigation = document.createElement("div");
+  navigation.className = "user-input-navigation";
+  const previous = document.createElement("button");
+  previous.type = "button";
+  previous.className = "user-input-nav";
+  previous.textContent = "←";
+  previous.title = "Previous question";
+  previous.setAttribute("aria-label", "Previous question");
+  previous.disabled = index === 0;
+  const position = document.createElement("span");
+  position.textContent = `${index + 1} / ${request.questions.length}`;
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "user-input-nav";
+  next.textContent = index === request.questions.length - 1 ? "✓" : "→";
+  next.title = index === request.questions.length - 1
+    ? "Submit all answers"
+    : "Next question";
+  next.setAttribute("aria-label", next.title);
+  next.disabled = request.resumable === false
+    ? index === request.questions.length - 1
+    : false;
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "user-input-close";
+  cancel.textContent = "×";
+  cancel.title = "Cancel questions";
+  cancel.setAttribute("aria-label", "Cancel questions");
+  navigation.append(previous, position, next, cancel);
+  header.append(heading, navigation);
+  panel.append(header);
+
+  if (request.resumable === false) {
+    const expired = document.createElement("p");
+    expired.className = "user-input-expired";
+    expired.textContent = "The questions were restored, but the underlying harness request cannot resume after the Host restart.";
+    panel.append(expired);
+  } else if (question.options.length > 0) {
+    const options = document.createElement("div");
+    options.className = "user-input-options";
+    question.options.forEach((option, optionIndex) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "user-input-option";
+      button.dataset.selected = String(
+        request.answersByQuestion[question.id] === option.label
+      );
+      const key = document.createElement("span");
+      key.className = "user-input-option-key";
+      key.textContent = String.fromCharCode(65 + optionIndex);
+      const content = document.createElement("span");
+      const optionLabel = document.createElement("strong");
+      optionLabel.textContent = option.label;
+      content.append(optionLabel);
+      if (option.description) {
+        const description = document.createElement("small");
+        description.textContent = option.description;
+        content.append(description);
+      }
+      button.append(key, content);
+      button.addEventListener("click", async () => {
+        elements.messageInput.value = option.label;
+        await answerActiveUserInput();
+      });
+      options.append(button);
+    });
+    panel.append(options);
+  }
+
+  previous.addEventListener("click", () => {
+    if (request.resumable === false) {
+      request.currentQuestionIndex = index - 1;
+      renderActiveUserInput();
+    } else {
+      void navigateUserInput(index - 1, false);
+    }
+  });
+  next.addEventListener("click", () => {
+    if (request.resumable === false) {
+      request.currentQuestionIndex = Math.min(request.questions.length - 1, index + 1);
+      renderActiveUserInput();
+    } else {
+      void answerActiveUserInput();
+    }
+  });
+  cancel.addEventListener("click", cancelActiveUserInput);
+  elements.messageInput.value = request.answersByQuestion[question.id] ?? "";
+  elements.messageInput.placeholder = request.resumable === false
+    ? "This harness request can no longer resume"
+    : "Type a custom answer…";
+  elements.messageInput.readOnly = request.resumable === false;
+  elements.sendButtonLabel.textContent = index === request.questions.length - 1
+    ? "Submit"
+    : "Next";
+  resizeComposer();
+  updateComposerStatus();
+  if (request.resumable !== false) elements.messageInput.focus();
+}
+
+function currentUserInputAnswers(request) {
+  return request.questions.flatMap(question => {
+    const answer = request.answersByQuestion[question.id]?.trim();
+    return answer ? [{ questionId: question.id, answer }] : [];
+  });
+}
+
+function captureCurrentUserInputAnswer(required) {
+  const request = state.activeUserInput;
+  if (!request) return false;
+  const question = request.questions[request.currentQuestionIndex];
+  const answer = elements.messageInput.value.trim();
+  if (!answer) {
+    delete request.answersByQuestion[question.id];
+    if (required) {
+      elements.messageInput.setAttribute("aria-invalid", "true");
+      elements.composerStatus.textContent = "Answer this question before continuing";
+      return false;
+    }
+  } else {
+    request.answersByQuestion[question.id] = answer;
+    elements.messageInput.removeAttribute("aria-invalid");
+  }
+  return true;
+}
+
+async function persistUserInputDraft(targetIndex) {
+  const request = state.activeUserInput;
+  if (!request) return;
+  await fetchJson(`/api/user-input/${encodeURIComponent(request.id)}/draft`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      browserSessionId: state.browserSessionId,
+      executionSessionId: request.executionSessionId,
+      currentQuestionIndex: targetIndex,
+      answers: currentUserInputAnswers(request)
+    })
+  });
+}
+
+async function navigateUserInput(targetIndex, requireAnswer) {
+  const request = state.activeUserInput;
+  if (!request || request.resumable === false) return;
+  if (!captureCurrentUserInputAnswer(requireAnswer)) return;
+  const bounded = Math.max(0, Math.min(request.questions.length - 1, targetIndex));
+  try {
+    await persistUserInputDraft(bounded);
+    request.currentQuestionIndex = bounded;
+    renderActiveUserInput();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function answerActiveUserInput() {
+  const request = state.activeUserInput;
+  if (!request) return;
+  if (request.resumable === false) {
+    showToast("The underlying harness request cannot be resumed.");
+    return;
+  }
+  if (!captureCurrentUserInputAnswer(true)) return;
+  if (request.currentQuestionIndex < request.questions.length - 1) {
+    await navigateUserInput(request.currentQuestionIndex + 1, true);
+    return;
+  }
+  const answers = currentUserInputAnswers(request);
+  if (answers.length !== request.questions.length) {
+    const missing = request.questions.findIndex(
+      question => !request.answersByQuestion[question.id]?.trim()
+    );
+    await navigateUserInput(missing, false);
+    elements.composerStatus.textContent = "Answer every question before submitting";
+    return;
+  }
+  elements.sendButton.disabled = true;
+  try {
+    await fetchJson(`/api/user-input/${encodeURIComponent(request.id)}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        browserSessionId: state.browserSessionId,
+        executionSessionId: request.executionSessionId,
+        answers,
+        cancelled: false
+      })
+    });
+    clearActiveUserInput();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    elements.sendButton.disabled = false;
+  }
+}
+
+async function cancelActiveUserInput() {
+  const request = state.activeUserInput;
+  if (!request) return;
+  try {
+    await fetchJson(`/api/user-input/${encodeURIComponent(request.id)}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        browserSessionId: state.browserSessionId,
+        executionSessionId: request.executionSessionId,
+        answers: currentUserInputAnswers(request),
+        cancelled: true
+      })
+    });
+    clearActiveUserInput();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function addApprovalActivity(assistant, streamEvent, historical = false) {
   const action = streamEvent.localAction;
   closeAssistantReasoning(assistant);
@@ -17817,6 +18356,11 @@ function updateComposerStatus() {
     elements.composerStatus.textContent = state.requestController
       ? "Read-only · another conversation is still running"
       : "Read-only history · open this conversation again to continue";
+  } else if (state.activeUserInput) {
+    const request = state.activeUserInput;
+    elements.composerStatus.textContent = request.resumable === false
+      ? "Questions restored · harness request unavailable"
+      : `Answering question ${request.currentQuestionIndex + 1} of ${request.questions.length}`;
   } else if (state.requestController) {
     elements.composerStatus.textContent = state.steeringMessage
       ? t("steer.sending")

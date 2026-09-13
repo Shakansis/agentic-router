@@ -421,6 +421,23 @@ public sealed class ExecutionEffectTests
   }
 
   [TestMethod]
+  public void PlanManagementToolsFollowAuthoritativePlanState()
+  {
+    var withoutPlan = ExecutionTurnToolPolicy.Resolve(
+      "Inspect and update the workspace",
+      validationProfileAvailable: false
+    );
+    Assert.IsTrue(withoutPlan.Allows("create_execution_plan"));
+    Assert.IsFalse(withoutPlan.Allows("revise_execution_plan"));
+    Assert.IsFalse(withoutPlan.Allows("get_execution_plan"));
+
+    var withPlan = withoutPlan.WithPlanState(hasExecutionPlan: true);
+    Assert.IsFalse(withPlan.Allows("create_execution_plan"));
+    Assert.IsTrue(withPlan.Allows("revise_execution_plan"));
+    Assert.IsTrue(withPlan.Allows("get_execution_plan"));
+  }
+
+  [TestMethod]
   public void UnknownToolHandlingSuggestsOnlyClosedUnambiguousCapabilities()
   {
     var resolver = new ToolNameResolver();
