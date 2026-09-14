@@ -169,6 +169,7 @@ public sealed class ChatController : ControllerBase
           request.Model,
           request.ApprovalPolicy,
           request.Harness,
+          request.ExecutionStrategy,
           request.Images,
           request.HideUserMessage,
           request.ReplaceFromMessageIndex,

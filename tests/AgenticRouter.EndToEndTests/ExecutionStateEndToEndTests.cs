@@ -17,6 +17,7 @@ namespace AgenticRouter.EndToEndTests;
 public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<ExecutionStateEndToEndTests>
 {
   [TestMethod]
+  [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task GitCardAndPanelExposeAuthoritativeBoundedRepositoryViews()
   {
@@ -3979,16 +3980,16 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator("#session-history").EvaluateAsync(
       "element => element.open = true"
     );
-    var resumeResponse = Page.WaitForResponseAsync(
+    var openResponse = Page.WaitForResponseAsync(
       response => response.Url.EndsWith(
-        $"/api/sessions/{sessionId}/resume",
+        $"/api/sessions/{sessionId}/open",
         StringComparison.Ordinal
       ) && response.Request.Method == "POST"
     );
     await Page.Locator(
       $"#recent-sessions [data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
-    await resumeResponse;
+    await openResponse;
 
     var historicalApproval = Page.Locator(
       ".action-approval[data-event-type=\"action.awaiting-approval\"]"
@@ -5402,7 +5403,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task RecentSessionCardIsCompactAndDetailsModalOwnsActionsAndSummary()
+  public async Task RecentSessionCardOpensDirectlyAndDetailsModalOwnsManagementActions()
   {
     var workspaceId = await ActiveWorkspaceIdAsync();
     using (
@@ -5524,7 +5525,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(card.Locator("button")).ToHaveCountAsync(2);
     await Expect(card.Locator(".session-entry-content")).ToHaveAttributeAsync(
       "aria-label",
-      "Resume Keep this compact conversation available."
+      "Open Keep this compact conversation available."
     );
     await Expect(card).Not.ToContainTextAsync("Rename");
     await Expect(card).Not.ToContainTextAsync("Summary");
@@ -5533,6 +5534,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await card.Locator(".session-details-button").ClickAsync();
     await Expect(Page.Locator("#session-details-dialog")).ToBeVisibleAsync();
     await Expect(Page.Locator("#session-details-title")).ToHaveTextAsync(
+      "Conversation Details"
+    );
+    await Expect(Page.Locator("#session-details-conversation-title")).ToHaveTextAsync(
       "Keep this compact conversation available."
     );
     await Expect(Page.Locator("#session-details-summary")).ToContainTextAsync(
@@ -5542,8 +5546,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "Keep secondary actions in the details modal."
     );
     await Expect(Page.Locator("#session-details-dialog textarea")).ToHaveCountAsync(0);
+    await Expect(Page.Locator("#resume-session-details")).ToHaveCountAsync(0);
     await Expect(Page.Locator("#session-details-rename")).ToBeVisibleAsync();
     await Expect(Page.Locator("#edit-session-summary")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#session-details-dialog .dialog-footer > *")).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#dismiss-session-details")).ToHaveTextAsync("Close");
+    await Expect(Page.Locator(".session-details-actions > *")).ToHaveCountAsync(5);
+    await Expect(Page.Locator(".session-details-lifecycle-actions > *")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".session-details-actions #session-details-archive")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".session-details-actions #session-details-delete")).ToHaveCountAsync(0);
     var detailsHeight = await Page.Locator(
       "#session-details-dialog .session-details-shell"
     ).EvaluateAsync<double>(
@@ -5563,9 +5574,761 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       tallestAction
     );
 
-    await Page.Locator("#resume-session-details").ClickAsync();
+    await Page.Locator("#dismiss-session-details").ClickAsync();
+    var openResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        "/api/sessions/compact-card-v0913/open",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await card.Locator(".session-entry-content").ClickAsync();
+    await openResponse;
     await Expect(Page.Locator(".message.user")).ToContainTextAsync(
       "Keep this compact conversation available."
+    );
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("native");
+    await Expect(Page.Locator("#approval-policy")).ToHaveValueAsync("auto");
+    await Expect(Page.Locator("#send-strategy-toggle")).ToHaveAttributeAsync(
+      "aria-label",
+      "Choose Execute send strategy. Current: Auto"
+    );
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ActiveConversationPreservesIdentityAndSelectionsAcrossSwitchRestartAndArchive()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (
+      var conversationA = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "active-conversation-a-v0913",
+          messages = new object[]
+          {
+            new
+            {
+              role = "user",
+              content = "Conversation A original message.",
+              turnId = "turn-active-a-v0913"
+            },
+            new
+            {
+              role = "assistant",
+              content = "Conversation A original answer.",
+              contentBlocks = new[]
+              {
+                new
+                {
+                  kind = "response",
+                  content = "Conversation A original answer.",
+                  id = "response-active-a-v0913"
+                }
+              },
+              turnId = "turn-active-a-v0913"
+            }
+          },
+          interactionMode = "execute",
+          selectedModel = "alpha:latest",
+          state = "completed",
+          approvalPolicy = "ask",
+          harness = "opencode",
+          executionStrategy = "direct"
+        }
+      )
+    )
+    {
+      conversationA.EnsureSuccessStatusCode();
+    }
+    using (
+      var conversationB = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "active-conversation-b-v0913",
+          messages = new[]
+          {
+            new
+            {
+              role = "user",
+              content = "Conversation B original message."
+            },
+            new
+            {
+              role = "assistant",
+              content = "Conversation B original answer."
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "command-r:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      conversationB.EnsureSuccessStatusCode();
+    }
+
+    async Task OpenConversationAsync(string sessionId)
+    {
+      var response = Page.WaitForResponseAsync(
+        item => item.Url.EndsWith(
+          $"/api/sessions/{sessionId}/open",
+          StringComparison.Ordinal
+        ) && item.Request.Method == "POST"
+      );
+      await Page.Locator(
+        $"#recent-sessions [data-session-id=\"{sessionId}\"] .session-entry-content"
+      ).ClickAsync();
+      await response;
+      await Expect(Page.Locator(
+        $"#recent-sessions [data-session-id=\"{sessionId}\"]"
+      )).ToHaveAttributeAsync("aria-current", "true");
+      await Expect(Page.Locator("#new-conversation")).ToBeEnabledAsync();
+    }
+
+    async Task AssertConversationARestoredAsync()
+    {
+      await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
+      await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+      await Expect(Page.Locator(".message.user")).ToContainTextAsync(
+        "Conversation A original message."
+      );
+      await Expect(Page.Locator(".message.assistant")).ToContainTextAsync(
+        "Conversation A original answer."
+      );
+      await Expect(Page.Locator("#model-selector")).ToHaveValueAsync("alpha:latest");
+      await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("opencode");
+      await Expect(Page.Locator("[data-mode=\"execute\"]")).ToHaveAttributeAsync(
+        "aria-pressed",
+        "true"
+      );
+      await Expect(Page.Locator("#approval-policy")).ToHaveValueAsync("ask");
+      await Expect(Page.Locator("#send-strategy-toggle")).ToHaveAttributeAsync(
+        "aria-label",
+        "Choose Execute send strategy. Current: Direct"
+      );
+      await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+      await Expect(Page.Locator("#session-details-dialog")).Not.ToBeVisibleAsync();
+    }
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await OpenConversationAsync("active-conversation-a-v0913");
+    await AssertConversationARestoredAsync();
+
+    await OpenConversationAsync("active-conversation-b-v0913");
+    await Expect(Page.Locator(".message.user")).ToContainTextAsync(
+      "Conversation B original message."
+    );
+    await OpenConversationAsync("active-conversation-a-v0913");
+    await AssertConversationARestoredAsync();
+
+    var alternateDirectory = _environment.CreateWorkspaceDirectory(
+      $"conversation-switch-{Guid.NewGuid():N}"
+    );
+    using var createdWorkspace = await _environment.HttpClient.PostAsJsonAsync(
+      "api/workspaces",
+      new
+      {
+        name = "Conversation switch target",
+        path = alternateDirectory
+      }
+    );
+    createdWorkspace.EnsureSuccessStatusCode();
+    using var createdWorkspaceDocument = JsonDocument.Parse(
+      await createdWorkspace.Content.ReadAsStringAsync()
+    );
+    var alternateWorkspaceId = createdWorkspaceDocument.RootElement.GetProperty("id").GetString()!;
+    using (
+      var activateAlternate = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{alternateWorkspaceId}/activate",
+        null
+      )
+    )
+    {
+      activateAlternate.EnsureSuccessStatusCode();
+    }
+    using (
+      var activateOriginal = await _environment.HttpClient.PostAsync(
+        $"api/workspaces/{workspaceId}/activate",
+        null
+      )
+    )
+    {
+      activateOriginal.EnsureSuccessStatusCode();
+    }
+
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    await Expect(Page.Locator(
+      "#recent-sessions [data-session-id=\"active-conversation-a-v0913\"]"
+    )).ToBeVisibleAsync();
+    await OpenConversationAsync("active-conversation-a-v0913");
+    await AssertConversationARestoredAsync();
+
+    await Page.Locator("[data-mode=\"chat\"]").ClickAsync();
+    await SendMessageAsync("Continue conversation A after restart.");
+    using var continuedResponse = await _environment.HttpClient.GetAsync(
+      $"api/sessions/active-conversation-a-v0913?workspaceId={workspaceId}"
+    );
+    continuedResponse.EnsureSuccessStatusCode();
+    using var continuedDocument = JsonDocument.Parse(
+      await continuedResponse.Content.ReadAsStringAsync()
+    );
+    var continued = continuedDocument.RootElement;
+    Assert.AreEqual("active-conversation-a-v0913", continued.GetProperty("id").GetString());
+    Assert.IsFalse(continued.GetProperty("archived").GetBoolean());
+    Assert.HasCount(4, continued.GetProperty("messages").EnumerateArray().ToArray());
+    Assert.AreEqual(
+      "Continue conversation A after restart.",
+      continued.GetProperty("messages")[2].GetProperty("content").GetString()
+    );
+
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    var activeCard = Page.Locator(
+      "#recent-sessions [data-session-id=\"active-conversation-a-v0913\"]"
+    );
+    await activeCard.Locator(".session-details-button").ClickAsync();
+    await Expect(Page.Locator("#session-details-dialog")).ToBeVisibleAsync();
+    await Page.Locator("#session-details-archive").ClickAsync();
+    await Expect(activeCard).ToHaveCountAsync(0);
+    await Expect(Page.Locator("#archived-session-section")).ToBeVisibleAsync();
+    await Page.Locator("#archived-session-section").EvaluateAsync(
+      "element => element.open = true"
+    );
+    var archivedCard = Page.Locator(
+      "#archived-sessions [data-session-id=\"active-conversation-a-v0913\"]"
+    );
+    await Expect(archivedCard).ToBeVisibleAsync();
+    var archivedOpenResponse = Page.WaitForResponseAsync(
+      response => response.Url.EndsWith(
+        "/api/sessions/active-conversation-a-v0913/open",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await archivedCard.Locator(".session-entry-content").ClickAsync();
+    await archivedOpenResponse;
+    await Expect(Page.Locator(".message.user").Last).ToContainTextAsync(
+      "Continue conversation A after restart."
+    );
+    using var archivedResponse = await _environment.HttpClient.GetAsync(
+      $"api/sessions/active-conversation-a-v0913?workspaceId={workspaceId}"
+    );
+    archivedResponse.EnsureSuccessStatusCode();
+    using var archivedDocument = JsonDocument.Parse(
+      await archivedResponse.Content.ReadAsStringAsync()
+    );
+    Assert.IsTrue(archivedDocument.RootElement.GetProperty("archived").GetBoolean());
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task SessionCompactionHandlesBoundariesLifecycleCorruptionContinuationAndRestart()
+  {
+    const int thresholdBytes = 10_485_760;
+    const int targetBytes = 5_242_880;
+    const string marker = "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1";
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (
+      var history = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/workspaces/{workspaceId}/history",
+        new
+        {
+          enabled = true
+        }
+      )
+    )
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    var sessionDirectory = Path.Combine(
+      _environment.DataDirectory,
+      "workspaces",
+      workspaceId,
+      "sessions"
+    );
+    Directory.CreateDirectory(
+      sessionDirectory
+    );
+    var jsonOptions = new JsonSerializerOptions(
+      JsonSerializerDefaults.Web
+    )
+    {
+      WriteIndented = true
+    };
+
+    async Task<string> WriteSizedSessionAsync(
+      string id,
+      int bytes,
+      string state
+    )
+    {
+      var now = DateTimeOffset.UtcNow;
+      var olderAssistant = new JsonObject
+      {
+        ["role"] = "assistant",
+        ["content"] = string.Empty,
+        ["turnId"] = $"turn-old-{id}",
+        ["timeline"] = new JsonArray(
+          new JsonObject
+          {
+            ["requestId"] = $"request-{id}",
+            ["type"] = "action.completed",
+            ["timestamp"] = now,
+            ["message"] = "Validated the historical workspace change.",
+            ["localAction"] = new JsonObject
+            {
+              ["actionId"] = $"action-{id}",
+              ["tool"] = "write_file",
+              ["summary"] = "Updated src/continuity.txt with the accepted decision.",
+              ["state"] = "completed",
+              ["requiresApproval"] = false,
+              ["relativePaths"] = new JsonArray("src/continuity.txt")
+            }
+          }
+        )
+      };
+      var root = new JsonObject
+      {
+        ["schemaVersion"] = 1,
+        ["id"] = id,
+        ["workspaceId"] = workspaceId,
+        ["title"] = $"Compaction boundary {id}",
+        ["createdAt"] = now,
+        ["updatedAt"] = now,
+        ["archived"] = false,
+        ["state"] = state,
+        ["lastInteractionMode"] = "chat",
+        ["selectedModel"] = "alpha:latest",
+        ["messages"] = new JsonArray(
+          new JsonObject
+          {
+            ["role"] = "user",
+            ["content"] = "Constraint: preserve the approved workspace boundary and do not discard unresolved work.",
+            ["turnId"] = $"turn-old-{id}"
+          },
+          olderAssistant,
+          new JsonObject
+          {
+            ["role"] = "user",
+            ["content"] = $"Newest user history for {id} must remain exact.",
+            ["turnId"] = $"turn-new-{id}"
+          },
+          new JsonObject
+          {
+            ["role"] = "assistant",
+            ["content"] = $"Newest assistant history for {id} remains exact and unresolved item NEXT-{id} stays visible.",
+            ["turnId"] = $"turn-new-{id}"
+          }
+        ),
+        ["executionReviews"] = new JsonArray(),
+        ["interrupted"] = false,
+        ["contextTruncated"] = false,
+        ["artifactsTruncated"] = false,
+        ["storageBytes"] = 0,
+        ["executionRollbacks"] = new JsonArray(),
+        ["pinned"] = false,
+        ["pinnedAt"] = null,
+        ["sessionSummary"] = new JsonObject
+        {
+          ["content"] = new JsonObject
+          {
+            ["objective"] = "Preserve continuity after semantic compaction.",
+            ["decisions"] = new JsonArray("Decision: retain the trusted workspace boundary."),
+            ["filesChanged"] = new JsonArray("src/continuity.txt"),
+            ["commandsAndValidation"] = new JsonArray("Validation passed before compaction."),
+            ["unresolvedIssues"] = new JsonArray($"NEXT-{id}"),
+            ["nextSuggestedStep"] = "Continue using the newest retained turn."
+          },
+          ["model"] = "manual",
+          ["provider"] = "local",
+          ["estimatedInputTokens"] = 0,
+          ["createdAt"] = now,
+          ["updatedAt"] = now,
+          ["generated"] = false
+        },
+        ["preferredModelProfileId"] = null,
+        ["lastApprovalPolicy"] = "ask",
+        ["selectedHarness"] = "native",
+        ["lastExecutionStrategy"] = "auto"
+      };
+      var prefix = "Decision: keep the accepted constraint.\n"
+        + "Relevant fact: the previous operation completed successfully.\n"
+        + "Important file change: src/continuity.txt was updated.\n"
+        + $"Unresolved work: NEXT-{id}.\n";
+      olderAssistant["content"] = prefix;
+      var initial = root.ToJsonString(
+        jsonOptions
+      ) + "\n";
+      var paddingLength = bytes - Encoding.UTF8.GetByteCount(
+        initial
+      );
+      Assert.IsGreaterThan(
+        0,
+        paddingLength
+      );
+      olderAssistant["content"] = prefix + new string(
+        'x',
+        paddingLength
+      );
+      var json = root.ToJsonString(
+        jsonOptions
+      ) + "\n";
+      Assert.AreEqual(
+        bytes,
+        Encoding.UTF8.GetByteCount(
+          json
+        )
+      );
+      var path = Path.Combine(
+        sessionDirectory,
+        $"{id}.json"
+      );
+      await File.WriteAllTextAsync(
+        path,
+        json,
+        new UTF8Encoding(
+          false
+        )
+      );
+      return path;
+    }
+
+    var belowPath = await WriteSizedSessionAsync(
+      "compaction-below-v0913",
+      thresholdBytes - 1,
+      "completed"
+    );
+    var exactPath = await WriteSizedSessionAsync(
+      "compaction-exact-v0913",
+      thresholdBytes,
+      "completed"
+    );
+    var abovePath = await WriteSizedSessionAsync(
+      "compaction-above-v0913",
+      thresholdBytes + 1,
+      "completed"
+    );
+    var lifecyclePath = await WriteSizedSessionAsync(
+      "compaction-lifecycle-v0913",
+      thresholdBytes - 2,
+      "running"
+    );
+    var corruptPath = Path.Combine(
+      sessionDirectory,
+      "compaction-corrupt-v0913.json"
+    );
+    await File.WriteAllTextAsync(
+      corruptPath,
+      "{ this is not a valid session record",
+      new UTF8Encoding(
+        false
+      )
+    );
+    var legacySettings = JsonNode.Parse(
+      await File.ReadAllTextAsync(
+        _environment.SettingsPath
+      )
+    )!.AsObject();
+    var legacySessionHistory = legacySettings["sessionHistory"]!.AsObject();
+    legacySessionHistory.Remove(
+      "sessionCompactionThresholdBytes"
+    );
+    legacySessionHistory.Remove(
+      "sessionCompactionTargetBytes"
+    );
+    legacySessionHistory["maxSessionBytes"] = 5_242_880;
+    await File.WriteAllTextAsync(
+      _environment.SettingsPath,
+      legacySettings.ToJsonString(
+        jsonOptions
+      ),
+      new UTF8Encoding(
+        false
+      )
+    );
+
+    await _environment.RestartApplicationAsync();
+    Assert.AreEqual(
+      thresholdBytes - 1,
+      new FileInfo(
+        belowPath
+      ).Length
+    );
+    Assert.IsFalse(
+      (await File.ReadAllTextAsync(
+        belowPath
+      )).Contains(
+        marker,
+        StringComparison.Ordinal
+      )
+    );
+    using (
+      var settingsResponse = await _environment.HttpClient.GetAsync(
+        "api/settings"
+      )
+    )
+    {
+      settingsResponse.EnsureSuccessStatusCode();
+      using var settingsDocument = JsonDocument.Parse(
+        await settingsResponse.Content.ReadAsStringAsync()
+      );
+      var migratedHistory = settingsDocument.RootElement.GetProperty(
+        "sessionHistory"
+      );
+      Assert.AreEqual(
+        thresholdBytes,
+        migratedHistory.GetProperty("sessionCompactionThresholdBytes").GetInt32()
+      );
+      Assert.AreEqual(
+        targetBytes,
+        migratedHistory.GetProperty("sessionCompactionTargetBytes").GetInt32()
+      );
+      Assert.IsFalse(
+        migratedHistory.TryGetProperty(
+          "maxSessionBytes",
+          out _
+        )
+      );
+    }
+    foreach (var compactedPath in new[]
+      {
+        exactPath,
+        abovePath,
+        lifecyclePath
+      })
+    {
+      Assert.IsLessThanOrEqualTo(
+        targetBytes,
+        new FileInfo(
+          compactedPath
+        ).Length,
+        compactedPath
+      );
+      var compactedJson = await File.ReadAllTextAsync(
+        compactedPath
+      );
+      StringAssert.Contains(
+        compactedJson,
+        marker
+      );
+      StringAssert.Contains(
+        compactedJson,
+        "Decision: retain the trusted workspace boundary."
+      );
+      StringAssert.Contains(
+        compactedJson,
+        "Constraint: preserve the approved workspace boundary"
+      );
+      StringAssert.Contains(
+        compactedJson,
+        "Relevant fact: the previous operation completed successfully."
+      );
+      StringAssert.Contains(
+        compactedJson,
+        "src/continuity.txt"
+      );
+      StringAssert.Contains(
+        compactedJson,
+        "NEXT-"
+      );
+      StringAssert.Contains(
+        compactedJson,
+        "Continue using the newest retained turn."
+      );
+    }
+    using (
+      var lifecycleResponse = await _environment.HttpClient.GetAsync(
+        $"api/sessions/compaction-lifecycle-v0913?workspaceId={workspaceId}"
+      )
+    )
+    {
+      lifecycleResponse.EnsureSuccessStatusCode();
+      using var lifecycleDocument = JsonDocument.Parse(
+        await lifecycleResponse.Content.ReadAsStringAsync()
+      );
+      Assert.AreEqual(
+        "interrupted",
+        lifecycleDocument.RootElement.GetProperty("state").GetString()
+      );
+      Assert.IsTrue(
+        lifecycleDocument.RootElement.GetProperty("interrupted").GetBoolean()
+      );
+    }
+    using (
+      var sessionsResponse = await _environment.HttpClient.GetAsync(
+        "api/sessions"
+      )
+    )
+    {
+      sessionsResponse.EnsureSuccessStatusCode();
+      var sessionsJson = await sessionsResponse.Content.ReadAsStringAsync();
+      StringAssert.Contains(
+        sessionsJson,
+        "compaction-exact-v0913"
+      );
+      Assert.IsFalse(
+        sessionsJson.Contains(
+          "compaction-corrupt-v0913",
+          StringComparison.Ordinal
+        )
+      );
+    }
+    StringAssert.Contains(
+      _environment.ApiOutput,
+      "Skipping invalid persisted session compaction-corrupt-v0913"
+    );
+    using (
+      var liveWrite = await _environment.HttpClient.PutAsJsonAsync(
+        "api/sessions/current",
+        new
+        {
+          sessionId = "compaction-live-write-v0913",
+          messages = new object[]
+          {
+            new
+            {
+              role = "user",
+              content = "Older live-write requirement: preserve the accepted decision.",
+              turnId = "turn-old-live-write-v0913"
+            },
+            new
+            {
+              role = "assistant",
+              content = "Decision: live writes compact semantically.\n"
+                + new string('y', thresholdBytes),
+              turnId = "turn-old-live-write-v0913"
+            },
+            new
+            {
+              role = "user",
+              content = "Newest live-write user message remains exact.",
+              turnId = "turn-new-live-write-v0913"
+            },
+            new
+            {
+              role = "assistant",
+              content = "Newest live-write assistant message remains exact.",
+              turnId = "turn-new-live-write-v0913"
+            }
+          },
+          interactionMode = "chat",
+          selectedModel = "alpha:latest",
+          state = "completed"
+        }
+      )
+    )
+    {
+      liveWrite.EnsureSuccessStatusCode();
+    }
+    var liveWritePath = Path.Combine(
+      sessionDirectory,
+      "compaction-live-write-v0913.json"
+    );
+    Assert.IsLessThanOrEqualTo(
+      targetBytes,
+      new FileInfo(
+        liveWritePath
+      ).Length
+    );
+    var liveWriteJson = await File.ReadAllTextAsync(
+      liveWritePath
+    );
+    StringAssert.Contains(
+      liveWriteJson,
+      marker
+    );
+    StringAssert.Contains(
+      liveWriteJson,
+      "Newest live-write assistant message remains exact."
+    );
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync(
+      "element => element.open = true"
+    );
+    var openResponse = Page.WaitForResponseAsync(response =>
+      response.Url.EndsWith(
+        "/api/sessions/compaction-exact-v0913/open",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator(
+      "#recent-sessions [data-session-id=\"compaction-exact-v0913\"] .session-entry-content"
+    ).ClickAsync();
+    await openResponse;
+    await Expect(Page.Locator("#new-conversation")).ToBeEnabledAsync();
+    await Expect(Page.Locator(".message.user").Last).ToContainTextAsync(
+      "Newest user history for compaction-exact-v0913 must remain exact."
+    );
+    await Expect(Page.Locator(".message.assistant").Last).ToContainTextAsync(
+      "Newest assistant history for compaction-exact-v0913 remains exact"
+    );
+    await Expect(Page.Locator("#messages .workspace-note")).ToContainTextAsync(
+      "Older turns were compacted into continuity context"
+    );
+    await SendMessageAsync(
+      "Continue after persisted history compaction."
+    );
+    using (
+      var continuedResponse = await _environment.HttpClient.GetAsync(
+        $"api/sessions/compaction-exact-v0913?workspaceId={workspaceId}"
+      )
+    )
+    {
+      continuedResponse.EnsureSuccessStatusCode();
+      var continuedJson = await continuedResponse.Content.ReadAsStringAsync();
+      StringAssert.Contains(
+        continuedJson,
+        marker
+      );
+      StringAssert.Contains(
+        continuedJson,
+        "Continue after persisted history compaction."
+      );
+      StringAssert.Contains(
+        continuedJson,
+        "Newest assistant history for compaction-exact-v0913 remains exact"
+      );
+    }
+
+    await _environment.RestartApplicationAsync();
+    using var restartedResponse = await _environment.HttpClient.GetAsync(
+      $"api/sessions/compaction-exact-v0913?workspaceId={workspaceId}"
+    );
+    restartedResponse.EnsureSuccessStatusCode();
+    var restartedJson = await restartedResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(
+      restartedJson,
+      marker
+    );
+    StringAssert.Contains(
+      restartedJson,
+      "Continue after persisted history compaction."
     );
   }
 
@@ -5626,7 +6389,20 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(Page.Locator("#session-details-state")).ToContainTextAsync(
       "Interrupted"
     );
-    await Page.Locator("#resume-session-details").ClickAsync();
+    await Page.Locator("#dismiss-session-details").ClickAsync();
+    var openResponse = Page.WaitForResponseAsync(
+      response => response.Url.Contains(
+        "/api/sessions/",
+        StringComparison.Ordinal
+      ) && response.Url.EndsWith(
+        "/open",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator(
+      "#recent-sessions .session-entry .session-entry-content"
+    ).ClickAsync();
+    await openResponse;
     await Expect(
       Page.Locator(
         ".message.assistant"
@@ -8834,7 +9610,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator("#app-modal-input").FillAsync("feat: exact sidebar commit");
     await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(Page.Locator("#git-quick-status")).ToContainTextAsync(
-      "feat: exact sidebar commit"
+      "feat: exact sidebar commit",
+      new() { Timeout = 25_000 }
     );
     Assert.AreEqual(
       "feat: exact sidebar commit",
@@ -8851,7 +9628,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator("#git-commit-quick").ClickAsync();
     await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(Page.Locator("#git-quick-status")).ToContainTextAsync(
-      "chore: update project changes"
+      "chore: update project changes",
+      new() { Timeout = 25_000 }
     );
     Assert.AreEqual(
       "chore: update project changes",
@@ -8877,7 +9655,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator("#git-push-quick").ClickAsync();
     await Page.Locator("#app-modal-confirm").ClickAsync();
     await Expect(Page.Locator("#git-quick-status")).ToContainTextAsync(
-      "no configured upstream"
+      "no configured upstream",
+      new() { Timeout = 25_000 }
     );
   }
 }

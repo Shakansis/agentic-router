@@ -2158,11 +2158,11 @@ public sealed class ExecutionSession
     }
   }
 
-  public void RefreshCompletionGate()
+  public void RefreshCompletionGate(bool allowReadOnlyCompletion = false)
   {
     lock (_gate)
     {
-      EvaluateCompletionGate();
+      EvaluateCompletionGate(allowReadOnlyCompletion);
     }
   }
 
@@ -2612,7 +2612,8 @@ public sealed class ExecutionSession
 
   public void Complete(
     string state,
-    string? warning = null
+    string? warning = null,
+    bool allowReadOnlyCompletion = false
   )
   {
     lock (_gate)
@@ -2623,7 +2624,7 @@ public sealed class ExecutionSession
       }
 
       State = state;
-      EvaluateCompletionGate();
+      EvaluateCompletionGate(allowReadOnlyCompletion);
       CompletedAt = DateTimeOffset.UtcNow;
       _stopwatch.Stop();
 
@@ -2969,7 +2970,7 @@ public sealed class ExecutionSession
     };
   }
 
-  private void EvaluateCompletionGate()
+  private void EvaluateCompletionGate(bool allowReadOnlyCompletion = false)
   {
     if (!string.IsNullOrWhiteSpace(_forcedCompletionStatus))
     {
@@ -3007,7 +3008,11 @@ public sealed class ExecutionSession
       )
     ) == true);
 
-    if (RequiresMutationUnsafe() && !HasVerifiedMutationUnsafe())
+    if (
+      !allowReadOnlyCompletion
+      && RequiresMutationUnsafe()
+      && !HasVerifiedMutationUnsafe()
+    )
     {
       _completionStatus = "blocked-mutation-not-performed";
       if (State is "completed" or "completed-with-warnings")

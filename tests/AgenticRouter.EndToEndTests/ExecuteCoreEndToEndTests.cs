@@ -1453,6 +1453,20 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       exported,
       "retention_days: 90"
     );
+    StringAssert.Contains(
+      exported,
+      "session_compaction_threshold_bytes: 10485760"
+    );
+    StringAssert.Contains(
+      exported,
+      "session_compaction_target_bytes: 5242880"
+    );
+    Assert.IsFalse(
+      exported.Contains(
+        "max_session_bytes",
+        StringComparison.Ordinal
+      )
+    );
     StringAssert.Contains(exported, "plan_effort: \"high\"");
     StringAssert.Contains(exported, "complete_effort: \"low\"");
     Assert.IsFalse(
@@ -3211,16 +3225,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator("#session-history").EvaluateAsync(
       "element => element.open = true"
     );
-    var resumeResponse = Page.WaitForResponseAsync(
+    var openResponse = Page.WaitForResponseAsync(
       response => response.Url.EndsWith(
-        $"/api/sessions/{sessionId}/resume",
+        $"/api/sessions/{sessionId}/open",
         StringComparison.Ordinal
       ) && response.Request.Method == "POST"
     );
     await Page.Locator(
       $"#recent-sessions [data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
-    await resumeResponse;
+    await openResponse;
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
     await Expect(

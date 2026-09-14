@@ -359,7 +359,9 @@ internal sealed record TestSessionHistorySettings
 {
   public int MaxSessionsPerWorkspace { get; init; } = 50;
 
-  public int MaxSessionBytes { get; init; } = 5_242_880;
+  public int SessionCompactionThresholdBytes { get; init; } = 10_485_760;
+
+  public int SessionCompactionTargetBytes { get; init; } = 5_242_880;
 
   public int MaxStoredProcessOutputBytesPerTurn { get; init; } = 65_536;
 

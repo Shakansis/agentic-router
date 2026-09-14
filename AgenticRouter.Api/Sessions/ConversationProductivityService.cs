@@ -349,7 +349,8 @@ public sealed class ConversationProductivityService
     );
     var saved = await _store.WriteAsync(
       duplicate,
-      limits.MaxSessionBytes,
+      limits.SessionCompactionThresholdBytes,
+      limits.SessionCompactionTargetBytes,
       cancellationToken
     );
     return new DuplicateConversationResponse(
@@ -1253,7 +1254,8 @@ public sealed class ConversationProductivityService
         {
           UpdatedAt = DateTimeOffset.UtcNow
         },
-        limits.MaxSessionBytes,
+        limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes,
         cancellationToken
       );
     }

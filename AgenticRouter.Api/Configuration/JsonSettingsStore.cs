@@ -122,6 +122,24 @@ public sealed class JsonSettingsStore : ISettingsStore
           "planLimitsSchemaVersion",
           out _
         );
+      var sessionHistoryElement = document.RootElement.TryGetProperty(
+        "sessionHistory",
+        out var savedSessionHistory
+      )
+        ? savedSessionHistory
+        : default;
+      var hasSessionCompactionThreshold = sessionHistoryElement.ValueKind
+          == JsonValueKind.Object
+        && sessionHistoryElement.TryGetProperty(
+          "sessionCompactionThresholdBytes",
+          out _
+        );
+      var hasSessionCompactionTarget = sessionHistoryElement.ValueKind
+          == JsonValueKind.Object
+        && sessionHistoryElement.TryGetProperty(
+          "sessionCompactionTargetBytes",
+          out _
+        );
 
       if (!hasCoordinatorModel)
       {
@@ -188,6 +206,40 @@ public sealed class JsonSettingsStore : ISettingsStore
             MaxPlanRevisions = settings.ProjectAwareness.MaxPlanRevisions == 3
               ? ProjectAwarenessSettings.MaximumPlanRevisions
               : settings.ProjectAwareness.MaxPlanRevisions
+          }
+        };
+      }
+
+      if (!hasSessionCompactionThreshold || !hasSessionCompactionTarget)
+      {
+        var legacyThreshold = sessionHistoryElement.ValueKind == JsonValueKind.Object
+          && sessionHistoryElement.TryGetProperty(
+            "maxSessionBytes",
+            out var savedMaximum
+          )
+          && savedMaximum.TryGetInt32(
+            out var parsedMaximum
+          )
+          && parsedMaximum != 5_242_880
+            ? parsedMaximum
+            : SessionHistorySettings.DefaultCompactionThresholdBytes;
+        var threshold = hasSessionCompactionThreshold
+          ? settings.SessionHistory.SessionCompactionThresholdBytes
+          : legacyThreshold;
+        settings = settings with
+        {
+          SessionHistory = settings.SessionHistory with
+          {
+            SessionCompactionThresholdBytes = threshold,
+            SessionCompactionTargetBytes = hasSessionCompactionTarget
+              ? settings.SessionHistory.SessionCompactionTargetBytes
+              : Math.Min(
+                SessionHistorySettings.DefaultCompactionTargetBytes,
+                Math.Max(
+                  65_536,
+                  threshold / 2
+                )
+              )
           }
         };
       }
@@ -262,6 +314,8 @@ public sealed class JsonSettingsStore : ISettingsStore
         || !hasActionModel
         || !hasMaxRecoveryAttempts
         || !hasPlanLimitsSchemaVersion
+        || !hasSessionCompactionThreshold
+        || !hasSessionCompactionTarget
         || runtimeProfileUpgraded;
 
       if (

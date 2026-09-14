@@ -257,7 +257,10 @@ public sealed record ConversationSessionSummary(
   DateTimeOffset? PinnedAt = null,
   bool HasSummary = false,
   string? PreferredModelProfileId = null,
-  string? SelectedModel = null
+  string? SelectedModel = null,
+  string SelectedHarness = "native",
+  string LastApprovalPolicy = "auto",
+  string LastExecutionStrategy = "auto"
 );
 
 public sealed record SessionSummaryContent(
@@ -302,7 +305,8 @@ public sealed record ConversationSessionRecord(
   SessionSummaryRecord? SessionSummary = null,
   string? PreferredModelProfileId = null,
   string LastApprovalPolicy = "auto",
-  string SelectedHarness = "native"
+  string SelectedHarness = "native",
+  string LastExecutionStrategy = "auto"
 );
 
 public sealed record RenameConversationSessionRequest(
@@ -324,7 +328,8 @@ public sealed record SaveConversationSessionRequest(
   string? SelectedModel,
   string State,
   string ApprovalPolicy = "auto",
-  string Harness = "native"
+  string Harness = "native",
+  string ExecutionStrategy = "auto"
 );
 
 public sealed record ConversationPersistenceView(

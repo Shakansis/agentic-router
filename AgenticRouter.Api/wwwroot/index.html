@@ -2208,9 +2208,10 @@
     <section class="session-details-shell">
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">Saved conversation</span>
-          <h2 id="session-details-title">Conversation details</h2>
-          <p id="session-details-metadata">Select a saved conversation.</p>
+          <span class="eyebrow">Conversation options</span>
+          <h2 id="session-details-title">Conversation Details</h2>
+          <strong id="session-details-conversation-title" class="session-details-conversation-title">Select a conversation.</strong>
+          <p id="session-details-metadata">Select a conversation.</p>
         </div>
         <button id="close-session-details" class="icon-button" type="button" aria-label="Close conversation details">×</button>
       </header>
@@ -2226,21 +2227,22 @@
             <button id="session-details-pin" class="secondary-button" type="button">Pin</button>
             <button id="session-details-rename" class="secondary-button" type="button">Rename</button>
             <button id="session-details-duplicate" class="secondary-button" type="button">Duplicate</button>
-            <button id="session-details-archive" class="secondary-button" type="button">Archive</button>
             <a id="session-details-markdown" class="secondary-button" href="#" download>Export Markdown</a>
             <a id="session-details-json" class="secondary-button" href="#" download>Export JSON</a>
+          </div>
+          <div class="session-details-lifecycle-actions" aria-label="Conversation lifecycle actions">
+            <button id="session-details-archive" class="secondary-button" type="button">Archive</button>
             <button id="session-details-delete" class="secondary-button danger-button" type="button">Delete</button>
           </div>
+          <span id="session-details-status" class="save-status" role="status"></span>
         </section>
         <section class="session-details-section session-details-summary-section" aria-labelledby="session-details-summary-title">
           <div class="session-details-section-heading">
             <div>
-              <h3 id="session-details-summary-title">Continuity summary</h3>
-              <p>
-                Optional. Organizes decisions and next steps for export or context handoff; it is not required to resume the conversation.
-              </p>
+              <h3 id="session-details-summary-title">Continuity Summary</h3>
+              <p>Organize important decisions, context and next steps.</p>
             </div>
-            <button id="edit-session-summary" class="secondary-button" type="button">Create or edit summary</button>
+            <button id="edit-session-summary" class="secondary-button" type="button">Create Summary</button>
           </div>
           <div id="session-details-summary" class="session-details-summary" aria-live="polite">
             Loading summary…
@@ -2248,9 +2250,7 @@
         </section>
       </div>
       <footer class="dialog-footer">
-        <span id="session-details-status" class="save-status" role="status"></span>
         <button id="dismiss-session-details" class="secondary-button" type="button">Close</button>
-        <button id="resume-session-details" class="primary-button" type="button">Resume conversation</button>
       </footer>
     </section>
   </dialog>
@@ -2261,13 +2261,13 @@
         <div>
           <span class="eyebrow">Optional continuity</span>
           <h2>Edit conversation summary</h2>
-          <p id="session-summary-session-title">Select a saved conversation.</p>
+          <p id="session-summary-session-title">Select a conversation.</p>
         </div>
         <button id="close-session-summary" class="icon-button" type="button" aria-label="Close summary">×</button>
       </header>
       <div class="dialog-body productivity-dialog-body">
         <p class="workspace-note">
-          This record does not replace history and is not required to resume. Use it only when you want a reviewable summary for export, duplication, or work continuity.
+          This record does not replace history. Use it only when you want a reviewable summary for export, duplication, or long-running work.
         </p>
         <div class="settings-grid">
           <label>

@@ -710,7 +710,8 @@ public sealed class DurableSupervisionEndToEndTests
         "Context "
       );
       await Expect(Page.Locator("#context-usage-summary-text")).Not.ToHaveTextAsync(
-        "Context will be calculated when sending"
+        "Context will be calculated when sending",
+        new() { Timeout = 25_000 }
       );
       await plan.Locator("summary").ClickAsync();
       await Expect(plan).ToHaveAttributeAsync("open", string.Empty);
@@ -732,6 +733,9 @@ public sealed class DurableSupervisionEndToEndTests
         ".assistant-reasoning-body",
         new() { HasText = "Reasoning segment 30" }
       );
+      await Expect(workerReasoning.First).ToBeAttachedAsync(
+        new() { Timeout = 25_000 }
+      );
       Assert.IsGreaterThan(
         0,
         await workerReasoning.CountAsync(),
@@ -750,7 +754,7 @@ public sealed class DurableSupervisionEndToEndTests
         ).First
       ).ToBeVisibleAsync();
       await Expect(assistant.Locator(".assistant-response")).ToContainTextAsync(
-        "Created hello.txt",
+        "Completed and verified from current Host evidence",
         new() { Timeout = 25_000 }
       );
       await Expect(
@@ -1077,7 +1081,9 @@ public sealed class DurableSupervisionEndToEndTests
       AssertEffort("SUPERVISION_WORKER_V1", "high");
       AssertEffort("SUPERVISION_VERIFY_V1", "low");
       AssertEffort("SUPERVISION_CORRECTION_V1", "medium");
-      AssertEffort("SUPERVISION_COMPLETE_V1", "high");
+      Assert.IsFalse(requests.Any(request => request.Messages.Any(message =>
+        message.Content.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal)
+      )));
 
       void AssertEffort(string marker, string expected)
       {
@@ -1137,6 +1143,194 @@ public sealed class DurableSupervisionEndToEndTests
     ));
     Assert.HasCount(1, events.Where(item =>
       item["type"]!.GetValue<string>() == "supervision.worker-started"
+    ));
+    var preflights = events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.preflight-completed"
+    ).ToArray();
+    Assert.HasCount(3, preflights);
+    StringAssert.Contains(preflights[0]["message"]!.GetValue<string>(), "prepared immutable");
+    Assert.HasCount(2, preflights.Where(item =>
+      item["message"]!.GetValue<string>().Contains("reused immutable", StringComparison.Ordinal)
+    ));
+    Assert.IsTrue(preflights.All(item =>
+      item["durationMilliseconds"]!.GetValue<long>() >= 0
+    ));
+    Assert.IsNotEmpty(_environment.FakeOllama.CapabilityQueries);
+    Assert.AreEqual(3, _environment.FakeOllama.TagQueryCount);
+    Assert.IsEmpty(events.Where(item =>
+      item["role"]?.GetValue<string>() == "supervisor"
+      && item["message"]?.GetValue<string>().Contains(
+        "blocked-mutation-not-performed",
+        StringComparison.Ordinal
+      ) == true
+    ));
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.deterministic-completion"
+    ));
+    Assert.AreEqual(
+      events.Count(item => item["type"]!.GetValue<string>() is
+        "supervision.supervisor-started" or "supervision.verification-started"),
+      telemetry["supervisorTransitionCount"]!.GetValue<int>()
+    );
+    Assert.AreEqual(
+      events.Single(item =>
+        item["type"]!.GetValue<string>() == "supervision.work-queued"
+      )["durationMilliseconds"]!.GetValue<long>(),
+      telemetry["decompositionDurationMilliseconds"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      events.Single(item =>
+        item["type"]!.GetValue<string>() == "supervision.worker-claimed"
+      )["durationMilliseconds"]!.GetValue<long>(),
+      telemetry["workerDurationMilliseconds"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      events.Single(item =>
+        item["type"]!.GetValue<string>() == "supervision.work-accepted"
+      )["durationMilliseconds"]!.GetValue<long>(),
+      telemetry["verificationDurationMilliseconds"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      events.Single(item =>
+        item["type"]!.GetValue<string>() == "supervision.completed"
+      )["durationMilliseconds"]!.GetValue<long>(),
+      telemetry["finalCompletionDurationMilliseconds"]!.GetValue<long>()
+    );
+    Assert.AreEqual(
+      "hello world today",
+      await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ReadOnlySupervisorRolesIgnoreWorkerMutationCompletionGate()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var runId = await StartNativeSupervisionAsync(
+      "supervision role aware completion fallback"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    using var response = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    var supervisorGates = events.Where(item =>
+      item["role"]?.GetValue<string>() == "supervisor"
+      && item["type"]!.GetValue<string>() == "completion-gate-evaluated"
+    ).ToArray();
+    Assert.IsGreaterThanOrEqualTo(2, supervisorGates.Length);
+    Assert.IsEmpty(supervisorGates.Where(item =>
+      item["message"]!.GetValue<string>().Contains(
+        "blocked-mutation-not-performed",
+        StringComparison.Ordinal
+      )
+    ));
+    foreach (var marker in new[]
+    {
+      "SUPERVISION_DECOMPOSE_V1",
+      "SUPERVISION_VERIFY_V1",
+      "SUPERVISION_COMPLETE_V1"
+    })
+    {
+      Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+        request.Messages.Any(message => message.Content.Contains(
+          marker,
+          StringComparison.Ordinal
+        ))
+      ), $"Expected role marker {marker}.");
+    }
+    Assert.IsEmpty(events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.deterministic-completion"
+    ));
+  }
+
+  [TestMethod]
+  [DataRow("required", "MUST:")]
+  [DataRow("preference", "SHOULD:")]
+  [DataRow("optional", "MAY:")]
+  [DataRow("mixed", "MUST:")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DecompositionPreservesRequirementModality(
+    string modality,
+    string expectedPrefix
+  )
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var runId = await StartNativeSupervisionAsync(
+      $"supervision requirement modality {modality}"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    var criteria = run["runtime"]!["workItems"]![0]!["acceptanceCriteria"]!
+      .AsArray()
+      .Select(item => item!.GetValue<string>())
+      .ToArray();
+    Assert.IsTrue(criteria.Any(criterion =>
+      criterion.StartsWith(expectedPrefix, StringComparison.Ordinal)
+    ));
+    if (modality == "mixed")
+    {
+      Assert.IsTrue(criteria.Any(value => value.StartsWith("SHOULD:", StringComparison.Ordinal)));
+      Assert.IsTrue(criteria.Any(value => value.StartsWith("MAY:", StringComparison.Ordinal)));
+    }
+    using var response = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.work-accepted"
+    ));
+    Assert.IsEmpty(events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.work-rejected"
+    ));
+    if (modality == "mixed")
+    {
+      Assert.AreEqual(
+        "hello world today",
+        await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
+      );
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RepeatedInvalidWorkerProposalReturnsTypedNoProgressThenRecoversDifferently()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var runId = await StartNativeSupervisionAsync(
+      "supervision deterministic planning repeat"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    Assert.AreEqual(
+      2,
+      run["runtime"]!["workItems"]![0]!["attemptCount"]!.GetValue<int>()
+    );
+    Assert.AreEqual(
+      1,
+      run["runtime"]!["telemetry"]!["actualWorkspaceMutationCount"]!.GetValue<int>()
+    );
+    using var response = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.retry-started"
+      && item["retryReason"]?.GetValue<string>() == "planning-no-progress"
+    ));
+    Assert.IsEmpty(events.Where(item =>
+      item["type"]!.GetValue<string>() == "recovery.requested"
     ));
     Assert.AreEqual(
       "hello world today",
@@ -1285,7 +1479,7 @@ public sealed class DurableSupervisionEndToEndTests
         && !message.Content.Contains("SUPERVISION_CORRECTION_V1", StringComparison.Ordinal)
       )
     ).ToArray();
-    Assert.IsGreaterThanOrEqualTo(4, supervisorRequests.Length);
+    Assert.HasCount(3, supervisorRequests);
     foreach (var supervisorRequest in supervisorRequests)
     {
       Assert.DoesNotContain("create_file", supervisorRequest.AvailableTools);
@@ -1350,8 +1544,14 @@ public sealed class DurableSupervisionEndToEndTests
     ).ToArray();
     Assert.HasCount(1, deltas);
     Assert.AreEqual(
-      "Created hello.txt with the exact text hello world today and verified the current file contents.",
+      "Completed and verified from current Host evidence: create file hello.txt with content hello world today.",
       deltas[0]["delta"]!.GetValue<string>()
+    );
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "supervision.deterministic-completion"
+      )
     );
     Assert.HasCount(
       1,
@@ -1424,7 +1624,7 @@ public sealed class DurableSupervisionEndToEndTests
     await Expect(sessionButton).ToBeVisibleAsync(new() { Timeout = 10_000 });
     await sessionButton.ClickAsync();
     await Expect(Page.Locator(".assistant-answer").Last).ToContainTextAsync(
-      "Created hello.txt with the exact text hello world today",
+      "Completed and verified from current Host evidence",
       new() { Timeout = 40_000 }
     );
 
@@ -1439,6 +1639,45 @@ public sealed class DurableSupervisionEndToEndTests
       session["id"]!.GetValue<string>() == conversationSessionId
     );
     Assert.IsFalse(persisted["interrupted"]!.GetValue<bool>());
+    await Expect(Page.Locator("#cancel-request")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
+
+    var newConversationResponse = Page.WaitForResponseAsync(response =>
+      response.Url.EndsWith("/api/sessions/new", StringComparison.Ordinal)
+      && response.Request.Method == "POST"
+    );
+    await Page.Locator("#new-conversation").ClickAsync();
+    await newConversationResponse;
+    await Expect(Page.Locator("#new-conversation")).ToBeEnabledAsync();
+    var completedOpenResponse = Page.WaitForResponseAsync(response =>
+      response.Url.EndsWith(
+        $"/api/sessions/{conversationSessionId}/open",
+        StringComparison.Ordinal
+      ) && response.Request.Method == "POST"
+    );
+    await Page.Locator(
+      $".session-entry[data-session-id=\"{conversationSessionId}\"] .session-entry-content"
+    ).ClickAsync();
+    await completedOpenResponse;
+    await Expect(Page.Locator("#new-conversation")).ToBeEnabledAsync();
+    await Expect(Page.Locator(".assistant-answer").Last).ToContainTextAsync(
+      "Completed and verified from current Host evidence"
+    );
+    await Expect(Page.Locator("#conversation-persistence")).ToContainTextAsync("Saved locally");
+    await Expect(Page.Locator("#supervision-recovery")).ToBeHiddenAsync();
+    using var completedRunsResponse = await _environment.HttpClient.GetAsync(
+      "api/supervision/runs"
+    );
+    completedRunsResponse.EnsureSuccessStatusCode();
+    var completedRuns = JsonNode.Parse(
+      await completedRunsResponse.Content.ReadAsStringAsync()
+    )!["runs"]!.AsArray().Select(item => item!.AsObject()).Where(run =>
+      run["conversationSessionId"]!.GetValue<string>() == conversationSessionId
+    ).ToArray();
+    Assert.HasCount(1, completedRuns);
+    Assert.AreEqual(runId, completedRuns[0]["runId"]!.GetValue<string>());
+    Assert.AreEqual("completed", completedRuns[0]["state"]!.GetValue<string>());
+    Assert.IsTrue(completedRuns[0]["terminal"]!.GetValue<bool>());
   }
 
   [TestMethod]
@@ -1746,7 +1985,8 @@ public sealed class DurableSupervisionEndToEndTests
       item["type"]!.GetValue<string>() == "supervision.work-rejected"
     ));
     Assert.HasCount(1, events.Where(item =>
-      item["retryReason"]?.GetValue<string>() == "acceptance-mismatch"
+      item["type"]!.GetValue<string>() == "supervision.retry-started"
+      && item["retryReason"]?.GetValue<string>() == "acceptance-mismatch"
     ));
     Assert.AreEqual(
       2,

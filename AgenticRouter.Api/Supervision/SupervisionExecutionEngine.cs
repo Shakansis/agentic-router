@@ -8,6 +8,7 @@ using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Supervision;
@@ -31,6 +32,7 @@ internal sealed record SupervisionTurnProgress(
   ContextUsageView? ContextUsage = null,
   LocalActionEvent? LocalAction = null,
   string? RetryReason = null,
+  long? DurationMilliseconds = null,
   bool Transient = false
 );
 
@@ -102,6 +104,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
   private readonly IWorkspaceProfileService _workspaces;
   private readonly ITrustedWorkspaceService _workspace;
   private readonly ISupervisionRouteResolver _routes;
+  private TimeSpan _turnStatusInterval = TimeSpan.FromSeconds(30);
+  private string _recoveryEffort = ModelEffortLevels.Medium;
 
   public SupervisionExecutionEngine(
     IExecutionSpecialistTurnService turns,
@@ -128,6 +132,12 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     var checkpoint = input.Checkpoint;
     var runtime = input.Runtime;
     var settings = await _settings.GetAsync(cancellationToken);
+    _turnStatusInterval = TimeSpan.FromSeconds(Math.Clamp(
+      settings.Runtime.GenerationTimeoutSeconds / 3,
+      1,
+      30
+    ));
+    _recoveryEffort = settings.Execution.PhaseEffort.Recovery;
     var maximumItems = checkpoint.Recovery?.Budgets.MaximumWorkItems
       ?? settings.ProjectAwareness.MaxPlanSteps;
     var maximumSupervisorTransitions = checkpoint.Recovery?.Budgets.MaximumSupervisorTransitions
@@ -254,7 +264,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         $"The supervisor dispatched {items.Length} ordered work item(s).",
         runtime,
         role: "supervisor",
-        contextId: supervisor.Id
+        contextId: supervisor.Id,
+        durationMilliseconds: decompositionTimer.ElapsedMilliseconds
       );
     }
 
@@ -318,7 +329,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           runtime,
           role: "worker",
           contextId: worker.Id,
-          workItemId: item.Id
+          workItemId: item.Id,
+          retryReason: workerRetryReason
         );
 
         var workerPrompt = CreateWorkerPrompt(
@@ -381,19 +393,26 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             && item.AttemptCount < maximumWorkerAttempts
           )
           {
+            var failureRetryReason = string.Equals(
+              workerTurn.Failure.Code,
+              "planning-no-progress",
+              StringComparison.Ordinal
+            )
+              ? SupervisionRetryReasons.PlanningNoProgress
+              : SupervisionRetryReasons.WorkerFailure;
             item = item with
             {
               Status = SupervisionWorkItemStates.Pending,
               LastDiscrepancy = "Recoverable worker failure: "
                 + workerTurn.Failure.Message,
               RejectionReason = null,
-              RetryReason = SupervisionRetryReasons.WorkerFailure
+              RetryReason = failureRetryReason
             };
             runtime = AddTelemetry(
               Replace(runtime, itemIndex, item, worker),
               telemetry => telemetry with
               {
-                RetryReason = SupervisionRetryReasons.WorkerFailure
+                RetryReason = failureRetryReason
               }
             );
             yield return Update(
@@ -405,7 +424,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
               role: "worker",
               contextId: worker.Id,
               workItemId: item.Id,
-              retryReason: SupervisionRetryReasons.WorkerFailure
+              retryReason: failureRetryReason
             );
             continue;
           }
@@ -460,7 +479,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           runtime,
           role: "worker",
           contextId: worker.Id,
-          workItemId: item.Id
+          workItemId: item.Id,
+          retryReason: workerRetryReason,
+          durationMilliseconds: workerTimer.ElapsedMilliseconds
         );
         if (noProgress)
         {
@@ -495,6 +516,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         SupervisionContextView supervisor;
         SupervisionDecision currentDecision;
         var rejectionRetryReason = SupervisionRetryReasons.AcceptanceMismatch;
+        var verificationPhaseTimer = Stopwatch.StartNew();
         while (true)
         {
           if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
@@ -758,6 +780,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           runtime = AddVerificationDuration(runtime, verificationTimer.ElapsedMilliseconds);
           break;
         }
+        verificationPhaseTimer.Stop();
 
         supervisor = SuspendContext(
           supervisor,
@@ -837,7 +860,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             role: "supervisor",
             contextId: supervisor.Id,
             workItemId: item.Id,
-            rejectionReason: rejectionRetryReason
+            rejectionReason: rejectionRetryReason,
+            durationMilliseconds: verificationPhaseTimer.ElapsedMilliseconds
           );
           if (item.AttemptCount >= maximumWorkerAttempts)
           {
@@ -904,10 +928,69 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           runtime,
           role: "supervisor",
           contextId: supervisor.Id,
-          workItemId: item.Id
+          workItemId: item.Id,
+          durationMilliseconds: verificationPhaseTimer.ElapsedMilliseconds
         );
         break;
       }
+    }
+
+    var deterministicCompletionTimer = Stopwatch.StartNew();
+    var deterministicFinalAnswer = await TryCreateDeterministicFinalAnswerAsync(
+      runtime,
+      input.ActionJournal,
+      maximumEvidencePaths,
+      cancellationToken
+    );
+    deterministicCompletionTimer.Stop();
+    if (deterministicFinalAnswer is not null)
+    {
+      var deterministicSupervisor = runtime.Contexts.First(context =>
+        string.Equals(context.Role, "supervisor", StringComparison.Ordinal)
+      );
+      deterministicSupervisor = CompleteContext(
+        deterministicSupervisor,
+        "Global completion established by the Host deterministic safety gate.",
+        checkpoint.Revision
+      );
+      runtime = AddTelemetry(
+        ReplaceContext(runtime, deterministicSupervisor) with
+        {
+          ActiveRole = null,
+          ActiveWorkItemId = null,
+          FinalAnswer = deterministicFinalAnswer,
+          LastFailure = null
+        },
+        telemetry => telemetry with
+        {
+          FinalCompletionDurationMilliseconds = checked(
+            telemetry.FinalCompletionDurationMilliseconds
+              + deterministicCompletionTimer.ElapsedMilliseconds
+          )
+        }
+      );
+      yield return Update(
+        DurableSupervisionRunStates.Running,
+        SupervisionRunPhases.Completing,
+        SupervisionEventTypeIds.DeterministicCompletion,
+        "The Host deterministic completion gate confirmed current evidence without another model turn.",
+        runtime,
+        role: "supervisor",
+        contextId: deterministicSupervisor.Id,
+        durationMilliseconds: deterministicCompletionTimer.ElapsedMilliseconds
+      );
+      yield return Update(
+        DurableSupervisionRunStates.Completed,
+        SupervisionRunPhases.Completing,
+        SupervisionEventTypeIds.Completed,
+        "The supervised objective completed from current Host evidence.",
+        runtime,
+        terminal: true,
+        role: "supervisor",
+        contextId: deterministicSupervisor.Id,
+        durationMilliseconds: deterministicCompletionTimer.ElapsedMilliseconds
+      );
+      yield break;
     }
 
     if (runtime.SupervisorTransitionCount >= maximumSupervisorTransitions)
@@ -1023,7 +1106,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       runtime,
       terminal: true,
       role: "supervisor",
-      contextId: finalSupervisor.Id
+      contextId: finalSupervisor.Id,
+      durationMilliseconds: completionTimer.ElapsedMilliseconds
     );
   }
 
@@ -1040,7 +1124,6 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     CancellationToken cancellationToken
   )
   {
-    await EnsureFixedRouteAsync(checkpoint, cancellationToken);
     var supervisor = string.Equals(context.Role, "supervisor", StringComparison.Ordinal);
     var autonomous = IsAutonomous(checkpoint);
     var approvalPolicy = autonomous
@@ -1051,12 +1134,6 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     var scope = supervisor
       ? CreateSupervisorToolScope(validationAvailable)
       : null;
-    var settings = await _settings.GetAsync(cancellationToken);
-    var turnStatusInterval = TimeSpan.FromSeconds(Math.Clamp(
-      settings.Runtime.GenerationTimeoutSeconds / 3,
-      1,
-      30
-    ));
     var activePrompt = prompt;
     var activeEffort = requestedEffort;
     var watchdogRecoveryAttempted = false;
@@ -1078,6 +1155,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         ExecutionStrategy: SupervisionExecutionStrategies.Direct
       );
       string? roleResult = null;
+      ExecutionPreflightMeasurement? preflight = null;
       var invocation = new ExecutionSpecialistTurnInvocation(
         context.Id,
         supervisor ? ExecutionContextRole.Supervisor : ExecutionContextRole.Worker,
@@ -1085,7 +1163,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         UseMinimalToolInventory: supervisor,
         CaptureRoleResult: value => roleResult = value,
         ActionJournal: actionJournal,
-        RequestedEffort: activeEffort
+        RequestedEffort: activeEffort,
+        CapturePreflight: value => preflight = value
       );
       var answer = new StringBuilder();
       ProviderError? failure = null;
@@ -1112,7 +1191,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         var moveNext = stream.MoveNextAsync().AsTask();
         var nextStatus = progressSink is null
           ? Task.Delay(Timeout.InfiniteTimeSpan, statusLifetime.Token)
-          : Task.Delay(turnStatusInterval, statusLifetime.Token);
+          : Task.Delay(_turnStatusInterval, statusLifetime.Token);
         try
         {
           while (true)
@@ -1135,7 +1214,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
                 cancellationToken
               );
               nextStatus = Task.Delay(
-                turnStatusInterval,
+                _turnStatusInterval,
                 statusLifetime.Token
               );
               continue;
@@ -1282,6 +1361,12 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       {
         failure = CreateHarnessFailure(checkpoint, exception);
       }
+      catch (ChatStageException exception) when (
+        !cancellationToken.IsCancellationRequested
+      )
+      {
+        failure = CreateStageFailure(checkpoint, exception);
+      }
 
       if (watchdogTriggered)
       {
@@ -1291,6 +1376,21 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           context,
           watchdogRetrySafe,
           repeated
+        );
+      }
+
+      if (preflight is not null && progressSink is not null)
+      {
+        await progressSink.ReportAsync(
+          new SupervisionTurnProgress(
+            SupervisionEventTypeIds.PreflightCompleted,
+            $"{context.Role} preflight {(preflight.Reused ? "reused immutable run context" : "prepared immutable run context")} in {preflight.DurationMilliseconds} ms.",
+            context.Role,
+            context.Id,
+            context.WorkItemId,
+            DurationMilliseconds: preflight.DurationMilliseconds
+          ),
+          cancellationToken
         );
       }
 
@@ -1338,7 +1438,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         {
           canonicalRecoveryAttempted = true;
           activePrompt = CreateCanonicalRecoveryPrompt(prompt);
-          activeEffort = settings.Execution.PhaseEffort.Recovery;
+          activeEffort = _recoveryEffort;
           if (progressSink is not null)
           {
             await progressSink.ReportAsync(
@@ -1369,7 +1469,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           context,
           outcome.Failure
         );
-        activeEffort = settings.Execution.PhaseEffort.Recovery;
+        activeEffort = _recoveryEffort;
         if (progressSink is not null)
         {
           await progressSink.ReportAsync(
@@ -1397,7 +1497,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         context,
         failure!.Message
       );
-      activeEffort = settings.Execution.PhaseEffort.Recovery;
+      activeEffort = _recoveryEffort;
       if (progressSink is not null)
       {
         await progressSink.ReportAsync(
@@ -1582,6 +1682,26 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         ["harnessId"] = exception.HarnessId
       },
       exception.Code
+    );
+  }
+
+  private static ProviderError CreateStageFailure(
+    DurableSupervisionCheckpoint checkpoint,
+    ChatStageException exception
+  )
+  {
+    return new ProviderError(
+      "supervision-turn",
+      exception.Message,
+      exception.TechnicalMessage,
+      checkpoint.RunId,
+      exception.Provider,
+      exception.Model ?? checkpoint.Route.Model,
+      exception.Intention,
+      exception.HttpStatus,
+      exception.Recoverable,
+      exception.Details,
+      exception.Stage
     );
   }
 
@@ -1819,10 +1939,10 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       {{(autonomous ? "AUTONOMOUS MODE: the user delegated every approval they could personally grant. Resolve ordinary ambiguities yourself, prefer the smallest reversible path, and never defer a permitted decision to the user. Hard Host boundaries remain non-negotiable." : "")}}
 
       Return JSON only:
-      {"decision":"dispatch_work","items":[{"objective":"...","acceptanceCriteria":["..."],"evidencePaths":["relative/path"]}]}
+      {"decision":"dispatch_work","items":[{"objective":"...","criteria":[{"text":"...","modality":"must|should|may"}],"evidencePaths":["relative/path"]}]}
       Maximum work items: {{maximumItems}}.
       Maximum declared evidence paths per work item: {{maximumEvidencePaths}}.
-      Paths must be relative to the trusted workspace. Keep criteria concrete and observable.
+      Paths must be relative to the trusted workspace. Preserve modality: must is blocking, should is a non-blocking preference, and may is optional guidance. Keep criteria concrete and observable.
       Verification, review, and completion reporting are Supervisor/Host responsibilities, not worker items. Return exactly one item when the requested mutation is atomic.
       """;
   }
@@ -1846,8 +1966,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       Active work item {{item.Id}}:
       {{item.Objective}}
 
-      Acceptance criteria:
-      {{string.Join("\n", item.AcceptanceCriteria.Select((criterion, index) => $"{index + 1}. {criterion}"))}}
+      Requirements and guidance:
+      {{FormatCriteria(item)}}
 
       {{(string.IsNullOrWhiteSpace(item.LastDiscrepancy) ? "" : "Supervisor correction:\n" + item.LastDiscrepancy)}}
       {{(correctionEvidence is null ? "" : $"Current Host evidence revision {correctionEvidence.Revision}:\n{correctionEvidence.Json}\nInspect this current state, preserve every already-correct effect, and apply only the missing or incorrect delta. Do not replay the original mutation blindly.")}}
@@ -1870,8 +1990,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       You are the focused read-only supervisor. The worker response is only a claim. Evaluate the current Host evidence below against every acceptance criterion.
       Work item: {{item.Id}}
       Objective: {{item.Objective}}
-      Acceptance criteria:
-      {{string.Join("\n", item.AcceptanceCriteria.Select((criterion, index) => $"{index + 1}. {criterion}"))}}
+      Requirements and guidance:
+      {{FormatCriteria(item)}}
 
       Worker claim:
       {{Truncate(workerClaim, 4_096)}}
@@ -1886,7 +2006,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       Return JSON only. Accept:
       {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":["exact criterion text"],"summary":"..."}
       Reject:
-      {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"discrepancy":"exact observed mismatch","correctiveBrief":"bounded materially different correction"}
+      {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"blockingCriterion":"exact must criterion text","discrepancy":"exact observed mismatch","correctiveBrief":"bounded materially different correction"}
       Other permitted decisions: request_validation, {{(autonomous ? "stop_blocked" : "await_user, stop_blocked")}}, or replace_pending_work. replace_pending_work must also cover the current criteria and include replacement items.
       """;
   }
@@ -1913,6 +2033,68 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       """;
   }
 
+  private async Task<string?> TryCreateDeterministicFinalAnswerAsync(
+    SupervisionRuntimeView runtime,
+    IExecutionActionJournal? actionJournal,
+    int maximumEvidencePaths,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      actionJournal is not IExecutionActionJournalStateReader stateReader
+      || runtime.WorkItems.Count == 0
+      || runtime.CompletedItems != runtime.TotalItems
+      || runtime.WorkItems.Any(item =>
+        item.Status != SupervisionWorkItemStates.Completed
+        || item.EvidencePaths.Count == 0
+        || MandatoryCriteria(item).Count == 0
+        || string.IsNullOrWhiteSpace(item.EvidenceSha256)
+      )
+    )
+    {
+      return null;
+    }
+
+    var journal = stateReader.GetState();
+    if (
+      journal.HasUnresolvedAction
+      || journal.HasUnresolvedApproval
+      || journal.HasPendingValidation
+      || journal.ActualWorkspaceMutationCount == 0
+    )
+    {
+      return null;
+    }
+
+    var revision = runtime.EvidenceRevision;
+    foreach (var item in runtime.WorkItems)
+    {
+      var current = await BuildEvidenceAsync(
+        null,
+        item.EvidencePaths,
+        checked(++revision),
+        maximumEvidencePaths,
+        cancellationToken
+      );
+      if (!string.Equals(
+        current.Sha256,
+        item.EvidenceSha256,
+        StringComparison.Ordinal
+      ))
+      {
+        return null;
+      }
+    }
+
+    var completed = runtime.WorkItems.Count == 1
+      ? runtime.WorkItems[0].Objective
+      : $"{runtime.WorkItems.Count} accepted work items";
+    return Truncate(
+      $"Completed and verified from current Host evidence: {completed}.",
+      16_384
+    );
+  }
+
   private static string CreateAutonomousDecisionPrompt(
     SupervisionWorkItemView item,
     string workerClaim,
@@ -1927,8 +2109,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
       Work item: {{item.Id}}
       Objective: {{item.Objective}}
-      Acceptance criteria:
-      {{string.Join("\n", item.AcceptanceCriteria.Select((criterion, index) => $"{index + 1}. {criterion}"))}}
+      Requirements and guidance:
+      {{FormatCriteria(item)}}
 
       Worker claim:
       {{Truncate(workerClaim, 4_096)}}
@@ -1942,7 +2124,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       Return JSON only. Accept:
       {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":["exact criterion text"],"summary":"..."}
       Reject:
-      {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"discrepancy":"exact observed mismatch","correctiveBrief":"bounded materially different correction"}
+      {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"blockingCriterion":"exact must criterion text","discrepancy":"exact observed mismatch","correctiveBrief":"bounded materially different correction"}
       Other permitted decisions: request_validation, replace_pending_work, or stop_blocked. Never return await_user.
       """;
   }
@@ -2036,10 +2218,13 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
       var existing = normalized[matchingIndex];
       var objective = existing.Objective.Trim() + Environment.NewLine + item.Objective.Trim();
-      var criteria = existing.AcceptanceCriteria!
-        .Concat(item.AcceptanceCriteria!)
-        .Select(criterion => criterion.Trim())
-        .Distinct(StringComparer.Ordinal)
+      var criteria = DecisionCriteria(existing)
+        .Concat(DecisionCriteria(item))
+        .Select(criterion => criterion with { Text = criterion.Text.Trim() })
+        .DistinctBy(
+          criterion => $"{criterion.Modality}:{criterion.Text}",
+          StringComparer.Ordinal
+        )
         .ToArray();
       if (objective.Length > 4_096 || criteria.Length > 12)
       {
@@ -2049,7 +2234,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       normalized[matchingIndex] = existing with
       {
         Objective = objective,
-        AcceptanceCriteria = criteria
+        AcceptanceCriteria = null,
+        Criteria = criteria
       };
     }
     return normalized;
@@ -2066,11 +2252,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       if (
         decision.EvidenceRevision != item.EvidenceRevision
         || decision.CoveredCriteria is null
-        || item.AcceptanceCriteria.Any(
-          criterion => !decision.CoveredCriteria.Contains(
-            criterion,
-            StringComparer.Ordinal
-          )
+        || MandatoryCriteria(item).Any(criterion =>
+          !decision.CoveredCriteria.Contains(criterion.Stored, StringComparer.Ordinal)
+          && !decision.CoveredCriteria.Contains(criterion.Text, StringComparer.Ordinal)
         )
       )
       {
@@ -2093,10 +2277,34 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     }
     if (decision.Decision == "reject_work")
     {
+      var criteria = ParsedCriteria(item);
+      var mandatory = criteria.Where(criterion =>
+        criterion.Modality == SupervisionRequirementModalities.Must
+      ).ToArray();
       if (
         decision.EvidenceRevision != item.EvidenceRevision
         || string.IsNullOrWhiteSpace(decision.Discrepancy)
         || string.IsNullOrWhiteSpace(decision.CorrectiveBrief)
+        || (
+          criteria.Any(criterion =>
+            criterion.Modality != SupervisionRequirementModalities.Must
+          )
+          && (
+            string.IsNullOrWhiteSpace(decision.BlockingCriterion)
+            || !mandatory.Any(criterion =>
+              string.Equals(
+                criterion.Text,
+                decision.BlockingCriterion,
+                StringComparison.Ordinal
+              )
+              || string.Equals(
+                criterion.Stored,
+                decision.BlockingCriterion,
+                StringComparison.Ordinal
+              )
+            )
+          )
+        )
       )
       {
         throw InvalidDecision(
@@ -2120,10 +2328,15 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     if (
       string.IsNullOrWhiteSpace(item.Objective)
       || item.Objective.Length > 4_096
-      || item.AcceptanceCriteria is null
-      || item.AcceptanceCriteria.Count is < 1 or > 12
-      || item.AcceptanceCriteria.Any(
-        criterion => string.IsNullOrWhiteSpace(criterion) || criterion.Length > 1_024
+      || DecisionCriteria(item).Count is < 1 or > 12
+      || DecisionCriteria(item).Any(criterion =>
+        string.IsNullOrWhiteSpace(criterion.Text)
+        || criterion.Text.Length > 1_024
+        || criterion.Modality is not (
+          SupervisionRequirementModalities.Must
+          or SupervisionRequirementModalities.Should
+          or SupervisionRequirementModalities.May
+        )
       )
       || item.EvidencePaths is null
       || item.EvidencePaths.Count > maximumEvidencePaths
@@ -2168,7 +2381,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     return new SupervisionWorkItemView(
       $"work-{index:000}",
       item.Objective.Trim(),
-      item.AcceptanceCriteria!.Select(value => value.Trim()).ToArray(),
+      DecisionCriteria(item).Select(EncodeCriterion).ToArray(),
       item.EvidencePaths!.Select(value => value.Trim().Replace('\\', '/')).ToArray(),
       SupervisionWorkItemStates.Pending,
       0,
@@ -2176,6 +2389,81 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       0,
       null,
       null
+    );
+  }
+
+  private static IReadOnlyList<SupervisionDecisionCriterion> DecisionCriteria(
+    SupervisionDecisionItem item
+  )
+  {
+    if (item.Criteria is { Count: > 0 })
+    {
+      return item.Criteria.Select(criterion => criterion with
+      {
+        Text = criterion.Text.Trim(),
+        Modality = criterion.Modality.Trim().ToLowerInvariant()
+      }).ToArray();
+    }
+    return (item.AcceptanceCriteria ?? []).Select(criterion =>
+      new SupervisionDecisionCriterion(
+        criterion.Trim(),
+        SupervisionRequirementModalities.Must
+      )
+    ).ToArray();
+  }
+
+  private static string EncodeCriterion(SupervisionDecisionCriterion criterion)
+  {
+    return $"{criterion.Modality.ToUpperInvariant()}: {criterion.Text.Trim()}";
+  }
+
+  private static IReadOnlyList<ParsedCriterion> ParsedCriteria(
+    SupervisionWorkItemView item
+  )
+  {
+    return item.AcceptanceCriteria.Select(value =>
+    {
+      foreach (var modality in new[]
+      {
+        SupervisionRequirementModalities.Must,
+        SupervisionRequirementModalities.Should,
+        SupervisionRequirementModalities.May
+      })
+      {
+        var prefix = modality.ToUpperInvariant() + ":";
+        if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+          return new ParsedCriterion(
+            value,
+            value[prefix.Length..].Trim(),
+            modality
+          );
+        }
+      }
+      return new ParsedCriterion(
+        value,
+        value,
+        SupervisionRequirementModalities.Must
+      );
+    }).ToArray();
+  }
+
+  private static IReadOnlyList<ParsedCriterion> MandatoryCriteria(
+    SupervisionWorkItemView item
+  )
+  {
+    return ParsedCriteria(item).Where(criterion =>
+      criterion.Modality == SupervisionRequirementModalities.Must
+    ).ToArray();
+  }
+
+  private static string FormatCriteria(SupervisionWorkItemView item)
+  {
+    return string.Join(
+      "\n",
+      ParsedCriteria(item).Select((criterion, index) =>
+        $"{index + 1}. {criterion.Modality.ToUpperInvariant()} ({(criterion.Modality == SupervisionRequirementModalities.Must ? "blocking" : "non-blocking")}): {criterion.Text}"
+      )
     );
   }
 
@@ -2403,6 +2691,12 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     string? Content
   );
 
+  private sealed record ParsedCriterion(
+    string Stored,
+    string Text,
+    string Modality
+  );
+
   private sealed record SupervisionDecision(
     [property: JsonPropertyName("decision")] string Decision,
     [property: JsonPropertyName("items")] IReadOnlyList<SupervisionDecisionItem>? Items = null,
@@ -2411,12 +2705,19 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     [property: JsonPropertyName("summary")] string? Summary = null,
     [property: JsonPropertyName("discrepancy")] string? Discrepancy = null,
     [property: JsonPropertyName("correctiveBrief")] string? CorrectiveBrief = null,
+    [property: JsonPropertyName("blockingCriterion")] string? BlockingCriterion = null,
     [property: JsonPropertyName("finalAnswer")] string? FinalAnswer = null
   );
 
   private sealed record SupervisionDecisionItem(
     [property: JsonPropertyName("objective")] string Objective,
     [property: JsonPropertyName("acceptanceCriteria")] IReadOnlyList<string>? AcceptanceCriteria,
-    [property: JsonPropertyName("evidencePaths")] IReadOnlyList<string>? EvidencePaths
+    [property: JsonPropertyName("evidencePaths")] IReadOnlyList<string>? EvidencePaths,
+    [property: JsonPropertyName("criteria")] IReadOnlyList<SupervisionDecisionCriterion>? Criteria = null
+  );
+
+  private sealed record SupervisionDecisionCriterion(
+    [property: JsonPropertyName("text")] string Text,
+    [property: JsonPropertyName("modality")] string Modality
   );
 }

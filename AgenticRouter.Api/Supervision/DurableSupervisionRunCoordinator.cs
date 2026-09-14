@@ -1095,13 +1095,17 @@ public sealed class DurableSupervisionRunCoordinator
         {
           using var scope = _scopeFactory.CreateScope();
           var recoveryService = scope.ServiceProvider.GetRequiredService<ISupervisionRecoveryService>();
+          var capturedRecovery = await recoveryService.CaptureAsync(
+            next,
+            effectiveRuntime,
+            current.Recovery?.Actions,
+            cancellationToken
+          );
           next = next with
           {
-            Recovery = await recoveryService.CaptureAsync(
-              next,
-              effectiveRuntime,
-              current.Recovery?.Actions,
-              cancellationToken
+            Recovery = PreserveTrackedFileBaseline(
+              current.Recovery,
+              capturedRecovery
             )
           };
         }
@@ -1136,6 +1140,30 @@ public sealed class DurableSupervisionRunCoordinator
     {
       state.TransitionGate.Release();
     }
+  }
+
+  private static SupervisionRecoverySnapshot PreserveTrackedFileBaseline(
+    SupervisionRecoverySnapshot? prior,
+    SupervisionRecoverySnapshot current
+  )
+  {
+    if (prior is null || prior.TrackedFiles.Count == 0)
+    {
+      return current;
+    }
+
+    var priorByPath = prior.TrackedFiles.ToDictionary(
+      file => file.RelativePath,
+      StringComparer.OrdinalIgnoreCase
+    );
+    return current with
+    {
+      TrackedFiles = current.TrackedFiles.Select(file =>
+        priorByPath.TryGetValue(file.RelativePath, out var retained)
+          ? retained
+          : file
+      ).ToArray()
+    };
   }
 
   private void EvictTerminalRuns()
@@ -1345,7 +1373,8 @@ public sealed class DurableSupervisionRunCoordinator
       contextId: progress.ContextId,
       workItemId: progress.WorkItemId,
       slowRequest: progress.SlowRequest,
-      retryReason: progress.RetryReason
+      retryReason: progress.RetryReason,
+      durationMilliseconds: progress.DurationMilliseconds
     );
   }
 
@@ -1369,7 +1398,7 @@ public sealed class DurableSupervisionRunCoordinator
   private sealed class DurableExecutionActionJournal(
     DurableSupervisionRunCoordinator owner,
     LiveRunState state
-  ) : IExecutionActionJournal
+  ) : IExecutionActionJournal, IExecutionActionJournalStateReader
   {
     public Task RecordAsync(
       ValidatedLocalAction action,
@@ -1386,6 +1415,32 @@ public sealed class DurableSupervisionRunCoordinator
         requiresApproval,
         result,
         cancellationToken
+      );
+    }
+
+    public ExecutionActionJournalState GetState()
+    {
+      var actions = state.Checkpoint.Recovery?.Actions ?? [];
+      var unresolved = actions.Where(action => action.Phase is
+        SupervisionActionPhases.Prepared
+        or SupervisionActionPhases.AwaitingApproval
+        or SupervisionActionPhases.InFlight
+        or SupervisionActionPhases.Ambiguous
+      ).ToArray();
+      return new ExecutionActionJournalState(
+        unresolved.Length > 0,
+        unresolved.Any(action =>
+          action.Phase == SupervisionActionPhases.AwaitingApproval
+        ),
+        unresolved.Any(action => string.Equals(
+          action.Tool,
+          "run_validation_profile",
+          StringComparison.Ordinal
+        )),
+        actions.Count(action =>
+          !action.ReadOnly
+          && action.Phase == SupervisionActionPhases.Committed
+        )
       );
     }
   }
@@ -1420,6 +1475,7 @@ public sealed class DurableSupervisionRunCoordinator
     private DurableSupervisionCheckpoint _checkpoint;
     private SupervisionRuntimeView _runtime;
     private IReadOnlyList<SupervisionRunEvent> _transientEvents = [];
+    private ContextUsageView? _latestContextUsage;
     private long _eventSequence;
     private TaskCompletionSource _changed = NewSignal();
     private readonly CancellationTokenSource _cancellation = new();
@@ -1490,14 +1546,21 @@ public sealed class DurableSupervisionRunCoordinator
     {
       lock (_gate)
       {
+        var events = _checkpoint.Events.Concat(_transientEvents).Where(
+          item => item.Sequence > afterSequence
+        ).OrderBy(
+          item => item.Sequence
+        ).TakeLast(
+          _maximumEvents
+        ).Select(item =>
+          item.Terminal
+          && item.ContextUsage is null
+          && _latestContextUsage is not null
+            ? item with { ContextUsage = _latestContextUsage }
+            : item
+        ).ToArray();
         return new LiveReadBatch(
-          _checkpoint.Events.Concat(_transientEvents).Where(
-            item => item.Sequence > afterSequence
-          ).OrderBy(
-            item => item.Sequence
-          ).TakeLast(
-            _maximumEvents
-          ).ToArray(),
+          events,
           DurableSupervisionRunStates.IsTerminal(
             _checkpoint.State
           ),
@@ -1540,6 +1603,7 @@ public sealed class DurableSupervisionRunCoordinator
           return;
         }
         var runtime = _runtime;
+        _latestContextUsage = progress.ContextUsage ?? _latestContextUsage;
         _transientEvents = _transientEvents.Append(
           new SupervisionRunEvent(
             _checkpoint.RunId,
@@ -1557,9 +1621,10 @@ public sealed class DurableSupervisionRunCoordinator
             progress.SlowRequest,
             progress.ContextUsage,
             progress.LocalAction,
-            RetryReason: progress.RetryReason
+            RetryReason: progress.RetryReason,
+            DurationMilliseconds: progress.DurationMilliseconds
           )
-        ).TakeLast(64).ToArray();
+        ).TakeLast(_maximumEvents).ToArray();
         signal = _changed;
         _changed = NewSignal();
       }

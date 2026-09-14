@@ -19,7 +19,8 @@ public interface IPersistentSessionStore
 
   Task<ConversationSessionRecord> WriteAsync(
     ConversationSessionRecord session,
-    int maximumBytes,
+    int compactionThresholdBytes,
+    int compactionTargetBytes,
     CancellationToken cancellationToken
   );
 
@@ -45,16 +46,19 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
   };
 
   private readonly string _dataDirectory;
+  private readonly ILogger<PersistentSessionStore> _logger;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
   );
 
   public PersistentSessionStore(
-    IWorkspaceProfileStore workspaceStore
+    IWorkspaceProfileStore workspaceStore,
+    ILogger<PersistentSessionStore> logger
   )
   {
     _dataDirectory = workspaceStore.DataDirectory;
+    _logger = logger;
   }
 
   public async Task<IReadOnlyList<ConversationSessionRecord>> ReadAllAsync(
@@ -85,11 +89,27 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
       var sessionId = Path.GetFileNameWithoutExtension(
         path
       );
-      var session = await ReadAsync(
-        workspaceId,
-        sessionId,
-        cancellationToken
-      );
+      ConversationSessionRecord? session;
+      try
+      {
+        session = await ReadAsync(
+          workspaceId,
+          sessionId,
+          cancellationToken
+        );
+      }
+      catch (WorkspaceProfileException exception) when (
+        exception.Code == "session-file-invalid"
+      )
+      {
+        _logger.LogWarning(
+          exception,
+          "Skipping invalid persisted session {SessionId} in workspace {WorkspaceId}; other sessions remain available.",
+          sessionId,
+          workspaceId
+        );
+        continue;
+      }
 
       if (session is not null)
       {
@@ -183,7 +203,8 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
 
   public async Task<ConversationSessionRecord> WriteAsync(
     ConversationSessionRecord session,
-    int maximumBytes,
+    int compactionThresholdBytes,
+    int compactionTargetBytes,
     CancellationToken cancellationToken
   )
   {
@@ -193,29 +214,42 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
     ValidateId(
       session.Id
     );
-    var json = JsonSerializer.Serialize(
-      session with
-      {
-        StorageBytes = 0
-      },
-      JsonOptions
-    ).Replace(
-      "\r\n",
-      "\n",
-      StringComparison.Ordinal
-    ) + "\n";
+    var persisted = session;
+    var json = Serialize(
+      persisted
+    );
     var bytes = System.Text.Encoding.UTF8.GetByteCount(
       json
     );
-
-    if (bytes > maximumBytes)
+    if (bytes >= compactionThresholdBytes)
     {
-      throw new WorkspaceProfileException(
-        "session-file-too-large",
-        "session-persistence",
-        "The session exceeds the configured local history size limit.",
-        false
+      var compaction = PersistentSessionCompactor.Compact(
+        persisted,
+        compactionTargetBytes,
+        MeasureBytes
       );
+      persisted = compaction.Session;
+      json = Serialize(
+        persisted
+      );
+      bytes = System.Text.Encoding.UTF8.GetByteCount(
+        json
+      );
+      _logger.LogInformation(
+        "Compacted persisted session {SessionId} from {BeforeBytes} to {AfterBytes} bytes at the {ThresholdBytes}-byte threshold.",
+        session.Id,
+        compaction.BeforeBytes,
+        bytes,
+        compactionThresholdBytes
+      );
+      if (bytes >= compactionThresholdBytes)
+      {
+        _logger.LogWarning(
+          "Persisted session {SessionId} remains at {Bytes} bytes after semantic compaction; the write is retained because the threshold is not a hard failure limit.",
+          session.Id,
+          bytes
+        );
+      }
     }
 
     await _gate.WaitAsync(
@@ -264,7 +298,7 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
         }
       }
 
-      return session with
+      return persisted with
       {
         StorageBytes = bytes
       };
@@ -290,6 +324,34 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
     {
       _gate.Release();
     }
+  }
+
+  private static int MeasureBytes(
+    ConversationSessionRecord session
+  )
+  {
+    return System.Text.Encoding.UTF8.GetByteCount(
+      Serialize(
+        session
+      )
+    );
+  }
+
+  private static string Serialize(
+    ConversationSessionRecord session
+  )
+  {
+    return JsonSerializer.Serialize(
+      session with
+      {
+        StorageBytes = 0
+      },
+      JsonOptions
+    ).Replace(
+      "\r\n",
+      "\n",
+      StringComparison.Ordinal
+    ) + "\n";
   }
 
   public async Task DeleteAsync(

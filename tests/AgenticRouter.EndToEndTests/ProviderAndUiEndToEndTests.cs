@@ -5399,7 +5399,7 @@ baselineTotal!.Value
 
   [TestMethod]
   [Timeout(90_000, CooperativeCancellation = true)]
-  public async Task ProjectsSidebarGroupsSearchesCollapsesAndResumesAcrossWorkspaces()
+  public async Task ProjectsSidebarGroupsSearchesCollapsesAndOpensAcrossWorkspaces()
   {
     var firstWorkspaceId = await ActiveWorkspaceIdAsync();
     using var profilesResponse = await _environment.HttpClient.GetAsync(
@@ -5636,7 +5636,7 @@ baselineTotal!.Value
       AriaRole.Button,
       new()
       {
-        Name = "Resume safely",
+        Name = "Open conversation",
         Exact = true
       }
     ).ClickAsync();

@@ -71,6 +71,7 @@ public static class SupervisionEventTypeIds
   public const string TurnWatchdogRecovery = "supervision.turn-watchdog-recovery";
   public const string TurnCanonicalRecovery = "supervision.turn-canonical-recovery";
   public const string TurnHarnessRecovery = "supervision.turn-harness-recovery";
+  public const string PreflightCompleted = "supervision.preflight-completed";
   public const string NoProgress = "supervision.no-progress";
   public const string RecoveryEligible = "supervision.recovery-eligible";
   public const string ReconciliationRequired = "supervision.reconciliation-required";
@@ -82,6 +83,7 @@ public static class SupervisionEventTypeIds
   public const string ActionRejected = "supervision.action-rejected";
   public const string AwaitingUser = "supervision.awaiting-user";
   public const string Completed = "supervision.completed";
+  public const string DeterministicCompletion = "supervision.deterministic-completion";
   public const string Blocked = "supervision.blocked";
   public const string Cancelling = "supervision.cancelling";
   public const string Cancelled = "supervision.cancelled";
@@ -90,6 +92,7 @@ public static class SupervisionEventTypeIds
 public static class SupervisionRetryReasons
 {
   public const string WorkerFailure = "worker-failure";
+  public const string PlanningNoProgress = "planning-no-progress";
   public const string AcceptanceMismatch = "acceptance-mismatch";
   public const string StaleEvidenceReverification = "stale-evidence-reverification";
   public const string ValidationFailure = "validation-failure";
@@ -158,6 +161,13 @@ public static class SupervisionWorkItemStates
   public const string Verifying = "verifying";
   public const string Completed = "completed";
   public const string Blocked = "blocked";
+}
+
+public static class SupervisionRequirementModalities
+{
+  public const string Must = "must";
+  public const string Should = "should";
+  public const string May = "may";
 }
 
 public static class SupervisionContextStates
@@ -805,12 +815,61 @@ internal static class SupervisionViewFactory
     if (effectiveRuntime is not null)
     {
       var telemetry = effectiveRuntime.Telemetry ?? SupervisionTelemetryView.Empty;
+      var durableEvents = checkpoint.Events;
+      var decompositionDuration = SumDurations(
+        durableEvents,
+        SupervisionEventTypeIds.WorkQueued
+      );
+      var workerDuration = SumDurations(
+        durableEvents,
+        SupervisionEventTypeIds.WorkerClaimed,
+        retry: false
+      );
+      var correctionDuration = SumDurations(
+        durableEvents,
+        SupervisionEventTypeIds.WorkerClaimed,
+        retry: true
+      );
+      var verificationDuration = durableEvents.Where(item =>
+        item.Type is SupervisionEventTypeIds.WorkAccepted
+          or SupervisionEventTypeIds.WorkRejected
+      ).Sum(item => item.DurationMilliseconds ?? 0);
+      var completionDuration = SumDurations(
+        durableEvents,
+        SupervisionEventTypeIds.Completed
+      );
       effectiveRuntime = effectiveRuntime with
       {
         Telemetry = telemetry with
         {
+          DecompositionDurationMilliseconds = Math.Max(
+            telemetry.DecompositionDurationMilliseconds,
+            decompositionDuration
+          ),
+          WorkerDurationMilliseconds = Math.Max(
+            telemetry.WorkerDurationMilliseconds,
+            workerDuration
+          ),
+          VerificationDurationMilliseconds = Math.Max(
+            telemetry.VerificationDurationMilliseconds,
+            verificationDuration
+          ),
+          CorrectionDurationMilliseconds = Math.Max(
+            telemetry.CorrectionDurationMilliseconds,
+            correctionDuration
+          ),
+          FinalCompletionDurationMilliseconds = Math.Max(
+            telemetry.FinalCompletionDurationMilliseconds,
+            completionDuration
+          ),
           WorkerAttemptCount = effectiveRuntime.WorkItems.Sum(item => item.AttemptCount),
           SupervisorTransitionCount = effectiveRuntime.SupervisorTransitionCount,
+          RejectionReason = durableEvents.LastOrDefault(item =>
+            !string.IsNullOrWhiteSpace(item.RejectionReason)
+          )?.RejectionReason ?? telemetry.RejectionReason,
+          RetryReason = durableEvents.LastOrDefault(item =>
+            !string.IsNullOrWhiteSpace(item.RetryReason)
+          )?.RetryReason ?? telemetry.RetryReason,
           ActualWorkspaceMutationCount = checkpoint.Recovery?.Actions.Count(action =>
             !action.ReadOnly
             && action.Phase == SupervisionActionPhases.Committed
@@ -844,5 +903,20 @@ internal static class SupervisionViewFactory
       checkpoint.Takeover,
       checkpoint.ExecutionStrategy
     );
+  }
+
+  private static long SumDurations(
+    IReadOnlyList<SupervisionRunEvent> events,
+    string type,
+    bool? retry = null
+  )
+  {
+    return events.Where(item =>
+      item.Type == type
+      && (
+        retry is null
+        || retry.Value == !string.IsNullOrWhiteSpace(item.RetryReason)
+      )
+    ).Sum(item => item.DurationMilliseconds ?? 0);
   }
 }

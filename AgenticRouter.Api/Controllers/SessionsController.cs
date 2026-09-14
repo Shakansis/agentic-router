@@ -88,7 +88,25 @@ public sealed class SessionsController : ControllerBase
   {
     return await ExecuteAsync(
       async () => Present(
-        await _sessions.ResumeAsync(
+        await _sessions.OpenAsync(
+          id,
+          request.BrowserSessionId,
+          cancellationToken
+        )
+      )
+    );
+  }
+
+  [HttpPost("{id}/open")]
+  public async Task<IActionResult> Open(
+    string id,
+    [FromBody] ResumeConversationSessionRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(
+      async () => Present(
+        await _sessions.OpenAsync(
           id,
           request.BrowserSessionId,
           cancellationToken

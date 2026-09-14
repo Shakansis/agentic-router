@@ -34,6 +34,7 @@ public interface IPersistentSessionService
     string? model,
     string approvalPolicy,
     string harness,
+    string executionStrategy,
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
     int? replaceFromMessageIndex,
@@ -70,6 +71,12 @@ public interface IPersistentSessionService
   );
 
   Task<ConversationSessionRecord> ResumeAsync(
+    string sessionId,
+    string browserSessionId,
+    CancellationToken cancellationToken
+  );
+
+  Task<ConversationSessionRecord> OpenAsync(
     string sessionId,
     string browserSessionId,
     CancellationToken cancellationToken
@@ -158,18 +165,28 @@ public sealed class PersistentSessionService : IPersistentSessionService
         cancellationToken
       );
 
-      foreach (var session in sessions.Where(
-        item => item.State == "running"
-      ))
+      foreach (var session in sessions)
       {
+        var interrupted = session.State == "running";
+        if (
+          !interrupted
+          && session.StorageBytes < limits.SessionCompactionThresholdBytes
+        )
+        {
+          continue;
+        }
+
         await _store.WriteAsync(
-          session with
-          {
-            State = "interrupted",
-            Interrupted = true,
-            UpdatedAt = DateTimeOffset.UtcNow
-          },
-          limits.MaxSessionBytes,
+          interrupted
+            ? session with
+            {
+              State = "interrupted",
+              Interrupted = true,
+              UpdatedAt = DateTimeOffset.UtcNow
+            }
+            : session,
+          limits.SessionCompactionThresholdBytes,
+          limits.SessionCompactionTargetBytes,
           cancellationToken
         );
       }
@@ -384,7 +401,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
         {
           PreferredModelProfileId = active.PreferredModelProfileId,
           LastApprovalPolicy = request.ApprovalPolicy,
-          SelectedHarness = request.Harness
+          SelectedHarness = request.Harness,
+          LastExecutionStrategy = request.ExecutionStrategy
         };
       }
 
@@ -400,12 +418,14 @@ public sealed class PersistentSessionService : IPersistentSessionService
           ) ?? existing.SelectedModel,
           LastApprovalPolicy = request.ApprovalPolicy,
           SelectedHarness = request.Harness,
+          LastExecutionStrategy = request.ExecutionStrategy,
           Messages = SanitizeMessages(
             request.Messages,
             existing.Messages
           )
         },
-        limits.MaxSessionBytes,
+        limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes,
         cancellationToken
       );
       return new ConversationPersistenceView(
@@ -432,6 +452,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     string? model,
     string approvalPolicy,
     string harness,
+    string executionStrategy,
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
     int? replaceFromMessageIndex,
@@ -498,7 +519,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
         {
           PreferredModelProfileId = active.PreferredModelProfileId,
           LastApprovalPolicy = approvalPolicy,
-          SelectedHarness = harness
+          SelectedHarness = harness,
+          LastExecutionStrategy = executionStrategy
         };
       }
       else
@@ -547,7 +569,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
           {
             PreferredModelProfileId = active.PreferredModelProfileId,
             LastApprovalPolicy = approvalPolicy,
-            SelectedHarness = harness
+            SelectedHarness = harness,
+            LastExecutionStrategy = executionStrategy
           };
         }
         else
@@ -577,6 +600,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
         ) ?? session.SelectedModel,
         LastApprovalPolicy = approvalPolicy,
         SelectedHarness = harness,
+        LastExecutionStrategy = executionStrategy,
         Messages = session.Messages.Append(
           new ChatMessage(
             "user",
@@ -592,7 +616,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
       };
       return await _store.WriteAsync(
         session,
-        limits.MaxSessionBytes,
+        limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes,
         cancellationToken
       );
     }
@@ -825,7 +850,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
       var rollbackTruncated = snapshot is not null
         && snapshot.Files.Sum(
           file => file.RollbackBytes
-        ) > limits.MaxSessionBytes / 2;
+        ) > limits.SessionCompactionTargetBytes / 2;
 
       if (rollbackTruncated)
       {
@@ -904,7 +929,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
       };
       return await _store.WriteAsync(
         completed,
-        limits.MaxSessionBytes,
+        limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes,
         cancellationToken
       );
     }
@@ -974,7 +1000,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
         snapshot is not null
         && snapshot.Files.Sum(
           file => file.RollbackBytes
-        ) > limits.MaxSessionBytes / 2
+        ) > limits.SessionCompactionTargetBytes / 2
       )
       {
         snapshot = null;
@@ -1010,7 +1036,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
             snapshot
           )
         },
-        limits.MaxSessionBytes,
+        limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes,
         cancellationToken
       );
     }
@@ -1129,7 +1156,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
           Messages = messages,
           UpdatedAt = DateTimeOffset.UtcNow
         },
-        limits.MaxSessionBytes,
+        limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes,
         cancellationToken
       );
     }
@@ -1200,7 +1228,20 @@ public sealed class PersistentSessionService : IPersistentSessionService
     return result.ToArray();
   }
 
-  public async Task<ConversationSessionRecord> ResumeAsync(
+  public Task<ConversationSessionRecord> ResumeAsync(
+    string sessionId,
+    string browserSessionId,
+    CancellationToken cancellationToken
+  )
+  {
+    return OpenAsync(
+      sessionId,
+      browserSessionId,
+      cancellationToken
+    );
+  }
+
+  public async Task<ConversationSessionRecord> OpenAsync(
     string sessionId,
     string browserSessionId,
     CancellationToken cancellationToken
@@ -1312,7 +1353,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
     return session with
     {
-      ContextTruncated = session.Messages.Count > maximumMessages,
+      ContextTruncated = session.ContextTruncated
+        || session.Messages.Count > maximumMessages,
       ExecutionReviews = reviews
     };
   }
@@ -1532,7 +1574,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
       {
         UpdatedAt = DateTimeOffset.UtcNow
       },
-      limits.MaxSessionBytes,
+      limits.SessionCompactionThresholdBytes,
+      limits.SessionCompactionTargetBytes,
       cancellationToken
     );
   }
@@ -1764,6 +1807,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
       )
       || request.InteractionMode is not "chat" and not "execute"
       || request.ApprovalPolicy is not "ask" and not "auto"
+      || request.ExecutionStrategy is not "auto"
+        and not "direct"
+        and not "supervised"
+        and not "autonomous"
       || string.IsNullOrWhiteSpace(
         request.Harness
       )
@@ -1831,7 +1878,10 @@ public sealed class PersistentSessionService : IPersistentSessionService
       session.PinnedAt,
       session.SessionSummary is not null,
       session.PreferredModelProfileId,
-      session.SelectedModel
+      session.SelectedModel,
+      session.SelectedHarness,
+      session.LastApprovalPolicy,
+      session.LastExecutionStrategy
     );
   }
 

@@ -381,8 +381,14 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     Scalar(
       yaml,
       1,
-      "max_session_bytes",
-      settings.SessionHistory.MaxSessionBytes
+      "session_compaction_threshold_bytes",
+      settings.SessionHistory.SessionCompactionThresholdBytes
+    );
+    Scalar(
+      yaml,
+      1,
+      "session_compaction_target_bytes",
+      settings.SessionHistory.SessionCompactionTargetBytes
     );
     Scalar(
       yaml,
@@ -1851,6 +1857,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     var keys = new[]
     {
       "max_sessions_per_workspace",
+      "session_compaction_threshold_bytes",
+      "session_compaction_target_bytes",
       "max_session_bytes",
       "max_process_output_bytes_per_turn",
       "max_diff_bytes_per_turn"
@@ -1862,6 +1870,33 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       errors
     );
     var current = settings.SessionHistory;
+    var legacyThreshold = ReadInt(
+      section,
+      "max_session_bytes",
+      current.SessionCompactionThresholdBytes,
+      "session_history.max_session_bytes",
+      errors
+    );
+    var threshold = section.Children!.ContainsKey(
+      "session_compaction_threshold_bytes"
+    )
+      ? ReadInt(
+        section,
+        "session_compaction_threshold_bytes",
+        current.SessionCompactionThresholdBytes,
+        "session_history.session_compaction_threshold_bytes",
+        errors
+      )
+      : legacyThreshold == 5_242_880
+        ? SessionHistorySettings.DefaultCompactionThresholdBytes
+        : legacyThreshold;
+    var defaultTarget = Math.Min(
+      SessionHistorySettings.DefaultCompactionTargetBytes,
+      Math.Max(
+        65_536,
+        threshold / 2
+      )
+    );
     return settings with
     {
       SessionHistory = current with
@@ -1873,25 +1908,26 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
           $"session_history.{keys[0]}",
           errors
         ),
-        MaxSessionBytes = ReadInt(
+        SessionCompactionThresholdBytes = threshold,
+        SessionCompactionTargetBytes = ReadInt(
           section,
-          keys[1],
-          current.MaxSessionBytes,
-          $"session_history.{keys[1]}",
+          "session_compaction_target_bytes",
+          defaultTarget,
+          "session_history.session_compaction_target_bytes",
           errors
         ),
         MaxStoredProcessOutputBytesPerTurn = ReadInt(
           section,
-          keys[2],
+          "max_process_output_bytes_per_turn",
           current.MaxStoredProcessOutputBytesPerTurn,
-          $"session_history.{keys[2]}",
+          "session_history.max_process_output_bytes_per_turn",
           errors
         ),
         MaxStoredDiffBytesPerTurn = ReadInt(
           section,
-          keys[3],
+          "max_diff_bytes_per_turn",
           current.MaxStoredDiffBytesPerTurn,
-          $"session_history.{keys[3]}",
+          "session_history.max_diff_bytes_per_turn",
           errors
         )
       }

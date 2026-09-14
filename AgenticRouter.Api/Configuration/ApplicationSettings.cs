@@ -204,9 +204,15 @@ public sealed record GitDeliverySettings
 
 public sealed record SessionHistorySettings
 {
+  public const int DefaultCompactionThresholdBytes = 10_485_760;
+
+  public const int DefaultCompactionTargetBytes = 5_242_880;
+
   public int MaxSessionsPerWorkspace { get; init; } = 50;
 
-  public int MaxSessionBytes { get; init; } = 5_242_880;
+  public int SessionCompactionThresholdBytes { get; init; } = DefaultCompactionThresholdBytes;
+
+  public int SessionCompactionTargetBytes { get; init; } = DefaultCompactionTargetBytes;
 
   public int MaxStoredProcessOutputBytesPerTurn { get; init; } = 65_536;
 

@@ -557,6 +557,7 @@ function bindElements() {
     "cancel-session-search",
     "session-details-dialog",
     "session-details-title",
+    "session-details-conversation-title",
     "session-details-metadata",
     "session-details-state",
     "session-details-summary",
@@ -571,7 +572,6 @@ function bindElements() {
     "edit-session-summary",
     "close-session-details",
     "dismiss-session-details",
-    "resume-session-details",
     "session-summary-dialog",
     "session-summary-form",
     "session-summary-session-title",
@@ -875,10 +875,6 @@ function bindEvents() {
       event.preventDefault();
       closeSessionDetails();
     }
-  );
-  elements.resumeSessionDetails.addEventListener(
-    "click",
-    resumeSelectedSession
   );
   elements.sessionDetailsPin.addEventListener(
     "click",
@@ -4370,10 +4366,17 @@ function gitActionError(error) {
 async function openGitPanel() {
   elements.runtimeDetails.open = false;
   elements.gitActionStatus.textContent = "";
-  await refreshGit();
+  elements.gitInitializeQuick.disabled = true;
+  elements.gitCommitQuick.disabled = true;
+  elements.gitPushQuick.disabled = true;
   renderGitPanel();
-  elements.gitDialog.showModal();
+  if (!elements.gitDialog.open) {
+    elements.gitDialog.showModal();
+  }
   elements.closeGit.focus();
+
+  await refreshGit();
+  elements.gitInitializeQuick.disabled = false;
 
   if (state.git?.state === "available") {
     await loadGitDiff(state.activeGitView);
@@ -5996,7 +5999,7 @@ function renderProjectSidebar() {
       const empty = document.createElement("p");
       empty.className = "project-conversations-empty";
       empty.textContent = project.historyEnabled
-        ? "No saved conversations."
+        ? "No conversations yet."
         : "History disabled.";
       conversationStack.append(empty);
     }
@@ -6163,24 +6166,24 @@ function createProjectSessionEntry(session) {
     "aria-current",
     current ? "true" : "false"
   );
-  const resume = document.createElement("button");
-  resume.type = "button";
-  resume.className = "session-entry-content";
-  resume.setAttribute("aria-label", `Resume ${session.title}`);
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "session-entry-content";
+  open.setAttribute("aria-label", `Open ${session.title}`);
   const title = document.createElement("strong");
   title.textContent = session.title;
   const metadata = document.createElement("small");
   metadata.textContent = `${session.pinned ? "Pinned · " : ""}`
     + new Date(session.updatedAt).toLocaleDateString(window.AgenticRouterI18n.locale);
-  resume.append(title, metadata);
-  resume.addEventListener("click", () => resumeSession(session.id, session.workspaceId));
+  open.append(title, metadata);
+  open.addEventListener("click", () => openConversation(session.id, session.workspaceId));
   const details = document.createElement("button");
   details.type = "button";
   details.className = "session-details-button";
   details.textContent = "…";
   details.setAttribute("aria-label", `Details for ${session.title}`);
   details.addEventListener("click", () => openSessionDetails(session));
-  entry.append(resume, details);
+  entry.append(open, details);
   return entry;
 }
 
@@ -6200,7 +6203,7 @@ async function openSessionDetails(session) {
   renderSessionDetails(session);
   renderSessionDetailsSummary(null, true);
   elements.sessionDetailsDialog.showModal();
-  elements.resumeSessionDetails.focus();
+  elements.closeSessionDetails.focus();
 
   try {
     const summary = await fetchJson(
@@ -6221,11 +6224,12 @@ async function openSessionDetails(session) {
 }
 
 function renderSessionDetails(session) {
-  elements.sessionDetailsTitle.textContent = session.title;
+  elements.sessionDetailsTitle.textContent = "Conversation Details";
+  elements.sessionDetailsConversationTitle.textContent = session.title;
   elements.sessionDetailsMetadata.textContent = [
-    new Date(session.updatedAt).toLocaleString(window.AgenticRouterI18n.locale),
-    session.lastInteractionMode === "execute" ? "Execute" : "Chat",
-    session.selectedModel
+    `Created ${new Date(session.createdAt).toLocaleString(window.AgenticRouterI18n.locale)}`,
+    `Updated ${new Date(session.updatedAt).toLocaleString(window.AgenticRouterI18n.locale)}`,
+    session.selectedModel ? `Model ${session.selectedModel}` : null
   ].filter(Boolean).join(" · ");
   elements.sessionDetailsState.textContent = [
     state.conversationSessionId === session.id ? "Current conversation" : null,
@@ -6237,6 +6241,9 @@ function renderSessionDetails(session) {
   elements.sessionDetailsPin.textContent = session.pinned
     ? "Unpin"
     : "Pin";
+  elements.editSessionSummary.textContent = session.hasSummary
+    ? "Edit Summary"
+    : "Create Summary";
   elements.sessionDetailsArchive.hidden = session.archived;
   elements.sessionDetailsMarkdown.href =
     `/api/sessions/${encodeURIComponent(session.id)}/export/markdown`
@@ -6260,8 +6267,7 @@ function renderSessionDetailsSummary(content, loading) {
   if (!content) {
     const empty = document.createElement("p");
     empty.className = "runtime-note";
-    empty.textContent =
-      "No summary was created. The conversation can be resumed normally without it.";
+    empty.textContent = "No summary yet. This conversation is ready whenever you return.";
     elements.sessionDetailsSummary.append(empty);
     return;
   }
@@ -6324,7 +6330,8 @@ function findAttachableSupervisionRun(conversationSessionId) {
   return state.supervisionRuns
     .filter(run =>
       run.conversationSessionId === conversationSessionId
-      && (run.state === "running" || run.state === "completed")
+      && run.state === "running"
+      && run.terminal !== true
     )
     .sort((left, right) =>
       new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
@@ -6341,16 +6348,6 @@ function refreshSelectedSessionDetails(id) {
 
   state.detailsSession = session;
   renderSessionDetails(session);
-}
-
-async function resumeSelectedSession() {
-  const session = state.detailsSession;
-  if (!session) {
-    return;
-  }
-
-  closeSessionDetails();
-  await resumeSession(session.id, session.workspaceId);
 }
 
 async function toggleSelectedSessionPin() {
@@ -6416,7 +6413,7 @@ async function editSelectedSessionSummary() {
   await openSessionSummary(session);
 }
 
-async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
+async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) {
   if (state.requestController) {
     await openSessionReadOnly(
       id,
@@ -6445,7 +6442,7 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
           await refreshWorkspaceState();
         }
         const session = await fetchJson(
-          `/api/sessions/${encodeURIComponent(id)}/resume`,
+          `/api/sessions/${encodeURIComponent(id)}/open`,
           {
             method: "POST",
             headers: {
@@ -6485,7 +6482,8 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
           ? "execute"
           : session.lastInteractionMode ?? "chat";
         state.executionStrategy = supervisionRun?.executionStrategy
-          ?? (supervisionRun ? "supervised" : "auto");
+          ?? session.lastExecutionStrategy
+          ?? "auto";
         state.approvalPolicy = supervisionRun?.approvalPolicy
           ?? session.lastApprovalPolicy
           ?? "auto";
@@ -6518,6 +6516,7 @@ async function resumeSession(id, workspaceId = activeWorkspaceProfile()?.id) {
         updateInteractionControls();
         updateHarnessControls();
         updateComposerStatus();
+        elements.messageInput.focus();
         elements.workspaceDialog.close();
         await refreshSessions();
         await refreshGit();
@@ -6557,7 +6556,7 @@ async function openSessionReadOnly(id, workspaceId) {
     );
     state.conversationState = session.state;
     state.interactionMode = session.lastInteractionMode ?? "chat";
-    state.executionStrategy = "auto";
+    state.executionStrategy = session.lastExecutionStrategy ?? "auto";
     state.approvalPolicy = session.lastApprovalPolicy ?? "auto";
     state.harness = session.selectedHarness ?? "native";
     restoreSelectValue(
@@ -6726,8 +6725,14 @@ async function renderRestoredConversation(session, options = {}) {
   if (session.contextTruncated) {
     const notice = document.createElement("p");
     notice.className = "workspace-note";
-    notice.textContent =
-      "Older messages remain visible but will be omitted from the model's next context.";
+    notice.textContent = session.messages.some(message =>
+      message.role === "assistant"
+      && message.content.startsWith(
+        "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1"
+      )
+    )
+      ? "Older turns were compacted into continuity context. The most recent history remains at full fidelity."
+      : "Older messages remain visible but will be omitted from the model's next context.";
     elements.messages.append(notice);
   }
 
@@ -7039,12 +7044,12 @@ function renderSessionSearchResults(response) {
     const open = document.createElement("button");
     open.type = "button";
     open.className = "secondary-button";
-    open.textContent = "Resume safely";
+    open.textContent = "Open conversation";
     open.addEventListener(
       "click",
       async () => {
         closeSessionSearch();
-        await resumeSession(result.id, result.workspaceId);
+        await openConversation(result.id, result.workspaceId);
       }
     );
     entry.append(title, metadata, field, snippet, open);
@@ -9089,8 +9094,9 @@ function renderSettingsSummaries() {
       + `History: ${active.historyEnabled ? "enabled" : "disabled"}\n`
       + `Stored sessions: ${usage?.sessionCount ?? 0}\n`
       + `Storage: ${formatBytes(usage?.storageBytes ?? 0)}\n`
-      + `Retention: ${state.settings.sessionHistory.maxSessionsPerWorkspace} sessions, `
-      + `${formatBytes(state.settings.sessionHistory.maxSessionBytes)} each`
+      + `Retention: ${state.settings.sessionHistory.maxSessionsPerWorkspace} sessions\n`
+      + `Compaction: ${formatBytes(state.settings.sessionHistory.sessionCompactionThresholdBytes)} threshold, `
+      + `${formatBytes(state.settings.sessionHistory.sessionCompactionTargetBytes)} target`
     : "No active workspace.";
   renderProcessPermissions();
   elements.settingsGitSummary.textContent = state.git?.state === "available"
@@ -12117,7 +12123,8 @@ async function saveCurrentConversation() {
           selectedModel: elements.modelSelector.value,
           state: state.conversationState,
           approvalPolicy: state.approvalPolicy,
-          harness: state.harness
+          harness: state.harness,
+          executionStrategy: state.executionStrategy
         })
       }
     );

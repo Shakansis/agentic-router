@@ -7522,6 +7522,26 @@ textarea[readonly] {
   min-height: 34px;
 }
 
+.session-details-conversation-title {
+  display: block;
+  margin-top: 6px;
+  color: var(--text);
+}
+
+.session-details-lifecycle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.session-details-lifecycle-actions > * {
+  flex: 0 0 auto;
+  min-height: 34px;
+}
+
 .session-details-summary {
   display: grid;
   gap: 10px;

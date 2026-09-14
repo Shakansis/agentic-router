@@ -47,6 +47,18 @@ public interface IExecutionActionJournal
   );
 }
 
+public sealed record ExecutionActionJournalState(
+  bool HasUnresolvedAction,
+  bool HasUnresolvedApproval,
+  bool HasPendingValidation,
+  int ActualWorkspaceMutationCount
+);
+
+public interface IExecutionActionJournalStateReader
+{
+  ExecutionActionJournalState GetState();
+}
+
 public static class ExecutionActionJournalPhases
 {
   public const string Prepared = "prepared";

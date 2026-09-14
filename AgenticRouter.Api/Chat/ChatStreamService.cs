@@ -100,6 +100,7 @@ public sealed class ChatStreamService
     new Dictionary<string, string?>(
       StringComparer.OrdinalIgnoreCase
     );
+  private SupervisedPreflightCache? _supervisedPreflight;
 
   public ChatStreamService(
     ISettingsStore settingsStore,
@@ -219,7 +220,10 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    var settings = await _settingsStore.GetAsync(cancellationToken);
+    var settings = invocation.Role == ExecutionContextRole.Direct
+      ? await _settingsStore.GetAsync(cancellationToken)
+      : _supervisedPreflight?.Settings
+        ?? await _settingsStore.GetAsync(cancellationToken);
     var warningAfter = TimeSpan.FromSeconds(
       settings.Runtime.GenerationTimeoutSeconds
     );
@@ -255,6 +259,10 @@ public sealed class ChatStreamService
     using var requestLease = _requestTracker.BeginRequest();
     _trace.Link("turnId", requestId);
     var stopwatch = Stopwatch.StartNew();
+    var preflightTimer = Stopwatch.StartNew();
+    var cachedPreflight = invocation.Role == ExecutionContextRole.Direct
+      ? null
+      : _supervisedPreflight;
 
     try
     {
@@ -271,9 +279,8 @@ public sealed class ChatStreamService
       ValidateDiagnosticTraceReference(
         request
       );
-      var settings = await _settingsStore.GetAsync(
-        cancellationToken
-      );
+      var settings = cachedPreflight?.Settings
+        ?? await _settingsStore.GetAsync(cancellationToken);
       var benchmarkContext = _benchmarkContexts.Current;
       _usageModelRoleOverride = benchmarkContext is null
         ? null
@@ -286,7 +293,7 @@ public sealed class ChatStreamService
         "auto",
         StringComparison.OrdinalIgnoreCase
       );
-      var baseUri = new Uri(
+      var baseUri = cachedPreflight?.BaseUri ?? new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
       );
@@ -304,15 +311,13 @@ public sealed class ChatStreamService
         stopwatch
       );
 
-      var models = await GetModelsAsync(
-        baseUri,
-        cancellationToken
-      );
+      var models = cachedPreflight?.Models
+        ?? await GetModelsAsync(baseUri, cancellationToken);
       AutoModelHarnessRoutingResult? autoModelHarnessRoute = null;
-      var usageWorkspace = await _workspaceProfiles.GetActiveDataAsync(
-        cancellationToken
-      );
-      _usageWorkspaceId = usageWorkspace?.Id;
+      var usageWorkspace = cachedPreflight is null
+        ? await _workspaceProfiles.GetActiveDataAsync(cancellationToken)
+        : null;
+      _usageWorkspaceId = cachedPreflight?.WorkspaceId ?? usageWorkspace?.Id;
       _usageConversationId = request.ConversationSessionId;
       _usageTurnId = requestId;
       _usageModelRevisions = models.ToDictionary(
@@ -333,6 +338,33 @@ public sealed class ChatStreamService
       var images = _imageValidator.Validate(
         request.Images
       );
+
+      if (
+        cachedPreflight is not null
+        && (
+          !string.Equals(
+            cachedPreflight.Model,
+            selectedModel,
+            StringComparison.OrdinalIgnoreCase
+          )
+          || !string.Equals(
+            cachedPreflight.HarnessDefinition.Id,
+            request.Harness,
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+      )
+      {
+        throw new ChatStageException(
+          "supervision-preflight-drift",
+          "The supervised turn diverged from its prepared model or harness route.",
+          "Immutable supervision preflight state cannot be reused for a different model or harness.",
+          selectedModel,
+          null,
+          409,
+          false
+        );
+      }
 
       if (!isAuto)
       {
@@ -558,12 +590,17 @@ public sealed class ChatStreamService
           ? intention
           : null
       );
-      var capabilityResolution = await ResolveTurnCapabilitiesAsync(
-        baseUri,
-        selectedModel,
-        images.Count > 0,
-        cancellationToken
-      );
+      var capabilityResolution = cachedPreflight is null
+        ? await ResolveTurnCapabilitiesAsync(
+          baseUri,
+          selectedModel,
+          images.Count > 0,
+          cancellationToken
+        )
+        : (
+          Capabilities: cachedPreflight.Capabilities,
+          Warning: cachedPreflight.CapabilityWarning
+        );
       var capabilities = capabilityResolution.Capabilities;
       var externalHarness = string.Equals(
           request.InteractionMode,
@@ -580,7 +617,8 @@ public sealed class ChatStreamService
         : null;
       var harnessNativeWebSearch = selectedHarnessDefinition?.Capabilities.SupportsNativeWebSearch
         ?? false;
-      var bridgedApplicationWebSearch = selectedHarnessDefinition?.Capabilities.SupportsToolEvents == true
+      var bridgedApplicationWebSearch = cachedPreflight is null
+        && selectedHarnessDefinition?.Capabilities.SupportsToolEvents == true
         && await _webSearch.IsAvailableAsync(cancellationToken);
       if (harnessNativeWebSearch || bridgedApplicationWebSearch)
       {
@@ -686,10 +724,12 @@ public sealed class ChatStreamService
           : null
       );
 
-      var knowledge = await _knowledgeContext.RetrieveAsync(
-        request.Message,
-        cancellationToken
-      );
+      var knowledge = invocation.Role == ExecutionContextRole.Supervisor
+        ? KnowledgeContextResult.Disabled()
+        : await _knowledgeContext.RetrieveAsync(
+          request.Message,
+          cancellationToken
+        );
       if (knowledge.State != "disabled")
       {
         yield return Event(
@@ -782,9 +822,7 @@ public sealed class ChatStreamService
           selectedModel,
           intention
         );
-        var workspace = await _workspace.GetStatusAsync(
-          cancellationToken
-        );
+        var workspace = await _workspace.GetStatusAsync(cancellationToken);
 
         if (!workspace.Valid || workspace.Path is null)
         {
@@ -807,6 +845,25 @@ public sealed class ChatStreamService
             true
           );
         }
+        if (
+          cachedPreflight is not null
+          && !string.Equals(
+            cachedPreflight.Workspace.Path,
+            workspace.Path,
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+        {
+          throw new ChatStageException(
+            "supervision-workspace-drift",
+            "The active trusted workspace changed during supervised execution.",
+            "Immutable supervision workspace identity cannot be reused after the active trusted root changes.",
+            selectedModel,
+            intention,
+            409,
+            false
+          );
+        }
 
         yield return Event(
           requestId,
@@ -826,18 +883,18 @@ public sealed class ChatStreamService
         );
         _latency.Mark("project-awareness-start");
         var projectAwarenessStarted = Stopwatch.GetTimestamp();
-        var project = await _projectAwareness.GetAsync(
-          false,
-          cancellationToken
-        );
+        var project = cachedPreflight is null
+          ? await _projectAwareness.GetAsync(false, cancellationToken)
+          : await _projectAwareness.RefreshRepositoryAsync(
+            cachedPreflight.Project,
+            cancellationToken
+          );
         _latency.Mark(
           "project-awareness-end",
           (long)Stopwatch.GetElapsedTime(projectAwarenessStarted).TotalMilliseconds
         );
-        var rootInstructions = await _repositoryInstructions.ResolveAsync(
-          null,
-          cancellationToken
-        );
+        var rootInstructions = cachedPreflight?.RootInstructions
+          ?? await _repositoryInstructions.ResolveAsync(null, cancellationToken);
         _executionSession = _executionSessions.Begin(
           request.BrowserSessionId
             ?? throw new ChatStageException(
@@ -892,10 +949,8 @@ public sealed class ChatStreamService
         _executionSession.ApplyInstructions(
           rootInstructions
         );
-        var activeWorkspace = await _workspaceProfiles.GetActiveDataAsync(
-          cancellationToken
-        );
-        var activeValidationProfile = activeWorkspace?.ValidationProfile
+        var activeValidationProfile = cachedPreflight?.ValidationProfile
+          ?? usageWorkspace?.ValidationProfile
           ?? settings.ValidationProfile;
         _executionSession.SelectValidationProfile(
           activeValidationProfile
@@ -999,9 +1054,14 @@ public sealed class ChatStreamService
           );
         }
 
-        var harnessDefinition = GetHarnessDefinition(request.Harness);
+        var harnessDefinition = cachedPreflight?.HarnessDefinition
+          ?? GetHarnessDefinition(request.Harness);
         _latency.SetHarness(harnessDefinition.Id);
-        if (!_harnesses.TryGetAdapter(harnessDefinition.Id, out var harness))
+        var harness = cachedPreflight?.Harness;
+        if (
+          harness is null
+          && !_harnesses.TryGetAdapter(harnessDefinition.Id, out harness)
+        )
         {
           throw new ChatStageException(
             "harness-adapter-missing",
@@ -1013,6 +1073,33 @@ public sealed class ChatStreamService
             true
           );
         }
+
+        if (cachedPreflight is null && invocation.Role != ExecutionContextRole.Direct)
+        {
+          _supervisedPreflight = new SupervisedPreflightCache(
+            settings,
+            baseUri,
+            models,
+            selectedModel,
+            capabilities,
+            capabilityResolution.Warning,
+            workspace,
+            project,
+            rootInstructions,
+            activeValidationProfile,
+            harnessDefinition,
+            harness,
+            usageWorkspace?.Id
+          );
+        }
+        preflightTimer.Stop();
+        invocation.CapturePreflight?.Invoke(
+          new ExecutionPreflightMeasurement(
+            invocation.Role,
+            preflightTimer.ElapsedMilliseconds,
+            cachedPreflight is not null
+          )
+        );
 
         yield return Event(
           requestId,
@@ -1041,7 +1128,7 @@ public sealed class ChatStreamService
             executionToolScope,
             contextUsage,
             isAuto,
-            invocation.Role == ExecutionContextRole.Supervisor,
+            invocation.Role,
             invocation.CaptureRoleResult,
             invocation.ActionJournal,
             invocation.RequestedEffort,
@@ -1065,6 +1152,7 @@ public sealed class ChatStreamService
               knowledge.Context,
               hostCapabilities,
               invocation.UseMinimalToolInventory,
+              invocation.Role,
               invocation.CaptureRoleResult,
               invocation.ActionJournal,
               invocation.RequestedEffort,
@@ -1407,6 +1495,7 @@ public sealed class ChatStreamService
     string? managedContext,
     HostCapabilityProfile hostCapabilities,
     bool useMinimalToolInventory,
+    ExecutionContextRole executionRole,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
     string requestedEffort,
@@ -1491,6 +1580,7 @@ public sealed class ChatStreamService
       hostCapabilities,
       images,
       useMinimalToolInventory,
+      executionRole,
       captureRoleResult,
       actionJournal,
       requestedEffort,
@@ -1520,7 +1610,7 @@ public sealed class ChatStreamService
     ExecutionTurnToolScope executionToolScope,
     ContextUsageView? contextUsage,
     bool isAuto,
-    bool allowReadOnlyCompletion,
+    ExecutionContextRole executionRole,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
     string requestedEffort,
@@ -1649,7 +1739,7 @@ public sealed class ChatStreamService
       settings.Execution,
       settings.ProjectAwareness,
       capabilities.ContextTokens,
-      allowReadOnlyCompletion,
+      executionRole,
       captureRoleResult,
       actionJournal,
       cancellationToken
@@ -1698,7 +1788,8 @@ public sealed class ChatStreamService
       yield break;
     }
 
-    session.RefreshCompletionGate();
+    var allowReadOnlyCompletion = executionRole == ExecutionContextRole.Supervisor;
+    session.RefreshCompletionGate(allowReadOnlyCompletion);
     yield return Event(
       requestId,
       "completion-gate-evaluated",
@@ -1710,7 +1801,8 @@ public sealed class ChatStreamService
     session.Complete(
       session.HasWarnings
         ? "completed-with-warnings"
-        : "completed"
+        : "completed",
+      allowReadOnlyCompletion: allowReadOnlyCompletion
     );
     var hostReview = session.CreateReview();
     var hostResponse = CreateHostExecutionResponse(hostReview);
@@ -1784,6 +1876,7 @@ public sealed class ChatStreamService
     HostCapabilityProfile hostCapabilities,
     IReadOnlyList<ProviderImagePayload> images,
     bool useMinimalToolInventory,
+    ExecutionContextRole executionRole,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
     string requestedEffort,
@@ -2206,6 +2299,7 @@ public sealed class ChatStreamService
             projectAwareness,
             observer,
             actionJournal,
+            executionRole,
             citations => webCitations = MergeCitations(
               webCitations,
               citations
@@ -2736,8 +2830,12 @@ public sealed class ChatStreamService
     session.AddWarning(
       $"{harnessDefinition.DisplayName} lifecycle completion was recorded separately from Host-observed effects and validation facts."
     );
-    session.RefreshCompletionGate();
-    session.Complete("completed-with-warnings");
+    var allowReadOnlyCompletion = executionRole == ExecutionContextRole.Supervisor;
+    session.RefreshCompletionGate(allowReadOnlyCompletion);
+    session.Complete(
+      "completed-with-warnings",
+      allowReadOnlyCompletion: allowReadOnlyCompletion
+    );
     captureRoleResult?.Invoke(roleResultSegment.ToString());
     var summary = session.CreateSummary();
     var responseTail = CreateAuthoritativeStatus(summary.CompletionStatus);
@@ -2983,6 +3081,7 @@ public sealed class ChatStreamService
     ProjectAwarenessSettings projectAwareness,
     HarnessWorkspaceObserver observer,
     IExecutionActionJournal? actionJournal,
+    ExecutionContextRole executionRole,
     Action<IReadOnlyList<ProviderCitation>> captureCitations,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -3182,6 +3281,16 @@ public sealed class ChatStreamService
         model,
         intention
       );
+      if (executionRole == ExecutionContextRole.Worker)
+      {
+        throw new HarnessException(
+          "planning-no-progress",
+          $"{harnessDefinition.DisplayName} repeated the identical invalid {proposal.Tool} proposal.",
+          $"The Host suppressed the repeated proposal after deterministic failure {repeatedFailure.FailureCode}; supervision must choose a materially different recovery path.",
+          true,
+          harnessId: harnessDefinition.Id
+        );
+      }
       yield break;
     }
     if (proposal.Tool == "get_execution_plan")
@@ -3935,7 +4044,7 @@ public sealed class ChatStreamService
     ExecutionSettings settings,
     ProjectAwarenessSettings projectAwareness,
     int? providerMaximumTokens,
-    bool allowReadOnlyCompletion,
+    ExecutionContextRole executionRole,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
     [EnumeratorCancellation] CancellationToken cancellationToken
@@ -4031,7 +4140,7 @@ public sealed class ChatStreamService
         var attempt = planningFailures + 1;
         var completionAllowed = CanCompletePlanning(
           progress,
-          allowReadOnlyCompletion
+          executionRole == ExecutionContextRole.Supervisor
         );
         CoordinatorContextFit? preflightFit = null;
         StructuredContextFit? structuredPreflightFit = null;
@@ -4705,6 +4814,26 @@ public sealed class ChatStreamService
             maximumPlanningAttempts,
             requestId
           );
+          if (
+            executionRole == ExecutionContextRole.Worker
+            && repeatedCount > 1
+          )
+          {
+            progress.Failure = CreatePlanningNoProgressFailure(
+              model,
+              intention,
+              "The worker repeated the same invalid planning response after one corrected contract was supplied."
+            );
+            yield return Event(
+              requestId,
+              "action.planning-no-progress",
+              progress.Failure.Message,
+              stopwatch,
+              model,
+              intention
+            );
+            yield break;
+          }
           var recoveryLimitFailure = RecordRecoveryAttempt(
             progress,
             settings,
@@ -5296,6 +5425,15 @@ public sealed class ChatStreamService
             model,
             intention
           );
+          if (executionRole == ExecutionContextRole.Worker)
+          {
+            progress.Failure = CreatePlanningNoProgressFailure(
+              model,
+              intention,
+              $"The worker repeated the identical invalid {proposal.Tool} proposal after Host rejection."
+            );
+            yield break;
+          }
           RecordRecoveryAttempt(
             progress,
             settings,
@@ -11351,6 +11489,23 @@ public sealed class ChatStreamService
       or "harness-transport";
   }
 
+  private static ChatStageException CreatePlanningNoProgressFailure(
+    string model,
+    string? intention,
+    string message
+  )
+  {
+    return new ChatStageException(
+      "planning-no-progress",
+      message,
+      "The repeated proposal was not executed and the generic recovery budget was not consumed. Supervision must provide a materially different bounded recovery brief or stop.",
+      model,
+      intention,
+      409,
+      true
+    );
+  }
+
   private static JsonElement CreateRepeatArguments(
     LocalActionProposal proposal
   )
@@ -11804,6 +11959,22 @@ public sealed class ChatStreamService
       afterVerifiedMutation
     );
   }
+
+  private sealed record SupervisedPreflightCache(
+    ApplicationSettings Settings,
+    Uri BaseUri,
+    IReadOnlyList<InstalledModel> Models,
+    string Model,
+    ProviderModelCapabilities Capabilities,
+    CapabilityException? CapabilityWarning,
+    TrustedWorkspaceStatus Workspace,
+    ProjectProfile Project,
+    RepositoryInstructionSet RootInstructions,
+    ValidationProfileSettings? ValidationProfile,
+    HarnessDefinition HarnessDefinition,
+    IAgentHarness Harness,
+    string? WorkspaceId
+  );
 
   private sealed class ExecutionProgress
   {

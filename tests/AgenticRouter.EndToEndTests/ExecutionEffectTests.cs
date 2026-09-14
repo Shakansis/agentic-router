@@ -1094,6 +1094,27 @@ public sealed class ExecutionEffectTests
   }
 
   [TestMethod]
+  public void ReadOnlySupervisorGateDoesNotWeakenDirectMutationCompletion()
+  {
+    var supervisor = CreateSession("Edit app.js");
+    supervisor.RefreshCompletionGate(allowReadOnlyCompletion: true);
+    supervisor.Complete("completed", allowReadOnlyCompletion: true);
+    Assert.AreEqual(
+      "inspected-no-files-changed",
+      supervisor.CreateReview().Summary.CompletionStatus
+    );
+
+    var direct = CreateSession("Edit app.js");
+    direct.RefreshCompletionGate();
+    direct.Complete("completed");
+    Assert.AreEqual("blocked", direct.CreateReview().Summary.State);
+    Assert.AreEqual(
+      "blocked-mutation-not-performed",
+      direct.CreateReview().Summary.CompletionStatus
+    );
+  }
+
+  [TestMethod]
   public void NegatedMutationInstructionsKeepReadOnlyObjectiveInspectionOnly()
   {
     var session = CreateSession(

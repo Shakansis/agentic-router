@@ -1211,11 +1211,29 @@ public sealed class SettingsValidator : ISettingsValidator
     );
     ValidateRange(
       errors,
-      "sessionHistory.maxSessionBytes",
-      settings.MaxSessionBytes,
+      "sessionHistory.sessionCompactionThresholdBytes",
+      settings.SessionCompactionThresholdBytes,
       262_144,
       20_971_520
     );
+    ValidateRange(
+      errors,
+      "sessionHistory.sessionCompactionTargetBytes",
+      settings.SessionCompactionTargetBytes,
+      65_536,
+      20_971_519
+    );
+    if (
+      settings.SessionCompactionTargetBytes
+        >= settings.SessionCompactionThresholdBytes
+    )
+    {
+      AddError(
+        errors,
+        "sessionHistory.sessionCompactionTargetBytes",
+        "The session compaction target must be smaller than the compaction threshold."
+      );
+    }
     ValidateRange(
       errors,
       "sessionHistory.maxStoredProcessOutputBytesPerTurn",

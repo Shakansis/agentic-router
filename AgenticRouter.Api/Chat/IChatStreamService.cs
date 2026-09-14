@@ -20,7 +20,8 @@ public sealed record ExecutionSpecialistTurnInvocation(
   bool UseMinimalToolInventory = false,
   Action<string>? CaptureRoleResult = null,
   IExecutionActionJournal? ActionJournal = null,
-  string RequestedEffort = ModelEffortLevels.Medium
+  string RequestedEffort = ModelEffortLevels.Medium,
+  Action<ExecutionPreflightMeasurement>? CapturePreflight = null
 )
 {
   public static ExecutionSpecialistTurnInvocation Direct { get; } = new(
@@ -28,6 +29,12 @@ public sealed record ExecutionSpecialistTurnInvocation(
     ExecutionContextRole.Direct
   );
 }
+
+public sealed record ExecutionPreflightMeasurement(
+  ExecutionContextRole Role,
+  long DurationMilliseconds,
+  bool Reused
+);
 
 public interface IExecutionSpecialistTurnService
 {

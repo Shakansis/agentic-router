@@ -15,6 +15,11 @@ public interface IProjectAwarenessService
     bool refresh,
     CancellationToken cancellationToken
   );
+
+  Task<ProjectProfile> RefreshRepositoryAsync(
+    ProjectProfile profile,
+    CancellationToken cancellationToken
+  );
 }
 
 public interface IRepositoryInstructionService
@@ -116,6 +121,25 @@ public sealed class ProjectAwarenessService : IProjectAwarenessService
       ),
       cancellationToken
     );
+  }
+
+  public async Task<ProjectProfile> RefreshRepositoryAsync(
+    ProjectProfile profile,
+    CancellationToken cancellationToken
+  )
+  {
+    ArgumentNullException.ThrowIfNull(profile);
+    if (string.IsNullOrWhiteSpace(profile.WorkspacePath))
+    {
+      return profile;
+    }
+    return profile with
+    {
+      Repository = await DetectRepositoryAsync(
+        profile.WorkspacePath,
+        cancellationToken
+      )
+    };
   }
 
   private async Task<ProjectProfile> BuildProfileAsync(

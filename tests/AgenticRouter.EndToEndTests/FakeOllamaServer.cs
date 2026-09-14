@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Supervision;
 
 namespace AgenticRouter.EndToEndTests;
 
@@ -90,6 +91,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private string? _evictOnNextRemovedModel;
   private bool _hideInstalledModels;
   private int _nextModelTestDelayMilliseconds;
+  private int _tagQueryCount;
   private string? _realLifeProblemFailureMode;
   private Task? _listenTask;
 
@@ -114,6 +116,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   public IReadOnlyList<string> Errors => _errors.ToArray();
 
   public IReadOnlyCollection<string> LoadedModels => _loaded.Keys.ToArray();
+
+  public int TagQueryCount => Volatile.Read(ref _tagQueryCount);
 
   public static FakeOllamaServer Start()
   {
@@ -144,6 +148,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       ref _nextModelTestDelayMilliseconds,
       0
     );
+    Interlocked.Exchange(ref _tagQueryCount, 0);
   }
 
   public void SetRealLifeProblemFailureMode(string? mode)
@@ -287,6 +292,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         && path == "/api/tags"
       )
       {
+        Interlocked.Increment(ref _tagQueryCount);
         await WriteJsonAsync(
           context.Response,
           HttpStatusCode.OK,
@@ -5079,12 +5085,43 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         explanation = "Inspect the reconciled artifact before proposing any mutation."
       };
     }
+    if (
+      current.Contains("supervision deterministic planning repeat", StringComparison.OrdinalIgnoreCase)
+      && current.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal)
+    )
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "hello.txt"
+        },
+        explanation = "Repeat the fixture's deterministically incomplete proposal."
+      };
+    }
 
     if (current.Contains(
       "SUPERVISION_CORRECTION_V1",
       StringComparison.Ordinal
     ))
     {
+      if (current.Contains(
+        "supervision deterministic planning repeat",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "create_file",
+          arguments = new
+          {
+            path = "hello.txt",
+            content = "hello world today"
+          },
+          explanation = "Use the materially different complete contract supplied by supervision."
+        };
+      }
       if (current.Contains(
         "supervision incremental correction",
         StringComparison.OrdinalIgnoreCase
@@ -5193,6 +5230,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         current.Contains("supervision first pass success", StringComparison.OrdinalIgnoreCase)
         || current.Contains("supervision stale latest wrong", StringComparison.OrdinalIgnoreCase)
         || current.Contains("atomic redundant decomposition", StringComparison.OrdinalIgnoreCase)
+        || current.Contains("supervision requirement modality", StringComparison.OrdinalIgnoreCase)
+        || current.Contains("supervision role aware completion fallback", StringComparison.OrdinalIgnoreCase)
       )
       {
         return new
@@ -5967,6 +6006,90 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     if (current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
     {
       if (current.Contains(
+        "supervision requirement modality",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        var mode = current.Contains(
+          "supervision requirement modality mixed",
+          StringComparison.OrdinalIgnoreCase
+        )
+          ? "mixed"
+          : current.Contains(
+            "supervision requirement modality preference",
+            StringComparison.OrdinalIgnoreCase
+          )
+            ? SupervisionRequirementModalities.Should
+            : current.Contains(
+              "supervision requirement modality optional",
+              StringComparison.OrdinalIgnoreCase
+            )
+              ? SupervisionRequirementModalities.May
+              : SupervisionRequirementModalities.Must;
+        var criteria = mode == "mixed"
+          ? new[]
+          {
+            new { text = criterion, modality = SupervisionRequirementModalities.Must },
+            new { text = "The result should include a Web image.", modality = SupervisionRequirementModalities.Should },
+            new { text = "The result may include decorative metadata.", modality = SupervisionRequirementModalities.May }
+          }
+          : new[]
+          {
+            new
+            {
+              text = mode == SupervisionRequirementModalities.Must
+                ? criterion
+                : mode == SupervisionRequirementModalities.Should
+                  ? "The result should include a Web image."
+                  : "The result may include a Web image.",
+              modality = mode
+            }
+          };
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "dispatch_work",
+            items = new[]
+            {
+              new
+              {
+                objective = $"supervision requirement modality {mode} create hello.txt with content hello world today",
+                criteria,
+                evidencePaths = new[] { "hello.txt" }
+              }
+            }
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
+      if (current.Contains(
+        "supervision role aware completion fallback",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "dispatch_work",
+            items = new[]
+            {
+              new
+              {
+                objective = "supervision role aware completion fallback create hello.txt with content hello world today",
+                criteria = new[]
+                {
+                  new { text = criterion, modality = SupervisionRequirementModalities.Must }
+                },
+                evidencePaths = Array.Empty<string>()
+              }
+            }
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
+      if (current.Contains(
         "atomic redundant decomposition",
         StringComparison.OrdinalIgnoreCase
       ))
@@ -6080,6 +6203,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
                 )
                   ? "no progress supervision create file hello.txt with content hello world today"
                   : current.Contains(
+                    "supervision deterministic planning repeat",
+                    StringComparison.OrdinalIgnoreCase
+                  )
+                    ? "supervision deterministic planning repeat create file hello.txt with content hello world today"
+                  : current.Contains(
                   "supervision restart boundary",
                   StringComparison.OrdinalIgnoreCase
                 )
@@ -6128,6 +6256,26 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           "\"content\":\"hello world today\"",
           StringComparison.Ordinal
         );
+      if (current.Contains(
+        "supervision requirement modality",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        var covered = current.Contains("MUST (blocking)", StringComparison.Ordinal)
+          ? new[] { criterion }
+          : Array.Empty<string>();
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "accept_work",
+            evidenceRevision,
+            coveredCriteria = covered,
+            summary = "All mandatory criteria are satisfied; absent preferences remain non-blocking."
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
       decision = accepted
         ? JsonSerializer.Serialize(
           new
