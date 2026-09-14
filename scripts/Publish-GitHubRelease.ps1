@@ -42,7 +42,7 @@ function Invoke-GitHubCli {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.11.0_alpha.'
+  throw 'VersionLabel must use the form 0.12.0_alpha.'
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'Repository must use the OWNER/NAME form.'
@@ -161,7 +161,8 @@ foreach ($screenshotName in @(
   '08-execute-result.png',
   '09-review-files.png',
   '10-generated-website.png',
-  '11-view-folder.png'
+  '11-view-folder.png',
+  '12-benchmark-lab.png'
 )) {
   $publicFiles["screenshots\$screenshotName"] = Join-Path (
     $repositoryRoot
@@ -283,15 +284,24 @@ Portable Windows x64 and Linux x64 release.
 
 ## What's new
 
-- Choose Auto, Direct, Supervisor, or explicit Autonomous from the split Send
-  button for each Execute request.
-- Continue eligible local work through a durable serial supervisor/worker run
-  with current-artifact verification, bounded checkpoints, and safe reattach or
-  restart reconciliation.
-- Configure low, medium, or high model effort separately for Plan, Work, Verify,
-  Complete, and Recovery under Settings > General.
-- Preserve hard Host security, trusted-workspace, process, Git, validation, and
-  recovery boundaries in every strategy, including Autonomous.
+- Use explicit CUDA, ROCm, or opt-in combined Vulkan selections through isolated
+  Agentic Router-owned Ollama servers while Auto and custom endpoints remain
+  user-managed.
+- Observe mixed-vendor GPU telemetry without confusing configured affinity with
+  the backend and device reported by the active Ollama runner.
+- Compare Model × Harness pairs with the production-path Real Life Problem suite,
+  separate sequential repetitions, and structured Benchmark Lab reports.
+- Resume Host-mediated user questions and compacted session context across the
+  strengthened shared Chat, supervision, and cross-harness execution paths.
+
+## Validation
+
+- Complete deterministic Playwright/API gate: 461 passed, zero failed, and zero
+  skipped on the final full run.
+- Windows x64 portable Production smoke: HTTP 200 with file version 0.12.0.0.
+- Both archives passed package allowlist and structure validation. The Linux x64
+  WSL runtime smoke was unavailable because the local WSL service did not
+  respond; physical Linux was not tested.
 
 Ollama and models are installed separately. Linux AMD setup offers an explicit
 Vulkan or ROCm profile and never installs GPU drivers automatically. Linux ARM64,

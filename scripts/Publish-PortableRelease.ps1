@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$VersionLabel = '0.11.0_alpha',
+  [string]$VersionLabel = '0.12.0_alpha',
   [ValidateSet('win-x64', 'linux-x64')]
   [string]$RuntimeIdentifier = 'win-x64',
   [string]$OutputDirectory,
@@ -102,7 +102,7 @@ function New-PosixTarGzip {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.11.0_alpha.'
+  throw 'VersionLabel must use the form 0.12.0_alpha.'
 }
 
 $packageVersion = $VersionLabel.Replace('_', '-')
@@ -138,11 +138,13 @@ $archiveExtension = if ($isLinuxPackage) { '.tar.gz' } else { '.zip' }
 $archivePath = Join-Path $releaseRoot "$packageName$archiveExtension"
 $checksumPath = "$archivePath.sha256"
 $stagingDirectory = Join-Path $releaseRoot ".staging-$packageName-$PID"
+$buildArtifactsDirectory = Join-Path $releaseRoot ".build-$packageName-$PID"
 
 Assert-ChildPath -ChildPath $packageDirectory -ParentPath $releaseRoot
 Assert-ChildPath -ChildPath $archivePath -ParentPath $releaseRoot
 Assert-ChildPath -ChildPath $checksumPath -ParentPath $releaseRoot
 Assert-ChildPath -ChildPath $stagingDirectory -ParentPath $releaseRoot
+Assert-ChildPath -ChildPath $buildArtifactsDirectory -ParentPath $releaseRoot
 
 if ($PublishToGitHub) {
   $preflightArguments = @{
@@ -179,6 +181,7 @@ try {
     '--self-contained',
     'true',
     '--no-restore',
+    "-p:OutputPath=$buildArtifactsDirectory\bin\",
     '-o',
     $stagingDirectory,
     '-p:AssemblyName=AgenticRouter',
@@ -197,11 +200,20 @@ try {
   & dotnet @publishArguments
   Assert-SuccessfulExitCode -Operation 'Portable publish'
 
-  foreach ($unneededFile in @('appsettings.Development.json', 'web.config')) {
+  foreach ($unneededFile in @(
+    'appsettings.Development.json',
+    'playwright.ps1',
+    'playwright.sh',
+    'web.config'
+  )) {
     $unneededPath = Join-Path $stagingDirectory $unneededFile
     if (Test-Path -LiteralPath $unneededPath) {
       Remove-Item -LiteralPath $unneededPath -Force
     }
+  }
+  $playwrightInstallers = Join-Path $stagingDirectory '.playwright\package\bin'
+  if (Test-Path -LiteralPath $playwrightInstallers) {
+    Remove-Item -LiteralPath $playwrightInstallers -Recurse -Force
   }
   if (-not $isLinuxPackage) {
     $linuxScripts = Join-Path $stagingDirectory 'scripts'
@@ -370,5 +382,8 @@ To stop Agentic Router, close its console window or press Ctrl+C in that window.
 finally {
   if (Test-Path -LiteralPath $stagingDirectory) {
     Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $buildArtifactsDirectory) {
+    Remove-Item -LiteralPath $buildArtifactsDirectory -Recurse -Force
   }
 }

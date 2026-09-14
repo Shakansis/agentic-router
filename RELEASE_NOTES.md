@@ -1,3 +1,74 @@
+# Agentic Router v0.12.0 alpha
+
+This alpha turns the latest execution and benchmark work into one coherent
+release: explicit local GPU choices now have Host-owned Ollama runtime
+enforcement, Benchmark Lab exercises production Execute behavior, and shared
+conversation/supervision paths retain stronger bounded evidence across every
+supported harness.
+
+## Managed Ollama and mixed-vendor GPU evidence
+
+- Adds isolated Agentic Router-owned Ollama servers for explicit CUDA, ROCm,
+  combined Vulkan, and Vulkan-with-preferred-device selections on the standard
+  local Windows endpoint. Auto and custom or remote endpoints remain
+  user-managed.
+- Verifies the requested backend before routing and fails explicitly instead of
+  silently moving an exact selection to another GPU or CPU.
+- Correlates NVIDIA SMI, DXGI, and Windows GPU performance-counter evidence so
+  NVIDIA, AMD, and other adapters can appear together without treating a saved
+  affinity as proof of observed placement.
+- Keeps managed servers isolated by endpoint, records exact leases, and cleans
+  up only processes whose PID, start time, executable, and port ownership still
+  match. External Ollama tray and service processes are not stopped.
+
+## Benchmark Lab through production Execute
+
+- Adds the independently selectable Real Life Problem v1 suite. Its missing-game
+  scenario enters through production Auto/Execute and independently verifies
+  preserved files, requested assets, browser startup, console errors, missing
+  resources, and the authoritative Host terminal result.
+- Replaces the benchmark-only native executor with a production Execute runner,
+  keeping routing, tools, approvals, recovery, workspace boundaries, and effect
+  proof on the same path used by normal work.
+- Adds 1–20 sequential repetitions without collapsing evidence: every run waits
+  for the previous terminal state and keeps its own run ID and immutable history
+  record.
+- Expands recommendations and result visualization with sanitized structural
+  Markdown while preserving canonical prompts and technical evidence as literal
+  text.
+
+## Conversation, supervision, and harness reliability
+
+- Adds a Host-mediated user-input protocol so an active Execute turn can ask a
+  bounded question, survive browser reattachment, and resume with the answer
+  without granting the browser execution authority.
+- Adds bounded persistent-session compaction tied to the effective context
+  limit, retaining visible continuity while keeping diagnostic payloads small.
+- Shares ordered SSE presentation across Chat and supervision, strengthens
+  cross-harness activity projection, exact invocation identity, approval
+  recovery, workspace observation, and terminal evidence.
+- Improves Ollama tool-call parsing and diagnostics while keeping malformed or
+  ambiguous calls typed and recoverable instead of weakening Host validation.
+
+## Validation
+
+- Passes an isolated Release solution build with zero warnings and zero errors,
+  `dotnet format`, JavaScript and PowerShell syntax checks, Markdown asset checks,
+  and intended-diff whitespace validation.
+- Passes the complete deterministic Playwright/API suite on its second full run:
+  461 passed, zero failed, and zero skipped. The first run was 460/461 because one
+  context-meter timing assertion expired under suite load; that test then passed
+  twice independently before the clean full rerun.
+- Both portable artifacts pass the package allowlist and structure validation.
+  The Windows x64 package starts in Production and returns HTTP 200 with file
+  version 0.12.0.0.
+- The Linux x64 archive was inspected, including executable modes and required
+  setup scripts. Its WSL runtime smoke was unavailable because the local WSL
+  service stopped responding even to `wsl.exe --status`; physical Linux was not
+  tested.
+- Deterministic fake-provider evidence does not prove real Ollama inference,
+  cloud-provider acceptance, managed-GPU inference, or physical-Linux hardware.
+
 # Agentic Router v0.11.0 alpha
 
 This alpha makes the Execute path explicit at send time and completes the

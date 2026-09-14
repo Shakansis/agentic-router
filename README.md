@@ -2,14 +2,14 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.11.0_alpha - explicit Auto, Direct, Supervisor, and Autonomous Execute strategies, Host-owned phase effort, durable local supervision, and stronger effect/recovery evidence. Windows and Linux x64 portable releases are built from one shared core. This remains evaluation software.
+**Current Status**: v0.12.0_alpha - managed local CUDA, ROCm, and Vulkan Ollama profiles; mixed-vendor GPU telemetry; production-path Benchmark Lab scenarios and sequential runs; interactive user input; bounded session compaction; and stronger cross-harness execution evidence. Windows and Linux x64 portable releases are built from one shared core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.11.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-win-x64.zip.sha256) |
-| `v0.11.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.11.0_alpha/AgenticRouter-0.11.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.12.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-win-x64.zip.sha256) |
+| `v0.12.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -18,7 +18,7 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.11.0_alpha` is a pre-release intended for evaluation. The package is
+`0.12.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
@@ -550,6 +550,7 @@ The application provides a clean, dark-themed interface with real-time status mo
 - **Execute Send Strategy**: In Execute, use the split Send control to select Auto, Direct, Supervisor, or Autonomous per request
 - **Projects and conversations**: Groups bounded conversation history by project, provides direct new-chat and project-edit actions, and keeps the active workspace explicit
 - **Focused project settings**: Shows profile, optional AnythingLLM Knowledge/RAG, local history, and validation settings for only the selected project
+- **Benchmark Lab**: Compares selected Model × Harness pairs through the production Execute path, preserves each sequential repetition, and renders structured recommendation reports
 - **Collapsible Activity**: Routing and inference details in expandable panels
 - **Recent Conversations**: Shows saved sessions for the active workspace and supports explicit resume
 - **Git Panel**: Shows repository overview and bounded current-session, working-tree, staged, and last-commit diffs
@@ -620,7 +621,15 @@ Press **Escape** to close the configuration dialog.
 dotnet test tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj
 ```
 
-### Repeat Benchmark Lab runs
+### Benchmark Lab production scenarios and repeated runs
+
+Benchmark Lab keeps CRUD and Agent Behavior scenarios versioned and adds a Real
+Life Problem suite that exercises the same production Execute entry point used
+by an ordinary request. Its external validator checks preserved project files,
+the requested new artifacts, browser startup, missing assets, console errors,
+and the Host terminal result without introducing a benchmark-specific agent
+loop. Operational diagnostics such as tool calls, repeated actions, recovery,
+duration, and token provenance remain separate from pass/fail acceptance.
 
 The Benchmark Lab **Sequential runs** control accepts 1–20 repetitions. The
 browser starts the complete selected Model × Harness matrix again only after
