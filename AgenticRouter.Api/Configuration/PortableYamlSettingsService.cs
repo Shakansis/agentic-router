@@ -100,6 +100,12 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings.DefaultModel,
       null
     );
+    ModelGroup(
+      yaml,
+      "supervisor",
+      settings.SupervisorModel,
+      null
+    );
 
     foreach (var intentionName in SettingsDefaults.IntentionNames)
     {
@@ -151,6 +157,21 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         intentionName,
         settings.Intentions[intentionName].Gpu
       );
+    }
+
+    yaml.AppendLine(
+      "  model_affinities:"
+    );
+    var affinityIndex = 0;
+    foreach (var affinity in settings.ModelGpuAffinities.OrderBy(
+      pair => pair.Key,
+      StringComparer.OrdinalIgnoreCase
+    ))
+    {
+      affinityIndex++;
+      yaml.Append("    affinity_").Append(affinityIndex).AppendLine(":");
+      Scalar(yaml, 3, "model", affinity.Key);
+      Scalar(yaml, 3, "gpu", affinity.Value);
     }
 
     yaml.AppendLine(
@@ -716,7 +737,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         "router",
         "action",
         "coordinator",
-        "default"
+        "default",
+        "supervisor"
       }.Concat(
         SettingsDefaults.IntentionNames
       ),
@@ -755,6 +777,14 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       false,
       errors
     );
+    var supervisorModel = ReadModelGroup(
+      models,
+      "supervisor",
+      settings.SupervisorModel,
+      null,
+      false,
+      errors
+    );
     var intentions = settings.Intentions.ToDictionary(
       pair => pair.Key,
       pair => pair.Value,
@@ -785,6 +815,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       ActionModel = action.Primary,
       CoordinatorModel = action.Fallback ?? coordinator.Primary,
       DefaultModel = defaultModel.Primary,
+      SupervisorModel = supervisorModel.Primary,
       Intentions = intentions
     };
   }
@@ -815,6 +846,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         "action_gpu",
         "coordinator_gpu",
         "gpus",
+        "model_affinities",
         "system_prompts"
       ],
       "routing",
@@ -837,6 +869,37 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "routing.system_prompts",
       errors
     );
+    var modelAffinities = Map(
+      routing,
+      "model_affinities",
+      "routing.model_affinities",
+      errors
+    );
+    var importedAffinities = settings.ModelGpuAffinities;
+    if (modelAffinities?.Children is not null)
+    {
+      var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+      foreach (var entry in modelAffinities.Children.OrderBy(
+        pair => pair.Key,
+        StringComparer.Ordinal
+      ))
+      {
+        var path = $"routing.model_affinities.{entry.Key}";
+        if (entry.Value.Children is null)
+        {
+          AddError(errors, path, $"Line {entry.Value.Line}: expected a mapping.");
+          continue;
+        }
+        ValidateKeys(entry.Value, ["model", "gpu"], path, errors);
+        var model = ReadString(entry.Value, "model", string.Empty, $"{path}.model", errors);
+        var gpu = ReadString(entry.Value, "gpu", ModelGpuAffinitySelection.Auto, $"{path}.gpu", errors);
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+          values[model] = gpu;
+        }
+      }
+      importedAffinities = values;
+    }
 
     if (gpus is not null)
     {
@@ -913,6 +976,10 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         settings.CoordinatorGpu,
         "routing.coordinator_gpu",
         errors
+      ),
+      ModelGpuAffinities = new Dictionary<string, string>(
+        importedAffinities,
+        StringComparer.OrdinalIgnoreCase
       ),
       Intentions = intentions
     };

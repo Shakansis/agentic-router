@@ -3,6 +3,17 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
+if (string.Equals(
+  Path.GetFileNameWithoutExtension(Environment.ProcessPath),
+  "nvidia-smi",
+  StringComparison.OrdinalIgnoreCase
+))
+{
+  Console.WriteLine("0, GPU-nvidia-4090-fixture, NVIDIA GeForce RTX 4090, 24564");
+  Console.WriteLine("1, GPU-nvidia-2070-fixture, NVIDIA GeForce RTX 2070 SUPER, 8192");
+  return;
+}
+
 if (!args.SequenceEqual(["serve"], StringComparer.Ordinal))
 {
   Console.Error.WriteLine($"Unexpected fake Ollama arguments: {string.Join(' ', args)}");

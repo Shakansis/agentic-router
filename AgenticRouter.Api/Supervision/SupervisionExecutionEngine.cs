@@ -87,6 +87,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     "SUPERVISION_WATCHDOG_RECOVERY_V1";
   internal const string CanonicalRecoveryMarker =
     "SUPERVISION_CANONICAL_RECOVERY_V1";
+  internal const string VerificationDecisionRecoveryMarker =
+    "SUPERVISION_VERIFICATION_DECISION_RECOVERY_V1";
   internal const string CompleteMarker = "SUPERVISION_COMPLETE_V1";
 
   private const int MaximumDecisionCharacters = 32_768;
@@ -693,6 +695,59 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             verificationError = exception;
             verificationErrorCode = exception.Code;
           }
+          if (
+            verificationErrorCode == "supervision-decision-invalid"
+            && runtime.SupervisorTransitionCount < maximumSupervisorTransitions
+          )
+          {
+            runtime = runtime with
+            {
+              SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
+            };
+            var invalidAnswer = verification.Answer;
+            verification = await RunTurnAsync(
+              checkpoint,
+              supervisor,
+              CreateVerificationDecisionRecoveryPrompt(
+                item,
+                workerTurn.Answer,
+                evidence,
+                invalidAnswer,
+                verificationError!.Message,
+                autonomous: IsAutonomous(checkpoint)
+              ),
+              input.History,
+              [],
+              validationAvailable,
+              settings.Execution.PhaseEffort.Recovery,
+              input.ActionJournal,
+              input.ProgressSink,
+              cancellationToken
+            );
+            verificationError = null;
+            verificationErrorCode = null;
+            try
+            {
+              if (verification.Failure is not null)
+              {
+                throw InvalidDecision(
+                  "The supervisor verification decision correction failed: "
+                    + verification.Failure.Message
+                );
+              }
+              verificationDecision = ParseDecision(verification.Answer);
+              ValidateVerification(
+                verificationDecision,
+                item,
+                maximumEvidencePaths
+              );
+            }
+            catch (SupervisionException exception)
+            {
+              verificationError = exception;
+              verificationErrorCode = exception.Code;
+            }
+          }
           if (verificationError is not null)
           {
             verificationTimer.Stop();
@@ -1065,8 +1120,17 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     try
     {
       completionDecision = ParseDecision(completion.Answer);
-      if (
-        completionDecision!.Decision != "complete_goal"
+      if (completionDecision!.Decision == "stop_blocked")
+      {
+        if (string.IsNullOrWhiteSpace(completionDecision.Summary))
+        {
+          throw InvalidDecision(
+            "A final stop_blocked decision requires one bounded summary."
+          );
+        }
+      }
+      else if (
+        completionDecision.Decision != "complete_goal"
         || string.IsNullOrWhiteSpace(completionDecision.FinalAnswer)
       )
       {
@@ -1085,6 +1149,16 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       yield break;
     }
     var finalDecision = completionDecision!;
+    if (finalDecision.Decision == "stop_blocked")
+    {
+      yield return Blocked(
+        runtime,
+        finalDecision.Summary!,
+        finalSupervisor.Id,
+        waitCode: "supervision-completion-blocked"
+      );
+      yield break;
+    }
 
     finalSupervisor = CompleteContext(
       finalSupervisor,
@@ -1144,7 +1218,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     {
       var request = new ChatRequest(
         activePrompt,
-        checkpoint.Route.Model,
+        supervisor
+          ? checkpoint.Route.EffectiveSupervisorModel
+          : checkpoint.Route.Model,
         history,
         "execute",
         checkpoint.Route.Harness,
@@ -1164,7 +1240,11 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         CaptureRoleResult: value => roleResult = value,
         ActionJournal: actionJournal,
         RequestedEffort: activeEffort,
-        CapturePreflight: value => preflight = value
+        CapturePreflight: value => preflight = value,
+        Gpu: supervisor
+          ? checkpoint.Route.SupervisorGpuSelection
+            ?? checkpoint.Route.WorkerGpuSelection
+          : checkpoint.Route.WorkerGpuSelection
       );
       var answer = new StringBuilder();
       ProviderError? failure = null;
@@ -1359,13 +1439,13 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         !cancellationToken.IsCancellationRequested
       )
       {
-        failure = CreateHarnessFailure(checkpoint, exception);
+        failure = CreateHarnessFailure(checkpoint, context, exception);
       }
       catch (ChatStageException exception) when (
         !cancellationToken.IsCancellationRequested
       )
       {
-        failure = CreateStageFailure(checkpoint, exception);
+        failure = CreateStageFailure(checkpoint, context, exception);
       }
 
       if (watchdogTriggered)
@@ -1645,8 +1725,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       message,
       message,
       checkpoint.RunId,
-      checkpoint.Route.Provider,
-      checkpoint.Route.Model,
+      RouteProvider(checkpoint, context),
+      RouteModel(checkpoint, context),
       null,
       504,
       recoverable,
@@ -1663,6 +1743,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
   private static ProviderError CreateHarnessFailure(
     DurableSupervisionCheckpoint checkpoint,
+    SupervisionContextView context,
     HarnessException exception
   )
   {
@@ -1671,8 +1752,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       exception.Message,
       exception.TechnicalMessage,
       checkpoint.RunId,
-      checkpoint.Route.Provider,
-      checkpoint.Route.Model,
+      RouteProvider(checkpoint, context),
+      RouteModel(checkpoint, context),
       null,
       400,
       exception.Recoverable,
@@ -1687,6 +1768,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
   private static ProviderError CreateStageFailure(
     DurableSupervisionCheckpoint checkpoint,
+    SupervisionContextView context,
     ChatStageException exception
   )
   {
@@ -1696,13 +1778,33 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       exception.TechnicalMessage,
       checkpoint.RunId,
       exception.Provider,
-      exception.Model ?? checkpoint.Route.Model,
+      exception.Model ?? RouteModel(checkpoint, context),
       exception.Intention,
       exception.HttpStatus,
       exception.Recoverable,
       exception.Details,
       exception.Stage
     );
+  }
+
+  private static string RouteProvider(
+    DurableSupervisionCheckpoint checkpoint,
+    SupervisionContextView context
+  )
+  {
+    return string.Equals(context.Role, "supervisor", StringComparison.Ordinal)
+      ? checkpoint.Route.EffectiveSupervisorProvider
+      : checkpoint.Route.Provider;
+  }
+
+  private static string RouteModel(
+    DurableSupervisionCheckpoint checkpoint,
+    SupervisionContextView context
+  )
+  {
+    return string.Equals(context.Role, "supervisor", StringComparison.Ordinal)
+      ? checkpoint.Route.EffectiveSupervisorModel
+      : checkpoint.Route.Model;
   }
 
   private static string CreateHarnessRecoveryPrompt(
@@ -1752,6 +1854,46 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
       Bounded original decision contract:
       {{excerpt}}
+      """;
+  }
+
+  private static string CreateVerificationDecisionRecoveryPrompt(
+    SupervisionWorkItemView item,
+    string workerClaim,
+    SupervisorEvidence evidence,
+    string previousAnswer,
+    string validationError,
+    bool autonomous
+  )
+  {
+    var mandatoryCriteriaJson = JsonSerializer.Serialize(
+      MandatoryCriteria(item).Select(criterion => criterion.Text)
+    );
+    return $$"""
+      {{VerificationDecisionRecoveryMarker}}
+      The preceding supervisor answer was valid JSON but violated the canonical verification contract. This is the single bounded correction attempt; do not repeat the invalid shape.
+      Contract error: {{validationError}}
+      Previous answer:
+      {{Truncate(previousAnswer, 4_096)}}
+
+      Re-evaluate only the same current evidence. Do not call tools and do not add prose or a Markdown fence.
+      Work item: {{item.Id}}
+      Objective: {{item.Objective}}
+      Requirements and guidance:
+      {{FormatCriteria(item)}}
+
+      Worker claim:
+      {{Truncate(workerClaim, 4_096)}}
+
+      Host evidence revision {{evidence.Revision}}:
+      {{evidence.Json}}
+
+      {{(autonomous ? "AUTONOMOUS MODE: await_user is forbidden." : "")}}
+      Return exactly one JSON object. For accept_work, evidenceRevision must equal {{evidence.Revision}} and coveredCriteria must copy this exact Host-provided array unchanged: {{mandatoryCriteriaJson}}
+      {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":{{mandatoryCriteriaJson}},"summary":"..."}
+      For reject_work, identify an exact MUST criterion and provide a concrete observed discrepancy plus a materially different corrective brief:
+      {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"blockingCriterion":"exact complete MUST criterion text","discrepancy":"...","correctiveBrief":"..."}
+      Other permitted decisions: request_validation, {{(autonomous ? "stop_blocked" : "await_user, stop_blocked")}}, or replace_pending_work.
       """;
   }
 
@@ -1933,6 +2075,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     return $$"""
       {{DecomposeMarker}}
       You are the focused supervisor. Decompose the original objective into the smallest ordered queue that can be independently verified. Do not mutate files.
+      Every work item must deliver at least one durable Host-observable file change and list its concrete relative file path in evidencePaths. Never dispatch directory-only scaffolding, project structure, analysis, planning, test execution, verification, or review as a standalone work item. Combine required directories with the first file that uses them, and make test execution an acceptance criterion of the implementation item it validates. Empty evidencePaths and directory paths are not valid evidence for a mutation item.
       Original objective:
       {{objective}}
       {{takeoverContext}}
@@ -1985,6 +2128,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
   )
   {
     var marker = requireValidation ? VerifyWithValidationMarker : VerifyMarker;
+    var mandatoryCriteriaJson = JsonSerializer.Serialize(
+      MandatoryCriteria(item).Select(criterion => criterion.Text)
+    );
     return $$"""
       {{marker}}
       You are the focused read-only supervisor. The worker response is only a claim. Evaluate the current Host evidence below against every acceptance criterion.
@@ -2003,8 +2149,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
       {{(requireValidation ? "Invoke run_validation_profile before deciding. If it is unavailable or fails, reject or stop_blocked." : "If a configured validation profile is materially required, decision may be request_validation.")}}
       {{(autonomous ? "AUTONOMOUS MODE: await_user is forbidden. Resolve permitted ambiguity yourself using current evidence and the smallest reversible choice. Use stop_blocked only for a genuine hard boundary or when no permitted recovery remains." : "")}}
-      Return JSON only. Accept:
-      {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":["exact criterion text"],"summary":"..."}
+      Return JSON only. If every MUST criterion is satisfied, copy this exact Host-provided array unchanged into coveredCriteria: {{mandatoryCriteriaJson}}
+      {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":{{mandatoryCriteriaJson}},"summary":"..."}
       Reject:
       {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"blockingCriterion":"exact must criterion text","discrepancy":"exact observed mismatch","correctiveBrief":"bounded materially different correction"}
       Other permitted decisions: request_validation, {{(autonomous ? "stop_blocked" : "await_user, stop_blocked")}}, or replace_pending_work. replace_pending_work must also cover the current criteria and include replacement items.
@@ -2102,6 +2248,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     SupervisionDecision previousDecision
   )
   {
+    var mandatoryCriteriaJson = JsonSerializer.Serialize(
+      MandatoryCriteria(item).Select(criterion => criterion.Text)
+    );
     return $$"""
       {{AutonomousDecisionMarker}}
       You are the focused supervisor in Autonomous mode. The user delegated every approval they could personally grant, so await_user is forbidden.
@@ -2121,8 +2270,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       Host evidence revision {{evidence.Revision}}:
       {{evidence.Json}}
 
-      Return JSON only. Accept:
-      {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":["exact criterion text"],"summary":"..."}
+      Return JSON only. If every MUST criterion is satisfied, copy this exact Host-provided array unchanged into coveredCriteria: {{mandatoryCriteriaJson}}
+      {"decision":"accept_work","evidenceRevision":{{evidence.Revision}},"coveredCriteria":{{mandatoryCriteriaJson}},"summary":"..."}
       Reject:
       {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"blockingCriterion":"exact must criterion text","discrepancy":"exact observed mismatch","correctiveBrief":"bounded materially different correction"}
       Other permitted decisions: request_validation, replace_pending_work, or stop_blocked. Never return await_user.

@@ -6163,6 +6163,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       codexTurnInput,
       "Preserve unrelated existing user changes"
     );
+    StringAssert.Contains(
+      codexTurnInput,
+      "When a granted tool is needed, call it immediately"
+    );
     StringAssert.Contains(codexTurnInput, "Current user request:\ncreate codex file");
     Assert.DoesNotContain("Protected pre-existing paths", codexTurnInput);
 

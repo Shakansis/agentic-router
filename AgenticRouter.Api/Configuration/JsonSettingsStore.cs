@@ -297,6 +297,12 @@ public sealed class JsonSettingsStore : ISettingsStore
       ) || !document.RootElement.TryGetProperty(
         "onboarding",
         out _
+      ) || !document.RootElement.TryGetProperty(
+        "supervisorModel",
+        out _
+      ) || !document.RootElement.TryGetProperty(
+        "modelGpuAffinities",
+        out _
       ) || !hasProviderContext
         || !document.RootElement.GetProperty(
           "runtime"

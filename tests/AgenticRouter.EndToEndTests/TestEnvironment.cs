@@ -174,6 +174,21 @@ internal sealed class TestEnvironment : IAsyncDisposable
       RedirectStandardError = true
     };
     processStartInfo.Environment["AgenticRouter__DataDirectory"] = dataDirectory;
+    var fakeGpuTools = PrepareFakeGpuTools(
+      repositoryRoot,
+      temporaryRoot,
+      configuration
+    );
+    processStartInfo.Environment["AGENTIC_ROUTER_NVIDIA_SMI_PATH"] = Path.Combine(
+      fakeGpuTools,
+      OperatingSystem.IsWindows() ? "nvidia-smi.exe" : "nvidia-smi"
+    );
+    var pathKey = processStartInfo.Environment.Keys.FirstOrDefault(key =>
+      string.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase)
+    ) ?? "PATH";
+    processStartInfo.Environment[pathKey] = fakeGpuTools
+      + Path.PathSeparator
+      + Environment.GetEnvironmentVariable("PATH");
     processStartInfo.Environment["AgenticRouter__Providers__GroqBaseUrl"] =
       $"{fakeCloud.BaseUrl}/groq/openai/v1/";
     processStartInfo.Environment[
@@ -772,6 +787,58 @@ internal sealed class TestEnvironment : IAsyncDisposable
       settings,
       TestJson.Options
     );
+  }
+
+  private static string PrepareFakeGpuTools(
+    string repositoryRoot,
+    string temporaryRoot,
+    string configuration
+  )
+  {
+    var configuredExecutable = Environment.GetEnvironmentVariable(
+      "AGENTIC_ROUTER_E2E_FAKE_OLLAMA_PATH"
+    );
+    var sourceDirectory = string.IsNullOrWhiteSpace(configuredExecutable)
+      ? Path.Combine(
+        repositoryRoot,
+        "tests",
+        "FakeOllamaCli",
+        "bin",
+        configuration,
+        "net10.0"
+      )
+      : Path.GetDirectoryName(Path.GetFullPath(configuredExecutable))!;
+    var toolsDirectory = Path.Combine(temporaryRoot, "fake-tools");
+    Directory.CreateDirectory(toolsDirectory);
+    foreach (var source in Directory.EnumerateFiles(sourceDirectory, "FakeOllamaCli*"))
+    {
+      File.Copy(
+        source,
+        Path.Combine(toolsDirectory, Path.GetFileName(source)),
+        true
+      );
+    }
+    var sourceExecutable = string.IsNullOrWhiteSpace(configuredExecutable)
+      ? Path.Combine(
+        sourceDirectory,
+        OperatingSystem.IsWindows() ? "FakeOllamaCli.exe" : "FakeOllamaCli"
+      )
+      : Path.GetFullPath(configuredExecutable);
+    var targetExecutable = Path.Combine(
+      toolsDirectory,
+      OperatingSystem.IsWindows() ? "nvidia-smi.exe" : "nvidia-smi"
+    );
+    File.Copy(sourceExecutable, targetExecutable, true);
+    if (!OperatingSystem.IsWindows())
+    {
+      File.SetUnixFileMode(
+        targetExecutable,
+        UnixFileMode.UserRead
+          | UnixFileMode.UserWrite
+          | UnixFileMode.UserExecute
+      );
+    }
+    return toolsDirectory;
   }
 
   public async ValueTask DisposeAsync()

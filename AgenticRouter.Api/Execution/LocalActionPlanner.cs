@@ -60,6 +60,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   public const string PlannerMarker = "SPECIALIST_TOOL_LOOP_V2";
   public const string RequestToolsetTool = "request_toolset";
   public const string ToolCatalogMarker = "HOST_TOOL_CATALOG_V1";
+  public const string OutputLimitStage = "local-action-output-limit";
   private const int RetainedToolPairs = 4;
 
   private const string PlannerPrompt =
@@ -75,6 +76,14 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Re-evaluate the remaining work after every authoritative tool result and never repeat a "
     + "completed action. "
     + "Use exactly one native tool call when a local action is required. "
+    + "When a granted tool is needed, emit that tool call immediately. Do not draft, preview, "
+    + "or repeat its arguments in reasoning before the call; place the complete arguments only "
+    + "in the native tool call. "
+    + "Keep every write call comfortably within the model output budget. For multi-file or long "
+    + "source output, do not batch the implementation through create_files. Create one small file "
+    + "at a time. If one source file may not fit in a single response, create a small valid scaffold "
+    + "containing a unique insertion marker, then expand that marker through multiple bounded "
+    + "replace_text calls and remove it only with the final chunk. "
     + "When the user says to use, reuse, integrate, or inspect an existing file, dependency, or "
     + "asset, inspect it instead of creating or overwriting it. If the stated path does not "
     + "exist, list its parent directory and inspect the actual candidate. Never create a "
@@ -335,7 +344,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
           ? $"\nThis is retry attempt {attemptNumber}. The previous response was empty, invalid, "
             + "unavailable, or rejected during action validation. Change strategy: return one valid "
             + "available tool call when another action is necessary, or a final response without a "
-            + "tool call when the verified work is complete or no safe action remains."
+            + "tool call when the verified work is complete or no safe action remains. Do not narrate "
+            + "or precompose the intended action in reasoning; emit the native call now."
           : string.Empty
       )
       + (!planRequired
@@ -560,6 +570,29 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     IReadOnlyList<OllamaToolDefinition> availableTools
   )
   {
+    if (
+      canonicalTurn.ToolCalls.Count == 0
+      && ExhaustedOutputLimit(response)
+    )
+    {
+      var outputLimit = response.ContextResolution!.OutputTokenLimit;
+      var maximumContentCharacters = Math.Min(
+        6_000,
+        Math.Max(2_000, outputLimit * 2)
+      );
+      throw new LocalActionException(
+        OutputLimitStage,
+        $"The model exhausted the configured {outputLimit}-token output limit before emitting a valid native tool call.",
+        new JsonException(
+          "Change to bounded incremental writes now. Do not call create_files for this recovery. "
+            + "Call create_file for one small file or scaffold only; keep its content under "
+            + $"{maximumContentCharacters} characters. For a longer file, retain a unique insertion "
+            + "marker and add one bounded chunk per subsequent replace_text call. Do not draft file "
+            + "content in reasoning."
+        )
+      );
+    }
+
     try
     {
       if (canonicalTurn.ToolCalls.Count == 0)
@@ -649,6 +682,19 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         exception
       );
     }
+  }
+
+  private static bool ExhaustedOutputLimit(OllamaToolResponse response)
+  {
+    return response.ContextResolution is
+    {
+      OutputTokenLimit: > 0
+    } resolution
+      && response.Usage is
+      {
+        OutputTokens: > 0
+      } usage
+      && usage.OutputTokens >= resolution.OutputTokenLimit;
   }
 
   private static IReadOnlyList<CanonicalToolDefinition> CreateToolDefinitions()

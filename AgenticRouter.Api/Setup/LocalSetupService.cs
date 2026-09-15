@@ -172,6 +172,37 @@ public sealed class LocalSetupService : ILocalSetupService
       largestGpuBytes > 0 ? largestGpuBytes : null,
       installedModels
     );
+    if (
+      ollamaVersion is not null
+      && recommendations.Any(model =>
+        !model.Installed
+        && string.Equals(
+          model.Job?.State,
+          "completed",
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      try
+      {
+        installedModels = await _ollama.GetModelsAsync(
+          baseUri,
+          cancellationToken
+        );
+        recommendations = BuildRecommendations(
+          largestGpuBytes > 0 ? largestGpuBytes : null,
+          installedModels
+        );
+      }
+      catch (OllamaProviderException exception)
+      {
+        _logger.LogDebug(
+          exception,
+          "The installed model registry could not be refreshed after a completed setup pull."
+        );
+      }
+    }
     var compatibleModelInstalled = recommendations.Any(model => model.Installed)
       || installedModels.Any(
         model => IsCompatibleInstalledModel(model, largestGpuBytes)

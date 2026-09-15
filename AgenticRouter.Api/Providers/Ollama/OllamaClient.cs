@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
@@ -28,13 +29,15 @@ public sealed class OllamaClient : IOllamaClient
   private readonly ITokenEstimator _tokenEstimator;
   private readonly IUsageRecorder _usageRecorder;
   private readonly IOllamaManagedServerManager _managedServers;
+  private readonly IModelGpuAffinityResolver _modelGpuAffinities;
 
   public OllamaClient(
     HttpClient httpClient,
     ISettingsStore settingsStore,
     ITokenEstimator tokenEstimator,
     IUsageRecorder usageRecorder,
-    IOllamaManagedServerManager managedServers
+    IOllamaManagedServerManager managedServers,
+    IModelGpuAffinityResolver modelGpuAffinities
   )
   {
     _httpClient = httpClient;
@@ -42,6 +45,7 @@ public sealed class OllamaClient : IOllamaClient
     _tokenEstimator = tokenEstimator;
     _usageRecorder = usageRecorder;
     _managedServers = managedServers;
+    _modelGpuAffinities = modelGpuAffinities;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -1146,9 +1150,15 @@ public sealed class OllamaClient : IOllamaClient
     var settings = await _settingsStore.GetAsync(
       cancellationToken
     );
+    var resolvedGpu = await ResolveModelGpuSelectionAsync(
+      settings,
+      model,
+      gpuSelection ?? settings.DefaultGpu,
+      cancellationToken
+    );
     var endpoint = await _managedServers.ResolveAsync(
       baseUri,
-      gpuSelection ?? settings.DefaultGpu,
+      resolvedGpu,
       settings.DefaultGpu,
       cancellationToken
     );
@@ -1573,7 +1583,13 @@ public sealed class OllamaClient : IOllamaClient
     var requestedOutput = toolOutput
       ? settings.Execution.MaxToolOutputTokens
       : settings.Context.ReservedResponseTokens;
-    var gpuSelection = ResolveGpuSelection(settings, usageContext);
+    var roleGpuSelection = ResolveRoleGpuSelection(settings, usageContext);
+    var gpuSelection = await ResolveModelGpuSelectionAsync(
+      settings,
+      model,
+      roleGpuSelection,
+      cancellationToken
+    );
     var endpoint = await _managedServers.ResolveAsync(
       baseUri,
       gpuSelection,
@@ -1696,7 +1712,7 @@ public sealed class OllamaClient : IOllamaClient
     );
   }
 
-  private static string ResolveGpuSelection(
+  private static string ResolveRoleGpuSelection(
     ApplicationSettings settings,
     ProviderCallContext usageContext
   )
@@ -1708,6 +1724,35 @@ public sealed class OllamaClient : IOllamaClient
       UsageModelRoles.Coordinator => settings.CoordinatorGpu,
       _ => usageContext.Gpu ?? settings.DefaultGpu
     };
+  }
+
+  private async Task<string> ResolveModelGpuSelectionAsync(
+    ApplicationSettings settings,
+    string model,
+    string inheritedGpuSelection,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      return (await _modelGpuAffinities.ResolveAsync(
+        settings,
+        model,
+        inheritedGpuSelection,
+        cancellationToken
+      )).GpuSelection;
+    }
+    catch (ModelGpuAffinityException exception)
+    {
+      throw new OllamaProviderException(
+        "gpu-affinity-resolution",
+        exception.Message,
+        exception.Message,
+        409,
+        true,
+        exception
+      );
+    }
   }
 
   private static OllamaProviderException ProviderTimeout(

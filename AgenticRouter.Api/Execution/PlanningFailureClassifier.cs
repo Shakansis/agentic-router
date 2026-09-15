@@ -53,6 +53,7 @@ public sealed class PlanningFailureClassifier : IPlanningFailureClassifier
     return localAction.Stage switch
     {
       "local-action-planning" => CoordinatorFailureCategory.CorrectablePlanning,
+      LocalActionPlanner.OutputLimitStage => CoordinatorFailureCategory.CorrectablePlanning,
       "tool-phase-validation" => CoordinatorFailureCategory.CorrectablePlanning,
       "action-validation" => CoordinatorFailureCategory.CorrectablePlanning,
       "plan-action-binding" => CoordinatorFailureCategory.CorrectablePlanning,

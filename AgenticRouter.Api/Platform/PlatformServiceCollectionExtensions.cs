@@ -14,6 +14,7 @@ internal static class PlatformServiceCollectionExtensions
     string dataDirectory
   )
   {
+    services.AddSingleton<IModelGpuAffinityResolver, ModelGpuAffinityResolver>();
     services.AddSingleton(
       provider => new OllamaManagedServerManager(
         dataDirectory,

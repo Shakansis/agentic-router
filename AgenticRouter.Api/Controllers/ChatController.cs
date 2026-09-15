@@ -36,6 +36,7 @@ public sealed class ChatController : ControllerBase
   private readonly ISettingsStore _settings;
   private readonly IMarkdownRenderer _markdown;
   private readonly IExecutionLatencyTracker _latency;
+  private readonly IUserInputCoordinator _userInput;
   private SsePresentationWriter? _eventWriter;
   private string? _executionSessionId;
   private string? _conversationSessionId;
@@ -56,6 +57,7 @@ public sealed class ChatController : ControllerBase
     IIncidentJournal incidents,
     ITraceContext trace,
     IExecutionLatencyTracker latency,
+    IUserInputCoordinator userInput,
     ILogger<ChatController> logger
   )
   {
@@ -69,6 +71,7 @@ public sealed class ChatController : ControllerBase
     _incidents = incidents;
     _trace = trace;
     _latency = latency;
+    _userInput = userInput;
     _logger = logger;
   }
 
@@ -780,6 +783,7 @@ public sealed class ChatController : ControllerBase
   )
   {
     SupervisionRunStartView prepared;
+    DurableSupervisionRunView preparedView;
     DurableSupervisionRunView startedView;
     try
     {
@@ -803,6 +807,113 @@ public sealed class ChatController : ControllerBase
       );
       _durableSupervisionRunId = prepared.RunId;
       _trace.Link("supervisionRunId", prepared.RunId);
+      if (
+        !_supervisionRuns.TryGetView(prepared.RunId, out preparedView)
+      )
+      {
+        throw new SupervisionException(
+          "supervision-run-missing",
+          "supervision-prepare",
+          "The Host-owned run disappeared immediately after it was prepared.",
+          false,
+          500
+        );
+      }
+    }
+    catch (SupervisionException exception)
+    {
+      throw new ChatStageException(
+        exception.Stage,
+        exception.Message,
+        exception.Code,
+        request.Model,
+        null,
+        exception.StatusCode,
+        exception.Retryable,
+        exception,
+        new Dictionary<string, string?>
+        {
+          ["code"] = exception.Code,
+          ["providerPolicy"] = "ollama-local-only"
+        }
+      );
+    }
+    if (preparedView.Route.GpuPlacementConflict)
+    {
+      var warning = await _userInput.BeginAsync(
+        request.BrowserSessionId ?? string.Empty,
+        $"supervision-gpu-{prepared.RunId}",
+        "host",
+        [
+          new UserInputQuestionView(
+            "gpu-placement-conflict",
+            "GPU placement",
+            "The Worker is using multiple GPUs through Vulkan while the Supervisor is pinned to a single GPU. This may cause model reloads, VRAM contention, or reduced performance.",
+            [
+              new UserInputOptionView(
+                "Continue Anyway",
+                "Start this supervised run with the resolved placement."
+              )
+            ],
+            AllowsCustomAnswer: false
+          )
+        ],
+        cancellationToken
+      );
+      yield return new ChatStreamEvent(
+        requestId,
+        "supervision.gpu-placement-warning",
+        DateTimeOffset.UtcNow,
+        "Potential GPU placement conflict",
+        null,
+        preparedView.Route.Model,
+        null,
+        null,
+        null,
+        null,
+        SupervisionProgress: CreateSupervisionProgress(preparedView),
+        UserInput: warning.Request
+      );
+      UserInputOutcome decision;
+      try
+      {
+        decision = await warning.Completion.WaitAsync(cancellationToken);
+      }
+      catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+      {
+        await _userInput.CancelAsync(
+          warning.Request.Id,
+          CancellationToken.None
+        );
+        _ = await _supervisionRuns.CancelAsync(
+          prepared.RunId,
+          CancellationToken.None
+        );
+        throw;
+      }
+      if (decision.Cancelled)
+      {
+        _ = await _supervisionRuns.CancelAsync(
+          prepared.RunId,
+          cancellationToken
+        );
+        yield return new ChatStreamEvent(
+          requestId,
+          "request.cancelled",
+          DateTimeOffset.UtcNow,
+          "The supervised run was cancelled before execution because the GPU placement warning was not accepted.",
+          null,
+          preparedView.Route.Model,
+          null,
+          null,
+          null,
+          null
+        );
+        yield break;
+      }
+    }
+    try
+    {
       _ = await _supervisionRuns.StartAsync(
         prepared.RunId,
         cancellationToken
@@ -1221,10 +1332,25 @@ public sealed class ChatController : ControllerBase
           item.AttemptCount
         )
       ).ToArray(),
-      view.Route.Model,
+      string.Equals(
+        progressEvent?.Role ?? view.Runtime?.ActiveRole,
+        "supervisor",
+        StringComparison.Ordinal
+      )
+        ? view.Route.EffectiveSupervisorModel
+        : view.Route.Model,
       view.Route.Harness,
       view.ApprovalPolicy,
-      progressEvent?.ContextId
+      progressEvent?.ContextId,
+      view.Route.Model,
+      view.Route.WorkerGpuDeviceName ?? view.Route.WorkerGpuSelection,
+      view.Route.WorkerRuntime,
+      view.Route.EffectiveSupervisorModel,
+      view.Route.SupervisorGpuDeviceName
+        ?? view.Route.SupervisorGpuSelection
+        ?? view.Route.WorkerGpuDeviceName
+        ?? view.Route.WorkerGpuSelection,
+      view.Route.SupervisorRuntime ?? view.Route.WorkerRuntime
     );
   }
 

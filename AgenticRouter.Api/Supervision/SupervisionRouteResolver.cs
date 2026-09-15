@@ -1,6 +1,7 @@
 using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
@@ -38,6 +39,8 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
   private readonly IIntentionRouter _intentionRouter;
   private readonly IModelResolver _modelResolver;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
+  private readonly IModelGpuAffinityResolver _modelGpuAffinities;
+  private readonly ILogger<SupervisionRouteResolver> _logger;
 
   public SupervisionRouteResolver(
     IWorkspaceProfileService workspaces,
@@ -47,7 +50,9 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     IAutoModelHarnessRoutingService autoRoutes,
     IIntentionRouter intentionRouter,
     IModelResolver modelResolver,
-    IOllamaManagedServerManager managedOllamaServers
+    IOllamaManagedServerManager managedOllamaServers,
+    IModelGpuAffinityResolver modelGpuAffinities,
+    ILogger<SupervisionRouteResolver> logger
   )
   {
     _workspaces = workspaces;
@@ -58,6 +63,8 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     _intentionRouter = intentionRouter;
     _modelResolver = modelResolver;
     _managedOllamaServers = managedOllamaServers;
+    _modelGpuAffinities = modelGpuAffinities;
+    _logger = logger;
   }
 
   public async Task<SupervisionRouteResolution> ResolveAsync(
@@ -196,11 +203,13 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
 
     var selectedModel = modelReference.ModelId;
     var selectedHarness = request.Harness;
+    var workerRouteGpu = settings.DefaultGpu;
     if (useAutoModel)
     {
       var routing = _intentionRouter.Route(
         new ChatRequest(objective, "auto", [], InteractionMode: "execute")
       );
+      workerRouteGpu = settings.Intentions[routing.Decision.Intention].Gpu;
       var resolution = _modelResolver.Resolve(
         settings,
         routing.Decision.Intention,
@@ -270,6 +279,63 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       );
     }
 
+    var supervisorSameAsWorker = string.Equals(
+      settings.SupervisorModel,
+      SupervisorModelSelection.SameAsWorker,
+      StringComparison.Ordinal
+    );
+    var supervisorModelName = supervisorSameAsWorker
+      ? model.Name
+      : ProviderModelReference.Parse(settings.SupervisorModel).ModelId;
+    var supervisorReference = ProviderModelReference.Parse(
+      settings.SupervisorModel
+    );
+    if (
+      !string.Equals(
+        settings.SupervisorModel,
+        SupervisorModelSelection.SameAsWorker,
+        StringComparison.Ordinal
+      )
+      && !supervisorReference.IsLocal
+    )
+    {
+      throw new SupervisionException(
+        "supervision-local-supervisor-required",
+        "supervision-route",
+        "Durable Supervised Execute requires an exact local Ollama Supervisor model.",
+        true,
+        409
+      );
+    }
+    var supervisorModel = installed.SingleOrDefault(item =>
+      string.Equals(
+        item.Provider,
+        ModelProviderIds.OllamaLocal,
+        StringComparison.Ordinal
+      )
+      && string.Equals(
+        item.Name,
+        supervisorModelName,
+        StringComparison.OrdinalIgnoreCase
+      )
+    ) ?? throw new SupervisionException(
+      "supervision-supervisor-model-unavailable",
+      "supervision-route",
+      $"The configured Supervisor model '{supervisorModelName}' is not installed.",
+      true,
+      409
+    );
+    if (string.IsNullOrWhiteSpace(supervisorModel.Digest))
+    {
+      throw new SupervisionException(
+        "supervision-supervisor-model-digest-unavailable",
+        "supervision-route",
+        "The configured Supervisor model digest is unavailable for durable route identity.",
+        true,
+        409
+      );
+    }
+
     var harness = await ResolveHarnessAsync(
       selectedHarness,
       cancellationToken
@@ -303,11 +369,64 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       Path.DirectorySeparatorChar,
       Path.AltDirectorySeparatorChar
     );
-    var managedEndpoint = await _managedOllamaServers.ResolveAsync(
+    ModelGpuAffinityResolution workerGpu;
+    ModelGpuAffinityResolution supervisorGpu;
+    try
+    {
+      workerGpu = await _modelGpuAffinities.ResolveAsync(
+        settings,
+        model.Name,
+        workerRouteGpu,
+        cancellationToken
+      );
+      supervisorGpu = await _modelGpuAffinities.ResolveAsync(
+        settings,
+        supervisorModel.Name,
+        supervisorSameAsWorker
+          ? workerRouteGpu
+          : settings.CoordinatorGpu,
+        cancellationToken
+      );
+    }
+    catch (ModelGpuAffinityException exception)
+    {
+      throw new SupervisionException(
+        "supervision-gpu-affinity-unavailable",
+        "supervision-route",
+        exception.Message,
+        true,
+        409,
+        exception
+      );
+    }
+    var workerEndpoint = _managedOllamaServers.Plan(
       ollamaEndpoint,
-      settings.DefaultGpu,
-      settings.DefaultGpu,
-      cancellationToken
+      workerGpu.GpuSelection,
+      settings.DefaultGpu
+    );
+    var supervisorEndpoint = _managedOllamaServers.Plan(
+      ollamaEndpoint,
+      supervisorGpu.GpuSelection,
+      settings.DefaultGpu
+    );
+    var workerRuntime = workerEndpoint.Backend ?? workerGpu.Backend ?? "auto";
+    var supervisorRuntime = supervisorEndpoint.Backend
+      ?? supervisorGpu.Backend
+      ?? "auto";
+    var gpuPlacementConflict = !workerGpu.Explicit
+      && workerGpu.UsesMultipleVulkanDevices
+      && string.Equals(workerRuntime, "vulkan", StringComparison.Ordinal)
+      && supervisorGpu.Explicit;
+    _logger.LogInformation(
+      "Supervision route resolved Worker {WorkerModel} to {WorkerGpu} ({WorkerDevice}, {WorkerRuntime}) and Supervisor {SupervisorModel} to {SupervisorGpu} ({SupervisorDevice}, {SupervisorRuntime}).",
+      model.Name,
+      workerGpu.GpuSelection,
+      workerGpu.DeviceName ?? "runtime-managed",
+      workerRuntime,
+      supervisorModel.Name,
+      supervisorGpu.GpuSelection,
+      supervisorGpu.DeviceName ?? "runtime-managed",
+      supervisorRuntime
     );
 
     return new SupervisionRouteResolution(
@@ -321,13 +440,30 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         harness.Definition.Id,
         harness.Availability.Version,
         NormalizeEndpoint(
-          managedEndpoint.Endpoint
+          workerEndpoint.Endpoint
         ),
         SupervisionRequestPolicy.Hash(
           OperatingSystem.IsWindows()
             ? canonicalWorkspace.ToUpperInvariant()
             : canonicalWorkspace
-        )
+        ),
+        workerGpu.GpuSelection,
+        workerGpu.DeviceId,
+        workerGpu.DeviceName,
+        workerRuntime,
+        ModelProviderIds.OllamaLocal,
+        supervisorModel.Name,
+        supervisorModel.Digest,
+        NormalizeEndpoint(supervisorEndpoint.Endpoint),
+        supervisorGpu.GpuSelection,
+        supervisorGpu.DeviceId,
+        supervisorGpu.DeviceName,
+        supervisorRuntime,
+        gpuPlacementConflict,
+        workerRouteGpu,
+        supervisorSameAsWorker
+          ? workerRouteGpu
+          : settings.CoordinatorGpu
       )
     );
   }
@@ -417,15 +553,90 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         settings.OllamaUrl,
         UriKind.Absolute
       );
-      var managedEndpoint = await _managedOllamaServers.ResolveAsync(
-        endpoint,
-        settings.DefaultGpu,
-        settings.DefaultGpu,
+      var expectedSupervisorModel = string.Equals(
+        settings.SupervisorModel,
+        SupervisorModelSelection.SameAsWorker,
+        StringComparison.Ordinal
+      )
+        ? checkpoint.Route.Model
+        : ProviderModelReference.Parse(settings.SupervisorModel).ModelId;
+      if (!string.Equals(
+        expectedSupervisorModel,
+        checkpoint.Route.EffectiveSupervisorModel,
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return Ineligible(
+          "The configured Supervisor model changed."
+        );
+      }
+      var workerGpu = await _modelGpuAffinities.ResolveAsync(
+        settings,
+        checkpoint.Route.Model,
+        checkpoint.Route.WorkerInheritedGpuSelection ?? settings.DefaultGpu,
         cancellationToken
+      );
+      var supervisorGpu = await _modelGpuAffinities.ResolveAsync(
+        settings,
+        checkpoint.Route.EffectiveSupervisorModel,
+        checkpoint.Route.SupervisorInheritedGpuSelection
+          ?? checkpoint.Route.WorkerInheritedGpuSelection
+          ?? settings.DefaultGpu,
+        cancellationToken
+      );
+      if (
+        checkpoint.Route.WorkerInheritedGpuSelection is not null
+        && (
+          !string.Equals(
+            workerGpu.GpuSelection,
+            checkpoint.Route.WorkerGpuSelection,
+            StringComparison.Ordinal
+          )
+          || !string.Equals(
+            workerGpu.DeviceId,
+            checkpoint.Route.WorkerGpuDeviceId,
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+      )
+      {
+        return Ineligible(
+          "The resolved Worker GPU affinity changed."
+        );
+      }
+      if (
+        checkpoint.Route.SupervisorInheritedGpuSelection is not null
+        && (
+          !string.Equals(
+            supervisorGpu.GpuSelection,
+            checkpoint.Route.SupervisorGpuSelection,
+            StringComparison.Ordinal
+          )
+          || !string.Equals(
+            supervisorGpu.DeviceId,
+            checkpoint.Route.SupervisorGpuDeviceId,
+            StringComparison.OrdinalIgnoreCase
+          )
+        )
+      )
+      {
+        return Ineligible(
+          "The resolved Supervisor GPU affinity changed."
+        );
+      }
+      var workerEndpoint = _managedOllamaServers.Plan(
+        endpoint,
+        workerGpu.GpuSelection,
+        settings.DefaultGpu
+      );
+      var supervisorEndpoint = _managedOllamaServers.Plan(
+        endpoint,
+        supervisorGpu.GpuSelection,
+        settings.DefaultGpu
       );
       if (!string.Equals(
         NormalizeEndpoint(
-          managedEndpoint.Endpoint
+          workerEndpoint.Endpoint
         ),
         checkpoint.Route.OllamaEndpoint,
         StringComparison.OrdinalIgnoreCase
@@ -433,6 +644,16 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       {
         return Ineligible(
           "The configured local Ollama endpoint changed."
+        );
+      }
+      if (!string.Equals(
+        NormalizeEndpoint(supervisorEndpoint.Endpoint),
+        checkpoint.Route.EffectiveSupervisorOllamaEndpoint,
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return Ineligible(
+          "The configured Supervisor Ollama endpoint changed."
         );
       }
 
@@ -464,6 +685,30 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
           "The exact local model digest is unavailable or changed."
         );
       }
+      var supervisorModel = installed.SingleOrDefault(item =>
+        string.Equals(
+          item.Provider,
+          checkpoint.Route.EffectiveSupervisorProvider,
+          StringComparison.Ordinal
+        ) && string.Equals(
+          item.Name,
+          checkpoint.Route.EffectiveSupervisorModel,
+          StringComparison.OrdinalIgnoreCase
+        )
+      );
+      if (
+        supervisorModel is null
+        || !string.Equals(
+          supervisorModel.Digest ?? "unavailable",
+          checkpoint.Route.EffectiveSupervisorModelDigest,
+          StringComparison.Ordinal
+        )
+      )
+      {
+        return Ineligible(
+          "The exact Supervisor model digest is unavailable or changed."
+        );
+      }
 
       var harness = await ResolveHarnessAsync(
         checkpoint.Route.Harness,
@@ -488,6 +733,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     catch (Exception exception) when (
       exception is OllamaProviderException
       or SupervisionException
+      or ModelGpuAffinityException
       or UriFormatException
       or IOException
       or UnauthorizedAccessException

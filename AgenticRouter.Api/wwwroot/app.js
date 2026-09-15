@@ -411,6 +411,7 @@ function bindElements() {
     "coordinator-model",
     "coordinator-gpu",
     "default-model",
+    "supervisor-model",
     "default-gpu",
     "jump-latest",
     "runtime-summary",
@@ -9007,6 +9008,17 @@ function renderSettings() {
   );
   replaceOptions(elements.defaultModel, modelOptions(), state.settings.defaultModel);
   replaceOptions(
+    elements.supervisorModel,
+    [
+      {
+        value: "same-as-worker",
+        label: "Same as Worker"
+      },
+      ...modelOptions().filter(option => option.provider === "ollama-local")
+    ],
+    state.settings.supervisorModel ?? "same-as-worker"
+  );
+  replaceOptions(
     elements.defaultGpu,
     gpuOptions(false, state.settings.defaultGpu),
     state.settings.defaultGpu
@@ -9322,6 +9334,42 @@ function renderModelOrganization() {
     note.value = model.note ?? "";
     note.dataset.modelNote = "";
     fields.append(alias, note);
+    if (
+      model.providerId === "ollama-local"
+      && selectableAffinityDevices().length >= 2
+    ) {
+      const affinityField = document.createElement("label");
+      affinityField.className = "model-gpu-affinity-field";
+      const affinityLabel = document.createElement("span");
+      affinityLabel.textContent = "GPU Affinity";
+      const affinity = document.createElement("select");
+      affinity.dataset.modelGpuAffinity = model.qualifiedId;
+      replaceOptions(
+        affinity,
+        modelGpuAffinityOptions(
+          state.settings?.modelGpuAffinities?.[model.qualifiedId] ?? "auto"
+        ),
+        state.settings?.modelGpuAffinities?.[model.qualifiedId] ?? "auto"
+      );
+      affinity.addEventListener("change", () => {
+        const configured = {
+          ...(state.settings.modelGpuAffinities ?? {})
+        };
+        if (affinity.value === "auto") {
+          delete configured[model.qualifiedId];
+        } else {
+          configured[model.qualifiedId] = affinity.value;
+        }
+        state.settings = {
+          ...state.settings,
+          modelGpuAffinities: configured
+        };
+        state.settingsDirty = true;
+        updateSettingsDirtyState();
+      });
+      affinityField.append(affinityLabel, affinity);
+      fields.append(affinityField);
+    }
     const actions = document.createElement("div");
     actions.className = "settings-action-row";
 
@@ -9359,6 +9407,35 @@ function renderModelOrganization() {
     empty.textContent = "No model matches the filters.";
     elements.modelOrganizationList.append(empty);
   }
+}
+
+function selectableAffinityDevices() {
+  return state.devices.filter(
+    device => !device.isAuto && device.available && device.affinitySelectable
+  );
+}
+
+function modelGpuAffinityOptions(selected) {
+  const options = [
+    {
+      value: "auto",
+      label: "Auto"
+    },
+    ...selectableAffinityDevices().map(device => ({
+      value: `device:${device.id}`,
+      label: device.name
+    }))
+  ];
+  if (
+    selected?.startsWith("device:")
+    && !options.some(option => option.value === selected)
+  ) {
+    options.push({
+      value: selected,
+      label: "Configured GPU · unavailable"
+    });
+  }
+  return options;
 }
 
 async function handleModelOrganizationAction(event) {
@@ -10571,7 +10648,11 @@ async function saveSettings(event) {
     coordinatorModel: elements.coordinatorModel.value,
     coordinatorGpu: elements.coordinatorGpu.value,
     defaultModel: elements.defaultModel.value,
+    supervisorModel: elements.supervisorModel.value,
     defaultGpu: elements.defaultGpu.value,
+    modelGpuAffinities: {
+      ...(state.settings.modelGpuAffinities ?? {})
+    },
     trustedWorkspacePath: state.settings.trustedWorkspacePath ?? null,
     intentions,
     context: {
@@ -10722,6 +10803,8 @@ function markSettingsValidationErrors(errors) {
       control = elements.coordinatorModel;
     } else if (field.startsWith("defaultModel")) {
       control = elements.defaultModel;
+    } else if (field.startsWith("supervisorModel")) {
+      control = elements.supervisorModel;
     } else {
       const fieldControls = {
         "context.defaultContextTokens": elements.defaultContextTokens,
@@ -14215,9 +14298,12 @@ function renderSupervisionSessionHeader(assistant, supervision) {
   const strategy = supervision.executionStrategy === "autonomous"
     ? "Autonomous"
     : "Supervisor";
-  route.textContent =
-    `Target: ${supervision.model || "unavailable"} · `
-    + `Harness: ${supervision.harness || "unavailable"} · ${strategy}`;
+  route.textContent = supervision.workerModel || supervision.supervisorModel
+    ? `Worker: ${supervision.workerModel || "unavailable"} / ${supervision.workerGpu || "Auto"} / ${supervision.workerRuntime || "runtime"} · `
+      + `Supervisor: ${supervision.supervisorModel || "unavailable"} / ${supervision.supervisorGpu || "Auto"} / ${supervision.supervisorRuntime || "runtime"} · `
+      + `Harness: ${supervision.harness || "unavailable"} · ${strategy}`
+    : `Target: ${supervision.model || "unavailable"} · `
+      + `Harness: ${supervision.harness || "unavailable"} · ${strategy}`;
   route.title = [
     `Run: ${supervision.runId}`,
     supervision.approvalPolicy
@@ -15155,6 +15241,12 @@ async function consumeEventStream(stream, assistant, options = {}) {
         addTraceDiagnosticActions(assistant, diagnostic);
         stopSlowRequestTimer(assistant);
       } else if (
+        streamEvent.type === "supervision.gpu-placement-warning"
+        && streamEvent.userInput
+      ) {
+        addActivity(assistant, streamEvent, false);
+        await resolveGpuPlacementWarning(streamEvent.userInput);
+      } else if (
         streamEvent.type === "user-input.requested"
         && streamEvent.userInput
       ) {
@@ -15261,6 +15353,34 @@ async function consumeEventStream(stream, assistant, options = {}) {
     })),
     timeline
   };
+}
+
+async function resolveGpuPlacementWarning(request) {
+  const approved = await showAppConfirm(
+    "The Worker is configured to use multiple GPUs through Vulkan, while the Supervisor is pinned to a single GPU.\n\nThis configuration may cause model reloads, VRAM contention, or reduced performance.\n\nContinue with this configuration?",
+    {
+      title: "Potential GPU placement conflict",
+      confirmLabel: "Continue Anyway"
+    }
+  );
+  const question = request.questions[0];
+  await fetchJson(`/api/user-input/${encodeURIComponent(request.id)}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      browserSessionId: state.browserSessionId,
+      executionSessionId: request.executionSessionId,
+      answers: approved
+        ? [
+          {
+            questionId: question.id,
+            answer: "Continue Anyway"
+          }
+        ]
+        : [],
+      cancelled: !approved
+    })
+  });
 }
 
 function captureConversationContentBlock(blocks, streamEvent) {

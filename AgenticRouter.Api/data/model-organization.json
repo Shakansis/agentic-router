@@ -1,6 +1,34 @@
 {
   "schemaVersion": 1,
-  "preferences": [],
+  "preferences": [
+    {
+      "providerId": "groq",
+      "modelId": "allam-2-7b",
+      "alias": null,
+      "favorite": false,
+      "hidden": true,
+      "note": null,
+      "updatedAt": "2026-09-14T05:17:13.8260615+00:00"
+    },
+    {
+      "providerId": "groq",
+      "modelId": "canopylabs/orpheus-arabic-saudi",
+      "alias": null,
+      "favorite": false,
+      "hidden": true,
+      "note": null,
+      "updatedAt": "2026-09-14T05:19:08.4855743+00:00"
+    },
+    {
+      "providerId": "ollama-local",
+      "modelId": "umbra:24b",
+      "alias": null,
+      "favorite": false,
+      "hidden": true,
+      "note": null,
+      "updatedAt": "2026-09-14T05:19:18.2867613+00:00"
+    }
+  ],
   "profiles": [
     {
       "id": "1295349b2097488aa4d75894c4b6165c",

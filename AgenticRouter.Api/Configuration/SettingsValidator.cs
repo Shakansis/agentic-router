@@ -48,6 +48,14 @@ public sealed class SettingsValidator : ISettingsValidator
       "defaultModel",
       settings.DefaultModel
     );
+    ValidateSupervisorModel(
+      errors,
+      settings.SupervisorModel
+    );
+    ValidateModelGpuAffinities(
+      errors,
+      settings.ModelGpuAffinities
+    );
     ValidateContext(
       errors,
       settings.Context
@@ -293,6 +301,87 @@ public sealed class SettingsValidator : ISettingsValidator
     );
   }
 
+  private static void ValidateSupervisorModel(
+    IDictionary<string, List<string>> errors,
+    string? model
+  )
+  {
+    if (string.IsNullOrWhiteSpace(model) || model.Length > 256)
+    {
+      AddError(
+        errors,
+        "supervisorModel",
+        "Supervisor model must be Same as Worker or a configured model identifier of at most 256 characters."
+      );
+    }
+  }
+
+  private static void ValidateModelGpuAffinities(
+    IDictionary<string, List<string>> errors,
+    IReadOnlyDictionary<string, string> affinities
+  )
+  {
+    if (affinities.Count > 200)
+    {
+      AddError(
+        errors,
+        "modelGpuAffinities",
+        "At most 200 model GPU affinities may be configured."
+      );
+    }
+
+    foreach (var affinity in affinities)
+    {
+      var field = $"modelGpuAffinities.{affinity.Key}";
+      if (
+        string.IsNullOrWhiteSpace(affinity.Key)
+        || affinity.Key.Length > 256
+        || affinity.Key.Any(char.IsControl)
+      )
+      {
+        AddError(
+          errors,
+          field,
+          "Model GPU affinity requires a valid model identifier."
+        );
+      }
+      if (
+        !string.Equals(
+          affinity.Value,
+          ModelGpuAffinitySelection.Auto,
+          StringComparison.Ordinal
+        )
+        && (
+          !ModelGpuAffinitySelection.TryGetDeviceId(
+            affinity.Value,
+            out var deviceId
+          )
+          || deviceId.Length > 256
+          || deviceId.Any(char.IsControl)
+        )
+      )
+      {
+        AddError(
+          errors,
+          field,
+          "Model GPU affinity must be auto or one stable detected device identifier."
+        );
+      }
+    }
+
+    if (affinities.Keys.GroupBy(
+      key => key,
+      StringComparer.OrdinalIgnoreCase
+    ).Any(group => group.Count() > 1))
+    {
+      AddError(
+        errors,
+        "modelGpuAffinities",
+        "Model GPU affinity identifiers must be unique ignoring case."
+      );
+    }
+  }
+
   private static void ValidateModelGpuConflicts(
     IDictionary<string, List<string>> errors,
     ApplicationSettings settings
@@ -321,14 +410,28 @@ public sealed class SettingsValidator : ISettingsValidator
       settings.CoordinatorModel,
       settings.CoordinatorGpu,
       "coordinatorGpu",
-      settings.DefaultGpu
+      settings
     );
+    if (!string.Equals(
+      settings.SupervisorModel,
+      SupervisorModelSelection.SameAsWorker,
+      StringComparison.Ordinal
+    ))
+    {
+      AddGpuAssignment(
+        assignments,
+        settings.SupervisorModel,
+        settings.CoordinatorGpu,
+        "coordinatorGpu",
+        settings
+      );
+    }
     AddGpuAssignment(
       assignments,
       settings.DefaultModel,
       settings.DefaultGpu,
       "defaultGpu",
-      settings.DefaultGpu
+      settings
     );
 
     foreach (var intention in settings.Intentions)
@@ -345,7 +448,7 @@ public sealed class SettingsValidator : ISettingsValidator
         model,
         intention.Value.Gpu,
         $"intentions.{intention.Key}.gpu",
-        settings.DefaultGpu
+        settings
       );
       var fallback = string.Equals(
         intention.Value.FallbackModel,
@@ -359,7 +462,7 @@ public sealed class SettingsValidator : ISettingsValidator
         fallback,
         intention.Value.Gpu,
         $"intentions.{intention.Key}.gpu",
-        settings.DefaultGpu
+        settings
       );
     }
 
@@ -396,7 +499,7 @@ public sealed class SettingsValidator : ISettingsValidator
     string model,
     string selection,
     string field,
-    string defaultGpu
+    ApplicationSettings settings
   )
   {
     if (
@@ -421,13 +524,19 @@ public sealed class SettingsValidator : ISettingsValidator
       return;
     }
 
-    var effectiveGpu = string.Equals(
-      selection,
-      OllamaGpuSelection.Default,
-      StringComparison.Ordinal
+    var affinity = ModelGpuAffinitySelection.GetForModel(settings, model);
+    var effectiveGpu = ModelGpuAffinitySelection.TryGetDeviceId(
+      affinity,
+      out _
     )
-      ? defaultGpu
-      : selection;
+      ? affinity
+      : string.Equals(
+        selection,
+        OllamaGpuSelection.Default,
+        StringComparison.Ordinal
+      )
+        ? settings.DefaultGpu
+        : selection;
 
     if (!assignments.TryGetValue(
       model,

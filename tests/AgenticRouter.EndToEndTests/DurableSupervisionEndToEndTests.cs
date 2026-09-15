@@ -1203,6 +1203,206 @@ public sealed class DurableSupervisionEndToEndTests
   }
 
   [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ExplicitSupervisorKeepsRouterSelectedWorkerAndUsesEachModelGpuAffinity()
+  {
+    var configured = _environment.BaselineSettings with
+    {
+      SupervisorModel = "gpt-oss:20b",
+      DefaultGpu = "ollama:1",
+      ModelGpuAffinities = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["docs:latest"] = "device:GPU-nvidia-4090-fixture",
+        ["gpt-oss:20b"] = "device:GPU-nvidia-2070-fixture"
+      }
+    };
+    using var saved = await _environment.PutSettingsAsync(configured);
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      saved.StatusCode,
+      await saved.Content.ReadAsStringAsync()
+    );
+
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/supervision/runs/prepare",
+      new
+      {
+        objective = "write documentation supervision first pass success",
+        model = "auto",
+        harness = "native",
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    prepareResponse.EnsureSuccessStatusCode();
+    var prepared = JsonNode.Parse(
+      await prepareResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var runId = prepared["runId"]!.GetValue<string>();
+    var preparedRun = await GetRunAsync(runId);
+    var route = preparedRun["route"]!.AsObject();
+    Assert.AreEqual("docs:latest", route["model"]!.GetValue<string>());
+    Assert.AreEqual("gpt-oss:20b", route["supervisorModel"]!.GetValue<string>());
+    Assert.AreEqual(
+      "NVIDIA GeForce RTX 4090",
+      route["workerGpuDeviceName"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "NVIDIA GeForce RTX 2070 SUPER",
+      route["supervisorGpuDeviceName"]!.GetValue<string>()
+    );
+    Assert.IsFalse(route["gpuPlacementConflict"]!.GetValue<bool>());
+
+    using var startResponse = await _environment.HttpClient.PostAsync(
+      $"api/supervision/runs/{runId}/start",
+      null
+    );
+    startResponse.EnsureSuccessStatusCode();
+    var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual(
+      "completed",
+      completed["state"]!.GetValue<string>(),
+      completed.ToJsonString()
+    );
+
+    var turns = _environment.FakeOllama.Requests.Where(
+      request => request.Messages.Count > 0
+    ).ToArray();
+    var turnPlacements = string.Join(
+      ", ",
+      turns.Select(request => $"{request.Model}:main_gpu={request.MainGpu?.ToString() ?? "null"}")
+    );
+    Assert.IsTrue(turns.Any(request =>
+      request.Model == "docs:latest" && request.MainGpu == 0
+    ), $"The Router-selected Worker must use its explicit model affinity. {turnPlacements}");
+    Assert.IsTrue(turns.Any(request =>
+      request.Model == "gpt-oss:20b" && request.MainGpu == 1
+    ), $"Supervisor turns must use the configured Supervisor model and its affinity. {turnPlacements}");
+    Assert.IsFalse(turns.Any(request =>
+      request.Model == "gpt-oss:20b" && request.MainGpu != 1
+    ));
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task VulkanAutoWorkerAndSameWorkerSupervisorDoesNotWarn()
+  {
+    var configured = _environment.BaselineSettings with
+    {
+      DefaultGpu = "vulkan:all"
+    };
+    using var saved = await _environment.PutSettingsAsync(configured);
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      saved.StatusCode,
+      await saved.Content.ReadAsStringAsync()
+    );
+
+    using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/supervision/runs/prepare",
+      new
+      {
+        objective = "supervision auto affinity compatibility",
+        model = "qwen3-coder:30b",
+        harness = "native",
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    prepareResponse.EnsureSuccessStatusCode();
+    var prepared = JsonNode.Parse(
+      await prepareResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var runId = prepared["runId"]!.GetValue<string>();
+    var run = await GetRunAsync(runId);
+    var route = run["route"]!.AsObject();
+    Assert.AreEqual("qwen3-coder:30b", route["model"]!.GetValue<string>());
+    Assert.AreEqual(
+      "qwen3-coder:30b",
+      route["supervisorModel"]!.GetValue<string>()
+    );
+    Assert.AreEqual("vulkan:all", route["workerGpuSelection"]!.GetValue<string>());
+    Assert.IsFalse(route["gpuPlacementConflict"]!.GetValue<bool>());
+    await DiscardAsync(runId);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task VulkanMultiGpuWorkerAndPinnedSupervisorWarnsOnceAndSupportsCancelOrContinue()
+  {
+    var configured = _environment.BaselineSettings with
+    {
+      SupervisorModel = "gpt-oss:20b",
+      DefaultGpu = "vulkan:all",
+      ModelGpuAffinities = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["gpt-oss:20b"] = "device:GPU-nvidia-4090-fixture"
+      }
+    };
+    using var saved = await _environment.PutSettingsAsync(configured);
+    Assert.AreEqual(
+      HttpStatusCode.OK,
+      saved.StatusCode,
+      await saved.Content.ReadAsStringAsync()
+    );
+
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    await Page.GotoAsync("/");
+    await Page.GetByRole(
+      AriaRole.Button,
+      new() { Name = "Execute", Exact = true }
+    ).ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await Page.Locator("#send-strategy-toggle").ClickAsync();
+    await Page.Locator(
+      "#send-strategy-menu [data-send-strategy=\"supervised\"]"
+    ).ClickAsync();
+
+    await StartMessageAsync("supervision first pass success");
+    await Expect(Page.Locator("#app-modal")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#app-modal-title")).ToHaveTextAsync(
+      "Potential GPU placement conflict"
+    );
+    await Expect(Page.Locator("#app-modal-message")).ToContainTextAsync(
+      "multiple GPUs through Vulkan"
+    );
+    await Page.Locator("#app-modal-cancel").ClickAsync();
+    await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync(
+      "Send",
+      new() { Timeout = 20_000 }
+    );
+    Assert.HasCount(
+      0,
+      _environment.FakeOllama.Requests.Where(request => request.Stream)
+    );
+
+    await StartMessageAsync("supervision first pass success");
+    await Expect(Page.Locator("#app-modal")).ToBeVisibleAsync();
+    await Page.Locator("#app-modal-confirm").ClickAsync();
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".activity")).ToHaveAttributeAsync(
+      "data-terminal",
+      "true",
+      new() { Timeout = 60_000 }
+    );
+    await Expect(assistant.Locator(
+      "[data-event-type=\"supervision.gpu-placement-warning\"]"
+    )).ToHaveCountAsync(1);
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+      request.Stream
+      && request.Model == "gpt-oss:20b"
+      && request.MainGpu == 0
+    ));
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ReadOnlySupervisorRolesIgnoreWorkerMutationCompletionGate()
   {
@@ -1244,6 +1444,26 @@ public sealed class DurableSupervisionEndToEndTests
         ))
       ), $"Expected role marker {marker}.");
     }
+    var decompositionRequest = _environment.FakeOllama.Requests.Single(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        "SUPERVISION_DECOMPOSE_V1",
+        StringComparison.Ordinal
+      ))
+    );
+    var decompositionPrompt = decompositionRequest.Messages.Single(message =>
+      message.Content.Contains(
+        "SUPERVISION_DECOMPOSE_V1",
+        StringComparison.Ordinal
+      )
+    );
+    StringAssert.Contains(
+      decompositionPrompt.Content,
+      "Never dispatch directory-only scaffolding"
+    );
+    StringAssert.Contains(
+      decompositionPrompt.Content,
+      "Empty evidencePaths and directory paths are not valid evidence"
+    );
     Assert.IsEmpty(events.Where(item =>
       item["type"]!.GetValue<string>() == "supervision.deterministic-completion"
     ));
@@ -1335,6 +1555,42 @@ public sealed class DurableSupervisionEndToEndTests
     Assert.AreEqual(
       "hello world today",
       await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RepeatedNativeOutputLimitBlocksWithoutRepeatingWorkerAttempt()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var runId = await StartNativeSupervisionAsync(
+      "supervision always output limit"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("blocked", run["state"]!.GetValue<string>(), run.ToJsonString());
+    Assert.AreEqual(
+      "local-action-output-limit",
+      run["waitCode"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      1,
+      run["runtime"]!["workItems"]![0]!["attemptCount"]!.GetValue<int>()
+    );
+    StringAssert.Contains(
+      run["runtime"]!["lastFailure"]!.GetValue<string>(),
+      "output-token limit again"
+    );
+    Assert.HasCount(
+      2,
+      _environment.FakeOllama.Requests.Where(request =>
+        request.Messages.Any(message => message.Content.Contains(
+          "supervision always output limit",
+          StringComparison.OrdinalIgnoreCase
+        ))
+        && request.AvailableTools.Contains("create_file", StringComparer.Ordinal)
+      )
     );
   }
 
@@ -2075,6 +2331,58 @@ public sealed class DurableSupervisionEndToEndTests
     Assert.HasCount(
       1,
       events.Where(item => item["terminal"]!.GetValue<bool>())
+    );
+  }
+
+  [TestMethod]
+  [Timeout(40_000, CooperativeCancellation = true)]
+  public async Task InvalidVerificationDecisionUsesOneCanonicalCorrection()
+  {
+    _environment.FakeOllama.Reset();
+    var runId = await StartNativeSupervisionAsync(
+      "supervision first pass success with verification decision repair"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    Assert.AreEqual(
+      1,
+      run["runtime"]!["workItems"]![0]!["attemptCount"]!.GetValue<int>()
+    );
+    using var response = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.IsFalse(events.Any(item =>
+      item["type"]!.GetValue<string>() == "supervision.blocked"
+    ));
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        "SUPERVISION_VERIFICATION_DECISION_RECOVERY_V1",
+        StringComparison.Ordinal
+      ))
+    ));
+  }
+
+  [TestMethod]
+  [Timeout(40_000, CooperativeCancellation = true)]
+  public async Task FinalSupervisorStopBlockedPreservesItsTypedReason()
+  {
+    _environment.FakeOllama.Reset();
+    var runId = await StartNativeSupervisionAsync(
+      "supervision role aware completion fallback with supervision final blocked decision"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("blocked", run["state"]!.GetValue<string>(), run.ToJsonString());
+    Assert.AreEqual(
+      "supervision-completion-blocked",
+      run["waitCode"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "Required external validation is unavailable.",
+      run["runtime"]!["lastFailure"]!.GetValue<string>()
     );
   }
 

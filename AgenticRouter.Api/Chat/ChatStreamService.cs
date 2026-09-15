@@ -7,6 +7,7 @@ using System.Threading.Channels;
 using AgenticRouter.Api.Benchmarking;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Knowledge;
@@ -83,6 +84,7 @@ public sealed class ChatStreamService
   private readonly IExecutionContextTurnRunner _contextTurns;
   private readonly IAutoModelHarnessRoutingService _autoModelHarnessRouter;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
+  private readonly IModelGpuAffinityResolver _modelGpuAffinities;
   private readonly IBenchmarkExecutionContextAccessor _benchmarkContexts;
   private readonly HarnessWorkspaceBaselineCache _workspaceBaselines;
   private readonly IExecutionLatencyTracker _latency;
@@ -100,7 +102,8 @@ public sealed class ChatStreamService
     new Dictionary<string, string?>(
       StringComparer.OrdinalIgnoreCase
     );
-  private SupervisedPreflightCache? _supervisedPreflight;
+  private readonly Dictionary<ExecutionContextRole, SupervisedPreflightCache>
+    _supervisedPreflights = [];
 
   public ChatStreamService(
     ISettingsStore settingsStore,
@@ -135,6 +138,7 @@ public sealed class ChatStreamService
     IExecutionContextTurnRunner contextTurns,
     IAutoModelHarnessRoutingService autoModelHarnessRouter,
     IOllamaManagedServerManager managedOllamaServers,
+    IModelGpuAffinityResolver modelGpuAffinities,
     IBenchmarkExecutionContextAccessor benchmarkContexts,
     ITraceContext trace,
     HarnessWorkspaceBaselineCache workspaceBaselines,
@@ -175,6 +179,7 @@ public sealed class ChatStreamService
     _contextTurns = contextTurns;
     _autoModelHarnessRouter = autoModelHarnessRouter;
     _managedOllamaServers = managedOllamaServers;
+    _modelGpuAffinities = modelGpuAffinities;
     _benchmarkContexts = benchmarkContexts;
     _trace = trace;
     _workspaceBaselines = workspaceBaselines;
@@ -222,7 +227,7 @@ public sealed class ChatStreamService
   {
     var settings = invocation.Role == ExecutionContextRole.Direct
       ? await _settingsStore.GetAsync(cancellationToken)
-      : _supervisedPreflight?.Settings
+      : GetRunPreflight()?.Settings
         ?? await _settingsStore.GetAsync(cancellationToken);
     var warningAfter = TimeSpan.FromSeconds(
       settings.Runtime.GenerationTimeoutSeconds
@@ -260,9 +265,12 @@ public sealed class ChatStreamService
     _trace.Link("turnId", requestId);
     var stopwatch = Stopwatch.StartNew();
     var preflightTimer = Stopwatch.StartNew();
+    var runPreflight = invocation.Role == ExecutionContextRole.Direct
+      ? null
+      : GetRunPreflight();
     var cachedPreflight = invocation.Role == ExecutionContextRole.Direct
       ? null
-      : _supervisedPreflight;
+      : GetRoutePreflight(invocation, request);
 
     try
     {
@@ -279,7 +287,7 @@ public sealed class ChatStreamService
       ValidateDiagnosticTraceReference(
         request
       );
-      var settings = cachedPreflight?.Settings
+      var settings = runPreflight?.Settings
         ?? await _settingsStore.GetAsync(cancellationToken);
       var benchmarkContext = _benchmarkContexts.Current;
       _usageModelRoleOverride = benchmarkContext is null
@@ -293,7 +301,7 @@ public sealed class ChatStreamService
         "auto",
         StringComparison.OrdinalIgnoreCase
       );
-      var baseUri = cachedPreflight?.BaseUri ?? new Uri(
+      var baseUri = runPreflight?.BaseUri ?? new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
       );
@@ -311,13 +319,13 @@ public sealed class ChatStreamService
         stopwatch
       );
 
-      var models = cachedPreflight?.Models
+      var models = runPreflight?.Models
         ?? await GetModelsAsync(baseUri, cancellationToken);
       AutoModelHarnessRoutingResult? autoModelHarnessRoute = null;
-      var usageWorkspace = cachedPreflight is null
+      var usageWorkspace = runPreflight is null
         ? await _workspaceProfiles.GetActiveDataAsync(cancellationToken)
         : null;
-      _usageWorkspaceId = cachedPreflight?.WorkspaceId ?? usageWorkspace?.Id;
+      _usageWorkspaceId = runPreflight?.WorkspaceId ?? usageWorkspace?.Id;
       _usageConversationId = request.ConversationSessionId;
       _usageTurnId = requestId;
       _usageModelRevisions = models.ToDictionary(
@@ -523,9 +531,31 @@ public sealed class ChatStreamService
           : UsageModelRoles.Primary;
       }
 
-      _usageGpu = benchmarkContext?.Gpu ?? (isAuto
+      var inheritedGpu = invocation.Gpu ?? benchmarkContext?.Gpu ?? (isAuto
         ? settings.Intentions[intention].Gpu
         : settings.DefaultGpu);
+      try
+      {
+        _usageGpu = (await _modelGpuAffinities.ResolveAsync(
+          settings,
+          selectedModel,
+          inheritedGpu,
+          cancellationToken
+        )).GpuSelection;
+      }
+      catch (ModelGpuAffinityException exception)
+      {
+        throw new ChatStageException(
+          "gpu-affinity-resolution",
+          exception.Message,
+          exception.Message,
+          selectedModel,
+          intention,
+          409,
+          true,
+          exception
+        );
+      }
 
       if (request.AutoModelHarness)
       {
@@ -846,9 +876,9 @@ public sealed class ChatStreamService
           );
         }
         if (
-          cachedPreflight is not null
+          runPreflight is not null
           && !string.Equals(
-            cachedPreflight.Workspace.Path,
+            runPreflight.Workspace.Path,
             workspace.Path,
             StringComparison.OrdinalIgnoreCase
           )
@@ -883,17 +913,17 @@ public sealed class ChatStreamService
         );
         _latency.Mark("project-awareness-start");
         var projectAwarenessStarted = Stopwatch.GetTimestamp();
-        var project = cachedPreflight is null
+        var project = runPreflight is null
           ? await _projectAwareness.GetAsync(false, cancellationToken)
           : await _projectAwareness.RefreshRepositoryAsync(
-            cachedPreflight.Project,
+            runPreflight.Project,
             cancellationToken
           );
         _latency.Mark(
           "project-awareness-end",
           (long)Stopwatch.GetElapsedTime(projectAwarenessStarted).TotalMilliseconds
         );
-        var rootInstructions = cachedPreflight?.RootInstructions
+        var rootInstructions = runPreflight?.RootInstructions
           ?? await _repositoryInstructions.ResolveAsync(null, cancellationToken);
         _executionSession = _executionSessions.Begin(
           request.BrowserSessionId
@@ -949,7 +979,7 @@ public sealed class ChatStreamService
         _executionSession.ApplyInstructions(
           rootInstructions
         );
-        var activeValidationProfile = cachedPreflight?.ValidationProfile
+        var activeValidationProfile = runPreflight?.ValidationProfile
           ?? usageWorkspace?.ValidationProfile
           ?? settings.ValidationProfile;
         _executionSession.SelectValidationProfile(
@@ -1076,7 +1106,7 @@ public sealed class ChatStreamService
 
         if (cachedPreflight is null && invocation.Role != ExecutionContextRole.Direct)
         {
-          _supervisedPreflight = new SupervisedPreflightCache(
+          _supervisedPreflights[invocation.Role] = new SupervisedPreflightCache(
             settings,
             baseUri,
             models,
@@ -4819,14 +4849,31 @@ public sealed class ChatStreamService
             && repeatedCount > 1
           )
           {
-            progress.Failure = CreatePlanningNoProgressFailure(
-              model,
-              intention,
-              "The worker repeated the same invalid planning response after one corrected contract was supplied."
-            );
+            var outputLimitRepeated = planning.Failure is LocalActionException
+            {
+              Stage: LocalActionPlanner.OutputLimitStage
+            };
+            progress.Failure = outputLimitRepeated
+              ? new ChatStageException(
+                "local-action-output-limit",
+                "The worker exhausted its output-token limit again after the Host supplied one bounded incremental-write correction.",
+                "No proposal was executed. Increasing the configured model output limit or changing the implementation transport is required before retrying this work item.",
+                model,
+                intention,
+                409,
+                false,
+                planning.Failure
+              )
+              : CreatePlanningNoProgressFailure(
+                model,
+                intention,
+                "The worker repeated the same invalid planning response after one corrected contract was supplied."
+              );
             yield return Event(
               requestId,
-              "action.planning-no-progress",
+              outputLimitRepeated
+                ? "action.output-limit-exhausted"
+                : "action.planning-no-progress",
               progress.Failure.Message,
               stopwatch,
               model,
@@ -11975,6 +12022,37 @@ public sealed class ChatStreamService
     IAgentHarness Harness,
     string? WorkspaceId
   );
+
+  private SupervisedPreflightCache? GetRunPreflight()
+  {
+    return _supervisedPreflights.Values.FirstOrDefault();
+  }
+
+  private SupervisedPreflightCache? GetRoutePreflight(
+    ExecutionSpecialistTurnInvocation invocation,
+    ChatRequest request
+  )
+  {
+    if (_supervisedPreflights.TryGetValue(invocation.Role, out var rolePreflight))
+    {
+      return rolePreflight;
+    }
+
+    var matchingPreflight = _supervisedPreflights.Values.FirstOrDefault(item =>
+      string.Equals(item.Model, request.Model, StringComparison.OrdinalIgnoreCase)
+      && string.Equals(
+        item.HarnessDefinition.Id,
+        request.Harness,
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    if (matchingPreflight is not null)
+    {
+      _supervisedPreflights[invocation.Role] = matchingPreflight;
+    }
+
+    return matchingPreflight;
+  }
 
   private sealed class ExecutionProgress
   {

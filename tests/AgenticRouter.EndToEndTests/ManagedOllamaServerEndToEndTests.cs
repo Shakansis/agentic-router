@@ -15,6 +15,69 @@ public sealed class ManagedOllamaServerEndToEndTests
 {
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task PlanningAnotherRoleAffinityDoesNotReplaceTheActiveServer()
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      Assert.Inconclusive("Windows Job Object and TCP-owner validation are Windows-only.");
+    }
+
+    var temporaryRoot = Path.Combine(
+      Path.GetTempPath(),
+      "agentic-router-managed-ollama-e2e",
+      Guid.NewGuid().ToString("N")
+    );
+    Directory.CreateDirectory(temporaryRoot);
+    var executable = CopyFakeOllama(temporaryRoot);
+    OllamaManagedServerManager? manager = null;
+    try
+    {
+      manager = CreateManager(
+        Path.Combine(temporaryRoot, "data"),
+        new TestHttpClientFactory(),
+        executable
+      );
+      await manager.StartAsync(CancellationToken.None);
+      var endpoint = new Uri("http://127.0.0.1:11434");
+      var worker = await manager.ResolveAsync(
+        endpoint,
+        "vulkan:prefer:cuda:0",
+        "vulkan:prefer:cuda:0",
+        CancellationToken.None
+      );
+      var activeBeforePlan = manager.GetActiveServers().Single();
+
+      var supervisor = manager.Plan(endpoint, "rocm:0", "rocm:0");
+
+      Assert.IsTrue(supervisor.Managed);
+      Assert.AreEqual("rocm", supervisor.Backend);
+      Assert.AreEqual(worker.Endpoint, supervisor.Endpoint);
+      var activeAfterPlan = manager.GetActiveServers().Single();
+      Assert.AreEqual(activeBeforePlan.ProcessId, activeAfterPlan.ProcessId);
+      Assert.AreEqual(
+        "vulkan:prefer:cuda:0",
+        activeAfterPlan.Selection
+      );
+      using var activeProcess = Process.GetProcessById(
+        activeBeforePlan.ProcessId
+      );
+      Assert.IsFalse(activeProcess.HasExited);
+    }
+    finally
+    {
+      if (manager is not null)
+      {
+        await manager.DisposeAsync();
+      }
+      if (Directory.Exists(temporaryRoot))
+      {
+        Directory.Delete(temporaryRoot, recursive: true);
+      }
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task RetriesOnePortBindingRaceAndPreservesOtherStartupEvidence()
   {
     if (!OperatingSystem.IsWindows())
@@ -262,8 +325,7 @@ public sealed class ManagedOllamaServerEndToEndTests
       httpClients,
       NullLogger<OllamaManagedServerManager>.Instance,
       new FakeGpuDiscoveryService(),
-      executable,
-      portOffset: 1_000
+      executable
     );
   }
 

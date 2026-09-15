@@ -1445,6 +1445,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       exported,
       "fallback:"
     );
+    StringAssert.Contains(exported, "supervisor:");
+    StringAssert.Contains(exported, "model_affinities:");
     StringAssert.Contains(
       exported,
       "usage:"
@@ -1501,9 +1503,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           primary: beta:code
         coordinator:
           primary: docs:latest
+        supervisor:
+          primary: gpt-oss:20b
         software-development:
           primary: beta:code
           fallback: docs:latest
+      routing:
+        model_affinities:
+          affinity_1:
+            model: docs:latest
+            gpu: device:GPU-nvidia-4090-fixture
       runtime:
         generation_timeout_seconds: 222
       execution:
@@ -1543,6 +1552,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       imported.GetProperty(
         "coordinatorModel"
       ).GetString()
+    );
+    Assert.AreEqual(
+      "gpt-oss:20b",
+      imported.GetProperty("supervisorModel").GetString()
+    );
+    Assert.AreEqual(
+      "device:GPU-nvidia-4090-fixture",
+      imported.GetProperty("modelGpuAffinities")
+        .GetProperty("docs:latest")
+        .GetString()
     );
     Assert.AreEqual(
       "docs:latest",
@@ -1609,6 +1628,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     secondExportResponse.EnsureSuccessStatusCode();
     var secondExport = await secondExportResponse.Content.ReadAsStringAsync();
+    StringAssert.Contains(secondExport, "primary: \"gpt-oss:20b\"");
+    StringAssert.Contains(secondExport, "gpu: \"device:GPU-nvidia-4090-fixture\"");
     using var roundTripResponse = await _environment.HttpClient.PutAsJsonAsync(
       "api/settings/yaml",
       new
@@ -2103,6 +2124,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     StringAssert.Contains(
       nativeToolRequest.Messages[0].Content,
       "SPECIALIST_TOOL_LOOP_V2"
+    );
+    StringAssert.Contains(
+      nativeToolRequest.Messages[0].Content,
+      "place the complete arguments only in the native tool call"
     );
     StringAssert.Contains(
       nativeToolRequest.Messages[0].Content,

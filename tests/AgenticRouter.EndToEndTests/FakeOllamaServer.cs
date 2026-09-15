@@ -444,7 +444,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
-    var json = JsonSerializer.Serialize(payload, TestJson.Options) + "\n";
+    var json = JsonSerializer.Serialize(payload) + "\n";
     var bytes = Encoding.UTF8.GetBytes(json);
     await response.OutputStream.WriteAsync(bytes, cancellationToken);
     await response.OutputStream.FlushAsync(cancellationToken);
@@ -2338,6 +2338,62 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           StringComparison.Ordinal
         )
     ).ToArray();
+    if (
+      (
+        current.Contains(
+          "output limit incremental recovery",
+          StringComparison.OrdinalIgnoreCase
+        )
+        || current.Contains(
+          "always output limit",
+          StringComparison.OrdinalIgnoreCase
+        )
+      )
+      && availableTools.Contains("create_file", StringComparer.Ordinal)
+      && (
+        current.Contains("always output limit", StringComparison.OrdinalIgnoreCase)
+        || !activeMessages.Any(message => message.Content.StartsWith(
+          "LOCAL_ACTION_PLANNING_CORRECTION",
+          StringComparison.Ordinal
+        ))
+      )
+    )
+    {
+      if (stream)
+      {
+        await WriteStreamingToolResponseAsync(
+          response,
+          model,
+          string.Empty,
+          "I will draft an oversized file before calling the tool.",
+          null,
+          0,
+          cancellationToken,
+          4_096
+        );
+      }
+      else
+      {
+        await WriteJsonAsync(
+          response,
+          HttpStatusCode.OK,
+          new
+          {
+            message = new
+            {
+              role = "assistant",
+              content = string.Empty,
+              thinking = "I will draft an oversized file before calling the tool."
+            },
+            done = true,
+            prompt_eval_count = 120,
+            eval_count = 4_096
+          },
+          cancellationToken
+        );
+      }
+      return;
+    }
     var trackedPlanFixture = !messages.Any(message => message.Content.Contains(
       "SUPERVISION_",
       StringComparison.Ordinal
@@ -5064,6 +5120,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (
+      current.Contains(
+        "output limit incremental recovery",
+        StringComparison.OrdinalIgnoreCase
+      )
+      || current.Contains(
+        "always output limit",
+        StringComparison.OrdinalIgnoreCase
+      )
+    )
+    {
+      return new
+      {
+        tool = "create_file",
+        arguments = new
+        {
+          path = "output-limit-recovered.txt",
+          content = "recovered incrementally"
+        },
+        explanation = "Use one bounded file action after the output-limit correction."
+      };
+    }
     if (current.Contains("global user input native", StringComparison.OrdinalIgnoreCase))
     {
       return new
@@ -6188,6 +6266,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
               )
                 ? "automatic takeover inspect preserved effect in hello.txt"
                 : current.Contains(
+                  "verification decision repair",
+                  StringComparison.OrdinalIgnoreCase
+                )
+                  ? "supervision first pass success verification decision repair create file hello.txt with content hello world today"
+                : current.Contains(
+                  "supervision always output limit",
+                  StringComparison.OrdinalIgnoreCase
+                )
+                  ? "supervision always output limit create file hello.txt with content hello world today"
+                : current.Contains(
                   "supervision first pass success",
                   StringComparison.OrdinalIgnoreCase
                 )
@@ -6244,6 +6332,10 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         "SUPERVISION_VERIFY_WITH_VALIDATION_V1",
         StringComparison.Ordinal
       )
+      || current.Contains(
+        "SUPERVISION_VERIFICATION_DECISION_RECOVERY_V1",
+        StringComparison.Ordinal
+      )
     )
     {
       var evidenceRevision = ExtractSupervisionEvidenceRevision(current);
@@ -6256,6 +6348,28 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           "\"content\":\"hello world today\"",
           StringComparison.Ordinal
         );
+      if (current.Contains(
+        "verification decision repair",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "accept_work",
+            evidenceRevision,
+            coveredCriteria = current.Contains(
+              "SUPERVISION_VERIFICATION_DECISION_RECOVERY_V1",
+              StringComparison.Ordinal
+            )
+              ? new[] { criterion }
+              : Array.Empty<string>(),
+            summary = "The current Host evidence contains the exact required text."
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
       if (current.Contains(
         "supervision requirement modality",
         StringComparison.OrdinalIgnoreCase
@@ -6302,6 +6416,21 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
     if (current.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
     {
+      if (current.Contains(
+        "supervision final blocked decision",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = JsonSerializer.Serialize(
+          new
+          {
+            decision = "stop_blocked",
+            summary = "Required external validation is unavailable."
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
       decision = JsonSerializer.Serialize(
         new
         {
@@ -6838,7 +6967,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string? thinking,
     object? toolCalls,
     int thinkingDelayMilliseconds,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    int outputTokens = 30
   )
   {
     response.StatusCode = (int)HttpStatusCode.OK;
@@ -6890,7 +7020,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       null,
       toolCalls,
       true,
-      cancellationToken
+      cancellationToken,
+      outputTokens
     );
   }
 
@@ -7357,7 +7488,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string? thinking,
     object? toolCalls,
     bool done,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    int outputTokens = 30
   )
   {
     var json = JsonSerializer.Serialize(
@@ -7376,7 +7508,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             ? 120
             : (int?)null,
           eval_count = done
-            ? 30
+            ? outputTokens
             : (int?)null,
           total_duration = done ? 2_000_000_000L : (long?)null,
           load_duration = done ? 100_000_000L : (long?)null,

@@ -102,7 +102,9 @@ public sealed class LinuxGpuDiscoveryService : IGpuDiscoveryService
     {
       StartInfo = new ProcessStartInfo
       {
-        FileName = "nvidia-smi",
+        FileName = Environment.GetEnvironmentVariable(
+          "AGENTIC_ROUTER_NVIDIA_SMI_PATH"
+        ) ?? "nvidia-smi",
         UseShellExecute = false,
         CreateNoWindow = true,
         RedirectStandardOutput = true,

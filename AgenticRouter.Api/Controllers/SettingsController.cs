@@ -1,6 +1,8 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.WorkspaceProfiles;
@@ -19,6 +21,8 @@ public sealed class SettingsController : ControllerBase
   private readonly ITrustedWorkspaceService _trustedWorkspace;
   private readonly ICloudFallbackPolicy _cloudFallbackPolicy;
   private readonly IOllamaRuntimeProfileService _runtimeProfiles;
+  private readonly IModelOrganizationService _models;
+  private readonly IModelGpuAffinityResolver _modelGpuAffinities;
 
   public SettingsController(
     ISettingsStore settingsStore,
@@ -27,7 +31,9 @@ public sealed class SettingsController : ControllerBase
     IWorkspaceProfileService workspaceProfiles,
     ITrustedWorkspaceService trustedWorkspace,
     ICloudFallbackPolicy cloudFallbackPolicy,
-    IOllamaRuntimeProfileService runtimeProfiles
+    IOllamaRuntimeProfileService runtimeProfiles,
+    IModelOrganizationService models,
+    IModelGpuAffinityResolver modelGpuAffinities
   )
   {
     _settingsStore = settingsStore;
@@ -37,6 +43,8 @@ public sealed class SettingsController : ControllerBase
     _trustedWorkspace = trustedWorkspace;
     _cloudFallbackPolicy = cloudFallbackPolicy;
     _runtimeProfiles = runtimeProfiles;
+    _models = models;
+    _modelGpuAffinities = modelGpuAffinities;
   }
 
   [HttpGet]
@@ -203,6 +211,20 @@ public sealed class SettingsController : ControllerBase
       );
     }
 
+    var modelErrors = await ValidateModelSelectionsAsync(
+      settings,
+      cancellationToken
+    );
+    if (modelErrors.Count > 0)
+    {
+      return BadRequest(
+        new ValidationErrorsResponse(
+          "Settings were not saved because a Supervisor model or model GPU affinity is unavailable.",
+          modelErrors
+        )
+      );
+    }
+
     previous ??= await _settingsStore.GetAsync(
       cancellationToken
     );
@@ -228,6 +250,91 @@ public sealed class SettingsController : ControllerBase
     return Ok(
       result.Settings
     );
+  }
+
+  private async Task<IReadOnlyDictionary<string, string[]>> ValidateModelSelectionsAsync(
+    ApplicationSettings settings,
+    CancellationToken cancellationToken
+  )
+  {
+    if (
+      string.Equals(
+        settings.SupervisorModel,
+        SupervisorModelSelection.SameAsWorker,
+        StringComparison.Ordinal
+      )
+      && settings.ModelGpuAffinities.Count == 0
+    )
+    {
+      return new Dictionary<string, string[]>();
+    }
+
+    var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
+    var registry = await _models.GetAsync(cancellationToken);
+    var configuredModels = registry.Models.ToDictionary(
+      model => model.QualifiedId,
+      StringComparer.OrdinalIgnoreCase
+    );
+    if (
+      !string.Equals(
+        settings.SupervisorModel,
+        SupervisorModelSelection.SameAsWorker,
+        StringComparison.Ordinal
+      )
+      && (
+        !configuredModels.TryGetValue(settings.SupervisorModel, out var supervisor)
+        || !string.Equals(
+          supervisor.ProviderId,
+          ModelProviderIds.OllamaLocal,
+          StringComparison.Ordinal
+        )
+      )
+    )
+    {
+      errors["supervisorModel"] =
+      [
+        "Supervisor model must be Same as Worker or an available local model from the configured registry."
+      ];
+    }
+
+    foreach (var modelAffinity in settings.ModelGpuAffinities)
+    {
+      var field = $"modelGpuAffinities.{modelAffinity.Key}";
+      if (
+        !configuredModels.TryGetValue(modelAffinity.Key, out var model)
+        || !string.Equals(
+          model.ProviderId,
+          ModelProviderIds.OllamaLocal,
+          StringComparison.Ordinal
+        )
+      )
+      {
+        errors[field] = ["GPU affinity may be assigned only to a local model in the configured registry."];
+        continue;
+      }
+      if (string.Equals(
+        modelAffinity.Value,
+        ModelGpuAffinitySelection.Auto,
+        StringComparison.Ordinal
+      ))
+      {
+        continue;
+      }
+      try
+      {
+        _ = await _modelGpuAffinities.ResolveAsync(
+          settings,
+          modelAffinity.Key,
+          settings.DefaultGpu,
+          cancellationToken
+        );
+      }
+      catch (ModelGpuAffinityException exception)
+      {
+        errors[field] = [exception.Message];
+      }
+    }
+    return errors;
   }
 }
 

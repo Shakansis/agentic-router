@@ -15,6 +15,12 @@ namespace AgenticRouter.Api.Runtime;
 
 public interface IOllamaManagedServerManager
 {
+  OllamaEndpointResolution Plan(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection
+  );
+
   Task<OllamaEndpointResolution> ResolveAsync(
     Uri configuredEndpoint,
     string? selection,
@@ -56,6 +62,7 @@ public sealed class OllamaManagedServerManager :
   IHostedService,
   IAsyncDisposable
 {
+  private const int DefaultManagedPortOffset = 1_000;
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -85,7 +92,7 @@ public sealed class OllamaManagedServerManager :
     ILogger<OllamaManagedServerManager> logger,
     IGpuDiscoveryService gpuDiscovery,
     string? executableOverride = null,
-    int portOffset = 0
+    int portOffset = DefaultManagedPortOffset
   )
   {
     _leaseDirectory = Path.Combine(dataDirectory, "ollama-managed-servers");
@@ -128,6 +135,44 @@ public sealed class OllamaManagedServerManager :
     );
   }
 
+  public OllamaEndpointResolution Plan(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection
+  )
+  {
+    var target = OllamaGpuSelection.ResolveTarget(selection, defaultSelection);
+    if (target is null)
+    {
+      return new OllamaEndpointResolution(
+        configuredEndpoint,
+        null,
+        false,
+        null,
+        null
+      );
+    }
+
+    if (!ShouldManage(configuredEndpoint))
+    {
+      return new OllamaEndpointResolution(
+        configuredEndpoint,
+        target.AllDevices ? null : target.Index,
+        false,
+        target.Backend,
+        target.AllDevices ? null : target.Index
+      );
+    }
+
+    return new OllamaEndpointResolution(
+      ManagedEndpoint(configuredEndpoint),
+      ManagedMainGpu(target),
+      true,
+      target.Backend,
+      target.AllDevices ? null : target.Index
+    );
+  }
+
   public async Task<OllamaEndpointResolution> ResolveAsync(
     Uri configuredEndpoint,
     string? selection,
@@ -161,28 +206,14 @@ public sealed class OllamaManagedServerManager :
     CancellationToken cancellationToken
   )
   {
-    var target = OllamaGpuSelection.ResolveTarget(selection, defaultSelection);
-    if (target is null)
+    var planned = Plan(configuredEndpoint, selection, defaultSelection);
+    if (!planned.Managed)
     {
-      return new OllamaEndpointResolution(
-        configuredEndpoint,
-        null,
-        false,
-        null,
-        null
-      );
+      return planned;
     }
 
-    if (!ShouldManage(configuredEndpoint))
-    {
-      return new OllamaEndpointResolution(
-        configuredEndpoint,
-        target.AllDevices ? null : target.Index,
-        false,
-        target.Backend,
-        target.AllDevices ? null : target.Index
-      );
-    }
+    var target = OllamaGpuSelection.ResolveTarget(selection, defaultSelection);
+    Debug.Assert(target is not null);
 
     var server = await GetOrStartAsync(
       configuredEndpoint,
@@ -358,7 +389,7 @@ public sealed class OllamaManagedServerManager :
     )
     {
       _logger.LogWarning(
-        "Managed Ollama {Selection} lost the configured port during startup; retrying the verified port handoff once.",
+        "Managed Ollama {Selection} lost its managed port during startup; retrying the verified port handoff once.",
         target.Selection
       );
       await Task.Delay(PortHandoffInterval, cancellationToken);
@@ -980,6 +1011,14 @@ public sealed class OllamaManagedServerManager :
       && endpoint.Port == 11_434;
   }
 
+  private Uri ManagedEndpoint(Uri configuredEndpoint)
+  {
+    return new Uri(
+      $"http://127.0.0.1:{configuredEndpoint.Port + _portOffset}",
+      UriKind.Absolute
+    );
+  }
+
   private static int? ManagedMainGpu(OllamaGpuTarget target)
   {
     return target.AllDevices ? null : 0;
@@ -1019,8 +1058,8 @@ public sealed class OllamaManagedServerManager :
         if (!WindowsTcpOwner.TryGetOwnerProcessId(port, out var processId))
         {
           throw ManagedFailure(
-            "The configured Ollama port is already in use.",
-            $"Loopback port {port} is occupied, but its process identity could not be verified."
+            "The managed Ollama port is already in use.",
+            $"Managed loopback port {port} is occupied, but its process identity could not be verified."
           );
         }
         Process process;
@@ -1046,13 +1085,13 @@ public sealed class OllamaManagedServerManager :
           )
           {
             throw ManagedFailure(
-              "The configured Ollama port belongs to another process.",
-              $"Loopback port {port} belongs to PID {processId}; Agentic Router refused to stop an executable other than '{expectedExecutable}'."
+              "The managed Ollama port belongs to another process.",
+              $"Managed loopback port {port} belongs to PID {processId}; Agentic Router refused to stop an executable other than '{expectedExecutable}'."
             );
           }
 
           _logger.LogInformation(
-            "Stopping verified Ollama PID {ProcessId} on configured port {Port} before applying managed GPU configuration.",
+            "Stopping verified Ollama PID {ProcessId} on managed port {Port} before applying managed GPU configuration.",
             processId,
             port
           );
@@ -1065,8 +1104,8 @@ public sealed class OllamaManagedServerManager :
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
     {
       throw ManagedFailure(
-        "The configured Ollama port did not become available.",
-        $"Loopback port {port} remained occupied after verified Ollama processes were stopped for {ShutdownTimeout.TotalSeconds:0} seconds."
+        "The managed Ollama port did not become available.",
+        $"Managed loopback port {port} remained occupied after verified Ollama processes were stopped for {ShutdownTimeout.TotalSeconds:0} seconds."
       );
     }
   }

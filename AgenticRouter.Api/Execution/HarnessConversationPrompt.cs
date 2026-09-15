@@ -28,6 +28,9 @@ internal static class HarnessConversationPromptBuilder
     builder.Append(
       "- Report only actions and results that actually occurred.\n"
     );
+    builder.Append(
+      "- When a granted tool is needed, call it immediately. Do not draft, preview, or repeat the tool arguments in reasoning or visible prose; place the complete arguments only in the tool call.\n"
+    );
     builder.Append("- Host effort target for this turn: ")
       .Append(request.RequestedEffort)
       .Append(". ")

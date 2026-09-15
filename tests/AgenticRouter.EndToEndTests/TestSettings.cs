@@ -24,6 +24,10 @@ internal sealed record TestApplicationSettings
 
   public string DefaultGpu { get; init; } = "auto";
 
+  public string SupervisorModel { get; init; } = "same-as-worker";
+
+  public Dictionary<string, string> ModelGpuAffinities { get; init; } = [];
+
   public string? TrustedWorkspacePath { get; init; }
 
   public Dictionary<string, TestIntentionSettings> Intentions { get; init; } = [];

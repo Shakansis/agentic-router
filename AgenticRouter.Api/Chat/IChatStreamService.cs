@@ -21,7 +21,8 @@ public sealed record ExecutionSpecialistTurnInvocation(
   Action<string>? CaptureRoleResult = null,
   IExecutionActionJournal? ActionJournal = null,
   string RequestedEffort = ModelEffortLevels.Medium,
-  Action<ExecutionPreflightMeasurement>? CapturePreflight = null
+  Action<ExecutionPreflightMeasurement>? CapturePreflight = null,
+  string? Gpu = null
 )
 {
   public static ExecutionSpecialistTurnInvocation Direct { get; } = new(

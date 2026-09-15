@@ -932,7 +932,13 @@ public sealed record SupervisionProgressView(
   string? Model = null,
   string? Harness = null,
   string? ApprovalPolicy = null,
-  string? ContextId = null
+  string? ContextId = null,
+  string? WorkerModel = null,
+  string? WorkerGpu = null,
+  string? WorkerRuntime = null,
+  string? SupervisorModel = null,
+  string? SupervisorGpu = null,
+  string? SupervisorRuntime = null
 );
 
 public sealed record ChatStreamEvent(

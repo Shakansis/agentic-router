@@ -2614,7 +2614,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       string.Empty
     );
     var action = Page.Locator(
-      ".message.assistant .work-action"
+      ".message.assistant .work-action:has(.work-action-file)"
     );
     await Expect(
       action
@@ -3301,6 +3301,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       plannerRequests[0].Messages[0].Content,
       "create_file(path, content)"
     );
+    StringAssert.Contains(
+      plannerRequests[0].Messages[0].Content,
+      "unique insertion marker"
+    );
     Assert.IsTrue(
       plannerRequests.Any(
         request => request.AvailableTools.SequenceEqual(
@@ -3393,6 +3397,35 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
           "functiongemma-routing" or "functiongemma-routing-repair"
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeOutputLimitUsesOneIncrementalWriteCorrection()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute output limit incremental recovery");
+
+    Assert.AreEqual(
+      "recovered incrementally",
+      await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, "output-limit-recovered.txt")
+      )
+    );
+    await Expect(Page.Locator(
+      "[data-event-type=\"action.planning-retry\"]"
+    ).Filter(new() { HasTextString = "output limit" })).ToHaveCountAsync(1);
+    await Expect(Page.Locator(
+      "[data-event-type=\"action.output-limit-exhausted\"]"
+    )).ToHaveCountAsync(0);
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        "Do not call create_files for this recovery",
+        StringComparison.Ordinal
+      ))
+    ));
   }
 
   [TestMethod]

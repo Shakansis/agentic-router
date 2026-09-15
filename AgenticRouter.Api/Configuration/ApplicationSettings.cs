@@ -22,6 +22,10 @@ public sealed record ApplicationSettings
 
   public string DefaultGpu { get; init; } = "auto";
 
+  public string SupervisorModel { get; init; } = SupervisorModelSelection.SameAsWorker;
+
+  public Dictionary<string, string> ModelGpuAffinities { get; init; } = [];
+
   public string? TrustedWorkspacePath { get; init; }
 
   public Dictionary<string, IntentionSettings> Intentions { get; init; } = [];
@@ -55,6 +59,58 @@ public sealed record ApplicationSettings
   public ModelOrganizationSettings ModelOrganization { get; init; } = new();
 
   public OnboardingSettings Onboarding { get; init; } = new();
+}
+
+public static class SupervisorModelSelection
+{
+  public const string SameAsWorker = "same-as-worker";
+}
+
+public static class ModelGpuAffinitySelection
+{
+  public const string Auto = "auto";
+  public const string DevicePrefix = "device:";
+
+  public static string ForDevice(string deviceId)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+    return DevicePrefix + deviceId.Trim();
+  }
+
+  public static bool TryGetDeviceId(
+    string? affinity,
+    out string deviceId
+  )
+  {
+    deviceId = string.Empty;
+    if (
+      affinity is null
+      || !affinity.StartsWith(DevicePrefix, StringComparison.Ordinal)
+    )
+    {
+      return false;
+    }
+
+    deviceId = affinity[DevicePrefix.Length..].Trim();
+    return deviceId.Length > 0;
+  }
+
+  public static string GetForModel(
+    ApplicationSettings settings,
+    string model
+  )
+  {
+    var configured = settings.ModelGpuAffinities.FirstOrDefault(
+      pair => string.Equals(
+        pair.Key,
+        model,
+        StringComparison.OrdinalIgnoreCase
+      )
+    );
+    return string.IsNullOrWhiteSpace(configured.Key)
+      ? Auto
+      : configured.Value;
+  }
 }
 
 public sealed record OnboardingSettings

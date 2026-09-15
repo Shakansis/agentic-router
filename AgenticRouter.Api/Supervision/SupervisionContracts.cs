@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers;
 
@@ -275,8 +276,36 @@ public sealed record SupervisionRouteSnapshot(
   string Harness,
   string HarnessVersion,
   string OllamaEndpoint,
-  string WorkspacePathSha256
-);
+  string WorkspacePathSha256,
+  string WorkerGpuSelection = OllamaGpuSelection.Auto,
+  string? WorkerGpuDeviceId = null,
+  string? WorkerGpuDeviceName = null,
+  string? WorkerRuntime = null,
+  string? SupervisorProvider = null,
+  string? SupervisorModel = null,
+  string? SupervisorModelDigest = null,
+  string? SupervisorOllamaEndpoint = null,
+  string? SupervisorGpuSelection = null,
+  string? SupervisorGpuDeviceId = null,
+  string? SupervisorGpuDeviceName = null,
+  string? SupervisorRuntime = null,
+  bool GpuPlacementConflict = false,
+  string? WorkerInheritedGpuSelection = null,
+  string? SupervisorInheritedGpuSelection = null
+)
+{
+  [JsonIgnore]
+  public string EffectiveSupervisorProvider => SupervisorProvider ?? Provider;
+
+  [JsonIgnore]
+  public string EffectiveSupervisorModel => SupervisorModel ?? Model;
+
+  [JsonIgnore]
+  public string EffectiveSupervisorModelDigest => SupervisorModelDigest ?? ModelDigest;
+
+  [JsonIgnore]
+  public string EffectiveSupervisorOllamaEndpoint => SupervisorOllamaEndpoint ?? OllamaEndpoint;
+}
 
 public static class SupervisionActionPhases
 {

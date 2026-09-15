@@ -4610,6 +4610,167 @@ baselineTotal!.Value
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ModelGpuAffinityUsesStableDeviceIdentityAndOverridesRouteAndDefaultGpu()
+  {
+    var automatic = _environment.BaselineSettings with
+    {
+      DefaultGpu = "ollama:1"
+    };
+    using var automaticSaved = await _environment.PutSettingsAsync(automatic);
+    automaticSaved.EnsureSuccessStatusCode();
+    _environment.FakeOllama.Reset();
+    await PostChatStreamAsync(
+      "Use the inherited default GPU.",
+      "alpha:latest",
+      "browser-model-gpu-auto"
+    );
+    Assert.AreEqual(
+      1,
+      _environment.FakeOllama.Requests.Last(request => request.Stream).MainGpu,
+      "Auto model affinity must preserve DefaultGpu."
+    );
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator(
+      "[data-settings-target=\"models-routing\"]"
+    ).ClickAsync();
+    var organization = Page.Locator(
+      "#settings-models .model-organization-panel"
+    ).First;
+    await organization.Locator("summary").ClickAsync();
+    var card = organization.Locator(
+      ".model-organization-card[data-model-identity=\"alpha:latest\"]"
+    );
+    var affinity = card.Locator("select[data-model-gpu-affinity]");
+    await Expect(affinity).ToBeVisibleAsync();
+    var affinityLabels = await affinity.Locator("option").AllTextContentsAsync();
+    CollectionAssert.IsSubsetOf(
+      new[]
+      {
+        "Auto",
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA GeForce RTX 2070 SUPER"
+      },
+      affinityLabels.ToArray()
+    );
+    Assert.IsFalse(affinityLabels.Any(text =>
+      text.Contains("combined", StringComparison.OrdinalIgnoreCase)
+    ));
+    await affinity.SelectOptionAsync("device:GPU-nvidia-4090-fixture");
+    await Page.Locator(
+      "[data-settings-target=\"general\"]"
+    ).ClickAsync();
+    await Page.Locator("#default-gpu").SelectOptionAsync("ollama:1");
+    await Page.Locator("#supervisor-model").SelectOptionAsync("gpt-oss:20b");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+
+    var persisted = await GetSettingsJsonAsync();
+    Assert.AreEqual(
+      "device:GPU-nvidia-4090-fixture",
+      persisted["modelGpuAffinities"]!["alpha:latest"]!.GetValue<string>()
+    );
+    Assert.AreEqual(
+      "gpt-oss:20b",
+      persisted["supervisorModel"]!.GetValue<string>()
+    );
+
+    _environment.FakeOllama.Reset();
+    await PostChatStreamAsync(
+      "Use the model-specific stable GPU affinity.",
+      "alpha:latest",
+      "browser-model-gpu-affinity"
+    );
+    Assert.AreEqual(
+      0,
+      _environment.FakeOllama.Requests.Last(request => request.Stream).MainGpu,
+      "The explicit model affinity must override DefaultGpu=ollama:1."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SingleGpuSetupKeepsModelAffinityUiHidden()
+  {
+    using var setupResponse = await _environment.HttpClient.GetAsync(
+      "api/setup/status"
+    );
+    setupResponse.EnsureSuccessStatusCode();
+    var singleGpuSetup = JsonNode.Parse(
+      await setupResponse.Content.ReadAsStringAsync()
+    )!.AsObject();
+    var devices = singleGpuSetup["devices"]!.AsArray();
+    while (devices.Count > 2)
+    {
+      devices.RemoveAt(devices.Count - 1);
+    }
+    await Page.RouteAsync(
+      "**/api/setup/status",
+      route => route.FulfillAsync(
+        new RouteFulfillOptions
+        {
+          Status = 200,
+          ContentType = "application/json",
+          Body = singleGpuSetup.ToJsonString()
+        }
+      )
+    );
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator(
+      "[data-settings-target=\"models-routing\"]"
+    ).ClickAsync();
+    var organization = Page.Locator(
+      "#settings-models .model-organization-panel"
+    ).First;
+    await organization.Locator("summary").ClickAsync();
+    await Expect(organization.Locator(
+      "select[data-model-gpu-affinity]"
+    )).ToHaveCountAsync(0);
+    await Page.Locator(
+      "[data-settings-target=\"general\"]"
+    ).ClickAsync();
+    await Expect(Page.Locator("#supervisor-model")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#supervisor-model")).ToHaveValueAsync(
+      "same-as-worker"
+    );
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task LegacySettingsLoadWithSameWorkerAndAutomaticModelGpuDefaults()
+  {
+    var legacy = await GetSettingsJsonAsync();
+    legacy.Remove("supervisorModel");
+    legacy.Remove("modelGpuAffinities");
+    await _environment.RestartApplicationAsync(
+      () => File.WriteAllTextAsync(
+        _environment.SettingsPath,
+        legacy.ToJsonString(TestJson.Options)
+      )
+    );
+
+    var upgraded = await GetSettingsJsonAsync();
+    Assert.AreEqual(
+      "same-as-worker",
+      upgraded["supervisorModel"]!.GetValue<string>()
+    );
+    Assert.HasCount(
+      0,
+      upgraded["modelGpuAffinities"]!.AsObject()
+    );
+    var rewritten = JsonNode.Parse(
+      await File.ReadAllTextAsync(_environment.SettingsPath)
+    )!.AsObject();
+    Assert.IsNotNull(rewritten["supervisorModel"]);
+    Assert.IsNotNull(rewritten["modelGpuAffinities"]);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task AcceptsRocmAndCombinedVulkanGpuSelections()
   {
     var settings = await GetSettingsJsonAsync();
