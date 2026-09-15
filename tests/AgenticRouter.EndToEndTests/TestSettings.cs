@@ -181,7 +181,8 @@ internal sealed record TestOllamaRoleRuntimeSettings(
   int TargetContextTokens,
   int MaximumContextTokens,
   int KeepAlive,
-  int OutputTokenLimit
+  int OutputTokenLimit,
+  int? FileCreationOutputTokenLimit = null
 );
 
 internal sealed record TestOllamaModelRuntimeOverride(

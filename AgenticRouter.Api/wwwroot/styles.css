@@ -7840,6 +7840,53 @@ textarea[readonly] {
   gap: 0.75rem;
 }
 
+.benchmark-manual-prompt-fields,
+.benchmark-user-review {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--surface-elevated) 82%, transparent);
+}
+
+.benchmark-manual-prompt-fields[hidden],
+.benchmark-user-review[hidden] {
+  display: none;
+}
+
+.benchmark-manual-prompt-fields label,
+.benchmark-user-review label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.benchmark-manual-prompt-fields textarea,
+.benchmark-manual-prompt-fields input,
+.benchmark-user-review textarea,
+.benchmark-user-review input,
+.benchmark-controls > label select {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.6rem;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+
+.benchmark-manual-prompt-fields textarea,
+.benchmark-user-review textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.benchmark-manual-prompt-fields small,
+.benchmark-review-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
 .benchmark-selection-grid label {
   display: grid;
   gap: 0.35rem;
@@ -8080,6 +8127,15 @@ textarea[readonly] {
 
 .benchmark-score-context {
   margin: 0.25rem 0 0;
+}
+
+.benchmark-custom-ranking {
+  margin-top: 1rem;
+}
+
+.benchmark-custom-ranking p {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .benchmark-action-box {

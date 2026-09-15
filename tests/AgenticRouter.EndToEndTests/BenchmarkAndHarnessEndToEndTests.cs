@@ -3270,6 +3270,462 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   }
 
   [TestMethod]
+  [DoNotParallelize]
+  [Timeout(180_000, CooperativeCancellation = true)]
+  public async Task CustomPromptRunsBesidePredefinedTestsWithoutMixingScores()
+  {
+    _environment.FakeOllama.Reset();
+    const string prompt = "  native create host batch files\nKeep  internal   spacing.\n";
+    var selections = new[]
+    {
+      new BenchmarkSuiteSelection(BenchmarkSuiteIds.BasicCrud, 1),
+      new BenchmarkSuiteSelection(BenchmarkSuiteIds.Manual, BenchmarkSuiteIds.ManualVersion)
+    };
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "alpha:latest",
+        [HarnessIds.Native],
+        BenchmarkSuiteIds.BasicCrud,
+        1,
+        TimeoutSeconds: 30,
+        ModelExecutionPermissionGranted: true,
+        Models: ["alpha:latest"],
+        Suites: selections,
+        BenchmarkMode: BenchmarkModeIds.Manual,
+        CustomPrompt: prompt,
+        RunName: "Mixed test"
+      )
+    );
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(result);
+    Assert.AreEqual(BenchmarkSuiteIds.Combined, result.SuiteId);
+    Assert.AreEqual(BenchmarkModeIds.Manual, result.BenchmarkMode);
+    Assert.HasCount(2, result.SelectedSuites!);
+    Assert.AreEqual(prompt, result.CustomPrompt);
+    var cell = result.Cells!.Single();
+    var tests = cell.Result!.Tests;
+    Assert.HasCount(5, tests);
+    var manual = tests.Single(test => test.Run.SuiteId == BenchmarkSuiteIds.Manual);
+    var predefined = tests.Where(test => test.Run.SuiteId != BenchmarkSuiteIds.Manual).ToArray();
+    Assert.HasCount(4, predefined);
+    Assert.AreEqual(prompt, manual.Run.Prompt);
+    Assert.IsNull(manual.Score);
+    Assert.IsTrue(manual.WorkspaceRetained);
+    Assert.IsTrue(predefined.All(test => test.Score is not null));
+    var expected = decimal.Round(
+      predefined.Sum(test => test.Score!.Total) / predefined.Length,
+      2,
+      MidpointRounding.AwayFromZero
+    );
+    Assert.AreEqual(expected, cell.Score);
+    Assert.AreEqual(expected, cell.Result.Score);
+    Assert.AreEqual(expected, result.PairRanking!.Single().Score);
+    Assert.AreEqual(predefined.Count(test => test.RawResult.Status == BenchmarkResultStatusIds.Pass),
+      result.PairRanking!.Single().Passed);
+
+    using var rescore = await _environment.HttpClient.PostAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/rescore", null
+    );
+    rescore.EnsureSuccessStatusCode();
+    var projection = await rescore.Content.ReadFromJsonAsync<BenchmarkScoringProjection>();
+    Assert.IsNotNull(projection);
+    Assert.HasCount(4, projection.MatrixCellScores!.Single().Tests);
+    Assert.AreEqual(expected, projection.PairRanking!.Single().Score);
+    using var forbidden = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/results/{predefined[0].Run.RunId}/review",
+      new BenchmarkUserReviewRequest(99)
+    );
+    Assert.AreEqual(HttpStatusCode.BadRequest, forbidden.StatusCode);
+    if (manual.ReviewStatus == BenchmarkReviewStatusIds.AwaitingUserReview)
+    {
+      using var review = await _environment.HttpClient.PutAsJsonAsync(
+        $"api/benchmarks/suite-runs/{result.RunId}/results/{manual.Run.RunId}/review",
+        new BenchmarkUserReviewRequest(95, "Creative quality")
+      );
+      review.EnsureSuccessStatusCode();
+      var reviewed = await review.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+      Assert.IsNotNull(reviewed);
+      Assert.AreEqual(95, reviewed.Cells!.Single().UserScore);
+      Assert.AreEqual(expected, reviewed.PairRanking!.Single().Score);
+      Assert.AreEqual(expected, reviewed.Cells!.Single().Score);
+    }
+
+    using var rerunResponse = await _environment.HttpClient.PostAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/rerun", null
+    );
+    Assert.AreEqual(HttpStatusCode.Accepted, rerunResponse.StatusCode);
+    var rerunStart = await rerunResponse.Content.ReadFromJsonAsync<BenchmarkLiveRunStart>();
+    Assert.IsNotNull(rerunStart);
+    BenchmarkLiveRunView? rerunView = null;
+    for (var attempt = 0; attempt < 300; attempt++)
+    {
+      rerunView = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{rerunStart.RunId}/live"
+      );
+      if (rerunView?.Terminal == true) break;
+      await Task.Delay(100);
+    }
+    Assert.IsNotNull(rerunView);
+    Assert.IsTrue(rerunView.Terminal);
+    var rerun = rerunView.Events.Single(item =>
+      item.Type == BenchmarkProgressTypeIds.RunCompleted).FinalResult!;
+    Assert.AreEqual(result.RunId, rerun.RerunOfRunId);
+    Assert.AreEqual(prompt, rerun.CustomPrompt);
+    Assert.AreEqual(result.ScoreWeights, rerun.ScoreWeights);
+    Assert.HasCount(2, rerun.SelectedSuites!);
+    Assert.HasCount(5, rerun.Cells!.Single().Result!.Tests);
+    Assert.IsFalse(rerun.Cells!.Single().Result!.Tests.Select(test => test.Run.WorkspaceId)
+      .Intersect(tests.Select(test => test.Run.WorkspaceId),
+        StringComparer.OrdinalIgnoreCase).Any());
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Page.Locator("#benchmark-tab-history").ClickAsync();
+    await Page.Locator(".benchmark-history-advanced > summary").ClickAsync();
+    await Page.Locator("#benchmark-history").SelectOptionAsync(result.RunId);
+    await Expect(Page.Locator("#benchmark-suite-list input[value='manual']"))
+      .ToBeCheckedAsync();
+    await Expect(Page.Locator("#benchmark-suite-list input[value='basic-crud']"))
+      .ToBeCheckedAsync();
+    await Page.Locator("#benchmark-tab-results").ClickAsync();
+    await Expect(Page.Locator("#benchmark-custom-ranking")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-custom-ranking-body tr"))
+      .ToHaveCountAsync(1);
+    await Expect(Page.Locator("#benchmark-score-context"))
+      .ToContainTextAsync("only predefined tests");
+    await Page.Locator("#benchmark-results-body [data-model='alpha:latest']").ClickAsync();
+    await Expect(Page.Locator("#benchmark-result-detail .benchmark-test-detail"))
+      .ToHaveCountAsync(5);
+    await Expect(Page.Locator("#benchmark-result-detail .benchmark-user-review"))
+      .ToHaveCountAsync(1);
+
+    await SelectBenchmarkModelsAsync("alpha:latest");
+    await Page.Locator("#benchmark-harness-list input[value='native']").CheckAsync();
+    foreach (var harness in new[] { "codex", "opencode", "qwen-code", "claude-code" })
+    {
+      var toggle = Page.Locator($"#benchmark-harness-list input[value='{harness}']");
+      if (await toggle.IsCheckedAsync()) await toggle.UncheckAsync();
+    }
+    await Page.Locator("#benchmark-custom-prompt").FillAsync(prompt);
+    await Page.Locator("#benchmark-timeout").FillAsync("30");
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status"))
+      .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
+    await Page.Locator("#benchmark-tab-results").ClickAsync();
+    await Expect(Page.Locator("#benchmark-custom-ranking"))
+      .ToBeVisibleAsync();
+    var browserRunId = await Page.Locator("#benchmark-history").InputValueAsync();
+    Assert.AreNotEqual(result.RunId, browserRunId);
+    var browserRun = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+      $"api/benchmarks/suite-runs/{browserRunId}"
+    );
+    Assert.IsNotNull(browserRun);
+    Assert.HasCount(2, browserRun.SelectedSuites!);
+    Assert.HasCount(5, browserRun.Cells!.Single().Result!.Tests);
+    Assert.AreEqual(prompt, browserRun.CustomPrompt);
+
+    foreach (var runId in new[] { result.RunId, rerun.RunId, browserRunId })
+    {
+      using var delete = await _environment.HttpClient.DeleteAsync(
+        $"api/benchmarks/suite-runs/{runId}?confirmed=true"
+      );
+      delete.EnsureSuccessStatusCode();
+    }
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(180_000, CooperativeCancellation = true)]
+  public async Task ManualPromptUsesProductionExecutePersistsExactPromptAndRanksOnlyUserReviews()
+  {
+    _environment.FakeOllama.Reset();
+    const string prompt = "  native create host batch files\nKeep  internal   spacing.\n";
+    const string runName = "Galaga Test";
+    var models = new[] { "alpha:latest", "structured:latest" };
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        models[0],
+        [HarnessIds.Native],
+        BenchmarkSuiteIds.Manual,
+        BenchmarkSuiteIds.ManualVersion,
+        TimeoutSeconds: 30,
+        ModelExecutionPermissionGranted: true,
+        Models: models,
+        BenchmarkMode: BenchmarkModeIds.Manual,
+        CustomPrompt: prompt,
+        RunName: runName
+      )
+    );
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(result);
+    Assert.AreEqual(BenchmarkModeIds.Manual, result.BenchmarkMode);
+    Assert.AreEqual(prompt, result.CustomPrompt);
+    Assert.AreEqual(runName, result.RunName);
+    Assert.AreEqual("auto", result.Configuration!.ExecutionStrategy);
+    Assert.AreEqual("manual", result.Configuration.SupervisionResumePolicy);
+    Assert.AreEqual(BenchmarkReviewStatusIds.AwaitingUserReview, result.ReviewStatus);
+    Assert.IsEmpty(result.PairRanking!);
+    Assert.HasCount(2, result.Cells!);
+    var tests = result.Cells!.Select(cell => cell.Result!.Tests.Single()).ToArray();
+    Assert.HasCount(2, tests.Select(test => test.Run.WorkspaceId).Distinct().ToArray());
+    Assert.IsTrue(tests.All(test =>
+      test.Run.Prompt == prompt
+      && test.RawResult.Turns!.Single().Prompt == prompt
+      && test.Score is null
+      && test.UserReview is null
+      && test.WorkspaceRetained
+      && Directory.Exists(test.Run.WorkspacePath)
+      && test.RawResult.OperationalDiagnostics is not null), JsonSerializer.Serialize(tests));
+    var successful = tests.Single(test =>
+      test.RawResult.ExecutionStatus == BenchmarkExecutionStatusIds.Completed);
+    var technicalFailure = tests.Single(test =>
+      test.RawResult.ExecutionStatus == BenchmarkExecutionStatusIds.Failed);
+    Assert.IsNull(successful.RawResult.Error);
+    Assert.AreEqual(BenchmarkReviewStatusIds.AwaitingUserReview, successful.ReviewStatus);
+    Assert.IsNotNull(technicalFailure.RawResult.Error);
+    Assert.AreEqual(BenchmarkReviewStatusIds.TechnicalFailure, technicalFailure.ReviewStatus);
+    Assert.IsTrue(_environment.FakeOllama.Requests.Where(request =>
+      request.Messages.Any(message => message.Content.Contains(prompt, StringComparison.Ordinal)))
+      .Select(request => request.Model)
+      .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)
+      .SequenceEqual(models.Order(StringComparer.OrdinalIgnoreCase)), JsonSerializer.Serialize(
+        _environment.FakeOllama.Requests.Select(request => new
+        {
+          request.Model,
+          Messages = request.Messages.Select(message => message.Content).ToArray()
+        })
+      ));
+
+    var first = successful;
+    var firstOutputTokens = first.RawResult.OutputTokens;
+    using var firstReviewResponse = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/results/{first.Run.RunId}/review",
+      new BenchmarkUserReviewRequest(95, "  Strong result; preserve these notes exactly.  ")
+    );
+    firstReviewResponse.EnsureSuccessStatusCode();
+    var firstReviewed = await firstReviewResponse.Content
+      .ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.IsNotNull(firstReviewed);
+    Assert.AreEqual(BenchmarkReviewStatusIds.Reviewed, firstReviewed.ReviewStatus);
+    var savedFirst = firstReviewed.Cells!.Single(cell => cell.Model == first.Run.Model)
+      .Result!.Tests.Single();
+    Assert.AreEqual(95, savedFirst.UserReview!.Score);
+    Assert.AreEqual("  Strong result; preserve these notes exactly.  ", savedFirst.UserReview.Notes);
+    Assert.AreEqual(firstOutputTokens, savedFirst.RawResult.OutputTokens);
+    Assert.HasCount(1, firstReviewed.PairRanking!);
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Page.Locator("#benchmark-tab-history").ClickAsync();
+    await Expect(Page.Locator($"#benchmark-history option[value='{result.RunId}']"))
+      .ToHaveCountAsync(1);
+    await Page.Locator(".benchmark-history-advanced > summary").ClickAsync();
+    await Expect(Page.Locator("#benchmark-history")).ToBeVisibleAsync();
+    await Page.Locator("#benchmark-history").SelectOptionAsync(result.RunId);
+    await Expect(Page.Locator("#benchmark-suite-list input[value='manual']"))
+      .ToBeCheckedAsync();
+    await Expect(Page.Locator("#benchmark-custom-prompt")).ToHaveValueAsync(prompt);
+    await Page.Locator("#benchmark-tab-results").ClickAsync();
+    await Page.Locator($"#benchmark-results-body [data-model='{first.Run.Model}']").ClickAsync();
+    await Page.Locator("#benchmark-result-detail .benchmark-test-detail > summary")
+      .First.ClickAsync();
+    var reviewForm = Page.Locator(
+      $"#benchmark-result-detail .benchmark-user-review[data-test-run-id='{first.Run.RunId}']"
+    );
+    await reviewForm.Locator("[data-benchmark-review-score]").FillAsync("97");
+    await reviewForm.Locator("[data-benchmark-review-notes]").FillAsync("Updated in browser");
+    await reviewForm.Locator("[data-benchmark-save-review]").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status")).ToContainTextAsync("User review saved");
+    var browserReviewed = await _environment.HttpClient
+      .GetFromJsonAsync<BenchmarkSuiteRunResult>($"api/benchmarks/suite-runs/{result.RunId}");
+    Assert.AreEqual(97, browserReviewed!.Cells!.Single(cell => cell.Model == first.Run.Model)
+      .UserScore);
+    Assert.AreEqual("Updated in browser", browserReviewed.Cells!.Single(cell =>
+      cell.Model == first.Run.Model).Result!.Tests.Single().UserReview!.Notes);
+
+    using var updateReviewResponse = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/results/{first.Run.RunId}/review",
+      new BenchmarkUserReviewRequest(96, "Updated")
+    );
+    updateReviewResponse.EnsureSuccessStatusCode();
+    var updated = await updateReviewResponse.Content.ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+    Assert.AreEqual(96, updated!.Cells!.Single(cell => cell.Model == first.Run.Model).UserScore);
+
+    var second = technicalFailure;
+    using var failedReviewResponse = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/results/{second.Run.RunId}/review",
+      new BenchmarkUserReviewRequest(96, null)
+    );
+    Assert.AreEqual(HttpStatusCode.BadRequest, failedReviewResponse.StatusCode);
+    var reviewed = updated;
+    Assert.AreEqual(BenchmarkReviewStatusIds.Reviewed, reviewed.ReviewStatus);
+    CollectionAssert.AreEqual(
+      new[] { 96m },
+      reviewed.PairRanking!.Select(entry => entry.Score).ToArray()
+    );
+
+    using var invalidReview = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/results/{second.Run.RunId}/review",
+      new BenchmarkUserReviewRequest(101, null)
+    );
+    Assert.AreEqual(HttpStatusCode.BadRequest, invalidReview.StatusCode);
+
+    using var rerunResponse = await _environment.HttpClient.PostAsync(
+      $"api/benchmarks/suite-runs/{result.RunId}/rerun",
+      null
+    );
+    Assert.AreEqual(HttpStatusCode.Accepted, rerunResponse.StatusCode);
+    var rerunStart = await rerunResponse.Content.ReadFromJsonAsync<BenchmarkLiveRunStart>();
+    Assert.IsNotNull(rerunStart);
+    BenchmarkLiveRunView? rerunView = null;
+    for (var attempt = 0; attempt < 900; attempt++)
+    {
+      rerunView = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{rerunStart.RunId}/live"
+      );
+      if (rerunView?.Terminal == true) break;
+      await Task.Delay(100);
+    }
+    Assert.IsNotNull(rerunView);
+    Assert.IsTrue(rerunView.Terminal);
+    var rerun = rerunView.Events.Single(item => item.Type == BenchmarkProgressTypeIds.RunCompleted)
+      .FinalResult!;
+    Assert.AreNotEqual(result.RunId, rerun.RunId);
+    Assert.AreEqual(result.RunId, rerun.RerunOfRunId);
+    Assert.AreEqual(prompt, rerun.CustomPrompt);
+    Assert.IsTrue(rerun.Cells!.SelectMany(cell => cell.Result!.Tests)
+      .All(test => test.UserReview is null && test.Run.Prompt == prompt));
+    Assert.IsFalse(rerun.Cells!.SelectMany(cell => cell.Result!.Tests)
+      .Select(test => test.Run.WorkspaceId)
+      .Intersect(tests.Select(test => test.Run.WorkspaceId), StringComparer.OrdinalIgnoreCase)
+      .Any());
+    var original = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+      $"api/benchmarks/suite-runs/{result.RunId}"
+    );
+    Assert.AreEqual(BenchmarkReviewStatusIds.Reviewed, original!.ReviewStatus);
+
+    foreach (var runId in new[] { result.RunId, rerun.RunId })
+    {
+      using var delete = await _environment.HttpClient.DeleteAsync(
+        $"api/benchmarks/suite-runs/{runId}?confirmed=true"
+      );
+      delete.EnsureSuccessStatusCode();
+    }
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+    _environment.FakeOllama.RemoveLoadedModel("structured:latest");
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ManualPromptCancellationAndUnavailableCellsAreTechnicalFailuresWithoutScores()
+  {
+    const string prompt = "Create a readable project artifact in this workspace.";
+    var unavailableRunId = Guid.NewGuid().ToString("N");
+    using (var unavailableResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs",
+      new BenchmarkSuiteRunRequest(
+        "missing:latest",
+        [HarnessIds.Native],
+        BenchmarkSuiteIds.Manual,
+        BenchmarkSuiteIds.ManualVersion,
+        TimeoutSeconds: 30,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: unavailableRunId,
+        Models: ["missing:latest"],
+        BenchmarkMode: BenchmarkModeIds.Manual,
+        CustomPrompt: prompt
+      )
+    ))
+    {
+      unavailableResponse.EnsureSuccessStatusCode();
+      var unavailable = await unavailableResponse.Content
+        .ReadFromJsonAsync<BenchmarkSuiteRunResult>();
+      Assert.IsNotNull(unavailable);
+      var cell = unavailable.Cells!.Single();
+      Assert.AreEqual(BenchmarkMatrixCellStatusIds.Unavailable, cell.Status);
+      Assert.AreEqual(BenchmarkReviewStatusIds.TechnicalFailure, cell.ReviewStatus);
+      Assert.IsNull(cell.UserScore);
+      Assert.AreEqual(BenchmarkReviewStatusIds.Reviewed, unavailable.ReviewStatus);
+      Assert.IsEmpty(unavailable.PairRanking!);
+    }
+
+    var cancelRunId = Guid.NewGuid().ToString("N");
+    const string delayedPrompt = "Benchmark test: FS-READ-001\nCreate a readable project artifact in this workspace.";
+    using (var start = await _environment.HttpClient.PostAsJsonAsync(
+      "api/benchmarks/suite-runs/live",
+      new BenchmarkSuiteRunRequest(
+        "docs:latest",
+        [HarnessIds.Native],
+        BenchmarkSuiteIds.Manual,
+        BenchmarkSuiteIds.ManualVersion,
+        TimeoutSeconds: 60,
+        ModelExecutionPermissionGranted: true,
+        ClientRunId: cancelRunId,
+        Models: ["docs:latest", "alpha:latest"],
+        BenchmarkMode: BenchmarkModeIds.Manual,
+        CustomPrompt: delayedPrompt
+      )
+    ))
+    {
+      Assert.AreEqual(HttpStatusCode.Accepted, start.StatusCode);
+    }
+    for (var attempt = 0; attempt < 200; attempt++)
+    {
+      var current = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{cancelRunId}/live"
+      );
+      if (current?.Events.Any(item =>
+        item.Type == BenchmarkProgressTypeIds.HarnessStarted
+        && item.Model == "docs:latest") == true)
+      {
+        break;
+      }
+      await Task.Delay(50);
+    }
+    using (var cancel = await _environment.HttpClient.PostAsync(
+      $"api/benchmarks/suite-runs/{cancelRunId}/cancel", null
+    ))
+    {
+      Assert.AreEqual(HttpStatusCode.Accepted, cancel.StatusCode);
+    }
+    BenchmarkLiveRunView? terminal = null;
+    for (var attempt = 0; attempt < 300; attempt++)
+    {
+      terminal = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView>(
+        $"api/benchmarks/suite-runs/{cancelRunId}/live"
+      );
+      if (terminal?.Terminal == true) break;
+      await Task.Delay(100);
+    }
+    Assert.IsNotNull(terminal);
+    Assert.IsTrue(terminal.Terminal);
+    var cancelled = terminal.Events.Single(item =>
+      item.Type == BenchmarkProgressTypeIds.RunCompleted).FinalResult!;
+    Assert.AreEqual(BenchmarkRunStatusIds.Cancelled, cancelled.TerminalState);
+    Assert.HasCount(2, cancelled.Cells!);
+    Assert.IsTrue(cancelled.Cells!.All(cell =>
+      cell.Status == BenchmarkMatrixCellStatusIds.Cancelled
+      && cell.ReviewStatus == BenchmarkReviewStatusIds.TechnicalFailure
+      && cell.UserScore is null));
+    Assert.AreEqual(BenchmarkReviewStatusIds.Reviewed, cancelled.ReviewStatus);
+    Assert.IsEmpty(cancelled.PairRanking!);
+    foreach (var runId in new[] { unavailableRunId, cancelRunId })
+    {
+      using var delete = await _environment.HttpClient.DeleteAsync(
+        $"api/benchmarks/suite-runs/{runId}?confirmed=true"
+      );
+      delete.EnsureSuccessStatusCode();
+    }
+    _environment.FakeOllama.RemoveLoadedModel("docs:latest");
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task AutomatedBenchmarkUiSelectsHarnessesRanksAndOpensCrudEvidence()
   {
@@ -3277,9 +3733,45 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#open-benchmarks").ClickAsync();
     await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
     await Expect(Page.Locator("#conversation-view")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#benchmark-setup-tests")).ToBeVisibleAsync();
+    var defaultPrompt = await Page.EvaluateAsync<string>(
+      "() => window.AgenticRouterI18n.t('benchmark.custom_prompt.default')"
+    );
+    Assert.IsTrue(defaultPrompt.StartsWith("Build a playable Galaga-inspired", StringComparison.Ordinal));
+    await Expect(Page.Locator("#benchmark-custom-prompt"))
+      .ToHaveValueAsync(defaultPrompt);
+    await Expect(Page.Locator("#benchmark-custom-prompt-help"))
+      .ToHaveTextAsync("This test sends the exact text above. Use any task, including text review or creative writing.");
+    await Page.Locator("#benchmark-suite-list input[value='manual']").CheckAsync();
+    await Expect(Page.Locator("#benchmark-manual-prompt-fields")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-manual-prompt-fields label").First.Locator("span"))
+      .ToHaveTextAsync("Run name (optional)");
+    await Expect(Page.Locator("#benchmark-run-name"))
+      .ToHaveAttributeAsync("placeholder", "Galaga Test");
+    await Expect(Page.Locator("#benchmark-manual-prompt-fields label").Nth(1).Locator("span"))
+      .ToHaveTextAsync("Custom Benchmark Prompt");
+    await Page.Locator("#benchmark-custom-prompt")
+      .FillAsync("  Review this text and preserve its tone.  ");
+    await Page.EvaluateAsync(
+      "() => { window.AgenticRouterI18n.registerCatalog('qa', { 'benchmark.custom_prompt.name': 'QA Custom Prompt', 'benchmark.custom_prompt.help': 'QA translated help', 'benchmark.custom_prompt.switch_aria': 'QA switch' }); window.AgenticRouterI18n.setLocale('qa'); }"
+    );
+    await Expect(Page.Locator("#benchmark-suite-list label").Last.Locator("strong"))
+      .ToHaveTextAsync("QA Custom Prompt");
+    await Expect(Page.Locator("#benchmark-suite-list input[value='manual']"))
+      .ToHaveAttributeAsync("aria-label", "QA switch");
+    await Expect(Page.Locator("#benchmark-custom-prompt-help"))
+      .ToHaveTextAsync("QA translated help");
+    await Expect(Page.Locator("#benchmark-custom-prompt"))
+      .ToHaveValueAsync("  Review this text and preserve its tone.  ");
+    await Page.EvaluateAsync("() => window.AgenticRouterI18n.setLocale('en')");
+    await Page.Locator("#benchmark-suite-list input[value='manual']").UncheckAsync();
+    await Expect(Page.Locator("#benchmark-setup-tests")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-manual-prompt-fields")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#benchmark-custom-prompt"))
+      .ToHaveValueAsync("  Review this text and preserve its tone.  ");
     await Expect(Page.Locator("#close-benchmarks"))
       .ToContainTextAsync("Back to conversation");
-    await Expect(Page.Locator("#benchmark-suite-list input")).ToHaveCountAsync(3);
+    await Expect(Page.Locator("#benchmark-suite-list input")).ToHaveCountAsync(4);
     await Expect(Page.Locator("#benchmark-suite-list"))
       .ToContainTextAsync("Real Life Problem");
     await Expect(Page.Locator("#benchmark-suite-list input").First)

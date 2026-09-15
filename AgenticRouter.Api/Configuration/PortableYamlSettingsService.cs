@@ -1436,6 +1436,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         "target_context_tokens",
         "maximum_context_tokens",
         "output_token_limit",
+        "file_creation_output_token_limit",
         "keep_alive"
       ],
       path,
@@ -1470,6 +1471,13 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         "output_token_limit",
         fallback.OutputTokenLimit,
         $"{path}.output_token_limit",
+        errors
+      ),
+      FileCreationOutputTokenLimit = ReadNullableInt(
+        node,
+        "file_creation_output_token_limit",
+        fallback.FileCreationOutputTokenLimit,
+        $"{path}.file_creation_output_token_limit",
         errors
       ),
       KeepAlive = ReadInt(
@@ -2751,6 +2759,39 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     return fallback;
   }
 
+  private static int? ReadNullableInt(
+    YamlNode parent,
+    string key,
+    int? fallback,
+    string path,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    if (
+      parent.Children is null
+      || !parent.Children.TryGetValue(key, out var node)
+    )
+    {
+      return fallback;
+    }
+    if (node.Scalar is null)
+    {
+      AddError(errors, path, $"Line {node.Line}: expected a scalar value.");
+      return fallback;
+    }
+    if (int.TryParse(
+      node.Scalar,
+      NumberStyles.Integer,
+      CultureInfo.InvariantCulture,
+      out var parsed
+    ))
+    {
+      return parsed;
+    }
+    AddError(errors, path, "Value must be an integer.");
+    return fallback;
+  }
+
   private static long ReadLong(
     YamlNode parent,
     string key,
@@ -3095,6 +3136,15 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "output_token_limit",
       profile.OutputTokenLimit
     );
+    if (profile.FileCreationOutputTokenLimit is int fileCreationOutputTokenLimit)
+    {
+      Scalar(
+        yaml,
+        level,
+        "file_creation_output_token_limit",
+        fileCreationOutputTokenLimit
+      );
+    }
     Scalar(
       yaml,
       level,

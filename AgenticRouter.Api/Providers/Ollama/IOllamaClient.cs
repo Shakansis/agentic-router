@@ -62,7 +62,8 @@ public interface IOllamaClient
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
     string? requestedEffort = null,
-    ProviderGenerationProfile? generationProfile = null
+    ProviderGenerationProfile? generationProfile = null,
+    bool useFileCreationOutputTokenLimit = false
   );
 
   Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(

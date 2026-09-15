@@ -138,7 +138,8 @@ public sealed record ChatRequest(
   string? DiagnosticTraceId = null,
   bool HideUserMessage = false,
   int? ReplaceFromMessageIndex = null,
-  string? SupervisionRunId = null
+  string? SupervisionRunId = null,
+  bool PreserveExactUserMessage = false
 );
 
 public sealed record HarnessSteerInput(

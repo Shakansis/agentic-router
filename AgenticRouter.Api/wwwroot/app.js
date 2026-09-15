@@ -161,6 +161,10 @@ document.addEventListener("DOMContentLoaded", initialize);
 async function initialize() {
   window.AgenticRouterI18n.localizeDocument();
   bindElements();
+  const defaultBenchmarkPrompt = t("benchmark.custom_prompt.default");
+  if (defaultBenchmarkPrompt) {
+    elements.benchmarkCustomPrompt.value = defaultBenchmarkPrompt;
+  }
   bindEvents();
   initializeSidebarResize();
   initializeScrollFollowing();
@@ -323,6 +327,10 @@ function bindElements() {
     "open-benchmarks",
     "benchmark-view",
     "benchmark-form",
+    "benchmark-manual-prompt-fields",
+    "benchmark-run-name",
+    "benchmark-custom-prompt",
+    "benchmark-setup-tests",
     "benchmark-model",
     "benchmark-model-list",
     "benchmark-suite",
@@ -466,6 +474,9 @@ function bindElements() {
     "runtime-override-target",
     "runtime-override-maximum",
     "runtime-override-output",
+    "runtime-override-file-creation-output",
+    "general-file-creation-model",
+    "general-file-creation-output",
     "runtime-override-keep-alive",
     "save-runtime-override",
     "remove-runtime-override",
@@ -787,6 +798,8 @@ function bindEvents() {
   }
   elements.resetBenchmarkWeights.addEventListener("click", resetBenchmarkScoringProfile);
   elements.benchmarkResultsBody.addEventListener("click", openBenchmarkHarnessResult);
+  elements.benchmarkView.querySelector("#benchmark-custom-ranking-body")
+    .addEventListener("click", openBenchmarkHarnessResult);
   elements.benchmarkResultDetail.addEventListener("click", handleBenchmarkResultDetailClick);
   elements.benchmarkMatrix.addEventListener("click", openBenchmarkMatrixCell);
   elements.benchmarkRankingScope.addEventListener("change", () => {
@@ -938,6 +951,14 @@ function bindEvents() {
   elements.runtimeOverrideRole.addEventListener(
     "change",
     loadRuntimeOverrideEditor
+  );
+  elements.generalFileCreationModel.addEventListener(
+    "change",
+    loadGeneralFileCreationEditor
+  );
+  elements.generalFileCreationOutput.addEventListener(
+    "input",
+    updateGeneralFileCreationDraft
   );
   elements.runtimeMemoryDevicePolicies.addEventListener(
     "change",
@@ -1827,6 +1848,28 @@ function renderBenchmarkControls() {
     label.append(text, input);
     elements.benchmarkSuiteList.append(label);
   }
+  const manualLabel = document.createElement("label");
+  manualLabel.className = "benchmark-switch benchmark-test-group-option";
+  const manualToggle = document.createElement("input");
+  manualToggle.type = "checkbox";
+  manualToggle.name = "benchmark-suite";
+  manualToggle.value = "manual";
+  manualToggle.dataset.version = "1";
+  manualToggle.dataset.i18nAriaLabel = "benchmark.custom_prompt.switch_aria";
+  manualToggle.setAttribute("role", "switch");
+  manualToggle.setAttribute("aria-label", t("benchmark.custom_prompt.switch_aria"));
+  manualToggle.checked = persistedSelections.some(item => item.id === "manual");
+  const manualIdentity = document.createElement("span");
+  manualIdentity.className = "benchmark-switch-identity";
+  const manualName = document.createElement("strong");
+  manualName.dataset.i18n = "benchmark.custom_prompt.name";
+  manualName.textContent = t("benchmark.custom_prompt.name");
+  const manualDetail = document.createElement("small");
+  manualDetail.dataset.i18n = "benchmark.custom_prompt.switch_detail";
+  manualDetail.textContent = t("benchmark.custom_prompt.switch_detail");
+  manualIdentity.append(manualName, manualDetail);
+  manualLabel.append(manualIdentity, manualToggle);
+  elements.benchmarkSuiteList.append(manualLabel);
   elements.benchmarkTimeout.value = String(catalog?.defaultTimeoutSeconds ?? 120);
   elements.benchmarkTimeout.min = String(catalog?.minimumTimeoutSeconds ?? 5);
   elements.benchmarkTimeout.max = String(catalog?.maximumTimeoutSeconds ?? 1600);
@@ -1892,11 +1935,27 @@ function renderBenchmarkControls() {
       ...suites.map(suite => ({
         value: suite.id,
         label: benchmarkSuiteLabel(suite.id)
-      }))
+      })),
+      { value: "manual", label: benchmarkSuiteLabel("manual") }
     ],
     elements.benchmarkHistorySuiteFilter.value
   );
   renderBenchmarkScoringProfile();
+  updateBenchmarkManualSelection();
+  updateBenchmarkSuiteSelection();
+  renderBenchmarkSelectionSummary();
+}
+
+function isManualBenchmarkSelected() {
+  return Boolean(elements.benchmarkSuiteList.querySelector(
+    'input[name="benchmark-suite"][value="manual"]:checked'
+  ));
+}
+
+function updateBenchmarkManualSelection() {
+  const manual = isManualBenchmarkSelected();
+  elements.benchmarkManualPromptFields.hidden = !manual;
+  elements.benchmarkCustomPrompt.required = manual;
   updateBenchmarkSuiteSelection();
   renderBenchmarkSelectionSummary();
 }
@@ -1919,13 +1978,23 @@ function selectedBenchmarkSuites() {
     'input[name="benchmark-suite"]:checked'
   )].map(input => ({ id: input.value, version: Number(input.dataset.version) }));
   const suites = state.benchmark?.catalog?.suites ?? [];
-  return selected.map(selection => suites.find(suite =>
-    suite.id === selection.id && suite.version === selection.version
-  )).filter(Boolean);
+  return selected.map(selection => selection.id === "manual"
+    ? {
+      id: "manual",
+      version: 1,
+      tests: [{ id: "MANUAL-CUSTOM-001", timeoutSeconds: 1600, turnBudget: 1 }]
+    }
+    : suites.find(suite =>
+      suite.id === selection.id && suite.version === selection.version
+    )).filter(Boolean);
 }
 
 function updateBenchmarkSuiteSelection() {
+  elements.benchmarkManualPromptFields.hidden = !isManualBenchmarkSelected();
+  elements.benchmarkCustomPrompt.required = isManualBenchmarkSelected();
   const suites = selectedBenchmarkSuites();
+  elements.benchmarkScoringProfileChoice.disabled = Boolean(state.activeBenchmarkRunId)
+    || (suites.length > 0 && suites.every(suite => suite.id === "manual"));
   if (suites.length === 0) {
     elements.runBenchmark.textContent = "Select tests";
     return;
@@ -1939,6 +2008,19 @@ function updateBenchmarkSuiteSelection() {
     scenarioTimeout
   ));
   elements.runBenchmark.textContent = "Run benchmark";
+}
+
+function benchmarkIncludesCustomPrompt(result) {
+  return result?.benchmarkMode === "manual"
+    || result?.selectedSuites?.some(suite => suite.id === "manual")
+    || result?.suiteId === "manual";
+}
+
+function benchmarkIsCustomPromptOnly(result) {
+  if (!benchmarkIncludesCustomPrompt(result)) return false;
+  return result.suiteId === "manual"
+    || (result.selectedSuites?.length > 0
+      && result.selectedSuites.every(suite => suite.id === "manual"));
 }
 
 function benchmarkWeightInputs() {
@@ -2058,6 +2140,11 @@ async function rescoreBenchmarkResult() {
     renderBenchmarkResult(null);
     return;
   }
+  if (benchmarkIsCustomPromptOnly(result)) {
+    state.benchmark.scoringProjection = null;
+    renderBenchmarkResult(result);
+    return;
+  }
   state.benchmark.scoringProjection = await fetchJson(
     `/api/benchmarks/suite-runs/${encodeURIComponent(result.runId)}/rescore`,
     { method: "POST" }
@@ -2168,6 +2255,9 @@ function benchmarkHistoryRunLabel(result) {
 }
 
 function benchmarkSuiteLabel(suiteId) {
+  if (suiteId === "manual") {
+    return t("benchmark.custom_prompt.name");
+  }
   if (suiteId === "basic-crud") {
     return "CRUD";
   }
@@ -2639,8 +2729,14 @@ async function runBenchmarkSuite(event) {
     return;
   }
   const suites = selectedBenchmarkSuites();
+  const manual = suites.some(suite => suite.id === "manual");
   if (suites.length === 0) {
     elements.benchmarkStatus.textContent = "Select at least one test suite.";
+    return;
+  }
+  if (manual && elements.benchmarkCustomPrompt.value.trim() === "") {
+    elements.benchmarkStatus.textContent = t("benchmark.custom_prompt.required");
+    elements.benchmarkCustomPrompt.focus();
     return;
   }
   const repetitions = Number(elements.benchmarkRepetitions.value);
@@ -2676,7 +2772,10 @@ async function runBenchmarkSuite(event) {
       scoringProfileId: elements.benchmarkScoringProfileChoice.value,
       scoreWeights: elements.benchmarkScoringProfileChoice.value === "custom"
         ? benchmarkWeightsFromInputs()
-        : state.benchmark.catalog.scoreWeights
+        : state.benchmark.catalog.scoreWeights,
+      benchmarkMode: manual ? "manual" : "predefined",
+      customPrompt: manual ? elements.benchmarkCustomPrompt.value : null,
+      runName: manual ? elements.benchmarkRunName.value || null : null
     }
   };
   persistBenchmarkBatch();
@@ -2739,7 +2838,8 @@ function initializeBenchmarkLive(
   harnessIds = [],
   suites = selectedBenchmarkSuites()
 ) {
-  const tests = suites.flatMap(suite => suite.tests ?? []);
+  const tests = (suites ?? [{ tests: [{ id: "MANUAL-CUSTOM-001", turnBudget: 1 }] }])
+    .flatMap(suite => suite.tests ?? []);
   const cells = {};
   for (const model of modelIds) {
     for (const harness of harnessIds) {
@@ -3018,6 +3118,7 @@ function renderBenchmarkSelectionSummary() {
   // Disabled controls remain selected while a run is active.
   const selectedModels = state.activeBenchmarkRunId
     ? elements.benchmarkModelList.querySelectorAll("input:checked").length : models;
+  const manual = isManualBenchmarkSelected();
   const tests = new Set(selectedBenchmarkSuites().flatMap(suite => suite.tests.map(test => test.id))).size;
   const repeats = Number(elements.benchmarkRepetitions.value);
   const contextTokens = Number(elements.benchmarkContextTokens.value);
@@ -3053,6 +3154,15 @@ function benchmarkTestLabel(id) {
 
 function benchmarkStateLabel(value) {
   return { pending: "Queued", running: "Running", validating: "Validating", "harness-completed": "Validating outcome", passed: "Passed", failed: "Failed", "timed-out": "Timed out", completed: "Completed", cancelling: "Cancelling", cancelled: "Cancelled", unavailable: "Unavailable", unsupported: "Unsupported" }[value] ?? value;
+}
+
+function benchmarkReviewStatusLabel(value) {
+  return {
+    "awaiting-user-review": t("benchmark.custom_prompt.status.awaiting"),
+    reviewed: t("benchmark.custom_prompt.status.reviewed"),
+    "technical-failure": t("benchmark.custom_prompt.status.technical_failure"),
+    "not-applicable": t("benchmark.custom_prompt.status.not_applicable")
+  }[value] ?? value ?? t("benchmark.custom_prompt.status.awaiting");
 }
 
 function updateBenchmarkText(element, text) {
@@ -3324,9 +3434,11 @@ function refreshCompletedBenchmark(selectedRunId) {
   rescoreBenchmarkResult().catch(error => {
     elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
   });
-  generateGeneralBenchmarkRecommendation().catch(error => {
-    elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
-  });
+  if (!benchmarkIsCustomPromptOnly(state.benchmark?.result)) {
+    generateGeneralBenchmarkRecommendation().catch(error => {
+      elements.benchmarkRecommendationStatus.textContent = benchmarkErrorMessage(error);
+    });
+  }
 }
 
 function clearBenchmarkLiveConnection() {
@@ -3372,10 +3484,14 @@ function setBenchmarkRunning(running) {
   for (const input of elements.benchmarkModelList.querySelectorAll("input")) {
     input.disabled = running;
   }
-  elements.benchmarkScoringProfileChoice.disabled = running;
+  elements.benchmarkScoringProfileChoice.disabled = running
+    || (selectedBenchmarkSuites().length > 0
+      && selectedBenchmarkSuites().every(suite => suite.id === "manual"));
   elements.benchmarkTimeout.disabled = running;
   elements.benchmarkRepetitions.disabled = running;
   elements.benchmarkContextTokens.disabled = running;
+  elements.benchmarkRunName.disabled = running;
+  elements.benchmarkCustomPrompt.disabled = running;
   for (const input of elements.benchmarkSuiteList.querySelectorAll("input")) {
     input.disabled = running;
   }
@@ -3411,6 +3527,10 @@ async function openPersistedBenchmark() {
     state.benchmark.result = selected;
     state.benchmark.scoringProjection = null;
     if (selected) {
+      if (selected.customPrompt !== null && selected.customPrompt !== undefined) {
+        elements.benchmarkCustomPrompt.value = selected.customPrompt;
+      }
+      elements.benchmarkRunName.value = selected.runName ?? "";
       const selections = selected.selectedSuites
         ?? [{ id: selected.suiteId, version: selected.suiteVersion }];
       for (const input of elements.benchmarkSuiteList.querySelectorAll(
@@ -3420,10 +3540,12 @@ async function openPersistedBenchmark() {
           item.id === input.value && item.version === Number(input.dataset.version)
         );
       }
-      updateBenchmarkSuiteSelection();
+      updateBenchmarkManualSelection();
     }
     await rescoreBenchmarkResult();
-    await generateGeneralBenchmarkRecommendation();
+    if (!benchmarkIsCustomPromptOnly(selected)) {
+      await generateGeneralBenchmarkRecommendation();
+    }
     renderBenchmarkHistory();
     elements.benchmarkStatus.textContent = selected
       ? `Persisted result loaded: ${benchmarkSuiteLabel(selected.suiteId)} · ${selected.runId.slice(0, 8)}.`
@@ -3459,6 +3581,28 @@ function renderBenchmarkResultContent(result) {
   elements.benchmarkRawEvidenceContent.textContent = result
     ? JSON.stringify(result, null, 2)
     : "";
+  const manual = benchmarkIsCustomPromptOnly(result);
+  const mixed = benchmarkIncludesCustomPrompt(result) && !manual;
+  const customRanking = elements.benchmarkView.querySelector("#benchmark-custom-ranking");
+  customRanking.hidden = !mixed;
+  const scoringPanel = elements.benchmarkView.querySelector(".benchmark-scoring-advanced");
+  if (scoringPanel) scoringPanel.hidden = manual;
+  const rankingHeaders = elements.benchmarkResultsBody.closest("table").querySelectorAll("thead th");
+  rankingHeaders[2].dataset.i18n = manual
+    ? "benchmark.custom_prompt.technical_column"
+    : "benchmark.results.passed";
+  rankingHeaders[2].textContent = manual
+    ? t("benchmark.custom_prompt.technical_column")
+    : t("benchmark.results.passed");
+  rankingHeaders[3].dataset.i18n = manual
+    ? "benchmark.custom_prompt.user_score_column"
+    : "benchmark.results.score";
+  rankingHeaders[3].textContent = manual
+    ? t("benchmark.custom_prompt.user_score_column")
+    : t("benchmark.results.score");
+  rankingHeaders[3].title = manual
+    ? t("benchmark.custom_prompt.user_score_hint")
+    : t("benchmark.results.calculated_score_hint");
   if (!result) {
     elements.benchmarkRunSummary.textContent = "Run or open a persisted result.";
     elements.benchmarkResultDetail.textContent = "Select a harness in the table to inspect scenarios.";
@@ -3473,21 +3617,28 @@ function renderBenchmarkResultContent(result) {
     ? `${result.selectedModels.length} models × ${result.selectedHarnesses?.length ?? 0} harnesses`
     : result.selectedModels?.[0] ?? result.model;
   elements.benchmarkRunSummary.textContent =
-    `${modelSummary} · ${benchmarkSuiteLabel(result.suiteId)} · ${result.finalStatus} · ${formatBenchmarkDuration(result.durationMilliseconds)}`;
+    `${result.runName ? `${result.runName} · ` : ""}${modelSummary} · ${benchmarkSuiteLabel(result.suiteId)} · ${result.finalStatus}${benchmarkIncludesCustomPrompt(result) ? ` · ${t("benchmark.custom_prompt.name")} ${benchmarkReviewStatusLabel(result.reviewStatus)}` : ""} · ${formatBenchmarkDuration(result.durationMilliseconds)}`;
   const originalScore = benchmarkAggregateOriginalScore(result);
   const currentScore = benchmarkAggregateCurrentScore(projection, result);
   const executionConfiguration = result.configuration
     ? ` · ${Number(result.configuration.contextTokens ?? result.environment?.configuredContextTokens ?? 0).toLocaleString("en-US")} ctx · ${result.configuration.gpu ?? "GPU unavailable"}`
     : "";
-  elements.benchmarkScoreContext.textContent = profile
+  elements.benchmarkScoreContext.textContent = manual
+    ? t("benchmark.custom_prompt.score_context_manual")
+    : mixed
+    ? t("benchmark.custom_prompt.score_context_mixed")
+    : profile
     ? `Measured evidence unchanged · Original score ${originalScore.toFixed(2)} · Current-profile score ${currentScore.toFixed(2)} with ${profile.displayName} v${profile.version}${executionConfiguration}`
     : `Measured evidence and Calculated score are presented separately.${executionConfiguration}`;
   if ((result.cells ?? []).length > 0) {
     renderBenchmarkMatrix(result, projection);
     renderBenchmarkRankings(result, projection);
+    if (mixed) renderBenchmarkCustomRanking(result);
     const selection = state.benchmarkUi.resultSelection;
     const ranking = projection?.pairRanking ?? result.pairRanking ?? [];
-    const first = ranking.find(entry => selection?.runId === result.runId && entry.model === selection.model && entry.harness === selection.harness) ?? ranking[0];
+    const first = ranking.find(entry => selection?.runId === result.runId && entry.model === selection.model && entry.harness === selection.harness)
+      ?? ranking[0]
+      ?? result.cells.find(cell => cell.result);
     if (first) {
       renderBenchmarkMatrixCellDetail(first.model, first.harness);
     }
@@ -3572,7 +3723,11 @@ function renderBenchmarkMatrix(result, projection) {
       button.dataset.status = cell?.status ?? "unavailable";
       const calculated = scoreByCell.get(benchmarkCellKey(model, harness));
       button.textContent = cell?.status === "completed"
-        ? Number(calculated ?? cell.score).toFixed(2)
+        ? benchmarkIsCustomPromptOnly(result)
+          ? cell.userScore ?? benchmarkReviewStatusLabel(cell.reviewStatus)
+          : benchmarkIncludesCustomPrompt(result)
+          ? `${Number(calculated ?? cell.score).toFixed(2)} · ${cell.userScore ?? t("benchmark.custom_prompt.review_column")}`
+          : Number(calculated ?? cell.score).toFixed(2)
         : cell?.status ?? "unavailable";
       button.title = cell?.message ?? `${model} × ${benchmarkHarnessLabel(harness)}`;
       cellElement.append(button);
@@ -3587,6 +3742,47 @@ function renderBenchmarkMatrix(result, projection) {
 function renderBenchmarkRankings(result, projection) {
   elements.benchmarkResultsBody.replaceChildren();
   if (!result) {
+    return;
+  }
+  if (benchmarkIsCustomPromptOnly(result)) {
+    const cells = [...(result.cells ?? [])].sort((left, right) => {
+      if (left.userScore !== null && left.userScore !== undefined
+        && right.userScore !== null && right.userScore !== undefined) {
+        return right.userScore - left.userScore
+          || left.durationMilliseconds - right.durationMilliseconds;
+      }
+      if (left.userScore !== null && left.userScore !== undefined) return -1;
+      if (right.userScore !== null && right.userScore !== undefined) return 1;
+      return left.executionOrder - right.executionOrder;
+    });
+    let rank = 0;
+    for (const resultCell of cells) {
+      const row = document.createElement("tr");
+      const identity = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "benchmark-result-link";
+      button.dataset.model = resultCell.model;
+      button.dataset.harness = resultCell.harness;
+      if (resultCell.userScore !== null && resultCell.userScore !== undefined) rank++;
+      renderBenchmarkPairIdentity(button, resultCell.userScore === null || resultCell.userScore === undefined ? null : rank, resultCell.model, resultCell.harness);
+      identity.append(button);
+      row.append(identity);
+      for (const value of [
+        resultCell.status === "completed" ? benchmarkReviewStatusLabel(resultCell.reviewStatus) : resultCell.status,
+        resultCell.status === "completed"
+          ? t("benchmark.custom_prompt.technical_completed")
+          : t("benchmark.custom_prompt.technical_failure"),
+        resultCell.userScore ?? "—",
+        formatBenchmarkDuration(resultCell.durationMilliseconds),
+        `${resultCell.terminality}%`
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      elements.benchmarkResultsBody.append(row);
+    }
     return;
   }
   const scope = elements.benchmarkRankingScope.value;
@@ -3630,7 +3826,7 @@ function renderBenchmarkRankings(result, projection) {
     row.append(identity);
     for (const value of [
       entry.status,
-      `${entry.passed}/${resultCell?.total ?? 0}`,
+      `${entry.passed}/${resultCell?.result?.tests?.filter(test => test.run.suiteId !== "manual").length ?? Math.max(0, (resultCell?.total ?? 0) - (benchmarkIncludesCustomPrompt(result) ? 1 : 0))}`,
       Number(entry.score).toFixed(2),
       formatBenchmarkDuration(entry.durationMilliseconds),
       `${entry.terminality}%`
@@ -3640,6 +3836,45 @@ function renderBenchmarkRankings(result, projection) {
       row.append(cell);
     }
     elements.benchmarkResultsBody.append(row);
+  }
+}
+
+function renderBenchmarkCustomRanking(result) {
+  const body = elements.benchmarkView.querySelector("#benchmark-custom-ranking-body");
+  body.replaceChildren();
+  const cells = [...(result.cells ?? [])].sort((left, right) => {
+    if (left.userScore !== null && left.userScore !== undefined
+      && right.userScore !== null && right.userScore !== undefined) {
+      return right.userScore - left.userScore
+        || left.durationMilliseconds - right.durationMilliseconds;
+    }
+    if (left.userScore !== null && left.userScore !== undefined) return -1;
+    if (right.userScore !== null && right.userScore !== undefined) return 1;
+    return left.executionOrder - right.executionOrder;
+  });
+  let rank = 0;
+  for (const resultCell of cells) {
+    const row = document.createElement("tr");
+    const identity = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "benchmark-result-link";
+    button.dataset.model = resultCell.model;
+    button.dataset.harness = resultCell.harness;
+    if (resultCell.userScore !== null && resultCell.userScore !== undefined) rank++;
+    renderBenchmarkPairIdentity(button, resultCell.userScore === null || resultCell.userScore === undefined ? null : rank, resultCell.model, resultCell.harness);
+    identity.append(button);
+    row.append(identity);
+    for (const value of [
+      benchmarkReviewStatusLabel(resultCell.reviewStatus),
+      resultCell.userScore ?? "—",
+      formatBenchmarkDuration(resultCell.durationMilliseconds)
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    body.append(row);
   }
 }
 
@@ -3703,8 +3938,26 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     return;
   }
   const heading = document.createElement("h4");
-  heading.textContent = `${model ? `${model} × ` : ""}${benchmarkHarnessLabel(harness.harness)} · ${harness.passed}/${harness.total} passed`;
+  const result = state.benchmark?.result;
+  const manual = benchmarkIsCustomPromptOnly(result);
+  const predefined = harness.tests.filter(test => test.run.suiteId !== "manual");
+  const predefinedPassed = predefined.filter(test => test.rawResult.status === "pass").length;
+  const progress = manual
+    ? t("benchmark.custom_prompt.manual_review")
+    : benchmarkIncludesCustomPrompt(result)
+    ? `${t("benchmark.custom_prompt.predefined_passed", { passed: predefinedPassed, total: predefined.length })} · ${t("benchmark.custom_prompt.name")} ${benchmarkReviewStatusLabel(result.reviewStatus)}`
+    : `${harness.passed}/${harness.total} passed`;
+  heading.textContent = `${model ? `${model} × ` : ""}${benchmarkHarnessLabel(harness.harness)} · ${progress}`;
   elements.benchmarkResultDetail.append(heading);
+  if (benchmarkIncludesCustomPrompt(result)) {
+    const rerun = document.createElement("button");
+    rerun.type = "button";
+    rerun.className = "secondary-button";
+    rerun.dataset.benchmarkRerun = "true";
+    rerun.dataset.i18n = "benchmark.custom_prompt.rerun";
+    rerun.textContent = t("benchmark.custom_prompt.rerun");
+    elements.benchmarkResultDetail.append(rerun);
+  }
   if (calculated) {
     const scoreHeading = document.createElement("strong");
     scoreHeading.textContent = `Calculated score · ${Number(calculated.score).toFixed(2)}`;
@@ -3732,12 +3985,15 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     return;
   }
   for (const test of harness.tests) {
+    const manualTest = test.run.suiteId === "manual";
     const details = document.createElement("details");
     details.className = "benchmark-test-detail";
     details.dataset.disclosureKey = `${model ?? ""}:${harness.harness}:${test.run.testId}`;
     const summary = document.createElement("summary");
     const calculatedTest = calculated?.tests?.find(item => item.runId === test.run.runId);
-    summary.textContent = `${test.run.testId} · ${test.rawResult.status} · calculated score ${Number(calculatedTest?.score?.total ?? test.score?.total ?? 0).toFixed(2)}`;
+    summary.textContent = manualTest
+      ? `${test.run.testId} · ${test.rawResult.executionStatus} · ${benchmarkReviewStatusLabel(test.reviewStatus)}${test.userReview ? ` · ${t("benchmark.custom_prompt.quality_score", { score: test.userReview.score })}` : ""}`
+      : `${test.run.testId} · ${test.rawResult.status} · calculated score ${Number(calculatedTest?.score?.total ?? test.score?.total ?? 0).toFixed(2)}`;
     details.append(summary);
     const facts = document.createElement("dl");
     facts.className = "benchmark-evidence-grid";
@@ -3785,8 +4041,10 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     const evidence = [
       ["Terminal", test.rawResult.executionStatus],
       ["Failure category", test.rawResult.failureCategory ?? "unknown"],
-      ["Exactness", `${test.rawResult.exactness}%`],
-      ["Workspace", `${test.rawResult.containmentAccuracy}%`],
+      ...(manualTest ? [] : [
+        ["Exactness", `${test.rawResult.exactness}%`],
+        ["Workspace", `${test.rawResult.containmentAccuracy}%`]
+      ]),
       ["Host validation", test.rawResult.hostValidationResult],
       ["Duration", formatBenchmarkDuration(test.durationMilliseconds)],
       ["Workspace id", test.run.workspaceId],
@@ -3795,15 +4053,17 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       ["Tool calls", test.rawResult.toolCallCount ?? "Unavailable"],
       ["Errors / recovered", `${test.rawResult.surfacedErrorCount ?? "Unavailable"} / ${test.rawResult.recoveredErrorCount ?? "Unavailable"}`],
       ["Changed files", (test.rawResult.changedFiles ?? []).join(", ") || "none"],
-      ["Unexpected", (test.rawResult.unexpectedFiles ?? []).join(", ") || "none"],
-      ["Turns", `${test.rawResult.behaviorMetrics?.successfulTerminalTurns ?? 0}/${test.rawResult.behaviorMetrics?.totalTurns ?? 0}`],
-      ["Continuity", benchmarkMetric(test.rawResult.behaviorMetrics?.continuityPreservation)],
-      ["Scope accuracy", benchmarkMetric(test.rawResult.behaviorMetrics?.scopeAccuracy)],
-      ["Recovery", benchmarkMetric(test.rawResult.behaviorMetrics?.recovery)],
-      ["Convergence", benchmarkMetric(test.rawResult.behaviorMetrics?.convergence)],
-      ["Hygiene", benchmarkMetric(test.rawResult.behaviorMetrics?.hygiene)],
-      ["Truthful report", benchmarkMetric(test.rawResult.behaviorMetrics?.truthfulFinalReport)],
-      ["Narration", test.rawResult.behaviorMetrics?.narrationClassification ?? "Unavailable"],
+      ...(manualTest ? [] : [
+        ["Unexpected", (test.rawResult.unexpectedFiles ?? []).join(", ") || "none"],
+        ["Turns", `${test.rawResult.behaviorMetrics?.successfulTerminalTurns ?? 0}/${test.rawResult.behaviorMetrics?.totalTurns ?? 0}`],
+        ["Continuity", benchmarkMetric(test.rawResult.behaviorMetrics?.continuityPreservation)],
+        ["Scope accuracy", benchmarkMetric(test.rawResult.behaviorMetrics?.scopeAccuracy)],
+        ["Recovery", benchmarkMetric(test.rawResult.behaviorMetrics?.recovery)],
+        ["Convergence", benchmarkMetric(test.rawResult.behaviorMetrics?.convergence)],
+        ["Hygiene", benchmarkMetric(test.rawResult.behaviorMetrics?.hygiene)],
+        ["Truthful report", benchmarkMetric(test.rawResult.behaviorMetrics?.truthfulFinalReport)],
+        ["Narration", test.rawResult.behaviorMetrics?.narrationClassification ?? "Unavailable"]
+      ]),
       ...runtimeEvidence,
       ...operationalEvidence,
       ...Object.entries(test.rawResult.validationFacts ?? {}).map(
@@ -3824,6 +4084,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       error.textContent = `${test.rawResult.error.code}: ${test.rawResult.error.message}`;
       details.append(error);
     }
+    appendManualBenchmarkReview(test, details);
     appendBenchmarkWorkspaceReview(test, details);
     const promptLabel = document.createElement("strong");
     promptLabel.textContent = "Canonical prompt";
@@ -3929,6 +4190,65 @@ function appendBenchmarkWorkspaceReview(test, details) {
   refreshBenchmarkWorkspaceStatus(section);
 }
 
+function appendManualBenchmarkReview(test, details) {
+  if (test.run.suiteId !== "manual") {
+    return;
+  }
+  const section = document.createElement("section");
+  section.className = "benchmark-user-review";
+  section.dataset.testRunId = test.run.runId;
+  const heading = document.createElement("strong");
+  heading.dataset.i18n = "benchmark.custom_prompt.review_heading";
+  heading.textContent = t("benchmark.custom_prompt.review_heading");
+  const status = document.createElement("p");
+  status.className = "benchmark-review-status";
+  status.textContent = benchmarkReviewStatusLabel(test.reviewStatus);
+  section.append(heading, status);
+  if (test.reviewStatus === "technical-failure") {
+    const message = document.createElement("p");
+    message.dataset.i18n = "benchmark.custom_prompt.technical_failure_note";
+    message.textContent = t("benchmark.custom_prompt.technical_failure_note");
+    section.append(message);
+    details.append(section);
+    return;
+  }
+  const scoreLabel = document.createElement("label");
+  const scoreCaption = document.createElement("span");
+  scoreCaption.dataset.i18n = "benchmark.custom_prompt.score_label";
+  scoreCaption.textContent = t("benchmark.custom_prompt.score_label");
+  const score = document.createElement("input");
+  score.type = "number";
+  score.min = "0";
+  score.max = "100";
+  score.step = "1";
+  score.required = true;
+  score.value = test.userReview?.score ?? "";
+  score.dataset.benchmarkReviewScore = "true";
+  scoreLabel.append(scoreCaption, score);
+  const notesLabel = document.createElement("label");
+  const notesCaption = document.createElement("span");
+  notesCaption.dataset.i18n = "benchmark.custom_prompt.notes_label";
+  notesCaption.textContent = t("benchmark.custom_prompt.notes_label");
+  const notes = document.createElement("textarea");
+  notes.rows = 4;
+  notes.maxLength = 10000;
+  notes.value = test.userReview?.notes ?? "";
+  notes.dataset.benchmarkReviewNotes = "true";
+  notesLabel.append(notesCaption, notes);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary-button";
+  save.dataset.benchmarkSaveReview = "true";
+  save.dataset.i18n = test.userReview
+    ? "benchmark.custom_prompt.update_review"
+    : "benchmark.custom_prompt.save_review";
+  save.textContent = test.userReview
+    ? t("benchmark.custom_prompt.update_review")
+    : t("benchmark.custom_prompt.save_review");
+  section.append(scoreLabel, notesLabel, save);
+  details.append(section);
+}
+
 async function refreshBenchmarkWorkspaceStatus(section) {
   try {
     const workspace = await fetchJson(
@@ -3952,6 +4272,67 @@ async function refreshBenchmarkWorkspaceStatus(section) {
 }
 
 async function handleBenchmarkResultDetailClick(event) {
+  const saveReview = event.target.closest("[data-benchmark-save-review]");
+  if (saveReview) {
+    const reviewSection = saveReview.closest(".benchmark-user-review");
+    const rawScore = reviewSection.querySelector("[data-benchmark-review-score]").value;
+    const score = Number(rawScore);
+    if (rawScore.trim() === "" || !Number.isInteger(score) || score < 0 || score > 100) {
+      reviewSection.querySelector(".benchmark-review-status").textContent =
+        t("benchmark.custom_prompt.score_invalid");
+      return;
+    }
+    saveReview.disabled = true;
+    try {
+      const result = await fetchJson(
+        `/api/benchmarks/suite-runs/${encodeURIComponent(state.benchmark.result.runId)}/results/${encodeURIComponent(reviewSection.dataset.testRunId)}/review`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            score,
+            notes: reviewSection.querySelector("[data-benchmark-review-notes]").value || null
+          })
+        }
+      );
+      state.benchmark.result = result;
+      state.benchmark.scoringProjection = null;
+      renderBenchmarkResult(result);
+      await refreshBenchmarkHistory({ selectRunId: result.runId });
+      elements.benchmarkStatus.textContent = t("benchmark.custom_prompt.review_saved");
+    } catch (error) {
+      reviewSection.querySelector(".benchmark-review-status").textContent = benchmarkErrorMessage(error);
+      saveReview.disabled = false;
+    }
+    return;
+  }
+  const rerun = event.target.closest("[data-benchmark-rerun]");
+  if (rerun) {
+    rerun.disabled = true;
+    try {
+      const source = state.benchmark.result;
+      const started = await fetchJson(
+        `/api/benchmarks/suite-runs/${encodeURIComponent(source.runId)}/rerun`,
+        { method: "POST" }
+      );
+      state.activeBenchmarkRunId = started.runId;
+      sessionStorage.setItem(benchmarkLiveRunStorageKey, started.runId);
+      initializeBenchmarkLive(
+        started.runId,
+        source.selectedModels ?? [source.model],
+        source.selectedHarnesses ?? [],
+        null
+      );
+      setBenchmarkRunning(true);
+      showBenchmarkTab("execution");
+      connectBenchmarkEvents(started.runId, 0, started.eventsUrl);
+      elements.benchmarkStatus.textContent = t("benchmark.custom_prompt.rerunning");
+    } catch (error) {
+      rerun.disabled = false;
+      elements.benchmarkStatus.textContent = benchmarkErrorMessage(error);
+    }
+    return;
+  }
   const section = event.target.closest(".benchmark-workspace-review");
   if (!section) {
     return;
@@ -8535,6 +8916,14 @@ function renderRuntimeProfilesEditor() {
       || ""
   );
   replaceOptions(
+    elements.generalFileCreationModel,
+    localModels,
+    elements.generalFileCreationModel.value
+      || (localModels.some(model => model.value === state.settings.defaultModel)
+        ? state.settings.defaultModel
+        : localModels[0]?.value ?? "")
+  );
+  replaceOptions(
     elements.runtimeOverrideRole,
     Object.keys(runtimeRoleLabels).map(role => ({
       value: role,
@@ -8543,7 +8932,74 @@ function renderRuntimeProfilesEditor() {
     elements.runtimeOverrideRole.value || "specialist"
   );
   loadRuntimeOverrideEditor();
+  loadGeneralFileCreationEditor();
   renderRuntimeProfileEvidence();
+}
+
+function loadGeneralFileCreationEditor() {
+  const runtime = state.settings?.ollamaRuntime;
+  const model = state.models.find(candidate =>
+    candidate.provider === "ollama-local"
+      && candidate.name === elements.generalFileCreationModel.value
+  );
+  const saved = runtime?.modelOverrides.find(candidate =>
+    candidate.provider === "ollama-local"
+      && candidate.model === model?.name
+      && candidate.digest === model?.digest
+  )?.overrides?.specialist;
+  const profile = saved ?? runtime?.roleDefaults?.specialist;
+  elements.generalFileCreationOutput.disabled = !model?.digest || !profile;
+  elements.generalFileCreationOutput.value =
+    profile?.fileCreationOutputTokenLimit ?? "";
+}
+
+function updateGeneralFileCreationDraft() {
+  const model = state.models.find(candidate =>
+    candidate.provider === "ollama-local"
+      && candidate.name === elements.generalFileCreationModel.value
+  );
+  const runtime = state.settings?.ollamaRuntime;
+  if (!model?.digest || !runtime || elements.generalFileCreationOutput.validity.badInput) {
+    return;
+  }
+  const raw = elements.generalFileCreationOutput.value;
+  const limit = raw === "" ? null : Number(raw);
+  if (limit !== null && !Number.isInteger(limit)) {
+    return;
+  }
+  const overrides = runtime.modelOverrides.map(candidate => ({
+    ...candidate,
+    overrides: { ...candidate.overrides }
+  }));
+  let exact = overrides.find(candidate =>
+    candidate.provider === "ollama-local"
+      && candidate.model === model.name
+      && candidate.digest === model.digest
+  );
+  const existing = exact?.overrides?.specialist;
+  if (!existing && limit === null) {
+    return;
+  }
+  if (!exact) {
+    exact = {
+      provider: "ollama-local",
+      model: model.name,
+      digest: model.digest,
+      overrides: {}
+    };
+    overrides.push(exact);
+  }
+  exact.overrides.specialist = {
+    ...(existing ?? runtime.roleDefaults.specialist),
+    fileCreationOutputTokenLimit: limit
+  };
+  state.settings.ollamaRuntime = { ...runtime, modelOverrides: overrides };
+  state.settingsDirty = true;
+  updateSettingsDirtyState();
+  if (elements.runtimeOverrideModel.value === model.name
+    && elements.runtimeOverrideRole.value === "specialist") {
+    loadRuntimeOverrideEditor();
+  }
 }
 
 function loadRuntimeOverrideEditor() {
@@ -8568,6 +9024,8 @@ function loadRuntimeOverrideEditor() {
   elements.runtimeOverrideTarget.value = profile.targetContextTokens;
   elements.runtimeOverrideMaximum.value = profile.maximumContextTokens;
   elements.runtimeOverrideOutput.value = profile.outputTokenLimit;
+  elements.runtimeOverrideFileCreationOutput.value =
+    profile.fileCreationOutputTokenLimit ?? "";
   elements.runtimeOverrideKeepAlive.value = profile.keepAlive;
   elements.removeRuntimeOverride.disabled = !saved;
 }
@@ -8667,11 +9125,16 @@ function saveRuntimeOverrideDraft() {
     return;
   }
 
+  const fileCreationOutputTokenLimit =
+    elements.runtimeOverrideFileCreationOutput.value.trim();
   const profile = {
     minimumContextTokens: Number(elements.runtimeOverrideMinimum.value),
     targetContextTokens: Number(elements.runtimeOverrideTarget.value),
     maximumContextTokens: Number(elements.runtimeOverrideMaximum.value),
     outputTokenLimit: Number(elements.runtimeOverrideOutput.value),
+    fileCreationOutputTokenLimit: fileCreationOutputTokenLimit === ""
+      ? null
+      : Number(fileCreationOutputTokenLimit),
     keepAlive: Number(elements.runtimeOverrideKeepAlive.value)
   };
   const overrides = runtime.modelOverrides.map(

@@ -537,16 +537,18 @@ public static class SupervisionRequestPolicy
     var requestedStrategy = NormalizeStrategy(
       request.ExecutionStrategy
     );
-    var objective = request.Message.Trim();
+    var objective = request.PreserveExactUserMessage
+      ? request.Message
+      : request.Message.Trim();
     var activationReason = "explicit-direct";
 
-    if (HasDirective(objective, SupervisorDirective))
+    if (!request.PreserveExactUserMessage && HasDirective(objective, SupervisorDirective))
     {
       requestedStrategy = SupervisionExecutionStrategies.Supervised;
       objective = objective[SupervisorDirective.Length..].TrimStart();
       activationReason = "supervisor-directive";
     }
-    else if (HasDirective(objective, DirectDirective))
+    else if (!request.PreserveExactUserMessage && HasDirective(objective, DirectDirective))
     {
       requestedStrategy = SupervisionExecutionStrategies.Direct;
       objective = objective[DirectDirective.Length..].TrimStart();

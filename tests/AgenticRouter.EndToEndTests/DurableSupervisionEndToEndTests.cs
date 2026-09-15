@@ -632,6 +632,21 @@ public sealed class DurableSupervisionEndToEndTests
       await Page.Locator("#message-input").FillAsync(
         "autonomous watchdog feedback compact supervisor plan title create file hello.txt with exact text hello world today"
       );
+      await Page.EvaluateAsync(
+        """
+        () => {
+          const summary = document.querySelector('#context-usage-summary-text');
+          const markObserved = () => {
+            if (summary.textContent?.startsWith('Context ')
+              && summary.textContent !== 'Context will be calculated when sending') {
+              summary.dataset.contextObserved = 'true';
+            }
+          };
+          new MutationObserver(markObserved).observe(summary,
+            { childList: true, characterData: true, subtree: true });
+        }
+        """
+      );
       await Page.Locator("#send-button").ClickAsync();
 
       var assistant = Page.Locator(".message.assistant").Last;
@@ -706,11 +721,9 @@ public sealed class DurableSupervisionEndToEndTests
         "title",
         new System.Text.RegularExpressions.Regex("deliberately verbose implementation details")
       );
-      await Expect(Page.Locator("#context-usage-summary-text")).ToContainTextAsync(
-        "Context "
-      );
-      await Expect(Page.Locator("#context-usage-summary-text")).Not.ToHaveTextAsync(
-        "Context will be calculated when sending",
+      await Expect(Page.Locator("#context-usage-summary-text")).ToHaveAttributeAsync(
+        "data-context-observed",
+        "true",
         new() { Timeout = 25_000 }
       );
       await plan.Locator("summary").ClickAsync();

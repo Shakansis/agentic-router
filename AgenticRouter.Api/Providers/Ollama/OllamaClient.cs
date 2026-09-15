@@ -297,7 +297,8 @@ public sealed class OllamaClient : IOllamaClient
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
     string? requestedEffort = null,
-    ProviderGenerationProfile? generationProfile = null
+    ProviderGenerationProfile? generationProfile = null,
+    bool useFileCreationOutputTokenLimit = false
   )
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;
@@ -324,6 +325,7 @@ public sealed class OllamaClient : IOllamaClient
         estimatedInput,
         toolOutput,
         generationProfile.MaximumContextTokens,
+        useFileCreationOutputTokenLimit,
         cancellationToken
       );
       var payload = CreateRequest(
@@ -644,6 +646,7 @@ public sealed class OllamaClient : IOllamaClient
         estimatedInput,
         false,
         options.EffectiveGenerationProfile.MaximumContextTokens,
+        false,
         cancellationToken
       );
       var payload = CreateRequest(
@@ -1229,6 +1232,7 @@ public sealed class OllamaClient : IOllamaClient
         estimatedInput,
         false,
         options.EffectiveGenerationProfile.MaximumContextTokens,
+        false,
         cancellationToken
       );
     }
@@ -1573,6 +1577,7 @@ public sealed class OllamaClient : IOllamaClient
     long estimatedInputTokens,
     bool toolOutput,
     int? generationMaximumContextTokens,
+    bool useFileCreationOutputTokenLimit,
     CancellationToken cancellationToken
   )
   {
@@ -1651,7 +1656,8 @@ public sealed class OllamaClient : IOllamaClient
       metadata.DeclaredContextTokens,
       estimatedInputTokens,
       requestedOutput,
-      generationMaximumContextTokens
+      generationMaximumContextTokens,
+      useFileCreationOutputTokenLimit
     );
 
     if (usageContext.RuntimeContextTokens is not null)

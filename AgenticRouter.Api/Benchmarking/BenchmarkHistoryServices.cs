@@ -246,11 +246,23 @@ public sealed class BenchmarkHistoryService : IBenchmarkHistoryService
   )
   {
     var tests = Tests(result).ToArray();
-    var projected = tests.Select(test => _scorer.Score(
-      test.Result.RawResult,
-      profile.Weights
-    )).ToArray();
-    var originalScore = OriginalAggregateScore(result);
+    var manualOnly = tests.Length > 0 && tests.All(test =>
+      test.Result.Run.SuiteId == BenchmarkSuiteIds.Manual);
+    var predefined = tests.Where(test =>
+      test.Result.Run.SuiteId != BenchmarkSuiteIds.Manual).ToArray();
+    var projected = manualOnly
+      ? []
+      : predefined.Select(test => _scorer.Score(
+        test.Result.RawResult,
+        profile.Weights
+      )).ToArray();
+    var manualScores = tests.Select(test => test.Result.UserReview?.Score)
+      .Where(score => score.HasValue)
+      .Select(score => (decimal)score!.Value)
+      .ToArray();
+    var originalScore = manualOnly
+      ? Average(manualScores)
+      : OriginalAggregateScore(result);
     return new BenchmarkHistorySummary(
       result.RunId,
       result.StartedAt,
@@ -270,11 +282,14 @@ public sealed class BenchmarkHistoryService : IBenchmarkHistoryService
       )),
       tests.Length,
       originalScore,
-      Average(projected.Select(score => score.Total)),
-      result.ScoringProfileId,
-      result.ScoringProfileVersion,
-      profile.Id,
-      profile.Version
+      manualOnly ? originalScore : Average(projected.Select(score => score.Total)),
+      manualOnly ? "user" : result.ScoringProfileId,
+      manualOnly ? null : result.ScoringProfileVersion,
+      manualOnly ? "user" : profile.Id,
+      manualOnly ? 1 : profile.Version,
+      result.BenchmarkMode,
+      result.RunName,
+      result.ReviewStatus
     );
   }
 
@@ -403,7 +418,8 @@ public sealed class BenchmarkHistoryService : IBenchmarkHistoryService
       test => test.Key,
       StringComparer.OrdinalIgnoreCase
     );
-    foreach (var current in Tests(candidate))
+    foreach (var current in Tests(candidate).Where(test =>
+      test.Result.Run.SuiteId != BenchmarkSuiteIds.Manual))
     {
       if (!baselineTests.TryGetValue(current.Key, out var previous))
       {
@@ -483,7 +499,8 @@ public sealed class BenchmarkHistoryService : IBenchmarkHistoryService
     BenchmarkScoringProfile profile
   )
   {
-    var tests = Tests(result).ToArray();
+    var tests = Tests(result).Where(test =>
+      test.Result.Run.SuiteId != BenchmarkSuiteIds.Manual).ToArray();
     var scores = tests.Select(test => _scorer.Score(test.Result.RawResult, profile.Weights)).ToArray();
     return new MetricsSnapshot(
       Average(scores.Select(score => score.Total)),

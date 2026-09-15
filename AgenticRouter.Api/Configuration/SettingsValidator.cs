@@ -1944,6 +1944,18 @@ public sealed class SettingsValidator : ISettingsValidator
       );
     }
 
+    if (
+      profile.FileCreationOutputTokenLimit is <= 0
+      || profile.FileCreationOutputTokenLimit >= profile.MaximumContextTokens
+    )
+    {
+      AddError(
+        errors,
+        $"{prefix}.fileCreationOutputTokenLimit",
+        "File creation output token limit must be a positive integer smaller than the role maximum context."
+      );
+    }
+
     if (profile.KeepAlive is < -1 or > 86_400)
     {
       AddError(

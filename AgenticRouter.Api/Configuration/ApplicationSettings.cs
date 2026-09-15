@@ -507,6 +507,8 @@ public sealed record OllamaRoleRuntimeSettings
   public int KeepAlive { get; init; } = 300;
 
   public int OutputTokenLimit { get; init; } = 4_096;
+
+  public int? FileCreationOutputTokenLimit { get; init; }
 }
 
 public sealed record OllamaModelRuntimeOverride

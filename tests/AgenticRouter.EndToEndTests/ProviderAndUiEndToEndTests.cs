@@ -5437,6 +5437,41 @@ baselineTotal!.Value
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task MissingI18nKeysKeepEnglishMarkupAndCoreScriptsShareVersion()
+  {
+    await Page.GotoAsync("/");
+    Assert.IsTrue(await Page.EvaluateAsync<bool>(
+      "() => ['i18n.js', 'app.js'].every(name => [...document.scripts].some(script => script.src.endsWith('/' + name + '?v=20260915-custom-prompt-en')))"
+    ));
+    await Page.EvaluateAsync(
+      """
+      () => {
+        const fixture = document.createElement('div');
+        fixture.id = 'missing-translation-fixture';
+        fixture.innerHTML = '<span data-i18n="qa.missing">English label</span>'
+          + '<input placeholder="English placeholder" aria-label="English action"'
+          + ' data-i18n-placeholder="qa.missing" data-i18n-aria-label="qa.missing">';
+        document.body.append(fixture);
+        window.AgenticRouterI18n.localizeDocument(fixture);
+      }
+      """
+    );
+    await Expect(Page.Locator("#missing-translation-fixture span"))
+      .ToHaveTextAsync("English label");
+    await Expect(Page.Locator("#missing-translation-fixture input"))
+      .ToHaveAttributeAsync("placeholder", "English placeholder");
+    await Expect(Page.Locator("#missing-translation-fixture input"))
+      .ToHaveAttributeAsync("aria-label", "English action");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#benchmark-custom-prompt"))
+      .ToHaveValueAsync(new System.Text.RegularExpressions.Regex("^Build a playable Galaga-inspired"));
+    Assert.IsTrue(await Page.EvaluateAsync<bool>(
+      "() => document.querySelector('#benchmark-custom-prompt').textContent.startsWith('Build a playable Galaga-inspired')"
+    ));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CompactLayoutKeepsControlsIconsAndActiveAgentIdentity()
   {
     await Page.GotoAsync(

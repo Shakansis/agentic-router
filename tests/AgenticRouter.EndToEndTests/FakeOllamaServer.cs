@@ -5120,6 +5120,25 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (current.Contains(
+      "file token budget create files",
+      StringComparison.OrdinalIgnoreCase
+    ))
+    {
+      return new
+      {
+        tool = "create_files",
+        arguments = new
+        {
+          files = new[]
+          {
+            new { path = "token-budget-a.txt", content = "first" },
+            new { path = "token-budget-b.txt", content = "second" }
+          }
+        },
+        explanation = "Create both token-budget fixtures in one Host batch."
+      };
+    }
     if (
       current.Contains(
         "output limit incremental recovery",

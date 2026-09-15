@@ -21,6 +21,10 @@ public static class BenchmarkSuiteIds
   public const int CombinedVersion = 1;
   public const string CombinedFixtureId = "multiple-versioned-fixtures";
   public const int CombinedFixtureVersion = 1;
+  public const string Manual = "manual";
+  public const int ManualVersion = 1;
+  public const string ManualFixtureId = "manual-empty-workspace";
+  public const int ManualFixtureVersion = 1;
 }
 
 public static class BenchmarkIds
@@ -37,6 +41,21 @@ public static class BenchmarkIds
   public const string StaleConflict001 = "STALE-CONFLICT-001";
   public const string TruthfulReport001 = "TRUTHFUL-REPORT-001";
   public const string MissingGame001 = "MISSING-GAME-001";
+  public const string ManualCustomPrompt001 = "MANUAL-CUSTOM-001";
+}
+
+public static class BenchmarkModeIds
+{
+  public const string Predefined = "predefined";
+  public const string Manual = "manual";
+}
+
+public static class BenchmarkReviewStatusIds
+{
+  public const string NotApplicable = "not-applicable";
+  public const string AwaitingUserReview = "awaiting-user-review";
+  public const string Reviewed = "reviewed";
+  public const string TechnicalFailure = "technical-failure";
 }
 
 public static class BenchmarkHarnessCapabilityIds
@@ -191,7 +210,11 @@ public sealed record BenchmarkSuiteRunRequest(
   string ScoringProfileId = BenchmarkScoringProfileIds.Default,
   BenchmarkScoreWeights? ScoreWeights = null,
   IReadOnlyList<BenchmarkSuiteSelection>? Suites = null,
-  int? ContextTokens = null
+  int? ContextTokens = null,
+  string BenchmarkMode = BenchmarkModeIds.Predefined,
+  string? CustomPrompt = null,
+  string? RunName = null,
+  string? RerunOfRunId = null
 );
 
 public sealed record BenchmarkSuiteSelection(
@@ -444,7 +467,20 @@ public sealed record BenchmarkRunResult(
   bool WorkspaceCleanedUp,
   BenchmarkScore? Score = null,
   long DurationMilliseconds = 0,
-  bool WorkspaceRetained = false
+  bool WorkspaceRetained = false,
+  string ReviewStatus = BenchmarkReviewStatusIds.NotApplicable,
+  BenchmarkUserReview? UserReview = null
+);
+
+public sealed record BenchmarkUserReview(
+  int Score,
+  string? Notes,
+  DateTimeOffset UpdatedAt
+);
+
+public sealed record BenchmarkUserReviewRequest(
+  int Score,
+  string? Notes = null
 );
 
 public sealed record BenchmarkHarnessResult(
@@ -571,7 +607,9 @@ public sealed record BenchmarkMatrixCellResult(
   int? Recovery,
   int? Convergence,
   int? Hygiene,
-  BenchmarkHarnessResult? Result
+  BenchmarkHarnessResult? Result,
+  string ReviewStatus = BenchmarkReviewStatusIds.NotApplicable,
+  int? UserScore = null
 );
 
 public sealed record BenchmarkEnvironmentIdentity(
@@ -608,7 +646,9 @@ public sealed record BenchmarkConfigurationIdentity(
   string Fingerprint,
   int? ContextTokens = null,
   string? Gpu = null,
-  string ModelRole = "benchmark"
+  string ModelRole = "benchmark",
+  string ExecutionStrategy = "auto",
+  string SupervisionResumePolicy = "manual"
 );
 
 public sealed record BenchmarkSuiteRunResult(
@@ -645,7 +685,12 @@ public sealed record BenchmarkSuiteRunResult(
   int? ScoringProfileVersion = null,
   string RawMeasurementsStatus = BenchmarkEvidenceStatusIds.Unavailable,
   string ValidationEvidenceStatus = BenchmarkEvidenceStatusIds.Unavailable,
-  IReadOnlyList<BenchmarkSuiteSelection>? SelectedSuites = null
+  IReadOnlyList<BenchmarkSuiteSelection>? SelectedSuites = null,
+  string BenchmarkMode = BenchmarkModeIds.Predefined,
+  string? CustomPrompt = null,
+  string? RunName = null,
+  string? RerunOfRunId = null,
+  string ReviewStatus = BenchmarkReviewStatusIds.NotApplicable
 );
 
 public sealed record BenchmarkHistorySummary(
@@ -667,7 +712,10 @@ public sealed record BenchmarkHistorySummary(
   string OriginalScoringProfileId,
   int? OriginalScoringProfileVersion,
   string CurrentScoringProfileId,
-  int CurrentScoringProfileVersion
+  int CurrentScoringProfileVersion,
+  string BenchmarkMode = BenchmarkModeIds.Predefined,
+  string? RunName = null,
+  string ReviewStatus = BenchmarkReviewStatusIds.NotApplicable
 );
 
 public sealed record BenchmarkComparisonRequest(

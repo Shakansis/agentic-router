@@ -14,7 +14,8 @@ public static class OllamaRuntimeProfileResolver
     int? declaredModelMaximum,
     long requiredInputTokens,
     int requestedOutputTokens,
-    int? generationMaximumContextTokens = null
+    int? generationMaximumContextTokens = null,
+    bool useFileCreationOutputTokenLimit = false
   )
   {
     var role = NormalizeRole(
@@ -99,10 +100,11 @@ public static class OllamaRuntimeProfileResolver
       minimum,
       maximum
     );
-    var outputTokens = Math.Min(
-      requestedOutputTokens,
-      profile.OutputTokenLimit
-    );
+    var explicitFileCreationOutputTokenLimit = useFileCreationOutputTokenLimit
+      ? profile.FileCreationOutputTokenLimit
+      : null;
+    var outputTokens = explicitFileCreationOutputTokenLimit
+      ?? Math.Min(requestedOutputTokens, profile.OutputTokenLimit);
     var required = checked(
       (int)Math.Min(
         int.MaxValue,

@@ -51,7 +51,8 @@ public interface ILocalActionPlanner
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
-    string? requestedEffort = null
+    string? requestedEffort = null,
+    bool useFileCreationOutputTokenLimit = false
   );
 }
 
@@ -252,7 +253,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
-    string? requestedEffort = null
+    string? requestedEffort = null,
+    bool useFileCreationOutputTokenLimit = false
   )
   {
     var request = CreatePlanningRequest(
@@ -273,7 +275,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       usageContext,
       cancellationToken,
       onThinkingDelta,
-      requestedEffort: requestedEffort
+      requestedEffort: requestedEffort,
+      useFileCreationOutputTokenLimit: useFileCreationOutputTokenLimit
     );
     var canonicalTurn = _toolingProtocol.Normalize(toolingProfile, response);
     var assistantMessage = _toolingProtocol.CreateAssistantMessage(canonicalTurn);

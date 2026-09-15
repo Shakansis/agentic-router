@@ -88,6 +88,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToContainTextAsync(
       "changes"
     );
+    await Expect(Page.Locator("#app-loader")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#message-input")).ToBeFocusedAsync();
     await Page.Locator(
       "#git-card"
     ).FocusAsync();
@@ -96,11 +98,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).PressAsync(
       "Enter"
     );
-    await Expect(
-      Page.Locator(
-        "#git-dialog"
-      )
-    ).ToBeVisibleAsync();
+    await Expect(Page.Locator("#git-dialog")).ToBeVisibleAsync();
     await Expect(
       Page.Locator(
         "#git-overview-section"
@@ -3403,6 +3401,38 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task NativeOutputLimitUsesOneIncrementalWriteCorrection()
   {
+    var specialist = new TestOllamaRoleRuntimeSettings(
+      4_096,
+      8_192,
+      40_960,
+      300,
+      2_048,
+      4_096
+    );
+    using (var saved = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with
+      {
+        OllamaRuntime = _environment.BaselineSettings.OllamaRuntime with
+        {
+          ModelOverrides =
+          [
+            new TestOllamaModelRuntimeOverride(
+              "ollama-local",
+              "qwen3-coder:30b",
+              "digest-qwen3-coder:30b",
+              new Dictionary<string, TestOllamaRoleRuntimeSettings>(StringComparer.Ordinal)
+              {
+                ["specialist"] = specialist
+              }
+            )
+          ]
+        }
+      }
+    ))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
     await SetExecuteModeAsync("auto");
@@ -3426,6 +3456,17 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         StringComparison.Ordinal
       ))
     ));
+    var planningRequests = _environment.FakeOllama.Requests.Where(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        LocalActionPlanner.PlannerMarker,
+        StringComparison.Ordinal
+      ))).ToArray();
+    Assert.IsTrue(planningRequests.Any(request =>
+      request.AvailableTools.Contains("create_file", StringComparer.Ordinal)
+      && request.PredictTokens == 4_096));
+    Assert.IsTrue(planningRequests.Where(request =>
+      !request.AvailableTools.Contains("create_file", StringComparer.Ordinal))
+      .All(request => request.PredictTokens == 2_048));
   }
 
   [TestMethod]

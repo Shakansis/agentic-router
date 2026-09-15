@@ -100,14 +100,16 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
   )
   {
     Validate(profile.Weights);
+    var plannedManualTests = result.SelectedSuites?.Count(selection =>
+      selection.Id == BenchmarkSuiteIds.Manual) ?? 0;
     var projectedHarnesses = result.HarnessResults.Select(harness =>
     {
-      var tests = harness.Tests.Select(test => new BenchmarkTestScoreProjection(
+      var tests = harness.Tests.Where(IsPredefined).Select(test => new BenchmarkTestScoreProjection(
         test.Run.RunId,
         test.Run.TestId,
         Score(test.RawResult, profile.Weights)
       )).ToArray();
-      var divisor = Math.Max(1, harness.Total);
+      var divisor = Math.Max(1, harness.Total - plannedManualTests);
       decimal Average(Func<BenchmarkScore, decimal> selector) => decimal.Round(
         tests.Sum(test => selector(test.Score)) / divisor,
         2,
@@ -133,13 +135,13 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
     );
     var ranking = result.HarnessResults
       .OrderByDescending(harness => projectionByHarness[harness.Harness].Score)
-      .ThenByDescending(harness => harness.Passed)
+      .ThenByDescending(harness => CountPredefinedPassed(harness.Tests))
       .ThenBy(harness => Math.Max(0, harness.DurationMilliseconds))
       .ThenBy(harness => harness.Harness, StringComparer.OrdinalIgnoreCase)
       .Select((harness, index) => new BenchmarkRankingEntry(
         index + 1,
         harness.Harness,
-        harness.Passed,
+        CountPredefinedPassed(harness.Tests),
         projectionByHarness[harness.Harness].Score,
         Math.Max(0, harness.DurationMilliseconds),
         harness.Terminality
@@ -149,12 +151,12 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
     var projectedCells = matrixCells.Where(cell => cell.Result is not null).Select(cell =>
     {
       var harness = cell.Result!;
-      var tests = harness.Tests.Select(test => new BenchmarkTestScoreProjection(
+      var tests = harness.Tests.Where(IsPredefined).Select(test => new BenchmarkTestScoreProjection(
         test.Run.RunId,
         test.Run.TestId,
         Score(test.RawResult, profile.Weights)
       )).ToArray();
-      var divisor = Math.Max(1, harness.Total);
+      var divisor = Math.Max(1, harness.Total - plannedManualTests);
       decimal Average(Func<BenchmarkScore, decimal> selector) => decimal.Round(
         tests.Sum(test => selector(test.Score)) / divisor,
         2,
@@ -187,7 +189,7 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
     }
     var pairRanking = matrixCells
       .OrderByDescending(CellScore)
-      .ThenByDescending(cell => cell.Passed)
+      .ThenByDescending(cell => CountPredefinedPassed(cell.Result?.Tests ?? []))
       .ThenBy(cell => cell.DurationMilliseconds)
       .ThenBy(cell => cell.Model, StringComparer.OrdinalIgnoreCase)
       .ThenBy(cell => cell.Harness, StringComparer.OrdinalIgnoreCase)
@@ -195,7 +197,7 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
         index + 1,
         cell.Model,
         cell.Harness,
-        cell.Passed,
+        CountPredefinedPassed(cell.Result?.Tests ?? []),
         CellScore(cell),
         cell.DurationMilliseconds,
         cell.Terminality,
@@ -224,7 +226,7 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
             StringComparison.Ordinal
           )),
           Total = matching.Length,
-          Passed = matching.Sum(cell => cell.Passed),
+          Passed = matching.Sum(cell => CountPredefinedPassed(cell.Result?.Tests ?? [])),
           Score = decimal.Round(
             matching.Sum(CellScore) / divisor,
             2,
@@ -266,6 +268,13 @@ public sealed class BenchmarkScorer : IBenchmarkScorer
       matrixCells.Count > 0 ? Aggregate(selectedHarnesses, cell => cell.Harness) : null
     );
   }
+
+  private static bool IsPredefined(BenchmarkRunResult test) =>
+    test.Run.SuiteId != BenchmarkSuiteIds.Manual;
+
+  private static int CountPredefinedPassed(IReadOnlyList<BenchmarkRunResult> tests) =>
+    tests.Count(test => IsPredefined(test)
+      && test.RawResult.Status == BenchmarkResultStatusIds.Pass);
 
   public void Validate(BenchmarkScoreWeights weights)
   {
@@ -464,6 +473,11 @@ public interface IBenchmarkResultStore
     CancellationToken cancellationToken
   );
 
+  Task UpdateAsync(
+    BenchmarkSuiteRunResult result,
+    CancellationToken cancellationToken
+  );
+
   Task<bool> DeleteAsync(
     string runId,
     CancellationToken cancellationToken
@@ -639,6 +653,49 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
         }
       }
       return results.OrderByDescending(result => result.StartedAt).ToArray();
+    }
+    finally
+    {
+      _gate.Release();
+    }
+  }
+
+  public async Task UpdateAsync(
+    BenchmarkSuiteRunResult result,
+    CancellationToken cancellationToken
+  )
+  {
+    var path = Resolve(result.RunId);
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (!File.Exists(path))
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-run-not-found",
+          $"Benchmark run '{result.RunId}' is unavailable.",
+          "runId"
+        );
+      }
+      var temporary = path + $".{Guid.NewGuid():N}.tmp";
+      try
+      {
+        var json = JsonSerializer.Serialize(result, JsonOptions);
+        await File.WriteAllTextAsync(
+          temporary,
+          json,
+          new UTF8Encoding(false),
+          cancellationToken
+        );
+        File.Move(temporary, path, true);
+      }
+      finally
+      {
+        if (File.Exists(temporary))
+        {
+          File.Delete(temporary);
+        }
+      }
     }
     finally
     {

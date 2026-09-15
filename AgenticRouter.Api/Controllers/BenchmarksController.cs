@@ -148,8 +148,120 @@ public sealed class BenchmarksController : ControllerBase
       {
         return NotFound();
       }
+      if (result.BenchmarkMode == BenchmarkModeIds.Manual
+        && (result.SuiteId == BenchmarkSuiteIds.Manual
+          || result.SelectedSuites?.All(selection =>
+            selection.Id == BenchmarkSuiteIds.Manual) == true))
+      {
+        return Ok(result);
+      }
       var profile = await _scoringProfiles.GetAsync(cancellationToken);
       return Ok(_scorer.Rescore(result, profile));
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpPut("suite-runs/{runId}/results/{testRunId}/review")]
+  public async Task<IActionResult> SaveManualReview(
+    string runId,
+    string testRunId,
+    [FromBody] BenchmarkUserReviewRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      if (request.Score is < 0 or > 100)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-review-score-invalid",
+          "User score must be between 0 and 100.",
+          "score"
+        );
+      }
+      if (request.Notes?.Length > 10_000)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-review-notes-too-large",
+          "Review notes cannot exceed 10000 characters.",
+          "notes"
+        );
+      }
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null)
+      {
+        return NotFound();
+      }
+      if (result.BenchmarkMode != BenchmarkModeIds.Manual)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-review-not-manual",
+          "User quality reviews apply only to Manual / Custom Prompt benchmarks.",
+          "runId"
+        );
+      }
+      var updated = ApplyManualReview(result, testRunId, request);
+      await _results.UpdateAsync(updated, cancellationToken);
+      return Ok(updated);
+    }
+    catch (BenchmarkRequestException exception)
+    {
+      return InvalidRequest(exception);
+    }
+  }
+
+  [HttpPost("suite-runs/{runId}/rerun")]
+  public async Task<IActionResult> RerunManual(
+    string runId,
+    CancellationToken cancellationToken
+  )
+  {
+    try
+    {
+      var result = await _results.GetAsync(runId, cancellationToken);
+      if (result is null)
+      {
+        return NotFound();
+      }
+      if (result.BenchmarkMode != BenchmarkModeIds.Manual
+        || result.CustomPrompt is null)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-rerun-not-manual",
+          "Only a persisted Manual / Custom Prompt benchmark can use this rerun endpoint.",
+          "runId"
+        );
+      }
+      var models = result.SelectedModels ?? [result.Model];
+      var harnesses = result.SelectedHarnesses
+        ?? result.Cells?.Select(cell => cell.Harness).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+        ?? result.HarnessResults.Select(harness => harness.Harness).ToArray();
+      var selections = result.SelectedSuites is { Count: > 0 }
+        ? result.SelectedSuites
+        : [new BenchmarkSuiteSelection(BenchmarkSuiteIds.Manual, BenchmarkSuiteIds.ManualVersion)];
+      var request = new BenchmarkSuiteRunRequest(
+        models[0],
+        harnesses,
+        selections[0].Id,
+        selections[0].Version,
+        result.TimeoutSeconds,
+        true,
+        ClientRunId: Guid.NewGuid().ToString("N"),
+        Models: models,
+        ScoringProfileId: result.ScoringProfileId,
+        ScoreWeights: result.ScoreWeights,
+        ContextTokens: result.Configuration?.ContextTokens
+          ?? result.Environment?.ConfiguredContextTokens,
+        Suites: selections,
+        BenchmarkMode: BenchmarkModeIds.Manual,
+        CustomPrompt: result.CustomPrompt,
+        RunName: result.RunName,
+        RerunOfRunId: result.RunId
+      );
+      return Accepted(await _liveRuns.StartAsync(request, cancellationToken));
     }
     catch (BenchmarkRequestException exception)
     {
@@ -662,13 +774,115 @@ public sealed class BenchmarksController : ControllerBase
     string workspaceId
   )
   {
-    return result.HarnessResults
-      .SelectMany(harness => harness.Tests)
+    return AllTests(result)
       .Any(test => string.Equals(
         test.Run.WorkspaceId,
         workspaceId,
         StringComparison.OrdinalIgnoreCase
       ));
+  }
+
+  private static BenchmarkSuiteRunResult ApplyManualReview(
+    BenchmarkSuiteRunResult result,
+    string testRunId,
+    BenchmarkUserReviewRequest request
+  )
+  {
+    var found = false;
+    var review = new BenchmarkUserReview(
+      request.Score,
+      string.IsNullOrWhiteSpace(request.Notes) ? null : request.Notes,
+      DateTimeOffset.UtcNow
+    );
+    BenchmarkRunResult UpdateTest(BenchmarkRunResult test)
+    {
+      if (!string.Equals(test.Run.RunId, testRunId, StringComparison.OrdinalIgnoreCase))
+      {
+        return test;
+      }
+      if (test.Run.SuiteId != BenchmarkSuiteIds.Manual)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-review-not-custom-prompt",
+          "Only the Custom Prompt test accepts a user quality score.",
+          "testRunId"
+        );
+      }
+      if (test.ReviewStatus == BenchmarkReviewStatusIds.TechnicalFailure
+        || test.RawResult.ExecutionStatus != BenchmarkExecutionStatusIds.Completed
+        || test.RawResult.Error is not null)
+      {
+        throw new BenchmarkRequestException(
+          "benchmark-review-technical-failure",
+          "A technical execution failure does not accept a user quality score.",
+          "testRunId"
+        );
+      }
+      found = true;
+      return test with
+      {
+        ReviewStatus = BenchmarkReviewStatusIds.Reviewed,
+        UserReview = review
+      };
+    }
+    BenchmarkHarnessResult UpdateHarness(BenchmarkHarnessResult harness) => harness with
+    {
+      Tests = harness.Tests.Select(UpdateTest).ToArray()
+    };
+    var harnessResults = result.HarnessResults.Select(UpdateHarness).ToArray();
+    var cells = (result.Cells ?? []).Select(cell => cell.Result is null
+      ? cell
+      : cell with
+      {
+        Result = UpdateHarness(cell.Result),
+        ReviewStatus = cell.Result.Tests.Any(test => string.Equals(
+          test.Run.RunId,
+          testRunId,
+          StringComparison.OrdinalIgnoreCase
+        )) ? BenchmarkReviewStatusIds.Reviewed : cell.ReviewStatus,
+        UserScore = cell.Result.Tests.Any(test => string.Equals(
+          test.Run.RunId,
+          testRunId,
+          StringComparison.OrdinalIgnoreCase
+        )) ? request.Score : cell.UserScore
+      }).ToArray();
+    if (!found)
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-review-result-unknown",
+        $"Manual benchmark result '{testRunId}' is unavailable.",
+        "testRunId"
+      );
+    }
+    var reviewedCells = cells.Where(cell => cell.UserScore.HasValue)
+      .OrderByDescending(cell => cell.UserScore)
+      .ThenBy(cell => cell.DurationMilliseconds)
+      .ThenBy(cell => cell.Model, StringComparer.OrdinalIgnoreCase)
+      .ThenBy(cell => cell.Harness, StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+    var ranking = reviewedCells.Select((cell, index) => new BenchmarkMatrixRankingEntry(
+      index + 1,
+      cell.Model,
+      cell.Harness,
+      cell.Passed,
+      cell.UserScore!.Value,
+      cell.DurationMilliseconds,
+      cell.Terminality,
+      cell.Status
+    )).ToArray();
+    var awaiting = cells.SelectMany(cell => cell.Result?.Tests ?? [])
+      .Any(test => test.ReviewStatus == BenchmarkReviewStatusIds.AwaitingUserReview);
+    var manualOnly = AllTests(result).All(test =>
+      test.Run.SuiteId == BenchmarkSuiteIds.Manual);
+    return result with
+    {
+      HarnessResults = harnessResults,
+      Cells = cells,
+      PairRanking = manualOnly ? ranking : result.PairRanking,
+      ReviewStatus = awaiting
+        ? BenchmarkReviewStatusIds.AwaitingUserReview
+        : BenchmarkReviewStatusIds.Reviewed
+    };
   }
 
   private async Task DeleteOwnedWorkspacesAsync(
@@ -677,8 +891,7 @@ public sealed class BenchmarksController : ControllerBase
   )
   {
     var workspaceIds = results
-      .SelectMany(result => result.HarnessResults)
-      .SelectMany(harness => harness.Tests)
+      .SelectMany(AllTests)
       .Where(test => !test.WorkspaceCleanedUp)
       .Select(test => test.Run.WorkspaceId)
       .Distinct(StringComparer.OrdinalIgnoreCase);
@@ -691,6 +904,16 @@ public sealed class BenchmarksController : ControllerBase
         );
       }
     }
+  }
+
+  private static IEnumerable<BenchmarkRunResult> AllTests(
+    BenchmarkSuiteRunResult result
+  )
+  {
+    return result.HarnessResults.SelectMany(harness => harness.Tests)
+      .Concat((result.Cells ?? []).SelectMany(cell => cell.Result?.Tests ?? []))
+      .GroupBy(test => test.Run.RunId, StringComparer.OrdinalIgnoreCase)
+      .Select(group => group.First());
   }
 
   private BadRequestObjectResult InvalidRequest(BenchmarkRequestException exception)

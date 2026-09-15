@@ -159,6 +159,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var resolvedSuites = ResolveSuites(request);
     var suite = resolvedSuites.Metadata;
     var tests = resolvedSuites.Tests;
+    var manual = tests.Any(IsManualTest);
+    var manualOnly = manual && tests.All(IsManualTest);
     if (request.TimeoutSeconds is < 5 or > 1600)
     {
       throw new BenchmarkRequestException(
@@ -170,7 +172,10 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var requestedHarnesses = NormalizeHarnesses(request.Harnesses);
     var requestedModels = NormalizeModels(request);
     var scoreWeights = request.ScoreWeights ?? BenchmarkScoreWeights.Default;
-    _scorer.Validate(scoreWeights);
+    if (!manualOnly)
+    {
+      _scorer.Validate(scoreWeights);
+    }
     var scoringProfileId = NormalizeScoringProfileId(request.ScoringProfileId);
     var settings = await _settingsStore.GetAsync(cancellationToken);
     var contextTokens = ResolveBenchmarkContextTokens(settings, request.ContextTokens);
@@ -289,7 +294,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
             harness,
             compatibility,
             tests.Count,
-            preCancellationCompatibility
+            preCancellationCompatibility,
+            manual
           ));
           Publish(progressSink, new BenchmarkProgressEvent(
             runId,
@@ -318,12 +324,20 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           gpu,
           lease.Token,
           progressSink,
-          liveResults
+          liveResults,
+          manualOnly
         );
         cells.Add(CreateCell(executionOrder, model.Installed!, result));
       }
     }
     var matrixCells = cells.ToArray();
+    BenchmarkMatrixCellResult[] scoringCells = manualOnly ? [] : matrixCells.Select(cell => cell.Result is null
+      ? cell
+      : cell with
+      {
+        Passed = CountPredefinedPassed(cell.Result.Tests),
+        Total = tests.Count(test => !IsManualTest(test))
+      }).ToArray();
     var harnessResults = models.Length == 1
       ? matrixCells.Where(cell => cell.Result is not null)
         .Select(cell => cell.Result!)
@@ -346,28 +360,28 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       : allPassed
         ? BenchmarkRunStatusIds.Passed
         : BenchmarkRunStatusIds.CompletedWithFailures;
-    var ranking = harnessResults
+    IReadOnlyList<BenchmarkRankingEntry> ranking = manualOnly ? [] : harnessResults
       .OrderByDescending(result => result.Score)
-      .ThenByDescending(result => result.Passed)
+      .ThenByDescending(result => CountPredefinedPassed(result.Tests))
       .ThenBy(result => result.DurationMilliseconds)
       .ThenBy(result => result.Harness, StringComparer.OrdinalIgnoreCase)
       .Select((result, index) => new BenchmarkRankingEntry(
         index + 1,
         result.Harness,
-        result.Passed,
+        CountPredefinedPassed(result.Tests),
         result.Score,
         result.DurationMilliseconds,
         result.Terminality
       ))
       .ToArray();
-    var pairRanking = RankPairs(matrixCells);
-    var modelRanking = RankAggregate(
-      matrixCells,
+    IReadOnlyList<BenchmarkMatrixRankingEntry> pairRanking = manualOnly ? [] : RankPairs(scoringCells);
+    IReadOnlyList<BenchmarkAggregateRankingEntry> modelRanking = manualOnly ? [] : RankAggregate(
+      scoringCells,
       cell => cell.Model,
       requestedModels
     );
-    var harnessRanking = RankAggregate(
-      matrixCells,
+    IReadOnlyList<BenchmarkAggregateRankingEntry> harnessRanking = manualOnly ? [] : RankAggregate(
+      scoringCells,
       cell => cell.Harness,
       requestedHarnesses
     );
@@ -443,7 +457,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           requestedModels,
           requestedHarnesses,
           contextTokens,
-          gpu
+          gpu,
+          request.CustomPrompt
         ),
         contextTokens,
         gpu,
@@ -452,7 +467,14 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       ScoringProfileVersion: BenchmarkScoringProfileIds.DefaultVersion,
       RawMeasurementsStatus: BenchmarkEvidenceStatusIds.Measured,
       ValidationEvidenceStatus: BenchmarkEvidenceStatusIds.Measured,
-      SelectedSuites: resolvedSuites.Selections
+      SelectedSuites: resolvedSuites.Selections,
+      BenchmarkMode: manual ? BenchmarkModeIds.Manual : BenchmarkModeIds.Predefined,
+      CustomPrompt: manual ? request.CustomPrompt : null,
+      RunName: manual ? NormalizeRunName(request.RunName) : null,
+      RerunOfRunId: manual ? request.RerunOfRunId : null,
+      ReviewStatus: manual
+        ? ManualSuiteReviewStatus(matrixCells)
+        : BenchmarkReviewStatusIds.NotApplicable
     );
     await _results.SaveAsync(suiteResult, CancellationToken.None);
     Publish(progressSink, new BenchmarkProgressEvent(
@@ -478,7 +500,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     string gpu,
     CancellationToken cancellationToken,
     IBenchmarkProgressSink? progressSink,
-    ConcurrentDictionary<string, BenchmarkHarnessResult> liveResults
+    ConcurrentDictionary<string, BenchmarkHarnessResult> liveResults,
+    bool manualOnly
   )
   {
     var harnessId = harness.Adapter.Definition.Id;
@@ -505,7 +528,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         startedAt,
         progressSink,
         liveResults,
-        true
+        true,
+        manualOnly
       );
       return empty;
     }
@@ -551,14 +575,17 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
             harnessId,
             test.Metadata.Id,
             progressSink
-          )
+          ),
+        IsManualTest(test)
       );
       testResults.Add(result);
       var partial = CreateHarnessResult(
         harness,
         tests.Count,
         testResults,
-        cancellationToken.IsCancellationRequested
+        cancellationToken.IsCancellationRequested,
+        manualOnly,
+        tests.Count(test => !IsManualTest(test))
       );
       liveResults[liveKey] = partial;
       Publish(progressSink, new BenchmarkProgressEvent(
@@ -572,12 +599,15 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         CompletedTests: testResults.Count,
         TotalTests: tests.Count,
         PassedTests: partial.Passed,
-        ProvisionalScore: ProvisionalScore(testResults),
+        ProvisionalScore: manualOnly ? null : ProvisionalScore(testResults),
         Terminality: partial.Terminality,
         ElapsedMilliseconds: Elapsed(startedAt),
         Model: model.Name
       ));
-      PublishRanking(runId, progressSink, liveResults, harnessId, model.Name);
+      if (!manualOnly)
+      {
+        PublishRanking(runId, progressSink, liveResults, harnessId, model.Name);
+      }
     }
 
     var observedRuntime = await ObserveRunningModelAsync(
@@ -609,7 +639,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       harness,
       tests.Count,
       testResults,
-      cancellationToken.IsCancellationRequested
+      cancellationToken.IsCancellationRequested,
+      manualOnly,
+      tests.Count(test => !IsManualTest(test))
     );
     liveResults[liveKey] = final;
     PublishHarnessResult(
@@ -619,7 +651,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       startedAt,
       progressSink,
       liveResults,
-      false
+      false,
+      manualOnly
     );
     return final;
   }
@@ -637,7 +670,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     int contextTokens,
     string gpu,
     bool observeRuntime,
-    BenchmarkProgressContext? progress = null
+    BenchmarkProgressContext? progress = null,
+    bool manual = false
   )
   {
     var testRunId = Guid.NewGuid().ToString("N");
@@ -650,7 +684,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var fingerprint = string.Empty;
     BenchmarkRunResult? result = null;
     var cleanedUp = false;
-    var retainWorkspace = string.Equals(
+    var retainWorkspace = manual || string.Equals(
       test.Metadata.Suite,
       BenchmarkSuiteIds.RealLifeProblem,
       StringComparison.OrdinalIgnoreCase
@@ -839,8 +873,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         ),
         raw,
         false,
-        _scorer.Score(raw, scoreWeights),
-        Math.Max(0, (long)(endedAt - startedAt).TotalMilliseconds)
+        manual ? null : _scorer.Score(raw, scoreWeights),
+        Math.Max(0, (long)(endedAt - startedAt).TotalMilliseconds),
+        ReviewStatus: manual
+          ? ManualResultReviewStatus(raw)
+          : BenchmarkReviewStatusIds.NotApplicable
       );
     }
     catch (OperationCanceledException)
@@ -856,6 +893,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         prompt,
         fingerprint,
         scoreWeights,
+        manual,
         runCancellationToken.IsCancellationRequested
           ? BenchmarkExecutionStatusIds.Cancelled
           : BenchmarkExecutionStatusIds.Failed,
@@ -884,6 +922,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         prompt,
         fingerprint,
         scoreWeights,
+        manual,
         BenchmarkExecutionStatusIds.Failed,
         new BenchmarkError(
           "benchmark-preparation-failed",
@@ -1251,6 +1290,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         contextTokens,
         gpu,
         progress,
+        test.Metadata.Suite == BenchmarkSuiteIds.Manual,
         cancellationToken
       );
       outcomes.Add(outcome);
@@ -1323,6 +1363,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     int contextTokens,
     string gpu,
     BenchmarkProgressContext? progress,
+    bool preserveExactUserMessage,
     CancellationToken cancellationToken
   )
   {
@@ -1336,6 +1377,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       turn.Order,
       turn.Name,
       progress,
+      preserveExactUserMessage,
       cancellationToken
     );
   }
@@ -1749,7 +1791,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     ResolvedBenchmarkHarness harness,
     CellCompatibility compatibility,
     int totalTests,
-    string? compatibilityStatus = null
+    string? compatibilityStatus = null,
+    bool manual = false
   )
   {
     return new BenchmarkMatrixCellResult(
@@ -1771,7 +1814,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       null,
       null,
       null,
-      null
+      null,
+      manual ? BenchmarkReviewStatusIds.TechnicalFailure : BenchmarkReviewStatusIds.NotApplicable
     );
   }
 
@@ -1832,7 +1876,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       AverageMetric(test => test.RawResult.BehaviorMetrics?.Recovery),
       AverageMetric(test => test.RawResult.BehaviorMetrics?.Convergence),
       AverageMetric(test => test.RawResult.BehaviorMetrics?.Hygiene),
-      result
+      result,
+      result.Tests.Select(test => test.ReviewStatus).FirstOrDefault(
+        status => status != BenchmarkReviewStatusIds.NotApplicable
+      ) ?? BenchmarkReviewStatusIds.NotApplicable,
+      result.Tests.Select(test => test.UserReview?.Score).FirstOrDefault(score => score.HasValue)
     );
   }
 
@@ -1902,7 +1950,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IReadOnlyList<string> models,
     IReadOnlyList<string> harnesses,
     int configuredContextTokens,
-    string gpu
+    string gpu,
+    string? customPrompt
   )
   {
     var canonical = string.Join("\n", new[]
@@ -1916,7 +1965,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       $"modelRole={UsageModelRoles.Benchmark}",
       "sequential=true",
       $"models={string.Join('|', models)}",
-      $"harnesses={string.Join('|', harnesses)}"
+      $"harnesses={string.Join('|', harnesses)}",
+      $"promptSha256={(customPrompt is null ? "none" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(customPrompt))).ToLowerInvariant())}"
     });
     return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
       .ToLowerInvariant();
@@ -1943,6 +1993,38 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           "Benchmark test groups must be non-empty and unique.",
           "suites"
         );
+      }
+      if (selection.Id == BenchmarkSuiteIds.Manual)
+      {
+        if (selection.Version != BenchmarkSuiteIds.ManualVersion)
+        {
+          throw new BenchmarkRequestException(
+            "benchmark-suite-unknown",
+            $"Custom Prompt test version {selection.Version} is unavailable.",
+            "suites"
+          );
+        }
+        if (string.IsNullOrWhiteSpace(request.CustomPrompt))
+        {
+          throw new BenchmarkRequestException(
+            "benchmark-custom-prompt-required",
+            "Custom Prompt test requires a non-empty prompt.",
+            "customPrompt"
+          );
+        }
+        var definition = new ManualPromptBenchmark(request.CustomPrompt);
+        var manualSuite = new BenchmarkSuiteMetadata(
+          BenchmarkSuiteIds.Manual,
+          BenchmarkSuiteIds.ManualVersion,
+          "Custom Prompt",
+          BenchmarkSuiteIds.ManualFixtureId,
+          BenchmarkSuiteIds.ManualFixtureVersion,
+          [definition.Metadata]
+        );
+        selections.Add(new BenchmarkSuiteSelection(manualSuite.Id, manualSuite.Version));
+        metadata.Add(manualSuite);
+        definitions.Add(definition);
+        continue;
       }
       if (!_tests.TryGetSuite(
         selection.Id,
@@ -2092,12 +2174,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
 
   private static decimal? ProvisionalScore(IReadOnlyCollection<BenchmarkRunResult> tests)
   {
-    if (tests.Count == 0)
+    var scored = tests.Where(test => test.Score is not null).ToArray();
+    if (scored.Length == 0)
     {
       return null;
     }
     return decimal.Round(
-      tests.Sum(test => test.Score?.Total ?? 0m) / tests.Count,
+      scored.Sum(test => test.Score!.Total) / scored.Length,
       2,
       MidpointRounding.AwayFromZero
     );
@@ -2200,7 +2283,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     DateTimeOffset startedAt,
     IBenchmarkProgressSink? progressSink,
     ConcurrentDictionary<string, BenchmarkHarnessResult> liveResults,
-    bool skipped
+    bool skipped,
+    bool manual
   )
   {
     var state = string.Equals(
@@ -2220,12 +2304,15 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       CompletedTests: result.Tests.Count,
       TotalTests: result.Total,
       PassedTests: result.Passed,
-      ProvisionalScore: ProvisionalScore(result.Tests),
+      ProvisionalScore: manual ? null : ProvisionalScore(result.Tests),
       Terminality: result.Terminality,
       ElapsedMilliseconds: Elapsed(startedAt),
       Model: model
     ));
-    PublishRanking(runId, progressSink, liveResults, result.Harness, model);
+    if (!manual)
+    {
+      PublishRanking(runId, progressSink, liveResults, result.Harness, model);
+    }
   }
 
   private static void PublishRanking(
@@ -2242,9 +2329,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       Result: pair.Value
     )).ToArray();
     var ranks = snapshot
-      .Where(item => item.Result.Tests.Count > 0)
+      .Where(item => item.Result.Tests.Any(test => test.Score is not null))
       .OrderByDescending(item => ProvisionalScore(item.Result.Tests))
-      .ThenByDescending(item => item.Result.Passed)
+      .ThenByDescending(item => CountPredefinedPassed(item.Result.Tests))
       .ThenBy(item => item.Result.DurationMilliseconds)
       .ThenBy(item => item.Model, StringComparer.OrdinalIgnoreCase)
       .ThenBy(item => item.Result.Harness, StringComparer.OrdinalIgnoreCase)
@@ -2329,7 +2416,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     ResolvedBenchmarkHarness harness,
     int totalTests,
     IReadOnlyList<BenchmarkRunResult> tests,
-    bool cancelled
+    bool cancelled,
+    bool manual = false,
+    int? scoringTestTotal = null
   )
   {
     var duration = Math.Max(
@@ -2347,7 +2436,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         BenchmarkExecutionStatusIds.Completed,
         StringComparison.Ordinal
       ) ? 100 : 0));
-    var score = tests.Sum(test => test.Score?.Total ?? 0m) / totalTests;
+    var score = manual ? 0m : tests.Sum(test => test.Score?.Total ?? 0m)
+      / Math.Max(1, scoringTestTotal ?? totalTests);
     return new BenchmarkHarnessResult(
       harness.Adapter.Definition.Id,
       harness.Availability.Version,
@@ -2499,6 +2589,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     string prompt,
     string fingerprint,
     BenchmarkScoreWeights scoreWeights,
+    bool manual,
     string status,
     BenchmarkError error
   )
@@ -2537,9 +2628,50 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       ),
       raw,
       false,
-      _scorer.Score(raw, scoreWeights),
-      Math.Max(0, (long)(endedAt - startedAt).TotalMilliseconds)
+      manual ? null : _scorer.Score(raw, scoreWeights),
+      Math.Max(0, (long)(endedAt - startedAt).TotalMilliseconds),
+      ReviewStatus: manual
+        ? BenchmarkReviewStatusIds.TechnicalFailure
+        : BenchmarkReviewStatusIds.NotApplicable
     );
+  }
+
+  private static string ManualResultReviewStatus(BenchmarkRawResult raw) =>
+    string.Equals(raw.ExecutionStatus, BenchmarkExecutionStatusIds.Completed, StringComparison.Ordinal)
+      && raw.Error is null
+        ? BenchmarkReviewStatusIds.AwaitingUserReview
+        : BenchmarkReviewStatusIds.TechnicalFailure;
+
+  private static bool IsManualTest(IBenchmarkTestDefinition test) =>
+    string.Equals(test.Metadata.Suite, BenchmarkSuiteIds.Manual, StringComparison.Ordinal);
+
+  private static int CountPredefinedPassed(IReadOnlyList<BenchmarkRunResult> tests) =>
+    tests.Count(test => test.Run.SuiteId != BenchmarkSuiteIds.Manual
+      && test.RawResult.Status == BenchmarkResultStatusIds.Pass);
+
+  private static string ManualSuiteReviewStatus(
+    IReadOnlyList<BenchmarkMatrixCellResult> cells
+  ) => cells.SelectMany(cell => cell.Result?.Tests ?? [])
+    .Any(test => test.ReviewStatus == BenchmarkReviewStatusIds.AwaitingUserReview)
+      ? BenchmarkReviewStatusIds.AwaitingUserReview
+      : BenchmarkReviewStatusIds.Reviewed;
+
+  private static string? NormalizeRunName(string? runName)
+  {
+    if (string.IsNullOrWhiteSpace(runName))
+    {
+      return null;
+    }
+    var normalized = runName.Trim();
+    if (normalized.Length > 200)
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-run-name-too-large",
+        "Manual benchmark run name cannot exceed 200 characters.",
+        "runName"
+      );
+    }
+    return normalized;
   }
 
   private sealed record ResolvedBenchmarkHarness(

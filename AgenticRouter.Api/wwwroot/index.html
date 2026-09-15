@@ -590,6 +590,17 @@
                 </legend>
                 <div id="benchmark-suite-list" class="benchmark-switch-list">
                 </div>
+                <section id="benchmark-manual-prompt-fields" class="benchmark-manual-prompt-fields" hidden>
+                  <label>
+                    <span data-i18n="benchmark.custom_prompt.run_name">Run name (optional)</span>
+                    <input id="benchmark-run-name" type="text" maxlength="200" placeholder="Galaga Test" data-i18n-placeholder="benchmark.custom_prompt.run_name_placeholder">
+                  </label>
+                  <label>
+                    <span data-i18n="benchmark.custom_prompt.prompt_label">Custom Benchmark Prompt</span>
+                    <textarea id="benchmark-custom-prompt" rows="9" spellcheck="true" aria-describedby="benchmark-custom-prompt-help">Build a playable Galaga-inspired arcade spaceship game for the browser in this workspace. Create the necessary files, preserve existing work, and validate the result.</textarea>
+                    <small id="benchmark-custom-prompt-help" data-i18n="benchmark.custom_prompt.help">This test sends the exact text above. Use any task, including text review or creative writing.</small>
+                  </label>
+                </section>
               </fieldset>
             </details>
             <div class="benchmark-selection-grid">
@@ -868,6 +879,16 @@
                   </tbody>
                 </table>
               </div>
+              <section id="benchmark-custom-ranking" class="benchmark-custom-ranking" hidden>
+                <h4 data-i18n="benchmark.custom_prompt.ranking_title">Custom Prompt · User ranking</h4>
+                <p data-i18n="benchmark.custom_prompt.ranking_note">User-assigned quality scores only; independent of the calculated ranking above.</p>
+                <div class="benchmark-table-shell">
+                  <table>
+                    <thead><tr><th data-i18n="benchmark.results.model_harness">Model × Harness</th><th data-i18n="benchmark.custom_prompt.review_column">Review</th><th data-i18n="benchmark.custom_prompt.user_score_column">User Score</th><th data-i18n="benchmark.results.duration">Duration</th></tr></thead>
+                    <tbody id="benchmark-custom-ranking-body"></tbody>
+                  </table>
+                </div>
+              </section>
               <div id="benchmark-result-detail" class="benchmark-result-detail">
                 <p>
                   Select a harness in the table to inspect scenarios.
@@ -1139,6 +1160,15 @@
                   aria-describedby="max-direct-plan-steps-help"
                 >
                 <small id="max-direct-plan-steps-help">Auto uses the Supervisor when a structured objective or accepted plan exceeds this number of steps.</small>
+              </label>
+              <label>
+                <span data-i18n="settings.native_file_creation.model_label">Native file creation · local model</span>
+                <select id="general-file-creation-model" aria-describedby="general-file-creation-help"></select>
+              </label>
+              <label>
+                <span data-i18n="settings.native_file_creation.limit_label">File Creation Output Token Limit</span>
+                <input id="general-file-creation-output" type="number" min="1" max="131071" placeholder="Inherit model default" data-i18n-placeholder="settings.native_file_creation.inherit_placeholder" aria-describedby="general-file-creation-help">
+                <small id="general-file-creation-help" data-i18n="settings.native_file_creation.help">Per-model budget for Native create_file/create_files. Blank inherits; normal output is unchanged. Save settings to apply.</small>
               </label>
               <fieldset class="phase-effort-settings">
                 <legend>Effort by supervised phase</legend>
@@ -1603,6 +1633,11 @@
                   <label>
                     <span>Output limit</span>
                     <input id="runtime-override-output" type="number" min="128" max="32768">
+                  </label>
+                  <label>
+                    <span data-i18n="settings.native_file_creation.limit_label">File Creation Output Token Limit</span>
+                    <input id="runtime-override-file-creation-output" type="number" min="1" max="131071" placeholder="Inherit model default" data-i18n-placeholder="settings.native_file_creation.inherit_placeholder">
+                    <small data-i18n="settings.native_file_creation.override_help">Leave empty to inherit the normal model output limit.</small>
                   </label>
                   <label>
                     <span>Keep-alive (seconds; -1 keeps the selected role loaded)</span>
@@ -2439,7 +2474,7 @@
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
-  <script src="/i18n.js"></script>
-  <script src="/app.js"></script>
+  <script src="/i18n.js?v=20260915-custom-prompt-en"></script>
+  <script src="/app.js?v=20260915-custom-prompt-en"></script>
 </body>
 </html>

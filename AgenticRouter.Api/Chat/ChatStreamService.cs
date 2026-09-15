@@ -4179,10 +4179,13 @@ public sealed class ChatStreamService
         var omittedContextBlocks = 0;
         long beforeCompactionTokens;
         long afterCompactionTokens;
+        var useFileCreationOutputTokenLimit = !structuredCoordination
+          && progress.FileCreationOutputTokenLimitPending;
         var budget = GetCoordinatorInputBudget(
           applicationSettings,
           model,
-          providerMaximumTokens
+          providerMaximumTokens,
+          useFileCreationOutputTokenLimit
         );
         if (structuredCoordination)
         {
@@ -4445,7 +4448,8 @@ public sealed class ChatStreamService
                       delta,
                       token
                     ),
-                    requestedEffort: progress.ProviderOptions.RequestedEffort
+                    requestedEffort: progress.ProviderOptions.RequestedEffort,
+                    useFileCreationOutputTokenLimit: useFileCreationOutputTokenLimit
                   )
               );
             }
@@ -4516,6 +4520,11 @@ public sealed class ChatStreamService
           }
 
           planning = await planningTask;
+          progress.FileCreationOutputTokenLimitPending = useFileCreationOutputTokenLimit
+            && planning.Failure is LocalActionException
+            {
+              Stage: LocalActionPlanner.OutputLimitStage
+            };
         }
 
         if (planning.Result?.Usage is not null)
@@ -5182,6 +5191,10 @@ public sealed class ChatStreamService
               "toolset-granted"
             );
           }
+
+          progress.FileCreationOutputTokenLimitPending = grant.Resolutions.Any(
+            resolution => resolution.CanonicalName is "create_file" or "create_files"
+          );
 
           planningFailures = 0;
           _executionSession?.ResetPlanningFailures();
@@ -10554,7 +10567,8 @@ public sealed class ChatStreamService
   private CoordinatorInputBudget GetCoordinatorInputBudget(
     ApplicationSettings settings,
     string model,
-    int? providerMaximumTokens
+    int? providerMaximumTokens,
+    bool useFileCreationOutputTokenLimit = false
   )
   {
     _usageModelRevisions.TryGetValue(model, out var digest);
@@ -10566,7 +10580,8 @@ public sealed class ChatStreamService
       usageRole,
       null,
       0,
-      settings.Execution.MaxToolOutputTokens
+      settings.Execution.MaxToolOutputTokens,
+      useFileCreationOutputTokenLimit: useFileCreationOutputTokenLimit
     );
     var effectiveLimit = _usageRuntimeContextTokens ?? new[]
     {
@@ -12144,6 +12159,8 @@ public sealed class ChatStreamService
     }
 
     public int ToolsetRequestCount { get; set; }
+
+    public bool FileCreationOutputTokenLimitPending { get; set; }
 
     public int VisibleMessages { get; }
 

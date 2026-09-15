@@ -19,6 +19,7 @@ public interface IBenchmarkProductionExecuteRunner
     int turnNumber,
     string turnName,
     BenchmarkProgressContext? progress,
+    bool preserveExactUserMessage,
     CancellationToken cancellationToken
   );
 }
@@ -57,6 +58,7 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     int turnNumber,
     string turnName,
     BenchmarkProgressContext? progress,
+    bool preserveExactUserMessage,
     CancellationToken cancellationToken
   )
   {
@@ -96,7 +98,8 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       BrowserSessionId: browserSessionId,
       AutoModelHarness: false,
       ExecutionStrategy: "auto",
-      SupervisionResumePolicy: "manual"
+      SupervisionResumePolicy: "manual",
+      PreserveExactUserMessage: preserveExactUserMessage
     );
     using var content = new StringContent(
       JsonSerializer.Serialize(request, JsonOptions),
