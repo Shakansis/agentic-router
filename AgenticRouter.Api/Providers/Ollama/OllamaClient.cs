@@ -53,13 +53,6 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
-    var settings = await _settingsStore.GetAsync(cancellationToken);
-    baseUri = (await _managedServers.ResolveAsync(
-      baseUri,
-      settings.DefaultGpu,
-      settings.DefaultGpu,
-      cancellationToken
-    )).Endpoint;
     using var request = new HttpRequestMessage(
       HttpMethod.Get,
       new Uri(
@@ -297,8 +290,7 @@ public sealed class OllamaClient : IOllamaClient
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
     string? requestedEffort = null,
-    ProviderGenerationProfile? generationProfile = null,
-    bool useFileCreationOutputTokenLimit = false
+    ProviderGenerationProfile? generationProfile = null
   )
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;
@@ -325,7 +317,7 @@ public sealed class OllamaClient : IOllamaClient
         estimatedInput,
         toolOutput,
         generationProfile.MaximumContextTokens,
-        useFileCreationOutputTokenLimit,
+        generationProfile.MaximumOutputTokens,
         cancellationToken
       );
       var payload = CreateRequest(
@@ -646,7 +638,7 @@ public sealed class OllamaClient : IOllamaClient
         estimatedInput,
         false,
         options.EffectiveGenerationProfile.MaximumContextTokens,
-        false,
+        options.EffectiveGenerationProfile.MaximumOutputTokens,
         cancellationToken
       );
       var payload = CreateRequest(
@@ -1176,7 +1168,7 @@ public sealed class OllamaClient : IOllamaClient
           0,
           contextTokens,
           null,
-          endpoint.Managed ? endpoint.MainGpu : mainGpu
+          endpoint.MainGpu
         ),
       keepAlive
     );
@@ -1232,7 +1224,7 @@ public sealed class OllamaClient : IOllamaClient
         estimatedInput,
         false,
         options.EffectiveGenerationProfile.MaximumContextTokens,
-        false,
+        options.EffectiveGenerationProfile.MaximumOutputTokens,
         cancellationToken
       );
     }
@@ -1577,7 +1569,7 @@ public sealed class OllamaClient : IOllamaClient
     long estimatedInputTokens,
     bool toolOutput,
     int? generationMaximumContextTokens,
-    bool useFileCreationOutputTokenLimit,
+    int? generationMaximumOutputTokens,
     CancellationToken cancellationToken
   )
   {
@@ -1585,9 +1577,10 @@ public sealed class OllamaClient : IOllamaClient
       cancellationToken
     );
 
-    var requestedOutput = toolOutput
-      ? settings.Execution.MaxToolOutputTokens
-      : settings.Context.ReservedResponseTokens;
+    var requestedOutput = generationMaximumOutputTokens
+      ?? (toolOutput
+        ? settings.Execution.MaxToolOutputTokens
+        : settings.Context.ReservedResponseTokens);
     var roleGpuSelection = ResolveRoleGpuSelection(settings, usageContext);
     var gpuSelection = await ResolveModelGpuSelectionAsync(
       settings,
@@ -1657,7 +1650,7 @@ public sealed class OllamaClient : IOllamaClient
       estimatedInputTokens,
       requestedOutput,
       generationMaximumContextTokens,
-      useFileCreationOutputTokenLimit
+      generationMaximumOutputTokens
     );
 
     if (usageContext.RuntimeContextTokens is not null)

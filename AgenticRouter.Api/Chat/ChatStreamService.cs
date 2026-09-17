@@ -1533,7 +1533,7 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    if (images.Count > 0 && harnessDefinition.Id != HarnessIds.Codex)
+    if (images.Count > 0 && !harnessDefinition.Capabilities.SupportsImages)
     {
       throw new ChatStageException(
         "harness-vision-unsupported",
@@ -4179,13 +4179,18 @@ public sealed class ChatStreamService
         var omittedContextBlocks = 0;
         long beforeCompactionTokens;
         long afterCompactionTokens;
-        var useFileCreationOutputTokenLimit = !structuredCoordination
-          && progress.FileCreationOutputTokenLimitPending;
+        var fileCreationOutputLimit = (structuredCoordination
+          ? progress.ToolScope.Allows("create_file")
+            || progress.ToolScope.Allows("create_files")
+          : progress.GrantedTools.Contains("create_file")
+            || progress.GrantedTools.Contains("create_files"))
+            ? applicationSettings.Execution.FileCreationOutputTokenLimit
+            : null;
         var budget = GetCoordinatorInputBudget(
           applicationSettings,
           model,
           providerMaximumTokens,
-          useFileCreationOutputTokenLimit
+          fileCreationOutputLimit
         );
         if (structuredCoordination)
         {
@@ -4424,7 +4429,8 @@ public sealed class ChatStreamService
                     model,
                     progress,
                     CoordinationUsageRole(applicationSettings, model),
-                    cancellationToken
+                    cancellationToken,
+                    fileCreationOutputLimit
                   )
                   : _actionPlanner.PlanAsync(
                     baseUri,
@@ -4449,7 +4455,7 @@ public sealed class ChatStreamService
                       token
                     ),
                     requestedEffort: progress.ProviderOptions.RequestedEffort,
-                    useFileCreationOutputTokenLimit: useFileCreationOutputTokenLimit
+                    maximumOutputTokens: fileCreationOutputLimit
                   )
               );
             }
@@ -4520,11 +4526,6 @@ public sealed class ChatStreamService
           }
 
           planning = await planningTask;
-          progress.FileCreationOutputTokenLimitPending = useFileCreationOutputTokenLimit
-            && planning.Failure is LocalActionException
-            {
-              Stage: LocalActionPlanner.OutputLimitStage
-            };
         }
 
         if (planning.Result?.Usage is not null)
@@ -5191,10 +5192,6 @@ public sealed class ChatStreamService
               "toolset-granted"
             );
           }
-
-          progress.FileCreationOutputTokenLimitPending = grant.Resolutions.Any(
-            resolution => resolution.CanonicalName is "create_file" or "create_files"
-          );
 
           planningFailures = 0;
           _executionSession?.ResetPlanningFailures();
@@ -9047,6 +9044,14 @@ public sealed class ChatStreamService
   {
     try
     {
+      var settings = await _settingsStore.GetAsync(cancellationToken);
+      var scope = ExecutionTurnToolPolicy.Resolve(
+        messages.Select(message => (message.Role, (string?)message.Content))
+      );
+      var fileCreationOutputLimit = scope.Allows("create_file")
+        || scope.Allows("create_files")
+          ? settings.Execution.FileCreationOutputTokenLimit
+          : null;
       return new GuidanceAttempt(
         await _expertGuidance.PrepareAsync(
           baseUri,
@@ -9057,7 +9062,8 @@ public sealed class ChatStreamService
             UsageModelRoles.Specialist,
             "expert-execution-guidance"
           ),
-          cancellationToken
+          cancellationToken,
+          maximumOutputTokens: fileCreationOutputLimit
         ),
         null
       );
@@ -9087,7 +9093,8 @@ public sealed class ChatStreamService
     string model,
     ExecutionProgress progress,
     string usageModelRole,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    int? maximumOutputTokens = null
   )
   {
     ProviderTokenUsage? providerUsage = null;
@@ -9102,7 +9109,8 @@ public sealed class ChatStreamService
       ),
       cancellationToken,
       usage => providerUsage = usage,
-      progress.ProviderOptions
+      progress.ProviderOptions,
+      maximumOutputTokens
     );
     progress.Guidance = guidance;
     var assistantMessage = new OllamaToolMessage(
@@ -10568,7 +10576,7 @@ public sealed class ChatStreamService
     ApplicationSettings settings,
     string model,
     int? providerMaximumTokens,
-    bool useFileCreationOutputTokenLimit = false
+    int? outputTokenLimitOverride = null
   )
   {
     _usageModelRevisions.TryGetValue(model, out var digest);
@@ -10581,7 +10589,7 @@ public sealed class ChatStreamService
       null,
       0,
       settings.Execution.MaxToolOutputTokens,
-      useFileCreationOutputTokenLimit: useFileCreationOutputTokenLimit
+      outputTokenLimitOverride: outputTokenLimitOverride
     );
     var effectiveLimit = _usageRuntimeContextTokens ?? new[]
     {
@@ -12159,8 +12167,6 @@ public sealed class ChatStreamService
     }
 
     public int ToolsetRequestCount { get; set; }
-
-    public bool FileCreationOutputTokenLimitPending { get; set; }
 
     public int VisibleMessages { get; }
 

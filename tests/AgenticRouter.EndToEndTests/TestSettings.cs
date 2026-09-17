@@ -181,8 +181,7 @@ internal sealed record TestOllamaRoleRuntimeSettings(
   int TargetContextTokens,
   int MaximumContextTokens,
   int KeepAlive,
-  int OutputTokenLimit,
-  int? FileCreationOutputTokenLimit = null
+  int OutputTokenLimit
 );
 
 internal sealed record TestOllamaModelRuntimeOverride(
@@ -319,6 +318,8 @@ internal static class TestOllamaRuntimeDefaults
 internal sealed record TestExecutionSettings
 {
   public int MaxDirectPlanSteps { get; init; } = 5;
+
+  public int? FileCreationOutputTokenLimit { get; init; }
 
   public TestPhaseEffortSettings PhaseEffort { get; init; } = new();
 

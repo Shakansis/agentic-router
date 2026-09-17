@@ -1300,6 +1300,50 @@ public sealed class DurableSupervisionEndToEndTests
   }
 
   [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task AutomaticSupervisorAndWorkerAffinityUseGeneralDefaultDespiteLegacyRoleGpus()
+  {
+    var settings = JsonSerializer.SerializeToNode(_environment.BaselineSettings, TestJson.Options)!;
+    settings["supervisorModel"] = "gpt-oss:20b";
+    settings["defaultGpu"] = "ollama:1";
+    settings["coordinatorGpu"] = "ollama:0";
+    settings["intentions"]!["documentation"]!["gpu"] = "ollama:0";
+    using var saved = await _environment.HttpClient.PutAsJsonAsync("api/settings", settings);
+    saved.EnsureSuccessStatusCode();
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    await Page.GotoAsync("/");
+    using var prepare = await _environment.HttpClient.PostAsJsonAsync(
+      "api/supervision/runs/prepare",
+      new
+      {
+        objective = "write documentation supervision first pass success",
+        model = "auto",
+        harness = "native",
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        browserSessionId = Guid.NewGuid().ToString("N")
+      }
+    );
+    prepare.EnsureSuccessStatusCode();
+    var runId = JsonNode.Parse(await prepare.Content.ReadAsStringAsync())!["runId"]!.GetValue<string>();
+    var prepared = await GetRunAsync(runId);
+    Assert.AreEqual("ollama:1", prepared["route"]!["workerGpuSelection"]!.GetValue<string>());
+    Assert.AreEqual("ollama:1", prepared["route"]!["supervisorGpuSelection"]!.GetValue<string>());
+    using var start = await _environment.HttpClient.PostAsync($"api/supervision/runs/{runId}/start", null);
+    start.EnsureSuccessStatusCode();
+    var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", completed["state"]!.GetValue<string>(), completed.ToJsonString());
+    var turns = _environment.FakeOllama.Requests.Where(request => request.Messages.Count > 0).ToArray();
+    foreach (var model in new[] { "docs:latest", "gpt-oss:20b" })
+    {
+      var requests = turns.Where(request => request.Model == model).ToArray();
+      Assert.IsNotEmpty(requests);
+      Assert.IsTrue(requests.All(request => request.MainGpu == 1));
+    }
+  }
+
+  [TestMethod]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task VulkanAutoWorkerAndSameWorkerSupervisorDoesNotWarn()
@@ -2376,6 +2420,120 @@ public sealed class DurableSupervisionEndToEndTests
         StringComparison.Ordinal
       ))
     ));
+  }
+
+  [TestMethod]
+  [Timeout(40_000, CooperativeCancellation = true)]
+  public async Task InvalidDecompositionQueueUsesOneBoundedSemanticCorrection()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var runId = await StartNativeSupervisionAsync(
+      "invalid decomposition queue recovery"
+    );
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    Assert.AreEqual(1, run["runtime"]!["totalItems"]!.GetValue<int>());
+    Assert.AreEqual(4, run["runtime"]!["supervisorTransitionCount"]!.GetValue<int>());
+    Assert.AreEqual(
+      "hello world today",
+      await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"))
+    );
+
+    using var response = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>()
+        == "supervision.turn-decomposition-decision-recovery"
+      && item["retryReason"]!.GetValue<string>()
+        == "decomposition-decision-recovery"
+    ));
+    Assert.IsFalse(events.Any(item =>
+      item["type"]!.GetValue<string>() == "supervision.blocked"
+    ));
+    var recoveryRequests = _environment.FakeOllama.Requests.Where(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        "SUPERVISION_DECOMPOSITION_DECISION_RECOVERY_V1",
+        StringComparison.Ordinal
+      ))
+    ).ToArray();
+    Assert.HasCount(1, recoveryRequests);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenSupervisorToolLoopRecoversWithoutToolsAndKeepsCompactedContinuity()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    var targetPath = Path.Combine(_environment.WorkspaceDirectory, "qwen-supervised.txt");
+    if (File.Exists(targetPath))
+    {
+      File.Delete(targetPath);
+    }
+    var markerPath = Path.Combine(
+      _environment.DataDirectory,
+      "qwen-code-runtime",
+      "fake-qwen-supervision-tool-loop-recovery.json"
+    );
+    if (File.Exists(markerPath))
+    {
+      File.Delete(markerPath);
+    }
+
+    using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
+      "api/supervision/runs/prepare",
+      new
+      {
+        objective = "qwen supervision tool loop recovery",
+        model = "qwen3.8:27b-gpu0",
+        harness = "qwen-code",
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        browserSessionId = Guid.NewGuid().ToString("N"),
+        history = new object[]
+        {
+          new
+          {
+            role = "assistant",
+            content = "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1\nRequirements and constraints:\n- Preserve the prior implementation objective."
+          },
+          new { role = "user", content = "try again" },
+          new { role = "assistant", content = "The previous supervised attempt failed." }
+        }
+      }
+    );
+    prepareResponse.EnsureSuccessStatusCode();
+    var runId = JsonNode.Parse(
+      await prepareResponse.Content.ReadAsStringAsync()
+    )!["runId"]!.GetValue<string>();
+    using var startResponse = await _environment.HttpClient.PostAsync(
+      $"api/supervision/runs/{runId}/start",
+      null
+    );
+    startResponse.EnsureSuccessStatusCode();
+
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(45));
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    Assert.AreEqual("visible Qwen activity", await File.ReadAllTextAsync(targetPath));
+    using var eventsResponse = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    eventsResponse.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await eventsResponse.Content.ReadAsStringAsync());
+    Assert.HasCount(1, events.Where(item =>
+      item["type"]!.GetValue<string>() == "supervision.turn-harness-recovery"
+      && item["retryReason"]!.GetValue<string>() == "tool-loop-recovery"
+    ));
+
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
+    Assert.IsTrue(marker.RootElement.GetProperty("includesPersistedContinuity").GetBoolean());
+    Assert.IsTrue(marker.RootElement.GetProperty("forbidsTools").GetBoolean());
   }
 
   [TestMethod]

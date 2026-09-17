@@ -165,7 +165,7 @@ public sealed class OllamaManagedServerManager :
     }
 
     return new OllamaEndpointResolution(
-      ManagedEndpoint(configuredEndpoint),
+      ManagedEndpoint(configuredEndpoint, target),
       ManagedMainGpu(target),
       true,
       target.Backend,
@@ -279,7 +279,7 @@ public sealed class OllamaManagedServerManager :
         );
       }
 
-      ManagedServer[] replaced;
+      ManagedServer? replaced;
       lock (_servers)
       {
         if (
@@ -290,15 +290,12 @@ public sealed class OllamaManagedServerManager :
         {
           return existing;
         }
-        replaced = _servers.Values.Where(
-          server => !server.Process.HasExited
-        ).ToArray();
-        _servers.Clear();
+        _servers.Remove(target.Selection, out replaced);
       }
 
-      foreach (var server in replaced)
+      if (replaced is not null)
       {
-        await StopServerAsync(server, cancellationToken);
+        await StopServerAsync(replaced, cancellationToken);
       }
 
       return await StartServerAsync(
@@ -323,7 +320,7 @@ public sealed class OllamaManagedServerManager :
   {
     var executable = ResolveOllamaExecutable();
     var library = ResolveLibrary(executable, target.Backend);
-    var port = configuredEndpoint.Port + _portOffset;
+    var port = ManagedEndpoint(configuredEndpoint, target).Port;
     string? vulkanOrder = null;
 
     if (target.PreferredDevice is not null)
@@ -1011,10 +1008,30 @@ public sealed class OllamaManagedServerManager :
       && endpoint.Port == 11_434;
   }
 
-  private Uri ManagedEndpoint(Uri configuredEndpoint)
+  private Uri ManagedEndpoint(Uri configuredEndpoint, OllamaGpuTarget target)
   {
+    // Six slots per device index keep backend/affinity endpoints stable across
+    // planning, restarts and request order. Slot 5 is the all-device Vulkan route.
+    var slot = target.PreferredDevice is { } preferred
+      ? (long)preferred.Index * 6 + (preferred.Backend == "cuda" ? 3 : 4)
+      : target.AllDevices
+        ? 5
+        : (long)target.Index * 6 + (target.Backend switch
+        {
+          "cuda" => 0,
+          "rocm" => 1,
+          _ => 2
+        });
+    var port = configuredEndpoint.Port + (long)_portOffset + slot;
+    if (port is < 1 or > 65_535)
+    {
+      throw ManagedFailure(
+        "The managed Ollama endpoint is outside the TCP port range.",
+        $"GPU selection '{target.Selection}' cannot be assigned a managed port."
+      );
+    }
     return new Uri(
-      $"http://127.0.0.1:{configuredEndpoint.Port + _portOffset}",
+      $"http://127.0.0.1:{port}",
       UriKind.Absolute
     );
   }

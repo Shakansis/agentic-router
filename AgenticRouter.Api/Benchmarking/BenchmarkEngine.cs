@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Providers;
@@ -44,6 +45,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private readonly IBenchmarkRunCancellationRegistry _cancellations;
   private readonly IBenchmarkEnvironmentSnapshotProvider _environmentSnapshots;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
+  private readonly IModelGpuAffinityResolver _modelGpuAffinities;
   private readonly ISystemMemoryMetricsProvider _systemMemory;
   private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly IMarkdownRenderer _markdown;
@@ -62,7 +64,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IOllamaManagedServerManager managedOllamaServers,
     ISystemMemoryMetricsProvider systemMemory,
     IGpuMemoryMetricsProvider gpuMemory,
-    IMarkdownRenderer markdown
+    IMarkdownRenderer markdown,
+    IModelGpuAffinityResolver modelGpuAffinities
   )
   {
     _tests = tests;
@@ -79,6 +82,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _systemMemory = systemMemory;
     _gpuMemory = gpuMemory;
     _markdown = markdown;
+    _modelGpuAffinities = modelGpuAffinities;
   }
 
   public async Task<BenchmarkRunResult> RunAsync(
@@ -107,12 +111,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       providerEndpoint,
       cancellationToken
     );
+    gpu = (await _modelGpuAffinities.ResolveAsync(
+      settings, model.Name, settings.DefaultGpu, cancellationToken
+    )).GpuSelection;
     providerEndpoint = (await _managedOllamaServers.ResolveAsync(
-      providerEndpoint,
-      gpu,
-      gpu,
-      contextTokens,
-      cancellationToken
+      providerEndpoint, gpu, settings.DefaultGpu, contextTokens, cancellationToken
     )).Endpoint;
     var harness = await ResolveHarnessAsync(request.Harness, cancellationToken);
     return await RunTestAsync(
@@ -185,13 +188,6 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       providerEndpoint,
       cancellationToken
     );
-    providerEndpoint = (await _managedOllamaServers.ResolveAsync(
-      providerEndpoint,
-      gpu,
-      gpu,
-      contextTokens,
-      cancellationToken
-    )).Endpoint;
     var models = requestedModels.Select(name => new ResolvedBenchmarkModel(
       name,
       installedModels.FirstOrDefault(candidate =>
@@ -311,17 +307,23 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           ));
           continue;
         }
+        var affinity = await _modelGpuAffinities.ResolveAsync(
+          settings, model.Installed!.Name, settings.DefaultGpu, lease.Token
+        );
+        var cellEndpoint = (await _managedOllamaServers.ResolveAsync(
+          providerEndpoint, affinity.GpuSelection, settings.DefaultGpu, contextTokens, lease.Token
+        )).Endpoint;
         var result = await RunHarnessAsync(
           runId,
           harness,
           tests,
           model.Installed!,
-          providerEndpoint,
+          cellEndpoint,
           settings,
           request.TimeoutSeconds,
           scoreWeights,
           contextTokens,
-          gpu,
+          affinity.GpuSelection,
           lease.Token,
           progressSink,
           liveResults,

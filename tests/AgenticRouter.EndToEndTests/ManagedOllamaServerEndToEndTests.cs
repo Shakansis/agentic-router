@@ -51,7 +51,7 @@ public sealed class ManagedOllamaServerEndToEndTests
 
       Assert.IsTrue(supervisor.Managed);
       Assert.AreEqual("rocm", supervisor.Backend);
-      Assert.AreEqual(worker.Endpoint, supervisor.Endpoint);
+      Assert.AreNotEqual(worker.Endpoint, supervisor.Endpoint);
       var activeAfterPlan = manager.GetActiveServers().Single();
       Assert.AreEqual(activeBeforePlan.ProcessId, activeAfterPlan.ProcessId);
       Assert.AreEqual(
@@ -62,6 +62,31 @@ public sealed class ManagedOllamaServerEndToEndTests
         activeBeforePlan.ProcessId
       );
       Assert.IsFalse(activeProcess.HasExited);
+
+      var resolvedSupervisor = await manager.ResolveAsync(
+        endpoint, "rocm:0", "rocm:0", 32_768, CancellationToken.None
+      );
+      Assert.AreEqual(supervisor.Endpoint, resolvedSupervisor.Endpoint);
+      Assert.HasCount(2, manager.GetActiveServers());
+      Assert.HasCount(2, Directory.GetFiles(
+        Path.Combine(temporaryRoot, "data", "ollama-managed-servers"), "*.json"
+      ));
+      using var client = new HttpClient();
+      for (var transition = 0; transition < 3; transition++)
+      {
+        await manager.ResolveAsync(endpoint, "vulkan:prefer:cuda:0", "auto", CancellationToken.None);
+        await manager.ResolveAsync(endpoint, "rocm:0", "auto", 32_768, CancellationToken.None);
+        var environments = await Task.WhenAll(
+          client.GetFromJsonAsync<JsonElement>(new Uri(worker.Endpoint, "/test/environment")),
+          client.GetFromJsonAsync<JsonElement>(new Uri(supervisor.Endpoint, "/test/environment"))
+        );
+        Assert.AreEqual(activeBeforePlan.ProcessId, environments[0].GetProperty("processId").GetInt32());
+        Assert.AreEqual("vulkan", environments[0].GetProperty("library").GetString());
+        Assert.AreEqual("rocm_v7_1", environments[1].GetProperty("library").GetString());
+        Assert.AreNotEqual(environments[0].GetProperty("processId").GetInt32(), environments[1].GetProperty("processId").GetInt32());
+      }
+      Assert.IsFalse(activeProcess.HasExited);
+
     }
     finally
     {
@@ -105,7 +130,7 @@ public sealed class ManagedOllamaServerEndToEndTests
 
       await File.WriteAllTextAsync(
         failurePath,
-        "listen tcp 127.0.0.1:12434: bind: Only one usage of each socket address is normally permitted"
+        "listen tcp 127.0.0.1:31434: bind: Only one usage of each socket address is normally permitted"
       );
       var recovered = await manager.ResolveAsync(
         new Uri("http://127.0.0.1:11434"),
@@ -178,8 +203,8 @@ public sealed class ManagedOllamaServerEndToEndTests
     {
       first = CreateManager(dataDirectory, httpClients, executable);
       await first.StartAsync(CancellationToken.None);
-      using var previous = StartUnmanagedFakeOllama(executable, 12_434);
-      await WaitUntilReadyAsync(12_434);
+      using var previous = StartUnmanagedFakeOllama(executable, 31_434);
+      await WaitUntilReadyAsync(31_434);
       var previousPid = previous.Id;
       var cuda = await first.ResolveAsync(
         new Uri("http://127.0.0.1:11434"),
@@ -189,7 +214,7 @@ public sealed class ManagedOllamaServerEndToEndTests
       );
       await AssertProcessExitedAsync(previousPid);
       Assert.IsTrue(cuda.Managed);
-      Assert.AreEqual(12_434, cuda.Endpoint.Port);
+      Assert.AreEqual(31_434, cuda.Endpoint.Port);
       Assert.AreEqual(0, cuda.MainGpu);
       var cudaEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(cuda.Endpoint, "/test/environment")
@@ -217,7 +242,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         "rocm:0",
         CancellationToken.None
       );
-      Assert.AreEqual(12_434, rocm.Endpoint.Port);
+      Assert.AreEqual(31_435, rocm.Endpoint.Port);
       var rocmEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(rocm.Endpoint, "/test/environment")
       );
@@ -231,7 +256,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         "vulkan:all",
         CancellationToken.None
       );
-      Assert.AreEqual(12_434, vulkan.Endpoint.Port);
+      Assert.AreEqual(31_439, vulkan.Endpoint.Port);
       var vulkanEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(vulkan.Endpoint, "/test/environment")
       );
@@ -246,7 +271,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         CancellationToken.None
       );
       Assert.IsNull(preferNvidia.MainGpu);
-      Assert.AreEqual(12_434, preferNvidia.Endpoint.Port);
+      Assert.AreEqual(31_437, preferNvidia.Endpoint.Port);
       var nvidiaEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(preferNvidia.Endpoint, "/test/environment")
       );
@@ -264,7 +289,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         CancellationToken.None
       );
       Assert.IsNull(preferAmd.MainGpu);
-      Assert.AreEqual(12_434, preferAmd.Endpoint.Port);
+      Assert.AreEqual(31_438, preferAmd.Endpoint.Port);
       var amdEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(preferAmd.Endpoint, "/test/environment")
       );
@@ -285,7 +310,7 @@ public sealed class ManagedOllamaServerEndToEndTests
         65_536,
         CancellationToken.None
       );
-      Assert.AreEqual(12_434, largerContext.Endpoint.Port);
+      Assert.AreEqual(preferAmd.Endpoint, largerContext.Endpoint);
       await AssertProcessExitedAsync(amdPid);
       var largerContextEnvironment = await new HttpClient().GetFromJsonAsync<JsonElement>(
         new Uri(largerContext.Endpoint, "/test/environment")
@@ -294,8 +319,8 @@ public sealed class ManagedOllamaServerEndToEndTests
         "65536",
         largerContextEnvironment.GetProperty("contextLength").GetString()
       );
-      Assert.HasCount(1, second.GetActiveServers());
-      Assert.AreEqual(65_536, second.GetActiveServers().Single().ContextLength);
+      Assert.HasCount(4, second.GetActiveServers());
+      Assert.AreEqual(65_536, second.GetActiveServers().Single(server => server.Endpoint == largerContext.Endpoint).ContextLength);
     }
     finally
     {
@@ -325,7 +350,8 @@ public sealed class ManagedOllamaServerEndToEndTests
       httpClients,
       NullLogger<OllamaManagedServerManager>.Instance,
       new FakeGpuDiscoveryService(),
-      executable
+      executable,
+      portOffset: 20_000
     );
   }
 

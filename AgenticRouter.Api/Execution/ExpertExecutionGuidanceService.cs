@@ -35,7 +35,8 @@ public interface IExpertExecutionGuidanceService
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
     Action<ProviderTokenUsage?>? usageObserver = null,
-    ProviderChatOptions? options = null
+    ProviderChatOptions? options = null,
+    int? maximumOutputTokens = null
   );
 }
 
@@ -247,7 +248,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     ProviderCallContext usageContext,
     CancellationToken cancellationToken,
     Action<ProviderTokenUsage?>? usageObserver = null,
-    ProviderChatOptions? options = null
+    ProviderChatOptions? options = null,
+    int? maximumOutputTokens = null
   )
   {
     var scope = ExecutionTurnToolPolicy.Resolve(
@@ -262,6 +264,17 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     }.Concat(
       messages
     ).ToArray();
+    if (maximumOutputTokens is not null)
+    {
+      options ??= ProviderChatOptions.Empty;
+      options = options with
+      {
+        GenerationProfile = options.EffectiveGenerationProfile with
+        {
+          MaximumOutputTokens = maximumOutputTokens
+        }
+      };
+    }
     var guidanceJson = await _ollamaClient.GenerateStructuredAsync(
       baseUri,
       model,

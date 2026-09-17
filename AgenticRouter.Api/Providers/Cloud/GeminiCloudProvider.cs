@@ -199,6 +199,10 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     {
       generationConfig["responseJsonSchema"] = schema;
     }
+    if (options.EffectiveGenerationProfile.MaximumOutputTokens is int maximumOutputTokens)
+    {
+      generationConfig["maxOutputTokens"] = maximumOutputTokens;
+    }
 
     using var request = CreateJsonRequest(
       $"models/{Uri.EscapeDataString(modelId)}:generateContent",
@@ -273,17 +277,22 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
   )
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;
+    var generationConfig = new Dictionary<string, object?>
+    {
+      ["temperature"] = generationProfile.Temperature,
+      ["topP"] = generationProfile.TopP
+    };
+    if (generationProfile.MaximumOutputTokens is int maximumOutputTokens)
+    {
+      generationConfig["maxOutputTokens"] = maximumOutputTokens;
+    }
     object payload = tools.Count == 0
       ? new
       {
         contents = ToGeminiToolContents(
           messages
         ),
-        generationConfig = new
-        {
-          temperature = generationProfile.Temperature,
-          topP = generationProfile.TopP
-        }
+        generationConfig
       }
       : new
       {
@@ -311,11 +320,7 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
             mode = "AUTO"
           }
         },
-        generationConfig = new
-        {
-          temperature = generationProfile.Temperature,
-          topP = generationProfile.TopP
-        }
+        generationConfig
       };
     using var request = CreateJsonRequest(
       $"models/{Uri.EscapeDataString(modelId)}:generateContent",

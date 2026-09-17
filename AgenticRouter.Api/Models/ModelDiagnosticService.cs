@@ -52,24 +52,18 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
       baseUri,
       cancellationToken
     );
-    var runtimeUri = (await _managedOllamaServers.ResolveAsync(
-      baseUri,
-      settings.DefaultGpu,
-      settings.DefaultGpu,
-      cancellationToken
-    )).Endpoint;
-    IReadOnlyList<OllamaRunningModel> loaded;
-
-    try
+    var loaded = new List<OllamaRunningModel>();
+    foreach (var endpoint in _managedOllamaServers.GetActiveServers()
+      .Select(server => server.Endpoint).Prepend(baseUri).Distinct())
     {
-      loaded = await _ollamaClient.GetRunningModelsAsync(
-        runtimeUri,
-        cancellationToken
-      );
-    }
-    catch (OllamaProviderException)
-    {
-      loaded = [];
+      try
+      {
+        loaded.AddRange(await _ollamaClient.GetRunningModelsAsync(endpoint, cancellationToken));
+      }
+      catch (OllamaProviderException)
+      {
+        // A diagnostic read must not start or replace a server.
+      }
     }
     var configured = new List<ConfiguredModel>
     {

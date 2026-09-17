@@ -2413,6 +2413,11 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Page.Locator("#model-selector").SelectOptionAsync(
       "qwen3-coder:30b"
     );
+    await Expect(Page.Locator("#attach-image")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#attach-image")).ToHaveAttributeAsync(
+      "title",
+      "The selected model does not accept image input."
+    );
     var webTag = Page.Locator(
       "#capability-tags [data-kind=\"web\"]"
     );
@@ -4561,7 +4566,7 @@ baselineTotal!.Value
     settings["routerGpu"] = "ollama:1";
     settings["actionGpu"] = "ollama:1";
     settings["coordinatorGpu"] = "ollama:1";
-    settings["intentions"]!["documentation"]!["gpu"] = "ollama:0";
+    settings["intentions"]!["documentation"]!["gpu"] = "ollama:1";
 
     using var saved = await PutSettingsJsonAsync(
       settings
@@ -4593,19 +4598,9 @@ baselineTotal!.Value
       specialist.MainGpu
     );
     settings["defaultModel"] = "router:latest";
-    using var conflicting = await PutSettingsJsonAsync(
-      settings
-    );
-    Assert.AreEqual(
-      HttpStatusCode.BadRequest,
-      conflicting.StatusCode
-    );
-    var conflict = await conflicting.Content.ReadFromJsonAsync<JsonElement>(
-      TestJson.Options
-    );
-    Assert.IsTrue(
-      conflict.GetProperty("errors").TryGetProperty("coordinatorGpu", out _)
-    );
+    using var conflicting = await PutSettingsJsonAsync(settings);
+    Assert.AreEqual(HttpStatusCode.OK, conflicting.StatusCode,
+      "Legacy role GPU conflicts cannot override model affinity or General Default GPU.");
   }
 
   [TestMethod]
@@ -4635,15 +4630,17 @@ baselineTotal!.Value
     await Page.Locator(
       "[data-settings-target=\"models-routing\"]"
     ).ClickAsync();
-    var organization = Page.Locator(
-      "#settings-models .model-organization-panel"
-    ).First;
-    await organization.Locator("summary").ClickAsync();
-    var card = organization.Locator(
-      ".model-organization-card[data-model-identity=\"alpha:latest\"]"
+    var intentionCard = Page.Locator(
+      "#settings-models .intention-card[data-intention=\"general-chat\"]"
     );
-    var affinity = card.Locator("select[data-model-gpu-affinity]");
+    CollectionAssert.AreEqual(
+      new[] { "Model", "Fallback", "GPU" },
+      (await intentionCard.Locator(".intention-selects > label > span").AllTextContentsAsync()).ToArray()
+    );
+    await intentionCard.Locator(".intention-model").SelectOptionAsync("alpha:latest");
+    var affinity = intentionCard.Locator(".intention-model-gpu-affinity");
     await Expect(affinity).ToBeVisibleAsync();
+    await Expect(affinity).ToBeEnabledAsync();
     var affinityLabels = await affinity.Locator("option").AllTextContentsAsync();
     CollectionAssert.IsSubsetOf(
       new[]
@@ -4691,7 +4688,7 @@ baselineTotal!.Value
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task SingleGpuSetupKeepsModelAffinityUiHidden()
+  public async Task SingleGpuSetupKeepsModelAffinityUiAvailableInIntentionCards()
   {
     using var setupResponse = await _environment.HttpClient.GetAsync(
       "api/setup/status"
@@ -4722,13 +4719,16 @@ baselineTotal!.Value
     await Page.Locator(
       "[data-settings-target=\"models-routing\"]"
     ).ClickAsync();
-    var organization = Page.Locator(
-      "#settings-models .model-organization-panel"
-    ).First;
-    await organization.Locator("summary").ClickAsync();
-    await Expect(organization.Locator(
-      "select[data-model-gpu-affinity]"
-    )).ToHaveCountAsync(0);
+    var intentionCard = Page.Locator(
+      "#settings-models .intention-card[data-intention=\"documentation\"]"
+    );
+    await intentionCard.Locator(".intention-model").SelectOptionAsync("docs:latest");
+    await Expect(
+      intentionCard.Locator(".intention-model-gpu-affinity")
+    ).ToBeVisibleAsync();
+    await Expect(
+      intentionCard.Locator(".intention-model-gpu-affinity")
+    ).ToBeEnabledAsync();
     await Page.Locator(
       "[data-settings-target=\"general\"]"
     ).ClickAsync();
@@ -5441,7 +5441,7 @@ baselineTotal!.Value
   {
     await Page.GotoAsync("/");
     Assert.IsTrue(await Page.EvaluateAsync<bool>(
-      "() => ['i18n.js', 'app.js'].every(name => [...document.scripts].some(script => script.src.endsWith('/' + name + '?v=20260915-custom-prompt-en')))"
+      "() => ['i18n.js', 'app.js'].every(name => [...document.scripts].some(script => script.src.endsWith('/' + name + '?v=20260916-harness-images')))"
     ));
     await Page.EvaluateAsync(
       """

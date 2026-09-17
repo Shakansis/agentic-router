@@ -508,7 +508,6 @@ public sealed record OllamaRoleRuntimeSettings
 
   public int OutputTokenLimit { get; init; } = 4_096;
 
-  public int? FileCreationOutputTokenLimit { get; init; }
 }
 
 public sealed record OllamaModelRuntimeOverride
@@ -708,6 +707,8 @@ public static class OllamaRuntimeDefaults
 public sealed record ExecutionSettings
 {
   public int MaxDirectPlanSteps { get; init; } = 5;
+
+  public int? FileCreationOutputTokenLimit { get; init; }
 
   public PhaseEffortSettings PhaseEffort { get; init; } = new();
 

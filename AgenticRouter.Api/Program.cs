@@ -442,7 +442,8 @@ builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
     services.GetRequiredService<IModelRequestTracker>(),
     services.GetRequiredService<IGpuMemoryMetricsProvider>(),
     services.GetRequiredService<ISystemMemoryMetricsProvider>(),
-    services.GetRequiredService<IOllamaManagedServerManager>()
+    services.GetRequiredService<IOllamaManagedServerManager>(),
+    services.GetRequiredService<IModelGpuAffinityResolver>()
   )
 );
 builder.Services.AddSingleton<IModelRequestTracker, ModelRequestTracker>();

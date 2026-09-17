@@ -44,7 +44,8 @@ public sealed record HarnessCapabilities(
   bool SupportsSteering,
   bool SupportsNativeWebSearch,
   bool SupportsUserInput = false,
-  bool SupportsUserInputResume = false
+  bool SupportsUserInputResume = false,
+  bool SupportsImages = false
 );
 
 public sealed record HarnessSteerRequest(

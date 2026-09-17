@@ -129,7 +129,24 @@ app.MapPost("/session", async (HttpContext context) =>
 app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpContext context) =>
 {
   using var body = await JsonDocument.ParseAsync(context.Request.Body);
-  var text = body.RootElement.GetProperty("parts")[0].GetProperty("text").GetString() ?? string.Empty;
+  var parts = body.RootElement.GetProperty("parts");
+  var text = parts.EnumerateArray()
+    .First(part => part.GetProperty("type").GetString() == "text")
+    .GetProperty("text").GetString() ?? string.Empty;
+  var images = parts.EnumerateArray()
+    .Where(part => part.GetProperty("type").GetString() == "file")
+    .Select(part =>
+    {
+      var url = part.GetProperty("url").GetString() ?? string.Empty;
+      return new
+      {
+        type = part.GetProperty("type").GetString(),
+        mime = part.GetProperty("mime").GetString(),
+        filename = part.GetProperty("filename").GetString(),
+        urlPrefix = url[..Math.Min(url.Length, 32)],
+        urlLength = url.Length
+      };
+    }).ToArray();
   var model = body.RootElement.GetProperty("model").GetProperty("modelID").GetString()
     ?? throw new InvalidOperationException("OpenCode prompt omitted modelID.");
   var provider = body.RootElement.GetProperty("model").GetProperty("providerID").GetString()
@@ -157,7 +174,8 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
         provider = body.RootElement.GetProperty("model").GetProperty("providerID").GetString(),
         variant,
         sessionId,
-        text
+        text,
+        images
       })
     );
   }

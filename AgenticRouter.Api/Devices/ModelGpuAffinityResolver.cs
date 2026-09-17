@@ -54,14 +54,9 @@ public sealed class ModelGpuAffinityResolver : IModelGpuAffinityResolver
     var affinity = ModelGpuAffinitySelection.GetForModel(settings, model);
     if (!ModelGpuAffinitySelection.TryGetDeviceId(affinity, out var deviceId))
     {
-      var effectiveSelection = string.IsNullOrWhiteSpace(inheritedGpuSelection)
-        || string.Equals(
-          inheritedGpuSelection,
-          OllamaGpuSelection.Default,
-          StringComparison.Ordinal
-        )
-          ? settings.DefaultGpu
-          : inheritedGpuSelection;
+      // Model affinity is the only override of General Default GPU. Legacy
+      // role/intent selections must not change the placement of an Auto model.
+      var effectiveSelection = settings.DefaultGpu;
       var target = OllamaGpuSelection.ResolveTarget(
         effectiveSelection,
         settings.DefaultGpu

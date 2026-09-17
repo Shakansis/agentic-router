@@ -71,6 +71,8 @@ public static class SupervisionEventTypeIds
   public const string TurnSlowCritical = "supervision.turn-slow-critical";
   public const string TurnWatchdogRecovery = "supervision.turn-watchdog-recovery";
   public const string TurnCanonicalRecovery = "supervision.turn-canonical-recovery";
+  public const string TurnDecompositionDecisionRecovery =
+    "supervision.turn-decomposition-decision-recovery";
   public const string TurnHarnessRecovery = "supervision.turn-harness-recovery";
   public const string PreflightCompleted = "supervision.preflight-completed";
   public const string NoProgress = "supervision.no-progress";
@@ -100,6 +102,9 @@ public static class SupervisionRetryReasons
   public const string HarnessRecovery = "harness-recovery";
   public const string WatchdogRecovery = "watchdog-recovery";
   public const string CanonicalRecovery = "canonical-recovery";
+  public const string DecompositionDecisionRecovery =
+    "decomposition-decision-recovery";
+  public const string ToolLoopRecovery = "tool-loop-recovery";
   public const string CrashRecovery = "crash-recovery";
 }
 

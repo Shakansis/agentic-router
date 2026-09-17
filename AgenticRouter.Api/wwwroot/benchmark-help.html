@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Benchmark Lab Help · Agentic Router</title>
+  <style>
+    :root { color-scheme: dark light; font: 16px/1.65 system-ui, sans-serif; }
+    body { margin: 0; background: light-dark(#f6f7fa, #16191f); color: light-dark(#202633, #e5e9f0); }
+    main { max-width: 980px; margin: auto; padding: 2rem clamp(1rem, 4vw, 3rem) 5rem; }
+    a { color: light-dark(#2453b8, #9bbfff); text-underline-offset: .2em; }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { font-size: clamp(2rem, 5vw, 3rem); margin-bottom: .6rem; }
+    h2 { margin-top: 3rem; padding-top: .7rem; border-top: 1px solid #77889966; }
+    nav { display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; padding: 1rem; border: 1px solid #77889966; border-radius: .8rem; }
+    dt { font-weight: 650; margin-top: 1rem; }
+    dd { margin: .3rem 0 1rem; }
+    code { font-size: .88em; overflow-wrap: anywhere; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { text-align: left; padding: .7rem; border-bottom: 1px solid #77889966; vertical-align: top; overflow-wrap: anywhere; }
+    th:first-child { width: 30%; }
+    .note { padding: 1rem 1.2rem; background: light-dark(#e8eefb, #222d41); border-radius: .8rem; }
+    section { scroll-margin-top: 1rem; }
+    @media (max-width: 550px) { th, td { padding: .5rem .25rem; } }
+    @media print { :root { color-scheme: light; } nav { display: none; } main { max-width: none; padding: 0; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p>AGENTIC ROUTER / LOCAL HELP</p>
+    <h1>Benchmark Lab Help</h1>
+    <p>Run repeatable tasks, inspect what the Host verified, and choose a Model × Harness using local evidence.</p>
+    <p>This guide opens separately so you can keep your current run and selections. Use your browser's Find command to locate a field or test ID.</p>
+  </header>
+  <nav aria-label="Help contents">
+    <a href="#start">Quick start</a><a href="#controls">Controls</a><a href="#tests">Tests</a>
+    <a href="#results">Read results</a><a href="#ranking">Ranking</a><a href="#recommendation">Recommendations</a>
+    <a href="#routing">Impact on AR</a><a href="#history">History</a><a href="#evidence">Evidence glossary</a>
+  </nav>
+  <section id="start">
+    <h2>Quick start</h2>
+    <ol>
+      <li>Select installed local models, available harnesses and test suites. A harness is the runtime that drives the model and its tools. Each model and harness pairing is a separate combination.</li>
+      <li>Choose timeout, context window and repetition count. Check the Default GPU inherited from Settings.</li>
+      <li>Select <strong>Run benchmark</strong>. This starts real execution using the selected models. Tests use dedicated benchmark workspaces.</li>
+      <li>In <strong>Tests in progress</strong>, select a combination or use Previous, Next or View active test. Expand a test for its outcome and activity timeline; open <strong>Advanced details</strong> for comparisons and recorded checks.</li>
+      <li>In <strong>Results</strong>, inspect failures before comparing scores. Use <strong>Recommendation</strong> for guidance across saved runs and <strong>History and comparison</strong> for changes over time.</li>
+    </ol>
+    <p>Model × Harness combinations run sequentially. Closing the benchmark view or disconnecting the browser does not cancel the active run. Use Cancel to request cancellation; completed evidence remains available.</p>
+  </section>
+  <section id="controls">
+    <h2>Controls and configuration</h2>
+    <dl>
+      <dt>Models / Harnesses / Tests</dt><dd>Switches define the run matrix and suites. Availability and versions help distinguish missing runtimes from failed tests. Experimental harness labels describe integration maturity.</dd>
+      <dt>Per-test timeout (seconds)</dt><dd>Time allowed for a test, within the UI's 5–1600 second range. Scenario-specific limits may also apply. Timeouts are recorded; independent subsequent combinations can continue.</dd>
+      <dt>Sequential runs</dt><dd>Repeat the full selection 1–20 times. Each repetition has its own run ID and saved evidence; results are not collapsed into one average run.</dd>
+      <dt>Context window (tokens)</dt><dd>Requested model context, from 4096 to 131072 tokens. The runtime evidence distinguishes requested context from observed context; selecting a value does not prove it was observed by the backend.</dd>
+      <dt>Default GPU</dt><dd>Read-only snapshot of the selection in Settings, frozen when the run starts. Saved selection and actual backend placement are different evidence.</dd>
+      <dt>Scoring profile / Score weights</dt><dd>Default or custom weights determine calculated scores. Each weight is 0–100 and at least one must be positive. Their sum is the normalization denominator; it need not be 100. Editing weights rescores existing evidence without model execution. Reset restores defaults.</dd>
+      <dt>Custom Benchmark Prompt / Run name</dt><dd>The custom test sends your exact prompt; the optional name helps identify it in history. Inspect the output and workspace, then assign a quality score and review notes. Execution completion does not automatically validate arbitrary user goals.</dd>
+      <dt>Progress, finished, passed and terminality</dt><dd>Finished counts tests that reached an ending, including failures. Passed counts accepted predefined tests. Terminality measures whether execution reached a recognized ending; it is not a correctness or pass rate.</dd>
+      <dt>Results, matrix and ranking scope</dt><dd>Select a pair to inspect its tests. Model and harness views aggregate across combinations in the selected run. The matrix shows individual cells, including unavailable and interrupted combinations.</dd>
+      <dt>Workspace review / Download / Rerun</dt><dd>Where available, inspect retained generated files or download the workspace. Rerun starts new execution and evidence; it does not repair or overwrite the earlier measurement.</dd>
+    </dl>
+  </section>
+  <section id="tests">
+    <h2>What each test checks</h2>
+    <p>The canonical prompt and recorded validation facts are available in Advanced details. Fixed tests check exact outcomes and, for some scenarios, specific observable actions.</p>
+    <table>
+      <thead><tr><th scope="col">Test</th><th scope="col">Acceptance intent</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">FS-CREATE-001</th><td>Create a file at the exact expected location with exact UTF-8 content. Preserve unrelated files.</td></tr>
+        <tr><th scope="row">FS-READ-001</th><td>Read two fixture files and return their required facts without modifying the workspace. The validator can use observed reads or required facts in the report.</td></tr>
+        <tr><th scope="row">FS-UPDATE-001</th><td>Apply the specified edit and preserve all other content and files.</td></tr>
+        <tr><th scope="row">FS-DELETE-001</th><td>Delete only the requested target and preserve unrelated files.</td></tr>
+        <tr><th scope="row">CONTINUITY-001</th><td>Preserve accumulated requirements across three completed turns in the same harness session.</td></tr>
+        <tr><th scope="row">SCOPE-RETENTION-001</th><td>Make a narrow edit without recreating the target or changing neighboring files.</td></tr>
+        <tr><th scope="row">RECOVERY-001</th><td>Attempt the stale path once, surface the failure, read the correct path and produce the exact recovery output. The Host must recognize the required read evidence and recovery.</td></tr>
+        <tr><th scope="row">CONVERGENCE-001</th><td>Make the edit, validate once and stop, with the required final report. When tool trace evidence is available, require exactly one recognized post-edit validation read and no later tool calls.</td></tr>
+        <tr><th scope="row">TERMINALITY-001</th><td>Finish the required edit and truthfully disclose that optional process validation is unavailable. A permitted partial terminal result can be accepted.</td></tr>
+        <tr><th scope="row">STALE-CONFLICT-001</th><td>Preserve an external file change made by the Host between turns, apply the requested edit and report preservation.</td></tr>
+        <tr><th scope="row">TRUTHFUL-REPORT-001</th><td>Complete the required edit, attempt the absent optional validation file once and report its failure truthfully. Do not claim that everything passed.</td></tr>
+        <tr><th scope="row">MISSING-GAME-001</th><td>Real Life Problem: produce the missing Snake game, preserve existing files, complete Execute and pass the Host's browser checks. Browser evidence covers the implemented checks, not every aspect of game quality.</td></tr>
+        <tr><th scope="row">MANUAL-CUSTOM-001</th><td>Custom Prompt: execute your task and retain reviewable evidence. You assign quality; this test is excluded from automatic predefined scoring and recommendations.</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section id="results">
+    <h2>Read the outcome first</h2>
+    <dl>
+      <dt>Passed / All tests passed</dt><dd>Passed means that test satisfied its acceptance criteria. “All tests passed” appears only when every planned test for the inspected combination is present and passed. A cancelled, incomplete or manually reviewed run does not qualify.</dd>
+      <dt>Failed / Host validation: fail</dt><dd>The Host could not confirm all required acceptance criteria. This is not a claim that the Host process crashed. Files can be correct while required behavioral evidence is missing.</dd>
+      <dt>Error / timed out / cancelled / unavailable</dt><dd>Execution or validation did not finish normally, exceeded its time limit, was cancelled or lacked a required runtime or validation capability. Inspect the typed error and phase for the actual cause.</dd>
+      <dt>Pending review / reviewed</dt><dd>Custom Prompt quality is assessed by you. Its user ranking is separate from predefined test rankings.</dd>
+    </dl>
+    <p class="note"><strong>Missing evidence is not proof that an action never happened.</strong> For example, native tool activity may lack the canonical tool name or exact path the benchmark expects. “The Host could not confirm the read” describes that limitation. A “tool completed” event alone does not prove the whole test passed.</p>
+    <p>Successful tests do not add explanation text. Failed tests show only relevant recorded failures, with a general fallback for older or incomplete evidence. Advanced details retains technical facts and errors. The final harness report is the agent's narrative; Host checks determine acceptance.</p>
+    <p>In comparison tables, <strong>Match</strong> means the displayed expected and observed values are equal; <strong>Different</strong> means they differ. This does not replace the test's acceptance result. <strong>Recorded</strong> identifies supporting evidence that is not directly comparable, such as a list of changed files beside an expected target path. <strong>Not observed</strong> preserves missing evidence. Hashes have Copy buttons; wide tables scroll horizontally and can be focused with the keyboard. Saved tool timelines show the last eight recorded events; complete traces remain in raw evidence.</p>
+  </section>
+  <section id="ranking">
+    <h2>How ranking works</h2>
+    <p><strong>A score is not a pass rate.</strong> A failed test may earn points for a correct file or successful termination while failing another required criterion. A high score does not turn that failure into a pass.</p>
+    <table>
+      <thead><tr><th scope="col">Dimension · default weight</th><th scope="col">Calculation</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Objective success · 35</th><td>100 if the objective was achieved; otherwise 0.</td></tr>
+        <tr><th scope="row">Correctness / exactness · 25</th><td>Mean of exactness and available continuity, recovery and truthful-report metrics.</td></tr>
+        <tr><th scope="row">Terminality · 15</th><td>Recorded behavioral terminality; otherwise 100 for completed execution and 0 for other endings. Behavioral terminality can include recognized failure endings.</td></tr>
+        <tr><th scope="row">Workspace accuracy · 20</th><td>Mean of recorded containment accuracy and available scope and hygiene metrics. These include expected file-change scope, not only security boundaries.</td></tr>
+        <tr><th scope="row">Efficiency · 5</th><td>Mean of a tool-call score and available convergence. Unknown call count = 50; zero = 80; one = 100; two = 90; three = 75; four = 60; then subtract 10 per call down to 20. This is not a speed benchmark.</td></tr>
+      </tbody>
+    </table>
+    <p>Test score = sum of (dimension × weight) divided by total weights, rounded to two decimals. Pair score sums recorded predefined scores and divides by the planned predefined test count; missing tests do not inflate it. Model/harness aggregates average their matrix cells.</p>
+    <p>Ranking sorts by score descending, then passed count descending, duration ascending, and stable model/harness identifiers. Live rankings are provisional. Custom Prompt rankings use user scores separately. Editing weights changes the projection, not the original evidence or acceptance result.</p>
+  </section>
+  <section id="recommendation">
+    <h2>Recommendations and confidence</h2>
+    <p>The recommendation uses saved local evidence, so it can differ from the currently displayed run ranking. “View overall recommendation” does not launch a benchmark. Evidence links identify the supporting runs; alternatives and trace explain the calculation.</p>
+    <dl>
+      <dt>Category</dt><dd>General coding uses the active score. Other categories blend 80% category focus with 20% active score: exact filesystem focuses on correctness/workspace/hygiene (55/35/10); long continuity on continuity/terminality/correctness (50/30/20); recovery-heavy on recovery/terminality/correctness (50/30/20). Correctness-first, terminality-first and efficiency-first emphasize that dimension. Missing focus metrics are omitted and remaining weights normalized.</dd>
+      <dt>Current and historical evidence</dt><dd>The newest relevant evidence anchors each candidate. With comparable history, current evidence contributes 70% and comparable history 30%. Otherwise, partially comparable history contributes 10% and current evidence 90%. Incompatible history contributes no score.</dd>
+      <dt>Confidence</dt><dd>Limited: no comparable historical observations. Moderate: one. Strong: at least two. Mixed: contributing scores differ by at least 20 points. Insufficient evidence means no usable recommendation. Confidence is evidence coverage and consistency, not a probability of future success.</dd>
+      <dt>Scoring</dt><dd>Choose the active profile or default profile for the recommendation.</dd>
+      <dt>Research external evidence</dt><dd>Explicitly requests external research through configured search. External claims remain unverified external evidence, distinct from local measurements; they do not substitute for local benchmark validation.</dd>
+    </dl>
+  </section>
+  <section id="routing">
+    <h2>How results affect Agentic Router</h2>
+    <p>Benchmarking does not train a model, modify its weights or grant extra capabilities. It creates local evidence used by recommendations and automatic harness selection.</p>
+    <p>When Auto harness routing applies to a selected local model, AR first looks for the best usable ranked available harness for that exact model. If none exists, it can use aggregate harness scores across ranked models. Without usable evidence, available Native is the deterministic fallback. The model selection is preserved.</p>
+    <p>The route is retained during the active task session. New results do not cause a mid-session switch. Manual selections remain explicit choices. Host approvals, workspace boundaries and validation remain authoritative regardless of ranking.</p>
+  </section>
+  <section id="history">
+    <h2>History and comparison</h2>
+    <p>Choose a saved result, filter by model, harness or suite, then select a baseline and candidate for comparison. Compare suite, test/fixture/acceptance versions, environment and identities before interpreting score or duration deltas.</p>
+    <dl>
+      <dt>Comparable</dt><dd>Evidence supports direct comparison under the recorded compatibility checks.</dd>
+      <dt>Partially comparable</dt><dd>Some dimensions match; read the listed differences before drawing conclusions.</dd>
+      <dt>Not directly comparable</dt><dd>Do not interpret score differences as a measured improvement of the same setup.</dd>
+      <dt>Original / recalculated score</dt><dd>Original weights belong to the saved run. Recalculated values apply the selected profile to that same evidence without rerunning inference.</dd>
+      <dt>Delete selected / Delete all</dt><dd>Removes saved benchmark results as requested. Removing history also removes that evidence from future recommendation calculations. Keep evidence you want to compare later.</dd>
+    </dl>
+  </section>
+  <section id="evidence">
+    <h2>Advanced evidence glossary</h2>
+    <p>Unavailable means the value was not observed or supplied; it is not zero. Measured, detected, estimated, requested and observed values are different kinds of evidence. Raw evidence retains original field names and values.</p>
+    <dl>
+      <dt>Terminal / Failure category / Error</dt><dd>The execution ending, failure classification and typed code/message. These explain runtime outcomes separately from Host acceptance.</dd>
+      <dt>Host validation / Workspace containment / Workspace</dt><dd>Acceptance result versus recorded workspace accuracy. The historical “Workspace containment” label includes file-change scope checks: a failure does not on its own establish a security escape. PASS can coexist with failed behavioral checks.</dd>
+      <dt>Exactness / Byte, directory and filename accuracy</dt><dd>Match against expected content, bytes and location. Hashes and byte lengths expose exact comparisons, including newline differences.</dd>
+      <dt>Scope accuracy / Hygiene / Changed files / Unexpected</dt><dd>Whether only expected files changed and unnecessary artifacts were avoided. Unexpected can include <code>missing:</code> entries for expected changes that were not found. <code>scopeAccurate</code> and <code>missingExpectedChanges</code> explain the behavioral scope check.</dd>
+      <dt>Continuity / Recovery / Convergence / Truthful report / Narration</dt><dd>Scenario metrics for retaining requirements, recovering from a tool failure, stopping after success and reporting observed reality. Narration is accurate, incomplete or misleading. Non-applicable metrics remain unavailable.</dd>
+      <dt>Turns / Terminal turns / Turn budget / Scenario timeout / Acceptance version</dt><dd>Recorded successful versus planned turns, allowed scenario turn count, time budget and version of the acceptance rules. A completed tool call is not a completed turn or accepted test.</dd>
+      <dt>Tool calls / Errors / Recovered</dt><dd>Observed tool attempts, surfaced failures and successful recovery observations. A designed failure can be required for a passing recovery test.</dd>
+      <dt>Stale read attempts / Correct read observed</dt><dd><code>staleReadAttempts</code> must be one and <code>correctReadObserved</code> true in RECOVERY-001. These are recognized canonical reads with matching paths; native activity without matching evidence may not count.</dd>
+      <dt>Tool trace available / Post mutation validation reads / Tool calls after success / Final report matched</dt><dd>For CONVERGENCE-001: availability of semantic trace, recognized reads after the last edit, later actions and expected report text. With trace available, require one validation read and zero later calls.</dd>
+      <dt>Target exact / Target recreated / Changed path count</dt><dd>SCOPE-RETENTION-001 checks final content and whether the trace shows recreation. The change count helps identify edits outside the target.</dd>
+      <dt>Expected / Actual final state / External mutation recorded / Initial read observed / External change preserved</dt><dd>Continuity and stale-conflict diagnostics. The external mutation is the Host's deliberate between-turn edit. Initial-read evidence is diagnostic; not every displayed fact is an independent pass condition.</dd>
+      <dt>Required change observed / Optional capability / Truthful report / Optional read attempts / Optional failure observed</dt><dd>Terminality and truthful-report facts distinguish required file work from intentionally unavailable or failed optional checks. TRUTHFUL-REPORT-001 requires one observed optional read and a surfaced failure.</dd>
+      <dt>Expected path / Absent path / SHA256 / Byte length / Primary and secondary read / Read evidence / Deleted files</dt><dd>CRUD diagnostics describe exact file content and location, source facts, observed-read versus report evidence and actual deletion scope. “Missing” is distinct from an empty file.</dd>
+      <dt>Existing files unchanged / Snake created / Unrelated files created / Browser validation / Browser errors / Referenced scripts and styles</dt><dd>Real Life Problem diagnostics cover preserved fixtures, game output, browser resources and errors. Observation milliseconds is browser observation time, not model execution duration. The canonical validator determines which diagnostics gate acceptance.</dd>
+      <dt>Runtime · GPU selection / Backend / Processor / Context</dt><dd>Configured device choice versus observed backend/processor and requested versus observed context. Unobserved placement must not be inferred from the selection alone.</dd>
+      <dt>Runtime · Model / VRAM / RAM / Memory samples</dt><dd>Reported residency sizes, estimated RAM and device/system snapshots. Samples do not necessarily represent peak usage or memory attributable only to this run.</dd>
+      <dt>Runtime · Prompt and output tokens/s / Timeout phase / Last progress</dt><dd>Available provider throughput and the latest observed execution phase. Unavailable throughput is not zero throughput.</dd>
+      <dt>Operational · Strategy / Tool validation errors / Repeated calls / Recovery attempts / Execution turns</dt><dd>Requested and resolved execution strategies, invalid tool requests, repeated actions and recovery observations. These diagnostics help explain behavior without changing acceptance.</dd>
+      <dt>Duration / Execute duration / Host setup / Browser validation duration</dt><dd>Overall test timing and available phase timings. Do not treat every duration as model inference time.</dd>
+      <dt>Tokens / Provenance / Unavailable metrics</dt><dd>Input/output counts and their source. Missing counts stay unavailable; estimates are not exact provider usage. Local Ollama has no per-token provider charge.</dd>
+      <dt>Workspace ID / Fixture fingerprint / Workspace cleaned / Run ID</dt><dd>Identities, fixture-content fingerprint and cleanup evidence. Cleanup reports workspace lifecycle, not success of the task. Retained reviewable workspaces are separate from disposable scenarios.</dd>
+      <dt>Canonical prompt / Final harness report / Persisted turns / Host events / Raw evidence</dt><dd>Exact input; agent narrative; recorded turn outcomes; Host-originated activity such as external mutations; and the original structured record. Narrative never overrides Host facts.</dd>
+    </dl>
+    <p><a href="#start">Back to quick start ↑</a></p>
+  </section>
+</main>
+</body>
+</html>

@@ -993,9 +993,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator(".benchmark-history-advanced > summary").ClickAsync();
     await Expect(Page.Locator("#benchmark-history-title"))
       .ToContainTextAsync("History and comparison");
+    await Expect(Page.Locator("#benchmark-history")).Not.ToHaveValueAsync("");
+    var retainedRunId = await Page.Locator("#benchmark-history").InputValueAsync();
     await Page.Locator("#benchmark-history-model-filter")
       .FillAsync("missing-history-model-fixture");
-    await Expect(Page.Locator("#benchmark-history option")).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#benchmark-history > option")).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#benchmark-history optgroup[label='Current configuration'] option"))
+      .ToHaveAttributeAsync("value", retainedRunId);
+    await Expect(Page.Locator("#benchmark-history")).ToHaveValueAsync(retainedRunId);
     await Page.Locator("#benchmark-history-model-filter").FillAsync("historical");
     await Expect(Page.Locator("#benchmark-history option")).Not.ToHaveCountAsync(1);
     await Page.Locator("#benchmark-history-harness-filter")
@@ -1032,6 +1037,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#compare-benchmark-runs").ClickAsync();
     await Expect(Page.Locator("#benchmark-comparison")).ToContainTextAsync("Comparable");
     await Expect(Page.Locator("#benchmark-comparison")).ToContainTextAsync("PASS changed");
+    await Expect(Page.Locator(".benchmark-comparison-deltas thead th"))
+      .ToHaveTextAsync(new[] { "Metric", "Baseline", "Candidate", "Change" });
+    await Page.Locator("#benchmark-comparison").ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-comparison-cards.png") });
     await Page.Locator("#benchmark-history").SelectOptionAsync(baseline.RunId);
     await Expect(Page.Locator("#benchmark-score-context"))
       .ToContainTextAsync("Original score");
@@ -1464,6 +1472,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       await Expect(Page.Locator(".benchmark-recommendation-alternatives"))
         .ToHaveAttributeAsync("open", "");
       await Expect(measuredCard.Locator("details")).ToHaveAttributeAsync("open", "");
+      await measuredCard.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-recommendation-card.png") });
       await measuredCard.Locator("[data-recommendation-run-id]").First.ClickAsync();
       await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync(measuredModel);
       await Page.Locator("#benchmark-tab-recommendation").ClickAsync();
@@ -3266,6 +3275,24 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       truthful.RawResult.FinalHarnessReport
     );
     Assert.AreEqual(0, truthful.RawResult.BehaviorMetrics.TruthfulFinalReport);
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await Page.Locator("#benchmark-tab-history").ClickAsync();
+    await Page.Locator(".benchmark-history-advanced > summary").ClickAsync();
+    await Page.Locator("#benchmark-history").SelectOptionAsync(result.RunId);
+    await Page.Locator("#benchmark-tab-results").ClickAsync();
+    var failedTest = Page.Locator(".benchmark-test-detail").Filter(new() { HasText = BenchmarkIds.TruthfulReport001 });
+    await failedTest.Locator(":scope > summary").ClickAsync();
+    await Expect(failedTest.Locator(".benchmark-outcome-summary"))
+      .ToContainTextAsync("The final report was incomplete or inconsistent with the observed result.");
+    await Expect(Page.Locator("#benchmark-result-detail > .benchmark-outcome-summary")).ToHaveCountAsync(0);
+    await Expect(failedTest.Locator(".benchmark-evidence-grid").First).ToBeHiddenAsync();
+    await failedTest.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-friendly-failure.png") });
+    await failedTest.Locator(".benchmark-test-advanced > summary").ClickAsync();
+    await Expect(failedTest.Locator(".benchmark-evidence-grid").First).ToBeVisibleAsync();
+    await Expect(failedTest.Locator(".benchmark-test-advanced")).ToContainTextAsync("misleading");
+    await Expect(failedTest.Locator(".benchmark-acceptance-table tbody tr").Filter(new() { HasText = "Host validation" }))
+      .ToContainTextAsync("Different");
     _environment.FakeOllama.RemoveLoadedModel("gpt-oss:20b");
   }
 
@@ -3432,6 +3459,91 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         $"api/benchmarks/suite-runs/{runId}?confirmed=true"
       );
       delete.EnsureSuccessStatusCode();
+    }
+    _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(180_000, CooperativeCancellation = true)]
+  public async Task BenchmarkRunValidatesOnlyItsInputsAndRevealsInvalidControls()
+  {
+    var consoleErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    var starts = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    Page.Console += (_, message) =>
+    {
+      if (message.Type == "error") consoleErrors.Enqueue(message.Text);
+    };
+    Page.Request += (_, request) =>
+    {
+      if (request.Method == "POST" && request.Url.EndsWith("/api/benchmarks/suite-runs/live", StringComparison.Ordinal))
+        starts.Enqueue(request.Url);
+    };
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await SelectBenchmarkModelsAsync("alpha:latest");
+    foreach (var toggle in await Page.Locator("#benchmark-harness-list input").AllAsync())
+      await toggle.SetCheckedAsync(await toggle.GetAttributeAsync("value") == HarnessIds.Native);
+    foreach (var toggle in await Page.Locator("#benchmark-suite-list input").AllAsync())
+      await toggle.SetCheckedAsync(await toggle.GetAttributeAsync("value") is BenchmarkSuiteIds.Manual or BenchmarkSuiteIds.BasicCrud);
+    const string prompt = "native create host batch files";
+    await Page.Locator("#benchmark-custom-prompt").FillAsync(prompt);
+    await Page.Locator("#benchmark-timeout").FillAsync("30");
+    await Page.Locator("#benchmark-scoring-profile-choice").SelectOptionAsync("default");
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status"))
+      .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
+    var firstRunId = await Page.Locator("#benchmark-history").InputValueAsync();
+    await Page.Locator("#benchmark-tab-results").ClickAsync();
+    await Page.Locator("#benchmark-result-detail .benchmark-test-detail[data-test-id='MANUAL-CUSTOM-001'] > summary").ClickAsync();
+    var score = Page.Locator("[data-benchmark-review-score]");
+    await Expect(score).ToHaveValueAsync("");
+    Assert.IsTrue(await score.EvaluateAsync<bool>("input => input.required && input.validity.valueMissing"));
+    Assert.IsTrue(await score.EvaluateAsync<bool>("input => input.form === null"));
+    await Page.Locator("[data-benchmark-save-review]").ClickAsync();
+    await Expect(Page.Locator(".benchmark-review-status"))
+      .ToHaveTextAsync(await Page.EvaluateAsync<string>("window.AgenticRouterI18n.t('benchmark.custom_prompt.score_invalid')"));
+    await Page.Locator("#benchmark-tab-execution").ClickAsync();
+    await Expect(score).ToBeHiddenAsync();
+
+    // An actual run input in a closed group must be revealed and still block submission.
+    await Page.Locator("#benchmark-custom-prompt").FillAsync("");
+    await Page.Locator("#benchmark-setup-tests > summary").ClickAsync();
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-setup-tests")).ToHaveAttributeAsync("open", "");
+    await Expect(Page.Locator("#benchmark-custom-prompt")).ToBeFocusedAsync();
+    Assert.HasCount(1, starts);
+    await Page.Locator("#benchmark-custom-prompt").FillAsync(prompt);
+    await Page.Locator("#benchmark-timeout").FillAsync("1");
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-timeout")).ToBeFocusedAsync();
+    Assert.HasCount(1, starts);
+    await Page.Locator("#benchmark-timeout").FillAsync("30");
+
+    // Scoring drafts belong to this request only when the custom profile is selected.
+    await Page.Locator("#benchmark-scoring-profile-choice").SelectOptionAsync("custom");
+    await Page.Locator("#benchmark-weight-objective").EvaluateAsync("input => { input.value = '101'; }");
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-pane-results")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".benchmark-scoring-advanced")).ToHaveAttributeAsync("open", "");
+    await Expect(Page.Locator("#benchmark-weight-objective")).ToBeFocusedAsync();
+    Assert.HasCount(1, starts);
+    await Page.Locator("#benchmark-scoring-profile-choice").SelectOptionAsync("default");
+    await Page.Locator("#benchmark-tab-execution").ClickAsync();
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status"))
+      .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
+    Assert.HasCount(2, starts);
+    var secondRunId = await Page.Locator("#benchmark-history").InputValueAsync();
+    Assert.AreNotEqual(firstRunId, secondRunId);
+    var first = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+      $"api/benchmarks/suite-runs/{firstRunId}");
+    Assert.IsNull(first!.Cells!.Single().Result!.Tests.Single(test => test.Run.SuiteId == BenchmarkSuiteIds.Manual).UserReview);
+    Assert.IsFalse(consoleErrors.Any(error => error.Contains("not focusable", StringComparison.OrdinalIgnoreCase)), string.Join('\n', consoleErrors));
+    foreach (var runId in new[] { firstRunId, secondRunId })
+    {
+      using var deleted = await _environment.HttpClient.DeleteAsync($"api/benchmarks/suite-runs/{runId}?confirmed=true");
+      deleted.EnsureSuccessStatusCode();
     }
     _environment.FakeOllama.RemoveLoadedModel("alpha:latest");
   }
@@ -3733,6 +3845,15 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#open-benchmarks").ClickAsync();
     await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
     await Expect(Page.Locator("#conversation-view")).ToBeHiddenAsync();
+    var helpPage = await Page.RunAndWaitForPopupAsync(() => Page.Locator("#benchmark-help").ClickAsync());
+    await Expect(helpPage.GetByRole(AriaRole.Heading, new() { Name = "Benchmark Lab Help", Exact = true })).ToBeVisibleAsync();
+    await helpPage.GetByRole(AriaRole.Link, new() { Name = "Ranking", Exact = true }).ClickAsync();
+    await Expect(helpPage.Locator("#ranking")).ToBeVisibleAsync();
+    await helpPage.SetViewportSizeAsync(390, 844);
+    Assert.IsTrue(await helpPage.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+    await helpPage.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-help-mobile.png") });
+    await helpPage.CloseAsync();
+    await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
     await Expect(Page.Locator("#benchmark-setup-tests")).ToBeVisibleAsync();
     var defaultPrompt = await Page.EvaluateAsync<string>(
       "() => window.AgenticRouterI18n.t('benchmark.custom_prompt.default')"
@@ -3890,7 +4011,42 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToHaveCountAsync(4);
     var update = Page.Locator("#benchmark-result-detail .benchmark-test-detail")
       .Filter(new() { HasText = BenchmarkIds.FileSystemUpdate001 });
-    await update.Locator("summary").ClickAsync();
+    await update.Locator(":scope > summary").ClickAsync();
+    await Expect(update.Locator(".benchmark-outcome-summary")).ToHaveCountAsync(0);
+    await Expect(update.Locator(".benchmark-evidence-grid").First).ToBeHiddenAsync();
+    await update.Locator(".benchmark-test-advanced > summary").ClickAsync();
+    await Expect(update.Locator(".benchmark-evidence-grid").First).ToBeVisibleAsync();
+    await Expect(update.Locator(".benchmark-test-identity strong")).ToHaveTextAsync("Update a file");
+    await Expect(update.Locator(":scope > summary .benchmark-status-badge")).ToHaveTextAsync("Passed");
+    await Expect(update.Locator(".benchmark-acceptance-table thead th"))
+      .ToHaveTextAsync(new[] { "Property", "Expected", "Observed", "Comparison" });
+    var hashRow = update.Locator(".benchmark-acceptance-table tbody tr").Filter(new() { HasText = "SHA256" });
+    await Expect(hashRow.Locator("td").Last).ToHaveTextAsync("Match");
+    var observedHashCopy = hashRow.Locator("td").Nth(1).Locator("button");
+    await Expect(observedHashCopy).ToHaveAttributeAsync("aria-label", "Copy Observed SHA256");
+    await observedHashCopy.ClickAsync();
+    await Expect(observedHashCopy).ToHaveAttributeAsync("aria-label", "Copied");
+    await Expect(observedHashCopy).ToHaveClassAsync("benchmark-copy-value copied");
+    var evidenceHelp = await Page.RunAndWaitForPopupAsync(() => update.Locator(".benchmark-test-advanced > summary a").ClickAsync());
+    await Expect(evidenceHelp.Locator("#evidence")).ToBeVisibleAsync();
+    await evidenceHelp.CloseAsync();
+    await Expect(update.Locator(".benchmark-test-advanced")).ToHaveAttributeAsync("open", "");
+    await Page.SetViewportSizeAsync(1280, 1800);
+    await update.Locator(".benchmark-acceptance-table").ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-result-comparison-table.png") });
+    await update.Locator(".benchmark-test-advanced > summary").ClickAsync();
+    await update.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-result-card.png") });
+    await update.Locator(".benchmark-test-advanced > summary").ClickAsync();
+    await Page.SetViewportSizeAsync(390, 844);
+    Assert.IsTrue(await Page.EvaluateAsync<bool>("document.documentElement.scrollWidth <= window.innerWidth"));
+    var evidenceTable = update.Locator(".benchmark-acceptance-table");
+    await Expect(evidenceTable).ToHaveAttributeAsync("tabindex", "0");
+    await evidenceTable.FocusAsync();
+    await evidenceTable.PressAsync("ArrowRight");
+    await Expect(evidenceTable).ToBeFocusedAsync();
+    await update.Locator(".benchmark-acceptance-table").ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-result-card-mobile.png") });
+    await Page.SetViewportSizeAsync(1280, 720);
+    await Expect(Page.Locator("#benchmark-result-detail > .benchmark-outcome-summary"))
+      .ToHaveTextAsync("All tests passed");
     await Expect(update).ToContainTextAsync("Host validation");
     await Expect(update).ToContainTextAsync("fixture/update.txt");
     await Expect(update).ToContainTextAsync("FS-UPDATE-001");
@@ -4151,7 +4307,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-live-dashboard"))
       .Not.ToContainTextAsync("estimated input");
     var created = Page.Locator(".benchmark-live-test[data-test-id=\"FS-CREATE-001\"]");
-    await created.Locator("summary").ClickAsync();
+    await created.Locator(":scope > summary").ClickAsync();
+    await created.Locator(".benchmark-test-advanced > summary").ClickAsync();
     await Page.EvaluateAsync("window.benchmarkReadingNode = document.querySelector('.benchmark-live-test[open]')");
     var elapsedBefore = await Page.Locator(".benchmark-live-summary").TextContentAsync();
     await Expect(Page.Locator(".benchmark-live-summary")).Not.ToHaveTextAsync(elapsedBefore!);
@@ -4164,7 +4321,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsNotNull(queuedValue);
     await picker.SelectOptionAsync(queuedValue);
     var pending = Page.Locator(".benchmark-live-test[data-test-id=\"FS-READ-001\"]");
-    await pending.Locator("summary").ClickAsync();
+    await pending.Locator(":scope > summary").ClickAsync();
     await Expect(pending).ToHaveAttributeAsync("data-state", "pending");
     await Page.Locator("#benchmark-setup-models > summary").ClickAsync();
     await Page.Locator("#benchmark-tab-results").ClickAsync();
@@ -4182,6 +4339,11 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.IsTrue(await Page.EvaluateAsync<bool>(
       "window.benchmarkReadingNode === document.querySelector('.benchmark-live-test[open]')"
     ));
+    await Expect(created.Locator(".benchmark-test-advanced")).ToHaveAttributeAsync("open", "");
+    await Expect(created.Locator(":scope > .benchmark-activity-timeline")).ToBeVisibleAsync();
+    await Page.SetViewportSizeAsync(1280, 2000);
+    await created.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-live-test-card.png") });
+    await Page.SetViewportSizeAsync(1280, 720);
     await Page.ScreenshotAsync(new() { Path = Path.Combine(Path.GetTempPath(), "ar-benchmark-ui-live.png"), FullPage = true });
     await Page.SetViewportSizeAsync(390, 844);
     await Expect(picker).ToBeVisibleAsync();
@@ -5382,11 +5544,17 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#harness-selector").SelectOptionAsync("opencode");
 
     await StartMessageAsync("long opencode");
+    await Expect(Page.Locator("#attach-image")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#attach-image")).ToHaveAttributeAsync(
+      "title",
+      new Regex("response is in progress", RegexOptions.IgnoreCase)
+    );
     await Expect(
       Page.Locator(".message.assistant .assistant-reasoning-body").Last
     ).ToContainTextAsync("Inspecting long OpenCode task");
     await Page.Locator("#cancel-request").ClickAsync();
     await Expect(Page.Locator("#send-button-label")).ToHaveTextAsync("Send");
+    await Expect(Page.Locator("#attach-image")).ToBeEnabledAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
@@ -6339,6 +6507,100 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodePromptQueueFullWaitsForRetryAfterAndResubmitsTheRejectedPrompt()
+  {
+    var markerPath = Path.Combine(
+      _environment.DataDirectory,
+      "qwen-code-runtime",
+      "fake-qwen-prompt-queue.json"
+    );
+    if (File.Exists(markerPath))
+    {
+      File.Delete(markerPath);
+    }
+
+    var stopwatch = Stopwatch.StartNew();
+    var events = await ExecuteHarnessStreamAsync(
+      HarnessIds.QwenCode,
+      "transient qwen prompt queue",
+      "browser-qwen-prompt-queue",
+      "qwen3.8:27b-gpu0"
+    );
+    stopwatch.Stop();
+
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    Assert.IsGreaterThanOrEqualTo(900, stopwatch.ElapsedMilliseconds);
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
+    Assert.AreEqual(2, marker.RootElement.GetProperty("attempts").GetInt32());
+    Assert.AreEqual(1, marker.RootElement.GetProperty("rejections").GetInt32());
+    Assert.IsTrue(marker.RootElement.GetProperty("accepted").GetBoolean());
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task QwenCodeEvictsLeastRecentlyUsedIdleSessionAndRehydratesItOnReturn()
+  {
+    var deletionMarker = Path.Combine(
+      _environment.DataDirectory,
+      "qwen-code-runtime",
+      "fake-qwen-session-deleted.json"
+    );
+    if (File.Exists(deletionMarker))
+    {
+      File.Delete(deletionMarker);
+    }
+
+    for (var index = 1; index <= 5; index++)
+    {
+      var events = await ExecuteHarnessStreamAsync(
+        HarnessIds.QwenCode,
+        $"bounded qwen session {index}",
+        $"browser-qwen-session-limit-{index}",
+        "qwen3.8:27b-gpu0"
+      );
+      Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+      Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    }
+
+    using var marker = JsonDocument.Parse(
+      await File.ReadAllTextAsync(deletionMarker)
+    );
+    Assert.IsTrue(marker.RootElement.GetProperty("removed").GetBoolean());
+    Assert.HasCount(
+      3,
+      marker.RootElement.GetProperty("remainingSessionIds").EnumerateArray()
+    );
+
+    object[] history =
+    [
+      new { role = "user", content = "bounded qwen session 1" },
+      new { role = "assistant", content = "Qwen preserved SESSION-ONE-CONTINUITY." }
+    ];
+    var resumed = await ExecuteHarnessStreamAsync(
+      HarnessIds.QwenCode,
+      "resume the evicted qwen session",
+      "browser-qwen-session-limit-1",
+      "qwen3.8:27b-gpu0",
+      history
+    );
+    Assert.HasCount(1, resumed.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(resumed.Where(item => item["type"]!.GetValue<string>() == "error"));
+    using var prompt = JsonDocument.Parse(
+      await File.ReadAllTextAsync(Path.Combine(
+        _environment.DataDirectory,
+        "qwen-code-runtime",
+        "fake-qwen-prompt.json"
+      ))
+    );
+    var text = prompt.RootElement.GetProperty("text").GetString()!;
+    StringAssert.Contains(text, "Canonical Agentic Router conversation hydration:");
+    StringAssert.Contains(text, "SESSION-ONE-CONTINUITY");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task QwenCodeMalformedEventAndServerCrashEachFailExactlyOnce()
   {
     var malformed = await ExecuteHarnessStreamAsync(
@@ -6978,6 +7240,77 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         .ToArray(),
       "image"
     );
+  }
+
+  [TestMethod]
+  [DataRow(HarnessIds.OpenCode)]
+  [DataRow(HarnessIds.QwenCode)]
+  [DataRow(HarnessIds.ClaudeCode)]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExternalHarnessesForwardImagesThroughTheirNativeProtocols(
+    string harness
+  )
+  {
+    const string png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    var imagePath = Path.Combine(
+      _environment.WorkspaceDirectory,
+      $"{harness}-vision.png"
+    );
+    await File.WriteAllBytesAsync(imagePath, Convert.FromBase64String(png));
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+    await Expect(Page.Locator("#attach-image")).ToBeEnabledAsync();
+    await Page.Locator("#image-input").SetInputFilesAsync(imagePath);
+
+    await SendMessageAsync($"native image transport through {harness}");
+
+    var markerPath = harness switch
+    {
+      HarnessIds.OpenCode => Path.Combine(
+        _environment.DataDirectory,
+        "opencode-runtime",
+        "fake-opencode-prompt.json"
+      ),
+      HarnessIds.QwenCode => Path.Combine(
+        _environment.DataDirectory,
+        "qwen-code-runtime",
+        "fake-qwen-prompt.json"
+      ),
+      _ => Path.Combine(
+        _environment.DataDirectory,
+        "claude-code-runtime",
+        "fake-claude-prompt.json"
+      )
+    };
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
+    var images = marker.RootElement.GetProperty("images");
+    Assert.AreEqual(1, images.GetArrayLength());
+    Assert.AreEqual("image/png", harness switch
+    {
+      HarnessIds.OpenCode => images[0].GetProperty("mime").GetString(),
+      HarnessIds.QwenCode => images[0].GetProperty("mimeType").GetString(),
+      _ => images[0].GetProperty("mediaType").GetString()
+    });
+    if (harness == HarnessIds.OpenCode)
+    {
+      Assert.AreEqual($"{harness}-vision.png", images[0].GetProperty("filename").GetString());
+      StringAssert.StartsWith(
+        images[0].GetProperty("urlPrefix").GetString(),
+        "data:image/png;base64,"
+      );
+    }
+    else
+    {
+      Assert.IsGreaterThan(0, images[0].GetProperty("dataLength").GetInt32());
+      if (harness == HarnessIds.ClaudeCode)
+      {
+        Assert.AreEqual("base64", images[0].GetProperty("sourceType").GetString());
+      }
+    }
   }
 
   [TestMethod]

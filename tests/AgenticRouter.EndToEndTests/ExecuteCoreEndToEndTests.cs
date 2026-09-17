@@ -57,167 +57,77 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
   }
 
   [TestMethod]
-  [Timeout(90_000, CooperativeCancellation = true)]
-  public async Task FileCreationOutputLimitPersistsAndOnlyAppliesToNativeCreationPlanning()
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task GlobalNativeFileCreationOutputLimitIsOptionalAndAppliesToEveryModel()
   {
-    var specialist = new TestOllamaRoleRuntimeSettings(
-      4_096,
-      8_192,
-      65_536,
-      300,
-      4_096,
-      16_384
-    );
-    var modelOverride = new TestOllamaModelRuntimeOverride(
-      "ollama-local",
-      "qwen3-coder:30b",
-      "digest-qwen3-coder:30b",
-      new Dictionary<string, TestOllamaRoleRuntimeSettings>(StringComparer.Ordinal)
-      {
-        ["specialist"] = specialist
-      }
-    );
+    Assert.IsNull(_environment.BaselineSettings.Execution.FileCreationOutputTokenLimit);
+    var baselineYaml = await _environment.HttpClient.GetStringAsync("api/settings/yaml");
+    Assert.DoesNotContain("file_creation_output_token_limit", baselineYaml);
     using var invalid = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
       {
-        OllamaRuntime = _environment.BaselineSettings.OllamaRuntime with
+        Execution = _environment.BaselineSettings.Execution with
         {
-          ModelOverrides =
-          [
-            modelOverride with
-            {
-              Overrides = new Dictionary<string, TestOllamaRoleRuntimeSettings>(StringComparer.Ordinal)
-              {
-                ["specialist"] = specialist with { FileCreationOutputTokenLimit = 0 }
-              }
-            }
-          ]
+          FileCreationOutputTokenLimit = 0
         }
       }
     );
     Assert.AreEqual(HttpStatusCode.BadRequest, invalid.StatusCode);
 
-    using var saved = await _environment.PutSettingsAsync(
-      _environment.BaselineSettings with
-      {
-        Context = _environment.BaselineSettings.Context with
-        {
-          DefaultContextTokens = 65_536,
-          ProviderContextTokens = 131_072
-        },
-        OllamaRuntime = _environment.BaselineSettings.OllamaRuntime with
-        {
-          ContextEscalationLadder =
-          [
-            4_096,
-            8_192,
-            12_288,
-            16_384,
-            24_576,
-            32_768,
-            40_960,
-            65_536
-          ],
-          ModelOverrides = [modelOverride]
-        }
-      }
-    );
-    saved.EnsureSuccessStatusCode();
-    var persisted = await saved.Content.ReadFromJsonAsync<TestApplicationSettings>();
-    Assert.AreEqual(
-      16_384,
-      persisted!.OllamaRuntime.ModelOverrides.Single().Overrides["specialist"]
-        .FileCreationOutputTokenLimit
-    );
-
     await Page.GotoAsync("/");
-    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
-    await SetExecuteModeAsync("auto");
-    await StartMessageAsync("file token budget create files");
-    await WaitUntilAsync(
-      () => _environment.FakeOllama.Requests.Count(request =>
+    await Page.Locator("#open-settings").ClickAsync();
+    await Expect(Page.Locator("#general-file-creation-model")).ToHaveCountAsync(0);
+    await Expect(Page.Locator("#runtime-override-file-creation-output")).ToHaveCountAsync(0);
+    await Expect(Page.Locator("#file-creation-output-token-limit")).ToHaveValueAsync("");
+    await Page.Locator("#file-creation-output-token-limit").FillAsync("12288");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+
+    var persisted = await _environment.HttpClient
+      .GetFromJsonAsync<TestApplicationSettings>("api/settings");
+    Assert.AreEqual(12_288, persisted!.Execution.FileCreationOutputTokenLimit);
+    var yaml = await _environment.HttpClient.GetStringAsync("api/settings/yaml");
+    StringAssert.Contains(yaml, "file_creation_output_token_limit: 12288");
+
+    await Page.Locator("#close-settings").ClickAsync();
+    var normalOutputLimits = new Dictionary<string, int>(StringComparer.Ordinal)
+    {
+      ["alpha:latest"] = 4_096,
+      ["qwen3-coder:30b"] = 2_048
+    };
+    foreach (var model in normalOutputLimits.Keys)
+    {
+      foreach (var file in new[] { "token-budget-a.txt", "token-budget-b.txt" })
+      {
+        File.Delete(Path.Combine(_environment.WorkspaceDirectory, file));
+      }
+      _environment.FakeOllama.Reset();
+      await Page.Locator("#model-selector").SelectOptionAsync(model);
+      await Page.Locator("#harness-selector").SelectOptionAsync("native");
+      await SetExecuteModeAsync("auto");
+      await StartMessageAsync("file token budget create files");
+      await WaitUntilAsync(
+        () => File.Exists(Path.Combine(_environment.WorkspaceDirectory, "token-budget-a.txt")),
+        TimeSpan.FromSeconds(20)
+      );
+      await Page.Locator("#cancel-request").ClickAsync();
+      await Expect(Page.Locator(".message.assistant .activity").Last)
+        .ToHaveAttributeAsync("data-terminal", "true");
+      var plannerRequests = _environment.FakeOllama.Requests.Where(request =>
         request.Messages.Any(message => message.Content.Contains(
           LocalActionPlanner.PlannerMarker,
           StringComparison.Ordinal
-        ))) >= 3,
-      TimeSpan.FromSeconds(20)
-    );
-
-    var plannerRequests = _environment.FakeOllama.Requests.Where(request =>
-      request.Messages.Any(message => message.Content.Contains(
-        LocalActionPlanner.PlannerMarker,
-        StringComparison.Ordinal
-      ))).ToArray();
-    Assert.IsTrue(plannerRequests.Any(request =>
-      request.AvailableTools.Contains("create_files", StringComparer.Ordinal)
-      && request.PredictTokens == 16_384), JsonSerializer.Serialize(plannerRequests.Select(request => new
-      {
-        request.AvailableTools,
-        request.PredictTokens,
-        Last = request.Messages.LastOrDefault()?.Content
-      })));
-    var creation = plannerRequests.Single(request => request.PredictTokens == 16_384);
-    Assert.AreEqual(16_384, creation.PredictTokens);
-    Assert.IsTrue(plannerRequests.Where(request => !ReferenceEquals(request, creation))
-      .All(request => request.PredictTokens == 2_048));
-    await WaitUntilAsync(
-      () => File.Exists(Path.Combine(_environment.WorkspaceDirectory, "token-budget-a.txt")),
-      TimeSpan.FromSeconds(20)
-    );
-
-    using var yamlResponse = await _environment.HttpClient.GetAsync("api/settings/yaml");
-    yamlResponse.EnsureSuccessStatusCode();
-    StringAssert.Contains(
-      await yamlResponse.Content.ReadAsStringAsync(),
-      "file_creation_output_token_limit: 16384"
-    );
-    if (await Page.Locator("#cancel-request").IsVisibleAsync())
-    {
-      await Page.Locator("#cancel-request").ClickAsync();
+        ) || message.Content.Contains(
+          ExpertExecutionGuidanceService.GuidanceMarker,
+          StringComparison.Ordinal
+        ))).ToArray();
+      Assert.IsTrue(plannerRequests.Any(request =>
+        request.PredictTokens == 12_288),
+        $"{model}: planners={JsonSerializer.Serialize(plannerRequests.Select(request => new { request.Model, request.AvailableTools, request.PredictTokens }))}; all={JsonSerializer.Serialize(_environment.FakeOllama.Requests.Select(request => new { request.Model, request.AvailableTools, request.PredictTokens, Markers = request.Messages.Select(message => message.Content[..Math.Min(message.Content.Length, 80)]).ToArray() }))}");
+      Assert.IsTrue(_environment.FakeOllama.Requests.Where(request =>
+        !plannerRequests.Contains(request))
+        .All(request => request.PredictTokens == normalOutputLimits[model]), model);
     }
-  }
-
-  [TestMethod]
-  [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task GeneralSettingsExposePerModelNativeFileCreationBudget()
-  {
-    await Page.GotoAsync("/");
-    await Page.Locator("#open-settings").ClickAsync();
-    await Expect(Page.Locator("#settings-general")).ToBeVisibleAsync();
-    await Expect(Page.Locator("#general-file-creation-help"))
-      .ToHaveTextAsync("Per-model budget for Native create_file/create_files. Blank inherits; normal output is unchanged. Save settings to apply.");
-    await Expect(Page.Locator("#general-file-creation-output"))
-      .ToHaveAttributeAsync("data-i18n-placeholder", "settings.native_file_creation.inherit_placeholder");
-    await Page.Locator("#general-file-creation-model")
-      .SelectOptionAsync("qwen3-coder:30b");
-    await Expect(Page.Locator("#general-file-creation-output"))
-      .ToHaveValueAsync("");
-    await Page.Locator("#general-file-creation-output").FillAsync("16384");
-    await Page.Locator("#save-settings").ClickAsync();
-    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
-    var saved = await _environment.HttpClient
-      .GetFromJsonAsync<TestApplicationSettings>("api/settings");
-    var specialist = saved!.OllamaRuntime.ModelOverrides.Single(item =>
-      item.Model == "qwen3-coder:30b").Overrides["specialist"];
-    Assert.AreEqual(16_384, specialist.FileCreationOutputTokenLimit);
-    Assert.AreEqual(
-      _environment.BaselineSettings.OllamaRuntime.RoleDefaults["specialist"].OutputTokenLimit,
-      specialist.OutputTokenLimit
-    );
-    await Page.ReloadAsync();
-    await Page.Locator("#open-settings").ClickAsync();
-    await Page.Locator("#general-file-creation-model")
-      .SelectOptionAsync("qwen3-coder:30b");
-    await Expect(Page.Locator("#general-file-creation-output"))
-      .ToHaveValueAsync("16384");
-    await Page.Locator("#general-file-creation-output").FillAsync("");
-    await Page.Locator("#save-settings").ClickAsync();
-    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
-    saved = await _environment.HttpClient
-      .GetFromJsonAsync<TestApplicationSettings>("api/settings");
-    Assert.IsNull(saved!.OllamaRuntime.ModelOverrides.Single(item =>
-      item.Model == "qwen3-coder:30b").Overrides["specialist"]
-        .FileCreationOutputTokenLimit);
   }
 
   [TestMethod]
@@ -4703,7 +4613,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.GotoAsync("/");
     await Page.Locator("#open-settings").ClickAsync();
     await Expect(Page.Locator("#default-gpu-help")).ToContainTextAsync(
-      "stops the Ollama server and any loaded model"
+      "explicit model affinity takes precedence"
     );
     var options = await Page.EvaluateAsync<JsonElement>(
       """

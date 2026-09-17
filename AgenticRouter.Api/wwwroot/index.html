@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260916-harness-images">
   <link rel="stylesheet" href="/bootstrap.css">
   <link rel="stylesheet" href="/user-input.css">
 </head>
@@ -512,7 +512,7 @@
   </main>
 
   <main id="benchmark-view" class="benchmark-workspace" hidden>
-    <form id="benchmark-form" class="benchmark-page">
+    <div class="benchmark-page">
       <header class="benchmark-page-header">
         <div>
           <span class="eyebrow">
@@ -525,12 +525,15 @@
             Compare combinations. Understand results. Choose with evidence.
           </p>
         </div>
-        <button id="close-benchmarks" class="secondary-button benchmark-back-button" type="button">
-          ← Back to conversation
-        </button>
+        <div class="benchmark-header-actions">
+          <a id="benchmark-help" class="secondary-button" href="/benchmark-help.html" target="_blank" rel="noopener">Help ↗</a>
+          <button id="close-benchmarks" class="secondary-button benchmark-back-button" type="button">
+            ← Back to conversation
+          </button>
+        </div>
       </header>
       <div class="benchmark-body">
-        <aside class="benchmark-panel benchmark-setup-panel" aria-labelledby="benchmark-selection-title">
+        <form id="benchmark-form" class="benchmark-panel benchmark-setup-panel" aria-labelledby="benchmark-selection-title">
           <div class="benchmark-panel-header">
             <div>
               <h3 id="benchmark-selection-title">
@@ -635,7 +638,7 @@
               <label>
                 <span class="field-label-with-help">
                   Default GPU
-                  <button class="information-button compact-information-button" type="button" aria-label="Default-GPU information" data-tooltip="Benchmark uses the Default GPU selection frozen from Settings when the run starts.">
+                  <button class="information-button compact-information-button" type="button" aria-label="Default-GPU information" data-tooltip="Auto model affinity uses the Default GPU saved when the benchmark starts. Explicit model GPU affinity takes precedence.">
                     i
                   </button>
                 </span>
@@ -668,7 +671,7 @@
               Run benchmark
             </button>
           </div>
-        </aside>
+        </form>
         <section class="benchmark-results-panel" aria-label="Benchmark tracking and results">
           <section class="benchmark-overview" aria-label="Run progress">
             <div class="benchmark-overview-heading">
@@ -1077,7 +1080,7 @@
           </section>
         </section>
       </div>
-    </form>
+    </div>
   </main>
 
   <dialog id="settings-dialog" class="settings-dialog">
@@ -1145,7 +1148,7 @@
                   name="defaultGpu"
                   aria-describedby="default-gpu-help"
                 ></select>
-                <small id="default-gpu-help">Changing GPU configuration stops the Ollama server and any loaded model on the configured port.</small>
+                <small id="default-gpu-help">Used when model GPU Affinity is Auto. An explicit model affinity takes precedence, including Supervisor and Worker.</small>
               </label>
               <label>
                 <span>Direct execution plan limit</span>
@@ -1162,13 +1165,18 @@
                 <small id="max-direct-plan-steps-help">Auto uses the Supervisor when a structured objective or accepted plan exceeds this number of steps.</small>
               </label>
               <label>
-                <span data-i18n="settings.native_file_creation.model_label">Native file creation · local model</span>
-                <select id="general-file-creation-model" aria-describedby="general-file-creation-help"></select>
-              </label>
-              <label>
-                <span data-i18n="settings.native_file_creation.limit_label">File Creation Output Token Limit</span>
-                <input id="general-file-creation-output" type="number" min="1" max="131071" placeholder="Inherit model default" data-i18n-placeholder="settings.native_file_creation.inherit_placeholder" aria-describedby="general-file-creation-help">
-                <small id="general-file-creation-help" data-i18n="settings.native_file_creation.help">Per-model budget for Native create_file/create_files. Blank inherits; normal output is unchanged. Save settings to apply.</small>
+                <span>Native file creation output limit</span>
+                <input
+                  id="file-creation-output-token-limit"
+                  name="fileCreationOutputTokenLimit"
+                  type="number"
+                  min="256"
+                  max="131072"
+                  step="1"
+                  placeholder="Use normal model limit"
+                  aria-describedby="file-creation-output-token-limit-help"
+                >
+                <small id="file-creation-output-token-limit-help">Optional global limit for Native create_file/create_files generation across all models. Blank preserves each model's normal output limit.</small>
               </label>
               <fieldset class="phase-effort-settings">
                 <legend>Effort by supervised phase</legend>
@@ -1415,7 +1423,7 @@
               <select id="coordinator-model" name="coordinatorModel" required></select>
               <small>Does not replace the model explicitly selected for the current request.</small>
             </label>
-            <label>
+            <label hidden>
               <span>Legacy specialist profile GPU</span>
               <select id="coordinator-gpu" name="coordinatorGpu"></select>
             </label>
@@ -1633,11 +1641,6 @@
                   <label>
                     <span>Output limit</span>
                     <input id="runtime-override-output" type="number" min="128" max="32768">
-                  </label>
-                  <label>
-                    <span data-i18n="settings.native_file_creation.limit_label">File Creation Output Token Limit</span>
-                    <input id="runtime-override-file-creation-output" type="number" min="1" max="131071" placeholder="Inherit model default" data-i18n-placeholder="settings.native_file_creation.inherit_placeholder">
-                    <small data-i18n="settings.native_file_creation.override_help">Leave empty to inherit the normal model output limit.</small>
                   </label>
                   <label>
                     <span>Keep-alive (seconds; -1 keeps the selected role loaded)</span>
@@ -2474,7 +2477,7 @@
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
-  <script src="/i18n.js?v=20260915-custom-prompt-en"></script>
-  <script src="/app.js?v=20260915-custom-prompt-en"></script>
+  <script src="/i18n.js?v=20260916-harness-images"></script>
+  <script src="/app.js?v=20260916-harness-images"></script>
 </body>
 </html>

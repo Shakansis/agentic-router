@@ -6005,6 +6005,60 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       StringComparison.OrdinalIgnoreCase
     );
     if (
+      current.Contains(
+        "invalid decomposition queue recovery",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && current.Contains(
+        "SUPERVISION_DECOMPOSITION_DECISION_RECOVERY_V1",
+        StringComparison.Ordinal
+      )
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = "invalid decomposition queue recovery create file hello.txt with content hello world today",
+              criteria = new[]
+              {
+                new
+                {
+                  text = criterion,
+                  modality = SupervisionRequirementModalities.Must
+                }
+              },
+              evidencePaths = new[] { "hello.txt" }
+            }
+          }
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+    if (
+      current.Contains(
+        "invalid decomposition queue recovery",
+        StringComparison.OrdinalIgnoreCase
+      )
+      && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+    )
+    {
+      decision = JsonSerializer.Serialize(
+        new
+        {
+          decision = "dispatch_work",
+          items = Array.Empty<object>()
+        },
+        CompactJsonOptions
+      );
+      return true;
+    }
+    if (
       autonomousBoundary
       && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
     )

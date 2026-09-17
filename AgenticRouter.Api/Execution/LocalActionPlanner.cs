@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
@@ -52,7 +53,7 @@ public interface ILocalActionPlanner
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     string? requestedEffort = null,
-    bool useFileCreationOutputTokenLimit = false
+    int? maximumOutputTokens = null
   );
 }
 
@@ -254,7 +255,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     string? requestedEffort = null,
-    bool useFileCreationOutputTokenLimit = false
+    int? maximumOutputTokens = null
   )
   {
     var request = CreatePlanningRequest(
@@ -276,7 +277,12 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       cancellationToken,
       onThinkingDelta,
       requestedEffort: requestedEffort,
-      useFileCreationOutputTokenLimit: useFileCreationOutputTokenLimit
+      generationProfile: maximumOutputTokens is null
+        ? null
+        : ProviderGenerationProfiles.Deterministic with
+        {
+          MaximumOutputTokens = maximumOutputTokens
+        }
     );
     var canonicalTurn = _toolingProtocol.Normalize(toolingProfile, response);
     var assistantMessage = _toolingProtocol.CreateAssistantMessage(canonicalTurn);

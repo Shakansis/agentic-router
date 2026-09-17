@@ -40,6 +40,10 @@ var sessions = new ConcurrentDictionary<string, FakeSession>(StringComparer.Ordi
 var permissions = new ConcurrentDictionary<string, PendingPermission>(StringComparer.Ordinal);
 var sessionNumber = 0;
 var startupResponsesRemaining = 1;
+var inventoryStartupResponsesRemaining = 1;
+var maximumSessions = int.TryParse(ValueAfter("--max-sessions"), out var parsedMaximumSessions)
+  ? parsedMaximumSessions
+  : int.MaxValue;
 
 app.Use(async (context, next) =>
 {
@@ -83,12 +87,60 @@ app.MapGet("/capabilities", () => Results.Json(new
   policy = new { permission = "first-responder" }
 }));
 
+app.MapGet("/workspace/{id}/sessions", (string id) =>
+{
+  if (Interlocked.Exchange(ref inventoryStartupResponsesRemaining, 0) == 1)
+  {
+    return Results.Json(
+      new { error = "Daemon runtime is still starting", code = "daemon_runtime_starting" },
+      statusCode: StatusCodes.Status503ServiceUnavailable
+    );
+  }
+  if (!string.Equals(
+    Path.GetFullPath(id),
+    Path.GetFullPath(workspace),
+    StringComparison.OrdinalIgnoreCase
+  ))
+  {
+    return Results.BadRequest(new { code = "workspace_mismatch" });
+  }
+  return Results.Json(new
+  {
+    sessions = sessions.Values
+      .OrderBy(session => session.CreatedAt)
+      .Select(session => new
+      {
+        sessionId = session.Id,
+        workspaceCwd = session.Cwd,
+        createdAt = session.CreatedAt,
+        updatedAt = session.CreatedAt,
+        clientCount = 1,
+        hasActivePrompt = false,
+        isArchived = false
+      })
+      .ToArray()
+  });
+});
+
 app.MapPost("/session", async (HttpContext context) =>
 {
   if (Interlocked.Exchange(ref startupResponsesRemaining, 0) == 1)
   {
     return Results.Json(
       new { error = "Daemon runtime is still starting", code = "daemon_runtime_starting" },
+      statusCode: StatusCodes.Status503ServiceUnavailable
+    );
+  }
+  if (sessions.Count >= maximumSessions)
+  {
+    return Results.Json(
+      new
+      {
+        error = $"Session limit reached ({maximumSessions})",
+        code = "session_limit_exceeded",
+        limit = maximumSessions,
+        scope = "workspace"
+      },
       statusCode: StatusCodes.Status503ServiceUnavailable
     );
   }
@@ -349,7 +401,45 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
     return InvalidClient(session, context);
   }
   using var body = await JsonDocument.ParseAsync(context.Request.Body);
-  var text = body.RootElement.GetProperty("prompt")[0].GetProperty("text").GetString() ?? string.Empty;
+  var content = body.RootElement.GetProperty("prompt");
+  var text = content.EnumerateArray()
+    .First(part => part.GetProperty("type").GetString() == "text")
+    .GetProperty("text").GetString() ?? string.Empty;
+  var images = content.EnumerateArray()
+    .Where(part => part.GetProperty("type").GetString() == "image")
+    .Select(part => new
+    {
+      type = part.GetProperty("type").GetString(),
+      mimeType = part.GetProperty("mimeType").GetString(),
+      dataLength = (part.GetProperty("data").GetString() ?? string.Empty).Length
+    }).ToArray();
+  var promptSubmission = Interlocked.Increment(ref session.PromptSubmissionNumber);
+  var simulatePromptQueueFull = text.Contains(
+    "transient qwen prompt queue",
+    StringComparison.OrdinalIgnoreCase
+  );
+  if (simulatePromptQueueFull && promptSubmission == 1)
+  {
+    await WriteMarkerAsync("fake-qwen-prompt-queue.json", new
+    {
+      sessionId,
+      attempts = promptSubmission,
+      rejections = 1,
+      accepted = false
+    });
+    context.Response.Headers.RetryAfter = "1";
+    return Results.Json(
+      new
+      {
+        error = $"Prompt queue full for session \"{sessionId}\" (1/1 pending)",
+        code = "prompt_queue_full",
+        sessionId,
+        limit = 1,
+        pendingCount = 1
+      },
+      statusCode: StatusCodes.Status503ServiceUnavailable
+    );
+  }
   var promptId = $"{sessionId}########{Interlocked.Increment(ref session.PromptNumber)}";
   session.ActivePromptId = promptId;
   await WriteMarkerAsync("fake-qwen-prompt.json", new
@@ -359,8 +449,19 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
     promptId,
     model = session.Model,
     cwd = session.Cwd,
-    text
+    text,
+    images
   });
+  if (simulatePromptQueueFull)
+  {
+    await WriteMarkerAsync("fake-qwen-prompt-queue.json", new
+    {
+      sessionId,
+      attempts = promptSubmission,
+      rejections = 1,
+      accepted = true
+    });
+  }
   context.Response.StatusCode = StatusCodes.Status202Accepted;
   await context.Response.WriteAsJsonAsync(new { promptId, lastEventId = session.EventId });
   await context.Response.CompleteAsync();
@@ -377,6 +478,53 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   if (text.Contains("SUPERVISION_", StringComparison.Ordinal))
   {
     const string criterion = "qwen-supervised.txt contains the exact text visible Qwen activity";
+    if (
+      text.Contains("qwen supervision tool loop recovery", StringComparison.OrdinalIgnoreCase)
+      && text.Contains("SUPERVISION_HARNESS_RECOVERY_V1", StringComparison.Ordinal)
+    )
+    {
+      await WriteMarkerAsync("fake-qwen-supervision-tool-loop-recovery.json", new
+      {
+        includesPersistedContinuity = text.Contains(
+          "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1",
+          StringComparison.Ordinal
+        ),
+        forbidsTools = text.Contains("Do not call tools.", StringComparison.Ordinal),
+        text
+      });
+      await CompleteAsync(
+        session,
+        promptId,
+        JsonSerializer.Serialize(new
+        {
+          decision = "dispatch_work",
+          items = new[]
+          {
+            new
+            {
+              objective = "Inspect the existing implementation and create qwen-supervised.txt through Qwen Code.",
+              acceptanceCriteria = new[] { criterion },
+              evidencePaths = new[] { "qwen-supervised.txt" }
+            }
+          }
+        }),
+        includeReadTool: false
+      );
+      return Results.Empty;
+    }
+    if (
+      text.Contains("qwen supervision tool loop recovery", StringComparison.OrdinalIgnoreCase)
+      && text.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+    )
+    {
+      await EmitAsync(session, "turn_error", new
+      {
+        sessionId = session.Id,
+        promptId,
+        message = "Tool-call loop protection stopped this turn. The session is still available; send a more specific instruction to continue."
+      });
+      return Results.Empty;
+    }
     if (text.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
     {
       await CompleteAsync(
@@ -912,14 +1060,20 @@ app.MapPost("/session/{sessionId}/cancel", async (string sessionId, HttpContext 
   return Results.NoContent();
 });
 
-app.MapDelete("/session/{sessionId}", (string sessionId, HttpContext context) =>
+app.MapDelete("/session/{sessionId}", async (string sessionId, HttpContext context) =>
 {
   if (sessions.TryGetValue(sessionId, out var session)
     && !HasRegisteredClient(context, session))
   {
     return InvalidClient(session, context);
   }
-  sessions.TryRemove(sessionId, out _);
+  var removed = sessions.TryRemove(sessionId, out _);
+  await WriteMarkerAsync("fake-qwen-session-deleted.json", new
+  {
+    sessionId,
+    removed,
+    remainingSessionIds = sessions.Keys.Order(StringComparer.Ordinal).ToArray()
+  });
   return Results.NoContent();
 });
 
@@ -1401,6 +1555,8 @@ sealed class FakeSession
 
   public string Cwd { get; }
 
+  public DateTimeOffset CreatedAt { get; } = DateTimeOffset.UtcNow;
+
   public string Model { get; set; } = string.Empty;
 
   public string ModelRouteId { get; set; } = string.Empty;
@@ -1408,6 +1564,8 @@ sealed class FakeSession
   public string? ActivePromptId { get; set; }
 
   public int PromptNumber;
+
+  public int PromptSubmissionNumber;
 
   public long EventId;
 

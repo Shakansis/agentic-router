@@ -144,7 +144,8 @@ public sealed record ProviderGenerationProfile(
   double Temperature,
   double? TopP = null,
   double? RepeatPenalty = null,
-  int? MaximumContextTokens = null
+  int? MaximumContextTokens = null,
+  int? MaximumOutputTokens = null
 );
 
 public static class ProviderGenerationProfiles

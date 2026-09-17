@@ -623,6 +623,12 @@ dotnet test tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj
 
 ### Benchmark Lab production scenarios and repeated runs
 
+Use **Help** in the Benchmark Lab header for the local
+[Benchmark Lab guide](AgenticRouter.Api/wwwroot/benchmark-help.html): controls,
+test criteria, failure explanations, ranking, recommendations, routing impact,
+history and the advanced evidence glossary. Failed tests show plain-English
+summaries; **Advanced details** retains technical evidence.
+
 Benchmark Lab keeps CRUD and Agent Behavior scenarios versioned and adds a Real
 Life Problem suite that exercises the same production Execute entry point used
 by an ordinary request. Its external validator checks preserved project files,

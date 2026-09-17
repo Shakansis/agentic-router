@@ -176,6 +176,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
           ? messages
           : ToMultimodalMessages(messages, options.Images),
         temperature = 0,
+        max_tokens = options.EffectiveGenerationProfile.MaximumOutputTokens,
         stream = false,
         response_format = responseFormat
       }
@@ -240,6 +241,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         ),
         temperature = generationProfile.Temperature,
         top_p = generationProfile.TopP,
+        max_tokens = generationProfile.MaximumOutputTokens,
         stream = false
       }
       : new
@@ -263,6 +265,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         tool_choice = "auto",
         temperature = generationProfile.Temperature,
         top_p = generationProfile.TopP,
+        max_tokens = generationProfile.MaximumOutputTokens,
         stream = false
       };
     using var request = CreateJsonRequest(

@@ -87,6 +87,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     "SUPERVISION_WATCHDOG_RECOVERY_V1";
   internal const string CanonicalRecoveryMarker =
     "SUPERVISION_CANONICAL_RECOVERY_V1";
+  internal const string DecompositionDecisionRecoveryMarker =
+    "SUPERVISION_DECOMPOSITION_DECISION_RECOVERY_V1";
   internal const string VerificationDecisionRecoveryMarker =
     "SUPERVISION_VERIFICATION_DECISION_RECOVERY_V1";
   internal const string CompleteMarker = "SUPERVISION_COMPLETE_V1";
@@ -199,13 +201,14 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         cancellationToken
       );
       decompositionTimer.Stop();
+      var decompositionDurationMilliseconds = decompositionTimer.ElapsedMilliseconds;
       runtime = AddTelemetry(
         runtime,
         telemetry => telemetry with
         {
           DecompositionDurationMilliseconds = checked(
             telemetry.DecompositionDurationMilliseconds
-              + decompositionTimer.ElapsedMilliseconds
+              + decompositionDurationMilliseconds
           )
         }
       );
@@ -234,6 +237,87 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       catch (SupervisionException exception)
       {
         decompositionError = exception;
+      }
+      if (decompositionError is not null)
+      {
+        if (
+          decompositionError.Code == "supervision-decision-invalid"
+          && runtime.SupervisorTransitionCount < maximumSupervisorTransitions
+        )
+        {
+          runtime = runtime with
+          {
+            SupervisorTransitionCount = runtime.SupervisorTransitionCount + 1
+          };
+          if (input.ProgressSink is not null)
+          {
+            await input.ProgressSink.ReportAsync(
+              new SupervisionTurnProgress(
+                SupervisionEventTypeIds.TurnDecompositionDecisionRecovery,
+                "The supervisor returned valid JSON with an invalid work queue. The Host is making one bounded semantic correction attempt.",
+                supervisor.Role,
+                supervisor.Id,
+                RetryReason: SupervisionRetryReasons.DecompositionDecisionRecovery
+              ),
+              cancellationToken
+            );
+          }
+          var recoveryTimer = Stopwatch.StartNew();
+          decomposition = await RunTurnAsync(
+            checkpoint,
+            supervisor,
+            CreateDecompositionDecisionRecoveryPrompt(
+              checkpoint.Objective,
+              maximumItems,
+              maximumEvidencePaths,
+              decomposition.Answer,
+              decompositionError.Message,
+              autonomous: IsAutonomous(checkpoint)
+            ),
+            input.History,
+            [],
+            validationAvailable,
+            settings.Execution.PhaseEffort.Recovery,
+            input.ActionJournal,
+            input.ProgressSink,
+            cancellationToken
+          );
+          recoveryTimer.Stop();
+          decompositionDurationMilliseconds = checked(
+            decompositionDurationMilliseconds + recoveryTimer.ElapsedMilliseconds
+          );
+          runtime = AddTelemetry(
+            runtime,
+            telemetry => telemetry with
+            {
+              DecompositionDurationMilliseconds = checked(
+                telemetry.DecompositionDurationMilliseconds
+                  + recoveryTimer.ElapsedMilliseconds
+              )
+            }
+          );
+          decompositionError = null;
+          try
+          {
+            if (decomposition.Failure is not null)
+            {
+              throw InvalidDecision(
+                "The supervisor decomposition decision correction failed: "
+                  + decomposition.Failure.Message
+              );
+            }
+            decision = ParseDecision(decomposition.Answer);
+            ValidateDecomposition(
+              decision,
+              maximumItems,
+              maximumEvidencePaths
+            );
+          }
+          catch (SupervisionException exception)
+          {
+            decompositionError = exception;
+          }
+        }
       }
       if (decompositionError is not null)
       {
@@ -267,7 +351,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         runtime,
         role: "supervisor",
         contextId: supervisor.Id,
-        durationMilliseconds: decompositionTimer.ElapsedMilliseconds
+        durationMilliseconds: decompositionDurationMilliseconds
       );
     }
 
@@ -1208,6 +1292,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     var scope = supervisor
       ? CreateSupervisorToolScope(validationAvailable)
       : null;
+    var activeScope = scope;
     var activePrompt = prompt;
     var activeEffort = requestedEffort;
     var watchdogRecoveryAttempted = false;
@@ -1235,7 +1320,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       var invocation = new ExecutionSpecialistTurnInvocation(
         context.Id,
         supervisor ? ExecutionContextRole.Supervisor : ExecutionContextRole.Worker,
-        scope,
+        activeScope,
         UseMinimalToolInventory: supervisor,
         CaptureRoleResult: value => roleResult = value,
         ActionJournal: actionJournal,
@@ -1544,10 +1629,15 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       )
       {
         harnessRecoveryAttempted = true;
+        var toolLoopRecovery = IsToolCallLoopFailure(outcome.Failure);
+        activeScope = toolLoopRecovery
+          ? CreateSupervisorCanonicalDecisionScope()
+          : scope;
         activePrompt = CreateHarnessRecoveryPrompt(
           prompt,
           context,
-          outcome.Failure
+          outcome.Failure,
+          canonicalOnly: toolLoopRecovery
         );
         activeEffort = _recoveryEffort;
         if (progressSink is not null)
@@ -1555,11 +1645,15 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           await progressSink.ReportAsync(
             new SupervisionTurnProgress(
               SupervisionEventTypeIds.TurnHarnessRecovery,
-              $"The supervisor turn hit recoverable harness failure {outcome.Failure.Code}; the Host reset its native session and is retrying once with a concise, materially different brief.",
+              toolLoopRecovery
+                ? "The supervisor repeated invalid tool calls. The Host reset its native session and is retrying once without tools for the required canonical decision."
+                : $"The supervisor turn hit recoverable harness failure {outcome.Failure.Code}; the Host reset its native session and is retrying once with a concise, materially different brief.",
               context.Role,
               context.Id,
               context.WorkItemId,
-              RetryReason: SupervisionRetryReasons.HarnessRecovery
+              RetryReason: toolLoopRecovery
+                ? SupervisionRetryReasons.ToolLoopRecovery
+                : SupervisionRetryReasons.HarnessRecovery
             ),
             cancellationToken
           );
@@ -1593,6 +1687,14 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         );
       }
     }
+  }
+
+  private static bool IsToolCallLoopFailure(ProviderError failure)
+  {
+    return failure.Message.Contains(
+      "Tool-call loop protection stopped this turn",
+      StringComparison.OrdinalIgnoreCase
+    );
   }
 
   private static bool ShouldForwardTurnActivity(ChatStreamEvent streamEvent)
@@ -1810,15 +1912,19 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
   private static string CreateHarnessRecoveryPrompt(
     string originalPrompt,
     SupervisionContextView context,
-    ProviderError failure
+    ProviderError failure,
+    bool canonicalOnly
   )
   {
+    var recoveryInstruction = canonicalOnly
+      ? "Do not call tools. Use the bounded conversation and Host facts already provided, then return the required canonical final JSON immediately with no prose or Markdown fence."
+      : "Use the bounded facts in this prompt, call only a read-only tool if a missing fact is essential, and return the required canonical final JSON concisely.";
     return $$"""
       {{originalPrompt}}
 
       {{HarnessRecoveryMarker}}
       The preceding {{context.Role}} turn ended with the typed recoverable harness failure {{failure.Code}}: {{failure.Message}}
-      The Host reset the provider-native session. Preserve all committed Host effects and budgets. Do not repeat lengthy analysis or the failed generation pattern. Use the bounded facts in this prompt, call only a read-only tool if a missing fact is essential, and return the required canonical final JSON concisely.
+      The Host reset the provider-native session. Preserve all committed Host effects and budgets. Do not repeat lengthy analysis or the failed generation pattern. {{recoveryInstruction}}
       """;
   }
 
@@ -1894,6 +2000,35 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       For reject_work, identify an exact MUST criterion and provide a concrete observed discrepancy plus a materially different corrective brief:
       {"decision":"reject_work","evidenceRevision":{{evidence.Revision}},"blockingCriterion":"exact complete MUST criterion text","discrepancy":"...","correctiveBrief":"..."}
       Other permitted decisions: request_validation, {{(autonomous ? "stop_blocked" : "await_user, stop_blocked")}}, or replace_pending_work.
+      """;
+  }
+
+  private static string CreateDecompositionDecisionRecoveryPrompt(
+    string objective,
+    int maximumItems,
+    int maximumEvidencePaths,
+    string previousAnswer,
+    string validationError,
+    bool autonomous
+  )
+  {
+    return $$"""
+      {{DecompositionDecisionRecoveryMarker}}
+      The preceding supervisor answer was valid JSON but violated the canonical decomposition contract. This is the single bounded correction attempt; do not repeat the invalid shape.
+      Contract error: {{validationError}}
+      Previous answer:
+      {{Truncate(previousAnswer, 4_096)}}
+
+      Correct only the work queue for the same original objective. Do not call tools and do not add prose or a Markdown fence.
+      Original objective:
+      {{objective}}
+      {{(autonomous ? "AUTONOMOUS MODE: the user delegated every approval they could personally grant. Resolve ordinary ambiguities yourself; hard Host boundaries remain non-negotiable." : "")}}
+
+      Return exactly one JSON object with a non-empty items array:
+      {"decision":"dispatch_work","items":[{"objective":"...","criteria":[{"text":"...","modality":"must|should|may"}],"evidencePaths":["relative/path"]}]}
+      Maximum work items: {{maximumItems}}.
+      Maximum declared evidence paths per work item: {{maximumEvidencePaths}}.
+      Every item must deliver at least one durable Host-observable file change and include at least one concrete relative file path in evidencePaths. Do not dispatch planning, verification, review, or reporting as standalone work items. Return exactly one item when the requested mutation is atomic.
       """;
   }
 
@@ -2050,6 +2185,19 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       ProcessExecutionAllowed: false,
       ManualValidationRequested: false,
       ValidationProfileAvailable: validationAvailable,
+      GitToolsAvailable: false,
+      DirectoryCreationAvailable: false,
+      DeletionAvailable: false
+    );
+  }
+
+  private static ExecutionTurnToolScope CreateSupervisorCanonicalDecisionScope()
+  {
+    return new ExecutionTurnToolScope(
+      [],
+      ProcessExecutionAllowed: false,
+      ManualValidationRequested: false,
+      ValidationProfileAvailable: false,
       GitToolsAvailable: false,
       DirectoryCreationAvailable: false,
       DeletionAvailable: false

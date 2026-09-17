@@ -3406,8 +3406,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       8_192,
       40_960,
       300,
-      2_048,
-      4_096
+      2_048
     );
     using (var saved = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
@@ -3463,7 +3462,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       ))).ToArray();
     Assert.IsTrue(planningRequests.Any(request =>
       request.AvailableTools.Contains("create_file", StringComparer.Ordinal)
-      && request.PredictTokens == 4_096));
+      && request.PredictTokens == 2_048));
     Assert.IsTrue(planningRequests.Where(request =>
       !request.AvailableTools.Contains("create_file", StringComparer.Ordinal))
       .All(request => request.PredictTokens == 2_048));

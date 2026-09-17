@@ -23,6 +23,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 {
   private const int MaximumActivityText = 8_192;
   private const int MaximumNativeDiagnosticsPerTurn = 8;
+  private const int MaximumSessionsPerWorkspace = 4;
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
   private static readonly string[] RequiredFeatures =
   [
@@ -67,7 +68,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsNativePermissions: true,
       SupportsSteering: true,
       SupportsNativeWebSearch: true,
-      SupportsUserInput: true
+      SupportsUserInput: true,
+      SupportsImages: true
     ),
     ["ollama-local"]
   );
@@ -89,6 +91,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private string? _token;
   private string? _configurationKey;
   private HarnessAvailability? _cachedAvailability;
+  private long _sessionUseSequence;
   private bool _disposed;
 
   public QwenCodeHarnessAdapter(
@@ -285,19 +288,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           : $"The selected model does not advertise reasoning support; {request.RequestedEffort} effort is prompt-guided for this Qwen Code turn."
       );
 
-      var prompt = await SendAsync(
-        HttpMethod.Post,
-        $"session/{EncodePath(session.SessionId)}/prompt",
+      var prompt = await SubmitPromptAsync(
+        session,
         new
         {
-          prompt = new[]
-          {
-            new { type = "text", text = turnPrompt.Text }
-          }
+          prompt = CreatePromptContent(turnPrompt.Text, request.Images)
         },
-        session.ClientId,
-        cancellationToken,
-        HttpStatusCode.Accepted
+        cancellationToken
       );
       active.PromptId = RequiredString(prompt, "promptId");
       var baselineEventId = Long(prompt, "lastEventId") ?? 0;
@@ -586,6 +583,28 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         _turnGate.Release();
       }
     }
+  }
+
+  private static IReadOnlyList<object> CreatePromptContent(
+    string text,
+    IReadOnlyList<HarnessImageInput>? images
+  )
+  {
+    var content = new List<object>
+    {
+      new { type = "text", text }
+    };
+    if (images is null)
+    {
+      return content;
+    }
+    content.AddRange(images.Select(image => (object)new
+    {
+      type = "image",
+      data = Convert.ToBase64String(image.Bytes),
+      mimeType = image.MimeType
+    }));
+    return content;
   }
 
   public async Task ResolveApprovalAsync(
@@ -944,7 +963,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         "--port", port.ToString(System.Globalization.CultureInfo.InvariantCulture),
         "--hostname", "127.0.0.1",
         "--require-auth",
-        "--max-sessions", "4",
+        "--max-sessions", MaximumSessionsPerWorkspace.ToString(
+          System.Globalization.CultureInfo.InvariantCulture
+        ),
         "--max-pending-prompts-per-session", "1",
         "--workspace", Path.GetFullPath(workingDirectory),
         "--memory-project-scope", "workspace",
@@ -1065,8 +1086,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   {
     if (_sessions.TryGetValue(request.SessionId, out var existing))
     {
+      existing.LastUsedSequence = Interlocked.Increment(ref _sessionUseSequence);
       return existing;
     }
+    await EvictIdleSessionsAsync(
+      request.WorkingDirectory,
+      cancellationToken
+    );
     var requestedClientId = $"agentic-router-{Guid.NewGuid():N}";
     var created = await CreateSessionAsync(
       request.WorkingDirectory,
@@ -1075,50 +1101,204 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     );
     var sessionId = RequiredString(created, "sessionId");
     var clientId = RequiredString(created, "clientId");
-    var returnedWorkspace = RequiredString(created, "workspaceCwd");
-    if (!string.Equals(
-      Path.GetFullPath(returnedWorkspace),
-      Path.GetFullPath(request.WorkingDirectory),
-      FileSystemPathSemantics.Comparison
-    ))
-    {
-      throw Failure("qwen-code-workspace-mismatch", "Qwen Code returned a different session workspace.");
-    }
-    var context = await SendAsync(
-      HttpMethod.Get,
-      $"session/{EncodePath(sessionId)}/context",
-      null,
+    var session = new QwenSession(
+      sessionId,
       clientId,
-      cancellationToken
+      Interlocked.Increment(ref _sessionUseSequence)
     );
-    var currentModel = RequiredString(context.GetProperty("state").GetProperty("models"), "currentModelId");
-    var availableModels = context.GetProperty("state").GetProperty("models").GetProperty("availableModels");
-    if (
-      availableModels.ValueKind != JsonValueKind.Array
-      || !availableModels.EnumerateArray().Any(
-        candidate => string.Equals(String(candidate, "modelId"), currentModel, StringComparison.Ordinal)
+    try
+    {
+      var returnedWorkspace = RequiredString(created, "workspaceCwd");
+      if (!string.Equals(
+        Path.GetFullPath(returnedWorkspace),
+        Path.GetFullPath(request.WorkingDirectory),
+        FileSystemPathSemantics.Comparison
+      ))
+      {
+        throw Failure("qwen-code-workspace-mismatch", "Qwen Code returned a different session workspace.");
+      }
+      var context = await SendAsync(
+        HttpMethod.Get,
+        $"session/{EncodePath(sessionId)}/context",
+        null,
+        clientId,
+        cancellationToken
+      );
+      var currentModel = RequiredString(context.GetProperty("state").GetProperty("models"), "currentModelId");
+      var availableModels = context.GetProperty("state").GetProperty("models").GetProperty("availableModels");
+      if (
+        availableModels.ValueKind != JsonValueKind.Array
+        || !availableModels.EnumerateArray().Any(
+          candidate => string.Equals(String(candidate, "modelId"), currentModel, StringComparison.Ordinal)
+        )
       )
+      {
+        throw Failure("qwen-code-model-mismatch", "Qwen Code session context did not retain the selected model route.");
+      }
+      var providers = await SendAsync(
+        HttpMethod.Get,
+        "workspace/providers",
+        null,
+        null,
+        cancellationToken
+      );
+      ValidateSelectedProvider(
+        providers,
+        currentModel,
+        request.Model,
+        request.ProviderEndpoint!,
+        request.WorkingDirectory
+      );
+      _sessions[request.SessionId] = session;
+      return session;
+    }
+    catch
+    {
+      try
+      {
+        await DeleteSessionAsync(
+          session.SessionId,
+          session.ClientId,
+          CancellationToken.None
+        );
+      }
+      catch (Exception cleanupException)
+      {
+        _logger.LogWarning(
+          cleanupException,
+          "Failed to close partially created Qwen Code session {QwenSessionId}.",
+          session.SessionId
+        );
+      }
+      throw;
+    }
+  }
+
+  private async Task EvictIdleSessionsAsync(
+    string workingDirectory,
+    CancellationToken cancellationToken
+  )
+  {
+    while (true)
+    {
+      var inventory = await GetSessionInventoryAsync(
+        workingDirectory,
+        cancellationToken
+      );
+      if (
+        !inventory.TryGetProperty("sessions", out var sessions)
+        || sessions.ValueKind != JsonValueKind.Array
+      )
+      {
+        throw Failure(
+          "qwen-code-session-inventory-invalid",
+          "Qwen Code returned an invalid live-session inventory."
+        );
+      }
+      var liveSessions = sessions.EnumerateArray()
+        .Where(item => Long(item, "clientCount") > 0)
+        .ToArray();
+      if (liveSessions.Length < MaximumSessionsPerWorkspace)
+      {
+        return;
+      }
+      var candidate = liveSessions
+        .Where(item => !Boolean(item, "hasActivePrompt"))
+        .OrderBy(item => String(item, "updatedAt") ?? String(item, "createdAt"), StringComparer.Ordinal)
+        .ThenBy(item => String(item, "sessionId"), StringComparer.Ordinal)
+        .FirstOrDefault();
+      var candidateId = String(candidate, "sessionId");
+      if (string.IsNullOrWhiteSpace(candidateId))
+      {
+        throw Failure(
+          "qwen-code-session-capacity-active",
+          "Qwen Code reached its workspace session limit and every live session is still active."
+        );
+      }
+      var tracked = _sessions.FirstOrDefault(pair => string.Equals(
+        pair.Value.SessionId,
+        candidateId,
+        StringComparison.Ordinal
+      ));
+      await DeleteSessionAsync(
+        candidateId,
+        tracked.Value?.ClientId,
+        cancellationToken
+      );
+      if (tracked.Value is not null)
+      {
+        _sessions.TryRemove(tracked.Key, out _);
+      }
+      _logger.LogInformation(
+        "Closed least-recently-used idle Qwen Code session {QwenSessionId} before creating a new conversation session.",
+        candidateId
+      );
+    }
+  }
+
+  private async Task<JsonElement> GetSessionInventoryAsync(
+    string workingDirectory,
+    CancellationToken cancellationToken
+  )
+  {
+    var deadline = DateTimeOffset.UtcNow + _options.StartupTimeout;
+    var delay = TimeSpan.FromMilliseconds(100);
+    while (true)
+    {
+      using var request = CreateRequest(
+        HttpMethod.Get,
+        $"workspace/{EncodePath(Path.GetFullPath(workingDirectory))}/sessions?size=16",
+        null
+      );
+      using var response = await Client().SendAsync(request, cancellationToken);
+      var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+      if (response.IsSuccessStatusCode)
+      {
+        using var document = JsonDocument.Parse(bytes);
+        return document.RootElement.Clone();
+      }
+      var body = Truncate(Encoding.UTF8.GetString(bytes));
+      var runtimeStarting = response.StatusCode == HttpStatusCode.ServiceUnavailable
+        && body.Contains("\"code\":\"daemon_runtime_starting\"", StringComparison.Ordinal);
+      if (!runtimeStarting)
+      {
+        throw Failure(
+          "qwen-code-http",
+          $"Qwen Code returned HTTP {(int)response.StatusCode} ({response.StatusCode}). {body}"
+        );
+      }
+      if (DateTimeOffset.UtcNow + delay > deadline)
+      {
+        throw Failure(
+          "qwen-code-daemon-runtime-start-timeout",
+          "Qwen Code did not finish starting its workspace runtime before the session inventory timeout."
+        );
+      }
+      await Task.Delay(delay, cancellationToken);
+      delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 500));
+    }
+  }
+
+  private async Task DeleteSessionAsync(
+    string sessionId,
+    string? clientId,
+    CancellationToken cancellationToken
+  )
+  {
+    using var request = CreateRequest(
+      HttpMethod.Delete,
+      $"session/{EncodePath(sessionId)}",
+      clientId
+    );
+    using var response = await Client().SendAsync(request, cancellationToken);
+    if (
+      response.StatusCode == HttpStatusCode.NoContent
+      || response.StatusCode == HttpStatusCode.NotFound
     )
     {
-      throw Failure("qwen-code-model-mismatch", "Qwen Code session context did not retain the selected model route.");
+      return;
     }
-    var providers = await SendAsync(
-      HttpMethod.Get,
-      "workspace/providers",
-      null,
-      null,
-      cancellationToken
-    );
-    ValidateSelectedProvider(
-      providers,
-      currentModel,
-      request.Model,
-      request.ProviderEndpoint!,
-      request.WorkingDirectory
-    );
-    var session = new QwenSession(sessionId, clientId);
-    _sessions[request.SessionId] = session;
-    return session;
+    await EnsureSuccessAsync(response, "qwen-code-http", cancellationToken);
   }
 
   private async Task<JsonElement> CreateSessionAsync(
@@ -1531,13 +1711,10 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       {
         try
         {
-          await SendAsync(
-            HttpMethod.Delete,
-            $"session/{EncodePath(session.SessionId)}",
-            null,
+          await DeleteSessionAsync(
+            session.SessionId,
             session.ClientId,
-            timeout.Token,
-            HttpStatusCode.NoContent
+            timeout.Token
           );
         }
         catch (Exception)
@@ -1596,6 +1773,110 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
     using var document = JsonDocument.Parse(bytes);
     return document.RootElement.Clone();
+  }
+
+  private async Task<JsonElement> SubmitPromptAsync(
+    QwenSession session,
+    object body,
+    CancellationToken cancellationToken
+  )
+  {
+    var deadline = DateTimeOffset.UtcNow + _options.RequestTimeout;
+    var fallbackDelay = TimeSpan.FromMilliseconds(250);
+    var attempt = 0;
+    while (true)
+    {
+      attempt++;
+      using var request = CreateRequest(
+        HttpMethod.Post,
+        $"session/{EncodePath(session.SessionId)}/prompt",
+        session.ClientId
+      );
+      request.Content = new StringContent(
+        JsonSerializer.Serialize(body),
+        Encoding.UTF8,
+        "application/json"
+      );
+      using var response = await Client().SendAsync(request, cancellationToken);
+      var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+      if (response.StatusCode == HttpStatusCode.Accepted)
+      {
+        using var document = JsonDocument.Parse(bytes);
+        return document.RootElement.Clone();
+      }
+      if (!IsPromptQueueFull(response, bytes, session.SessionId))
+      {
+        throw Failure(
+          "qwen-code-http",
+          $"Qwen Code returned HTTP {(int)response.StatusCode} ({response.StatusCode}). {Truncate(Encoding.UTF8.GetString(bytes))}"
+        );
+      }
+
+      var delay = PromptQueueRetryDelay(response, fallbackDelay);
+      if (DateTimeOffset.UtcNow + delay > deadline)
+      {
+        throw Failure(
+          "qwen-code-prompt-queue-timeout",
+          $"Qwen Code session {session.SessionId} remained busy until the configured request timeout."
+        );
+      }
+      _logger.LogInformation(
+        "Qwen Code prompt queue is full for session {SessionId}; retrying submission after {DelayMilliseconds} ms (attempt {Attempt}).",
+        session.SessionId,
+        delay.TotalMilliseconds,
+        attempt
+      );
+      await Task.Delay(delay, cancellationToken);
+      fallbackDelay = TimeSpan.FromMilliseconds(
+        Math.Min(fallbackDelay.TotalMilliseconds * 2, 2_000)
+      );
+    }
+  }
+
+  private static bool IsPromptQueueFull(
+    HttpResponseMessage response,
+    ReadOnlyMemory<byte> body,
+    string expectedSessionId
+  )
+  {
+    if (response.StatusCode != HttpStatusCode.ServiceUnavailable)
+    {
+      return false;
+    }
+    try
+    {
+      using var document = JsonDocument.Parse(body);
+      var root = document.RootElement;
+      return string.Equals(
+          String(root, "code"),
+          "prompt_queue_full",
+          StringComparison.Ordinal
+        )
+        && string.Equals(
+          String(root, "sessionId"),
+          expectedSessionId,
+          StringComparison.Ordinal
+        );
+    }
+    catch (JsonException)
+    {
+      return false;
+    }
+  }
+
+  private static TimeSpan PromptQueueRetryDelay(
+    HttpResponseMessage response,
+    TimeSpan fallback
+  )
+  {
+    var retryAfter = response.Headers.RetryAfter;
+    var delay = retryAfter?.Delta
+      ?? (retryAfter?.Date is { } retryAt
+        ? retryAt - DateTimeOffset.UtcNow
+        : fallback);
+    return delay < TimeSpan.FromMilliseconds(100)
+      ? TimeSpan.FromMilliseconds(100)
+      : delay;
   }
 
   private HttpRequestMessage CreateRequest(HttpMethod method, string relativeUri, string? clientId)
@@ -1893,6 +2174,16 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
   }
 
+  private static bool Boolean(
+    JsonElement value,
+    string property
+  )
+  {
+    return value.ValueKind == JsonValueKind.Object
+      && value.TryGetProperty(property, out var result)
+      && result.ValueKind == JsonValueKind.True;
+  }
+
   private static HarnessException Failure(string code, string message)
   {
     return new HarnessException(code, message, message, true, harnessId: HarnessIds.QwenCode);
@@ -1909,11 +2200,17 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
   private sealed record ResolvedCommand(string FileName, string? ScriptPath);
 
-  private sealed class QwenSession(string sessionId, string clientId)
+  private sealed class QwenSession(
+    string sessionId,
+    string clientId,
+    long lastUsedSequence
+  )
   {
     public string SessionId { get; } = sessionId;
 
     public string ClientId { get; } = clientId;
+
+    public long LastUsedSequence { get; set; } = lastUsedSequence;
 
     public long? SynchronizedThroughVersion { get; set; }
   }

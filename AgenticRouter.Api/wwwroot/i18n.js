@@ -133,11 +133,6 @@
       "benchmark.results.model_harness": "Model × Harness",
       "benchmark.results.duration": "Duration",
       "benchmark.results.calculated_score_hint": "Score calculated by the active profile from measured evidence.",
-      "settings.native_file_creation.model_label": "Native file creation · local model",
-      "settings.native_file_creation.limit_label": "File Creation Output Token Limit",
-      "settings.native_file_creation.inherit_placeholder": "Inherit model default",
-      "settings.native_file_creation.help": "Per-model budget for Native create_file/create_files. Blank inherits; normal output is unchanged. Save settings to apply.",
-      "settings.native_file_creation.override_help": "Leave empty to inherit the normal model output limit."
     })
   };
   const fallbackLocale = "en";

@@ -20,7 +20,9 @@ versioned persisted-contract migration.
 | --- | --- | --- |
 | `ollamaUrl` | ACTIVE | Ollama transport and model-discovery endpoint. Must be an absolute HTTP(S) URL. |
 | `defaultModel`, `defaultGpu` | ACTIVE | Default route when an intent does not select another model; `auto` device selection remains provider-managed. |
-| `intentions.*.{model,fallbackModel,gpu,systemPrompt}` | ACTIVE | Deterministic intent profiles. An explicit request selection still wins. Cloud primaries require an exact eligible local fallback. |
+| `intentions.*.{model,fallbackModel,systemPrompt}` | ACTIVE | Deterministic intent profiles. An explicit request selection still wins. Cloud primaries require an exact eligible local fallback. |
+| `modelGpuAffinities` | ACTIVE | Explicit model affinity overrides all other GPU settings. `Auto` uses `defaultGpu` directly, including supervisor and worker turns. |
+| `intentions.*.gpu` | COMPATIBILITY | Readable legacy role selection; does not override model affinity or General Default GPU. |
 | `coordinatorModel`, `coordinatorGpu` | COMPATIBILITY | Version-1 wire names retained by JSON/YAML, saved model profiles, runtime-profile grouping, and session evidence. The browser describes them as a legacy specialist-profile identity. They do not override the model + harness selected for the current Execute request. |
 | `routerModel`, `routerGpu` | COMPATIBILITY | Round-tripped by version-1 JSON/YAML and old model profiles. Intent classification is local keyword logic; no router-model inference runs. |
 | `actionModel`, `actionGpu` | COMPATIBILITY | Round-tripped for older settings/YAML. No resident model is preloaded, called, evicted, or used for takeover. |
@@ -43,12 +45,20 @@ migrations, not active routing behavior.
 | `ollamaRuntime.modelOverrides[*]` | ACTIVE | Exact local model/digest role overrides. |
 | `ollamaRuntime.memory.*` | ACTIVE | Global and per-device headroom, CPU-offload permission, and full-GPU preference used by profile analysis/request shaping. |
 
+The 2026-09-16 [GPU and residency correction](model-gpu-residency.md) establishes
+the model-affinity precedence above. It also replaces the per-model
+`fileCreationOutputTokenLimit` with the optional global
+`execution.fileCreationOutputTokenLimit`. Blank preserves the current model limit;
+a configured value applies to Native file-creation generation across all models.
+Older per-model JSON and YAML remain importable but are ignored.
+
 ## Execute, workspace, and persistence
 
 | Config group | Status | Current behavior |
 | --- | --- | --- |
 | `trustedWorkspacePath` | COMPATIBILITY | Preserved in the global payload for old clients. Active authority comes from the selected workspace profile. |
 | `execution.maxToolCallsPerTurn`, `maxConsecutiveToolFailures`, `maxRecoveryAttemptsPerTurn` | ACTIVE | Bounded specialist tool/recovery loop. |
+| `execution.fileCreationOutputTokenLimit` | ACTIVE | Optional global output limit used only while Native generates `create_file`/`create_files`; null preserves each model's normal limit. |
 | `execution.maxTrackedFilesPerSession`, `maxRollbackBytesPerFile`, `maxRollbackBytesPerSession` | ACTIVE | Review and rollback evidence limits. |
 | `execution.maxSearchFiles`, `maxSearchMatches`, `maxToolOutputTokens` | ACTIVE | Bounded Host search/tool-output limits. |
 | `execution.maxDirectPlanSteps` | ACTIVE | Maximum accepted structured steps for Auto to remain in direct Execute. Above this limit, the Host starts or takes over with durable supervision; default `5`, configurable in Settings > General. |

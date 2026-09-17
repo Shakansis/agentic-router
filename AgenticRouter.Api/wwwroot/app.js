@@ -444,6 +444,7 @@ function bindElements() {
     "provider-context-tokens",
     "reserved-response-tokens",
     "max-direct-plan-steps",
+    "file-creation-output-token-limit",
     "phase-effort-plan",
     "phase-effort-work",
     "phase-effort-verify",
@@ -474,9 +475,6 @@ function bindElements() {
     "runtime-override-target",
     "runtime-override-maximum",
     "runtime-override-output",
-    "runtime-override-file-creation-output",
-    "general-file-creation-model",
-    "general-file-creation-output",
     "runtime-override-keep-alive",
     "save-runtime-override",
     "remove-runtime-override",
@@ -751,6 +749,7 @@ function bindEvents() {
   elements.composer.addEventListener("submit", handleComposerSubmit);
   elements.openBenchmarks.addEventListener("click", openBenchmarks);
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
+  elements.benchmarkForm.addEventListener("invalid", event => revealBenchmarkInvalidControl(event.target), true);
   elements.benchmarkForm.addEventListener("change", renderBenchmarkSelectionSummary);
   elements.benchmarkRepetitions.addEventListener("input", renderBenchmarkSelectionSummary);
   elements.benchmarkContextTokens.addEventListener("input", renderBenchmarkSelectionSummary);
@@ -951,14 +950,6 @@ function bindEvents() {
   elements.runtimeOverrideRole.addEventListener(
     "change",
     loadRuntimeOverrideEditor
-  );
-  elements.generalFileCreationModel.addEventListener(
-    "change",
-    loadGeneralFileCreationEditor
-  );
-  elements.generalFileCreationOutput.addEventListener(
-    "input",
-    updateGeneralFileCreationDraft
   );
   elements.runtimeMemoryDevicePolicies.addEventListener(
     "change",
@@ -2360,18 +2351,13 @@ function renderBenchmarkComparison(comparison) {
     elements.benchmarkComparison.append(reasons);
   }
 
-  const deltas = document.createElement("dl");
-  deltas.className = "benchmark-comparison-deltas";
+  const deltas = createBenchmarkDataTable(["Metric", "Baseline", "Candidate", "Change"], "Measured changes", "benchmark-comparison-deltas");
   for (const delta of comparison.deltas) {
-    const term = document.createElement("dt");
-    term.textContent = delta.metric;
-    const value = document.createElement("dd");
     const numericDelta = Number(delta.delta);
-    value.textContent = `${Number(delta.baseline).toFixed(2)} → ${Number(delta.candidate).toFixed(2)} `
-      + `(${numericDelta >= 0 ? "+" : ""}${numericDelta.toFixed(2)} ${delta.unit ?? ""})`;
-    deltas.append(term, value);
+    appendBenchmarkDataRow(deltas.body, [benchmarkEvidenceLabel(delta.metric), Number(delta.baseline).toFixed(2), Number(delta.candidate).toFixed(2),
+      `${numericDelta >= 0 ? "+" : ""}${numericDelta.toFixed(2)} ${delta.unit ?? ""}`]);
   }
-  elements.benchmarkComparison.append(deltas);
+  elements.benchmarkComparison.append(deltas.shell);
 
   if (comparison.comparability !== "comparable") {
     const warning = document.createElement("p");
@@ -2395,16 +2381,11 @@ function renderBenchmarkComparison(comparison) {
     const metadata = document.createElement("details");
     const summary = document.createElement("summary");
     summary.textContent = `Changed metadata (${comparison.changedMetadata.length})`;
-    const list = document.createElement("dl");
-    list.className = "benchmark-comparison-metadata";
+    const list = createBenchmarkDataTable(["Property", "Baseline", "Candidate"], "Changed metadata", "benchmark-comparison-metadata");
     for (const change of comparison.changedMetadata) {
-      const term = document.createElement("dt");
-      term.textContent = change.field;
-      const value = document.createElement("dd");
-      value.textContent = `${change.baseline} → ${change.candidate}`;
-      list.append(term, value);
+      appendBenchmarkDataRow(list.body, [benchmarkEvidenceLabel(change.field), change.baseline, change.candidate]);
     }
-    metadata.append(summary, list);
+    metadata.append(summary, list.shell);
     elements.benchmarkComparison.append(metadata);
   }
 }
@@ -2711,10 +2692,27 @@ async function openBenchmarkRecommendationEvidence(event) {
   }
 }
 
+function revealBenchmarkInvalidControl(control) {
+  const pane = control.closest(".benchmark-tab-pane");
+  if (pane?.hidden) showBenchmarkTab(pane.id.replace("benchmark-pane-", ""));
+  for (let parent = control.parentElement; parent && parent !== elements.benchmarkView; parent = parent.parentElement) {
+    if (parent instanceof HTMLDetailsElement) parent.open = true;
+  }
+}
+
 async function runBenchmarkSuite(event) {
   event.preventDefault();
   if (state.activeBenchmarkRunId) {
     return;
+  }
+  if (elements.benchmarkScoringProfileChoice.value === "custom") {
+    const invalidWeight = benchmarkWeightInputs().find(input => !input.validity.valid);
+    if (invalidWeight) {
+      invalidWeight.closest(".benchmark-scoring-advanced").hidden = false;
+      revealBenchmarkInvalidControl(invalidWeight);
+      invalidWeight.reportValidity();
+      return;
+    }
   }
   const harnesses = [...elements.benchmarkHarnessList.querySelectorAll(
     'input[name="benchmark-harness"]:checked:not(:disabled)'
@@ -2736,6 +2734,7 @@ async function runBenchmarkSuite(event) {
   }
   if (manual && elements.benchmarkCustomPrompt.value.trim() === "") {
     elements.benchmarkStatus.textContent = t("benchmark.custom_prompt.required");
+    revealBenchmarkInvalidControl(elements.benchmarkCustomPrompt);
     elements.benchmarkCustomPrompt.focus();
     return;
   }
@@ -3148,7 +3147,8 @@ function benchmarkTestLabel(id) {
     "CONTINUITY-001": "Keep context across turns", "SCOPE-RETENTION-001": "Stay within task scope",
     "RECOVERY-001": "Recover from a failure", "CONVERGENCE-001": "Converge on a solution",
     "TERMINALITY-001": "Finish the task clearly", "STALE-CONFLICT-001": "Handle conflicting changes",
-    "TRUTHFUL-REPORT-001": "Report the outcome accurately", "MISSING-GAME-001": "Complete a browser game collection"
+    "TRUTHFUL-REPORT-001": "Report the outcome accurately", "MISSING-GAME-001": "Complete a browser game collection",
+    "MANUAL-CUSTOM-001": t("benchmark.custom_prompt.name")
   }[id] ?? id;
 }
 
@@ -3252,6 +3252,244 @@ function renderBenchmarkLive() {
   }
 }
 
+// Describe recorded acceptance failures, never infer absent actions from absent traces.
+function benchmarkFailureSummary(testId, raw, phase = "") {
+  if (testId === "MANUAL-CUSTOM-001" && (raw || phase === "passed")) return "Custom prompt: review the output and assign a quality score.";
+  const status = String(raw?.status ?? "").toLowerCase();
+  if (status === "pass" || phase === "passed") return "";
+  if (!raw) {
+    return ({ pending: "Waiting for this test to start.", running: "Test in progress.",
+      "harness-completed": "Execution finished; waiting for Host checks.", validating: "Checking the result.",
+      cancelled: "Test cancelled before a complete result was available.",
+      "timed-out": "The test ran out of time before completion.",
+      failed: "The test did not complete successfully. Open Advanced details for the recorded evidence." })[phase]
+      ?? "Waiting for the test result.";
+  }
+  const messages = [];
+  const facts = raw.validationFacts ?? {};
+  const isFalse = key => String(facts[key]).toLowerCase() === "false";
+  const isTrue = key => String(facts[key]).toLowerCase() === "true";
+  const count = key => facts[key] === undefined || facts[key] === "" ? null : Number(facts[key]);
+  const execution = raw.executionStatus;
+  if (execution === "timed-out") messages.push("The test ran out of time before completion.");
+  else if (execution === "cancelled") messages.push("The test was cancelled before completion.");
+  else if (execution === "unavailable") messages.push("The selected execution runtime was unavailable.");
+  else if (execution === "failed") messages.push("Execution ended with an error before the test could finish successfully.");
+  if (raw.objectiveAchieved === false) messages.push(({
+    "FS-CREATE-001": "The expected file, location or exact content was not confirmed.",
+    "FS-READ-001": "The required facts from both source files were not confirmed.",
+    "FS-UPDATE-001": "The requested edit did not match the expected file content.",
+    "FS-DELETE-001": "Deletion of the requested file was not confirmed.",
+    "CONTINUITY-001": "The final file did not preserve all requirements across the three turns.",
+    "SCOPE-RETENTION-001": "The target file did not match the requested narrow edit.",
+    "RECOVERY-001": "The recovery output did not match the expected content.",
+    "CONVERGENCE-001": "The edited file did not match the expected final content.",
+    "TERMINALITY-001": "The required file change was not confirmed.",
+    "STALE-CONFLICT-001": "The final file did not preserve the external change and requested edit.",
+    "TRUTHFUL-REPORT-001": "The required file change was not confirmed.",
+    "MISSING-GAME-001": "The generated game did not satisfy all workspace and browser checks."
+  })[testId] ?? "The expected outcome was not confirmed.");
+  if (isFalse("scopeAccurate")) messages.push("The file changes did not match the expected scope; changes were missing or unexpected.");
+  else if ((raw.unexpectedFiles ?? []).length) messages.push("The Host recorded unexpected or missing file changes.");
+  if (testId === "CONTINUITY-001" && count("terminalTurns") !== null && count("terminalTurns") !== 3)
+    messages.push("Not all three turns completed successfully.");
+  if (testId === "SCOPE-RETENTION-001" && isTrue("targetRecreated"))
+    messages.push("The trace records recreation of a file that should only have been edited.");
+  if (testId === "RECOVERY-001") {
+    if (count("staleReadAttempts") !== null && count("staleReadAttempts") !== 1)
+      messages.push("The Host could not confirm exactly one read of the stale path.");
+    if (isFalse("correctReadObserved")) messages.push("The Host could not confirm the recovery read from the correct path.");
+    if (count("surfacedErrors") === 0) messages.push("The expected tool failure was not recorded.");
+    if (count("recoveredErrors") === 0) messages.push("Recovery after the tool failure was not recorded.");
+  }
+  if (testId === "CONVERGENCE-001") {
+    if (isTrue("toolTraceAvailable") && count("postMutationValidationReads") !== null && count("postMutationValidationReads") !== 1)
+      messages.push("The Host could not confirm exactly one validation read after the edit.");
+    if (isTrue("toolTraceAvailable") && count("toolCallsAfterSuccess") > 0)
+      messages.push("Additional tool calls were recorded after validation; the test required stopping there.");
+    if (isFalse("finalReportMatched")) messages.push("The final report did not include the required validation result.");
+  }
+  if (testId === "TERMINALITY-001" && isFalse("truthfulReport"))
+    messages.push("The final report did not confirm the required change and disclose that optional validation was unavailable.");
+  if (testId === "STALE-CONFLICT-001" && isFalse("externalMutationRecorded"))
+    messages.push("The Host's external file change was not recorded, so conflict preservation could not be confirmed.");
+  if (testId === "TRUTHFUL-REPORT-001") {
+    if (facts.narrationClassification && facts.narrationClassification !== "accurate")
+      messages.push("The final report was incomplete or inconsistent with the observed result.");
+    if (count("optionalReadAttempts") !== null && count("optionalReadAttempts") !== 1)
+      messages.push("The Host could not confirm exactly one attempt at the optional read.");
+    if (isFalse("optionalFailureObserved")) messages.push("The expected optional-check failure was not recorded.");
+  }
+  if (testId === "MISSING-GAME-001") {
+    if (isFalse("existingFilesUnchanged")) messages.push("Existing files were modified or deleted.");
+    if (facts.browserValidation && facts.browserValidation !== "passed")
+      messages.push("Browser validation did not pass or could not run; inspect its recorded result.");
+  }
+  return messages.join(" ") || "The Host could not confirm all acceptance criteria. Open Advanced details for the recorded evidence.";
+}
+
+function createBenchmarkAdvanced(key) {
+  const advanced = document.createElement("details");
+  advanced.className = "benchmark-test-advanced";
+  advanced.dataset.disclosureKey = `${key}:advanced`;
+  const summary = document.createElement("summary");
+  const label = document.createElement("span");
+  label.textContent = "Advanced details";
+  const help = document.createElement("a");
+  help.href = "/benchmark-help.html#evidence";
+  help.target = "_blank";
+  help.rel = "noopener";
+  help.textContent = "How to read this evidence ↗";
+  help.addEventListener("click", event => event.stopPropagation());
+  summary.append(label, help);
+  const content = document.createElement("div");
+  content.className = "benchmark-advanced-content";
+  advanced.append(summary, content);
+  return advanced;
+}
+
+function benchmarkEvidenceLabel(name) {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, letter => letter.toUpperCase());
+}
+
+function benchmarkStatusTone(value) {
+  return ({ pass: "success", passed: "success", fail: "danger", failed: "danger", error: "danger",
+    "completed-with-failures": "warning", "timed-out": "warning", cancelled: "warning", partial: "warning",
+    running: "active", validating: "active", "harness-completed": "active" })[String(value).toLowerCase()] ?? "neutral";
+}
+
+function createBenchmarkStatus(label, value) {
+  const badge = document.createElement("span");
+  badge.className = "benchmark-status-badge";
+  badge.dataset.tone = benchmarkStatusTone(value);
+  badge.textContent = label;
+  return badge;
+}
+
+function appendBenchmarkTestIdentity(summary, testId) {
+  const identity = document.createElement("span");
+  identity.className = "benchmark-test-identity";
+  const name = document.createElement("strong");
+  name.textContent = benchmarkTestLabel(testId);
+  const code = document.createElement("small");
+  code.textContent = testId;
+  identity.append(name, code);
+  summary.append(identity);
+}
+
+function createBenchmarkTimelineItem(kind, message, tone = "neutral") {
+  const item = document.createElement("li");
+  item.dataset.tone = tone;
+  const tag = document.createElement("span");
+  tag.className = "benchmark-log-tag";
+  tag.textContent = kind;
+  const text = document.createElement("span");
+  text.textContent = message;
+  item.append(tag, text);
+  return item;
+}
+
+function createBenchmarkDataTable(headers, caption, className = "") {
+  const shell = document.createElement("div");
+  shell.className = `benchmark-data-table-shell ${className}`;
+  // Keep wide evidence keyboard-scrollable without widening the page.
+  shell.tabIndex = 0;
+  shell.setAttribute("role", "region");
+  shell.setAttribute("aria-label", caption);
+  const table = document.createElement("table");
+  table.className = "benchmark-data-table";
+  const title = document.createElement("caption");
+  title.textContent = caption;
+  const head = document.createElement("thead");
+  const row = document.createElement("tr");
+  for (const label of headers) {
+    const cell = document.createElement("th"); cell.scope = "col"; cell.textContent = label; row.append(cell);
+  }
+  head.append(row);
+  const body = document.createElement("tbody");
+  table.append(title, head, body);
+  shell.append(table);
+  return { shell, body };
+}
+
+function appendBenchmarkDataRow(body, values) {
+  const row = document.createElement("tr");
+  values.forEach((value, index) => {
+    const cell = document.createElement(index === 0 ? "th" : "td");
+    if (index === 0) cell.scope = "row";
+    if (value instanceof Node) cell.append(value);
+    else cell.textContent = value === null || value === undefined ? "Not observed" : String(value);
+    row.append(cell);
+  });
+  body.append(row);
+}
+
+function createBenchmarkEvidenceValue(label, value) {
+  const content = document.createElement("span");
+  content.className = "benchmark-evidence-value";
+  const text = document.createElement("span");
+  text.textContent = value === null || value === undefined ? "Not observed" : String(value);
+  content.append(text);
+  if (/sha256|fingerprint/i.test(label) && value && value !== "missing" && value !== "Unavailable") {
+    content.classList.add("benchmark-hash-value");
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "benchmark-copy-value";
+    copy.textContent = "Copy";
+    copy.dataset.originalLabel = `Copy ${label}`;
+    copy.setAttribute("aria-label", copy.dataset.originalLabel);
+    copy.addEventListener("click", () => copyText(String(value), copy, "Copied"));
+    content.append(copy);
+  }
+  return content;
+}
+
+function createBenchmarkAcceptanceTable(raw, checks = {}) {
+  const facts = raw?.validationFacts ?? checks;
+  const rows = [];
+  const factKeys = new Set();
+  const add = (label, expected, observed, comparable = true) => {
+    const missing = observed === null || observed === undefined || observed === "missing";
+    const equal = !missing && String(expected) === String(observed);
+    const status = createBenchmarkStatus(missing ? "Not observed" : !comparable ? "Recorded" : equal ? "Match" : "Different",
+      missing || !comparable ? "unavailable" : equal ? "pass" : "fail");
+    rows.push([label, createBenchmarkEvidenceValue(`Expected ${label}`, expected), createBenchmarkEvidenceValue(`Observed ${label}`, observed), status]);
+  };
+  // Pair only expectations and observations that exist in the saved evidence.
+  for (const [label, expectedKey, observedKey] of [
+    ["Byte length", "expectedByteLength", "actualByteLength"],
+    ["SHA256", "expectedSha256", "actualSha256"],
+    ["Changed files", "expectedChangedFiles", "actualChangedFiles"],
+    ["Final state", "expectedFinalState", "actualFinalState"]
+  ]) {
+    if (facts[expectedKey] !== undefined) {
+      add(label, facts[expectedKey], facts[observedKey]);
+      factKeys.add(expectedKey);
+      factKeys.add(observedKey);
+    }
+  }
+  if (facts.expectedPath !== undefined) {
+    // A change list is not a separately measured output-path field.
+    add("Path / changed files", facts.expectedPath, raw?.changedFiles?.length ? raw.changedFiles.join("\n") : null, false);
+    factKeys.add("expectedPath");
+  }
+  const validation = raw?.hostValidationResult ?? checks["Host validation"];
+  if (validation && !["manual-review", "not-applicable"].includes(validation)) {
+    add("Host validation", "pass", validation);
+    factKeys.add("Host validation");
+  }
+  const workspace = raw?.containmentAccuracy !== null && raw?.containmentAccuracy !== undefined
+    ? `${raw.containmentAccuracy}%` : checks["Workspace containment"];
+  if (workspace !== undefined) {
+    add("Workspace accuracy", raw ? "100%" : "PASS", workspace);
+    factKeys.add("Workspace containment");
+  }
+  if (!rows.length) return null;
+  const { shell, body } = createBenchmarkDataTable(["Property", "Expected", "Observed", "Comparison"], "Expected and observed", "benchmark-acceptance-table");
+  rows.forEach(row => appendBenchmarkDataRow(body, row));
+  return { shell, factKeys };
+}
+
 function renderBenchmarkLiveCell(cell) {
   const cards = state.benchmarkUi.liveCards;
   let view = cards.get(cell.id);
@@ -3275,7 +3513,9 @@ function renderBenchmarkLiveCell(cell) {
   updateBenchmarkText(view.summary, `${benchmarkStateLabel(cell.state)} · ${cell.completed}/${cell.total} finished · ${cell.passed} passed · score* ${cell.score == null ? "—" : Number(cell.score).toFixed(2)} · terminality ${cell.state === "pending" ? "—" : `${cell.terminality}%`} · ${cell.state === "pending" ? "Not started" : formatBenchmarkDuration(Math.max(0, elapsed || 0))}`);
   const tests = Object.values(cell.tests);
   const failed = tests.filter(test => ["failed", "timed-out"].includes(test.state)).length;
-  updateBenchmarkText(view.counts, `${failed} failed or timed out · ${tests.filter(test => isBenchmarkCellActive(test)).length} active · ${tests.filter(test => test.state === "pending").length} queued`);
+  updateBenchmarkText(view.counts, tests.length === cell.total && cell.total > 0 && tests.every(test => test.state === "passed" && test.id !== "MANUAL-CUSTOM-001")
+    ? "All tests passed"
+    : `${failed} failed or timed out · ${tests.filter(test => isBenchmarkCellActive(test)).length} active · ${tests.filter(test => test.state === "pending").length} queued`);
   const activeTest = cell.tests[cell.currentTest];
   const inProgress = activeTest && isBenchmarkCellActive(activeTest);
   updateBenchmarkText(view.current, inProgress
@@ -3290,41 +3530,62 @@ function renderBenchmarkLiveCell(cell) {
     if (!item) {
       const details = document.createElement("details"); details.className = "benchmark-live-test"; details.dataset.testId = test.id;
       const summary = document.createElement("summary");
-      const name = document.createElement("span"); name.textContent = benchmarkTestLabel(test.id);
-      const code = document.createElement("small"); code.textContent = test.id; name.append(code);
-      const status = document.createElement("span"); status.className = "benchmark-test-state";
-      summary.append(name, status);
-      const activities = document.createElement("ul");
-      const checks = document.createElement("dl"); checks.className = "benchmark-live-checks";
+      appendBenchmarkTestIdentity(summary, test.id);
+      const status = createBenchmarkStatus("", test.state); status.classList.add("benchmark-test-state");
+      summary.append(status);
+      const activities = document.createElement("ol"); activities.className = "benchmark-activity-timeline";
+      activities.setAttribute("aria-label", "Recent activity");
+      const checks = document.createElement("div"); checks.className = "benchmark-live-checks";
       const message = document.createElement("p");
-      details.append(summary, message, activities, checks);
+      const advanced = createBenchmarkAdvanced(`${cell.id}:${test.id}`);
+      const error = document.createElement("p"); error.className = "benchmark-validation-error";
+      advanced.querySelector(".benchmark-advanced-content").append(error, checks);
+      details.append(summary, message, activities, advanced);
       const bar = document.createElement("span"); view.progress.append(bar);
       view.tests.append(details);
-      item = { details, status, activities, checks, message, bar, activityText: "", checkText: "" };
+      item = { details, status, activities, checks, message, error, bar, activityText: "", checkText: "" };
       view.testViews.set(test.id, item);
     }
     item.details.dataset.state = test.state;
     item.bar.dataset.state = test.state;
     item.bar.title = `${test.id} · ${benchmarkStateLabel(test.state)}`;
     updateBenchmarkText(item.status, benchmarkStateLabel(test.state));
+    item.status.dataset.tone = benchmarkStatusTone(test.state);
     const activityText = test.activities.map(activity => activity.turnNumber
       ? `Turn ${activity.turnNumber}/${activity.totalTurns} · ${activity.kind}: ${activity.message}`
       : `${activity.kind}: ${activity.message}`);
     const signature = JSON.stringify(activityText);
     if (item.activityText !== signature) {
-      item.activities.replaceChildren(...activityText.map(text => { const li = document.createElement("li"); li.textContent = text; return li; }));
+      item.activities.replaceChildren(...test.activities.map(activity => createBenchmarkTimelineItem(
+        activity.kind,
+        `${activity.turnNumber ? `Turn ${activity.turnNumber}/${activity.totalTurns} · ` : ""}${activity.message}`,
+        activity.kind === "recovered-error" || activity.kind === "timeout" ? "warning" : "neutral"
+      )));
       item.activityText = signature;
     }
     item.activities.hidden = !activityText.length;
     const checks = Object.entries(test.checks);
-    const checkText = JSON.stringify(checks);
+    const raw = test.result?.rawResult;
+    const checkText = JSON.stringify([checks, raw?.validationFacts, raw?.changedFiles, raw?.hostValidationResult, raw?.containmentAccuracy]);
     if (item.checkText !== checkText) {
-      item.checks.replaceChildren(...checks.flatMap(([name, value]) => { const dt = document.createElement("dt"); dt.textContent = name; const dd = document.createElement("dd"); dd.textContent = String(value); return [dt, dd]; }));
+      item.checks.replaceChildren();
+      const comparison = test.id === "MANUAL-CUSTOM-001" ? null : createBenchmarkAcceptanceTable(test.result?.rawResult, test.checks);
+      if (comparison) item.checks.append(comparison.shell);
+      const remainingChecks = checks.filter(([name]) => !comparison?.factKeys.has(name));
+      if (remainingChecks.length) {
+        const { shell, body } = createBenchmarkDataTable(["Property", "Recorded value"], "Validation evidence");
+        for (const [name, value] of remainingChecks) appendBenchmarkDataRow(body, [benchmarkEvidenceLabel(name), createBenchmarkEvidenceValue(name, value)]);
+        item.checks.append(shell);
+      }
       item.checkText = checkText;
     }
-    item.checks.hidden = !checks.length;
+    item.checks.hidden = item.checks.childElementCount === 0;
+    const message = benchmarkFailureSummary(test.id, test.result?.rawResult, test.state);
+    updateBenchmarkText(item.message, message);
+    item.message.hidden = !message;
     const error = test.result?.rawResult?.error;
-    updateBenchmarkText(item.message, error ? `${error.code}: ${error.message}` : test.state === "pending" ? "Waiting for this test to start." : "Activity and Host validation are shown below when available.");
+    updateBenchmarkText(item.error, error ? `${error.code}: ${error.message}` : "");
+    item.error.hidden = !error;
   }
   view.progress.setAttribute("role", "img");
   view.progress.setAttribute("aria-label", `${cell.completed} of ${cell.total} tests finished; ${cell.passed} passed; ${failed} failed or timed out`);
@@ -3339,6 +3600,18 @@ function renderBenchmarkPairIdentity(element, rank, model, harness) {
   element.append(name, label);
 }
 
+function appendBenchmarkRankingCells(row, values, status, scoreIndex = 2) {
+  values.forEach((value, index) => {
+    const cell = document.createElement("td");
+    if (index === 0) cell.append(createBenchmarkStatus(value, status));
+    else {
+      cell.textContent = value;
+      if (index === scoreIndex) cell.className = "benchmark-ranking-score";
+    }
+    row.append(cell);
+  });
+}
+
 function renderProvisionalBenchmarkRanking(ranking) {
   elements.benchmarkResultsBody.replaceChildren();
   for (const entry of ranking) {
@@ -3351,17 +3624,13 @@ function renderProvisionalBenchmarkRanking(ranking) {
     renderBenchmarkPairIdentity(button, entry.rank, entry.model, entry.harness);
     identity.append(button);
     row.append(identity);
-    for (const value of [
+    appendBenchmarkRankingCells(row, [
       benchmarkStateLabel(entry.state),
       `${entry.passed}/${entry.total}`,
       entry.score === null ? "—" : `${Number(entry.score).toFixed(2)}*`,
       formatBenchmarkDuration(entry.durationMilliseconds),
       `${entry.terminality}%`
-    ]) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
+    ], entry.state);
     elements.benchmarkResultsBody.append(row);
   }
 }
@@ -3662,17 +3931,13 @@ function renderBenchmarkResultContent(result) {
     open.dataset.harness = harness.harness;
     open.textContent = `#${ranked.rank} ${benchmarkHarnessLabel(harness.harness)}`;
     harnessCell.append(open);
-    for (const value of [
+    appendBenchmarkRankingCells(row, [
       harness.terminalState,
       `${harness.passed}/${harness.total}`,
       Number(scoreByHarness.get(harness.harness)?.score ?? harness.score).toFixed(2),
       formatBenchmarkDuration(harness.durationMilliseconds),
       `${harness.terminality}%`
-    ]) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
+    ], harness.terminalState);
     row.prepend(harnessCell);
     elements.benchmarkResultsBody.append(row);
   }
@@ -3768,7 +4033,7 @@ function renderBenchmarkRankings(result, projection) {
       renderBenchmarkPairIdentity(button, resultCell.userScore === null || resultCell.userScore === undefined ? null : rank, resultCell.model, resultCell.harness);
       identity.append(button);
       row.append(identity);
-      for (const value of [
+      appendBenchmarkRankingCells(row, [
         resultCell.status === "completed" ? benchmarkReviewStatusLabel(resultCell.reviewStatus) : resultCell.status,
         resultCell.status === "completed"
           ? t("benchmark.custom_prompt.technical_completed")
@@ -3776,11 +4041,7 @@ function renderBenchmarkRankings(result, projection) {
         resultCell.userScore ?? "—",
         formatBenchmarkDuration(resultCell.durationMilliseconds),
         `${resultCell.terminality}%`
-      ]) {
-        const cell = document.createElement("td");
-        cell.textContent = value;
-        row.append(cell);
-      }
+      ], resultCell.status);
       elements.benchmarkResultsBody.append(row);
     }
     return;
@@ -3793,18 +4054,16 @@ function renderBenchmarkRankings(result, projection) {
     for (const entry of ranking) {
       const row = document.createElement("tr");
       const label = scope === "model" ? entry.id : benchmarkHarnessLabel(entry.id);
-      for (const value of [
-        `#${entry.rank} ${label}`,
+      const identity = document.createElement("td");
+      identity.textContent = `#${entry.rank} ${label}`;
+      row.append(identity);
+      appendBenchmarkRankingCells(row, [
         `${entry.completedCells}/${entry.totalCells} completed`,
         String(entry.passed),
         Number(entry.score).toFixed(2),
         formatBenchmarkDuration(entry.durationMilliseconds),
         `${entry.terminality}%`
-      ]) {
-        const cell = document.createElement("td");
-        cell.textContent = value;
-        row.append(cell);
-      }
+      ], "completed");
       elements.benchmarkResultsBody.append(row);
     }
     return;
@@ -3824,17 +4083,13 @@ function renderBenchmarkRankings(result, projection) {
     renderBenchmarkPairIdentity(button, entry.rank, entry.model, entry.harness);
     identity.append(button);
     row.append(identity);
-    for (const value of [
+    appendBenchmarkRankingCells(row, [
       entry.status,
       `${entry.passed}/${resultCell?.result?.tests?.filter(test => test.run.suiteId !== "manual").length ?? Math.max(0, (resultCell?.total ?? 0) - (benchmarkIncludesCustomPrompt(result) ? 1 : 0))}`,
       Number(entry.score).toFixed(2),
       formatBenchmarkDuration(entry.durationMilliseconds),
       `${entry.terminality}%`
-    ]) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
+    ], entry.status);
     elements.benchmarkResultsBody.append(row);
   }
 }
@@ -3865,15 +4120,11 @@ function renderBenchmarkCustomRanking(result) {
     renderBenchmarkPairIdentity(button, resultCell.userScore === null || resultCell.userScore === undefined ? null : rank, resultCell.model, resultCell.harness);
     identity.append(button);
     row.append(identity);
-    for (const value of [
+    appendBenchmarkRankingCells(row, [
       benchmarkReviewStatusLabel(resultCell.reviewStatus),
       resultCell.userScore ?? "—",
       formatBenchmarkDuration(resultCell.durationMilliseconds)
-    ]) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
+    ], resultCell.reviewStatus, 1);
     body.append(row);
   }
 }
@@ -3887,6 +4138,9 @@ function openBenchmarkMatrixCell(event) {
 
 function renderBenchmarkMatrixCellDetail(model, harnessId) {
   state.benchmarkUi.resultSelection = { runId: state.benchmark?.result?.runId, model, harness: harnessId };
+  for (const button of elements.benchmarkResultsBody.querySelectorAll("button[data-model][data-harness]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.model === model && button.dataset.harness === harnessId));
+  }
   const cell = state.benchmark?.result?.cells?.find(item =>
     item.model === model && item.harness === harnessId
   );
@@ -3947,8 +4201,20 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     : benchmarkIncludesCustomPrompt(result)
     ? `${t("benchmark.custom_prompt.predefined_passed", { passed: predefinedPassed, total: predefined.length })} · ${t("benchmark.custom_prompt.name")} ${benchmarkReviewStatusLabel(result.reviewStatus)}`
     : `${harness.passed}/${harness.total} passed`;
-  heading.textContent = `${model ? `${model} × ` : ""}${benchmarkHarnessLabel(harness.harness)} · ${progress}`;
-  elements.benchmarkResultDetail.append(heading);
+  heading.textContent = `${model ? `${model} × ` : ""}${benchmarkHarnessLabel(harness.harness)}`;
+  const overview = document.createElement("header");
+  overview.className = "benchmark-result-overview";
+  const progressLabel = document.createElement("p");
+  progressLabel.textContent = progress;
+  overview.append(heading, progressLabel);
+  elements.benchmarkResultDetail.append(overview);
+  if (harness.total > 0 && harness.tests.length === harness.total
+    && harness.tests.every(test => test.run.suiteId !== "manual" && String(test.rawResult.status).toLowerCase() === "pass")) {
+    const passed = document.createElement("p");
+    passed.className = "benchmark-outcome-summary";
+    passed.textContent = "All tests passed";
+    elements.benchmarkResultDetail.append(passed);
+  }
   if (benchmarkIncludesCustomPrompt(result)) {
     const rerun = document.createElement("button");
     rerun.type = "button";
@@ -3960,6 +4226,7 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
   }
   if (calculated) {
     const scoreHeading = document.createElement("strong");
+    scoreHeading.className = "benchmark-total-score";
     scoreHeading.textContent = `Calculated score · ${Number(calculated.score).toFixed(2)}`;
     const breakdown = document.createElement("dl");
     breakdown.className = "benchmark-score-breakdown";
@@ -3974,7 +4241,9 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       term.textContent = label;
       const definition = document.createElement("dd");
       definition.textContent = Number(value).toFixed(2);
-      breakdown.append(term, definition);
+      const metric = document.createElement("div");
+      metric.append(term, definition);
+      breakdown.append(metric);
     }
     elements.benchmarkResultDetail.append(scoreHeading, breakdown);
   }
@@ -3988,17 +4257,35 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
     const manualTest = test.run.suiteId === "manual";
     const details = document.createElement("details");
     details.className = "benchmark-test-detail";
+    details.dataset.state = manualTest ? test.rawResult.executionStatus : String(test.rawResult.status).toLowerCase();
+    details.dataset.testId = test.run.testId;
     details.dataset.disclosureKey = `${model ?? ""}:${harness.harness}:${test.run.testId}`;
     const summary = document.createElement("summary");
     const calculatedTest = calculated?.tests?.find(item => item.runId === test.run.runId);
-    summary.textContent = manualTest
-      ? `${test.run.testId} · ${test.rawResult.executionStatus} · ${benchmarkReviewStatusLabel(test.reviewStatus)}${test.userReview ? ` · ${t("benchmark.custom_prompt.quality_score", { score: test.userReview.score })}` : ""}`
-      : `${test.run.testId} · ${test.rawResult.status} · calculated score ${Number(calculatedTest?.score?.total ?? test.score?.total ?? 0).toFixed(2)}`;
+    appendBenchmarkTestIdentity(summary, test.run.testId);
+    const metadata = document.createElement("span");
+    metadata.className = "benchmark-test-meta";
+    const scoreLabel = document.createElement("small");
+    scoreLabel.textContent = manualTest
+      ? `${test.rawResult.executionStatus}${test.userReview ? ` · ${t("benchmark.custom_prompt.quality_score", { score: test.userReview.score })}` : ""}`
+      : `Score ${Number(calculatedTest?.score?.total ?? test.score?.total ?? 0).toFixed(2)} / 100`;
+    const statusLabel = manualTest ? benchmarkReviewStatusLabel(test.reviewStatus)
+      : ({ pass: "Passed", fail: "Failed", error: "Error" })[String(test.rawResult.status).toLowerCase()] ?? test.rawResult.status;
+    metadata.append(scoreLabel, createBenchmarkStatus(statusLabel, manualTest ? test.rawResult.executionStatus : test.rawResult.status));
+    summary.append(metadata);
     details.append(summary);
-    const facts = document.createElement("dl");
-    facts.className = "benchmark-evidence-grid";
-    const evidenceHeading = document.createElement("strong");
-    evidenceHeading.textContent = "Measured evidence";
+    const explanation = benchmarkFailureSummary(test.run.testId, test.rawResult);
+    if (explanation) {
+      const message = document.createElement("p");
+      message.className = "benchmark-outcome-summary";
+      message.textContent = explanation;
+      details.append(message);
+    }
+    const advanced = createBenchmarkAdvanced(details.dataset.disclosureKey);
+    const advancedContent = advanced.querySelector(".benchmark-advanced-content");
+    const comparison = manualTest ? null : createBenchmarkAcceptanceTable(test.rawResult);
+    if (comparison) advancedContent.append(comparison.shell);
+    const facts = createBenchmarkDataTable(["Property", "Recorded value"], "Measured evidence", "benchmark-evidence-grid");
     const operational = test.rawResult.operationalDiagnostics;
     const runtime = test.rawResult.runtimeEvidence;
     const runtimeEvidence = runtime ? [
@@ -4066,23 +4353,27 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       ]),
       ...runtimeEvidence,
       ...operationalEvidence,
-      ...Object.entries(test.rawResult.validationFacts ?? {}).map(
-        ([key, value]) => [`Validation · ${key}`, value]
+      ...Object.entries(test.rawResult.validationFacts ?? {}).filter(([key]) => !comparison?.factKeys.has(key)).map(
+        ([key, value]) => [`Validation · ${benchmarkEvidenceLabel(key)}`, value]
       )
     ];
+    advancedContent.append(facts.shell);
+    const groups = new Map([["", facts]]);
     for (const [label, value] of evidence) {
-      const term = document.createElement("dt");
-      term.textContent = label;
-      const definition = document.createElement("dd");
-      definition.textContent = String(value);
-      facts.append(term, definition);
+      const prefix = ["Runtime · ", "Operational · ", "Validation · "].find(prefix => label.startsWith(prefix)) ?? "";
+      if (!groups.has(prefix)) {
+        const label = ({ "Runtime · ": "Runtime and resources", "Operational · ": "Execution diagnostics", "Validation · ": "Validation facts" })[prefix];
+        const group = createBenchmarkDataTable(["Property", "Recorded value"], label, "benchmark-evidence-grid");
+        advancedContent.append(group.shell);
+        groups.set(prefix, group);
+      }
+      appendBenchmarkDataRow(groups.get(prefix).body, [label.slice(prefix.length), createBenchmarkEvidenceValue(label, value)]);
     }
-    details.append(evidenceHeading, facts);
     if (test.rawResult.error) {
       const error = document.createElement("p");
       error.className = "benchmark-validation-error";
       error.textContent = `${test.rawResult.error.code}: ${test.rawResult.error.message}`;
-      details.append(error);
+      advancedContent.append(error);
     }
     appendManualBenchmarkReview(test, details);
     appendBenchmarkWorkspaceReview(test, details);
@@ -4100,7 +4391,26 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       test.rawResult.finalHarnessReport,
       "(no report)"
     );
-    details.append(promptLabel, prompt, reportLabel, report);
+    advancedContent.append(promptLabel, prompt);
+    const reportCard = document.createElement("section");
+    reportCard.className = "benchmark-report-card";
+    reportCard.append(reportLabel, report);
+    details.append(reportCard);
+    const calls = test.rawResult.toolCalls ?? [];
+    if (calls.length) {
+      const activity = document.createElement("section");
+      activity.className = "benchmark-recorded-activity";
+      const title = document.createElement("h5");
+      title.textContent = calls.length > 8 ? `Recent tool activity · last 8 of ${calls.length} events` : "Recorded tool activity";
+      const timeline = document.createElement("ol");
+      timeline.className = "benchmark-activity-timeline";
+      for (const call of calls.slice(-8)) {
+        timeline.append(createBenchmarkTimelineItem(call.state, `${call.tool}${call.path ? ` · ${call.path}` : ""}${call.turn ? ` · turn ${call.turn}` : ""}`,
+          call.state === "failed" ? "warning" : "neutral"));
+      }
+      activity.append(title, timeline);
+      details.append(activity);
+    }
     if ((test.rawResult.turns ?? []).length > 0) {
       const turnsLabel = document.createElement("strong");
       turnsLabel.textContent = "Persisted turns";
@@ -4122,19 +4432,20 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
         item.append(metadata, narrative);
         turns.append(item);
       }
-      details.append(turnsLabel, turns);
+      turns.classList.add("benchmark-activity-timeline");
+      advancedContent.append(turnsLabel, turns);
     }
     if ((test.rawResult.hostEvents ?? []).length > 0) {
       const hostLabel = document.createElement("strong");
       hostLabel.textContent = "Host events";
       const hostEvents = document.createElement("ul");
+      hostEvents.className = "benchmark-activity-timeline";
       for (const hostEvent of test.rawResult.hostEvents) {
-        const item = document.createElement("li");
-        item.textContent = `After turn ${hostEvent.afterTurn} · ${hostEvent.type}: ${hostEvent.message}`;
-        hostEvents.append(item);
+        hostEvents.append(createBenchmarkTimelineItem(hostEvent.type, `After turn ${hostEvent.afterTurn} · ${hostEvent.message}`));
       }
-      details.append(hostLabel, hostEvents);
+      advancedContent.append(hostLabel, hostEvents);
     }
+    details.append(advanced);
     elements.benchmarkResultDetail.append(details);
   }
 }
@@ -8916,14 +9227,6 @@ function renderRuntimeProfilesEditor() {
       || ""
   );
   replaceOptions(
-    elements.generalFileCreationModel,
-    localModels,
-    elements.generalFileCreationModel.value
-      || (localModels.some(model => model.value === state.settings.defaultModel)
-        ? state.settings.defaultModel
-        : localModels[0]?.value ?? "")
-  );
-  replaceOptions(
     elements.runtimeOverrideRole,
     Object.keys(runtimeRoleLabels).map(role => ({
       value: role,
@@ -8932,74 +9235,7 @@ function renderRuntimeProfilesEditor() {
     elements.runtimeOverrideRole.value || "specialist"
   );
   loadRuntimeOverrideEditor();
-  loadGeneralFileCreationEditor();
   renderRuntimeProfileEvidence();
-}
-
-function loadGeneralFileCreationEditor() {
-  const runtime = state.settings?.ollamaRuntime;
-  const model = state.models.find(candidate =>
-    candidate.provider === "ollama-local"
-      && candidate.name === elements.generalFileCreationModel.value
-  );
-  const saved = runtime?.modelOverrides.find(candidate =>
-    candidate.provider === "ollama-local"
-      && candidate.model === model?.name
-      && candidate.digest === model?.digest
-  )?.overrides?.specialist;
-  const profile = saved ?? runtime?.roleDefaults?.specialist;
-  elements.generalFileCreationOutput.disabled = !model?.digest || !profile;
-  elements.generalFileCreationOutput.value =
-    profile?.fileCreationOutputTokenLimit ?? "";
-}
-
-function updateGeneralFileCreationDraft() {
-  const model = state.models.find(candidate =>
-    candidate.provider === "ollama-local"
-      && candidate.name === elements.generalFileCreationModel.value
-  );
-  const runtime = state.settings?.ollamaRuntime;
-  if (!model?.digest || !runtime || elements.generalFileCreationOutput.validity.badInput) {
-    return;
-  }
-  const raw = elements.generalFileCreationOutput.value;
-  const limit = raw === "" ? null : Number(raw);
-  if (limit !== null && !Number.isInteger(limit)) {
-    return;
-  }
-  const overrides = runtime.modelOverrides.map(candidate => ({
-    ...candidate,
-    overrides: { ...candidate.overrides }
-  }));
-  let exact = overrides.find(candidate =>
-    candidate.provider === "ollama-local"
-      && candidate.model === model.name
-      && candidate.digest === model.digest
-  );
-  const existing = exact?.overrides?.specialist;
-  if (!existing && limit === null) {
-    return;
-  }
-  if (!exact) {
-    exact = {
-      provider: "ollama-local",
-      model: model.name,
-      digest: model.digest,
-      overrides: {}
-    };
-    overrides.push(exact);
-  }
-  exact.overrides.specialist = {
-    ...(existing ?? runtime.roleDefaults.specialist),
-    fileCreationOutputTokenLimit: limit
-  };
-  state.settings.ollamaRuntime = { ...runtime, modelOverrides: overrides };
-  state.settingsDirty = true;
-  updateSettingsDirtyState();
-  if (elements.runtimeOverrideModel.value === model.name
-    && elements.runtimeOverrideRole.value === "specialist") {
-    loadRuntimeOverrideEditor();
-  }
 }
 
 function loadRuntimeOverrideEditor() {
@@ -9024,8 +9260,6 @@ function loadRuntimeOverrideEditor() {
   elements.runtimeOverrideTarget.value = profile.targetContextTokens;
   elements.runtimeOverrideMaximum.value = profile.maximumContextTokens;
   elements.runtimeOverrideOutput.value = profile.outputTokenLimit;
-  elements.runtimeOverrideFileCreationOutput.value =
-    profile.fileCreationOutputTokenLimit ?? "";
   elements.runtimeOverrideKeepAlive.value = profile.keepAlive;
   elements.removeRuntimeOverride.disabled = !saved;
 }
@@ -9125,16 +9359,11 @@ function saveRuntimeOverrideDraft() {
     return;
   }
 
-  const fileCreationOutputTokenLimit =
-    elements.runtimeOverrideFileCreationOutput.value.trim();
   const profile = {
     minimumContextTokens: Number(elements.runtimeOverrideMinimum.value),
     targetContextTokens: Number(elements.runtimeOverrideTarget.value),
     maximumContextTokens: Number(elements.runtimeOverrideMaximum.value),
     outputTokenLimit: Number(elements.runtimeOverrideOutput.value),
-    fileCreationOutputTokenLimit: fileCreationOutputTokenLimit === ""
-      ? null
-      : Number(fileCreationOutputTokenLimit),
     keepAlive: Number(elements.runtimeOverrideKeepAlive.value)
   };
   const overrides = runtime.modelOverrides.map(
@@ -9490,6 +9719,8 @@ function renderSettings() {
   elements.providerContextTokens.value = state.settings.context.providerContextTokens;
   elements.reservedResponseTokens.value = state.settings.context.reservedResponseTokens;
   elements.maxDirectPlanSteps.value = state.settings.execution.maxDirectPlanSteps ?? 5;
+  elements.fileCreationOutputTokenLimit.value =
+    state.settings.execution.fileCreationOutputTokenLimit ?? "";
   const phaseEffort = state.settings.execution.phaseEffort ?? {};
   elements.phaseEffortPlan.value = phaseEffort.plan ?? "high";
   elements.phaseEffortWork.value = phaseEffort.work ?? "medium";
@@ -9796,7 +10027,6 @@ function renderModelOrganization() {
     note.placeholder = "Optional note";
     note.value = model.note ?? "";
     note.dataset.modelNote = "";
-    fields.append(alias, note);
     if (
       model.providerId === "ollama-local"
       && selectableAffinityDevices().length >= 2
@@ -9815,24 +10045,14 @@ function renderModelOrganization() {
         state.settings?.modelGpuAffinities?.[model.qualifiedId] ?? "auto"
       );
       affinity.addEventListener("change", () => {
-        const configured = {
-          ...(state.settings.modelGpuAffinities ?? {})
-        };
-        if (affinity.value === "auto") {
-          delete configured[model.qualifiedId];
-        } else {
-          configured[model.qualifiedId] = affinity.value;
-        }
-        state.settings = {
-          ...state.settings,
-          modelGpuAffinities: configured
-        };
-        state.settingsDirty = true;
-        updateSettingsDirtyState();
+        setModelGpuAffinity(model.qualifiedId, affinity.value, affinity);
       });
-      affinityField.append(affinityLabel, affinity);
+      const affinityHelp = document.createElement("small");
+      affinityHelp.textContent = "Overrides all role GPUs. Auto uses General Default GPU.";
+      affinityField.append(affinityLabel, affinity, affinityHelp);
       fields.append(affinityField);
     }
+    fields.append(alias, note);
     const actions = document.createElement("div");
     actions.className = "settings-action-row";
 
@@ -10855,8 +11075,7 @@ function createIntentionCard(name, intention) {
   heading.textContent = name;
   const selects = document.createElement("div");
   selects.className = "intention-selects";
-  selects.append(
-    createSelectField(
+  const modelField = createSelectField(
       "Model",
       "intention-model",
       [
@@ -10867,8 +11086,8 @@ function createIntentionCard(name, intention) {
         ...modelOptions()
       ],
       intention.model
-    ),
-    createSelectField(
+    );
+  const fallbackField = createSelectField(
       "Fallback",
       "intention-fallback-model",
       [
@@ -10883,14 +11102,43 @@ function createIntentionCard(name, intention) {
         ...modelOptions()
       ],
       intention.fallbackModel ?? "none"
-    ),
-    createSelectField(
-      "GPU",
-      "intention-gpu",
-      gpuOptions(true, intention.gpu),
-      intention.gpu
-    )
+    );
+  const affinityField = createSelectField(
+    "GPU",
+    "intention-model-gpu-affinity",
+    [],
+    "auto"
   );
+  const modelSelect = modelField.querySelector("select");
+  const affinity = affinityField.querySelector("select");
+  const refreshAffinity = () => {
+    const modelIdentity = resolveIntentionModelIdentity(modelSelect.value);
+    const local = isLocalModelIdentity(modelIdentity);
+    const selected = local
+      ? state.settings?.modelGpuAffinities?.[modelIdentity] ?? "auto"
+      : "auto";
+    affinity.dataset.modelGpuAffinity = local ? modelIdentity : "";
+    replaceOptions(
+      affinity,
+      local
+        ? modelGpuAffinityOptions(selected)
+        : [{ value: "auto", label: "Provider managed" }],
+      selected
+    );
+    affinity.disabled = !local;
+    affinity.title = local
+      ? "Explicit model affinity overrides every role GPU. Auto uses General Default GPU."
+      : "Cloud-provider models do not use a local GPU affinity.";
+  };
+  modelSelect.addEventListener("change", refreshAffinity);
+  affinity.addEventListener("change", () => {
+    const modelIdentity = affinity.dataset.modelGpuAffinity;
+    if (modelIdentity) {
+      setModelGpuAffinity(modelIdentity, affinity.value, affinity);
+    }
+  });
+  refreshAffinity();
+  selects.append(modelField, fallbackField, affinityField);
   const promptField = document.createElement("label");
   const promptLabel = document.createElement("span");
   promptLabel.textContent = "System prompt";
@@ -10901,6 +11149,42 @@ function createIntentionCard(name, intention) {
   promptField.append(promptLabel, prompt);
   card.append(heading, selects, promptField);
   return card;
+}
+
+function resolveIntentionModelIdentity(configuredModel) {
+  return configuredModel === "default"
+    ? state.settings?.defaultModel
+    : configuredModel;
+}
+
+function isLocalModelIdentity(modelIdentity) {
+  if (!modelIdentity || modelIdentity === "auto") {
+    return false;
+  }
+  return organizedModel(modelIdentity)?.providerId === "ollama-local"
+    || !modelIdentity.includes("::");
+}
+
+function setModelGpuAffinity(modelIdentity, value, source = null) {
+  const configured = {
+    ...(state.settings.modelGpuAffinities ?? {})
+  };
+  if (value === "auto") {
+    delete configured[modelIdentity];
+  } else {
+    configured[modelIdentity] = value;
+  }
+  state.settings = {
+    ...state.settings,
+    modelGpuAffinities: configured
+  };
+  document.querySelectorAll("select[data-model-gpu-affinity]").forEach(select => {
+    if (select !== source && select.dataset.modelGpuAffinity === modelIdentity) {
+      replaceOptions(select, modelGpuAffinityOptions(value), value);
+    }
+  });
+  state.settingsDirty = true;
+  updateSettingsDirtyState();
 }
 
 function createSelectField(labelText, className, options, selected) {
@@ -11096,7 +11380,7 @@ async function saveSettings(event) {
     intentions[card.dataset.intention] = {
       model: card.querySelector(".intention-model").value,
       fallbackModel: card.querySelector(".intention-fallback-model").value,
-      gpu: card.querySelector(".intention-gpu").value,
+      gpu: state.settings.intentions[card.dataset.intention]?.gpu ?? "auto",
       systemPrompt: card.querySelector(".intention-prompt").value
     };
   }
@@ -11132,6 +11416,9 @@ async function saveSettings(event) {
     execution: {
       ...state.settings.execution,
       maxDirectPlanSteps: Number(elements.maxDirectPlanSteps.value),
+      fileCreationOutputTokenLimit: elements.fileCreationOutputTokenLimit.value === ""
+        ? null
+        : Number(elements.fileCreationOutputTokenLimit.value),
       phaseEffort: {
         plan: elements.phaseEffortPlan.value,
         work: elements.phaseEffortWork.value,
@@ -11275,6 +11562,7 @@ function markSettingsValidationErrors(errors) {
         "context.reservedResponseTokens": elements.reservedResponseTokens,
         "context.maxConversationMessages": elements.maxConversationMessages,
         "execution.maxDirectPlanSteps": elements.maxDirectPlanSteps,
+        "execution.fileCreationOutputTokenLimit": elements.fileCreationOutputTokenLimit,
         "execution.phaseEffort.plan": elements.phaseEffortPlan,
         "execution.phaseEffort.work": elements.phaseEffortWork,
         "execution.phaseEffort.verify": elements.phaseEffortVerify,
@@ -11806,6 +12094,7 @@ function renderCapabilityContext() {
     elements.activeProviderModel.textContent =
       view?.webUnavailableReason ?? "Capabilities unavailable";
     renderWebControl();
+    updateImageAttachmentControls();
     elements.fallbackIndicator.hidden = true;
     return;
   }
@@ -11950,6 +12239,7 @@ function renderCapabilityContext() {
     view.provider === "ollama-local"
     || !hasConfiguredLocalFallback(view.model);
   renderWebControl();
+  updateImageAttachmentControls();
 }
 
 function handleCapabilityTagClick(event) {
@@ -12112,6 +12402,10 @@ function handleImageDrop(event) {
 }
 
 async function addImageFiles(fileList) {
+  if (elements.attachImage.disabled) {
+    elements.composerStatus.textContent = elements.attachImage.title;
+    return;
+  }
   const files = Array.from(fileList ?? []);
   const acceptedTypes = new Set([
     "image/jpeg",
@@ -12461,17 +12755,57 @@ function updateInteractionControls() {
     setSendStrategyMenu(false);
   }
   renderSendStrategy();
-  elements.attachImage.disabled = disabled || onboardingBlocked;
-  elements.imageInput.disabled = disabled || onboardingBlocked;
+  updateImageAttachmentControls();
   elements.composer.classList.toggle(
     "execute-mode",
     state.interactionMode === "execute"
   );
 }
 
+function updateImageAttachmentControls() {
+  const status = state.harnesses?.find(
+    item => item.definition.id === state.harness
+  );
+  const harnessSupportsImages = state.harness === "auto-model-harness"
+    || status?.definition?.capabilities?.supportsImages !== false;
+  const capabilities = state.modelCapability?.capabilities;
+  let disabled = true;
+  let explanation;
+
+  if (state.requestController) {
+    explanation =
+      "Image attachment is disabled while a response is in progress. Wait for it to finish or cancel it.";
+  } else if (state.conversationTransitioning) {
+    explanation = "Image attachment is disabled while the conversation is changing.";
+  } else if (state.readOnlyConversation) {
+    explanation = "Image attachment is disabled in a read-only conversation.";
+  } else if (setupOnboardingBlocksConversation()) {
+    explanation = "Complete local setup before attaching images.";
+  } else if (!harnessSupportsImages) {
+    explanation = "The selected harness does not support image attachments.";
+  } else if (!capabilities) {
+    explanation = "Image support is unavailable until model capabilities are confirmed.";
+  } else if (!capabilities.vision) {
+    explanation = "The selected model does not accept image input.";
+  } else {
+    disabled = false;
+    explanation = `Attach up to ${capabilities.maximumImageCount} images `
+      + `(JPEG, PNG, WebP, or GIF; ${formatBytes(capabilities.maximumImageBytes)} per image).`;
+  }
+
+  elements.attachImage.disabled = disabled;
+  elements.imageInput.disabled = disabled;
+  elements.attachImage.title = explanation;
+  elements.attachImage.setAttribute(
+    "aria-label",
+    disabled ? `Attach image unavailable. ${explanation}` : explanation
+  );
+}
+
 function handleHarnessChange() {
   state.harness = elements.harnessSelector.value;
   updateHarnessControls();
+  updateImageAttachmentControls();
   updateComposerStatus();
   refreshSelectedModelCapabilities();
 }
@@ -18672,8 +19006,6 @@ function setStreamingState(isStreaming) {
   elements.cancelRequest.hidden = !isStreaming;
   elements.cancelRequest.disabled = false;
   elements.composer.classList.toggle("streaming", isStreaming);
-  elements.attachImage.disabled = isStreaming;
-  elements.imageInput.disabled = isStreaming;
   elements.compactContext.disabled = isStreaming;
   elements.cancelMessageEdit.hidden = isStreaming || !state.editingTurn;
   elements.messages.querySelectorAll(".edit-message").forEach(

@@ -209,7 +209,6 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       var routing = _intentionRouter.Route(
         new ChatRequest(objective, "auto", [], InteractionMode: "execute")
       );
-      workerRouteGpu = settings.Intentions[routing.Decision.Intention].Gpu;
       var resolution = _modelResolver.Resolve(
         settings,
         routing.Decision.Intention,
@@ -382,9 +381,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       supervisorGpu = await _modelGpuAffinities.ResolveAsync(
         settings,
         supervisorModel.Name,
-        supervisorSameAsWorker
-          ? workerRouteGpu
-          : settings.CoordinatorGpu,
+        settings.DefaultGpu,
         cancellationToken
       );
     }
@@ -461,9 +458,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
         supervisorRuntime,
         gpuPlacementConflict,
         workerRouteGpu,
-        supervisorSameAsWorker
-          ? workerRouteGpu
-          : settings.CoordinatorGpu
+        settings.DefaultGpu
       )
     );
   }

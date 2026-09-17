@@ -289,11 +289,6 @@ public sealed class SettingsValidator : ISettingsValidator
       );
     }
 
-    ValidateModelGpuConflicts(
-      errors,
-      settings
-    );
-
     return errors.ToDictionary(
       pair => pair.Key,
       pair => pair.Value.ToArray(),
@@ -380,176 +375,6 @@ public sealed class SettingsValidator : ISettingsValidator
         "Model GPU affinity identifiers must be unique ignoring case."
       );
     }
-  }
-
-  private static void ValidateModelGpuConflicts(
-    IDictionary<string, List<string>> errors,
-    ApplicationSettings settings
-  )
-  {
-    if (
-      OperatingSystem.IsWindows()
-      && Uri.TryCreate(settings.OllamaUrl, UriKind.Absolute, out var endpoint)
-      && endpoint.IsLoopback
-      && endpoint.Port == 11_434
-    )
-    {
-      // Explicit GPU selections use isolated Agentic Router-owned Ollama
-      // servers, so one model may safely be resident on different backends.
-      return;
-    }
-
-    var assignments = new Dictionary<
-      string,
-      List<(string Gpu, string Field)>
-    >(
-      StringComparer.OrdinalIgnoreCase
-    );
-    AddGpuAssignment(
-      assignments,
-      settings.CoordinatorModel,
-      settings.CoordinatorGpu,
-      "coordinatorGpu",
-      settings
-    );
-    if (!string.Equals(
-      settings.SupervisorModel,
-      SupervisorModelSelection.SameAsWorker,
-      StringComparison.Ordinal
-    ))
-    {
-      AddGpuAssignment(
-        assignments,
-        settings.SupervisorModel,
-        settings.CoordinatorGpu,
-        "coordinatorGpu",
-        settings
-      );
-    }
-    AddGpuAssignment(
-      assignments,
-      settings.DefaultModel,
-      settings.DefaultGpu,
-      "defaultGpu",
-      settings
-    );
-
-    foreach (var intention in settings.Intentions)
-    {
-      var model = string.Equals(
-        intention.Value.Model,
-        "default",
-        StringComparison.OrdinalIgnoreCase
-      )
-        ? settings.DefaultModel
-        : intention.Value.Model;
-      AddGpuAssignment(
-        assignments,
-        model,
-        intention.Value.Gpu,
-        $"intentions.{intention.Key}.gpu",
-        settings
-      );
-      var fallback = string.Equals(
-        intention.Value.FallbackModel,
-        "default",
-        StringComparison.OrdinalIgnoreCase
-      )
-        ? settings.DefaultModel
-        : intention.Value.FallbackModel;
-      AddGpuAssignment(
-        assignments,
-        fallback,
-        intention.Value.Gpu,
-        $"intentions.{intention.Key}.gpu",
-        settings
-      );
-    }
-
-    foreach (var assignment in assignments)
-    {
-      var distinct = assignment.Value.Select(
-        item => item.Gpu
-      ).Distinct(
-        StringComparer.Ordinal
-      ).ToArray();
-
-      if (distinct.Length <= 1)
-      {
-        continue;
-      }
-
-      foreach (var field in assignment.Value.Select(
-        item => item.Field
-      ).Distinct(
-        StringComparer.Ordinal
-      ))
-      {
-        AddError(
-          errors,
-          field,
-          $"Model '{assignment.Key}' cannot use conflicting GPU affinities in one Ollama daemon."
-        );
-      }
-    }
-  }
-
-  private static void AddGpuAssignment(
-    IDictionary<string, List<(string Gpu, string Field)>> assignments,
-    string model,
-    string selection,
-    string field,
-    ApplicationSettings settings
-  )
-  {
-    if (
-      string.IsNullOrWhiteSpace(
-        model
-      )
-      || string.Equals(
-        model,
-        "none",
-        StringComparison.OrdinalIgnoreCase
-      )
-      || string.Equals(
-        model,
-        "configure-model",
-        StringComparison.OrdinalIgnoreCase
-      )
-      || !ProviderModelReference.Parse(
-        model
-      ).IsLocal
-    )
-    {
-      return;
-    }
-
-    var affinity = ModelGpuAffinitySelection.GetForModel(settings, model);
-    var effectiveGpu = ModelGpuAffinitySelection.TryGetDeviceId(
-      affinity,
-      out _
-    )
-      ? affinity
-      : string.Equals(
-        selection,
-        OllamaGpuSelection.Default,
-        StringComparison.Ordinal
-      )
-        ? settings.DefaultGpu
-        : selection;
-
-    if (!assignments.TryGetValue(
-      model,
-      out var modelAssignments
-    ))
-    {
-      modelAssignments = [];
-      assignments[model] = modelAssignments;
-    }
-
-    modelAssignments.Add(
-      (effectiveGpu, field)
-    );
   }
 
   private static void ValidateGpuSelection(
@@ -952,6 +777,16 @@ public sealed class SettingsValidator : ISettingsValidator
       256,
       16_384
     );
+    if (execution.FileCreationOutputTokenLimit is int fileCreationOutputTokenLimit)
+    {
+      ValidateRange(
+        errors,
+        "execution.fileCreationOutputTokenLimit",
+        fileCreationOutputTokenLimit,
+        256,
+        131_072
+      );
+    }
     if (execution.PhaseEffort is null)
     {
       AddError(
@@ -1941,18 +1776,6 @@ public sealed class SettingsValidator : ISettingsValidator
         errors,
         $"{prefix}.outputTokenLimit",
         "Output token limit must be at least 128 and smaller than the role maximum context."
-      );
-    }
-
-    if (
-      profile.FileCreationOutputTokenLimit is <= 0
-      || profile.FileCreationOutputTokenLimit >= profile.MaximumContextTokens
-    )
-    {
-      AddError(
-        errors,
-        $"{prefix}.fileCreationOutputTokenLimit",
-        "File creation output token limit must be a positive integer smaller than the role maximum context."
       );
     }
 

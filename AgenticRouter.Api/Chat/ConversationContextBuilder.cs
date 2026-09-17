@@ -28,6 +28,8 @@ public sealed record ConversationContextResult(
 
 public sealed class ConversationContextBuilder : IConversationContextBuilder
 {
+  private const string PersistedHistoryCompactionMarker =
+    "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1";
   private readonly ITokenEstimator _tokenEstimator;
 
   public ConversationContextBuilder(ITokenEstimator tokenEstimator)
@@ -163,6 +165,11 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
     for (var index = 0; index + 1 < history.Count; index++)
     {
       var user = history[index];
+      if (IsPersistedHistoryCompaction(user))
+      {
+        turns.Add([user]);
+        continue;
+      }
       var assistant = history[index + 1];
 
       if (
@@ -186,7 +193,24 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
       }
     }
 
+    if (
+      history.Count > 0
+      && IsPersistedHistoryCompaction(history[^1])
+    )
+    {
+      turns.Add([history[^1]]);
+    }
+
     return turns;
+  }
+
+  private static bool IsPersistedHistoryCompaction(ChatMessage message)
+  {
+    return message.Role == "assistant"
+      && message.Content.StartsWith(
+        PersistedHistoryCompactionMarker,
+        StringComparison.Ordinal
+      );
   }
 
   private int EstimateTokens(

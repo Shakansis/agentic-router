@@ -45,7 +45,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsNativePermissions: true,
       SupportsSteering: false,
       SupportsNativeWebSearch: true,
-      SupportsUserInput: true
+      SupportsUserInput: true,
+      SupportsImages: true
     ),
     ["ollama-local"]
   );
@@ -247,7 +248,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             ["bash"] = false,
             ["task"] = false
           },
-          parts = new[] { new { type = "text", text = turnPrompt.Text } }
+          parts = CreatePromptParts(turnPrompt.Text, request.Images)
         },
         cancellationToken,
         expectedStatus: HttpStatusCode.NoContent
@@ -767,6 +768,29 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         _turnGate.Release();
       }
     }
+  }
+
+  private static IReadOnlyList<object> CreatePromptParts(
+    string text,
+    IReadOnlyList<HarnessImageInput>? images
+  )
+  {
+    var parts = new List<object>
+    {
+      new { type = "text", text }
+    };
+    if (images is null)
+    {
+      return parts;
+    }
+    parts.AddRange(images.Select(image => (object)new
+    {
+      type = "file",
+      mime = image.MimeType,
+      filename = image.FileName,
+      url = $"data:{image.MimeType};base64,{Convert.ToBase64String(image.Bytes)}"
+    }));
+    return parts;
   }
 
   public async Task ResolveApprovalAsync(

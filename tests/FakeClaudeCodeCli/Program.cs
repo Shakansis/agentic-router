@@ -84,13 +84,33 @@ if (promptLine is null)
   return;
 }
 using var promptDocument = JsonDocument.Parse(promptLine);
-var prompt = promptDocument.RootElement.GetProperty("message").GetProperty("content").GetString()
-  ?? string.Empty;
+var content = promptDocument.RootElement.GetProperty("message").GetProperty("content");
+var prompt = content.ValueKind == JsonValueKind.String
+  ? content.GetString() ?? string.Empty
+  : content.EnumerateArray()
+    .First(part => part.GetProperty("type").GetString() == "text")
+    .GetProperty("text").GetString() ?? string.Empty;
+object[] images = content.ValueKind == JsonValueKind.Array
+  ? content.EnumerateArray()
+    .Where(part => part.GetProperty("type").GetString() == "image")
+    .Select(part =>
+    {
+      var source = part.GetProperty("source");
+      return (object)new
+      {
+        type = part.GetProperty("type").GetString(),
+        sourceType = source.GetProperty("type").GetString(),
+        mediaType = source.GetProperty("media_type").GetString(),
+        dataLength = (source.GetProperty("data").GetString() ?? string.Empty).Length
+      };
+    }).ToArray()
+  : Array.Empty<object>();
 await File.WriteAllTextAsync(
   Path.Combine(runtime, "fake-claude-prompt.txt"),
   prompt,
   new UTF8Encoding(false)
 );
+await WriteMarkerAsync("fake-claude-prompt.json", new { prompt, images });
 
 if (prompt.Contains("malformed claude event", StringComparison.OrdinalIgnoreCase))
 {

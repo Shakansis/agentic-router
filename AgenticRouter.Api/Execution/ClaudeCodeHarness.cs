@@ -44,7 +44,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       SupportsNativePermissions: true,
       SupportsSteering: false,
       SupportsNativeWebSearch: true,
-      SupportsUserInput: true
+      SupportsUserInput: true,
+      SupportsImages: true
     ),
     ["ollama-local"]
   );
@@ -383,7 +384,11 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
         new
         {
           type = "user",
-          message = new { role = "user", content = turnPrompt.Text },
+          message = new
+          {
+            role = "user",
+            content = CreateUserContent(turnPrompt.Text, request.Images)
+          },
           parent_tool_use_id = (string?)null,
           session_id = "default"
         },
@@ -531,6 +536,32 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       process?.Dispose();
       active.Finish();
     }
+  }
+
+  private static object CreateUserContent(
+    string text,
+    IReadOnlyList<HarnessImageInput>? images
+  )
+  {
+    if (images is not { Count: > 0 })
+    {
+      return text;
+    }
+    var content = new List<object>
+    {
+      new { type = "text", text }
+    };
+    content.AddRange(images.Select(image => (object)new
+    {
+      type = "image",
+      source = new
+      {
+        type = "base64",
+        media_type = image.MimeType,
+        data = Convert.ToBase64String(image.Bytes)
+      }
+    }));
+    return content;
   }
 
   private ProcessStartInfo CreateTurnStartInfo(

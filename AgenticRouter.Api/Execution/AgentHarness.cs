@@ -48,7 +48,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       SupportsNativePermissions: true,
       SupportsSteering: true,
       SupportsNativeWebSearch: true,
-      SupportsUserInput: true
+      SupportsUserInput: true,
+      SupportsImages: true
     ),
     ["ollama-local"]
   );
