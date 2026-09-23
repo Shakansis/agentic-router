@@ -454,6 +454,8 @@ public sealed class JsonBenchmarkScoringProfileStore : IBenchmarkScoringProfileS
 
 public interface IBenchmarkResultStore
 {
+  Task RetainUnsavedAsync(BenchmarkSuiteRunResult result, CancellationToken cancellationToken);
+
   Task SaveAsync(
     BenchmarkSuiteRunResult result,
     CancellationToken cancellationToken
@@ -488,6 +490,7 @@ public interface IBenchmarkResultStore
 
 public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
 {
+  private readonly Dictionary<string, BenchmarkSuiteRunResult> _unsaved = new(StringComparer.OrdinalIgnoreCase);
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
     PropertyNameCaseInsensitive = true,
@@ -536,6 +539,7 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
           cancellationToken
         );
         File.Move(temporary, path, false);
+        _unsaved.Remove(path);
       }
       finally
       {
@@ -560,6 +564,7 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
     await _gate.WaitAsync(cancellationToken);
     try
     {
+      if (_unsaved.TryGetValue(path, out var unsaved)) return unsaved;
       if (!File.Exists(path))
       {
         return null;
@@ -712,9 +717,10 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
     await _gate.WaitAsync(cancellationToken);
     try
     {
+      var removedUnsaved = _unsaved.Remove(path);
       if (!File.Exists(path))
       {
-        return false;
+        return removedUnsaved;
       }
       File.Delete(path);
       return true;
@@ -730,11 +736,12 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
     await _gate.WaitAsync(cancellationToken);
     try
     {
+      var deleted = _unsaved.Count;
+      _unsaved.Clear();
       if (!Directory.Exists(_directory))
       {
-        return 0;
+        return deleted;
       }
-      var deleted = 0;
       foreach (var path in Directory.EnumerateFiles(_directory, "*.json"))
       {
         cancellationToken.ThrowIfCancellationRequested();
@@ -747,6 +754,19 @@ public sealed class JsonBenchmarkResultStore : IBenchmarkResultStore
     {
       _gate.Release();
     }
+  }
+
+  public async Task RetainUnsavedAsync(BenchmarkSuiteRunResult result, CancellationToken cancellationToken)
+  {
+    var path = Resolve(result.RunId);
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      _unsaved[path] = result;
+      foreach (var old in _unsaved.OrderByDescending(item => item.Value.StartedAt).Skip(20).ToArray())
+        _unsaved.Remove(old.Key);
+    }
+    finally { _gate.Release(); }
   }
 
   private string Resolve(string runId)

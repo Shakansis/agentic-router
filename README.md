@@ -1,15 +1,17 @@
 # Agentic Router
 
+<img src="AgenticRouter.Api/wwwroot/img/brand/agentic-router-full.png" alt="Agentic Router" width="480">
+
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: v0.12.0_alpha - managed local CUDA, ROCm, and Vulkan Ollama profiles; mixed-vendor GPU telemetry; production-path Benchmark Lab scenarios and sequential runs; interactive user input; bounded session compaction; and stronger cross-harness execution evidence. Windows and Linux x64 portable releases are built from one shared core. This remains evaluation software.
+**Current Status**: `v0.13.0_alpha` strengthens accepted-work continuity across browser interruptions, bounded recovery in Execute and Benchmark, and local-runtime availability. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.12.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-win-x64.zip.sha256) |
-| `v0.12.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.12.0_alpha/AgenticRouter-0.12.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.13.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-win-x64.zip.sha256) |
+| `v0.13.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -18,15 +20,43 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.12.0_alpha` is a pre-release intended for evaluation. The package is
+`0.13.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
 conversations by default and can be disabled or reopened from Local resources.
 
-The public distribution repository contains only this README, the evaluation
-license, its referenced screenshots, and downloadable release assets. Source code, development
-documentation, diagnostics, tests, and local application data are not included.
+### What's new in 0.13.0_alpha
+
+- Chat can reattach to an accepted Host run after a browser refresh without
+  resending the prompt. Large saved conversations open in bounded pages while
+  the original transcript remains available.
+- Execute adds bounded recovery for missing Qwen sessions and supported context
+  failures, reconciles durable Supervisor checkpoints before explicit resume,
+  and keeps a workspace occupied while its execution task is still active.
+- Benchmark Lab restores current matrix state after a replay gap, retains
+  completed evidence when infrastructure or result storage fails, and reports
+  the specialist's final completion rather than an action introduction.
+- Benchmark Lab can also run an exact custom prompt for manual quality review;
+  technical completion is kept separate from the user's score.
+- Per-model GPU affinity takes precedence over legacy role preferences. Each
+  managed backend/device selection keeps a separate Ollama server, so switching
+  roles does not force an unrelated model off its device.
+- Managed Ollama startup has a bounded readiness retry and reports unavailable
+  external resources in the project sidebar without replacing the selected
+  model, harness, or GPU.
+
+See [release notes](RELEASE_NOTES.md) for scope and validation evidence.
+
+Local settings, Benchmark results, usage records, and other files created under
+`AgenticRouter.Api/data/` stay on this machine. That directory is ignored by
+Git and is not part of the source or portable release archives. The local
+`Properties/launchSettings.json` developer profile is ignored as well.
+
+The public distribution repository contains its own README, the evaluation
+license, reviewed brand image and screenshots, and downloadable release assets.
+Source code, development documentation, diagnostics, tests, and local
+application data are not included.
 
 ## 🎯 Project Mission
 
@@ -156,9 +186,14 @@ recursively.
   contents are not checkpointed.
 - Closing or reloading the browser does not cancel the run. Reopening the saved
   conversation replays retained activity and reattaches to the same Host run.
+- A cancellation stays in progress until the execution task settles. If settlement
+  takes longer than 30 seconds, the Host reports that delay and retains workspace
+  ownership until the task actually ends.
 - Restart policy is explicit: `manual` waits for Resume; `auto-safe` continues only
   from a proven committed boundary. Route drift, workspace drift, pending approval,
   or ambiguous action state waits for the user instead of replaying blindly.
+- A failed checkpoint write pauses a durable run without replaying model actions;
+  explicit resume reconciles the workspace against the last valid checkpoint.
 - Direct Execute remains available explicitly and has no supervision/checkpoint
   overhead.
 
@@ -579,6 +614,12 @@ Click the "Configurações" button to access the configuration interface:
 6. The router resolves the requested model, harness, and execution strategy
 7. Response streams in real-time with routing and Host activity visible in collapsible details
 
+Refreshing or closing the browser detaches it from an accepted Chat turn or
+durable supervised Execute run; opening the same conversation reattaches to
+surviving Host activity. **Stop**
+cancels the matching run. A prompt that was already accepted is not submitted a
+second time during reconnection.
+
 ### Model Resolution Precedence
 
 The expert model is resolved in this order:
@@ -644,6 +685,13 @@ run ID and immutable history record, so repeated measurements remain available
 for comparison and recommendation analysis instead of being collapsed into a
 single averaged result. Canceling the active run prevents remaining repetitions
 from starting.
+
+If live Benchmark events fall outside the retained event journal, the dashboard
+rebuilds from a Host snapshot. An infrastructure failure stops the matrix while
+preserving earlier cells; an ordinary test failure may be followed by the next
+test. If final-result storage fails, the current Host retains the result for
+inspection and export. The next cell never starts while a timed-out Execute task
+is still active.
 
 ### Run the real Ollama protocol benchmark
 

@@ -180,6 +180,10 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     Validate(request);
     await _turnGate.WaitAsync(cancellationToken);
     ActiveTurn? active = null;
+    StreamReader? eventReader = null;
+    HttpResponseMessage? resumedResponse = null;
+    var acceptedNativeTurn = false;
+    var nativeTurnSettled = false;
     try
     {
       var hostProfile = request.HostCapabilities ?? throw Failure(
@@ -207,7 +211,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         request.UseMinimalToolInventory,
         cancellationToken
       );
-      var session = await GetOrCreateSessionAsync(request, cancellationToken);
       var nativeCapabilities = request.UseMinimalToolInventory
         ? ActiveNativeTools(hostProfile).Concat(MinimalCoreTools(hostProfile))
         : HarnessCapabilityProjection.NativeCommonTools(HarnessIds.QwenCode)
@@ -218,9 +221,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       var hostBridgeNames = hostBridgeTools
         .Select(tool => tool.Name)
         .ToArray();
-      var turnPrompt = HarnessConversationPromptBuilder.Create(
-        request,
-        session.SynchronizedThroughVersion,
+      string[] capabilityNotes =
         [
           $"Agentic Router common capabilities implemented by Qwen native tools for this turn: {string.Join(", ", nativeCapabilities)}.",
           $"Agentic Router common capabilities supplied through the Host bridge for this turn: {string.Join(", ", hostBridgeNames)}.",
@@ -228,8 +229,16 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             ? "No Host bridge tool is available for this turn."
             : $"Deferred Host tools use exact names mcp__agentic_router__<canonical-name>. Resolve only one permitted selector with tool_search when needed: {string.Join(", ", hostBridgeNames.Select(name => $"select:mcp__agentic_router__{name}"))}.",
           $"Host approval policy: {hostProfile.ApprovalPolicy}."
-        ]
-      );
+        ];
+      var turnPrompt = HarnessConversationPromptBuilder.Create(
+        request, request.ContextRecoveryInputBudget.HasValue ? null
+          : _sessions.GetValueOrDefault(request.SessionId)?.SynchronizedThroughVersion, capabilityNotes);
+      var session = await GetOrCreateSessionAsync(request, cancellationToken);
+      var opened = await OpenTurnEventsAsync(request, session, cancellationToken);
+      session = opened.Session;
+      using var eventsResponse = opened.Response;
+      if (opened.Recreated)
+        turnPrompt = HarnessConversationPromptBuilder.Create(request, null, capabilityNotes);
       active = new ActiveTurn(
         request.SessionId,
         session.SessionId,
@@ -243,26 +252,17 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         request.SessionId,
         hostProfile
       );
+      if (opened.Recreated)
+        yield return Event("warning", active,
+          message: "Qwen Code native session was missing. The Host recreated it once and restored canonical history before submitting the prompt.");
 
       yield return Event(
         "turn.started",
         active,
-        message: $"Qwen Code session {session.SessionId} started."
+        message: opened.Recreated
+          ? $"Qwen Code session {session.SessionId} recreated after the native session disappeared; canonical Host history restored before prompt submission."
+          : $"Qwen Code session {session.SessionId} started."
       );
-
-      using var eventsRequest = CreateRequest(
-        HttpMethod.Get,
-        $"session/{EncodePath(session.SessionId)}/events?connectReason=initial",
-        session.ClientId
-      );
-      eventsRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-      eventsRequest.Headers.TryAddWithoutValidation("Last-Event-ID", "0");
-      using var eventsResponse = await Client().SendAsync(
-        eventsRequest,
-        HttpCompletionOption.ResponseHeadersRead,
-        cancellationToken
-      );
-      await EnsureSuccessAsync(eventsResponse, "qwen-code-event-stream", cancellationToken);
 
       if (request.ModelSupportsReasoning)
       {
@@ -297,10 +297,47 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         cancellationToken
       );
       active.PromptId = RequiredString(prompt, "promptId");
+      acceptedNativeTurn = true;
+      // Accepted input is already in native history, even if generation later fails.
+      session.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
       var baselineEventId = Long(prompt, "lastEventId") ?? 0;
 
       await using var stream = await eventsResponse.Content.ReadAsStreamAsync(cancellationToken);
-      using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
+      eventReader = new StreamReader(stream, new UTF8Encoding(false, true));
+      var reconnects = 0;
+      async Task ReconnectEventsAsync()
+      {
+        using var reconnectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        reconnectTimeout.CancelAfter(_options.RequestTimeout);
+        eventReader.Dispose();
+        resumedResponse?.Dispose();
+        while (reconnects < 3)
+        {
+          reconnects++;
+          await Task.Delay(TimeSpan.FromMilliseconds(250 * reconnects), cancellationToken);
+          try
+          {
+            using var resumeRequest = CreateRequest(HttpMethod.Get,
+              $"session/{EncodePath(session.SessionId)}/events?connectReason=reconnect", session.ClientId);
+            resumeRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            resumeRequest.Headers.TryAddWithoutValidation("Last-Event-ID", baselineEventId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            resumedResponse = await Client().SendAsync(resumeRequest, HttpCompletionOption.ResponseHeadersRead, reconnectTimeout.Token);
+            await EnsureSuccessAsync(resumedResponse, "qwen-code-reconnect", reconnectTimeout.Token);
+            eventReader = new StreamReader(await resumedResponse.Content.ReadAsStreamAsync(cancellationToken), new UTF8Encoding(false, true));
+            return;
+          }
+          catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+          {
+            throw Failure("qwen-code-reconnect-timeout", "Qwen Code reconnection exceeded the configured request timeout; the accepted prompt was not resubmitted.");
+          }
+          catch (Exception exception) when (exception is HttpRequestException or IOException or HarnessException)
+          {
+            resumedResponse?.Dispose();
+          }
+        }
+        throw Failure("qwen-code-reconnect-exhausted",
+          "Qwen Code event tracking could not be restored after three attempts. The Host will cancel the untracked native turn; the accepted prompt was not resubmitted.");
+      }
       var tools = new Dictionary<string, string>(StringComparer.Ordinal);
       var preservedUpdateTypes = new HashSet<string>(StringComparer.Ordinal);
       var preservedEventTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -311,7 +348,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       Task<HarnessEvent>? hostToolRead = null;
       while (true)
       {
-        lineRead ??= ReadEventLineAsync(reader, cancellationToken);
+        lineRead ??= ReadEventLineAsync(eventReader, cancellationToken);
         hostToolRead ??= hostTurn.Events.ReadAsync(cancellationToken).AsTask();
         var next = await Task.WhenAny(lineRead, hostToolRead);
         if (ReferenceEquals(next, hostToolRead))
@@ -321,14 +358,16 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           yield return hostToolEvent;
           continue;
         }
-        var line = await lineRead;
+        string? line;
+        try { line = await lineRead; }
+        catch (HarnessException exception) when (exception.Code == "qwen-code-event-stream-failed") { line = null; }
         lineRead = null;
         if (line is null)
         {
-          throw Failure(
-            "qwen-code-event-stream-ended",
-            "Qwen Code event stream ended before terminal state."
-          );
+          await ReconnectEventsAsync();
+          foreach (var pending in textDeltas.Flush()) yield return pending;
+          yield return Event("warning", active, message: "Qwen Code event stream reconnected to the same accepted prompt; no actions were resubmitted.");
+          continue;
         }
         if (!line.StartsWith("data:", StringComparison.Ordinal))
         {
@@ -363,6 +402,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         {
           continue;
         }
+        if (eventId.HasValue) baselineEventId = eventId.Value;
         var type = String(payload, "type");
         if (type is null || !payload.TryGetProperty("data", out var data))
         {
@@ -424,6 +464,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             break;
           case "turn_complete" when MatchesPrompt(active, data):
             {
+              nativeTurnSettled = true;
               var stopReason = String(data, "stopReason") ?? "unknown";
               if (string.Equals(stopReason, "end_turn", StringComparison.Ordinal))
               {
@@ -440,7 +481,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 }
                 else
                 {
-                  session.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
                   yield return Event(
                     "turn.completed",
                     active,
@@ -462,13 +502,6 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               }
               else
               {
-                if (
-                  assistantCharacters > 0
-                  && stopReason is "max_tokens" or "length"
-                )
-                {
-                  session.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
-                }
                 yield return Event(
                   "turn.failed",
                   active,
@@ -483,6 +516,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               yield break;
             }
           case "turn_error" when MatchesPrompt(active, data):
+            nativeTurnSettled = true;
             yield return Event(
               "turn.failed",
               active,
@@ -492,9 +526,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               native: payload
             );
             yield break;
-          case "session_died":
           case "client_evicted":
           case "stream_error":
+            await ReconnectEventsAsync();
+            yield return Event("warning", active, message: $"Qwen Code stream recovered after {type}; continuing the same accepted prompt.");
+            break;
+          case "session_died":
+            nativeTurnSettled = true;
             yield return Event(
               "turn.failed",
               active,
@@ -507,6 +545,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           case "slow_client_warning":
           case "history_truncated":
           case "state_resync_required":
+            if (reconnects > 0 && type == "state_resync_required")
+              throw Failure("qwen-code-reconnect-gap",
+                "Qwen Code cannot replay all events after disconnection. The Host will cancel the untracked native turn rather than repeat accepted actions or claim unverified success.");
             yield return Event(
               "warning",
               active,
@@ -553,9 +594,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     {
       try
       {
-        if (cancellationToken.IsCancellationRequested)
+        eventReader?.Dispose();
+        resumedResponse?.Dispose();
+        if (cancellationToken.IsCancellationRequested || (acceptedNativeTurn && !nativeTurnSettled))
         {
-          await CancelTurnAsync(request.SessionId, CancellationToken.None);
+          using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+          try { await CancelTurnAsync(request.SessionId, cleanup.Token); }
+          catch (Exception exception) { _logger.LogWarning(exception, "Native Qwen cancellation could not be confirmed after tracking ended for {SessionId}.", request.SessionId); }
         }
         _activeTurns.TryRemove(request.SessionId, out _);
         if (active is not null)
@@ -1079,19 +1124,67 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     }
   }
 
+  private async Task<(QwenSession Session, HttpResponseMessage Response, bool Recreated)> OpenTurnEventsAsync(
+    HarnessTurnRequest request, QwenSession session, CancellationToken cancellationToken)
+  {
+    for (var attempt = 0; ; attempt++)
+    {
+      using var eventsRequest = CreateRequest(HttpMethod.Get,
+        $"session/{EncodePath(session.SessionId)}/events?connectReason=initial", session.ClientId);
+      eventsRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+      // Subscribe to new events before submitting this turn. A zero resume cursor
+      // replays the previous turn's ring (up to thousands of discarded events),
+      // creating backpressure before the new prompt has even been accepted.
+      var response = await Client().SendAsync(eventsRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+      try
+      {
+        var missing = false;
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+          try
+          {
+            using var error = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            missing = String(error.RootElement, "code") == "session_not_found"
+              && String(error.RootElement, "sessionId") == session.SessionId;
+          }
+          catch (JsonException) { /* Preserve ordinary HTTP failure semantics. */ }
+        }
+        if (missing)
+        {
+          _sessions.TryRemove(request.SessionId, out _);
+          if (attempt == 0 && !request.ContextRecoveryInputBudget.HasValue && !request.IsRecoveryContinuation)
+          {
+            response.Dispose();
+            cancellationToken.ThrowIfCancellationRequested();
+            session = await GetOrCreateSessionAsync(request, cancellationToken);
+            continue;
+          }
+          throw new HarnessException("qwen-code-session-recovery-exhausted",
+            "Qwen Code could not retain a native session before prompt submission.",
+            "The single missing-session recovery attempt was exhausted; no prompt was submitted.",
+            false, harnessId: HarnessIds.QwenCode);
+        }
+        await EnsureSuccessAsync(response, "qwen-code-event-stream", cancellationToken);
+        return (session, response, attempt > 0);
+      }
+      catch { response.Dispose(); throw; }
+    }
+  }
+
   private async Task<QwenSession> GetOrCreateSessionAsync(
     HarnessTurnRequest request,
     CancellationToken cancellationToken
   )
   {
-    if (_sessions.TryGetValue(request.SessionId, out var existing))
+    if (_sessions.TryGetValue(request.SessionId, out var existing) && !request.ContextRecoveryInputBudget.HasValue)
     {
       existing.LastUsedSequence = Interlocked.Increment(ref _sessionUseSequence);
       return existing;
     }
     await EvictIdleSessionsAsync(
       request.WorkingDirectory,
-      cancellationToken
+      cancellationToken,
+      request.ContextRecoveryInputBudget.HasValue ? existing?.SessionId : null
     );
     var requestedClientId = $"agentic-router-{Guid.NewGuid():N}";
     var created = await CreateSessionAsync(
@@ -1150,6 +1243,15 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         request.WorkingDirectory
       );
       _sessions[request.SessionId] = session;
+      if (request.ContextRecoveryInputBudget.HasValue && existing is not null)
+      {
+        // Replacement is already validated. Cleanup must not invalidate its committed mapping.
+        try { await DeleteSessionAsync(existing.SessionId, existing.ClientId, CancellationToken.None); }
+        catch (Exception exception)
+        {
+          _logger.LogWarning(exception, "Could not close the replaced Qwen context {SessionId}.", existing.SessionId);
+        }
+      }
       return session;
     }
     catch
@@ -1176,7 +1278,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
 
   private async Task EvictIdleSessionsAsync(
     string workingDirectory,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? retainedSessionId = null
   )
   {
     while (true)
@@ -1202,8 +1305,16 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       {
         return;
       }
+      if (retainedSessionId is not null)
+      {
+        throw new HarnessException(HarnessContextRecovery.Unavailable,
+          "Context recovery cannot allocate another native session without evicting existing context.",
+          "The original native session and other conversations were retained.", false,
+          harnessId: HarnessIds.QwenCode);
+      }
       var candidate = liveSessions
         .Where(item => !Boolean(item, "hasActivePrompt"))
+        .Where(item => String(item, "sessionId") != retainedSessionId)
         .OrderBy(item => String(item, "updatedAt") ?? String(item, "createdAt"), StringComparer.Ordinal)
         .ThenBy(item => String(item, "sessionId"), StringComparer.Ordinal)
         .FirstOrDefault();

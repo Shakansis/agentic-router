@@ -30,6 +30,7 @@ public sealed class OllamaClient : IOllamaClient
   private readonly IUsageRecorder _usageRecorder;
   private readonly IOllamaManagedServerManager _managedServers;
   private readonly IModelGpuAffinityResolver _modelGpuAffinities;
+  private readonly ILogger<OllamaClient> _logger;
 
   public OllamaClient(
     HttpClient httpClient,
@@ -37,7 +38,8 @@ public sealed class OllamaClient : IOllamaClient
     ITokenEstimator tokenEstimator,
     IUsageRecorder usageRecorder,
     IOllamaManagedServerManager managedServers,
-    IModelGpuAffinityResolver modelGpuAffinities
+    IModelGpuAffinityResolver modelGpuAffinities,
+    ILogger<OllamaClient> logger
   )
   {
     _httpClient = httpClient;
@@ -46,6 +48,7 @@ public sealed class OllamaClient : IOllamaClient
     _usageRecorder = usageRecorder;
     _managedServers = managedServers;
     _modelGpuAffinities = modelGpuAffinities;
+    _logger = logger;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -1521,6 +1524,8 @@ public sealed class OllamaClient : IOllamaClient
       && timeout?.IsCancellationRequested == true
     )
     {
+      _logger.LogWarning("ollama-timeout at {Stage}: Ollama did not respond in time. Check that it is running and review its address in settings.", stage);
+      _logger.LogDebug(exception, "Ollama transport timeout cause at {Stage}.", stage);
       throw ProviderTimeout(
         stage,
         effectiveTimeout,
@@ -1529,6 +1534,8 @@ public sealed class OllamaClient : IOllamaClient
     }
     catch (HttpRequestException exception)
     {
+      _logger.LogWarning("ollama-unavailable at {Stage}: Ollama could not be reached. Start Ollama or check its address in settings.", stage);
+      _logger.LogDebug(exception, "Ollama transport failure cause at {Stage}.", stage);
       throw new OllamaProviderException(
         stage,
         "Ollama is unavailable. Check that it is running and that the saved URL is correct.",

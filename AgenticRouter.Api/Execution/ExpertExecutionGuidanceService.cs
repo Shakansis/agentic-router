@@ -61,6 +61,8 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "Treat minor spelling and grammar mistakes as recoverable input. Resolve an ambiguous phrase "
     + "from the surrounding requested assets and constraints, state the chosen conventional interpretation "
     + "in the objective, and do not invent unrelated behavior. "
+    + "Write objective as one or two short user-facing sentences in the user's language that state "
+    + "how you understood the request and the immediate work you will perform, without claiming results. "
     + "When local work is required, set actionRequired to true and provide exactly one action "
     + "with a short title, an exact supported tool name, and a complete JSON arguments object. "
     + "The Host owns plan and step IDs; do not generate identifiers. Use only "
@@ -75,7 +77,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     + "process arguments, and ordering dependencies. A statement such as "
     + "'I cannot access the disk' is not a valid substitute for execution guidance. "
     + "When no local action is required, set actionRequired to false and return no actions. "
-    + "Do not address the user and do not return Markdown or a generic prose plan.";
+    + "Do not return Markdown or a generic multi-step prose plan.";
 
   private static readonly JsonElement GuidanceSchema = CreateGuidanceSchema();
 

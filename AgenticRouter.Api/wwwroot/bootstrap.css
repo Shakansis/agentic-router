@@ -30,17 +30,9 @@ body.bootstrapping > :not(.app-loader) {
 }
 
 .app-loader-brand {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid rgba(109, 141, 255, 0.5);
-  border-radius: 11px;
-  color: #dfe6ff;
-  background: var(--accent-soft);
-  font-size: 13px;
-  font-weight: 750;
-  letter-spacing: 0.06em;
+  display: block;
+  width: min(300px, 100%);
+  height: auto;
 }
 
 .app-loader h1,

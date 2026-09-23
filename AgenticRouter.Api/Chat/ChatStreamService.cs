@@ -92,6 +92,7 @@ public sealed class ChatStreamService
   private readonly ILogger<ChatStreamService> _logger;
   private readonly ITraceContext _trace;
   private ExecutionSession? _executionSession;
+  private ExecutionContextRecoveryBudget? _contextRecoveryBudget;
   private string? _usageWorkspaceId;
   private string? _usageConversationId;
   private string? _usageTurnId;
@@ -262,6 +263,7 @@ public sealed class ChatStreamService
   )
   {
     using var requestLease = _requestTracker.BeginRequest();
+    _contextRecoveryBudget = invocation.ContextRecoveryBudget;
     _trace.Link("turnId", requestId);
     var stopwatch = Stopwatch.StartNew();
     var preflightTimer = Stopwatch.StartNew();
@@ -1140,6 +1142,17 @@ public sealed class ChatStreamService
           intention
         );
 
+        if (harnessDefinition.Id == HarnessIds.Native)
+        {
+          await foreach (var startupEvent in PrepareManagedOllamaAsync(
+            requestId, selectedModel, intention, baseUri, settings,
+            null, stopwatch, cancellationToken
+          ))
+          {
+            yield return startupEvent;
+          }
+        }
+
         var execution = new AgentHarnessExecution<ChatStreamEvent>(
           nativeCancellationToken => ExecuteNativeHarnessSelectionAsync(
             request,
@@ -1232,6 +1245,14 @@ public sealed class ChatStreamService
           selectedModel,
           intention
         );
+      }
+
+      await foreach (var startupEvent in PrepareManagedOllamaAsync(
+        requestId, selectedModel, intention, baseUri, settings,
+        null, stopwatch, cancellationToken
+      ))
+      {
+        yield return startupEvent;
       }
 
       var progress = new GenerationProgress(contextUsage);
@@ -1586,13 +1607,14 @@ public sealed class ChatStreamService
       ContextUsage: contextUsage
     );
 
-    var harnessEndpoint = await _managedOllamaServers.ResolveAsync(
-      baseUri,
-      _usageGpu,
-      settings.DefaultGpu,
-      contextUsage.EffectiveLimitTokens,
-      cancellationToken
-    );
+    await foreach (var startupEvent in PrepareManagedOllamaAsync(
+      requestId, selectedModel, intention, baseUri, settings,
+      contextUsage.EffectiveLimitTokens, stopwatch, cancellationToken
+    ))
+    {
+      yield return startupEvent;
+    }
+    var harnessEndpoint = _managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu);
     await foreach (var streamEvent in ExecuteExternalHarnessAsync(
       harness,
       harnessDefinition,
@@ -1836,6 +1858,10 @@ public sealed class ChatStreamService
     );
     var hostReview = session.CreateReview();
     var hostResponse = CreateHostExecutionResponse(hostReview);
+    var visibleResponse = CreateVisibleExecutionResponse(
+      execution.SpecialistCompletion,
+      hostResponse
+    );
     yield return new ChatStreamEvent(
       requestId,
       "response.completed",
@@ -1845,14 +1871,14 @@ public sealed class ChatStreamService
       hostReview.Summary.CoordinatorModel,
       isAuto ? intention : null,
       stopwatch.ElapsedMilliseconds,
-      _markdownRenderer.Render(hostResponse),
+      _markdownRenderer.Render(visibleResponse),
       null,
       null,
       hostReview.Summary,
       Citations: execution.Citations,
       ContextUsage: execution.LatestContextUsage ?? contextUsage,
-      ResponseTail: hostResponse,
-      ResponseTailHtml: _markdownRenderer.Render(hostResponse),
+      ResponseTail: visibleResponse,
+      ResponseTailHtml: _markdownRenderer.Render(visibleResponse),
       SpecialistCompletion: execution.SpecialistCompletion
     );
   }
@@ -1947,6 +1973,10 @@ public sealed class ChatStreamService
     string? activeResponseItemId = null;
     var approvedDeletionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var approvedNativeMutation = false;
+    var nativeActions = new Dictionary<string, HarnessEvent>(StringComparer.Ordinal);
+    var unidentifiedNativeAction = false;
+    var contextRecoveryAttempted = false;
+    IReadOnlyList<ExecutionFileChange>? contextRecoveryObserved = null;
     HarnessEvent? terminalFailure = null;
     IReadOnlyList<ProviderCitation>? webCitations = null;
     var latestContextUsage = initialContextUsage;
@@ -2034,10 +2064,9 @@ public sealed class ChatStreamService
   StartHarnessTurn:
     terminalFailure = null;
     _latency.MarkOnce("harness-turn-start");
-    await foreach (var harnessEvent in harness.StartTurnAsync(
-      harnessTurnRequest,
-      cancellationToken
-    ))
+    await foreach (var harnessEvent in contextRecoveryAttempted
+      ? RunContextRecoveryAsync(harness, harnessTurnRequest, cancellationToken)
+      : harness.StartTurnAsync(harnessTurnRequest, cancellationToken))
     {
       session.RecordHarnessActivity();
       if (!string.Equals(
@@ -2211,6 +2240,11 @@ public sealed class ChatStreamService
         case "tool.output":
         case "tool.completed":
         case "tool.failed":
+          var nativeActionId = harnessEvent.ToolCallId ?? harnessEvent.ItemId;
+          if (nativeActionId is not null)
+            nativeActions[nativeActionId] = harnessEvent;
+          else if (harnessEvent.Type == "tool.started")
+            unidentifiedNativeAction = true;
           var actionResponseHtml = responseSegment.Length == 0
             ? null
             : _markdownRenderer.Render(responseSegment.ToString());
@@ -2693,7 +2727,61 @@ public sealed class ChatStreamService
       }
     }
 
-    if (terminalFailure is not null && CanAutomaticallyContinueCodex(
+    if (terminalFailure is not null && HarnessContextRecovery.IsContextFailure(terminalFailure))
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var recoveryObserved = await ObserveHarnessWorkspaceAsync(observer, harnessDefinition,
+        approvedDeletionPaths, !hostCapabilities.MutationRequiresApproval || approvedNativeMutation, cancellationToken);
+      RecordHarnessObservations(session, recoveryObserved, contextRecoveryObserved);
+      contextRecoveryObserved = recoveryObserved;
+      if (automaticContinuationAttempts > 0 || _contextRecoveryBudget?.Consumed == true)
+        throw new HarnessException(HarnessContextRecovery.Exhausted,
+          "The context recovery budget is exhausted; completed Host effects remain available for review.",
+          terminalFailure.Message ?? terminalFailure.ErrorCode ?? "Context failure", false,
+          harnessId: harnessDefinition.Id);
+
+      var pendingJournal = (actionJournal as IExecutionActionJournalStateReader)?.GetState();
+      var beforeRecovery = session.CreateReview();
+      if (unidentifiedNativeAction
+        || nativeActions.Values.Any(action => action.Type is "tool.started" or "tool.output"
+          && action.State is not ("completed" or "failed" or "cancelled"))
+        || beforeRecovery.Actions?.Any(action => action.State is not ("completed" or "failed" or "rejected" or "cancelled")) == true
+        || pendingJournal is { HasUnresolvedAction: true } or { HasUnresolvedApproval: true } or { HasPendingValidation: true }
+        || _userInput.HasPendingForExecution(session.Id))
+        throw new HarnessException(HarnessContextRecovery.Unavailable,
+          "Context recovery cannot replace a session with unresolved actions or decisions.",
+          "The original Host context and recorded effects were retained.", false, harnessId: harnessDefinition.Id);
+
+      var recoveryRequest = HarnessContextRecovery.Prepare(
+        harnessTurnRequest, session.CreateReview(), initialContextUsage.ReservedResponseTokens,
+        terminalFailure.Message, request.History, nativeActions.Values.ToArray(), out var recoveryInputTokens);
+      if (_contextRecoveryBudget is not null && !_contextRecoveryBudget.TryConsume())
+        throw new HarnessException(HarnessContextRecovery.Exhausted, "The context recovery budget is exhausted.",
+          "Another recovery already consumed this role's bounded attempt.", false, harnessId: harnessDefinition.Id);
+      automaticContinuationAttempts++;
+      contextRecoveryAttempted = true;
+      yield return Event(requestId, "harness.context-recovery-started",
+        $"Host context recovery 1/1 for {harnessDefinition.DisplayName}: deterministic continuity; estimated base Host envelope {recoveryInputTokens} tokens, input budget {recoveryRequest.ContextRecoveryInputBudget}, output reserve {initialContextUsage.ReservedResponseTokens}. Adapter notes are checked before replacement; native-only overhead remains unknown.",
+        stopwatch, model, intention);
+      answer.Clear();
+      responseSegment.Clear();
+      roleResultSegment.Clear();
+      activeResponseItemId = null;
+      liveContextBase = initialContextUsage;
+      liveOutputCharacters = 0;
+      lastPublishedLiveOutputTokens = 0;
+      lastLiveContextUpdateMilliseconds = stopwatch.ElapsedMilliseconds;
+      harnessTurnRequest = recoveryRequest;
+      goto StartHarnessTurn;
+    }
+
+    if (contextRecoveryAttempted)
+      yield return Event(requestId, terminalFailure is null
+        ? "harness.context-recovery-completed" : "harness.context-recovery-exhausted",
+        terminalFailure is null ? "Host context recovery completed." : "Host context recovery failed after its single attempt.",
+        stopwatch, model, intention);
+
+    if (terminalFailure is not null && _contextRecoveryBudget?.Consumed != true && CanAutomaticallyContinueCodex(
         harnessDefinition,
         terminalFailure,
         automaticContinuationAttempts
@@ -2707,6 +2795,7 @@ public sealed class ChatStreamService
         cancellationToken
       );
       automaticContinuationAttempts++;
+      _contextRecoveryBudget?.TryConsume();
       var recoveryPrompt = CreateCodexAutomaticContinuationPrompt(
         terminalFailure,
         session,
@@ -2750,7 +2839,7 @@ public sealed class ChatStreamService
       !hostCapabilities.MutationRequiresApproval || approvedNativeMutation,
       cancellationToken
     );
-    HarnessWorkspaceObserver.Record(session, observed);
+    RecordHarnessObservations(session, observed, contextRecoveryObserved);
     yield return Event(
       requestId,
       $"harness.{harnessDefinition.Id}-effects-observed",
@@ -2848,11 +2937,11 @@ public sealed class ChatStreamService
           ? HostActionCodes.HarnessStall
           : originalFailureCode;
       throw new HarnessException(
-        failureCode,
+        contextRecoveryAttempted ? HarnessContextRecovery.Exhausted : failureCode,
         terminalFailure.Message ?? $"{harnessDefinition.DisplayName} turn failed.",
         $"Original harness code: {originalFailureCode}. "
           + (terminalFailure.Message ?? $"{harnessDefinition.DisplayName} reported a failed turn."),
-        true,
+        !contextRecoveryAttempted,
         harnessId: harnessDefinition.Id
       );
     }
@@ -2889,10 +2978,45 @@ public sealed class ChatStreamService
       ResponseSegmentHtml: responseSegment.Length == 0
         ? null
         : _markdownRenderer.Render(responseSegment.ToString()),
-      ResponseTail: responseTail,
-      ResponseTailHtml: _markdownRenderer.Render(responseTail),
+      ResponseTail: visibleAnswer,
+      ResponseTailHtml: _markdownRenderer.Render(visibleAnswer),
       SpecialistCompletion: answer.ToString()
     );
+  }
+
+  private static void RecordHarnessObservations(
+    ExecutionSession session, IReadOnlyList<ExecutionFileChange> observed,
+    IReadOnlyList<ExecutionFileChange>? alreadyRecorded)
+  {
+    HarnessWorkspaceObserver.Record(session, alreadyRecorded is null ? observed : observed.Where(change =>
+      !alreadyRecorded.Any(previous => previous.RelativePath == change.RelativePath
+        && previous.Operation == change.Operation && previous.FinalHash == change.FinalHash)).ToArray());
+  }
+
+  private async IAsyncEnumerable<HarnessEvent> RunContextRecoveryAsync(
+    IAgentHarnessTransport harness,
+    HarnessTurnRequest request,
+    [EnumeratorCancellation] CancellationToken cancellationToken)
+  {
+    await using var stream = harness.StartTurnAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
+    while (true)
+    {
+      var next = false;
+      HarnessEvent? failure = null;
+      try { next = await stream.MoveNextAsync(); }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        _logger.LogWarning(exception, "The single context recovery attempt failed for {HarnessId}.", request.HarnessId);
+        // Rejoin normal effect observation before emitting the one public terminal error.
+        failure = new HarnessEvent("turn.failed",
+          message: $"The single Host context recovery attempt failed: {exception.Message}",
+          errorCode: HarnessContextRecovery.Exhausted, harnessId: request.HarnessId,
+          sessionId: request.SessionId, terminalState: HarnessTerminalState.Failed);
+      }
+      if (failure is not null) { yield return failure; yield break; }
+      if (!next) yield break;
+      yield return stream.Current;
+    }
   }
 
   private static bool CanAutomaticallyContinueCodex(
@@ -3883,6 +4007,64 @@ public sealed class ChatStreamService
       failureOutput,
       failureCode
     );
+  }
+
+  private async IAsyncEnumerable<ChatStreamEvent> PrepareManagedOllamaAsync(
+    string requestId,
+    string selectedModel,
+    string intention,
+    Uri baseUri,
+    ApplicationSettings settings,
+    int? contextLength,
+    Stopwatch stopwatch,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    if (ProviderModelReference.Parse(selectedModel).ProviderId != ModelProviderIds.OllamaLocal
+      || !_managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu).Managed)
+    {
+      yield break;
+    }
+
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    var updates = Channel.CreateUnbounded<ChatStreamEvent>(new UnboundedChannelOptions
+    {
+      SingleReader = true,
+      SingleWriter = false
+    });
+    var producer = ProduceAsync();
+    try
+    {
+      await foreach (var update in updates.Reader.ReadAllAsync(cancellationToken))
+      {
+        yield return update;
+      }
+    }
+    finally
+    {
+      await lifetime.CancelAsync();
+      await producer;
+    }
+
+    async Task ProduceAsync()
+    {
+      try
+      {
+        var recovery = new OllamaStartupRecovery(
+          update => updates.Writer.TryWrite(Event(
+            requestId, update.Stage, update.Message, stopwatch, selectedModel, intention
+          ))
+        );
+        await _managedOllamaServers.ResolveWithRecoveryAsync(
+          baseUri, _usageGpu, settings.DefaultGpu, contextLength, recovery, lifetime.Token
+        );
+        updates.Writer.TryComplete();
+      }
+      catch (Exception exception)
+      {
+        updates.Writer.TryComplete(exception);
+      }
+    }
   }
 
   private async Task<PendingUserInputHandle> BeginUserInputAsync(
@@ -5124,6 +5306,61 @@ public sealed class ChatStreamService
           captureRoleResult?.Invoke(progress.SpecialistCompletion);
           noActionRequired = true;
           break;
+        }
+
+        if (!progress.ActionIntroductionPublished)
+        {
+          var introduction = planningResult.ActionIntroduction?.Trim();
+          if (string.IsNullOrWhiteSpace(introduction) || introduction.Length > 1_000)
+          {
+            const string introductionCorrection = "The first tool proposal must include one or two short user-facing sentences "
+              + "in the user's language that state how you understood the request and the immediate actions you will take. "
+              + "Do not claim results. Return the same action only after adding that brief introduction.";
+            var introductionFailure = new LocalActionException(
+              "action-introduction-required",
+              introductionCorrection
+            );
+            planningFailures++;
+            _executionSession?.RecordPlanningFailure();
+            exhaustedFailure = introductionFailure;
+            progress.ToolMessages.Add(planningResult.AssistantMessage);
+            progress.ActiveToolCallId = planningResult.CallId;
+            progress.ToolMessages.Add(
+              NativeToolResultMessage(
+                progress,
+                proposal.Tool,
+                "rejected",
+                introductionCorrection,
+                effectVerified: false,
+                code: "action-introduction-required"
+              )
+            );
+            yield return Event(
+              requestId,
+              "action.introduction-required",
+              "The Host asked the specialist for a brief user-facing summary before allowing the first action.",
+              stopwatch,
+              model,
+              intention
+            );
+            continue;
+          }
+
+          progress.ActionIntroductionPublished = true;
+          yield return new ChatStreamEvent(
+            requestId,
+            "response.delta",
+            DateTimeOffset.UtcNow,
+            null,
+            introduction + "\n",
+            model,
+            intention,
+            stopwatch.ElapsedMilliseconds,
+            null,
+            null,
+            ExecutionSession: _executionSession?.CreateSummary(),
+            ContentBlockId: $"action-introduction:{requestId}"
+          );
         }
 
         var proposalRepeatArguments = CreateRepeatArguments(proposal);
@@ -9152,7 +9389,8 @@ public sealed class ChatStreamService
       structuredProposal,
       assistantMessage,
       false,
-      Usage: providerUsage
+      Usage: providerUsage,
+      ActionIntroduction: guidance.Objective.Trim()
     );
   }
 
@@ -11908,6 +12146,20 @@ public sealed class ChatStreamService
     return builder.ToString().TrimEnd();
   }
 
+  private static string CreateVisibleExecutionResponse(
+    string? specialistCompletion,
+    string hostResponse
+  )
+  {
+    return string.IsNullOrWhiteSpace(specialistCompletion)
+      ? hostResponse
+      : string.Concat(
+        specialistCompletion.Trim(),
+        "\n\n---\n",
+        hostResponse
+      );
+  }
+
   private static bool TryAcceptResponseDelta(
     GenerationProgress progress,
     string delta,
@@ -12197,6 +12449,8 @@ public sealed class ChatStreamService
     public bool PartialContextExhausted { get; set; }
 
     public string? SpecialistCompletion { get; set; }
+
+    public bool ActionIntroductionPublished { get; set; }
 
   }
 

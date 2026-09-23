@@ -145,7 +145,8 @@ public sealed record HarnessTurnRequest(
   bool IsRecoveryContinuation = false,
   IReadOnlyList<string>? ManagedContext = null,
   string RequestedEffort = Providers.ModelEffortLevels.Medium,
-  bool ModelSupportsReasoning = false
+  bool ModelSupportsReasoning = false,
+  int? ContextRecoveryInputBudget = null
 );
 
 public sealed record HarnessEvent

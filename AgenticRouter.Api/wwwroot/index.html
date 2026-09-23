@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
-  <link rel="stylesheet" href="/styles.css?v=20260916-harness-images">
-  <link rel="stylesheet" href="/bootstrap.css">
+  <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
+  <link rel="stylesheet" href="/styles.css?v=20260922-brand-header">
+  <link rel="stylesheet" href="/bootstrap.css?v=20260922-brand-header">
   <link rel="stylesheet" href="/user-input.css">
 </head>
 <body class="bootstrapping">
@@ -19,9 +20,8 @@
     aria-busy="true"
   >
     <section class="app-loader-card" aria-labelledby="app-loader-title">
-      <div class="app-loader-brand" aria-hidden="true">AR</div>
+      <img class="app-loader-brand" src="/img/brand/agentic-router-full.png" alt="Agentic Router" width="1890" height="545">
       <div>
-        <span class="eyebrow">Agentic Router</span>
         <h1 id="app-loader-title">Preparing your local workspace</h1>
         <p id="app-loader-detail" role="status" aria-live="polite">Starting the application…</p>
       </div>
@@ -54,11 +54,7 @@
   </div>
   <aside id="sidebar" class="sidebar" aria-label="Projects and conversations">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">AR</span>
-      <div class="sidebar-expanded-only">
-        <strong>Agentic Router</strong>
-        <span>Local model chat</span>
-      </div>
+      <img class="brand-mark" src="/img/brand/agentic-router-icon.png" alt="Agentic Router">
       <button
         id="toggle-sidebar"
         class="icon-button sidebar-collapse-button"
@@ -135,7 +131,13 @@
       <output id="git-quick-status" class="inline-status sidebar-expanded-only" role="status"></output>
     </section>
 
-    <span class="app-version sidebar-expanded-only">v0.12.0_alpha</span>
+    <details id="external-app-warnings" class="external-app-warnings sidebar-expanded-only" hidden>
+      <summary id="external-app-warnings-summary" aria-live="polite"></summary>
+      <p>Some external apps or configured devices are unavailable. Your settings have been preserved.</p>
+      <ul id="external-app-warnings-list" class="project-conversation-list" tabindex="0" aria-label="Availability warnings"></ul>
+    </details>
+
+    <span class="app-version sidebar-expanded-only">v0.13.0_alpha</span>
   </aside>
 
   <div
@@ -234,6 +236,17 @@
         <section id="setup-onboarding" class="setup-onboarding" data-setup-surface="onboarding" aria-live="polite" hidden></section>
       </div>
     </section>
+
+    <div
+      id="conversation-history-loader"
+      class="conversation-history-loader"
+      role="status"
+      aria-live="polite"
+      hidden
+    >
+      <span class="conversation-history-spinner" aria-hidden="true"></span>
+      <strong>Loading conversation…</strong>
+    </div>
 
     <button id="jump-latest" class="jump-latest" type="button" hidden>
       Jump to latest
@@ -638,11 +651,14 @@
               <label>
                 <span class="field-label-with-help">
                   Default GPU
-                  <button class="information-button compact-information-button" type="button" aria-label="Default-GPU information" data-tooltip="Auto model affinity uses the Default GPU saved when the benchmark starts. Explicit model GPU affinity takes precedence.">
+                  <button class="information-button compact-information-button" type="button" aria-label="Default-GPU information" data-tooltip="Choose the Default GPU for this benchmark only. Explicit model GPU affinity takes precedence. Settings are not changed.">
                     i
                   </button>
                 </span>
-                <input id="benchmark-default-gpu" type="text" value="Loading…" readonly aria-readonly="true">
+                <select id="benchmark-default-gpu" aria-describedby="benchmark-default-gpu-help">
+                  <option>Loading…</option>
+                </select>
+                <small id="benchmark-default-gpu-help">Starts with the Settings selection; changes apply only to this benchmark.</small>
               </label>
               <label>
                 <span class="field-label-with-help">
@@ -683,7 +699,7 @@
                   Ready to benchmark
                 </h3>
               </div>
-              <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled>
+              <button id="cancel-benchmark" class="secondary-button danger-button" type="button" disabled hidden>
                 Cancel run
               </button>
             </div>
@@ -1464,8 +1480,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.12.0."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.12.0."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.13.0."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.13.0."
                 >i</button>
               </div>
             </div>
@@ -1917,8 +1933,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.12.0."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.12.0. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.13.0."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.13.0. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
@@ -2477,7 +2493,7 @@
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
-  <script src="/i18n.js?v=20260916-harness-images"></script>
-  <script src="/app.js?v=20260916-harness-images"></script>
+  <script src="/i18n.js?v=20260922-sidebar-availability"></script>
+  <script src="/app.js?v=20260922-sidebar-availability"></script>
 </body>
 </html>

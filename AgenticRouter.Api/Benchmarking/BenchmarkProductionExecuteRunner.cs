@@ -1,11 +1,16 @@
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Supervision;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace AgenticRouter.Api.Benchmarking;
+
+public sealed class BenchmarkExecutionUnsettledException(Exception innerException)
+  : IOException("The prior benchmark execution has not confirmed shutdown. Its workspace was retained and the matrix was stopped.", innerException);
 
 public interface IBenchmarkProductionExecuteRunner
 {
@@ -34,18 +39,24 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
   private readonly IServer _server;
   private readonly IBenchmarkExecutionScopeRegistry _scopes;
   private readonly ILogger<BenchmarkProductionExecuteRunner> _logger;
+  private readonly LiveChatRuns _chatRuns;
+  private readonly IDurableSupervisionRunCoordinator _supervisionRuns;
 
   public BenchmarkProductionExecuteRunner(
     IHttpClientFactory httpClients,
     IServer server,
     IBenchmarkExecutionScopeRegistry scopes,
-    ILogger<BenchmarkProductionExecuteRunner> logger
+    ILogger<BenchmarkProductionExecuteRunner> logger,
+    LiveChatRuns chatRuns,
+    IDurableSupervisionRunCoordinator supervisionRuns
   )
   {
     _httpClients = httpClients;
     _server = server;
     _scopes = scopes;
     _logger = logger;
+    _chatRuns = chatRuns;
+    _supervisionRuns = supervisionRuns;
   }
 
   public async Task<BenchmarkHarnessEvidence> ExecuteAsync(
@@ -88,6 +99,7 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       BenchmarkActivityKindIds.HostValidation
     );
     var browserSessionId = $"benchmark-{workspace.Id}";
+    var chatRunId = Guid.NewGuid().ToString("N");
     var request = new ChatRequest(
       prompt,
       model,
@@ -99,7 +111,8 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       AutoModelHarness: false,
       ExecutionStrategy: "auto",
       SupervisionResumePolicy: "manual",
-      PreserveExactUserMessage: preserveExactUserMessage
+      PreserveExactUserMessage: preserveExactUserMessage,
+      ChatRunId: chatRunId
     );
     using var content = new StringContent(
       JsonSerializer.Serialize(request, JsonOptions),
@@ -111,17 +124,23 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     {
       Content = content
     };
-    using var response = await client.SendAsync(
-      requestMessage,
-      HttpCompletionOption.ResponseHeadersRead,
-      cancellationToken
-    );
-    response.EnsureSuccessStatusCode();
-    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-    using var reader = new StreamReader(stream);
     var collector = new ProductionEvidenceCollector(setupDuration, turnNumber, turnName, prompt);
+    var admissionRejected = false;
+    // Do not invent an in-flight run if cancellation happened before dispatch.
+    cancellationToken.ThrowIfCancellationRequested();
+    // Finish admission independently so a concurrent Stop has an exact run to cancel.
+    using var admissionTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     try
     {
+      using var response = await client.SendAsync(
+        requestMessage,
+        HttpCompletionOption.ResponseHeadersRead,
+        admissionTimeout.Token
+      );
+      admissionRejected = !response.IsSuccessStatusCode;
+      response.EnsureSuccessStatusCode();
+      await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+      using var reader = new StreamReader(stream);
       while (true)
       {
         cancellationToken.ThrowIfCancellationRequested();
@@ -171,7 +190,10 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
       collector.MarkCancelled();
-      response.Dispose();
+    }
+    finally
+    {
+      if (!admissionRejected) await SettleExecutionAsync(chatRunId, cancel: !collector.Completed);
     }
     collector.SetExecutionDuration(Elapsed(executionStartedAt));
     _logger.LogInformation(
@@ -182,23 +204,50 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     );
     if (!string.IsNullOrWhiteSpace(collector.ExecutionSessionId))
     {
+      using var reviewTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
       try
       {
         var review = await client.GetFromJsonAsync<ExecutionSessionReview>(
           $"/api/execution-sessions/{Uri.EscapeDataString(collector.ExecutionSessionId)}/review",
           JsonOptions,
-          cancellationToken.IsCancellationRequested
-            ? CancellationToken.None
-            : cancellationToken
+          reviewTimeout.Token
         );
         collector.Observe(review);
       }
-      catch (HttpRequestException exception)
+      catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or JsonException)
       {
         _logger.LogDebug(exception, "Benchmark production execution review was unavailable.");
       }
     }
     return collector.CreateEvidence();
+  }
+
+  private async Task SettleExecutionAsync(string chatRunId, bool cancel)
+  {
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    try
+    {
+      var run = _chatRuns.Find(chatRunId);
+      // An HTTP request can be cancelled before its admission response arrives.
+      while (run is null)
+      {
+        await Task.Delay(50, timeout.Token);
+        run = _chatRuns.Find(chatRunId);
+      }
+      if (cancel) run.Cancel();
+      await run.WaitForCompletionAsync(timeout.Token);
+      if (run.View.SupervisionRunId is { } supervisionId)
+      {
+        if (cancel)
+          await _supervisionRuns.CancelAsync(supervisionId, timeout.Token);
+        while (_supervisionRuns.TryGetView(supervisionId, out var view) && view.ExecutionActive)
+          await Task.Delay(50, timeout.Token);
+      }
+    }
+    catch (Exception exception) when (exception is OperationCanceledException or HttpRequestException)
+    {
+      throw new BenchmarkExecutionUnsettledException(exception);
+    }
   }
 
   private Uri ResolveLoopbackAddress()
@@ -379,6 +428,7 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     public string? ExecutionSessionId { get; private set; }
 
     public int RecoveryCount => _recoveries;
+    public bool Completed => _completed;
 
     public void SetExecutionDuration(long value) => _executionDuration = value;
 
@@ -416,11 +466,10 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       {
         _completed = true;
         _terminalReason = streamEvent.ExecutionSession?.CompletionStatus ?? "response.completed";
-        if (
-          _report.Length == 0
-          && !string.IsNullOrWhiteSpace(streamEvent.SpecialistCompletion)
-        )
+        if (!string.IsNullOrWhiteSpace(streamEvent.SpecialistCompletion))
         {
+          // Earlier response deltas can be action introductions, not the final report.
+          _report.Clear();
           _report.Append(streamEvent.SpecialistCompletion);
         }
         else if (_report.Length == 0 && !string.IsNullOrWhiteSpace(streamEvent.ResponseTail))

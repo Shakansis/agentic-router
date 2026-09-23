@@ -34,7 +34,8 @@ public sealed record CanonicalSpecialistTurn(
   IReadOnlyList<CanonicalToolCall> ToolCalls,
   CanonicalToolCompletion? Completion,
   int IgnoredToolCallCount,
-  string? Thinking = null
+  string? Thinking = null,
+  string? ActionIntroduction = null
 );
 
 public sealed record SpecialistToolingIdentity(
@@ -99,7 +100,10 @@ public sealed class SpecialistToolingProfileResolver : ISpecialistToolingProfile
 {
   private const string QwenCodePrompt =
     "SPECIALIST_TOOLING_PROFILE qwen-code-ollama-v1\n"
-    + "Use tools for actions and text only for the final user-facing response. "
+    + "Use tools for actions. On the first tool call, include one or two short user-facing sentences "
+    + "in the user's language that state how you understood the request and the immediate actions you will take. "
+    + "Do not claim results in that introduction and do not repeat it on later tool calls. "
+    + "Use text without a tool call for the final user-facing response. "
     + "Prefer the dedicated file, search, validation, and Git tools over run_process. "
     + "Treat the native tool definitions in the current request as a closed list: never call a tool "
     + "that is absent, and never call run_process when the Host says process execution is unavailable "
@@ -117,7 +121,10 @@ public sealed class SpecialistToolingProfileResolver : ISpecialistToolingProfile
   private const string GenericNativePrompt =
     "SPECIALIST_TOOLING_PROFILE generic-native-v1\n"
     + "Use a tool call only when an action materially advances the user's goal. Tool availability is "
-    + "not evidence that the user requested the tool. When the requested effects are complete, return "
+    + "not evidence that the user requested the tool. On the first tool call, include one or two short "
+    + "user-facing sentences in the user's language that state how you understood the request and the "
+    + "immediate actions you will take. Do not claim results and do not repeat the introduction. "
+    + "When the requested effects are complete, return "
     + "the final response without a tool call.";
 
   public SpecialistToolingProfile Resolve(
@@ -225,11 +232,15 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
     var completion = calls.Length == 0 && !string.IsNullOrWhiteSpace(response.Content)
       ? new CanonicalToolCompletion(response.Content.Trim(), response.Thinking)
       : null;
+    var actionIntroduction = calls.Length > 0 && !string.IsNullOrWhiteSpace(response.Content)
+      ? response.Content.Trim()
+      : null;
     return new CanonicalSpecialistTurn(
       calls,
       completion,
       response.ToolCalls.Count - calls.Length,
-      response.Thinking
+      response.Thinking,
+      actionIntroduction
     );
   }
 
@@ -239,7 +250,7 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
   {
     return new OllamaToolMessage(
       "assistant",
-      turn.Completion?.Content,
+      turn.Completion?.Content ?? turn.ActionIntroduction,
       turn.Thinking,
       turn.ToolCalls.Select(
         call => new OllamaToolCall(

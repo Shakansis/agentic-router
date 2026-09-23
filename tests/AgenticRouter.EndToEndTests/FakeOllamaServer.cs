@@ -3698,6 +3698,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         explanation = "Run the saved validation profile."
       };
     }
+    else if (
+      hasResult
+      && current.Contains("MISSING_ACTION_INTRODUCTION_V1", StringComparison.Ordinal)
+      && attempt == 2
+    )
+    {
+      plan = CreateLocalActionPlan(current);
+    }
     else if (hasResult)
     {
       plan = new
@@ -3904,8 +3912,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         ? toolName is null
           ? validationFailed
             ? "NO_LOCAL_ACTION_REQUIRED"
-            : "The requested local work is complete."
-          : string.Empty
+            : current.Contains("RELATORIO_PROJETO_VISIVEL_V1", StringComparison.Ordinal)
+              ? "Relatório do projeto: o arquivo analisado contém evidência de leitura sem alterações."
+              : "The requested local work is complete."
+          : current.Contains("MISSING_ACTION_INTRODUCTION_V1", StringComparison.Ordinal)
+            && !hasResult
+            ? string.Empty
+            : current.Contains("RELATORIO_PROJETO_VISIVEL_V1", StringComparison.Ordinal)
+            ? "Entendi que você quer uma análise do projeto. Vou ler o arquivo relevante e preparar um relatório curto."
+            : "I understand the request. I’ll inspect the relevant project state and perform the next required action."
         : JsonSerializer.Serialize(
           plan,
           CompactJsonOptions
@@ -5120,6 +5135,30 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     string current
   )
   {
+    if (current.Contains("MISSING_ACTION_INTRODUCTION_V1", StringComparison.Ordinal))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "report-source.txt"
+        },
+        explanation = "Return one tool call without its required introduction, then recover."
+      };
+    }
+    if (current.Contains("RELATORIO_PROJETO_VISIVEL_V1", StringComparison.Ordinal))
+    {
+      return new
+      {
+        tool = "read_file",
+        arguments = new
+        {
+          path = "report-source.txt"
+        },
+        explanation = "Read the requested project evidence before preparing the report."
+      };
+    }
     if (current.Contains(
       "file token budget create files",
       StringComparison.OrdinalIgnoreCase
@@ -7494,12 +7533,15 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           }
         }
       };
+    var visibleContent = tool is null
+      ? content
+      : "I understand the benchmark request. I’ll inspect the relevant evidence and perform the next required action.";
     if (stream)
     {
       await WriteStreamingToolResponseAsync(
         response,
         model,
-        content,
+        visibleContent,
         tool is null ? null : $"Using structured benchmark tool {tool}.",
         toolCalls,
         0,
@@ -7517,7 +7559,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           message = new
           {
             role = "assistant",
-            content,
+            content = visibleContent,
             thinking = tool is null ? null : $"Using structured benchmark tool {tool}.",
             tool_calls = toolCalls
           },

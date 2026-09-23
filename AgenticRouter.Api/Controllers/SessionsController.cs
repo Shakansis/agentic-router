@@ -1,3 +1,4 @@
+using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Sessions;
@@ -10,17 +11,20 @@ namespace AgenticRouter.Api.Controllers;
 [Route("api/sessions")]
 public sealed class SessionsController : ControllerBase
 {
+  private readonly LiveChatRuns _chatRuns;
   private readonly IPersistentSessionService _sessions;
   private readonly IConversationProductivityService _productivity;
   private readonly IMarkdownRenderer _markdown;
 
   public SessionsController(
     IPersistentSessionService sessions,
+    LiveChatRuns chatRuns,
     IConversationProductivityService productivity,
     IMarkdownRenderer markdown
   )
   {
     _sessions = sessions;
+    _chatRuns = chatRuns;
     _productivity = productivity;
     _markdown = markdown;
   }
@@ -131,6 +135,26 @@ public sealed class SessionsController : ControllerBase
         )
       )
     );
+  }
+
+  [HttpGet("{id}/history")]
+  public async Task<IActionResult> History(
+    string id,
+    [FromQuery] string workspaceId,
+    [FromQuery] int before,
+    CancellationToken cancellationToken
+  )
+  {
+    return await ExecuteAsync(async () =>
+    {
+      var session = await _sessions.OpenReadOnlyAsync(workspaceId, id, cancellationToken);
+      var end = Math.Clamp(before, 0, session.Messages.Count);
+      var start = HistoryPageStart(session.Messages, end);
+      return new ConversationHistoryPage(
+        start,
+        session.Messages.Skip(start).Take(end - start).Select(PresentMessage).ToArray()
+      );
+    });
   }
 
   [HttpPut("{id}/name")]
@@ -478,29 +502,56 @@ public sealed class SessionsController : ControllerBase
     ConversationSessionRecord session
   )
   {
+    var run = _chatRuns.FindConversation(session.Id)?.View;
+    if (run?.TurnId is not null)
+      session = session with
+      {
+        Messages = session.Messages.Select(message => message.TurnId == run.TurnId
+        ? message with { Timeline = null, Hidden = message.Role == "assistant" || message.Hidden }
+        : message).ToArray()
+      };
+    var offset = HistoryPageStart(session.Messages, session.Messages.Count);
     return session with
     {
+      ActiveChatRun = run,
+      PresentationOffset = offset,
+      LastContextUsage = session.Messages.SelectMany(message => message.Timeline ?? [])
+        .LastOrDefault(item => item.ContextUsage is not null)?.ContextUsage,
       Messages = session.Messages.Select(
-        message => message.Role == "assistant"
-          ? message with
-          {
-            RenderedHtml = _markdown.Render(
-              message.Content
-            ),
-            ContentBlocks = message.ContentBlocks?.Select(
-              block => block.Kind == "response"
-                ? block with
-                {
-                  RenderedHtml = _markdown.Render(
-                    block.Content
-                  )
-                }
-                : block
-            ).ToArray()
-          }
-          : message
+        (message, index) => index < offset
+          ? message with { Timeline = null, ContentBlocks = null, RenderedHtml = null }
+          : PresentMessage(message)
       ).ToArray()
     };
+  }
+
+  private ChatMessage PresentMessage(ChatMessage message)
+  {
+    return message.Role == "assistant"
+      ? message with
+      {
+        RenderedHtml = _markdown.Render(message.Content),
+        ContentBlocks = message.ContentBlocks?.Select(block => block.Kind == "response"
+          ? block with { RenderedHtml = _markdown.Render(block.Content) }
+          : block).ToArray()
+      }
+      : message;
+  }
+
+  private static int HistoryPageStart(IReadOnlyList<ChatMessage> messages, int end)
+  {
+    // A single long execution can contain tens of thousands of streamed events.
+    // Always include one message; subsequent pages retain original edit indices.
+    var start = end;
+    long events = 0;
+    while (start > 0 && end - start < 20)
+    {
+      var count = messages[start - 1].Timeline?.Count ?? 0;
+      if (start < end && count > 0 && events + count > 2_000) break;
+      events += count;
+      start--;
+    }
+    return start;
   }
 
   private object Error(

@@ -13,24 +13,24 @@ From the repository root:
 .\scripts\Publish-PortableRelease.ps1
 ```
 
-The default command creates `0.12.0_alpha` for `win-x64` under
+The default command creates `0.13.0_alpha` for `win-x64` under
 `artifacts\releases`:
 
 - an unpacked directory for inspection;
-- `AgenticRouter-0.12.0_alpha-win-x64.zip`;
+- `AgenticRouter-0.13.0_alpha-win-x64.zip`;
 - a SHA-256 checksum file beside the ZIP.
 
 To create the Linux x64 package locally:
 
 ```powershell
 .\scripts\Publish-PortableRelease.ps1 `
-  -VersionLabel 0.12.0_alpha `
+  -VersionLabel 0.13.0_alpha `
   -RuntimeIdentifier linux-x64 `
   -OutputDirectory artifacts\releases
 ```
 
 This creates an unpacked inspection directory,
-`AgenticRouter-0.12.0_alpha-linux-x64.tar.gz`, and its matching `.sha256` file.
+`AgenticRouter-0.13.0_alpha-linux-x64.tar.gz`, and its matching `.sha256` file.
 
 The first publish for a runtime identifier may download the corresponding .NET
 runtime packs from NuGet. Later offline publishes can use `-NoRestore` after the
@@ -40,7 +40,7 @@ Optional parameters:
 
 ```powershell
 .\scripts\Publish-PortableRelease.ps1 `
-  -VersionLabel 0.12.0_alpha `
+  -VersionLabel 0.13.0_alpha `
   -RuntimeIdentifier win-x64 `
   -OutputDirectory artifacts\releases
 ```
@@ -60,19 +60,17 @@ packages first, then publish their archives and checksums in one release:
 
 ```powershell
 .\scripts\Publish-GitHubRelease.ps1 `
-  -VersionLabel 0.12.0_alpha `
+  -VersionLabel 0.13.0_alpha `
   -RuntimeIdentifier win-x64,linux-x64 `
   -ArchivePath `
-    artifacts\releases\AgenticRouter-0.12.0_alpha-win-x64.zip, `
-    artifacts\releases\AgenticRouter-0.12.0_alpha-linux-x64.tar.gz `
+    artifacts\releases\AgenticRouter-0.13.0_alpha-win-x64.zip, `
+    artifacts\releases\AgenticRouter-0.13.0_alpha-linux-x64.tar.gz `
   -ChecksumPath `
-    artifacts\releases\AgenticRouter-0.12.0_alpha-win-x64.zip.sha256, `
-    artifacts\releases\AgenticRouter-0.12.0_alpha-linux-x64.tar.gz.sha256 `
-  -CreateRepository
+    artifacts\releases\AgenticRouter-0.13.0_alpha-win-x64.zip.sha256, `
+    artifacts\releases\AgenticRouter-0.13.0_alpha-linux-x64.tar.gz.sha256
 ```
 
-Omit `-CreateRepository` for later versions. The
-`Publish-PortableRelease.ps1 -PublishToGitHub` path remains available for an
+The `Publish-PortableRelease.ps1 -PublishToGitHub` path remains available for an
 intentionally single-platform release, but it must not be invoked twice with
 the same version tag.
 
@@ -83,6 +81,7 @@ The public repository is restricted by an allowlist to:
 
 - `README.md`;
 - `LICENSE.md`;
+- the reviewed brand image under `brand/`;
 - the twelve reviewed manual images under `screenshots/` (numbered `01`
   through `12`).
 
@@ -93,7 +92,7 @@ release or its immutable assets:
 
 ```powershell
 .\scripts\Publish-GitHubRelease.ps1 `
-  -VersionLabel 0.12.0_alpha `
+  -VersionLabel 0.13.0_alpha `
   -RuntimeIdentifier win-x64,linux-x64 `
   -DocumentationOnly
 ```

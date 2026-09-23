@@ -991,7 +991,9 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
               message = new
               {
                 role = "assistant",
-                content = (string?)null,
+                content = plannerRequest
+                  ? "I will create the requested file, then inspect the Host result."
+                  : null,
                 tool_calls = new[]
                 {
                   new

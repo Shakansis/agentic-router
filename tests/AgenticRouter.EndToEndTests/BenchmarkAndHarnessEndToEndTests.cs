@@ -1998,11 +1998,12 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   [TestMethod]
   [DoNotParallelize]
   [Timeout(90_000, CooperativeCancellation = true)]
-  public async Task BenchmarkFreezesDefaultGpuAndSelectedContextAtProviderBoundary()
+  public async Task BenchmarkFreezesSelectedGpuAndContextWithoutChangingSettings()
   {
     _environment.FakeOllama.Reset();
     var settings = await GetSettingsJsonAsync();
     var expectedGpu = settings["defaultGpu"]!.GetValue<string>();
+    var selectedGpu = expectedGpu == "auto" ? "ollama:0" : "auto";
     const int contextTokens = 40_960;
     var runId = Guid.NewGuid().ToString("N");
 
@@ -2028,7 +2029,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         TimeoutSeconds: 20,
         ModelExecutionPermissionGranted: true,
         ClientRunId: runId,
-        ContextTokens: contextTokens
+        ContextTokens: contextTokens,
+        DefaultGpu: selectedGpu
       )
     );
     Assert.AreEqual(HttpStatusCode.Accepted, response.StatusCode);
@@ -2051,7 +2053,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .FinalResult;
     Assert.IsNotNull(result);
     Assert.AreEqual(contextTokens, result.Configuration!.ContextTokens);
-    Assert.AreEqual(expectedGpu, result.Configuration.Gpu);
+    Assert.AreEqual(selectedGpu, result.Configuration.Gpu);
     Assert.AreEqual("benchmark", result.Configuration.ModelRole);
     Assert.AreEqual(contextTokens, result.Environment!.ConfiguredContextTokens);
     foreach (var test in result.Cells!.Single().Result!.Tests)
@@ -2059,6 +2061,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       var runtime = test.RawResult.RuntimeEvidence;
       Assert.IsNotNull(runtime, test.Run.TestId);
       Assert.AreEqual(contextTokens, runtime.RequestedContextTokens, test.Run.TestId);
+      Assert.AreEqual(selectedGpu, runtime.GpuSelection, test.Run.TestId);
       Assert.AreEqual(contextTokens, runtime.ActualContextTokens, test.Run.TestId);
       Assert.AreEqual("matched", runtime.ContextStatus, test.Run.TestId);
       Assert.IsNotNull(runtime.DeviceMemory, test.Run.TestId);
@@ -2073,6 +2076,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToArray();
     Assert.IsGreaterThan(0, providerRequests.Length);
     Assert.IsTrue(providerRequests.All(request => request.ContextTokens == contextTokens));
+    Assert.AreEqual(expectedGpu, (await GetSettingsJsonAsync())["defaultGpu"]!.GetValue<string>());
     var liveRuns = await _environment.HttpClient.GetFromJsonAsync<BenchmarkLiveRunView[]>(
       "api/benchmarks/suite-runs/live"
     );
@@ -3477,7 +3481,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Page.Request += (_, request) =>
     {
       if (request.Method == "POST" && request.Url.EndsWith("/api/benchmarks/suite-runs/live", StringComparison.Ordinal))
-        starts.Enqueue(request.Url);
+      {
+        var runId = JsonNode.Parse(request.PostData ?? "{}")?["clientRunId"]?.GetValue<string>();
+        if (runId is not null) starts.Enqueue(runId.Replace("-", "", StringComparison.Ordinal));
+      }
     };
     await Page.GotoAsync("/");
     await Page.Locator("#open-benchmarks").ClickAsync();
@@ -3493,7 +3500,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#run-benchmark").ClickAsync();
     await Expect(Page.Locator("#benchmark-status"))
       .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
-    var firstRunId = await Page.Locator("#benchmark-history").InputValueAsync();
+    var firstRunId = starts.Single();
+    await Expect(Page.Locator("#benchmark-history")).ToHaveValueAsync(firstRunId);
     await Page.Locator("#benchmark-tab-results").ClickAsync();
     await Page.Locator("#benchmark-result-detail .benchmark-test-detail[data-test-id='MANUAL-CUSTOM-001'] > summary").ClickAsync();
     var score = Page.Locator("[data-benchmark-review-score]");
@@ -3534,7 +3542,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-status"))
       .ToContainTextAsync("Benchmark completed", new() { Timeout = 30_000 });
     Assert.HasCount(2, starts);
-    var secondRunId = await Page.Locator("#benchmark-history").InputValueAsync();
+    var secondRunId = starts.Last();
+    await Expect(Page.Locator("#benchmark-history")).ToHaveValueAsync(secondRunId);
     Assert.AreNotEqual(firstRunId, secondRunId);
     var first = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
       $"api/benchmarks/suite-runs/{firstRunId}");
@@ -4217,15 +4226,24 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       "targetContextTokens"
     ]!.GetValue<int>();
     var defaultGpu = settings["defaultGpu"]!.GetValue<string>();
+    var selectedGpu = defaultGpu == "auto" ? "ollama:0" : "auto";
     await Page.GotoAsync("/");
     await Page.Locator("#open-benchmarks").ClickAsync();
+    await Expect(Page.Locator("#cancel-benchmark")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-context-tokens")).ToHaveValueAsync(
       defaultContext.ToString()
     );
     await Expect(Page.Locator("#benchmark-default-gpu")).ToHaveValueAsync(defaultGpu);
+    await Expect(Page.Locator("#benchmark-default-gpu")).ToBeEnabledAsync();
+    Assert.AreEqual(
+      await Page.Locator("#default-gpu option:checked").TextContentAsync(),
+      await Page.Locator("#benchmark-default-gpu option:checked").TextContentAsync()
+    );
+    await Page.Locator("#benchmark-default-gpu").SelectOptionAsync(selectedGpu);
+    await Expect(Page.Locator("#benchmark-selection-total")).ToContainTextAsync(selectedGpu);
     await Page.Locator("#benchmark-context-tokens").FillAsync("40960");
     await Expect(Page.Locator("#benchmark-selection-total")).ToContainTextAsync("40,960 ctx");
-    await Expect(Page.Locator("#benchmark-selection-total")).ToContainTextAsync(defaultGpu);
+    await Expect(Page.Locator("#benchmark-selection-total")).ToContainTextAsync(selectedGpu);
     await SelectBenchmarkModelsAsync("docs:latest");
     await Page.Locator("#benchmark-suite-list input[value=\"basic-crud\"]")
       .CheckAsync();
@@ -4240,6 +4258,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#benchmark-timeout").FillAsync("60");
     await Page.Locator("#run-benchmark").ClickAsync();
     await Expect(Page.Locator("#benchmark-context-tokens")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#benchmark-default-gpu")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#cancel-benchmark")).ToBeVisibleAsync();
 
     await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
     await Page.Locator("#benchmark-tab-results").ClickAsync();
@@ -4259,16 +4279,24 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-view")).ToBeVisibleAsync();
     await Expect(Page.Locator("#conversation-view")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#benchmark-default-gpu")).ToHaveValueAsync(selectedGpu);
     await Expect(Page.Locator("#cancel-benchmark")).ToBeEnabledAsync();
     await Page.Locator("#cancel-benchmark").ClickAsync();
     await Expect(Page.Locator("#benchmark-status"))
       .ToContainTextAsync("canceled", new() { Timeout = 15_000 });
+    await Expect(Page.Locator("#cancel-benchmark")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-live-dashboard")).ToBeVisibleAsync();
     await Expect(Page.Locator(".benchmark-live-test[data-test-id=\"FS-CREATE-001\"]"))
       .ToHaveAttributeAsync("open", "");
     await Expect(Page.Locator("#benchmark-ranking-note")).ToBeHiddenAsync();
     await Expect(Page.Locator("#benchmark-run-summary")).ToContainTextAsync("cancelled");
     await Expect(Page.Locator("#benchmark-history")).Not.ToHaveValueAsync("");
+    var result = await _environment.HttpClient.GetFromJsonAsync<BenchmarkSuiteRunResult>(
+      $"api/benchmarks/suite-runs/{await Page.Locator("#benchmark-history").InputValueAsync()}"
+    );
+    Assert.IsNotNull(result);
+    Assert.AreEqual(selectedGpu, result.Configuration?.Gpu);
+    await Expect(Page.Locator("#benchmark-default-gpu")).ToBeEnabledAsync();
     _environment.FakeOllama.RemoveLoadedModel("docs:latest");
   }
 
@@ -4647,6 +4675,86 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
       "Claude Code [Experimental]"
     );
+  }
+
+  [TestMethod]
+  [DataRow(HarnessIds.ClaudeCode, "qwen3.8:27b-gpu0", "claude deterministic turn", false)]
+  [DataRow(HarnessIds.OpenCode, "qwen3.8:27b-gpu0", "opencode deterministic turn", true)]
+  [DataRow(HarnessIds.QwenCode, "qwen3.8:27b-gpu0", "qwen code deterministic turn", false)]
+  [DataRow(HarnessIds.Codex, "alpha:latest", "create codex file", false)]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task CurrentActivityProjectsHostPhasesAcrossHarnesses(
+    string harness,
+    string model,
+    string prompt,
+    bool expectsVisibleReadStart
+  )
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync(model);
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+    await Page.EvaluateAsync(
+      """
+      () => {
+        window.observedCurrentActivities = [];
+        new MutationObserver(() => {
+          document.querySelectorAll('.assistant-current-activity').forEach(label => {
+            const value = label.textContent;
+            const observed = window.observedCurrentActivities;
+            if (value && observed.at(-1) !== value) observed.push(value);
+          });
+        }).observe(document.querySelector('#messages'), {
+          childList: true,
+          characterData: true,
+          subtree: true
+        });
+      }
+      """
+    );
+
+    await StartMessageAsync(prompt);
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".activity")).ToHaveAttributeAsync(
+      "data-terminal",
+      "true",
+      new() { Timeout = 20_000 }
+    );
+    var errors = await assistant.Locator(".assistant-answer.error").AllInnerTextsAsync();
+    Assert.IsEmpty(
+      errors,
+      $"{harness} ended before activity projection could be verified: {string.Join(" | ", errors)}"
+    );
+
+    var activities = await Page.EvaluateAsync<string[]>(
+      "window.observedCurrentActivities"
+    );
+    Assert.IsTrue(
+      activities.Any(value => value == "Understanding request…"),
+      $"{harness} did not expose the Host request phase. Observed: {string.Join(" | ", activities)}"
+    );
+    Assert.IsTrue(
+      activities.Any(value =>
+        value.StartsWith("Analyzing request", StringComparison.Ordinal)
+        || value.StartsWith("Analyzing findings", StringComparison.Ordinal)
+      ),
+      $"{harness} did not expose a Host analysis phase. Observed: {string.Join(" | ", activities)}"
+    );
+    Assert.IsTrue(
+      activities.Any(value => value.StartsWith("Writing response", StringComparison.Ordinal)),
+      $"{harness} did not expose the Host response phase. Observed: {string.Join(" | ", activities)}"
+    );
+    if (expectsVisibleReadStart)
+    {
+      Assert.IsTrue(
+        activities.Any(value => value.StartsWith("Reading", StringComparison.Ordinal)),
+        $"{harness} did not expose its normalized read action. Observed: {string.Join(" | ", activities)}"
+      );
+      Assert.IsTrue(
+        activities.Any(value => value.StartsWith("Analyzing findings", StringComparison.Ordinal)),
+        $"{harness} did not expose the completed read result. Observed: {string.Join(" | ", activities)}"
+      );
+    }
   }
 
   [TestMethod]
@@ -5852,6 +5960,38 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ToolDiscoveryIsTechnicalAndWorkActionsShowInputsAndReadableResults()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+    await SendMessageAsync("activity details qwen code");
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".assistant-work .work-action", new() { HasText = "ToolSearch" })).ToHaveCountAsync(0);
+    var discovery = assistant.Locator(".activity .work-action", new() { HasText = "ToolSearch" });
+    await Expect(discovery).ToHaveCountAsync(1);
+    await Expect(discovery).ToBeHiddenAsync();
+    await assistant.Locator(".activity > summary").ClickAsync();
+    await discovery.Locator("summary").ClickAsync();
+    await Expect(discovery.Locator(".work-action-preview")).ToContainTextAsync("select:mcp__agentic_router__search_text");
+    await Expect(discovery.Locator(".work-action-preview")).ToContainTextAsync("Loaded 1 tool(s)");
+    var search = assistant.Locator(".assistant-work .work-action", new() { HasText = "Search activity.txt" });
+    await search.Locator("summary").ClickAsync();
+    await Expect(search.Locator(".work-action-preview")).ToContainTextAsync("needle");
+    await Expect(search.Locator(".work-action-preview")).ToContainTextAsync("activity.txt:3: needle found");
+    var read = assistant.Locator(".assistant-work .work-action", new() { HasText = "Read activity.txt" });
+    await read.Locator("summary").ClickAsync();
+    await Expect(read.Locator(".work-action-preview")).ToContainTextAsync("Offset: 0 bytes · Read: 45 bytes · Size: 80 bytes");
+    StringAssert.Contains(await read.Locator(".work-action-preview").TextContentAsync(), "First line\nconst name = 'Durham';\nneedle found");
+    await Expect(read.Locator(".work-action-preview")).Not.ToContainTextAsync("\\u0027");
+    var literal = assistant.Locator(".assistant-work .work-action", new() { HasText = "Read literal.json" });
+    await literal.Locator("summary").ClickAsync();
+    await Expect(literal.Locator(".work-action-preview")).ToContainTextAsync("{\"message\":\"literal\\nJSON\"}");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task QwenCodeToolEventsAndExactUsageAreNormalized()
   {
     var events = await ExecuteHarnessStreamAsync(
@@ -6539,6 +6679,57 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeReusedSessionSubscribesToNewEventsWithoutReplayingOldTurns()
+  {
+    var path = Path.Combine(_environment.DataDirectory, "qwen-code-runtime", "fake-qwen-event-opens.jsonl");
+    if (File.Exists(path)) File.Delete(path);
+    for (var index = 0; index < 2; index++)
+    {
+      var events = await ExecuteHarnessStreamAsync(HarnessIds.QwenCode,
+        $"live subscription turn {index}", "browser-qwen-live-subscription", "qwen3.8:27b-gpu0");
+      Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+      Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    }
+    var opens = (await File.ReadAllLinesAsync(path)).Select(line => JsonNode.Parse(line)!).ToArray();
+    Assert.HasCount(2, opens);
+    Assert.AreEqual(opens[0]["sessionId"]!.GetValue<string>(), opens[1]["sessionId"]!.GetValue<string>());
+    Assert.IsTrue(opens.All(open => open["lastEventId"]!.GetValue<string>() == ""),
+      "A new prompt subscribes before submission; it must not request the previous turn's event backlog.");
+  }
+
+  [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenCodeReconnectsTheAcceptedPromptAndRejectsReplayGaps(bool gap)
+  {
+    var marker = Path.Combine(_environment.DataDirectory, "qwen-code-runtime", "reconnect-native-prompts.txt");
+    if (File.Exists(marker)) File.Delete(marker);
+    var events = await ExecuteHarnessStreamAsync(HarnessIds.QwenCode,
+      "reconnect native fixture" + (gap ? " gap" : ""), "browser-native-reconnect", "qwen3.8:27b-gpu0");
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.HasCount(1, await File.ReadAllLinesAsync(marker), "An accepted native prompt must never be posted again.");
+    if (gap)
+    {
+      var error = events.Single(item => item["type"]!.GetValue<string>() == "error");
+      Assert.AreEqual("qwen-code-reconnect-gap", error["error"]!["code"]!.GetValue<string>());
+    }
+    else
+    {
+      Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+      var answer = string.Concat(events.Where(item => item["type"]!.GetValue<string>() == "response.delta")
+        .Select(item => item["delta"]!.GetValue<string>()));
+      StringAssert.Contains(answer, "Before disconnect.");
+      StringAssert.Contains(answer, "After reconnect.");
+      Assert.HasCount(1, Regex.Matches(answer, "Before disconnect"));
+      Assert.IsTrue(events.Any(item => item["message"]?.GetValue<string>().Contains("stream recovered", StringComparison.Ordinal) == true));
+    }
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
   [Timeout(90_000, CooperativeCancellation = true)]
   public async Task QwenCodeEvictsLeastRecentlyUsedIdleSessionAndRehydratesItOnReturn()
   {
@@ -6597,6 +6788,54 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var text = prompt.RootElement.GetProperty("text").GetString()!;
     StringAssert.Contains(text, "Canonical Agentic Router conversation hydration:");
     StringAssert.Contains(text, "SESSION-ONE-CONTINUITY");
+  }
+
+  [TestMethod]
+  [DataRow("once")]
+  [DataRow("always")]
+  [DataRow("unrelated")]
+  [DataRow("wrong-id")]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task QwenMissingSessionRecoversOnlyBeforeSubmissionAndOnlyOnce(string mode)
+  {
+    await Page.GotoAsync("/");
+    var browserId = "qwen-expiry-contract";
+    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    var modeFile = Path.Combine(runtime, "fake-qwen-expiry-mode.txt");
+    var opensFile = Path.Combine(runtime, "fake-qwen-event-opens.jsonl");
+    var promptFile = Path.Combine(runtime, "fake-qwen-prompt.json");
+    if (File.Exists(modeFile)) File.Delete(modeFile);
+    var first = await ExecuteHarnessStreamAsync("qwen-code", "Inspect the existing workspace.", browserId, "qwen3.8:27b-gpu0");
+    Assert.IsFalse(first.Any(item => item["type"]!.GetValue<string>() == "error"));
+    var originalPrompt = await File.ReadAllTextAsync(promptFile);
+    var daemon = await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-process-id.txt"));
+    File.Delete(opensFile);
+    await File.WriteAllTextAsync(modeFile, mode);
+    try
+    {
+      var events = await ExecuteHarnessStreamAsync("qwen-code", "Continue inspecting.", browserId, "qwen3.8:27b-gpu0",
+        [new { role = "user", content = "EXPIRY-CONSTRAINT: preserve configuration." },
+         new { role = "assistant", content = "Prior Host conversation is retained." }]);
+      Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+      Assert.HasCount(mode is "once" or "always" ? 2 : 1, await File.ReadAllLinesAsync(opensFile));
+      Assert.AreEqual(daemon, await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-process-id.txt")));
+      if (mode == "once")
+      {
+        Assert.IsFalse(events.Any(item => item["type"]!.GetValue<string>() == "error"));
+        var prompt = JsonNode.Parse(await File.ReadAllTextAsync(promptFile))!;
+        Assert.AreNotEqual(JsonNode.Parse(originalPrompt)!["sessionId"]!.GetValue<string>(), prompt["sessionId"]!.GetValue<string>());
+        StringAssert.Contains(prompt["text"]!.GetValue<string>(), "Canonical Agentic Router conversation hydration:");
+        StringAssert.Contains(prompt["text"]!.GetValue<string>(), "EXPIRY-CONSTRAINT");
+        Assert.IsTrue(prompt["promptId"]!.GetValue<string>().EndsWith("########1", StringComparison.Ordinal));
+      }
+      else
+      {
+        Assert.HasCount(1, events.Where(item => item["type"]!.GetValue<string>() == "error"));
+        Assert.AreEqual(originalPrompt, await File.ReadAllTextAsync(promptFile), "A rejected event connection must not submit a prompt.");
+      }
+    }
+    finally { if (File.Exists(modeFile)) File.Delete(modeFile); }
   }
 
   [TestMethod]
@@ -6727,6 +6966,75 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       0,
       events.Where(item => item["type"]!.GetValue<string>() == "response.completed")
     );
+  }
+
+  [TestMethod]
+  [DataRow("qwen-code", "empty qwen code")]
+  [DataRow("qwen-code", "malformed qwen code")]
+  [DataRow("opencode", "malformed opencode")]
+  [DataRow("codex", "malformed codex event")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AcceptedHarnessPromptIsNotHydratedAgainAfterFailure(string harness, string failurePrompt)
+  {
+    await Page.GotoAsync("/");
+    var browserSessionId = Guid.NewGuid().ToString("N");
+    const string continuity = "UNIQUE-COMPACTED-CONTINUITY";
+    object[] history =
+    [
+      new { role = "assistant", content = "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1\n" + continuity },
+      new { role = "user", content = "Preserve the earlier work." },
+      new { role = "assistant", content = "The earlier work remains available." }
+    ];
+    async Task<JsonObject[]> SendAsync(string message) => ParseSseEvents(
+      await Page.EvaluateAsync<string>("""
+        async request => {
+          const response = await fetch('/api/chat/stream', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(request)
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return await response.text();
+        }
+        """, new
+      {
+        message,
+        history,
+        browserSessionId,
+        harness,
+        model = "qwen3.8:27b-gpu0",
+        interactionMode = "execute",
+        approvalPolicy = "auto",
+        executionStrategy = "direct"
+      })
+    );
+    async Task<(string Id, string Text)> ReadPromptAsync()
+    {
+      var runtime = Path.Combine(_environment.DataDirectory, harness + "-runtime");
+      var path = harness == "codex" ? "fake-app-server-turn-request.json"
+        : harness == "opencode" ? "fake-opencode-prompt.json" : "fake-qwen-prompt.json";
+      using var prompt = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(runtime, path)));
+      return (
+        prompt.RootElement.GetProperty(harness == "codex" ? "threadId" : "sessionId").GetString()!,
+        harness == "codex"
+          ? await File.ReadAllTextAsync(Path.Combine(runtime, "fake-app-server-turn-input.txt"))
+          : prompt.RootElement.GetProperty("text").GetString()!
+      );
+    }
+
+    var failed = await SendAsync(failurePrompt);
+    Assert.HasCount(1, failed.Where(IsTerminalStreamEvent));
+    Assert.IsTrue(failed.Any(item => item["type"]!.GetValue<string>() == "error"));
+    var first = await ReadPromptAsync();
+    StringAssert.Contains(first.Text, continuity);
+
+    var recovered = await SendAsync("Continue using the facts already received.");
+    Assert.HasCount(1, recovered.Where(IsTerminalStreamEvent));
+    Assert.IsFalse(recovered.Any(item => item["type"]!.GetValue<string>() == "error"));
+    var second = await ReadPromptAsync();
+    Assert.AreEqual(first.Id, second.Id, "This regression must reuse the native session that accepted the failed turn.");
+    Assert.DoesNotContain(continuity, second.Text);
+    Assert.DoesNotContain("Canonical Agentic Router conversation hydration:", second.Text);
+    StringAssert.Contains(second.Text, "Continue using the facts already received.");
   }
 
   [TestMethod]
@@ -6920,6 +7228,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     StringAssert.Contains(
       codexTurnInput,
       "When a granted tool is needed, call it immediately"
+    );
+    StringAssert.Contains(
+      codexTurnInput,
+      "Before the first action, briefly tell the user in their language"
     );
     StringAssert.Contains(codexTurnInput, "Current user request:\ncreate codex file");
     Assert.DoesNotContain("Protected pre-existing paths", codexTurnInput);

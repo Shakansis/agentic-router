@@ -610,6 +610,36 @@ async Task RunTurnAsync(
     await SendAsync(new { method = "turn/started", @params = new { threadId, turn = new { id = turnId, status = "inProgress" } } });
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "Inspecting — revisão " } });
 
+    if (input.Contains("reactive context fixture", StringComparison.Ordinal))
+    {
+      var recovering = input.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
+      await File.AppendAllTextAsync(Path.Combine(codexHome!, "fake-context-recovery.jsonl"),
+        JsonSerializer.Serialize(new { sessionId = threadId, recovering, text = input }) + "\n");
+      if (!recovering && input.Contains("with committed effect", StringComparison.Ordinal))
+        await File.AppendAllTextAsync(Path.Combine(cwd, "context-effect.txt"), "committed once\n");
+      if (recovering && input.Contains("always fail", StringComparison.Ordinal) && input.Contains("with committed effect", StringComparison.Ordinal))
+        await File.WriteAllTextAsync(Path.Combine(cwd, "recovery-effect.txt"), "observed before second failure");
+      var succeeded = recovering && !input.Contains("always fail", StringComparison.Ordinal);
+      if (succeeded)
+        await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = "context-answer", delta = "Recovered the existing objective." } });
+      await SendAsync(new
+      {
+        method = "turn/completed",
+        @params = new
+        {
+          threadId,
+          turn = new
+          {
+            id = turnId,
+            status = succeeded ? "completed" : "failed",
+            error = succeeded ? null : new { message = "Context exceeded", codexErrorInfo = new { type = "contextWindowExceeded" } }
+          }
+        }
+      });
+      turns.TryRemove(turnId, out _);
+      return;
+    }
+
     if (currentRequest.Contains("codex live context usage", StringComparison.OrdinalIgnoreCase))
     {
       await SendAsync(new

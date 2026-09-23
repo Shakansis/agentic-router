@@ -53,16 +53,19 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
   );
 
   private readonly string _dataDirectory;
+  private readonly ILogger<SupervisionCheckpointStore> _logger;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
   );
 
   public SupervisionCheckpointStore(
-    IWorkspaceProfileStore workspaceProfiles
+    IWorkspaceProfileStore workspaceProfiles,
+    ILogger<SupervisionCheckpointStore> logger
   )
   {
     _dataDirectory = workspaceProfiles.DataDirectory;
+    _logger = logger;
   }
 
   public async Task<SupervisionCheckpointLoadResult> ReadAllAsync(
@@ -156,6 +159,27 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
   }
 
   public async Task<DurableSupervisionCheckpoint> WriteAsync(
+    DurableSupervisionCheckpoint checkpoint,
+    long? expectedRevision,
+    CancellationToken cancellationToken
+  )
+  {
+    for (var attempt = 0; ; attempt++)
+    {
+      try { return await WriteCoreAsync(checkpoint, expectedRevision, cancellationToken); }
+      catch (SupervisionException exception) when (attempt < 3
+        && exception.Code is "supervision-checkpoint-failed" or "supervision-checkpoint-invalid"
+        && exception.InnerException is IOException)
+      {
+        // Retry storage only. Never rerun the model or the action whose effect was observed.
+        _logger.LogWarning(exception, "Checkpoint {RunId} revision {Revision}: retrying storage, attempt {Attempt}.",
+          checkpoint.RunId, checkpoint.Revision, attempt + 1);
+        await Task.Delay(TimeSpan.FromMilliseconds(250 * (1 << attempt)), cancellationToken);
+      }
+    }
+  }
+
+  private async Task<DurableSupervisionCheckpoint> WriteCoreAsync(
     DurableSupervisionCheckpoint checkpoint,
     long? expectedRevision,
     CancellationToken cancellationToken

@@ -259,7 +259,8 @@ public sealed class BenchmarksController : ControllerBase
         BenchmarkMode: BenchmarkModeIds.Manual,
         CustomPrompt: result.CustomPrompt,
         RunName: result.RunName,
-        RerunOfRunId: result.RunId
+        RerunOfRunId: result.RunId,
+        DefaultGpu: result.Configuration?.Gpu
       );
       return Accepted(await _liveRuns.StartAsync(request, cancellationToken));
     }

@@ -22,13 +22,21 @@ public sealed record ExecutionSpecialistTurnInvocation(
   IExecutionActionJournal? ActionJournal = null,
   string RequestedEffort = ModelEffortLevels.Medium,
   Action<ExecutionPreflightMeasurement>? CapturePreflight = null,
-  string? Gpu = null
+  string? Gpu = null,
+  ExecutionContextRecoveryBudget? ContextRecoveryBudget = null
 )
 {
   public static ExecutionSpecialistTurnInvocation Direct { get; } = new(
     null,
     ExecutionContextRole.Direct
   );
+}
+
+public sealed class ExecutionContextRecoveryBudget
+{
+  private int _consumed;
+  public bool Consumed => Volatile.Read(ref _consumed) != 0;
+  public bool TryConsume() => Interlocked.CompareExchange(ref _consumed, 1, 0) == 0;
 }
 
 public sealed record ExecutionPreflightMeasurement(

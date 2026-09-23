@@ -144,6 +144,12 @@ app.MapPost("/session", async (HttpContext context) =>
       statusCode: StatusCodes.Status503ServiceUnavailable
     );
   }
+  var failedRecoverySetup = Path.Combine(runtime, "fail-context-setup");
+  if (File.Exists(failedRecoverySetup))
+  {
+    File.Delete(failedRecoverySetup);
+    return Results.Json(new { code = "fixture_setup_failed" }, statusCode: 500);
+  }
   var settingsPath = Path.Combine(runtime, "settings.json");
   using var settings = JsonDocument.Parse(await File.ReadAllTextAsync(settingsPath));
   var selectedAuthType = settings.RootElement
@@ -324,6 +330,22 @@ app.MapGet("/session/{sessionId}/context", (string sessionId, HttpContext contex
 
 app.MapGet("/session/{sessionId}/events", async (string sessionId, HttpContext context) =>
 {
+  await File.AppendAllTextAsync(Path.Combine(Environment.CurrentDirectory, "fake-qwen-event-opens.jsonl"),
+    JsonSerializer.Serialize(new { sessionId, lastEventId = context.Request.Headers["Last-Event-ID"].ToString() }) + "\n");
+  var expiryFixture = Path.Combine(Environment.CurrentDirectory, "fake-qwen-expiry-mode.txt");
+  if (File.Exists(expiryFixture))
+  {
+    var mode = await File.ReadAllTextAsync(expiryFixture);
+    if (mode != "always") File.Delete(expiryFixture);
+    if (mode is "once" or "always") sessions.TryRemove(sessionId, out _);
+    context.Response.StatusCode = StatusCodes.Status404NotFound;
+    await context.Response.WriteAsJsonAsync(new
+    {
+      code = mode == "unrelated" ? "route_not_found" : "session_not_found",
+      sessionId = mode == "wrong-id" ? "different-session" : sessionId
+    });
+    return;
+  }
   if (!sessions.TryGetValue(sessionId, out var session))
   {
     context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -337,7 +359,17 @@ app.MapGet("/session/{sessionId}/events", async (string sessionId, HttpContext c
   }
   var subscriberId = Guid.NewGuid();
   var channel = Channel.CreateUnbounded<string>();
-  session.Subscribers[subscriberId] = channel;
+  lock (session.Replay)
+  {
+    session.Subscribers[subscriberId] = channel;
+    if (long.TryParse(context.Request.Headers["Last-Event-ID"], out var cursor))
+    {
+      if (session.ReplayGap)
+        channel.Writer.TryWrite(JsonSerializer.Serialize(new { type = "state_resync_required", data = new { reason = "ring_evicted" } }));
+      else
+        foreach (var frame in session.Replay.Where(frame => frame.Id >= cursor)) channel.Writer.TryWrite(frame.Payload);
+    }
+  }
   context.Response.ContentType = "text/event-stream";
   try
   {
@@ -441,6 +473,10 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
     );
   }
   var promptId = $"{sessionId}########{Interlocked.Increment(ref session.PromptNumber)}";
+  if (text.Contains("AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1", StringComparison.Ordinal))
+  {
+    session.ContinuityHydrations++;
+  }
   session.ActivePromptId = promptId;
   await WriteMarkerAsync("fake-qwen-prompt.json", new
   {
@@ -466,6 +502,84 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   await context.Response.WriteAsJsonAsync(new { promptId, lastEventId = session.EventId });
   await context.Response.CompleteAsync();
 
+  if (text.Contains("reconnect native fixture", StringComparison.Ordinal))
+  {
+    await File.AppendAllTextAsync(Path.Combine(runtime, "reconnect-native-prompts.txt"), promptId + "\n");
+    await EmitSessionUpdateAsync(session, new { sessionUpdate = "agent_message_chunk", content = new { type = "text", text = "Before disconnect. " } });
+    session.ReplayGap = text.Contains("gap", StringComparison.Ordinal);
+    var terminal = JsonSerializer.Serialize(new { type = "client_evicted", data = new { reason = "queue_bytes_overflow" } });
+    foreach (var subscriber in session.Subscribers.Values) subscriber.Writer.TryWrite(terminal);
+    await Task.Delay(100);
+    await CompleteAsync(session, promptId, "After reconnect.", includeReadTool: false);
+    return Results.Empty;
+  }
+
+  if (text.Contains("sticky status fixture", StringComparison.Ordinal))
+  {
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "agent_thought_chunk",
+      content = new { type = "text", text = "Preserved thinking content for the sticky status check." }
+    });
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "agent_message_chunk",
+      content = new { type = "text", text = string.Join("\n\n", Enumerable.Range(1, 90).Select(index => $"Progress observation {index}: inspected the existing workspace.")) }
+    });
+    var release = Path.Combine(runtime, "sticky-status-release.txt");
+    var deadline = DateTime.UtcNow.AddSeconds(30);
+    while (!File.Exists(release) && DateTime.UtcNow < deadline) await Task.Delay(50);
+    var outcome = File.Exists(release) ? await File.ReadAllTextAsync(release) : "failed";
+    if (outcome == "completed") await CompleteAsync(session, promptId, "Final verified fixture response.", includeReadTool: false);
+    else if (outcome != "cancelled")
+      await EmitAsync(session, "turn_error", new { sessionId, promptId, message = "Sticky status fixture failure." });
+    return Results.Empty;
+  }
+
+  if (text.Contains("reactive context fixture", StringComparison.Ordinal))
+  {
+    var recovering = text.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
+    await File.AppendAllTextAsync(Path.Combine(runtime, "fake-context-recovery.jsonl"),
+      JsonSerializer.Serialize(new { sessionId, recovering, text }) + "\n");
+    if (!recovering && text.Contains("setup failure", StringComparison.Ordinal))
+      await File.WriteAllTextAsync(Path.Combine(runtime, "fail-context-setup"), "once");
+    if (!recovering && text.Contains("with committed effect", StringComparison.Ordinal))
+      await File.AppendAllTextAsync(Path.Combine(session.Cwd, "context-effect.txt"), "committed once\n");
+    if (recovering && text.Contains("always fail", StringComparison.Ordinal) && text.Contains("with committed effect", StringComparison.Ordinal))
+      await File.WriteAllTextAsync(Path.Combine(session.Cwd, "recovery-effect.txt"), "observed before second failure");
+    if (recovering && text.Contains("pause recovery", StringComparison.Ordinal))
+      return Results.Empty;
+    if (recovering && text.Contains("recovery transport failure", StringComparison.Ordinal))
+    {
+      await File.WriteAllTextAsync(Path.Combine(session.Cwd, "recovery-effect.txt"), "observed before transport failure");
+      await BroadcastRawAsync(session, "{bad-json");
+      return Results.Empty;
+    }
+    if (recovering && !text.Contains("always fail", StringComparison.Ordinal))
+      await CompleteAsync(session, promptId, "Recovered the existing objective.", includeReadTool: false);
+    else
+    {
+      if (text.Contains("unresolved tool", StringComparison.Ordinal))
+        await EmitSessionUpdateAsync(session, new
+        {
+          sessionUpdate = "tool_call",
+          toolCallId = "pending-context-tool",
+          title = "Read pending.txt",
+          kind = "read",
+          status = "in_progress",
+          rawInput = new { path = "pending.txt" }
+        });
+      await EmitAsync(session, "turn_error", new
+      {
+        sessionId,
+        promptId,
+        message = (text.Contains("unrelated error", StringComparison.Ordinal) ? "Unrelated diagnostic: " : "")
+          + "Context is too large to send safely after automatic compression. Estimated prompt tokens: 171119; hard limit: 108072; compression status: COMPRESSION_FAILED_EMPTY_SUMMARY."
+      });
+    }
+    return Results.Empty;
+  }
+
   if (text.Contains("malformed qwen code", StringComparison.Ordinal))
   {
     await BroadcastRawAsync(session, "{bad-json");
@@ -475,17 +589,56 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   {
     Environment.Exit(23);
   }
+  if (text.Contains("activity details qwen code", StringComparison.Ordinal))
+  {
+    async Task ActivityAsync(string id, string tool, string title, object input, object output)
+    {
+      await EmitSessionUpdateAsync(session, new
+      {
+        sessionUpdate = "tool_call",
+        toolCallId = id,
+        title,
+        status = "in_progress",
+        rawInput = input,
+        _meta = new { toolName = tool }
+      });
+      await EmitSessionUpdateAsync(session, new
+      {
+        sessionUpdate = "tool_call_update",
+        toolCallId = id,
+        title,
+        status = "completed",
+        rawOutput = output,
+        _meta = new { toolName = tool }
+      });
+    }
+    await ActivityAsync("discovery-details", "tool_search", "ToolSearch",
+      new { query = "select:mcp__agentic_router__search_text" }, "Loaded 1 tool(s)");
+    await ActivityAsync("search-details", "search_text", "Search activity.txt",
+      new { path = "activity.txt", query = "needle" }, "activity.txt:3: needle found");
+    await ActivityAsync("read-details", "read_file", "Read activity.txt",
+      new { path = "activity.txt", offsetBytes = 0, lengthBytes = 45 },
+      new { offsetBytes = 0, lengthBytes = 45, sizeBytes = 80, content = "First line\nconst name = 'Durham';\nneedle found" });
+    await ActivityAsync("literal-details", "read_file", "Read literal.json",
+      new { path = "literal.json" }, "{\"message\":\"literal\\nJSON\"}");
+    await CompleteAsync(session, promptId, "Activity details complete.", includeReadTool: false);
+    return Results.Empty;
+  }
   if (text.Contains("SUPERVISION_", StringComparison.Ordinal))
   {
     const string criterion = "qwen-supervised.txt contains the exact text visible Qwen activity";
     if (
-      text.Contains("qwen supervision tool loop recovery", StringComparison.OrdinalIgnoreCase)
+      (text.Contains("qwen supervision tool loop recovery", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("qwen supervision empty response recovery", StringComparison.OrdinalIgnoreCase))
       && text.Contains("SUPERVISION_HARNESS_RECOVERY_V1", StringComparison.Ordinal)
     )
     {
       await WriteMarkerAsync("fake-qwen-supervision-tool-loop-recovery.json", new
       {
-        includesPersistedContinuity = text.Contains(
+        includesPersistedContinuity = session.ContinuityHydrations > 0,
+        continuityHydrations = session.ContinuityHydrations,
+        promptNumber = session.PromptNumber,
+        promptContainsPersistedContinuity = text.Contains(
           "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1",
           StringComparison.Ordinal
         ),
@@ -510,6 +663,19 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
         }),
         includeReadTool: false
       );
+      return Results.Empty;
+    }
+    if (
+      text.Contains("qwen supervision empty response recovery", StringComparison.OrdinalIgnoreCase)
+      && text.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)
+    )
+    {
+      await EmitAsync(session, "turn_complete", new
+      {
+        sessionId = session.Id,
+        promptId,
+        stopReason = "end_turn"
+      });
       return Results.Empty;
     }
     if (
@@ -1051,6 +1217,7 @@ app.MapPost("/session/{sessionId}/cancel", async (string sessionId, HttpContext 
   {
     return InvalidClient(session, context);
   }
+  await WriteMarkerAsync("fake-context-cancelled.json", new { sessionId });
   await EmitAsync(session, "turn_complete", new
   {
     sessionId,
@@ -1363,7 +1530,14 @@ Task EmitSessionUpdateAsync(FakeSession session, object update)
 async Task EmitAsync(FakeSession session, string type, object data)
 {
   var id = Interlocked.Increment(ref session.EventId);
-  await BroadcastRawAsync(session, JsonSerializer.Serialize(new { id, v = 1, type, data }));
+  var payload = JsonSerializer.Serialize(new { id, v = 1, type, data });
+  lock (session.Replay)
+  {
+    session.Replay.Add((id, payload));
+    if (session.Replay.Count > 8_000) session.Replay.RemoveAt(0);
+    foreach (var subscriber in session.Subscribers.Values) subscriber.Writer.TryWrite(payload);
+  }
+  await Task.CompletedTask;
 }
 
 async Task BroadcastRawAsync(FakeSession session, string payload)
@@ -1565,9 +1739,15 @@ sealed class FakeSession
 
   public int PromptNumber;
 
+  public int ContinuityHydrations;
+
   public int PromptSubmissionNumber;
 
   public long EventId;
+
+  public bool ReplayGap;
+
+  public List<(long Id, string Payload)> Replay { get; } = [];
 
   public ConcurrentDictionary<string, byte> SettledSteerIds { get; } = new(StringComparer.Ordinal);
 

@@ -42,7 +42,7 @@ function Invoke-GitHubCli {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.12.0_alpha.'
+  throw 'VersionLabel must use the form 0.13.0_alpha.'
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'Repository must use the OWNER/NAME form.'
@@ -149,6 +149,7 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $publicFiles = @{
   'LICENSE.md' = Join-Path $repositoryRoot 'LICENSE.md'
   'README.md' = Join-Path $repositoryRoot 'distribution\README.md'
+  'brand\agentic-router-full.png' = Join-Path $repositoryRoot 'distribution\brand\agentic-router-full.png'
 }
 foreach ($screenshotName in @(
   '01-first-run-setup.png',
@@ -242,7 +243,7 @@ try {
   Assert-NativeSuccess -Operation 'Public repository Git author configuration'
   & git -C $temporaryRoot config user.email "$authenticatedUser@users.noreply.github.com"
   Assert-NativeSuccess -Operation 'Public repository Git email configuration'
-  & git -C $temporaryRoot add -A -- 'LICENSE.md' 'README.md' 'screenshots'
+  & git -C $temporaryRoot add -A -- 'LICENSE.md' 'README.md' 'brand' 'screenshots'
   Assert-NativeSuccess -Operation 'Public repository staging'
   & git -C $temporaryRoot diff --cached --quiet
   $hasPublicChanges = $LASTEXITCODE -eq 1
@@ -269,45 +270,19 @@ try {
   $windowsRelease = $RuntimeIdentifier -contains 'win-x64'
   $linuxRelease = $RuntimeIdentifier -contains 'linux-x64'
   $releaseNotes = if ($windowsRelease -and $linuxRelease) {
-    @"
-# Agentic Router $VersionLabel
-
-Portable Windows x64 and Linux x64 release.
-
-## Install
-
-- Windows x64: download the `win-x64.zip` archive, verify it with the matching
-  `.sha256` file, extract it, and run `AgenticRouter.exe`.
-- Linux x64: download the `linux-x64.tar.gz` archive, verify it with the matching
-  `.sha256` file, extract it, and run `./run-agentic-router.sh`. Apply
-  `chmod +x AgenticRouter run-agentic-router.sh` if required.
-
-## What's new
-
-- Use explicit CUDA, ROCm, or opt-in combined Vulkan selections through isolated
-  Agentic Router-owned Ollama servers while Auto and custom endpoints remain
-  user-managed.
-- Observe mixed-vendor GPU telemetry without confusing configured affinity with
-  the backend and device reported by the active Ollama runner.
-- Compare Model × Harness pairs with the production-path Real Life Problem suite,
-  separate sequential repetitions, and structured Benchmark Lab reports.
-- Resume Host-mediated user questions and compacted session context across the
-  strengthened shared Chat, supervision, and cross-harness execution paths.
-
-## Validation
-
-- Complete deterministic Playwright/API gate: 461 passed, zero failed, and zero
-  skipped on the final full run.
-- Windows x64 portable Production smoke: HTTP 200 with file version 0.12.0.0.
-- Both archives passed package allowlist and structure validation. The Linux x64
-  WSL runtime smoke was unavailable because the local WSL service did not
-  respond; physical Linux was not tested.
-
-Ollama and models are installed separately. Linux AMD setup offers an explicit
-Vulkan or ROCm profile and never installs GPU drivers automatically. Linux ARM64,
-Windows ARM64, and macOS are not included in this release. This is alpha software
-and is not recommended for unattended or production use.
-"@
+    $notesSource = Join-Path $repositoryRoot 'RELEASE_NOTES.md'
+    $topSection = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in [System.IO.File]::ReadAllLines($notesSource)) {
+      if ($topSection.Count -gt 0 -and $line.StartsWith('# Agentic Router v')) {
+        break
+      }
+      $topSection.Add($line)
+    }
+    $expectedHeading = "# Agentic Router v$($VersionLabel.Replace('_', ' '))"
+    if ($topSection.Count -eq 0 -or $topSection[0] -ne $expectedHeading) {
+      throw "The first release notes heading must be '$expectedHeading'."
+    }
+    ($topSection -join [Environment]::NewLine).Trim()
   }
   elseif ($linuxRelease) {
     @"

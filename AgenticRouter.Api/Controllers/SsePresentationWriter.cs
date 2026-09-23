@@ -207,10 +207,12 @@ internal sealed class SsePresentationWriter : IAsyncDisposable
   {
     private readonly ChatStreamEvent _first;
     private readonly StringBuilder _content;
+    private long? _sequence;
 
     public PendingPresentationEvent(ChatStreamEvent streamEvent)
     {
       _first = streamEvent;
+      _sequence = streamEvent.ChatRunSequence;
       _content = new StringBuilder(
         streamEvent.Type == "reasoning.delta"
           ? streamEvent.ReasoningDelta
@@ -230,6 +232,7 @@ internal sealed class SsePresentationWriter : IAsyncDisposable
 
     public void Append(ChatStreamEvent streamEvent)
     {
+      _sequence = streamEvent.ChatRunSequence;
       _content.Append(
         streamEvent.Type == "reasoning.delta"
           ? streamEvent.ReasoningDelta
@@ -240,8 +243,8 @@ internal sealed class SsePresentationWriter : IAsyncDisposable
     public ChatStreamEvent Build()
     {
       return _first.Type == "reasoning.delta"
-        ? _first with { ReasoningDelta = _content.ToString() }
-        : _first with { Delta = _content.ToString() };
+        ? _first with { ReasoningDelta = _content.ToString(), ChatRunSequence = _sequence }
+        : _first with { Delta = _content.ToString(), ChatRunSequence = _sequence };
     }
   }
 }

@@ -1,3 +1,4 @@
+using AgenticRouter.Api.Chat;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
@@ -120,11 +121,13 @@ public interface IPersistentSessionService
 
 public sealed class PersistentSessionService : IPersistentSessionService
 {
+  private readonly LiveChatRuns _chatRuns;
   private readonly IPersistentSessionStore _store;
   private readonly IWorkspaceProfileService _profiles;
   private readonly ISettingsStore _settings;
   private readonly IExecutionSessionStore _executionSessions;
   private readonly IDurableSupervisionRunCoordinator _supervisionRuns;
+  private readonly ILogger<PersistentSessionService> _logger;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
@@ -132,17 +135,21 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
   public PersistentSessionService(
     IPersistentSessionStore store,
+    LiveChatRuns chatRuns,
     IWorkspaceProfileService profiles,
     ISettingsStore settings,
     IExecutionSessionStore executionSessions,
-    IDurableSupervisionRunCoordinator supervisionRuns
+    IDurableSupervisionRunCoordinator supervisionRuns,
+    ILogger<PersistentSessionService> logger
   )
   {
     _store = store;
+    _chatRuns = chatRuns;
     _profiles = profiles;
     _settings = settings;
     _executionSessions = executionSessions;
     _supervisionRuns = supervisionRuns;
+    _logger = logger;
   }
 
   public async Task RecoverInterruptedAsync(
@@ -160,7 +167,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
     foreach (var workspace in workspaces.Profiles)
     {
-      var sessions = await _store.ReadAllAsync(
+      var sessions = await _store.ReadAllMetadataAsync(
         workspace.Id,
         cancellationToken
       );
@@ -170,21 +177,38 @@ public sealed class PersistentSessionService : IPersistentSessionService
         var interrupted = session.State == "running";
         if (
           !interrupted
-          && session.StorageBytes < limits.SessionCompactionThresholdBytes
+          && session.RecordBytes < limits.SessionCompactionThresholdBytes
         )
         {
           continue;
         }
 
+        ConversationSessionRecord? fullSession;
+        try
+        {
+          fullSession = await _store.ReadAsync(
+            workspace.Id,
+            session.Id,
+            cancellationToken
+          );
+        }
+        catch (WorkspaceProfileException exception) when (exception.Code == "session-file-invalid")
+        {
+          _logger.LogWarning(exception,
+            "Skipping invalid persisted session {SessionId} in workspace {WorkspaceId} during startup recovery.",
+            session.Id, workspace.Id);
+          continue;
+        }
+        if (fullSession is null) continue;
         await _store.WriteAsync(
           interrupted
-            ? session with
+            ? fullSession with
             {
               State = "interrupted",
               Interrupted = true,
               UpdatedAt = DateTimeOffset.UtcNow
             }
-            : session,
+            : fullSession,
           limits.SessionCompactionThresholdBytes,
           limits.SessionCompactionTargetBytes,
           cancellationToken
@@ -200,7 +224,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     var active = await RequireActiveAsync(
       cancellationToken
     );
-    var sessions = await _store.ReadAllAsync(
+    var sessions = await _store.ReadAllMetadataAsync(
       active.Id,
       cancellationToken
     );
@@ -406,6 +430,15 @@ public sealed class PersistentSessionService : IPersistentSessionService
         };
       }
 
+      if (request.PreservedMessageCount < 0 || request.PreservedMessageCount > existing.Messages.Count)
+      {
+        throw new WorkspaceProfileException(
+          "session-edit-conflict", "session-persistence",
+          "The saved conversation changed before the snapshot could be applied.", true
+        );
+      }
+      var snapshotMessages = existing.Messages.Take(request.PreservedMessageCount)
+        .Concat(request.Messages).ToArray();
       var saved = await _store.WriteAsync(
         existing with
         {
@@ -420,7 +453,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
           SelectedHarness = request.Harness,
           LastExecutionStrategy = request.ExecutionStrategy,
           Messages = SanitizeMessages(
-            request.Messages,
+            snapshotMessages,
             existing.Messages
           )
         },
@@ -1281,7 +1314,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
       cancellationToken
     );
 
-    if (session.State == "running")
+    if (session.State == "running" && _chatRuns.FindConversation(sessionId) is null)
     {
       await MarkTerminalAsync(
         sessionId,
@@ -1537,7 +1570,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
     return System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
       session with
       {
-        ExecutionRollbacks = []
+        ExecutionRollbacks = [],
+        TranscriptId = null,
+        ContextMessages = null
       },
       new System.Text.Json.JsonSerializerOptions(
         System.Text.Json.JsonSerializerDefaults.Web
@@ -1861,7 +1896,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
   }
 
   private static ConversationSessionSummary ToSummary(
-    ConversationSessionRecord session
+    ConversationSessionMetadata session
   )
   {
     return new ConversationSessionSummary(
@@ -1876,7 +1911,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
       session.StorageBytes,
       session.Pinned,
       session.PinnedAt,
-      session.SessionSummary is not null,
+      session.HasSessionSummary,
       session.PreferredModelProfileId,
       session.SelectedModel,
       session.SelectedHarness,
@@ -1949,7 +1984,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
   private static WorkspaceHistoryUsage CreateUsage(
     WorkspaceProfileData workspace,
-    IReadOnlyList<ConversationSessionRecord> sessions
+    IReadOnlyList<ConversationSessionMetadata> sessions
   )
   {
     return new WorkspaceHistoryUsage(

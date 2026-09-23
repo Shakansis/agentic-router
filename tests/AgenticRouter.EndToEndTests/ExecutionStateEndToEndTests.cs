@@ -19,6 +19,306 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   [TestMethod]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DirectApprovalRetainsItsAuthorityAfterBrowserReload()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true });
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("ask");
+    await StartMessageAsync("execute create file");
+    await Expect(Page.Locator(".action-approval")).ToBeVisibleAsync();
+    await Page.ReloadAsync();
+    var approve = Page.Locator(".action-approval").GetByRole(AriaRole.Button, new() { Name = "Approve", Exact = true });
+    await Expect(approve).ToBeEnabledAsync();
+    await approve.ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity")).ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
+  }
+
+  [TestMethod]
+  [DataRow(false, "completed", true)]
+  [DataRow(true, "completed", true)]
+  [DataRow(false, "cancelled", true)]
+  [DataRow(false, "completed", false)]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task ActiveChatSurvivesBrowserLossAndReattachesWithoutResubmitting(bool closePage, string outcome, bool historyEnabled)
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = historyEnabled });
+    history.EnsureSuccessStatusCode();
+    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    var release = Path.Combine(runtime, "sticky-status-release.txt");
+    if (File.Exists(release)) File.Delete(release);
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+    await StartMessageAsync("sticky status fixture");
+    await Expect(Page.Locator(".assistant-work")).ToContainTextAsync("Progress observation 90");
+    var savedRun = await Page.EvaluateAsync<string>("JSON.parse(localStorage.getItem('agentic-router.live-chat-run')).id");
+    using var duplicate = await _environment.HttpClient.PostAsJsonAsync("api/chat/stream", new
+    {
+      chatRunId = savedRun,
+      message = "Must not be submitted twice",
+      model = "qwen3.8:27b-gpu0"
+    });
+    Assert.AreEqual(HttpStatusCode.Conflict, duplicate.StatusCode);
+    var promptBefore = await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"));
+    var page = Page;
+    try
+    {
+      if (closePage)
+      {
+        page = await Context.NewPageAsync();
+        await Page.CloseAsync();
+        await page.GotoAsync(_environment.BaseUri.ToString());
+      }
+      else await page.ReloadAsync();
+      await Expect(page.Locator(".assistant-work")).ToContainTextAsync("Progress observation 90");
+      await Expect(page.Locator("#cancel-request")).ToBeVisibleAsync();
+      using var running = await _environment.HttpClient.GetAsync($"api/chat/runs/{savedRun}");
+      running.EnsureSuccessStatusCode();
+      Assert.IsFalse(JsonNode.Parse(await running.Content.ReadAsStringAsync())!["completed"]!.GetValue<bool>());
+      Assert.AreEqual(promptBefore, await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json")));
+      if (outcome == "cancelled") await page.Locator("#cancel-request").ClickAsync();
+      await File.WriteAllTextAsync(release, outcome);
+      await Expect(page.Locator(".message.assistant .activity")).ToHaveAttributeAsync("data-terminal", "true");
+      await Expect(page.Locator(".message.user")).ToHaveCountAsync(1);
+      await Expect(page.Locator(".message.assistant")).ToHaveCountAsync(1);
+      if (outcome == "completed") await Expect(page.Locator(".assistant-answer")).ToContainTextAsync("Final verified fixture response.");
+      else await Expect(page.Locator(".activity > summary")).ToContainTextAsync("Canceled");
+      Assert.AreEqual(promptBefore, await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json")));
+    }
+    finally
+    {
+      await File.WriteAllTextAsync(release, outcome);
+      using var cancelled = await _environment.HttpClient.PostAsync($"api/chat/runs/{savedRun}/cancel", null);
+      if (page != Page) await page.CloseAsync();
+    }
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task OpeningSavedConversationShowsChatLoaderUntilHistoryIsReady()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history",
+      new { enabled = true }
+    ))
+    {
+      history.EnsureSuccessStatusCode();
+    }
+    using (var saved = await _environment.HttpClient.PutAsJsonAsync(
+      "api/sessions/current",
+      new
+      {
+        sessionId = "history-loader-v1",
+        messages = new object[]
+        {
+          new { role = "user", content = "Load this saved conversation." },
+          new { role = "assistant", content = "Saved history is ready." }
+        },
+        interactionMode = "chat",
+        selectedModel = "alpha:latest",
+        state = "completed"
+      }
+    ))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+    await Page.RouteAsync(
+      "**/api/sessions/history-loader-v1/open",
+      async route =>
+      {
+        await Task.Delay(400);
+        await route.ContinueAsync();
+      }
+    );
+    await Page.GotoAsync("/");
+    var open = Page.Locator(
+      ".session-entry[data-session-id=\"history-loader-v1\"] .session-entry-content"
+    );
+
+    await open.ClickAsync();
+
+    var loader = Page.Locator("#conversation-history-loader");
+    await Expect(loader).ToBeVisibleAsync();
+    await Expect(loader).ToContainTextAsync("Loading conversation…");
+    await Expect(Page.Locator("#messages")).ToHaveAttributeAsync("aria-busy", "true");
+    await Expect(Page.Locator("#message-input")).ToBeDisabledAsync();
+    var loaderBounds = await loader.EvaluateAsync<double[]>(
+      """
+      loader => {
+        const loaderRect = loader.getBoundingClientRect();
+        const messagesRect = document.querySelector('#messages').getBoundingClientRect();
+        return [
+          Math.abs(loaderRect.top - messagesRect.top),
+          Math.abs(loaderRect.bottom - messagesRect.bottom)
+        ];
+      }
+      """
+    );
+    Assert.IsLessThanOrEqualTo(1d, loaderBounds[0]);
+    Assert.IsLessThanOrEqualTo(1d, loaderBounds[1]);
+    await Expect(Page.Locator(".message.user")).ToContainTextAsync(
+      "Load this saved conversation."
+    );
+    await Expect(Page.Locator(".assistant-answer")).ToContainTextAsync(
+      "Saved history is ready."
+    );
+    await Expect(loader).ToBeHiddenAsync();
+    await Expect(Page.Locator("#messages")).Not.ToHaveAttributeAsync("aria-busy", "true");
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task LargeHistoryPagesByEventCountAndReplaysWithoutBlockingTheBrowser()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true });
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute create file");
+    using var listed = await _environment.HttpClient.GetAsync("api/sessions");
+    var sessionId = JsonNode.Parse(await listed.Content.ReadAsStringAsync())!["recent"]![0]!["id"]!.GetValue<string>();
+    var path = Path.Combine(_environment.DataDirectory, "workspaces", workspaceId, "sessions", sessionId + ".json");
+    var saved = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+    var messages = saved["messages"]!.AsArray();
+    var timeline = messages[1]!["timeline"]!.AsArray();
+    var originalTimeline = timeline.Select(item => item!.DeepClone()).ToArray();
+    timeline.Clear();
+    for (var index = 0; index < 30_000; index++)
+    {
+      timeline.Add(new JsonObject
+      {
+        ["requestId"] = "large-history",
+        ["type"] = "reasoning.delta",
+        ["timestamp"] = DateTimeOffset.UtcNow,
+        ["contentBlockId"] = "large-thinking",
+        ["reasoningDelta"] = $"Observation {index}. "
+      });
+    }
+    foreach (var item in originalTimeline) timeline.Add(item);
+    messages.Add(new JsonObject { ["role"] = "user", ["content"] = "Latest question" });
+    messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Latest answer" });
+    await File.WriteAllTextAsync(path, saved.ToJsonString());
+    await _environment.RestartApplicationAsync();
+    using var opened = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}?workspaceId={workspaceId}");
+    opened.EnsureSuccessStatusCode();
+    var view = JsonNode.Parse(await opened.Content.ReadAsStringAsync())!;
+    Assert.AreEqual(2, view["presentationOffset"]!.GetValue<int>());
+    Assert.IsNull(view["messages"]![1]!["timeline"]);
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id=\"{sessionId}\"] .session-entry-content").ClickAsync();
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".assistant-answer")).ToHaveTextAsync("Latest answer");
+    await Page.EvaluateAsync("""
+      () => {
+        window.historyReplayFrames = 0;
+        const sample = () => {
+          const thinking = document.querySelector('[data-content-block-id="large-thinking"]');
+          const count = Number(thinking?.dataset.deltaCount ?? 0);
+          if (count > 0 && count < 30000) window.historyReplayFrames++;
+          if (count < 30000) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      }
+      """);
+    await Page.Locator(".see-more-history").ClickAsync();
+    await Expect(Page.Locator(".see-more-history")).ToHaveCountAsync(0, new() { Timeout = 30_000 });
+    var thinking = Page.Locator("[data-content-block-id=\"large-thinking\"]");
+    await Expect(thinking).ToHaveAttributeAsync("data-delta-count", "30000");
+    var text = await thinking.Locator(".assistant-reasoning-body").TextContentAsync();
+    Assert.AreEqual(string.Concat(Enumerable.Range(0, 30_000).Select(index => $"Observation {index}. ")), text);
+    Assert.IsGreaterThan(1, await Page.EvaluateAsync<int>("window.historyReplayFrames"),
+      "The browser must paint during a single large message replay, not only after it finishes.");
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".message.assistant .execution-session-footer").First).ToBeVisibleAsync();
+    using var exported = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}/export");
+    exported.EnsureSuccessStatusCode();
+    var original = JsonNode.Parse(await exported.Content.ReadAsStringAsync())!;
+    Assert.AreEqual(timeline.Count, original["messages"]![1]!["timeline"]!.AsArray().Count);
+  }
+
+  [TestMethod]
+  [DataRow(1280, "completed")]
+  [DataRow(390, "failed")]
+  [DataRow(1280, "cancelled")]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExecutionStatusSticksWhileRunningAndClosesWithOneStaticCopy(int width, string outcome)
+  {
+    var release = Path.Combine(_environment.DataDirectory, "qwen-code-runtime", "sticky-status-release.txt");
+    if (File.Exists(release)) File.Delete(release);
+    await Page.SetViewportSizeAsync(width, 800);
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
+    await StartMessageAsync("sticky status fixture");
+    var assistant = Page.Locator(".message.assistant").Last;
+    var header = assistant.Locator(".execution-session-header");
+    var footer = assistant.Locator(".execution-session-footer");
+    try
+    {
+      await Expect(assistant.Locator(".assistant-work")).ToContainTextAsync("Progress observation 90");
+      await Expect(header).ToHaveClassAsync(new Regex("is-live"));
+      await Expect(footer).ToBeHiddenAsync();
+      await Page.Locator("#messages").EvaluateAsync("element => element.scrollTop = 0");
+      Assert.IsTrue(await header.EvaluateAsync<bool>("""
+        header => {
+          const viewport = document.querySelector('#messages');
+          return header.getBoundingClientRect().top > viewport.getBoundingClientRect().top
+            + parseFloat(getComputedStyle(viewport).paddingTop) + 2;
+        }
+        """), "Before scrolling, the header must remain in its original position.");
+      await Page.Locator("#messages").EvaluateAsync("element => element.scrollTop = element.scrollHeight");
+      await Expect(header).ToBeInViewportAsync();
+      var metrics = await header.EvaluateAsync<double[]>("""
+        header => {
+          const rect = header.getBoundingClientRect();
+          const messages = document.querySelector('#messages');
+          const viewport = messages.getBoundingClientRect();
+          const contentTop = viewport.top + parseFloat(getComputedStyle(messages).paddingTop);
+          return [Math.abs(rect.top - contentTop), rect.right - viewport.right,
+            document.querySelector('#messages').scrollWidth - document.querySelector('#messages').clientWidth];
+        }
+        """);
+      Assert.IsLessThanOrEqualTo(2d, metrics[0], "The running status must stay at the chat viewport top.");
+      Assert.IsLessThanOrEqualTo(1d, metrics[1]);
+      Assert.IsLessThanOrEqualTo(1d, metrics[2]);
+      await Expect(assistant.Locator(".assistant-reasoning")).ToContainTextAsync("Preserved thinking content");
+      if (outcome == "cancelled") await Page.Locator("#cancel-request").ClickAsync();
+      await File.WriteAllTextAsync(release, outcome);
+      await Expect(assistant.Locator(".activity")).ToHaveAttributeAsync("data-terminal", "true");
+      await Expect(header).Not.ToHaveClassAsync(new Regex("is-live"));
+      await Expect(footer).ToHaveCountAsync(1);
+      await Expect(footer).ToBeVisibleAsync();
+      await Expect(footer).ToHaveTextAsync(await header.InnerTextAsync(), new() { UseInnerText = true });
+      await Expect(footer.Locator("strong")).ToHaveTextAsync(outcome);
+      Assert.AreEqual("static", await header.EvaluateAsync<string>("element => getComputedStyle(element).position"));
+      Assert.AreEqual("static", await footer.EvaluateAsync<string>("element => getComputedStyle(element).position"));
+      Assert.IsTrue(await footer.EvaluateAsync<bool>("element => element.previousElementSibling.classList.contains('activity') && element.nextElementSibling.classList.contains('message-actions')"));
+    }
+    finally { await File.WriteAllTextAsync(release, "cancelled"); }
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task GitCardAndPanelExposeAuthoritativeBoundedRepositoryViews()
   {
     _ = await InitializeDeliveryRepositoryAsync();
@@ -1883,6 +2183,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute write file coding task validate"
     );
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Modified: Program.cs");
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Validation: Build sample project · passed");
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Validation: Test sample project · passed");
+    await Expect(Page.Locator(".execution-completion-summary li")).ToHaveCountAsync(3);
+    await Expect(Page.Locator(".work-action-label", new() { HasText = "Write" })).ToHaveCountAsync(1);
     Assert.AreEqual(
       "Console.WriteLine(\"fixed\");\n",
       await File.ReadAllTextAsync(
@@ -1963,6 +2268,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute create file validate"
     );
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Created: hello.txt");
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Validation: Build missing project · failed");
+    await Expect(Page.Locator(".execution-completion-summary")).Not.ToContainTextAsync("· passed");
     await Expect(
       Page.Locator(
         "[data-event-type=\"validation-completed\"]"
@@ -2002,6 +2310,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute create file"
     );
+    await Expect(Page.Locator(".message.assistant > .execution-session-header")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".activity .execution-session-header")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".execution-completion-summary li")).ToHaveTextAsync(
+      new[] { "Created: hello.txt", "Validation: not run" }
+    );
+    await Expect(Page.Locator(".assistant-running-indicator")).ToBeHiddenAsync();
     var file = Path.Combine(
       _environment.WorkspaceDirectory,
       "hello.txt"
@@ -2163,6 +2477,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute run process"
     );
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Process: dotnet · exit 0");
+    var processAction = Page.Locator(".assistant-work .work-action", new() { HasText = "dotnet --version" });
+    await processAction.Locator("summary").ClickAsync();
+    await Expect(processAction.Locator(".work-action-preview")).ToContainTextAsync("dotnet --version");
+    await Expect(processAction.Locator(".work-action-preview")).ToContainTextAsync("Exit code: 0");
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
@@ -2576,6 +2895,16 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToContainTextAsync(
       "Search completed in '.'"
     );
+    var search = Page.Locator(".message.assistant").Last.Locator(".work-action", new() { HasText = "Search" });
+    await search.Locator("summary").ClickAsync();
+    await Expect(search.Locator(".work-action-preview")).ToContainTextAsync("Search for: hello");
+    await Expect(search.Locator(".work-action-preview")).ToContainTextAsync("hello.txt:1: hello search");
+    await File.WriteAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "hello.txt"), "different content");
+    await SendMessageAsync("execute search text no matches");
+    var emptySearch = Page.Locator(".message.assistant").Last.Locator(".work-action", new() { HasText = "Search" });
+    await emptySearch.Locator("summary").ClickAsync();
+    await Expect(emptySearch.Locator(".work-action-preview")).ToContainTextAsync("No matches found.");
+    await Expect(emptySearch.Locator(".work-action-preview")).ToContainTextAsync("Search for: hello");
     Assert.IsFalse(
       _environment.FakeOllama.Requests.Any(
         request => request.Messages.Any(
@@ -2597,6 +2926,23 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await SetExecuteModeAsync(
       "auto"
+    );
+    await Page.EvaluateAsync(
+      """
+      () => {
+        window.observedCurrentActivities = [];
+        new MutationObserver(records => {
+          for (const record of records) {
+            if (record.target.matches?.('.assistant-current-activity')) {
+              window.observedCurrentActivities.push(record.target.textContent);
+              for (const node of record.removedNodes) {
+                window.observedCurrentActivities.push(node.textContent);
+              }
+            }
+          }
+        }).observe(document.querySelector('#messages'), { childList: true, subtree: true });
+      }
+      """
     );
     await StartMessageAsync(
       "execute retry unknown tool create file"
@@ -2625,6 +2971,23 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "data-state",
       "completed"
     );
+    var observedActivities = await Page.EvaluateAsync<string[]>(
+      "window.observedCurrentActivities"
+    );
+    Assert.IsTrue(
+      observedActivities.Any(value =>
+        value.StartsWith("Creating ", StringComparison.Ordinal)
+        && value.Contains("hello.txt", StringComparison.Ordinal)
+      ),
+      $"Expected a creating-file activity with its Host-verified relative path. Observed: {string.Join(" | ", observedActivities)}"
+    );
+    Assert.IsTrue(
+      observedActivities.Any(value =>
+        value.StartsWith("Reviewing changes", StringComparison.Ordinal)
+      ),
+      $"Expected a post-action review activity. Observed: {string.Join(" | ", observedActivities)}"
+    );
+    await Expect(Page.Locator(".assistant-current-activity")).Not.ToContainTextAsync("Creating");
     await Expect(
       action.Locator(
         ":scope > summary"
@@ -3809,6 +4172,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(
       approval
     ).ToBeVisibleAsync();
+    await Expect(Page.Locator(".message.assistant > .execution-session-header")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".assistant-current-activity")).ToHaveTextAsync("Awaiting approval…");
+    await Expect(Page.Locator(".execution-completion-summary")).ToBeHiddenAsync();
     Assert.IsTrue(
       File.Exists(
         file
@@ -4327,17 +4693,29 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     sessions.EnsureSuccessStatusCode();
     using var sessionsDocument = JsonDocument.Parse(await sessions.Content.ReadAsStringAsync());
     var sessionId = sessionsDocument.RootElement.GetProperty("recent")[0].GetProperty("id").GetString()!;
-    using var pendingSession = await _environment.HttpClient.GetAsync(
-      $"api/sessions/{sessionId}?workspaceId={workspaceId}"
-    );
-    pendingSession.EnsureSuccessStatusCode();
-    using var pendingDocument = JsonDocument.Parse(await pendingSession.Content.ReadAsStringAsync());
-    var pendingEvents = pendingDocument.RootElement.GetProperty("messages")
-      .EnumerateArray()
-      .Where(message => message.TryGetProperty("timeline", out _))
-      .SelectMany(message => message.GetProperty("timeline").EnumerateArray().Select(item => item.Clone()))
-      .ToArray();
-    var awaiting = pendingEvents.Single(item => item.GetProperty("type").GetString() == "action.awaiting-approval");
+    JsonElement[] pendingEvents = [];
+    var pendingJson = "";
+    var sessionPath = Path.Combine(_environment.DataDirectory, "workspaces", workspaceId,
+      "sessions", sessionId + ".json");
+    var timelineDeadline = DateTimeOffset.UtcNow.AddSeconds(5);
+    do
+    {
+      using var pendingDocument = JsonDocument.Parse(await File.ReadAllTextAsync(sessionPath));
+      pendingJson = pendingDocument.RootElement.GetRawText();
+      pendingEvents = pendingDocument.RootElement.GetProperty("messages")
+        .EnumerateArray()
+        .Where(message => message.TryGetProperty("timeline", out _))
+        .SelectMany(message => message.GetProperty("timeline").EnumerateArray().Select(item => item.Clone()))
+        .ToArray();
+      if (pendingEvents.Any(item => item.GetProperty("type").GetString() == "action.awaiting-approval"))
+        break;
+      await Task.Delay(50);
+    } while (DateTimeOffset.UtcNow < timelineDeadline);
+    var awaitingEvents = pendingEvents.Where(item =>
+      item.GetProperty("type").GetString() == "action.awaiting-approval").ToArray();
+    Assert.HasCount(1, awaitingEvents,
+      $"Persisted timeline event types: {string.Join(", ", pendingEvents.Select(item => item.GetProperty("type").GetString()))}. Session: {pendingJson[..Math.Min(3000, pendingJson.Length)]}");
+    var awaiting = awaitingEvents[0];
     Assert.AreEqual(
       HostActionCodes.ApprovalPending,
       awaiting.GetProperty("localAction").GetProperty("code").GetString()
@@ -4510,6 +4888,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToContainTextAsync(
       "could not be started"
     );
+    var failedAction = Page.Locator(".work-action[data-state=\"failed\"]");
+    await Expect(failedAction).ToHaveCountAsync(1);
+    await Expect(failedAction).Not.ToHaveAttributeAsync("open", string.Empty);
+    await failedAction.Locator(":scope > summary").ClickAsync();
+    await Expect(failedAction.Locator(".work-action-preview")).ToBeVisibleAsync();
     await Expect(
       Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
     ).ToHaveCountAsync(0);
@@ -5080,6 +5463,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var originalModelNotice = await assistant.Locator(
       ".model-selection-note"
     ).InnerTextAsync();
+    var originalHostSummary = await assistant.Locator(".execution-completion-summary").InnerTextAsync();
+    var originalStatus = await assistant.Locator(".execution-session-footer").InnerTextAsync();
+    await Expect(assistant.Locator(".execution-session-header")).Not.ToHaveClassAsync(new Regex("is-live"));
+    StringAssert.Contains(originalHostSummary, "Created: hello.txt");
     var originalWork = await assistant.Locator(
       ".assistant-work"
     ).InnerTextAsync();
@@ -5123,6 +5510,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).EnumerateArray().Last(
       message => message.GetProperty("role").GetString() == "assistant"
     );
+    var savedUsage = storedAssistant.GetProperty("timeline").EnumerateArray()
+      .Last(item => item.TryGetProperty("contextUsage", out var usage)
+        && usage.ValueKind == JsonValueKind.Object)
+      .GetProperty("contextUsage");
+    var savedContextTokens = savedUsage.GetProperty("activeContextTokens").GetInt64();
+    if (savedContextTokens == 0)
+    {
+      savedContextTokens = savedUsage.GetProperty("inputTokens").GetInt64();
+    }
     var persistedEventTypes = storedAssistant.GetProperty(
       "timeline"
     ).EnumerateArray().Select(
@@ -5175,6 +5571,18 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       $"#recent-sessions .session-entry[data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
     assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".execution-session-footer")).ToHaveCountAsync(1);
+    await Expect(assistant.Locator(".execution-session-footer")).ToHaveTextAsync(originalStatus, new() { UseInnerText = true });
+    await Expect(assistant.Locator(".execution-session-header")).Not.ToHaveClassAsync(new Regex("is-live"));
+    await Expect(assistant.Locator(".execution-completion-summary")).ToHaveTextAsync(
+      originalHostSummary,
+      new() { UseInnerText = true }
+    );
+    await Expect(Page.Locator("#context-usage-summary-text")).ToContainTextAsync("last recorded");
+    await Expect(Page.Locator("#context-usage-progress")).ToHaveAttributeAsync(
+      "aria-valuenow",
+      savedContextTokens.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    );
     await Expect(assistant.Locator(".activity")).Not.ToHaveAttributeAsync(
       "open",
       string.Empty,
@@ -5920,6 +6328,266 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   [TestMethod]
   [DoNotParallelize]
   [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task LegacyCompactionContextIsCollapsedAndSavedRouteIsRestored()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true }
+    );
+    history.EnsureSuccessStatusCode();
+    const string marker = "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1";
+    const string sessionId = "legacy-compacted-presentation";
+    using var save = await _environment.HttpClient.PutAsJsonAsync("api/sessions/current", new
+    {
+      sessionId,
+      messages = new[]
+      {
+        new { role = "assistant", content = marker + "\nUnresolved work and failures:\nwrite_file: { content: raw diagnostic }" },
+        new { role = "user", content = "Original latest request" },
+        new { role = "assistant", content = "Original latest answer" }
+      },
+      interactionMode = "execute",
+      selectedModel = "alpha:latest",
+      harness = "qwen-code",
+      approvalPolicy = "ask",
+      executionStrategy = "direct",
+      state = "completed"
+    });
+    save.EnsureSuccessStatusCode();
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id=\"{sessionId}\"] .session-entry-content").ClickAsync();
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".assistant-answer")).ToHaveTextAsync("Original latest answer");
+    await Expect(Page.Locator(".persisted-continuity")).Not.ToHaveAttributeAsync("open", string.Empty);
+    await Expect(Page.Locator(".persisted-continuity pre")).ToBeHiddenAsync();
+    await Expect(Page.Locator(".execution-session-header")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#model-selector")).ToHaveValueAsync("alpha:latest");
+    await Expect(Page.Locator("#harness-selector")).ToHaveValueAsync("qwen-code");
+    await Expect(Page.Locator("#approval-policy")).ToHaveValueAsync("ask");
+    await Page.Locator(".persisted-continuity > summary").ClickAsync();
+    await Expect(Page.Locator(".persisted-continuity pre")).ToContainTextAsync(marker);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task LosslessTranscriptRestoresOriginalTimelineThroughSeeMoreAndSurvivesContinuation()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true }
+    );
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute create file");
+    var originalWork = await Page.Locator(".message.assistant .assistant-work").InnerTextAsync();
+    using var listed = await _environment.HttpClient.GetAsync("api/sessions");
+    var sessionId = JsonNode.Parse(await listed.Content.ReadAsStringAsync())!["recent"]![0]!["id"]!.GetValue<string>();
+    var directory = Path.Combine(_environment.DataDirectory, "workspaces", workspaceId, "sessions");
+    var path = Path.Combine(directory, sessionId + ".json");
+    var saved = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var messages = saved["messages"]!.AsArray();
+    var paddingEvent = new JsonObject
+    {
+      ["requestId"] = "transcript-padding",
+      ["type"] = "fixture.diagnostic",
+      ["timestamp"] = DateTimeOffset.UtcNow,
+      ["message"] = new string('x', 10_485_760)
+    };
+    for (var index = 0; index < 10; index++)
+    {
+      messages.Add(new JsonObject { ["role"] = "user", ["content"] = $"Retained user {index}" });
+      messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = $"Retained answer {index}" });
+    }
+    messages[3]!["timeline"] = new JsonArray(
+      new JsonObject
+      {
+        ["requestId"] = "retained-answer",
+        ["type"] = "response.delta",
+        ["timestamp"] = DateTimeOffset.UtcNow,
+        ["delta"] = "Retained answer 0"
+      },
+      paddingEvent
+    );
+    await File.WriteAllTextAsync(path, saved.ToJsonString());
+    await _environment.RestartApplicationAsync();
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id=\"{sessionId}\"] .session-entry-content").ClickAsync();
+    await Expect(Page.Locator(".see-more-history")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(10);
+    await Expect(Page.Locator(".persisted-continuity")).ToHaveCountAsync(0);
+    await Page.Locator(".see-more-history").ClickAsync();
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(11);
+    await Expect(Page.Locator(".see-more-history")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".message.assistant .assistant-work").First).ToHaveTextAsync(
+      originalWork, new() { UseInnerText = true }
+    );
+    await Expect(Page.Locator(".message.assistant .activity").First).Not.ToHaveAttributeAsync("open", string.Empty);
+    Assert.IsLessThan(10_485_760L, new FileInfo(path).Length);
+    Assert.HasCount(1, Directory.GetFiles(directory, $"{sessionId}.*.history.gz"));
+
+    await Page.GetByRole(AriaRole.Button, new() { Name = "Chat", Exact = true }).ClickAsync();
+    await SendMessageAsync("Continue with the preserved transcript.");
+    await Page.Locator("#new-conversation").ClickAsync();
+    await _environment.RestartApplicationAsync();
+    using var reopened = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}?workspaceId={workspaceId}");
+    reopened.EnsureSuccessStatusCode();
+    var reopenedSession = JsonNode.Parse(await reopened.Content.ReadAsStringAsync())!;
+    Assert.AreEqual(24, reopenedSession["messages"]!.AsArray().Count);
+    Assert.AreEqual("execute create file", reopenedSession["messages"]![0]!["content"]!.GetValue<string>());
+    using var older = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}/history?workspaceId={workspaceId}&before=2");
+    older.EnsureSuccessStatusCode();
+    var olderMessages = JsonNode.Parse(await older.Content.ReadAsStringAsync())!["messages"]!;
+    Assert.IsGreaterThan(0, olderMessages[1]!["timeline"]!.AsArray().Count);
+    using var export = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}/export");
+    export.EnsureSuccessStatusCode();
+    var exported = JsonNode.Parse(await export.Content.ReadAsStringAsync())!;
+    Assert.IsNull(exported["transcriptId"]);
+    Assert.AreEqual(24, exported["messages"]!.AsArray().Count);
+    Assert.IsGreaterThan(0, exported["messages"]![1]!["timeline"]!.AsArray().Count);
+    using var duplicate = await _environment.HttpClient.PostAsync($"api/sessions/{sessionId}/duplicate", null);
+    duplicate.EnsureSuccessStatusCode();
+    var duplicateSession = JsonNode.Parse(await duplicate.Content.ReadAsStringAsync())!["session"]!;
+    var duplicateId = duplicateSession["id"]!.GetValue<string>();
+    var expectedDuplicateMessages = exported["messages"]!.AsArray()
+      .Count(message => !string.IsNullOrWhiteSpace(message!["content"]!.GetValue<string>()));
+    Assert.AreEqual(expectedDuplicateMessages, duplicateSession["messages"]!.AsArray().Count);
+    Assert.HasCount(1, Directory.GetFiles(directory, $"{duplicateId}.*.history.gz"));
+    using var deleteDuplicate = await _environment.HttpClient.DeleteAsync($"api/sessions/{duplicateId}?confirmed=true");
+    deleteDuplicate.EnsureSuccessStatusCode();
+    Assert.HasCount(0, Directory.GetFiles(directory, $"{duplicateId}.*.history.gz"));
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id=\"{sessionId}\"] .session-entry-content").ClickAsync();
+    await Page.Locator(".see-more-history").ClickAsync();
+    await Expect(Page.Locator(".see-more-history")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(12);
+    await Page.Locator(".message.user").First.GetByRole(
+      AriaRole.Button, new() { Name = "Edit message", Exact = true }
+    ).ClickAsync();
+    await StartMessageAsync("Edited original request after loading earlier history.");
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.assistant .activity")).ToHaveAttributeAsync(
+      "data-terminal", "true", new() { Timeout = 20_000 }
+    );
+    await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
+    using var edited = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}?workspaceId={workspaceId}");
+    edited.EnsureSuccessStatusCode();
+    var editedSession = JsonNode.Parse(await edited.Content.ReadAsStringAsync())!;
+    Assert.AreEqual(2, editedSession["messages"]!.AsArray().Count);
+    Assert.AreEqual("Edited original request after loading earlier history.", editedSession["messages"]![0]!["content"]!.GetValue<string>());
+    Assert.HasCount(0, Directory.GetFiles(directory, $"{sessionId}.*.history.gz"));
+    using var deleted = await _environment.HttpClient.DeleteAsync($"api/sessions/{sessionId}?confirmed=true");
+    deleted.EnsureSuccessStatusCode();
+    Assert.HasCount(0, Directory.GetFiles(directory, $"{sessionId}.*.history.gz"));
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task StartupAndInitialHistoryLoadLeaveCompactedTranscriptUnopened()
+  {
+    const string sessionId = "startup-metadata-lazy";
+    const string marker = "lazy-transcript-content-marker";
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true }))
+    {
+      history.EnsureSuccessStatusCode();
+    }
+
+    var settings = JsonNode.Parse(await File.ReadAllTextAsync(_environment.SettingsPath))!.AsObject();
+    settings["sessionHistory"]!["sessionCompactionThresholdBytes"] = 262_144;
+    settings["sessionHistory"]!["sessionCompactionTargetBytes"] = 131_072;
+    await File.WriteAllTextAsync(_environment.SettingsPath, settings.ToJsonString());
+
+    var directory = Path.Combine(_environment.DataDirectory, "workspaces", workspaceId, "sessions");
+    Directory.CreateDirectory(directory);
+    var transcript = JsonSerializer.SerializeToUtf8Bytes(new[]
+    {
+      new { role = "user", content = marker + Convert.ToBase64String(
+        System.Security.Cryptography.RandomNumberGenerator.GetBytes(400_000)) }
+    });
+    var transcriptId = Convert.ToHexStringLower(
+      System.Security.Cryptography.SHA256.HashData(transcript));
+    var transcriptPath = Path.Combine(directory, $"{sessionId}.{transcriptId}.history.gz");
+    await using (var output = File.Create(transcriptPath))
+    {
+      await using var compressed = new GZipStream(output, CompressionLevel.Optimal);
+      await compressed.WriteAsync(transcript);
+    }
+    Assert.IsGreaterThan(262_144, new FileInfo(transcriptPath).Length);
+
+    var now = DateTimeOffset.UtcNow;
+    var sessionPath = Path.Combine(directory, $"{sessionId}.json");
+    var record = new JsonObject
+    {
+      ["schemaVersion"] = 1,
+      ["id"] = sessionId,
+      ["workspaceId"] = workspaceId,
+      ["title"] = "Lazily loaded conversation",
+      ["createdAt"] = now,
+      ["updatedAt"] = now,
+      ["archived"] = false,
+      ["state"] = "completed",
+      ["lastInteractionMode"] = "chat",
+      ["selectedModel"] = "alpha:latest",
+      ["messages"] = new JsonArray(new JsonObject
+      {
+        ["role"] = "assistant",
+        ["content"] = "Retained context"
+      }),
+      ["executionReviews"] = new JsonArray(),
+      ["interrupted"] = false,
+      ["contextTruncated"] = true,
+      ["artifactsTruncated"] = false,
+      ["storageBytes"] = 0,
+      ["transcriptId"] = transcriptId
+    };
+    await File.WriteAllTextAsync(sessionPath, record.ToJsonString());
+    var previousWrite = DateTime.UtcNow.AddMinutes(-5);
+    File.SetLastWriteTimeUtc(sessionPath, previousWrite);
+    previousWrite = File.GetLastWriteTimeUtc(sessionPath);
+
+    await _environment.RestartApplicationAsync();
+    Assert.AreEqual(previousWrite, File.GetLastWriteTimeUtc(sessionPath));
+    using (var listing = await _environment.HttpClient.GetAsync("api/sessions"))
+    {
+      listing.EnsureSuccessStatusCode();
+      StringAssert.Contains(await listing.Content.ReadAsStringAsync(), sessionId);
+    }
+    using (var search = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/search",
+      new
+      {
+        query = (string?)null,
+        allWorkspaces = true,
+        archived = false,
+        limit = 100
+      }))
+    {
+      search.EnsureSuccessStatusCode();
+      StringAssert.Contains(await search.Content.ReadAsStringAsync(), sessionId);
+    }
+    Assert.AreEqual(previousWrite, File.GetLastWriteTimeUtc(sessionPath));
+    await Page.GotoAsync("/");
+    await Expect(Page.Locator($"[data-session-id=\"{sessionId}\"]")).ToBeVisibleAsync();
+    Assert.AreEqual(previousWrite, File.GetLastWriteTimeUtc(sessionPath));
+
+    using var fullSearch = await _environment.HttpClient.PostAsJsonAsync(
+      "api/sessions/search", new { query = marker, allWorkspaces = true, limit = 100 });
+    fullSearch.EnsureSuccessStatusCode();
+    StringAssert.Contains(await fullSearch.Content.ReadAsStringAsync(), sessionId);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
   public async Task SessionCompactionHandlesBoundariesLifecycleCorruptionContinuationAndRestart()
   {
     const int thresholdBytes = 10_485_760;
@@ -6053,6 +6721,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         + "Relevant fact: the previous operation completed successfully.\n"
         + "Important file change: src/continuity.txt was updated.\n"
         + $"Unresolved work: NEXT-{id}.\n";
+      if (id == "compaction-above-v0913")
+        root["messages"]!.AsArray().Insert(0, new JsonObject
+        {
+          ["role"] = "assistant",
+          ["content"] = marker + "\nPreviously compacted continuity context:\n"
+            + marker + "\nRequirements and constraints:\n- Keep legacy requirement A.\n"
+            + "Decisions and relevant facts:\n- Retain accepted design.\n"
+            + "Requirements and constraints:\n- Keep legacy requirement B.\n- Keep legacy requirement A.\n"
+        });
       olderAssistant["content"] = prefix;
       var initial = root.ToJsonString(
         jsonOptions
@@ -6205,6 +6882,13 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       var compactedJson = await File.ReadAllTextAsync(
         compactedPath
       );
+      var continuity = JsonNode.Parse(compactedJson)!["messages"]![0]!["content"]!.GetValue<string>();
+      Assert.HasCount(1, Regex.Matches(continuity, marker));
+      if (compactedPath == abovePath)
+      {
+        Assert.HasCount(1, Regex.Matches(continuity, "Keep legacy requirement A\\."));
+        StringAssert.Contains(continuity, "Keep legacy requirement B.");
+      }
       StringAssert.Contains(
         compactedJson,
         marker
@@ -6362,8 +7046,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "Newest assistant history for compaction-exact-v0913 remains exact"
     );
     await Expect(Page.Locator("#messages .workspace-note")).ToContainTextAsync(
-      "Older turns were compacted into continuity context"
+      "Model context was compacted. The original conversation history is preserved."
     );
+    await Expect(Page.Locator(".persisted-continuity")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".message.assistant").First).Not.ToContainTextAsync(marker);
+    await Expect(Page.Locator(".execution-session-header:visible")).ToHaveCountAsync(0);
     await SendMessageAsync(
       "Continue after persisted history compaction."
     );
@@ -6463,19 +7151,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "Interrupted"
     );
     await Page.Locator("#dismiss-session-details").ClickAsync();
-    var openResponse = Page.WaitForResponseAsync(
-      response => response.Url.Contains(
-        "/api/sessions/",
-        StringComparison.Ordinal
-      ) && response.Url.EndsWith(
-        "/open",
-        StringComparison.Ordinal
-      ) && response.Request.Method == "POST"
-    );
     await Page.Locator(
       "#recent-sessions .session-entry .session-entry-content"
     ).ClickAsync();
-    await openResponse;
     await Expect(
       Page.Locator(
         ".message.assistant"
@@ -6565,8 +7243,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   }
 
   [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ReviewAndUndoRemainEligibleAfterExplicitResume()
+  public async Task ReviewAndUndoRemainEligibleAfterExplicitResume(bool historicalReviewOnly)
   {
     var activeId = await ActiveWorkspaceIdAsync();
     using var history = await _environment.HttpClient.PutAsJsonAsync(
@@ -6613,7 +7293,22 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       legacySettings.EnsureSuccessStatusCode();
     }
 
-    await _environment.RestartApplicationAsync();
+    var sessions = await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/sessions");
+    var sessionId = sessions!["recent"]![0]!["id"]!.GetValue<string>();
+    await _environment.RestartApplicationAsync(async () =>
+    {
+      if (historicalReviewOnly)
+      {
+        var path = Path.Combine(_environment.DataDirectory, "workspaces", activeId, "sessions", sessionId + ".json");
+        var stored = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+        stored["executionRollbacks"] = new JsonArray();
+        foreach (var message in stored["messages"]!.AsArray())
+        {
+          message!["timeline"] = new JsonArray();
+        }
+        await File.WriteAllTextAsync(path, stored.ToJsonString());
+      }
+    });
     await Page.GotoAsync(
       "/"
     );
@@ -6625,9 +7320,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#recent-sessions .session-entry"
     ).Locator(".session-entry-content").ClickAsync();
-    await Page.Locator(
-      ".message.assistant .review-changes"
-    ).Last.ClickAsync();
+    await Expect(Page.GetByRole(AriaRole.Button, new() { Name = "Review completed changes", Exact = true }))
+      .ToHaveCountAsync(0);
+    await Page.Locator("#git-card").ClickAsync();
+    await Page.Locator("#git-open-review").ClickAsync();
     await Expect(
       Page.Locator(
         "#change-review-body"
@@ -6635,6 +7331,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToContainTextAsync(
       "hello.txt"
     );
+    if (historicalReviewOnly)
+    {
+      await Expect(Page.Locator("#undo-execution")).ToBeDisabledAsync();
+      Assert.IsTrue(File.Exists(changedFile));
+      return;
+    }
     await Expect(
       Page.Locator(
         "#undo-execution"

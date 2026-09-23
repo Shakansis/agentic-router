@@ -1,3 +1,92 @@
+# Agentic Router v0.13.0 alpha
+
+This alpha focuses on continuity and recovery in Chat, Execute, and Benchmark
+Lab. The Host keeps ownership of accepted work, trusted-workspace boundaries,
+approval decisions, and terminal evidence while local runtimes or the browser
+are temporarily unavailable.
+
+Portable Windows x64 and Linux x64 packages include the .NET runtime. Download
+the archive and matching `.sha256` file, verify the hash, and extract to a
+writable folder. Start `AgenticRouter.exe` on Windows or
+`./run-agentic-router.sh` on Linux (apply executable mode if required by the
+filesystem). Ollama, local models, and optional harnesses are installed
+separately. This remains alpha evaluation software, not an unattended or
+production deployment recommendation.
+
+## Conversation continuity
+
+- An accepted Chat turn survives browser refresh or close and can be reattached
+  without submitting the prompt again. Stop still cancels the matching Host run.
+- Large saved conversations open in bounded pages without replacing the original
+  transcript with model-context summaries. Restored messages keep stable edit
+  indices and preserve failed-turn evidence.
+- Metadata-only conversation searches avoid loading full saved transcripts when
+  no content or effect filter is requested.
+- Qwen Code recovers an expired native session before prompt admission and
+  handles bounded stream reconnection without replaying an accepted prompt.
+
+## Execute and Supervisor recovery
+
+- Supported native context failures may rebuild one affected harness context
+  from canonical conversation and Host-observed effects. Pending or ambiguous
+  actions prevent replacement; required continuity is never silently dropped.
+- A durable Supervisor checkpoint write uses bounded storage-only retries. A
+  persistent failure pauses the run and requires explicit reconciliation before
+  resume; it does not replay model actions or erase the previous checkpoint.
+- Cancellation remains visible until the execution task settles. A delayed
+  settlement reports a failure after 30 seconds while keeping the workspace
+  occupied until the task actually ends.
+- Supervision admission can project oversized history to the configured context
+  budget without rewriting the saved transcript or discarding requirements.
+
+## Benchmark and local-runtime resilience
+
+- Adds an exact Custom Prompt benchmark mode with independent manual quality
+  review; a technical pass never silently becomes a user quality score.
+- Benchmark Lab restores the current matrix from a Host snapshot when the live
+  event cursor falls outside its bounded journal. It preserves completed cells
+  after infrastructure failure and keeps an unsaved final result available for
+  export from the current Host process.
+- Normal test failures can continue to later cells; infrastructure failure or
+  unconfirmed Execute shutdown stops the matrix. Final harness reports retain
+  the specialist's completion rather than an earlier action introduction.
+- A rerun of a saved manual Benchmark keeps the original Default GPU selection.
+- Managed Ollama startup retries bounded readiness and reports missing backend
+  evidence explicitly. Startup warnings do not silently replace a selected GPU,
+  model, or harness. The interface opens with actionable warnings when external
+  resources are unavailable.
+- Explicit per-model GPU affinity overrides legacy role preferences, and managed
+  servers remain separate per backend/device selection. Auto affinity uses the
+  General default GPU rather than a stale role setting.
+- Runtime settings, Benchmark evidence, usage records, and pending user input
+  are no longer tracked in the source repository. The developer-specific
+  launch profile is local too. Existing local files remain on disk; fresh
+  installations create their own data.
+
+## Validation and limits
+
+- Complete deterministic Playwright/API suite: 565 passed, zero failed, zero
+  skipped with the `0.13.0_alpha` version stamp. An isolated Release solution
+  build had zero warnings and zero errors; scoped formatting,
+  JavaScript syntax, and diff checks passed.
+- Real local Benchmark matrix: Native, Claude Code, Codex, OpenCode, and Qwen
+  Code each completed with `qwen3.8:27b-gpu0`; all five files and final reports
+  contained the requested marker.
+- Real local Execute Supervisor: all five harnesses completed with
+  `qwen3.8:27b-gpu0` as worker, `gpt-oss:20b` as supervisor, durable checkpoints,
+  verified file effects, and no active execution at terminal state. Qwen Code
+  completed after one visible correction.
+- Both portable candidate archives passed package inspection and SHA-256
+  verification. The Windows x64 package started in Production and returned
+  HTTP 200 from the page and settings API with file version `0.13.0.0`.
+  The Linux x64 package returned HTTP 200 from both endpoints in WSL Ubuntu;
+  its executable and launcher retained mode 755.
+- Fault injection for checkpoint, cancellation, replay gap, infrastructure
+  failure, and result storage used deterministic browser/API tests. These
+  failures were not induced against the real GPU providers. WSL smoke does not
+  establish physical-Linux compatibility; cloud-provider acceptance was not
+  tested for this candidate.
+
 # Agentic Router v0.12.0 alpha
 
 This alpha turns the latest execution and benchmark work into one coherent

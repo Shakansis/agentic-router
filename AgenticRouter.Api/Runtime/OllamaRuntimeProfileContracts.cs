@@ -128,6 +128,15 @@ public sealed record OllamaRuntimeProfilesView(
   IReadOnlyList<OllamaRuntimeMeasurementView> Measurements,
   IReadOnlyList<OllamaSharedModelWarning> SharedModelWarnings,
   DateTimeOffset GeneratedAt
+)
+{
+  public IReadOnlyList<OllamaRuntimeProfileDiagnostic> Diagnostics { get; init; } = [];
+}
+
+public sealed record OllamaRuntimeProfileDiagnostic(
+  string Code,
+  string Message,
+  string? Model = null
 );
 
 public sealed record OllamaRuntimeRecommendation(

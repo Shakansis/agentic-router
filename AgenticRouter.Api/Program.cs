@@ -65,7 +65,9 @@ builder.Logging.AddDebug();
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<OllamaClient>(
   client => client.Timeout = Timeout.InfiniteTimeSpan
-);
+).RemoveAllLoggers();
+builder.Services.AddHttpClient(AnythingLlmKnowledgeProvider.HttpClientName)
+  .RemoveAllLoggers();
 builder.Services.AddSingleton<ISettingsValidator, SettingsValidator>();
 builder.Services.AddSingleton<
   IPortableYamlSettingsService,
@@ -443,11 +445,13 @@ builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
     services.GetRequiredService<IGpuMemoryMetricsProvider>(),
     services.GetRequiredService<ISystemMemoryMetricsProvider>(),
     services.GetRequiredService<IOllamaManagedServerManager>(),
-    services.GetRequiredService<IModelGpuAffinityResolver>()
+    services.GetRequiredService<IModelGpuAffinityResolver>(),
+    services.GetRequiredService<ILogger<OllamaRuntimeProfileService>>()
   )
 );
 builder.Services.AddSingleton<IModelRequestTracker, ModelRequestTracker>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
+builder.Services.AddSingleton<LiveChatRuns>();
 builder.Services.AddScoped<ChatStreamService>();
 builder.Services.AddScoped<IChatStreamService>(
   services => services.GetRequiredService<ChatStreamService>()

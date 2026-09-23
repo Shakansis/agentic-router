@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Sessions;
 
@@ -20,7 +21,33 @@ internal static class PersistentSessionCompactor
   private const int MaximumContextEntryCharacters = 4_096;
   private const int MaximumContextEntriesPerSection = 64;
   private const int MaximumRetainedMessageCharacters = 65_536;
-  private const int MaximumPriorCompactionContextCharacters = 262_144;
+
+  // An inference projection only: callers retain the original transcript and stored history.
+  public static IReadOnlyList<ChatMessage>? FitHistoryToInput(
+    IReadOnlyList<ChatMessage> history, long budget, ITokenEstimator tokens)
+  {
+    if (tokens.EstimateMessages(history) <= budget)
+      return history;
+
+    var context = new ContinuityContextBuilder(null, preserveRequirements: true);
+    foreach (var message in history)
+    {
+      if (IsCompactionContext(message)) context.AddPriorContext(message.Content);
+      else context.AddMessage(message);
+    }
+    for (var characters = MaximumContextEntryCharacters; characters >= 256; characters /= 2)
+    {
+      var candidate = new[] { new ChatMessage("assistant", context.Render(history.Count, 0, 0, characters)) };
+      if (tokens.EstimateMessages(candidate) <= budget) return candidate;
+    }
+    // Keep requirements intact even when no optional detail can be retained.
+    for (var entries = MaximumContextEntriesPerSection / 2; entries >= 0; entries = entries == 0 ? -1 : entries / 2)
+    {
+      var candidate = new[] { new ChatMessage("assistant", context.Render(history.Count, 0, 0, 256, entries)) };
+      if (tokens.EstimateMessages(candidate) <= budget) return candidate;
+    }
+    return null;
+  }
 
   public static SessionCompactionResult Compact(
     ConversationSessionRecord session,
@@ -422,15 +449,17 @@ internal static class PersistentSessionCompactor
     private readonly Section _unresolved = new(
       "Unresolved work and failures"
     );
-    private readonly ConversationSessionRecord _session;
-    private string? _priorContext;
+    private readonly ConversationSessionRecord? _session;
+    private readonly bool _preserveRequirements;
 
     public ContinuityContextBuilder(
-      ConversationSessionRecord session
+      ConversationSessionRecord? session,
+      bool preserveRequirements = false
     )
     {
       _session = session;
-      if (session.SessionSummary is not { } summary)
+      _preserveRequirements = preserveRequirements;
+      if (session?.SessionSummary is not { } summary)
       {
         return;
       }
@@ -471,23 +500,50 @@ internal static class PersistentSessionCompactor
       || _facts.Count > 0
       || _changes.Count > 0
       || _validation.Count > 0
-      || _unresolved.Count > 0
-      || !string.IsNullOrWhiteSpace(
-        _priorContext
-      );
+      || _unresolved.Count > 0;
 
     public void AddPriorContext(
       string content
     )
     {
-      _priorContext = CompactText(
-        string.IsNullOrWhiteSpace(
-          _priorContext
-        )
-          ? content
-          : _priorContext + "\n\n" + content,
-        MaximumPriorCompactionContextCharacters
-      );
+      // V1 embeds previous summaries verbatim. Read their sections instead of nesting
+      // the complete document again. Indented continuation lines remain literal data.
+      Section? section = null;
+      var entry = new StringBuilder();
+      void Flush()
+      {
+        if (entry.Length == 0) return;
+        var target = section ?? _requirements;
+        target.Add(entry.ToString(), _preserveRequirements && target == _requirements);
+        entry.Clear();
+      }
+      foreach (var line in content.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+      {
+        var heading = line switch
+        {
+          "Requirements and constraints:" => _requirements,
+          "Decisions and relevant facts:" => _facts,
+          "Important file and workspace changes:" => _changes,
+          "Commands and validation:" => _validation,
+          "Unresolved work and failures:" => _unresolved,
+          _ => null
+        };
+        if (heading is not null) { Flush(); section = heading; continue; }
+        if (line == ContextMarker || line == "Previously compacted continuity context:"
+          || line.StartsWith("This Host-generated context ", StringComparison.Ordinal)
+          || line.StartsWith("Conversation: ", StringComparison.Ordinal)
+          || line.StartsWith("Persisted route: ", StringComparison.Ordinal)
+          || line.StartsWith("Compacted records: ", StringComparison.Ordinal)
+          || line == "Optional historical details may be omitted; reinspect files and Host evidence before relying on them.")
+        { Flush(); section = null; continue; }
+        if (line.StartsWith("- ", StringComparison.Ordinal))
+        { Flush(); entry.Append(line.AsSpan(2)); }
+        else if (line.StartsWith("  ", StringComparison.Ordinal))
+          entry.Append('\n').Append(line.AsSpan(2));
+        else if (!string.IsNullOrWhiteSpace(line))
+          entry.Append(entry.Length == 0 ? "" : "\n").Append(line);
+      }
+      Flush();
     }
 
     public void AddMessage(
@@ -501,7 +557,8 @@ internal static class PersistentSessionCompactor
         (message.Role == "user"
           ? _requirements
           : _facts).Add(
-            message.Content
+            message.Content,
+            _preserveRequirements && message.Role == "user"
           );
       }
 
@@ -650,7 +707,9 @@ internal static class PersistentSessionCompactor
     public string Render(
       int compactedMessages,
       int compactedReviews,
-      int compactedRollbacks
+      int compactedRollbacks,
+      int entryCharacters = MaximumContextEntryCharacters,
+      int optionalEntries = MaximumContextEntriesPerSection
     )
     {
       var builder = new StringBuilder();
@@ -661,43 +720,34 @@ internal static class PersistentSessionCompactor
         "This Host-generated context preserves continuity from older conversation history compacted at semantic boundaries."
       );
       builder.AppendLine(
-        $"Conversation: {_session.Title}"
+        $"Conversation: {_session?.Title ?? "Current conversation"}"
       );
-      builder.AppendLine(
-        $"Persisted route: mode={_session.LastInteractionMode}; model={_session.SelectedModel ?? "auto"}; "
-          + $"harness={_session.SelectedHarness}; strategy={_session.LastExecutionStrategy}; "
-          + $"approval={_session.LastApprovalPolicy}."
-      );
+      if (_session is not null)
+        builder.AppendLine(
+          $"Persisted route: mode={_session.LastInteractionMode}; model={_session.SelectedModel ?? "auto"}; "
+            + $"harness={_session.SelectedHarness}; strategy={_session.LastExecutionStrategy}; "
+            + $"approval={_session.LastApprovalPolicy}."
+        );
       builder.AppendLine(
         $"Compacted records: messages={compactedMessages}; reviews={compactedReviews}; "
           + $"rollback-snapshots={compactedRollbacks}."
       );
-      if (!string.IsNullOrWhiteSpace(
-        _priorContext
-      ))
-      {
-        builder.AppendLine();
-        builder.AppendLine(
-          "Previously compacted continuity context:"
-        );
-        builder.AppendLine(
-          _priorContext
-        );
-      }
+      builder.AppendLine("Optional historical details may be omitted; reinspect files and Host evidence before relying on them.");
       _requirements.Render(
-        builder
+        builder, _preserveRequirements ? int.MaxValue : entryCharacters,
+        _preserveRequirements ? int.MaxValue : optionalEntries
       );
       _facts.Render(
-        builder
+        builder, entryCharacters, optionalEntries
       );
       _changes.Render(
-        builder
+        builder, entryCharacters, optionalEntries
       );
       _validation.Render(
-        builder
+        builder, entryCharacters, optionalEntries
       );
       _unresolved.Render(
-        builder
+        builder, entryCharacters, optionalEntries
       );
       return builder.ToString().TrimEnd();
     }
@@ -715,20 +765,20 @@ internal static class PersistentSessionCompactor
     public int Count => _values.Count;
 
     public void Add(
-      string? value
+      string? value,
+      bool preserve = false
     )
     {
       if (
         string.IsNullOrWhiteSpace(
           value
         )
-        || _values.Count >= MaximumContextEntriesPerSection
       )
       {
         return;
       }
 
-      var compact = CompactText(
+      var compact = preserve ? value.Trim() : CompactText(
         value,
         MaximumContextEntryCharacters
       );
@@ -736,6 +786,11 @@ internal static class PersistentSessionCompactor
         compact
       ))
       {
+        if (!preserve && _values.Count >= MaximumContextEntriesPerSection)
+        {
+          _seen.Remove(_values[0]);
+          _values.RemoveAt(0);
+        }
         _values.Add(
           compact
         );
@@ -743,7 +798,9 @@ internal static class PersistentSessionCompactor
     }
 
     public void Render(
-      StringBuilder builder
+      StringBuilder builder,
+      int entryCharacters = MaximumContextEntryCharacters,
+      int maximumEntries = MaximumContextEntriesPerSection
     )
     {
       if (_values.Count == 0)
@@ -755,11 +812,11 @@ internal static class PersistentSessionCompactor
       builder.AppendLine(
         $"{title}:"
       );
-      foreach (var value in _values)
+      foreach (var value in _values.TakeLast(maximumEntries))
       {
         builder.Append("- ");
         builder.AppendLine(
-          value.Replace(
+          CompactText(value, entryCharacters).Replace(
             "\n",
             "\n  ",
             StringComparison.Ordinal

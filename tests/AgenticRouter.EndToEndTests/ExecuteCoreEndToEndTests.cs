@@ -18,6 +18,130 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 {
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeExecuteRejectsTheFirstActionUntilTheSpecialistProvidesAnIntroduction()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(_environment.WorkspaceDirectory, "report-source.txt"),
+      "evidência do projeto"
+    );
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "MISSING_ACTION_INTRODUCTION_V1 inspect the report source",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "auto",
+        executionStrategy = "direct",
+        browserSessionId = "browser-required-execute-introduction"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    var correctionIndex = Array.FindIndex(events, item =>
+      item["type"]!.GetValue<string>() == "action.introduction-required");
+    var introductionIndex = Array.FindIndex(events, item =>
+      item["type"]!.GetValue<string>() == "response.delta");
+    var firstExecutionIndex = Array.FindIndex(events, item =>
+      item["type"]!.GetValue<string>() == "action.execution-started");
+
+    Assert.IsGreaterThanOrEqualTo(0, correctionIndex);
+    Assert.IsGreaterThanOrEqualTo(0, introductionIndex);
+    Assert.IsGreaterThanOrEqualTo(0, firstExecutionIndex);
+    Assert.IsLessThan(introductionIndex, correctionIndex);
+    Assert.IsLessThan(firstExecutionIndex, introductionIndex);
+    Assert.HasCount(
+      1,
+      events.Where(item =>
+        item["type"]!.GetValue<string>() == "action.introduction-required")
+        .ToArray()
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeExecuteIntroducesWorkBeforeTheFirstActionAndPreservesTheFinalReport()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(_environment.WorkspaceDirectory, "report-source.txt"),
+      "evidência do projeto"
+    );
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "RELATORIO_PROJETO_VISIVEL_V1 analise o projeto e me entregue um relatório",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "auto",
+        executionStrategy = "direct",
+        browserSessionId = "browser-visible-execute-report"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    var introductionIndex = Array.FindIndex(events, item =>
+      item["type"]!.GetValue<string>() == "response.delta"
+      && item["delta"]?.GetValue<string>().Contains(
+        "Entendi que você quer uma análise do projeto.",
+        StringComparison.Ordinal
+      ) == true);
+    var firstActionIndex = Array.FindIndex(events, item =>
+      item["type"]!.GetValue<string>() is "action.proposed" or "action.execution-started");
+
+    Assert.IsGreaterThanOrEqualTo(0, introductionIndex);
+    Assert.IsLessThan(
+      firstActionIndex,
+      introductionIndex,
+      $"Expected the specialist introduction before the first action, but indexes were {introductionIndex} and {firstActionIndex}."
+    );
+    var completed = events.Single(item =>
+      item["type"]!.GetValue<string>() == "response.completed");
+    Assert.AreEqual(
+      "Relatório do projeto: o arquivo analisado contém evidência de leitura sem alterações.",
+      completed["specialistCompletion"]!.GetValue<string>()
+    );
+    var responseTail = completed["responseTail"]!.GetValue<string>();
+    StringAssert.Contains(responseTail, "Relatório do projeto:");
+    StringAssert.Contains(responseTail, "Authoritative execution status:");
+    StringAssert.Contains(responseTail, "Inspected only; no files were changed.");
+    Assert.DoesNotContain(
+      "I will execute the requested changes and show only the affected files.",
+      string.Concat(events.Select(item => item.ToJsonString()))
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task BrowserShowsTheSpecialistReportAfterReadOnlyExecuteWork()
+  {
+    await File.WriteAllTextAsync(
+      Path.Combine(_environment.WorkspaceDirectory, "report-source.txt"),
+      "evidência do projeto"
+    );
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+
+    await SendMessageAsync(
+      "RELATORIO_PROJETO_VISIVEL_V1 analise o projeto e me entregue um relatório"
+    );
+
+    var answer = Page.Locator(".message.assistant .assistant-answer").Last;
+    await Expect(answer).ToContainTextAsync("Relatório do projeto:");
+    await Expect(answer).ToContainTextAsync("Authoritative execution status:");
+    await Expect(answer).ToContainTextAsync("Inspected only; no files were changed.");
+    await Expect(answer).Not.ToContainTextAsync(
+      "I will execute the requested changes and show only the affected files."
+    );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task NativeHarnessCreatesUtf8FilesThroughOneHostBatchTool()
   {
     await Page.GotoAsync("/");
@@ -504,6 +628,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator("#harness-selector").SelectOptionAsync("codex");
 
     await SendMessageAsync("delete codex file");
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Deleted: codex-delete.txt");
+    await Expect(Page.Locator(".execution-completion-summary")).Not.ToContainTextAsync("codex-delete-unrelated.txt");
     await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
     Assert.IsFalse(File.Exists(target));
     Assert.AreEqual("preserve me", await File.ReadAllTextAsync(unrelated));
@@ -2270,7 +2396,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Expect(
       timelineItems
     ).ToHaveCountAsync(
-      6
+      7
     );
     var timelineKinds = await timelineItems.EvaluateAllAsync<string[]>(
       "nodes => nodes.map(node => node.dataset.timelineKind)"
@@ -2279,13 +2405,15 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       new[]
       {
         "thinking",
+        "response",
         "toolset",
         "thinking",
         "action",
         "thinking",
         "action"
       },
-      timelineKinds
+      timelineKinds,
+      string.Join(", ", timelineKinds)
     );
     await Expect(
       assistant.Locator(
@@ -3151,7 +3279,9 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task EditingUserMessageReplacesTurnAndTruncatesLaterContext()
+  [DataRow(false)]
+  [DataRow(true)]
+  public async Task EditingUserMessageReplacesTurnAndTruncatesLaterContext(bool afterFailure)
   {
     var workspaceId = await ActiveWorkspaceIdAsync();
     using (
@@ -3169,6 +3299,12 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.GotoAsync(
       "/"
     );
+    if (afterFailure)
+    {
+      await StartMessageAsync("generic HTTP failure");
+      await Expect(Page.Locator(".assistant-answer.error").Last).ToContainTextAsync("Reference:");
+      await Expect(Page.Locator("#harness-selector")).ToBeEnabledAsync();
+    }
     await SendMessageAsync(
       "First message"
     );
@@ -3177,7 +3313,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Page.Locator(
       ".message.user"
-    ).First.GetByRole(
+    ).Nth(afterFailure ? 1 : 0).GetByRole(
       AriaRole.Button,
       new()
       {
@@ -3247,12 +3383,12 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".message.user"
       )
     ).ToHaveCountAsync(
-      1
+      afterFailure ? 2 : 1
     );
     await Expect(
       Page.Locator(
         ".message.user .message-content"
-      )
+      ).Last
     ).ToHaveTextAsync(
       "First message edited"
     );
@@ -3293,22 +3429,22 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "messages"
     );
     Assert.AreEqual(
-      2,
+      afterFailure ? 4 : 2,
       persistedMessages.GetArrayLength(),
       "The replaced branch must not remain in persistent history."
     );
     Assert.AreEqual(
       "First message edited",
-      persistedMessages[0].GetProperty("content").GetString()
+      persistedMessages[afterFailure ? 2 : 0].GetProperty("content").GetString()
     );
     Assert.AreEqual(
-      persistedMessages[0].GetProperty("turnId").GetString(),
-      persistedMessages[1].GetProperty("turnId").GetString(),
+      persistedMessages[afterFailure ? 2 : 0].GetProperty("turnId").GetString(),
+      persistedMessages[afterFailure ? 3 : 1].GetProperty("turnId").GetString(),
       "The persisted answer must remain correlated with its replacement prompt."
     );
     Assert.IsGreaterThan(
       0,
-      persistedMessages[1].GetProperty("timeline").GetArrayLength(),
+      persistedMessages[afterFailure ? 3 : 1].GetProperty("timeline").GetArrayLength(),
       "The replacement turn's visible activity must remain persisted."
     );
 
@@ -3334,8 +3470,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       $"#recent-sessions [data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
     await openResponse;
-    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
-    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(afterFailure ? 2 : 1);
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(afterFailure ? 2 : 1);
     await Expect(
       Page.Locator(".message.assistant [data-timeline-kind]").First
     ).ToBeAttachedAsync();
@@ -3423,6 +3559,46 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToHaveTextAsync(
       "Send"
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task RejectedEditKeepsTheOriginalConversationAndDraft()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var enabled = await _environment.HttpClient.PutAsJsonAsync($"api/workspaces/{workspaceId}/history", new { enabled = true });
+    enabled.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await SendMessageAsync("Original message before external replacement");
+    var sessions = JsonNode.Parse(await _environment.HttpClient.GetStringAsync("api/sessions"))!;
+    var id = sessions["recent"]![0]!["id"]!.GetValue<string>();
+    using var replaced = await _environment.HttpClient.PutAsJsonAsync("api/sessions/current", new
+    {
+      sessionId = id,
+      messages = new[] {
+        new { role = "assistant", content = "Externally replaced history" },
+        new { role = "user", content = "External replacement user turn" }
+      },
+      interactionMode = "chat",
+      selectedModel = "alpha:latest",
+      state = "completed"
+    });
+    replaced.EnsureSuccessStatusCode();
+    var requests = _environment.FakeOllama.Requests.Count;
+    await Page.Locator(".message.user").First.GetByRole(AriaRole.Button, new() { Name = "Edit message", Exact = true }).ClickAsync();
+    await Page.Locator("#message-input").FillAsync("Edited draft must survive the conflict");
+    var responseTask = Page.WaitForResponseAsync(response => response.Url.EndsWith("/api/chat/stream", StringComparison.Ordinal));
+    await Page.Locator("#message-input").PressAsync("Enter");
+    var response = await responseTask;
+    StringAssert.Contains(await response.TextAsync(), "session-edit-conflict");
+    await Expect(Page.Locator("#message-input")).ToHaveValueAsync("Edited draft must survive the conflict");
+    await Expect(Page.Locator("#cancel-message-edit")).ToBeVisibleAsync();
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.user")).ToContainTextAsync("Original message before external replacement");
+    Assert.HasCount(requests, _environment.FakeOllama.Requests);
+    var stored = JsonNode.Parse(await _environment.HttpClient.GetStringAsync($"api/sessions/{id}?workspaceId={workspaceId}"))!;
+    Assert.AreEqual("Externally replaced history", stored["messages"]![0]!["content"]!.GetValue<string>());
+    await Page.Locator("#cancel-message-edit").ClickAsync();
   }
 
   [TestMethod]
@@ -3841,7 +4017,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).SelectOptionAsync(
       "docs:latest"
     );
-    await StartMessageAsync(
+    await SendMessageAsync(
       "generic HTTP failure"
     );
     await Expect(
@@ -3851,6 +4027,15 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "Failed"
     );
+    var technicalDetails = Page.Locator(".message.assistant .activity").Last;
+    await Expect(technicalDetails).Not.ToHaveAttributeAsync("open", string.Empty);
+    var technicalSummary = Page.Locator(".message.assistant .activity > summary").Last;
+    await technicalSummary.FocusAsync();
+    await technicalSummary.PressAsync("Enter");
+    await Expect(technicalDetails).ToHaveAttributeAsync("open", string.Empty);
+    var errorGroup = technicalDetails.Locator(".activity-group.warning").Last;
+    await Expect(errorGroup).ToBeVisibleAsync();
+    await Expect(errorGroup).Not.ToHaveAttributeAsync("open", string.Empty);
     await Expect(
       Page.Locator(
         "[data-event-type=\"memory-pressure-detected\"]"
@@ -3892,10 +4077,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       .Last(
         request => request.Stream
       );
-    Assert.HasCount(
-      2,
-      target.Messages
-    );
+    Assert.HasCount(2, target.Messages);
     Assert.IsFalse(
       target.Messages.Any(
         message => message.Content.Contains(

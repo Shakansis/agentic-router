@@ -238,29 +238,26 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         providerEndpoint,
         cancellationToken
       );
-      var harnessSession = await GetOrStartThreadAsync(
-        request,
-        contextConfiguration,
-        cancellationToken
-      );
-      var threadId = harnessSession.NativeSessionId;
       var hostBridgeTools = request.HostCapabilities is null
         ? []
         : HarnessCapabilityProjection.HostBridgeTools(
           HarnessIds.Codex,
           request.HostCapabilities
         );
-      var turnPrompt = HarnessConversationPromptBuilder.Create(
-        request,
-        harnessSession.SynchronizedThroughVersion,
+      string[] capabilityNotes =
         [
           "Agentic Router common capabilities are additive to Codex built-ins. Use Codex native filesystem and sandboxed command tools when suitable, and use the offered Host tools for structured Host-owned operations.",
           "Codex native web_search is enabled for this route. Use it when current public-web evidence materially improves the answer.",
           request.HostCapabilities is null
             ? "No Host capability profile was supplied."
             : $"Host approval policy: {request.HostCapabilities.ApprovalPolicy}. Host bridge tools: {string.Join(", ", hostBridgeTools.Select(CodexDynamicToolName))}."
-        ]
-      );
+        ];
+      var recoveryPrompt = request.ContextRecoveryInputBudget.HasValue
+        ? HarnessConversationPromptBuilder.Create(request, null, capabilityNotes) : null;
+      var harnessSession = await GetOrStartThreadAsync(request, contextConfiguration, cancellationToken);
+      var threadId = harnessSession.NativeSessionId;
+      var turnPrompt = recoveryPrompt ?? HarnessConversationPromptBuilder.Create(
+        request, harnessSession.SynchronizedThroughVersion, capabilityNotes);
       active = new ActiveHarnessTurn(
         request.SessionId,
         threadId,
@@ -304,6 +301,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         "turn",
         "id"
       );
+      // Accepted input is already in native history, even if the event stream fails.
+      harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
 
       yield return CreateEvent(
         active,
@@ -331,10 +330,6 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         cancellationToken
       ))
       {
-        if (harnessEvent.IsTerminal)
-        {
-          harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
-        }
         yield return harnessEvent;
 
         if (harnessEvent.IsTerminal)
@@ -732,7 +727,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     CancellationToken cancellationToken
   )
   {
-    if (_threadsByConversation.TryGetValue(request.SessionId, out var existing)
+    if (!request.ContextRecoveryInputBudget.HasValue
+      && _threadsByConversation.TryGetValue(request.SessionId, out var existing)
       && string.Equals(
         existing.CapabilitySignature,
         request.HostCapabilities?.Signature,

@@ -37,6 +37,15 @@ public interface IOllamaManagedServerManager
   );
 
   IReadOnlyList<OllamaManagedServerStatus> GetActiveServers();
+
+  Task<OllamaEndpointResolution> ResolveWithRecoveryAsync(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection,
+    int? contextLength,
+    OllamaStartupRecovery recovery,
+    CancellationToken cancellationToken
+  );
 }
 
 public sealed record OllamaEndpointResolution(
@@ -68,7 +77,6 @@ public sealed class OllamaManagedServerManager :
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     WriteIndented = true
   };
-  private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(20);
   private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
   private static readonly TimeSpan PortHandoffInterval =
     TimeSpan.FromMilliseconds(100);
@@ -79,6 +87,8 @@ public sealed class OllamaManagedServerManager :
   private readonly string? _executableOverride;
   private readonly IGpuDiscoveryService _gpuDiscovery;
   private readonly int _portOffset;
+  private readonly TimeSpan _startupTimeout;
+  private readonly TimeSpan _recoveryTimeout;
   private readonly SemaphoreSlim _gate = new(1, 1);
   private readonly Dictionary<string, ManagedServer> _servers = new(
     StringComparer.Ordinal
@@ -92,7 +102,8 @@ public sealed class OllamaManagedServerManager :
     ILogger<OllamaManagedServerManager> logger,
     IGpuDiscoveryService gpuDiscovery,
     string? executableOverride = null,
-    int portOffset = DefaultManagedPortOffset
+    int portOffset = DefaultManagedPortOffset,
+    OllamaStartupOptions? startupOptions = null
   )
   {
     _leaseDirectory = Path.Combine(dataDirectory, "ollama-managed-servers");
@@ -101,6 +112,14 @@ public sealed class OllamaManagedServerManager :
     _gpuDiscovery = gpuDiscovery;
     _executableOverride = executableOverride;
     _portOffset = portOffset;
+    startupOptions ??= new OllamaStartupOptions();
+    if (startupOptions.AttemptTimeoutSeconds is < 1 or > 3_600
+      || startupOptions.RecoveryTimeoutSeconds is < 1 or > 86_400)
+    {
+      throw new ArgumentOutOfRangeException(nameof(startupOptions));
+    }
+    _startupTimeout = TimeSpan.FromSeconds(startupOptions.AttemptTimeoutSeconds);
+    _recoveryTimeout = TimeSpan.FromSeconds(startupOptions.RecoveryTimeoutSeconds);
   }
 
   public async Task StartAsync(CancellationToken cancellationToken)
@@ -203,7 +222,8 @@ public sealed class OllamaManagedServerManager :
     string? selection,
     string defaultSelection,
     int? contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    OllamaStartupRecovery? recovery = null
   )
   {
     var planned = Plan(configuredEndpoint, selection, defaultSelection);
@@ -215,12 +235,17 @@ public sealed class OllamaManagedServerManager :
     var target = OllamaGpuSelection.ResolveTarget(selection, defaultSelection);
     Debug.Assert(target is not null);
 
-    var server = await GetOrStartAsync(
-      configuredEndpoint,
-      target,
-      contextLength,
-      cancellationToken
-    );
+    ManagedServer server;
+    try
+    {
+      server = await GetOrStartAsync(
+        configuredEndpoint, target, contextLength, cancellationToken, recovery
+      );
+    }
+    catch (StartupNotReadyException exception)
+    {
+      throw ManagedFailure(exception.Message, exception.TechnicalMessage, exception);
+    }
     return new OllamaEndpointResolution(
       server.Endpoint,
       ManagedMainGpu(target),
@@ -248,6 +273,25 @@ public sealed class OllamaManagedServerManager :
     }
   }
 
+  public Task<OllamaEndpointResolution> ResolveWithRecoveryAsync(
+    Uri configuredEndpoint,
+    string? selection,
+    string defaultSelection,
+    int? contextLength,
+    OllamaStartupRecovery recovery,
+    CancellationToken cancellationToken
+  )
+  {
+    if (contextLength is <= 0)
+    {
+      throw new ArgumentOutOfRangeException(nameof(contextLength));
+    }
+    return ResolveCoreAsync(
+      configuredEndpoint, selection, defaultSelection, contextLength,
+      cancellationToken, recovery
+    );
+  }
+
   public async ValueTask DisposeAsync()
   {
     if (_disposed)
@@ -265,9 +309,20 @@ public sealed class OllamaManagedServerManager :
     Uri configuredEndpoint,
     OllamaGpuTarget target,
     int? contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    OllamaStartupRecovery? recovery
   )
   {
+    // An unrelated startup recovery must not block healthy servers.
+    lock (_servers)
+    {
+      if (_servers.TryGetValue(target.Selection, out var active)
+        && !active.Process.HasExited
+        && (contextLength is null || active.ContextLength == contextLength))
+      {
+        return active;
+      }
+    }
     await _gate.WaitAsync(cancellationToken);
     try
     {
@@ -302,7 +357,8 @@ public sealed class OllamaManagedServerManager :
         configuredEndpoint,
         target,
         contextLength,
-        cancellationToken
+        cancellationToken,
+        recovery
       );
     }
     finally
@@ -315,7 +371,8 @@ public sealed class OllamaManagedServerManager :
     Uri configuredEndpoint,
     OllamaGpuTarget target,
     int? contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    OllamaStartupRecovery? recovery
   )
   {
     var executable = ResolveOllamaExecutable();
@@ -325,14 +382,15 @@ public sealed class OllamaManagedServerManager :
 
     if (target.PreferredDevice is not null)
     {
-      var probe = await StartServerProcessWithPortRecoveryAsync(
+      var probe = await StartServerProcessWithRecoveryAsync(
         target,
         executable,
         library,
         port,
         null,
         contextLength,
-        cancellationToken
+        cancellationToken,
+        recovery
       );
       try
       {
@@ -348,57 +406,57 @@ public sealed class OllamaManagedServerManager :
       }
     }
 
-    return await StartServerProcessWithPortRecoveryAsync(
+    return await StartServerProcessWithRecoveryAsync(
       target,
       executable,
       library,
       port,
       vulkanOrder,
       contextLength,
-      cancellationToken
+      cancellationToken,
+      recovery
     );
   }
 
-  private async Task<ManagedServer> StartServerProcessWithPortRecoveryAsync(
+  private async Task<ManagedServer> StartServerProcessWithRecoveryAsync(
     OllamaGpuTarget target,
     string executable,
     string library,
     int port,
     string? vulkanOrder,
     int? contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    OllamaStartupRecovery? recovery
   )
   {
-    try
+    for (var attempt = 1; ; attempt++)
     {
-      return await StartServerProcessAsync(
-        target,
-        executable,
-        library,
-        port,
-        vulkanOrder,
-        contextLength,
-        cancellationToken
-      );
-    }
-    catch (OllamaProviderException exception) when (
-      IsPortBindingFailure(exception.TechnicalMessage)
-    )
-    {
-      _logger.LogWarning(
-        "Managed Ollama {Selection} lost its managed port during startup; retrying the verified port handoff once.",
-        target.Selection
-      );
-      await Task.Delay(PortHandoffInterval, cancellationToken);
-      return await StartServerProcessAsync(
-        target,
-        executable,
-        library,
-        port,
-        vulkanOrder,
-        contextLength,
-        cancellationToken
-      );
+      recovery?.Report(new OllamaStartupProgress(
+        "ollama.startup-attempt",
+        $"Starting managed Ollama {BackendLabel(target.Backend)} (attempt {attempt}/2; up to {_startupTimeout.TotalSeconds:0} seconds)."
+      ));
+      try
+      {
+        return await StartServerProcessAsync(
+          target, executable, library, port, vulkanOrder, contextLength,
+          cancellationToken, attempt == 2 ? recovery : null
+        );
+      }
+      catch (OllamaProviderException exception) when (
+        attempt == 1 && (exception is StartupNotReadyException
+          || IsPortBindingFailure(exception.TechnicalMessage))
+      )
+      {
+        _logger.LogWarning(exception,
+          "Managed Ollama {Selection} startup failed; restarting its owned process once.",
+          target.Selection
+        );
+        recovery?.Report(new OllamaStartupProgress(
+          "ollama.startup-retrying",
+          $"Managed Ollama {BackendLabel(target.Backend)} was not ready. Its owned process was stopped; retrying once."
+        ));
+        await Task.Delay(PortHandoffInterval, cancellationToken);
+      }
     }
   }
 
@@ -409,7 +467,8 @@ public sealed class OllamaManagedServerManager :
     int port,
     string? vulkanOrder,
     int? contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    OllamaStartupRecovery? recovery
   )
   {
     await TakeOverPortAsync(port, executable, cancellationToken);
@@ -482,7 +541,14 @@ public sealed class OllamaManagedServerManager :
     try
     {
       await WriteLeaseAsync(server, cancellationToken);
-      await WaitUntilHealthyAsync(server, cancellationToken);
+      try
+      {
+        await WaitUntilHealthyAsync(server, _startupTimeout, cancellationToken);
+      }
+      catch (StartupNotReadyException exception) when (recovery is not null)
+      {
+        await WaitForStartupRecoveryAsync(server, recovery, exception, cancellationToken);
+      }
       lock (_servers)
       {
         _servers[target.Selection] = server;
@@ -616,14 +682,16 @@ public sealed class OllamaManagedServerManager :
 
   private async Task WaitUntilHealthyAsync(
     ManagedServer server,
+    TimeSpan duration,
     CancellationToken cancellationToken
   )
   {
     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
       cancellationToken
     );
-    timeout.CancelAfter(StartupTimeout);
+    timeout.CancelAfter(duration);
     var client = _httpClients.CreateClient();
+    var httpResponsive = false;
 
     try
     {
@@ -644,6 +712,7 @@ public sealed class OllamaManagedServerManager :
             new Uri(server.Endpoint, "/api/version"),
             timeout.Token
           );
+          httpResponsive = response.IsSuccessStatusCode;
           if (
             response.IsSuccessStatusCode
             && HasBackendEvidence(server)
@@ -669,10 +738,56 @@ public sealed class OllamaManagedServerManager :
     {
     }
 
-    throw ManagedFailure(
+    throw new StartupNotReadyException(
       $"The Agentic Router-owned Ollama {BackendLabel(server.Target.Backend)} server did not become ready.",
-      $"A healthy /api/version response and {BackendLabel(server.Target.Backend)} discovery evidence were not both observed at {server.Endpoint} within {StartupTimeout.TotalSeconds:0} seconds. {StartupOutputEvidence(server.Output)}"
+      $"A healthy /api/version response and {BackendLabel(server.Target.Backend)} discovery evidence were not both observed at {server.Endpoint} within {duration.TotalSeconds:0} seconds. {StartupOutputEvidence(server.Output)}",
+      httpResponsive
     );
+  }
+
+  private async Task WaitForStartupRecoveryAsync(
+    ManagedServer server,
+    OllamaStartupRecovery recovery,
+    StartupNotReadyException failure,
+    CancellationToken cancellationToken
+  )
+  {
+    using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    waiting.CancelAfter(_recoveryTimeout);
+    var backend = BackendLabel(server.Target.Backend);
+    var message = $"Managed Ollama {backend} is still unavailable after two startup attempts. "
+      + (failure.HttpResponsive
+        ? $"The HTTP endpoint responded, but {backend} GPU discovery was not confirmed. "
+        : "The server did not stay ready. ")
+      + $"Check Ollama and the {backend} GPU/runtime. No response is required. "
+      + $"The Host will keep checking readiness for {_recoveryTimeout.TotalSeconds:0} seconds and continue automatically if it recovers. "
+      + "If it remains unavailable, this request will fail; Stop cancels it.";
+    recovery.Report(new OllamaStartupProgress("ollama.startup-delayed", message));
+    try
+    {
+      await WaitUntilHealthyAsync(server, Timeout.InfiniteTimeSpan, waiting.Token);
+      recovery.Report(new OllamaStartupProgress(
+        "ollama.startup-recovered", $"Managed Ollama {backend} is ready; continuing automatically."
+      ));
+    }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+      throw new OllamaProviderException(
+        "managed-ollama-start-timeout",
+        $"Managed Ollama {backend} did not become ready after two startup attempts and {_recoveryTimeout.TotalSeconds:0} additional seconds of recovery monitoring.",
+        failure.TechnicalMessage, null, true, failure
+      );
+    }
+  }
+
+  private sealed class StartupNotReadyException(
+    string message,
+    string technicalMessage,
+    bool httpResponsive
+  )
+    : OllamaProviderException("managed-ollama-start", message, technicalMessage, null, true)
+  {
+    public bool HttpResponsive { get; } = httpResponsive;
   }
 
   private static async Task AwaitOutputReadersAsync(ManagedServer server)
@@ -957,10 +1072,16 @@ public sealed class OllamaManagedServerManager :
     {
       while (await reader.ReadLineAsync() is { } line)
       {
-        output.Enqueue(line);
-        while (output.Count > 256)
+        // Repeated readiness probes must not evict backend/loader diagnostics
+        // before a long startup timeout can report them.
+        if (!line.StartsWith("[GIN]", StringComparison.Ordinal)
+          || !line.Contains("\"/api/version\"", StringComparison.Ordinal))
         {
-          output.TryDequeue(out _);
+          output.Enqueue(line);
+          while (output.Count > 256)
+          {
+            output.TryDequeue(out _);
+          }
         }
         _logger.LogDebug(
           "Managed Ollama {Selection}: {Output}",

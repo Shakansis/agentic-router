@@ -277,6 +277,8 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
     private readonly object _gate = new();
     private readonly int _maximumEvents;
     private readonly List<BenchmarkProgressEvent> _events = [];
+    // Keep current semantic state independently of the bounded activity journal.
+    private readonly Dictionary<(string Type, string? Model, string? Harness, string? Test), BenchmarkProgressEvent> _snapshot = [];
     private TaskCompletionSource _changed = NewSignal();
     private long _sequence;
     private bool _terminal;
@@ -344,7 +346,7 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
     {
       lock (_gate)
       {
-        var events = _events.ToArray();
+        var events = SnapshotEvents();
         var current = events.LastOrDefault(item => item.Model is not null
           || item.Harness is not null
           || item.TestId is not null);
@@ -368,8 +370,13 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
     {
       lock (_gate)
       {
+        var gap = _events.Count > 0 && afterSequence < _events[0].Sequence - 1;
         return new LiveReadBatch(
-          _events.Where(item => item.Sequence > afterSequence).ToArray(),
+          gap
+            ? [new BenchmarkProgressEvent(RunId, BenchmarkProgressTypeIds.Snapshot,
+              DateTimeOffset.UtcNow, _events[^1].State, Sequence: _sequence,
+              SnapshotEvents: SnapshotEvents())]
+            : _events.Where(item => item.Sequence > afterSequence).ToArray(),
           _terminal,
           _changed.Task
         );
@@ -386,6 +393,10 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
           return;
         }
         progressEvent = progressEvent with { Sequence = ++_sequence };
+        if (progressEvent.Type != BenchmarkProgressTypeIds.Activity)
+        {
+          _snapshot[(progressEvent.Type, progressEvent.Model, progressEvent.Harness, progressEvent.TestId)] = progressEvent;
+        }
         _events.Add(progressEvent);
         if (_events.Count > _maximumEvents)
         {
@@ -397,6 +408,12 @@ public sealed class BenchmarkLiveRunCoordinator : IBenchmarkLiveRunCoordinator
       }
       signal.TrySetResult();
     }
+
+    private BenchmarkProgressEvent[] SnapshotEvents() => _snapshot.Values
+      .Concat(_events)
+      .DistinctBy(item => item.Sequence)
+      .OrderBy(item => item.Sequence)
+      .ToArray();
 
     private static TaskCompletionSource NewSignal()
     {

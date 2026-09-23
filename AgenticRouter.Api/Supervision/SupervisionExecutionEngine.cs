@@ -200,6 +200,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         input.ProgressSink,
         cancellationToken
       );
+      runtime = IncludeCompletionSummary(runtime, decomposition);
       decompositionTimer.Stop();
       var decompositionDurationMilliseconds = decompositionTimer.ElapsedMilliseconds;
       runtime = AddTelemetry(
@@ -282,6 +283,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             input.ProgressSink,
             cancellationToken
           );
+          runtime = IncludeCompletionSummary(runtime, decomposition);
           recoveryTimer.Stop();
           decompositionDurationMilliseconds = checked(
             decompositionDurationMilliseconds + recoveryTimer.ElapsedMilliseconds
@@ -439,6 +441,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           input.ProgressSink,
           cancellationToken
         );
+        runtime = IncludeCompletionSummary(runtime, workerTurn);
         workerTimer.Stop();
         runtime = AddTelemetry(
           runtime,
@@ -658,6 +661,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             input.ProgressSink,
             cancellationToken
           );
+          runtime = IncludeCompletionSummary(runtime, verification);
           if (verification.Failure is not null)
           {
             verificationTimer.Stop();
@@ -712,6 +716,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
                 input.ProgressSink,
                 cancellationToken
               );
+              runtime = IncludeCompletionSummary(runtime, verification);
               if (verification.Failure is not null)
               {
                 throw InvalidDecision(
@@ -753,6 +758,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
                 input.ProgressSink,
                 cancellationToken
               );
+              runtime = IncludeCompletionSummary(runtime, verification);
               if (verification.Failure is not null)
               {
                 throw InvalidDecision(
@@ -808,6 +814,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
               input.ProgressSink,
               cancellationToken
             );
+            runtime = IncludeCompletionSummary(runtime, verification);
             verificationError = null;
             verificationErrorCode = null;
             try
@@ -1177,6 +1184,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       input.ProgressSink,
       cancellationToken
     );
+    runtime = IncludeCompletionSummary(runtime, completion);
     completionTimer.Stop();
     runtime = AddTelemetry(
       runtime,
@@ -1298,6 +1306,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     var watchdogRecoveryAttempted = false;
     var canonicalRecoveryAttempted = false;
     var harnessRecoveryAttempted = false;
+    var contextRecoveryBudget = new ExecutionContextRecoveryBudget();
 
     while (true)
     {
@@ -1329,7 +1338,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         Gpu: supervisor
           ? checkpoint.Route.SupervisorGpuSelection
             ?? checkpoint.Route.WorkerGpuSelection
-          : checkpoint.Route.WorkerGpuSelection
+          : checkpoint.Route.WorkerGpuSelection,
+        ContextRecoveryBudget: contextRecoveryBudget
       );
       var answer = new StringBuilder();
       ProviderError? failure = null;
@@ -1626,9 +1636,11 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         && outcome.Failure?.Recoverable == true
         && !watchdogTriggered
         && !harnessRecoveryAttempted
+        && !contextRecoveryBudget.Consumed
       )
       {
         harnessRecoveryAttempted = true;
+        contextRecoveryBudget.TryConsume();
         var toolLoopRecovery = IsToolCallLoopFailure(outcome.Failure);
         activeScope = toolLoopRecovery
           ? CreateSupervisorCanonicalDecisionScope()
@@ -1646,8 +1658,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             new SupervisionTurnProgress(
               SupervisionEventTypeIds.TurnHarnessRecovery,
               toolLoopRecovery
-                ? "The supervisor repeated invalid tool calls. The Host reset its native session and is retrying once without tools for the required canonical decision."
-                : $"The supervisor turn hit recoverable harness failure {outcome.Failure.Code}; the Host reset its native session and is retrying once with a concise, materially different brief.",
+                ? "The supervisor repeated invalid tool calls. The Host is retrying once without tools for the required canonical decision."
+                : $"The supervisor turn hit recoverable harness failure {outcome.Failure.Code}; the Host is retrying once with a materially different recovery brief.",
               context.Role,
               context.Id,
               context.WorkItemId,
@@ -2223,6 +2235,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     return $$"""
       {{DecomposeMarker}}
       You are the focused supervisor. Decompose the original objective into the smallest ordered queue that can be independently verified. Do not mutate files.
+      Reason through dependencies, but do not draft the queue or its JSON in reasoning. Leave enough of the bounded output budget to return one complete, concise JSON decision before the limit is reached. A tool call is needed only when current workspace evidence must be inspected; call an available read-only tool promptly instead of expanding analysis without that evidence.
       Every work item must deliver at least one durable Host-observable file change and list its concrete relative file path in evidencePaths. Never dispatch directory-only scaffolding, project structure, analysis, planning, test execution, verification, or review as a standalone work item. Combine required directories with the first file that uses them, and make test execution an acceptance criterion of the implementation item it validates. Empty evidencePaths and directory paths are not valid evidence for a mutation item.
       Original objective:
       {{objective}}
@@ -2857,6 +2870,23 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       contexts[index] = context;
     }
     return runtime with { Contexts = contexts.ToArray() };
+  }
+
+  private static SupervisionRuntimeView IncludeCompletionSummary(
+    SupervisionRuntimeView runtime,
+    TurnOutcome turn
+  )
+  {
+    var lines = (runtime.CompletionSummary ?? [])
+      .Concat(turn.Review?.Summary.CompletionSummary ?? [])
+      .Distinct(StringComparer.Ordinal)
+      .ToArray();
+    if (lines.Any(line => line.StartsWith("Validation: ", StringComparison.Ordinal)
+      && line != "Validation: not run"))
+    {
+      lines = lines.Where(line => line != "Validation: not run").ToArray();
+    }
+    return runtime with { CompletionSummary = lines };
   }
 
   private static SupervisionExecutionUpdate Update(

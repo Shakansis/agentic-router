@@ -181,6 +181,25 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
   }
   context.Response.StatusCode = StatusCodes.Status204NoContent;
   await context.Response.CompleteAsync();
+  if (text.Contains("reactive context fixture", StringComparison.Ordinal))
+  {
+    var recovering = text.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
+    await File.AppendAllTextAsync(Path.Combine(runtime!, "fake-context-recovery.jsonl"),
+      JsonSerializer.Serialize(new { sessionId, recovering, text }) + "\n");
+    if (!recovering && text.Contains("with committed effect", StringComparison.Ordinal))
+      await File.AppendAllTextAsync(Path.Combine(context.Request.Query["directory"].ToString(), "context-effect.txt"), "committed once\n");
+    if (recovering && text.Contains("always fail", StringComparison.Ordinal) && text.Contains("with committed effect", StringComparison.Ordinal))
+      await File.WriteAllTextAsync(Path.Combine(context.Request.Query["directory"].ToString(), "recovery-effect.txt"), "observed before second failure");
+    if (recovering && !text.Contains("always fail", StringComparison.Ordinal))
+      await CompleteAsync(sessionId, "Recovered the existing objective.", includeReadTool: false);
+    else
+      await EmitAsync("session.error", new
+      {
+        sessionID = sessionId,
+        error = new { name = "ContextOverflowError", data = new { message = "Context exceeded" } }
+      });
+    return;
+  }
   await EmitAsync("message.part.updated", new
   {
     sessionID = sessionId,

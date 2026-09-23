@@ -172,6 +172,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
         bridgeTools,
         cancellationToken
       );
+      if (request.ContextRecoveryInputBudget.HasValue)
+        _ = CreateConversationPrompt(request, null, hostProfile, ActiveNativeTools(request, hostProfile));
       var session = _sessions.AddOrUpdate(
         request.SessionId,
         _ => new HarnessSession(
@@ -180,7 +182,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
           Path.GetFullPath(request.WorkingDirectory),
           hostProfile.Signature
         ),
-        (_, current) => current.Matches(request, hostProfile)
+        (_, current) => !request.ContextRecoveryInputBudget.HasValue && current.Matches(request, hostProfile)
           ? current
           : new HarnessSession(
             Guid.NewGuid().ToString(),
@@ -332,15 +334,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     {
       Directory.CreateDirectory(_options.RuntimeDirectory);
       var nativeToolNames = ActiveNativeTools(request, hostProfile);
-      var turnPrompt = HarnessConversationPromptBuilder.Create(
-        request,
-        session.SynchronizedThroughVersion,
-        [
-          $"Claude native workspace tools intentionally available: {string.Join(", ", nativeToolNames)}.",
-          $"Agentic Router Host bridge tools intentionally available: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.ClaudeCode, hostProfile))}.",
-          $"Host approval policy: {hostProfile.ApprovalPolicy}. Use Host tools for structured delete, process execution, validation, Git, and other capabilities not present in the native list."
-        ]
-      );
+      var turnPrompt = CreateConversationPrompt(request, session.SynchronizedThroughVersion, hostProfile, nativeToolNames);
       var startInfo = CreateTurnStartInfo(
         request,
         session,
@@ -563,6 +557,16 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     }));
     return content;
   }
+
+  private static HarnessConversationPrompt CreateConversationPrompt(
+    HarnessTurnRequest request, long? synchronizedThroughVersion,
+    HostCapabilityProfile hostProfile, IReadOnlyList<string> nativeToolNames) =>
+    HarnessConversationPromptBuilder.Create(request, synchronizedThroughVersion,
+    [
+      $"Claude native workspace tools intentionally available: {string.Join(", ", nativeToolNames)}.",
+      $"Agentic Router Host bridge tools intentionally available: {string.Join(", ", HarnessCapabilityProjection.HostBridgeTools(HarnessIds.ClaudeCode, hostProfile))}.",
+      $"Host approval policy: {hostProfile.ApprovalPolicy}. Use Host tools for structured delete, process execution, validation, Git, and other capabilities not present in the native list."
+    ]);
 
   private ProcessStartInfo CreateTurnStartInfo(
     HarnessTurnRequest request,

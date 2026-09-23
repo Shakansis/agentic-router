@@ -1,5 +1,6 @@
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Sessions;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Chat;
@@ -88,9 +89,18 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
         - settings.Context.ReservedResponseTokens
         - fixedTokens
     );
-    var completeTurns = GetCompleteTurns(
-      request.History
-    );
+    var inputHistory = request.History;
+    if (inputHistory?.Any(IsPersistedHistoryCompaction) == true)
+    {
+      // A continuity document is not an expendable old assistant reply. Refit its
+      // optional evidence for this model/role instead of silently omitting it whole.
+      inputHistory = PersistentSessionCompactor.FitHistoryToInput(inputHistory, historyBudget, _tokenEstimator)
+        ?? throw new ChatStageException("context",
+          "The continuity context cannot fit without dropping required constraints.",
+          $"Required continuity exceeds the estimated history budget of {historyBudget} tokens.",
+          request.Model, intention, 413, false);
+    }
+    var completeTurns = GetCompleteTurns(inputHistory);
     var selected = new List<IReadOnlyList<ChatMessage>>();
     var selectedMessages = 0;
     var selectedTokens = 0;
@@ -123,9 +133,11 @@ public sealed class ConversationContextBuilder : IConversationContextBuilder
         turn => turn
       )
       .ToArray();
-    var totalUsefulHistory = completeTurns.Sum(
-      turn => turn.Count
-    );
+    // Preserve the source conversation version when many messages become one
+    // continuity document; native hydration cursors must not move backwards.
+    var totalUsefulHistory = ReferenceEquals(inputHistory, request.History)
+      ? completeTurns.Sum(turn => turn.Count)
+      : Math.Max(history.Length, GetCompleteTurns(request.History).Sum(turn => turn.Count));
     var messages = systemMessages
       .Concat(
         history

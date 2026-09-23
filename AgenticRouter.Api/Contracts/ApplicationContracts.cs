@@ -139,7 +139,8 @@ public sealed record ChatRequest(
   bool HideUserMessage = false,
   int? ReplaceFromMessageIndex = null,
   string? SupervisionRunId = null,
-  bool PreserveExactUserMessage = false
+  bool PreserveExactUserMessage = false,
+  string? ChatRunId = null
 );
 
 public sealed record HarnessSteerInput(
@@ -264,6 +265,11 @@ public sealed record ConversationSessionSummary(
   string LastExecutionStrategy = "auto"
 );
 
+public sealed record ConversationHistoryPage(
+  int StartIndex,
+  IReadOnlyList<ChatMessage> Messages
+);
+
 public sealed record SessionSummaryContent(
   string Objective,
   IReadOnlyList<string> Decisions,
@@ -307,7 +313,12 @@ public sealed record ConversationSessionRecord(
   string? PreferredModelProfileId = null,
   string LastApprovalPolicy = "auto",
   string SelectedHarness = "native",
-  string LastExecutionStrategy = "auto"
+  string LastExecutionStrategy = "auto",
+  string? TranscriptId = null,
+  IReadOnlyList<ChatMessage>? ContextMessages = null,
+  int PresentationOffset = 0,
+  ContextUsageView? LastContextUsage = null,
+  AgenticRouter.Api.Chat.LiveChatRunView? ActiveChatRun = null
 );
 
 public sealed record RenameConversationSessionRequest(
@@ -330,7 +341,8 @@ public sealed record SaveConversationSessionRequest(
   string State,
   string ApprovalPolicy = "auto",
   string Harness = "native",
-  string ExecutionStrategy = "auto"
+  string ExecutionStrategy = "auto",
+  int PreservedMessageCount = 0
 );
 
 public sealed record ConversationPersistenceView(
@@ -763,7 +775,8 @@ public sealed record ExecutionSessionSummary(
   string? ConformanceIdentity = null,
   string? HandoffReason = null,
   ExecutionRoutingEvidence? RoutingEvidence = null,
-  ExecutionTimingView? Timing = null
+  ExecutionTimingView? Timing = null,
+  IReadOnlyList<string>? CompletionSummary = null
 );
 
 public sealed record ExecutionTimingView(
@@ -939,7 +952,8 @@ public sealed record SupervisionProgressView(
   string? WorkerRuntime = null,
   string? SupervisorModel = null,
   string? SupervisorGpu = null,
-  string? SupervisorRuntime = null
+  string? SupervisorRuntime = null,
+  IReadOnlyList<string>? CompletionSummary = null
 );
 
 public sealed record ChatStreamEvent(
@@ -969,7 +983,9 @@ public sealed record ChatStreamEvent(
   SlowRequestStatusView? SlowRequest = null,
   SupervisionProgressView? SupervisionProgress = null,
   string? SpecialistCompletion = null,
-  UserInputRequestView? UserInput = null
+  UserInputRequestView? UserInput = null,
+  string? ChatRunId = null,
+  long? ChatRunSequence = null
 );
 
 public sealed record ValidationErrorsResponse(

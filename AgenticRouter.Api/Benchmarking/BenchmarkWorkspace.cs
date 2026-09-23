@@ -218,7 +218,7 @@ public sealed class BenchmarkWorkspaceFactory : IBenchmarkWorkspaceFactory
       throw new InvalidOperationException("Refusing to clean a reparse-point run root.");
     }
 
-    DeleteOwnedTree(runDirectory, root);
+    DeleteOwnedTree(runDirectory, root, cancellationToken);
     return Task.FromResult(!Directory.Exists(runDirectory));
   }
 
@@ -275,9 +275,11 @@ public sealed class BenchmarkWorkspaceFactory : IBenchmarkWorkspaceFactory
 
   private static void DeleteOwnedTree(
     string directory,
-    string root
+    string root,
+    CancellationToken cancellationToken
   )
   {
+    cancellationToken.ThrowIfCancellationRequested();
     var fullDirectory = Path.GetFullPath(directory);
     if (!ContainsPath(root, fullDirectory))
     {
@@ -286,6 +288,7 @@ public sealed class BenchmarkWorkspaceFactory : IBenchmarkWorkspaceFactory
 
     foreach (var entry in new DirectoryInfo(fullDirectory).EnumerateFileSystemInfos())
     {
+      cancellationToken.ThrowIfCancellationRequested();
       var fullPath = Path.GetFullPath(entry.FullName);
       if (!ContainsPath(root, fullPath))
       {
@@ -293,7 +296,7 @@ public sealed class BenchmarkWorkspaceFactory : IBenchmarkWorkspaceFactory
       }
       if (entry is DirectoryInfo && !entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
       {
-        DeleteOwnedTree(fullPath, root);
+        DeleteOwnedTree(fullPath, root, cancellationToken);
         continue;
       }
       entry.Attributes = FileAttributes.Normal;

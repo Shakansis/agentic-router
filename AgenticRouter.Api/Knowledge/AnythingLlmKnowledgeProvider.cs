@@ -9,6 +9,7 @@ namespace AgenticRouter.Api.Knowledge;
 
 public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
 {
+  public const string HttpClientName = "AnythingLlm";
   private const int MaximumResponseBytes = 2_097_152;
   private static readonly JsonSerializerOptions JsonOptions = new(
     JsonSerializerDefaults.Web
@@ -17,16 +18,19 @@ public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
   private readonly IHttpClientFactory _httpClientFactory;
   private readonly ISettingsStore _settingsStore;
   private readonly IProtectedSecretStore _secretStore;
+  private readonly ILogger<AnythingLlmKnowledgeProvider> _logger;
 
   public AnythingLlmKnowledgeProvider(
     IHttpClientFactory httpClientFactory,
     ISettingsStore settingsStore,
-    IProtectedSecretStore secretStore
+    IProtectedSecretStore secretStore,
+    ILogger<AnythingLlmKnowledgeProvider> logger
   )
   {
     _httpClientFactory = httpClientFactory;
     _settingsStore = settingsStore;
     _secretStore = secretStore;
+    _logger = logger;
   }
 
   public KnowledgeProviderDefinition Definition { get; } = new(
@@ -285,7 +289,7 @@ public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
 
     try
     {
-      return await _httpClientFactory.CreateClient().SendAsync(
+      return await _httpClientFactory.CreateClient(HttpClientName).SendAsync(
         request,
         HttpCompletionOption.ResponseHeadersRead,
         timeout.Token
@@ -295,6 +299,8 @@ public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
       !cancellationToken.IsCancellationRequested
     )
     {
+      _logger.LogWarning("knowledge-timeout: AnythingLLM did not respond in time. Check that it is running and review the project Knowledge settings.");
+      _logger.LogDebug(exception, "AnythingLLM transport timeout cause.");
       throw Error(
         "knowledge-timeout",
         "knowledge-transport",
@@ -305,10 +311,12 @@ public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
     }
     catch (HttpRequestException exception)
     {
+      _logger.LogWarning("knowledge-unavailable: AnythingLLM could not be reached. Start AnythingLLM or check its address in the project Knowledge settings.");
+      _logger.LogDebug(exception, "AnythingLLM transport failure cause.");
       throw Error(
         "knowledge-unavailable",
         "knowledge-transport",
-        "AnythingLLM could not be reached at the configured address.",
+        "AnythingLLM could not be reached at the configured address. Start AnythingLLM or check its address in the project Knowledge settings.",
         true,
         innerException: exception
       );

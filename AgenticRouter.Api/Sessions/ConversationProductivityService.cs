@@ -155,6 +155,13 @@ public sealed class ConversationProductivityService
     var query = NormalizeOptional(
       request.Query
     );
+    if (query is null && string.IsNullOrWhiteSpace(request.FileChanged)
+      && string.IsNullOrWhiteSpace(request.ValidationResult))
+    {
+      return await SearchMetadataAsync(
+        selectedWorkspaces, request, limit, cancellationToken
+      );
+    }
     var results = new List<ConversationSearchResult>();
     var scanned = 0;
     var matchedBeyondLimit = false;
@@ -246,6 +253,60 @@ public sealed class ConversationProductivityService
       request.AllWorkspaces
         ? "all-workspaces"
         : "active-workspace"
+    );
+  }
+
+  private async Task<ConversationSearchResponse> SearchMetadataAsync(
+    IEnumerable<WorkspaceProfileView> workspaces,
+    ConversationSearchRequest request,
+    int limit,
+    CancellationToken cancellationToken
+  )
+  {
+    var results = new List<ConversationSearchResult>();
+    var scanned = 0;
+    var matchedBeyondLimit = false;
+    foreach (var workspace in workspaces.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+    {
+      var sessions = await _store.ReadAllMetadataAsync(workspace.Id, cancellationToken);
+      foreach (var session in sessions.OrderByDescending(item => item.UpdatedAt)
+        .ThenBy(item => item.Id, StringComparer.Ordinal))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        scanned++;
+        if (request.Archived is not null && session.Archived != request.Archived
+          || request.Pinned is not null && session.Pinned != request.Pinned
+          || request.From is not null && session.UpdatedAt < request.From
+          || request.To is not null && session.UpdatedAt > request.To)
+        {
+          continue;
+        }
+        var reference = string.IsNullOrWhiteSpace(session.SelectedModel)
+          ? null : ProviderModelReference.Parse(session.SelectedModel);
+        if (!MatchesOptional(reference?.ProviderId, request.Provider)
+          || !MatchesOptional(session.SelectedModel, request.Model))
+        {
+          continue;
+        }
+        if (results.Count >= limit)
+        {
+          matchedBeyondLimit = true;
+          continue;
+        }
+        results.Add(new ConversationSearchResult(
+          session.Id, session.WorkspaceId, workspace.Name, session.Title,
+          session.UpdatedAt, session.Archived, session.Pinned,
+          session.HasSessionSummary, reference?.ProviderId, session.SelectedModel,
+          "title", Bound(session.Title, 220), []
+        ));
+      }
+    }
+    return new ConversationSearchResponse(
+      results.OrderByDescending(result => result.Pinned)
+        .ThenByDescending(result => result.UpdatedAt)
+        .ThenBy(result => result.Id, StringComparer.Ordinal).ToArray(),
+      matchedBeyondLimit, scanned,
+      request.AllWorkspaces ? "all-workspaces" : "active-workspace"
     );
   }
 

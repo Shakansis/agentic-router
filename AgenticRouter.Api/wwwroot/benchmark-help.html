@@ -42,7 +42,7 @@
     <h2>Quick start</h2>
     <ol>
       <li>Select installed local models, available harnesses and test suites. A harness is the runtime that drives the model and its tools. Each model and harness pairing is a separate combination.</li>
-      <li>Choose timeout, context window and repetition count. Check the Default GPU inherited from Settings.</li>
+      <li>Choose timeout, context window, repetition count and Default GPU. The GPU starts with the Settings selection and can be changed for this benchmark.</li>
       <li>Select <strong>Run benchmark</strong>. This starts real execution using the selected models. Tests use dedicated benchmark workspaces.</li>
       <li>In <strong>Tests in progress</strong>, select a combination or use Previous, Next or View active test. Expand a test for its outcome and activity timeline; open <strong>Advanced details</strong> for comparisons and recorded checks.</li>
       <li>In <strong>Results</strong>, inspect failures before comparing scores. Use <strong>Recommendation</strong> for guidance across saved runs and <strong>History and comparison</strong> for changes over time.</li>
@@ -56,7 +56,7 @@
       <dt>Per-test timeout (seconds)</dt><dd>Time allowed for a test, within the UI's 5–1600 second range. Scenario-specific limits may also apply. Timeouts are recorded; independent subsequent combinations can continue.</dd>
       <dt>Sequential runs</dt><dd>Repeat the full selection 1–20 times. Each repetition has its own run ID and saved evidence; results are not collapsed into one average run.</dd>
       <dt>Context window (tokens)</dt><dd>Requested model context, from 4096 to 131072 tokens. The runtime evidence distinguishes requested context from observed context; selecting a value does not prove it was observed by the backend.</dd>
-      <dt>Default GPU</dt><dd>Read-only snapshot of the selection in Settings, frozen when the run starts. Saved selection and actual backend placement are different evidence.</dd>
+      <dt>Default GPU</dt><dd>Starts with the selection in Settings. Changing it affects only this benchmark and is frozen when the run starts; explicit model GPU affinity takes precedence. Saved selection and actual backend placement are different evidence.</dd>
       <dt>Scoring profile / Score weights</dt><dd>Default or custom weights determine calculated scores. Each weight is 0–100 and at least one must be positive. Their sum is the normalization denominator; it need not be 100. Editing weights rescores existing evidence without model execution. Reset restores defaults.</dd>
       <dt>Custom Benchmark Prompt / Run name</dt><dd>The custom test sends your exact prompt; the optional name helps identify it in history. Inspect the output and workspace, then assign a quality score and review notes. Execution completion does not automatically validate arbitrary user goals.</dd>
       <dt>Progress, finished, passed and terminality</dt><dd>Finished counts tests that reached an ending, including failures. Passed counts accepted predefined tests. Terminality measures whether execution reached a recognized ending; it is not a correctness or pass rate.</dd>

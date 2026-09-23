@@ -31,6 +31,9 @@ internal static class HarnessConversationPromptBuilder
     builder.Append(
       "- When a granted tool is needed, call it immediately. Do not draft, preview, or repeat the tool arguments in reasoning or visible prose; place the complete arguments only in the tool call.\n"
     );
+    builder.Append(
+      "- Before the first action, briefly tell the user in their language how you understood the request and which immediate actions you will take. Keep this to one or two sentences, do not claim results, and do not repeat it before later actions.\n"
+    );
     builder.Append("- Host effort target for this turn: ")
       .Append(request.RequestedEffort)
       .Append(". ")
@@ -126,6 +129,10 @@ internal static class HarnessConversationPromptBuilder
     )
       .Append(request.Prompt);
 
+    if (request.ContextRecoveryInputBudget.HasValue)
+    {
+      HarnessContextRecovery.ValidateEnvelope(request, builder.ToString());
+    }
     return new HarnessConversationPrompt(
       builder.ToString(),
       request.IsRecoveryContinuation

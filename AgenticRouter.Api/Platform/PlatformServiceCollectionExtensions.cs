@@ -20,7 +20,11 @@ internal static class PlatformServiceCollectionExtensions
         dataDirectory,
         provider.GetRequiredService<IHttpClientFactory>(),
         provider.GetRequiredService<ILogger<OllamaManagedServerManager>>(),
-        provider.GetRequiredService<IGpuDiscoveryService>()
+        provider.GetRequiredService<IGpuDiscoveryService>(),
+        executableOverride: provider.GetRequiredService<IConfiguration>()["AgenticRouter:ManagedOllama:ExecutablePath"],
+        portOffset: provider.GetRequiredService<IConfiguration>().GetValue("AgenticRouter:ManagedOllama:PortOffset", 1_000),
+        startupOptions: provider.GetRequiredService<IConfiguration>()
+          .GetSection("AgenticRouter:ManagedOllama").Get<OllamaStartupOptions>()
       )
     );
     services.AddSingleton<IOllamaManagedServerManager>(

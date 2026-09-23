@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.WorkspaceProfiles;
@@ -6,6 +8,11 @@ namespace AgenticRouter.Api.Sessions;
 
 public interface IPersistentSessionStore
 {
+  Task<IReadOnlyList<ConversationSessionMetadata>> ReadAllMetadataAsync(
+    string workspaceId,
+    CancellationToken cancellationToken
+  );
+
   Task<IReadOnlyList<ConversationSessionRecord>> ReadAllAsync(
     string workspaceId,
     CancellationToken cancellationToken
@@ -36,8 +43,54 @@ public interface IPersistentSessionStore
   );
 }
 
+public sealed record ConversationSessionMetadata(
+  string Id,
+  string WorkspaceId,
+  string Title,
+  DateTimeOffset CreatedAt,
+  DateTimeOffset UpdatedAt,
+  bool Archived,
+  string State,
+  string LastInteractionMode,
+  string? SelectedModel,
+  bool Interrupted,
+  bool Pinned,
+  DateTimeOffset? PinnedAt,
+  bool HasSessionSummary,
+  string? PreferredModelProfileId,
+  string LastApprovalPolicy,
+  string SelectedHarness,
+  string LastExecutionStrategy,
+  string? TranscriptId,
+  long RecordBytes,
+  long StorageBytes
+);
+
 public sealed class PersistentSessionStore : IPersistentSessionStore
 {
+  private sealed record SessionMetadataFile
+  {
+    public int SchemaVersion { get; init; }
+    public string? Id { get; init; }
+    public string? WorkspaceId { get; init; }
+    public string? Title { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+    public bool Archived { get; init; }
+    public string? State { get; init; }
+    public string? LastInteractionMode { get; init; }
+    public string? SelectedModel { get; init; }
+    public bool Interrupted { get; init; }
+    public bool Pinned { get; init; }
+    public DateTimeOffset? PinnedAt { get; init; }
+    public JsonElement? SessionSummary { get; init; }
+    public string? PreferredModelProfileId { get; init; }
+    public string? LastApprovalPolicy { get; init; }
+    public string? SelectedHarness { get; init; }
+    public string? LastExecutionStrategy { get; init; }
+    public string? TranscriptId { get; init; }
+  }
+
   private static readonly JsonSerializerOptions JsonOptions = new(
     JsonSerializerDefaults.Web
   )
@@ -59,6 +112,63 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
   {
     _dataDirectory = workspaceStore.DataDirectory;
     _logger = logger;
+  }
+
+  public async Task<IReadOnlyList<ConversationSessionMetadata>> ReadAllMetadataAsync(
+    string workspaceId,
+    CancellationToken cancellationToken
+  )
+  {
+    ValidateId(workspaceId);
+    var directory = SessionDirectory(workspaceId);
+    if (!Directory.Exists(directory)) return [];
+
+    var sessions = new List<ConversationSessionMetadata>();
+    foreach (var path in Directory.EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly))
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var sessionId = Path.GetFileNameWithoutExtension(path);
+      try
+      {
+        ValidateId(sessionId);
+        await using var stream = File.OpenRead(path);
+        var stored = await JsonSerializer.DeserializeAsync<SessionMetadataFile>(
+          stream, JsonOptions, cancellationToken
+        );
+        if (stored is null || stored.SchemaVersion != 1
+          || !string.Equals(stored.Id, sessionId, StringComparison.Ordinal)
+          || !string.Equals(stored.WorkspaceId, workspaceId, StringComparison.Ordinal)
+          || stored.Title is null || stored.State is null || stored.LastInteractionMode is null)
+        {
+          throw new InvalidDataException("The session metadata is invalid.");
+        }
+
+        var recordBytes = stream.Length;
+        var storageBytes = recordBytes;
+        if (stored.TranscriptId is { } transcriptId)
+        {
+          storageBytes += new FileInfo(TranscriptPath(workspaceId, sessionId, transcriptId)).Length;
+        }
+        sessions.Add(new ConversationSessionMetadata(
+          sessionId, workspaceId, stored.Title, stored.CreatedAt, stored.UpdatedAt,
+          stored.Archived, stored.State, stored.LastInteractionMode, stored.SelectedModel,
+          stored.Interrupted, stored.Pinned, stored.PinnedAt,
+          stored.SessionSummary is { ValueKind: JsonValueKind.Object },
+          stored.PreferredModelProfileId, stored.LastApprovalPolicy ?? "auto",
+          stored.SelectedHarness ?? "native", stored.LastExecutionStrategy ?? "auto",
+          stored.TranscriptId, recordBytes, storageBytes
+        ));
+      }
+      catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+        or JsonException or InvalidDataException
+        or WorkspaceProfileException { Code: "session-file-invalid" })
+      {
+        _logger.LogWarning(exception,
+          "Skipping invalid persisted session {SessionId} in workspace {WorkspaceId}; other sessions remain available.",
+          sessionId, workspaceId);
+      }
+    }
+    return sessions;
   }
 
   public async Task<IReadOnlyList<ConversationSessionRecord>> ReadAllAsync(
@@ -146,6 +256,7 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
       return null;
     }
 
+    await _gate.WaitAsync(cancellationToken);
     try
     {
       await using var stream = File.OpenRead(
@@ -177,11 +288,21 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
         );
       }
 
+      var storageBytes = new FileInfo(path).Length;
+      if (session.TranscriptId is { } transcriptId)
+      {
+        var transcriptPath = TranscriptPath(workspaceId, sessionId, transcriptId);
+        await using var transcript = File.OpenRead(transcriptPath);
+        await using var decompressed = new GZipStream(transcript, CompressionMode.Decompress);
+        var messages = await JsonSerializer.DeserializeAsync<ChatMessage[]>(
+          decompressed, JsonOptions, cancellationToken
+        ) ?? throw new InvalidDataException("The saved transcript is empty.");
+        session = session with { ContextMessages = session.Messages, Messages = messages };
+        storageBytes += transcript.Length;
+      }
       return session with
       {
-        StorageBytes = new FileInfo(
-          path
-        ).Length
+        StorageBytes = storageBytes
       };
     }
     catch (Exception exception) when (
@@ -199,6 +320,10 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
         exception
       );
     }
+    finally
+    {
+      _gate.Release();
+    }
   }
 
   public async Task<ConversationSessionRecord> WriteAsync(
@@ -214,7 +339,8 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
     ValidateId(
       session.Id
     );
-    var persisted = session;
+    var persisted = session with { TranscriptId = null, ContextMessages = null, PresentationOffset = 0 };
+    byte[]? transcriptBytes = null;
     var json = Serialize(
       persisted
     );
@@ -229,6 +355,11 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
         MeasureBytes
       );
       persisted = compaction.Session;
+      transcriptBytes = JsonSerializer.SerializeToUtf8Bytes(session.Messages, JsonOptions);
+      persisted = persisted with
+      {
+        TranscriptId = Convert.ToHexStringLower(SHA256.HashData(transcriptBytes))
+      };
       json = Serialize(
         persisted
       );
@@ -275,6 +406,28 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
 
       try
       {
+        if (transcriptBytes is not null && persisted.TranscriptId is { } transcriptId)
+        {
+          var transcriptPath = TranscriptPath(session.WorkspaceId, session.Id, transcriptId);
+          if (!File.Exists(transcriptPath))
+          {
+            var transcriptTemporary = temporary + ".gz";
+            try
+            {
+              await using (var output = File.Create(transcriptTemporary))
+              {
+                await using var compressed = new GZipStream(output, CompressionLevel.Optimal);
+                await compressed.WriteAsync(transcriptBytes, cancellationToken);
+              }
+              File.Move(transcriptTemporary, transcriptPath, true);
+            }
+            finally
+            {
+              if (File.Exists(transcriptTemporary)) File.Delete(transcriptTemporary);
+            }
+          }
+          bytes += checked((int)new FileInfo(transcriptPath).Length);
+        }
         await File.WriteAllTextAsync(
           temporary,
           json,
@@ -285,6 +438,18 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
           path,
           true
         );
+        // The JSON pointer is committed only after its lossless transcript exists.
+        // Retain the previous transcript on a failed write.
+        foreach (var oldTranscript in Directory.EnumerateFiles(directory, $"{session.Id}.*.history.gz"))
+        {
+          if (persisted.TranscriptId is null
+            || !string.Equals(oldTranscript, TranscriptPath(session.WorkspaceId, session.Id, persisted.TranscriptId), StringComparison.Ordinal))
+          {
+            try { File.Delete(oldTranscript); }
+            catch (IOException exception) { _logger.LogWarning(exception, "Could not remove an obsolete conversation transcript."); }
+            catch (UnauthorizedAccessException exception) { _logger.LogWarning(exception, "Could not remove an obsolete conversation transcript."); }
+          }
+        }
       }
       finally
       {
@@ -300,7 +465,9 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
 
       return persisted with
       {
-        StorageBytes = bytes
+        StorageBytes = bytes,
+        Messages = session.Messages,
+        ContextMessages = persisted.TranscriptId is null ? null : persisted.Messages
       };
     }
     catch (WorkspaceProfileException)
@@ -344,7 +511,9 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
     return JsonSerializer.Serialize(
       session with
       {
-        StorageBytes = 0
+        StorageBytes = 0,
+        ContextMessages = null,
+        PresentationOffset = 0
       },
       JsonOptions
     ).Replace(
@@ -384,6 +553,14 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
         File.Delete(
           path
         );
+      }
+      var directory = SessionDirectory(workspaceId);
+      if (Directory.Exists(directory))
+      {
+        foreach (var transcript in Directory.EnumerateFiles(directory, $"{sessionId}.*.history.gz"))
+        {
+          File.Delete(transcript);
+        }
       }
     }
     catch (Exception exception) when (
@@ -450,6 +627,15 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
       ),
       $"{sessionId}.json"
     );
+  }
+
+  private string TranscriptPath(string workspaceId, string sessionId, string transcriptId)
+  {
+    if (transcriptId.Length != 64 || transcriptId.Any(character => !char.IsAsciiHexDigit(character)))
+    {
+      throw new InvalidDataException("The saved transcript identifier is invalid.");
+    }
+    return Path.Combine(SessionDirectory(workspaceId), $"{sessionId}.{transcriptId}.history.gz");
   }
 
   private static void ValidateId(

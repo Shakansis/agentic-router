@@ -139,6 +139,27 @@ await EmitAsync(new
   capabilities = new[] { "interrupt_receipt_v1" }
 });
 
+if (prompt.Contains("reactive context fixture", StringComparison.Ordinal))
+{
+  var recovering = prompt.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
+  await File.AppendAllTextAsync(Path.Combine(runtime, "fake-context-recovery.jsonl"),
+    JsonSerializer.Serialize(new { sessionId = nativeSessionId, recovering, text = prompt }) + "\n");
+  if (!recovering && prompt.Contains("with committed effect", StringComparison.Ordinal))
+    await File.AppendAllTextAsync(Path.Combine(cwd, "context-effect.txt"), "committed once\n");
+  if (recovering && prompt.Contains("always fail", StringComparison.Ordinal) && prompt.Contains("with committed effect", StringComparison.Ordinal))
+    await File.WriteAllTextAsync(Path.Combine(cwd, "recovery-effect.txt"), "observed before second failure");
+  var succeeded = recovering && !prompt.Contains("always fail", StringComparison.Ordinal);
+  await EmitAsync(new
+  {
+    type = "result",
+    subtype = succeeded ? "success" : "error_during_execution",
+    is_error = !succeeded,
+    result = succeeded ? "Recovered the existing objective." : "Prompt is too long",
+    session_id = nativeSessionId
+  });
+  return;
+}
+
 if (prompt.Contains("diagnostic overflow", StringComparison.OrdinalIgnoreCase))
 {
   for (var index = 0; index < 260; index++)

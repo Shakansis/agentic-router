@@ -37,6 +37,8 @@ public sealed class ChatController : ControllerBase
   private readonly IMarkdownRenderer _markdown;
   private readonly IExecutionLatencyTracker _latency;
   private readonly IUserInputCoordinator _userInput;
+  private readonly LiveChatRuns _chatRuns;
+  private LiveChatRun? _ownedRun;
   private SsePresentationWriter? _eventWriter;
   private string? _executionSessionId;
   private string? _conversationSessionId;
@@ -48,6 +50,7 @@ public sealed class ChatController : ControllerBase
 
   public ChatController(
     IChatStreamService chatStreamService,
+    LiveChatRuns chatRuns,
     IExecutionSessionStore executionSessions,
     IPersistentSessionService persistentSessions,
     IImageAttachmentValidator imageValidator,
@@ -62,6 +65,7 @@ public sealed class ChatController : ControllerBase
   )
   {
     _chatStreamService = chatStreamService;
+    _chatRuns = chatRuns;
     _executionSessions = executionSessions;
     _persistentSessions = persistentSessions;
     _imageValidator = imageValidator;
@@ -76,7 +80,92 @@ public sealed class ChatController : ControllerBase
   }
 
   [HttpPost("stream")]
-  public async Task Stream(
+  public async Task Stream([FromBody] ChatRequest request, CancellationToken cancellationToken)
+  {
+    if (request.ChatRunId is null)
+    {
+      await StreamCore(request, cancellationToken);
+      return;
+    }
+    _ownedRun = _chatRuns.Create(request);
+    if (_ownedRun is null)
+    {
+      Response.StatusCode = StatusCodes.Status409Conflict;
+      return; // Never submit a duplicate client run identifier.
+    }
+    var producer = ProduceOwnedAsync(request, _ownedRun);
+    await Task.WhenAll(producer, AttachRunAsync(_ownedRun, 0, cancellationToken));
+  }
+
+  private async Task ProduceOwnedAsync(ChatRequest request, LiveChatRun run)
+  {
+    try { await StreamCore(request, run.Token); }
+    catch (OperationCanceledException) when (run.Token.IsCancellationRequested)
+    {
+      // Cancellation can arrive during initial settings/request validation,
+      // before StreamCore has entered its execution error-handling boundary.
+      await MarkPersistentTerminalAsync("cancelled");
+    }
+    finally
+    {
+      try
+      {
+        if (run.StopRequested && !run.HasTerminal)
+        {
+          await WriteEventAsync(new ChatStreamEvent(_turnId ?? run.Id, "request.cancelled",
+            DateTimeOffset.UtcNow, "Request cancelled.", null, request.Model,
+            null, null, null, null), CancellationToken.None);
+          await PersistPresentationTimelineAsync(_turnId ?? run.Id);
+        }
+      }
+      finally { run.Complete(); }
+    }
+  }
+
+  [HttpGet("runs/{id}")]
+  public IActionResult GetRun(string id) => _chatRuns.Find(id) is { } run ? Ok(run.View) : NotFound();
+
+  [HttpGet("runs")]
+  public IActionResult GetRuns() => Ok(_chatRuns.Active);
+
+  [HttpPost("runs/{id}/cancel")]
+  public async Task<IActionResult> CancelRun(string id)
+  {
+    if (_chatRuns.Find(id) is not { } run) return NotFound();
+    if (run.View.SupervisionRunId is { } supervisionId)
+    {
+      await _supervisionRuns.CancelAsync(supervisionId, CancellationToken.None);
+      return Accepted();
+    }
+    run.Cancel();
+    var execution = _executionSessions.GetActive(run.View.BrowserSessionId);
+    if (execution is not null && execution.RequestId == run.View.TurnId)
+      execution.Complete("cancelled", "The user explicitly stopped this Host-owned request.");
+    return Accepted();
+  }
+
+  [HttpGet("runs/{id}/stream")]
+  public async Task AttachRun(string id, [FromQuery] long afterSequence, CancellationToken cancellationToken)
+  {
+    if (_chatRuns.Find(id) is not { } run) { Response.StatusCode = 404; return; }
+    await AttachRunAsync(run, afterSequence, cancellationToken);
+  }
+
+  private async Task AttachRunAsync(LiveChatRun run, long after, CancellationToken cancellationToken)
+  {
+    Response.ContentType = "text/event-stream";
+    Response.Headers.CacheControl = "no-cache";
+    try
+    {
+      await using var writer = new SsePresentationWriter(Response, JsonOptions, _latency, cancellationToken);
+      await foreach (var item in run.ReadAsync(after, cancellationToken))
+        await writer.WriteAsync(item, cancellationToken);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    catch (IOException) { /* Only the subscriber left; the producer still owns the turn. */ }
+  }
+
+  private async Task StreamCore(
     [FromBody] ChatRequest request,
     CancellationToken cancellationToken
   )
@@ -149,7 +238,7 @@ public sealed class ChatController : ControllerBase
       return;
     }
 
-    _eventWriter = new SsePresentationWriter(
+    if (_ownedRun is null) _eventWriter = new SsePresentationWriter(
       Response,
       JsonOptions,
       _latency,
@@ -180,6 +269,10 @@ public sealed class ChatController : ControllerBase
         );
         _conversationSessionId = persisted?.Id
           ?? _conversationSessionId;
+        if (!request.HideUserMessage && persisted?.ContextMessages is { } contextMessages)
+        {
+          request = request with { History = contextMessages.SkipLast(1).ToArray() };
+        }
         _trace.Link("conversationId", _conversationSessionId);
         if (persisted is not null)
         {
@@ -397,6 +490,8 @@ public sealed class ChatController : ControllerBase
     {
       if (_durableSupervisionRunId is not null)
       {
+        if (_ownedRun?.StopRequested == true)
+          await _supervisionRuns.CancelAsync(_durableSupervisionRunId, CancellationToken.None);
         _logger.LogInformation(
           "Browser detached from durable supervision run {RunId}; Host execution continues.",
           _durableSupervisionRunId
@@ -1350,7 +1445,8 @@ public sealed class ChatController : ControllerBase
         ?? view.Route.SupervisorGpuSelection
         ?? view.Route.WorkerGpuDeviceName
         ?? view.Route.WorkerGpuSelection,
-      view.Route.SupervisorRuntime ?? view.Route.WorkerRuntime
+      view.Route.SupervisorRuntime ?? view.Route.WorkerRuntime,
+      view.Terminal ? view.Runtime?.CompletionSummary : null
     );
   }
 
@@ -1503,7 +1599,7 @@ public sealed class ChatController : ControllerBase
         _turnId,
         summary.State,
         review,
-        HttpContext.RequestAborted
+        _ownedRun?.Token ?? HttpContext.RequestAborted
       );
     }
     catch (WorkspaceProfileException exception)
@@ -1892,9 +1988,11 @@ public sealed class ChatController : ControllerBase
       }
     }
 
+    if (_ownedRun is not null) streamEvent = _ownedRun.Publish(streamEvent);
     _presentationTimeline.Add(
       streamEvent
     );
+    if (_ownedRun is not null) return streamEvent;
 
     if (_eventWriter is not null)
     {

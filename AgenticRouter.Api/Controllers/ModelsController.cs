@@ -66,9 +66,11 @@ public sealed class ModelsController : ControllerBase
     catch (OllamaProviderException exception)
     {
       _logger.LogWarning(
-        exception,
-        "Ollama model discovery failed."
+        "Model discovery unavailable at {Stage}: {Message}",
+        exception.Stage,
+        exception.Message
       );
+      _logger.LogDebug(exception, "Model discovery failure cause.");
       var error = new ProviderError(
         exception.Stage,
         exception.Message,

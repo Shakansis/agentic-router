@@ -251,7 +251,9 @@ public sealed record SupervisionRuntimeView(
   string? FinalAnswer,
   string? LastFailure,
   bool RecoverableInCurrentProcess,
-  SupervisionTelemetryView? Telemetry = null
+  SupervisionTelemetryView? Telemetry = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  IReadOnlyList<string>? CompletionSummary = null
 )
 {
   public static SupervisionRuntimeView Empty(bool recoverableInCurrentProcess = true)
@@ -445,7 +447,9 @@ public sealed record DurableSupervisionRunView(
   SupervisionRecoverySnapshot? Recovery = null,
   string? WaitCode = null,
   SupervisionTakeoverSnapshot? Takeover = null,
-  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised
+  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised,
+  bool ExecutionActive = false,
+  string? DurabilityError = null
 );
 
 public sealed record SupervisionRunListView(

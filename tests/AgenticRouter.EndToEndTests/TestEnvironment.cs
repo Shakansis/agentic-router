@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace AgenticRouter.EndToEndTests;
 
@@ -375,6 +376,21 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   public async Task ResetSettingsAsync()
   {
+    // Closing a test page is now a detach, not cancellation. Settle only this
+    // fixture Host's surviving runs before changing its workspace/settings.
+    using (var active = await HttpClient.GetAsync("api/chat/runs"))
+    {
+      active.EnsureSuccessStatusCode();
+      var runs = JsonNode.Parse(await active.Content.ReadAsStringAsync())!.AsArray();
+      foreach (var run in runs)
+      {
+        var id = run!["id"]!.GetValue<string>();
+        using var cancel = await HttpClient.PostAsync($"api/chat/runs/{id}/cancel", null);
+        cancel.EnsureSuccessStatusCode();
+        using var settled = await HttpClient.GetAsync($"api/chat/runs/{id}/stream?afterSequence={long.MaxValue}");
+        settled.EnsureSuccessStatusCode();
+      }
+    }
     _fakeOllama.Reset();
     _fakeCloud.Reset();
 
@@ -703,6 +719,21 @@ internal sealed class TestEnvironment : IAsyncDisposable
     _apiProcess.StartInfo.Environment[
       "AgenticRouter__Codex__ExecutablePath"
     ] = executablePath;
+    await RestartApplicationAsync();
+  }
+
+  public async Task SetManagedOllamaAndRestartAsync(
+    string? executablePath,
+    int portOffset = 1_000,
+    int attemptTimeoutSeconds = 120,
+    int recoveryTimeoutSeconds = 600
+  )
+  {
+    var environment = _apiProcess.StartInfo.Environment;
+    environment["AgenticRouter__ManagedOllama__ExecutablePath"] = executablePath;
+    environment["AgenticRouter__ManagedOllama__PortOffset"] = portOffset.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    environment["AgenticRouter__ManagedOllama__AttemptTimeoutSeconds"] = attemptTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    environment["AgenticRouter__ManagedOllama__RecoveryTimeoutSeconds"] = recoveryTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
     await RestartApplicationAsync();
   }
 

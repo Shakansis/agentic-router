@@ -94,6 +94,7 @@ public static class BenchmarkRunStatusIds
 
 public static class BenchmarkMatrixCellStatusIds
 {
+  public const string NotRun = "not-run";
   public const string Available = "available";
   public const string Unsupported = "unsupported";
   public const string Unavailable = "unavailable";
@@ -133,6 +134,7 @@ public static class BenchmarkLiveStateIds
 
 public static class BenchmarkProgressTypeIds
 {
+  public const string Snapshot = "run.snapshot";
   public const string RunStarted = "run.started";
   public const string RunCancelling = "run.cancelling";
   public const string HarnessStarted = "harness.started";
@@ -214,7 +216,8 @@ public sealed record BenchmarkSuiteRunRequest(
   string BenchmarkMode = BenchmarkModeIds.Predefined,
   string? CustomPrompt = null,
   string? RunName = null,
-  string? RerunOfRunId = null
+  string? RerunOfRunId = null,
+  string? DefaultGpu = null
 );
 
 public sealed record BenchmarkSuiteSelection(
@@ -690,7 +693,9 @@ public sealed record BenchmarkSuiteRunResult(
   string? CustomPrompt = null,
   string? RunName = null,
   string? RerunOfRunId = null,
-  string ReviewStatus = BenchmarkReviewStatusIds.NotApplicable
+  string ReviewStatus = BenchmarkReviewStatusIds.NotApplicable,
+  BenchmarkError? InfrastructureError = null,
+  BenchmarkError? PersistenceError = null
 );
 
 public sealed record BenchmarkHistorySummary(
@@ -931,7 +936,8 @@ public sealed record BenchmarkProgressEvent(
   string? Model = null,
   IReadOnlyList<string>? SelectedModels = null,
   int CompletedCells = 0,
-  int TotalCells = 0
+  int TotalCells = 0,
+  IReadOnlyList<BenchmarkProgressEvent>? SnapshotEvents = null
 );
 
 public sealed record BenchmarkLiveRunStart(

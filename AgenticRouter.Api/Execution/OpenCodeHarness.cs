@@ -184,11 +184,10 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         cancellationToken
       );
       await EnsureStartedAsync(endpoint, request.Model, bridge, cancellationToken);
-      var harnessSession = await GetOrCreateSessionAsync(request, cancellationToken);
-      var sessionId = harnessSession.NativeSessionId;
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
-        harnessSession.SynchronizedThroughVersion,
+        request.ContextRecoveryInputBudget.HasValue ? null
+          : _sessions.GetValueOrDefault(request.SessionId)?.SynchronizedThroughVersion,
         [
           $"Agentic Router common capabilities implemented by OpenCode native tools: {string.Join(", ", HarnessCapabilityProjection.NativeCommonTools(HarnessIds.OpenCode))}.",
           "OpenCode native websearch/webfetch are enabled for this route. Use them when current public-web evidence materially improves the answer.",
@@ -196,6 +195,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           $"Host approval policy: {hostProfile.ApprovalPolicy}."
         ]
       );
+      var harnessSession = await GetOrCreateSessionAsync(request, cancellationToken);
+      var sessionId = harnessSession.NativeSessionId;
       active = new ActiveTurn(request.SessionId, sessionId, request.WorkingDirectory, turnId);
       _activeTurns[request.SessionId] = active;
       using var hostTurn = _hostTools.BeginTurn(
@@ -253,6 +254,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         cancellationToken,
         expectedStatus: HttpStatusCode.NoContent
       );
+      // Accepted input is already in native history, even if generation later fails.
+      harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
 
       await using var stream = await eventsResponse.Content.ReadAsStreamAsync(cancellationToken);
       using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
@@ -702,12 +705,10 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 terminal: HarnessTerminalState.Completed,
                 native: payload
               );
-              harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
               terminal = true;
               break;
             }
           case "session.status" when StatusType(properties) == "idle":
-            harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
             yield return Event(
               "turn.completed",
               sessionId,
@@ -962,7 +963,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     CancellationToken cancellationToken
   )
   {
-    if (_sessions.TryGetValue(request.SessionId, out var existing))
+    if (_sessions.TryGetValue(request.SessionId, out var existing) && !request.ContextRecoveryInputBudget.HasValue)
     {
       return existing;
     }

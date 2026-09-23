@@ -14,6 +14,171 @@ public sealed class DurableSupervisionEndToEndTests
   : ChatEndToEndTestBase<DurableSupervisionEndToEndTests>
 {
   [TestMethod]
+  [DataRow(false, false)]
+  [DataRow(false, true)]
+  [DataRow(true, false)]
+  [DataRow(true, true)]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task OversizedSupervisionHistoryRecoversAtAdmission(bool resume, bool manyMessages)
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    const string marker = "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1";
+    const string requirement = "ADMISSION-CONSTRAINT: preserve existing configuration.";
+    var history = manyMessages
+      ? Enumerable.Range(0, 120).Select(index => new
+      {
+        role = index % 2 == 0 ? "user" : "assistant",
+        content = index % 2 == 0 ? requirement : "Accepted constraint."
+      }).ToArray()
+      : [new { role = "assistant", content = string.Concat(Enumerable.Range(0, 8).Select(index =>
+          marker + "\nPreviously compacted continuity context:\n"
+          + "Requirements and constraints:\n- " + requirement
+          + "\n" + string.Join("\n", Enumerable.Range(0, 80).Select(item => $"- REQUIRED-{item:D2}: retain this distinct restriction."))
+          + "\nDecisions and relevant facts:\n- Historical tool diagnostic " + new string('x', 40_000)
+          + "\nImportant file and workspace changes:\n- Verified edit: preserved.txt"
+          + "\nUnresolved work and failures:\n- Recheck outstanding validation.\n")) }];
+    string runId;
+    if (resume)
+    {
+      _ = await EnableHistoryAsync();
+      var prepared = await PrepareAsync("manual");
+      runId = prepared["runId"]!.GetValue<string>();
+      await _environment.RestartApplicationAsync();
+      await WaitForStateAsync(runId, "interrupted-recoverable", TimeSpan.FromSeconds(10));
+      await Page.GotoAsync("/");
+      await PostFromBrowserAsync($"/api/supervision/runs/{runId}/resume", new
+      {
+        browserSessionId = Guid.NewGuid().ToString("N"),
+        history
+      });
+    }
+    else
+    {
+      await Page.GotoAsync("/");
+      var prepared = await PostFromBrowserAsync("/api/supervision/runs/prepare", new
+      {
+        objective = "Build the complete local application in bounded steps",
+        model = "qwen3-coder:30b",
+        harness = "native",
+        browserSessionId = Guid.NewGuid().ToString("N"),
+        approvalPolicy = "auto",
+        resumePolicy = "manual",
+        history
+      });
+      runId = prepared["runId"]!.GetValue<string>();
+      Assert.HasCount(0, _environment.FakeOllama.Requests, "Admission must not invoke a summarizing model.");
+      await PostFromBrowserAsync($"/api/supervision/runs/{runId}/start", new { });
+    }
+    var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", completed["state"]!.GetValue<string>(), completed.ToJsonString());
+    var prompts = _environment.FakeOllama.Requests.SelectMany(request => request.Messages).Select(message => message.Content).ToArray();
+    Assert.IsTrue(prompts.Any(content => content.Contains(requirement, StringComparison.Ordinal)));
+    if (!manyMessages)
+    {
+      var summaries = prompts.Where(content => content.Contains(marker, StringComparison.Ordinal)).ToArray();
+      Assert.IsNotEmpty(summaries);
+      Assert.IsTrue(summaries.All(content => Regex.Matches(content, marker).Count == 1));
+      Assert.IsTrue(summaries.Any(content => content.Contains("preserved.txt", StringComparison.Ordinal)));
+      Assert.IsTrue(summaries.Any(content => content.Contains("Recheck outstanding validation.", StringComparison.Ordinal)));
+      Assert.IsTrue(summaries.Any(content => content.Contains("REQUIRED-00", StringComparison.Ordinal)
+        && content.Contains("REQUIRED-79", StringComparison.Ordinal)));
+      var activity = await Page.EvaluateAsync<string>(
+        "async url => await (await fetch(url)).text()", $"/api/supervision/runs/{runId}/events?follow=false");
+      StringAssert.Contains(activity, "Host history compacted for inference");
+    }
+    await DiscardAsync(runId);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(30_000, CooperativeCancellation = true)]
+  public async Task OversizedRequiredSupervisionConstraintsFailWithoutInference()
+  {
+    _environment.FakeOllama.Reset();
+    await Page.GotoAsync("/");
+    var result = await Page.EvaluateAsync<string>("""
+      async () => {
+        const response = await fetch('/api/supervision/runs/prepare', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({objective: 'Keep all specified requirements.', model: 'qwen3-coder:30b',
+            harness: 'native', browserSessionId: 'oversized-required-context',
+            history: [{role: 'user', content: 'Mandatory constraint '.repeat(20000)}]})
+        });
+        return JSON.stringify({status: response.status, error: await response.json()});
+      }
+      """);
+    var error = JsonNode.Parse(result)!;
+    Assert.AreEqual(413, error["status"]!.GetValue<int>());
+    Assert.AreEqual("supervision-history-too-large", error["error"]!["code"]!.GetValue<string>());
+    StringAssert.Contains(error["error"]!["message"]!.GetValue<string>(), "required constraints");
+    Assert.HasCount(0, _environment.FakeOllama.Requests);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ContinuityProjectionDoesNotMoveTheNativeHistoryCursorBackwards()
+  {
+    await Page.GotoAsync("/");
+    var history = new List<object>
+    {
+      new { role = "assistant", content = "AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1\nRequirements and constraints:\n- CURSOR-CONSTRAINT: preserve config.\n" }
+    };
+    for (var index = 0; index < 10; index++)
+    {
+      history.Add(new { role = "user", content = $"CURSOR-USER-{index}: inspect the existing artifact." });
+      history.Add(new { role = "assistant", content = new string('x', 20_000) });
+    }
+    var browserId = Guid.NewGuid().ToString("N");
+    async Task SendAsync(IReadOnlyList<object> messages)
+    {
+      var stream = await Page.EvaluateAsync<string>("""
+        async request => await (await fetch('/api/chat/stream', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)
+        })).text()
+        """, new
+      {
+        message = "Inspect the existing workspace.",
+        history = messages,
+        model = "qwen3.8:27b-gpu0",
+        harness = "qwen-code",
+        browserSessionId = browserId,
+        interactionMode = "execute",
+        executionStrategy = "direct",
+        approvalPolicy = "auto"
+      });
+      Assert.IsFalse(ParseSseEvents(stream).Any(item => item["type"]!.GetValue<string>() == "error"), stream);
+    }
+    await SendAsync(history);
+    var promptPath = Path.Combine(_environment.DataDirectory, "qwen-code-runtime", "fake-qwen-prompt.json");
+    var first = JsonNode.Parse(await File.ReadAllTextAsync(promptPath))!;
+    StringAssert.Contains(first["text"]!.GetValue<string>(), "CURSOR-CONSTRAINT");
+    // Same canonical positions, with previously large optional observations reduced.
+    for (var index = 2; index < history.Count; index += 2)
+      history[index] = new { role = "assistant", content = "Recorded observation." };
+    await SendAsync(history);
+    var second = JsonNode.Parse(await File.ReadAllTextAsync(promptPath))!;
+    Assert.AreEqual(first["sessionId"]!.GetValue<string>(), second["sessionId"]!.GetValue<string>());
+    Assert.IsFalse(second["text"]!.GetValue<string>().Contains("CURSOR-USER", StringComparison.Ordinal));
+    Assert.IsFalse(second["text"]!.GetValue<string>().Contains("Canonical Agentic Router conversation", StringComparison.Ordinal));
+  }
+
+  private async Task<JsonNode> PostFromBrowserAsync(string url, object body)
+  {
+    var result = await Page.EvaluateAsync<string>("""
+      async ({url, body}) => {
+        const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+        const text = await response.text();
+        if (!response.ok) throw new Error(text);
+        return text;
+      }
+      """, new { url, body });
+    return JsonNode.Parse(result)!;
+  }
+
+  [TestMethod]
   [Timeout(30_000, CooperativeCancellation = true)]
   public async Task SupervisionDirectiveInChatAndCloudRouteFailBeforeInference()
   {
@@ -658,6 +823,12 @@ public sealed class DurableSupervisionEndToEndTests
       );
       var sessionHeader = assistant.Locator(".execution-session-header");
       await Expect(sessionHeader).Not.ToHaveAttributeAsync("hidden", string.Empty);
+      await Expect(sessionHeader).ToBeVisibleAsync();
+      await Expect(assistant.Locator(".activity .execution-session-header")).ToHaveCountAsync(0);
+      await Expect(assistant.Locator(".assistant-current-activity")).ToContainTextAsync("Planning work");
+      await Expect(assistant.Locator(".assistant-current-activity")).ToContainTextAsync(
+        "autonomous watchdog feedback"
+      );
       await assistant.Locator(".activity > summary").ClickAsync();
       await Expect(sessionHeader).ToBeVisibleAsync();
       await Expect(sessionHeader).ToContainTextAsync("qwen3-coder:30b");
@@ -864,6 +1035,7 @@ public sealed class DurableSupervisionEndToEndTests
     await Expect(assistant.Locator(".assistant-response")).ToContainTextAsync(
       finalAnswer
     );
+    await Expect(assistant.Locator(".execution-completion-summary")).ToContainTextAsync($"Created: {relativePath}");
     var commentary = assistant.Locator(
       ".activity-row[data-event-type=\"supervision.turn-commentary\"]"
     );
@@ -1520,6 +1692,14 @@ public sealed class DurableSupervisionEndToEndTests
     StringAssert.Contains(
       decompositionPrompt.Content,
       "Empty evidencePaths and directory paths are not valid evidence"
+    );
+    StringAssert.Contains(
+      decompositionPrompt.Content,
+      "Leave enough of the bounded output budget to return one complete, concise JSON decision"
+    );
+    StringAssert.Contains(
+      decompositionPrompt.Content,
+      "A tool call is needed only when current workspace evidence must be inspected"
     );
     Assert.IsEmpty(events.Where(item =>
       item["type"]!.GetValue<string>() == "supervision.deterministic-completion"
@@ -2465,9 +2645,11 @@ public sealed class DurableSupervisionEndToEndTests
   }
 
   [TestMethod]
+  [DataRow(true)]
+  [DataRow(false)]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task QwenSupervisorToolLoopRecoversWithoutToolsAndKeepsCompactedContinuity()
+  public async Task QwenSupervisorRecoveryKeepsCompactedContinuityWithoutDuplicatingNativeHistory(bool toolLoop)
   {
     _environment.FakeOllama.Reset();
     ResetSupervisionFixture();
@@ -2490,7 +2672,7 @@ public sealed class DurableSupervisionEndToEndTests
       "api/supervision/runs/prepare",
       new
       {
-        objective = "qwen supervision tool loop recovery",
+        objective = toolLoop ? "qwen supervision tool loop recovery" : "qwen supervision empty response recovery",
         model = "qwen3.8:27b-gpu0",
         harness = "qwen-code",
         approvalPolicy = "auto",
@@ -2528,12 +2710,18 @@ public sealed class DurableSupervisionEndToEndTests
     var events = ParseSseEvents(await eventsResponse.Content.ReadAsStringAsync());
     Assert.HasCount(1, events.Where(item =>
       item["type"]!.GetValue<string>() == "supervision.turn-harness-recovery"
-      && item["retryReason"]!.GetValue<string>() == "tool-loop-recovery"
+      && item["retryReason"]!.GetValue<string>() == (toolLoop ? "tool-loop-recovery" : "harness-recovery")
     ));
 
     using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
     Assert.IsTrue(marker.RootElement.GetProperty("includesPersistedContinuity").GetBoolean());
-    Assert.IsTrue(marker.RootElement.GetProperty("forbidsTools").GetBoolean());
+    Assert.AreEqual(1, marker.RootElement.GetProperty("continuityHydrations").GetInt32());
+    Assert.AreEqual(toolLoop, marker.RootElement.GetProperty("forbidsTools").GetBoolean());
+    Assert.AreEqual(toolLoop, marker.RootElement.GetProperty("promptContainsPersistedContinuity").GetBoolean());
+    Assert.AreEqual(toolLoop ? 1 : 2, marker.RootElement.GetProperty("promptNumber").GetInt32());
+    Assert.IsFalse(events.Any(item => item["message"]?.GetValue<string>().Contains(
+      "reset its native session", StringComparison.Ordinal
+    ) == true));
   }
 
   [TestMethod]

@@ -2699,9 +2699,63 @@ public sealed class ExecutionSession
         ConformanceIdentity,
         HandoffReason,
         _routingEvidence,
-        CreateTimingUnsafe()
+        CreateTimingUnsafe(),
+        State is "running" or "awaiting-user-input" ? null : CreateCompletionSummaryUnsafe()
       );
     }
+  }
+
+  private IReadOnlyList<string> CreateCompletionSummaryUnsafe()
+  {
+    var lines = new List<string>();
+    foreach (var file in _files.Where(file => file.Verified))
+    {
+      var operation = file.Operation switch
+      {
+        "created" or "modified" when !file.ExistedBefore => "Created",
+        "created" or "modified" when file.OriginalHash != file.FinalHash => "Modified",
+        "deleted" => "Deleted",
+        "deleted-directory" => "Deleted folder",
+        _ => null
+      };
+      if (operation is not null)
+      {
+        lines.Add($"{operation}: {file.RelativePath}");
+      }
+    }
+
+    foreach (var process in _processes)
+    {
+      if (_validation?.Steps.Any(step =>
+        step.Executable == process.Executable
+        && step.Arguments.SequenceEqual(process.Arguments)
+        && step.ExitCode == process.ExitCode
+        && step.DurationMilliseconds == process.DurationMilliseconds
+        && step.TimedOut == process.TimedOut
+        && step.Cancelled == process.Cancelled
+      ) == true)
+      {
+        continue;
+      }
+      var result = process.Cancelled ? "cancelled"
+        : process.TimedOut ? "timed out"
+        : process.ExitCode is { } exitCode ? $"exit {exitCode}"
+        : "exit unavailable";
+      lines.Add($"Process: {Path.GetFileName(process.Executable)} · {result}");
+    }
+
+    if (_validation is null || _validation.Steps.Count == 0)
+    {
+      lines.Add($"Validation: {_validation?.State ?? "not run"}");
+    }
+    else
+    {
+      foreach (var step in _validation.Steps)
+      {
+        lines.Add($"Validation: {step.Label} · {step.Status}");
+      }
+    }
+    return lines;
   }
 
   private ExecutionTimingView CreateTimingUnsafe()

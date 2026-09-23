@@ -29,6 +29,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
   private readonly ISystemMemoryMetricsProvider _systemMemory;
   private readonly IOllamaManagedServerManager _managedOllamaServers;
   private readonly IModelGpuAffinityResolver _modelGpuAffinities;
+  private readonly ILogger<OllamaRuntimeProfileService> _logger;
   private readonly SemaphoreSlim _measurementGate = new(
     1,
     1
@@ -42,7 +43,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     IGpuMemoryMetricsProvider gpuMemory,
     ISystemMemoryMetricsProvider systemMemory,
     IOllamaManagedServerManager managedOllamaServers,
-    IModelGpuAffinityResolver modelGpuAffinities
+    IModelGpuAffinityResolver modelGpuAffinities,
+    ILogger<OllamaRuntimeProfileService> logger
   )
   {
     _storePath = Path.Combine(
@@ -57,6 +59,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     _systemMemory = systemMemory;
     _managedOllamaServers = managedOllamaServers;
     _modelGpuAffinities = modelGpuAffinities;
+    _logger = logger;
   }
 
   public async Task<OllamaRuntimeProfilesView> GetAsync(
@@ -70,14 +73,23 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       settings.OllamaUrl,
       UriKind.Absolute
     );
-    var installed = await _ollamaClient.GetModelsAsync(
-      baseUri,
-      cancellationToken
-    );
-    var version = await _ollamaClient.GetVersionAsync(
-      baseUri,
-      cancellationToken
-    );
+    var diagnostics = new List<OllamaRuntimeProfileDiagnostic>();
+    IReadOnlyList<InstalledModel> installed = [];
+    string? version = null;
+    try
+    {
+      installed = await _ollamaClient.GetModelsAsync(baseUri, cancellationToken);
+      version = await _ollamaClient.GetVersionAsync(baseUri, cancellationToken);
+    }
+    catch (OllamaProviderException exception)
+    {
+      _logger.LogWarning("runtime-provider-unavailable: Runtime profiles cannot be refreshed. Start Ollama or check its address in settings. Saved settings are unchanged.");
+      _logger.LogDebug(exception, "Runtime profile provider failure cause.");
+      diagnostics.Add(new OllamaRuntimeProfileDiagnostic(
+        "runtime-provider-unavailable",
+        "Ollama is unavailable. Runtime measurements cannot be refreshed. Start Ollama or check its address in settings."
+      ));
+    }
     var hardwareSignature = HardwareSignature(
       _gpuMemory.GetStatus().Devices,
       _systemMemory.GetStatus()
@@ -100,23 +112,49 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         )
       );
 
-      if (exact is null)
+      if (exact is null || version is null)
       {
         continue;
       }
 
-      var affinity = await _modelGpuAffinities.ResolveAsync(
-        settings, exact.Name, settings.DefaultGpu, cancellationToken
-      );
-      var planned = _managedOllamaServers.Plan(
-        baseUri,
-        affinity.GpuSelection,
-        settings.DefaultGpu
-      );
-      IReadOnlyList<OllamaRunningModel> running = planned.Managed
-        && !_managedOllamaServers.GetActiveServers().Any(server => server.Endpoint == planned.Endpoint)
-          ? []
-          : await _ollamaClient.GetRunningModelsAsync(planned.Endpoint, cancellationToken);
+      IReadOnlyList<OllamaRunningModel> running;
+      try
+      {
+        var affinity = await _modelGpuAffinities.ResolveAsync(
+          settings, exact.Name, settings.DefaultGpu, cancellationToken
+        );
+        var planned = _managedOllamaServers.Plan(
+          baseUri,
+          affinity.GpuSelection,
+          settings.DefaultGpu
+        );
+        running = planned.Managed
+          && !_managedOllamaServers.GetActiveServers().Any(server => server.Endpoint == planned.Endpoint)
+            ? []
+            : await _ollamaClient.GetRunningModelsAsync(planned.Endpoint, cancellationToken);
+      }
+      catch (ModelGpuAffinityException exception)
+      {
+        _logger.LogWarning("model-gpu-unavailable: The configured GPU for {Model} is unavailable or cannot support its placement. Check the model GPU selection in settings. Saved settings are unchanged.", exact.Name);
+        _logger.LogDebug(exception, "Runtime profile GPU availability cause for {Model}.", exact.Name);
+        diagnostics.Add(new OllamaRuntimeProfileDiagnostic(
+          "model-gpu-unavailable",
+          $"The configured GPU for '{exact.Name}' is unavailable or cannot support its placement. Check the model GPU selection in settings. Your configuration has been preserved.",
+          exact.Name
+        ));
+        continue;
+      }
+      catch (OllamaProviderException exception)
+      {
+        _logger.LogWarning("model-runtime-unavailable: The Ollama runtime for {Model} could not be reached. Start it or check its address in settings.", exact.Name);
+        _logger.LogDebug(exception, "Runtime profile connection failure cause for {Model}.", exact.Name);
+        diagnostics.Add(new OllamaRuntimeProfileDiagnostic(
+          "model-runtime-unavailable",
+          $"The Ollama runtime for '{exact.Name}' could not be reached. Start it or check the configured address.",
+          exact.Name
+        ));
+        continue;
+      }
 
       var metadata = await TryGetMetadataAsync(
         baseUri,
@@ -186,7 +224,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     var measurementViews = records.Records.Select(
       record => record with
       {
-        Stale = IsStale(
+        Stale = version is null || IsStale(
           record,
           installed,
           version,
@@ -221,7 +259,10 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       measurementViews,
       warnings,
       DateTimeOffset.UtcNow
-    );
+    )
+    {
+      Diagnostics = diagnostics.Distinct().ToArray()
+    };
   }
 
   public async Task<OllamaRuntimeAnalysisResult> AnalyzeAsync(

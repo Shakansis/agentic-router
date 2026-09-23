@@ -49,6 +49,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   private readonly ISystemMemoryMetricsProvider _systemMemory;
   private readonly IGpuMemoryMetricsProvider _gpuMemory;
   private readonly IMarkdownRenderer _markdown;
+  private readonly ILogger<BenchmarkEngine> _logger;
 
   public BenchmarkEngine(
     IBenchmarkTestRegistry tests,
@@ -65,7 +66,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     ISystemMemoryMetricsProvider systemMemory,
     IGpuMemoryMetricsProvider gpuMemory,
     IMarkdownRenderer markdown,
-    IModelGpuAffinityResolver modelGpuAffinities
+    IModelGpuAffinityResolver modelGpuAffinities,
+    ILogger<BenchmarkEngine> logger
   )
   {
     _tests = tests;
@@ -83,6 +85,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     _gpuMemory = gpuMemory;
     _markdown = markdown;
     _modelGpuAffinities = modelGpuAffinities;
+    _logger = logger;
   }
 
   public async Task<BenchmarkRunResult> RunAsync(
@@ -181,8 +184,17 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     }
     var scoringProfileId = NormalizeScoringProfileId(request.ScoringProfileId);
     var settings = await _settingsStore.GetAsync(cancellationToken);
+    var gpu = request.DefaultGpu ?? settings.DefaultGpu;
+    if (!OllamaGpuSelection.IsValid(gpu, allowDefault: false))
+    {
+      throw new BenchmarkRequestException(
+        "benchmark-gpu-invalid",
+        "Benchmark Default GPU must be auto, an exact CUDA/ROCm/Vulkan index, or combined Vulkan.",
+        "defaultGpu"
+      );
+    }
+    settings = settings with { DefaultGpu = gpu };
     var contextTokens = ResolveBenchmarkContextTokens(settings, request.ContextTokens);
-    var gpu = settings.DefaultGpu;
     var providerEndpoint = new Uri(settings.OllamaUrl, UriKind.Absolute);
     var installedModels = await _ollamaClient.GetModelsAsync(
       providerEndpoint,
@@ -263,12 +275,16 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     }
     var cells = new List<BenchmarkMatrixCellResult>(models.Length * harnesses.Count);
     var executionOrder = 0;
+    BenchmarkError? infrastructureError = null;
     foreach (var model in models)
     {
       foreach (var harness in harnesses)
       {
         executionOrder++;
         var compatibility = Compatibility(model, harness);
+        if (infrastructureError is not null)
+          compatibility = new CellCompatibility(BenchmarkMatrixCellStatusIds.NotRun,
+            "Not executed because an earlier cell encountered an infrastructure failure.");
         string? preCancellationCompatibility = null;
         if (lease.Token.IsCancellationRequested)
         {
@@ -307,29 +323,54 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           ));
           continue;
         }
-        var affinity = await _modelGpuAffinities.ResolveAsync(
-          settings, model.Installed!.Name, settings.DefaultGpu, lease.Token
-        );
-        var cellEndpoint = (await _managedOllamaServers.ResolveAsync(
-          providerEndpoint, affinity.GpuSelection, settings.DefaultGpu, contextTokens, lease.Token
-        )).Endpoint;
-        var result = await RunHarnessAsync(
-          runId,
-          harness,
-          tests,
-          model.Installed!,
-          cellEndpoint,
-          settings,
-          request.TimeoutSeconds,
-          scoreWeights,
-          contextTokens,
-          affinity.GpuSelection,
-          lease.Token,
-          progressSink,
-          liveResults,
-          manualOnly
-        );
-        cells.Add(CreateCell(executionOrder, model.Installed!, result));
+        try
+        {
+          var affinity = await _modelGpuAffinities.ResolveAsync(
+            settings, model.Installed!.Name, settings.DefaultGpu, lease.Token
+          );
+          var cellEndpoint = (await _managedOllamaServers.ResolveAsync(
+            providerEndpoint, affinity.GpuSelection, settings.DefaultGpu, contextTokens, lease.Token
+          )).Endpoint;
+          var result = await RunHarnessAsync(
+            runId,
+            harness,
+            tests,
+            model.Installed!,
+            cellEndpoint,
+            settings,
+            request.TimeoutSeconds,
+            scoreWeights,
+            contextTokens,
+            affinity.GpuSelection,
+            lease.Token,
+            progressSink,
+            liveResults,
+            manualOnly
+          );
+          cells.Add(CreateCell(executionOrder, model.Installed!, result));
+        }
+        catch (OperationCanceledException) when (lease.Token.IsCancellationRequested)
+        {
+          cells.Add(CreateNonExecutableCell(executionOrder, model, harness,
+            new CellCompatibility(BenchmarkMatrixCellStatusIds.Cancelled,
+              "Cancelled while preparing the benchmark cell."), tests.Count, manual: manual));
+        }
+        catch (Exception exception) when (exception is ModelGpuAffinityException or OllamaProviderException
+          or IOException or UnauthorizedAccessException or InvalidOperationException or HttpRequestException)
+        {
+          _logger.LogError(exception, "Benchmark {RunId} infrastructure failed in cell {Cell}.",
+            runId, executionOrder);
+          infrastructureError = new BenchmarkError("benchmark-cell-infrastructure-failed",
+            "The Host could not complete this cell because its execution infrastructure failed. Completed evidence was retained.",
+            "benchmark-cell", true);
+          var partial = liveResults[CellKey(model.RequestedName, harness.Adapter.Definition.Id)];
+          cells.Add(partial.Tests.Count > 0
+            ? CreateCell(executionOrder, model.Installed!, partial) with
+            { Status = BenchmarkMatrixCellStatusIds.Failed, Message = infrastructureError.Message }
+            : CreateNonExecutableCell(executionOrder, model, harness,
+              new CellCompatibility(BenchmarkMatrixCellStatusIds.Failed, infrastructureError.Message),
+              tests.Count, manual: manual));
+        }
       }
     }
     var matrixCells = cells.ToArray();
@@ -349,7 +390,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     var endedAt = DateTimeOffset.UtcNow;
     var terminalState = lease.Token.IsCancellationRequested
       ? BenchmarkRunStatusIds.Cancelled
-      : BenchmarkRunStatusIds.Completed;
+      : infrastructureError is not null ? BenchmarkRunStatusIds.Failed : BenchmarkRunStatusIds.Completed;
     var allPassed = !lease.Token.IsCancellationRequested
       && matrixCells.Length == models.Length * harnesses.Count
       && matrixCells.All(cell => string.Equals(
@@ -357,8 +398,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         BenchmarkMatrixCellStatusIds.Completed,
         StringComparison.Ordinal
       ) && cell.Passed == tests.Count);
-    var finalStatus = terminalState == BenchmarkRunStatusIds.Cancelled
-      ? BenchmarkRunStatusIds.Cancelled
+    var finalStatus = terminalState != BenchmarkRunStatusIds.Completed
+      ? terminalState
       : allPassed
         ? BenchmarkRunStatusIds.Passed
         : BenchmarkRunStatusIds.CompletedWithFailures;
@@ -476,9 +517,24 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       RerunOfRunId: manual ? request.RerunOfRunId : null,
       ReviewStatus: manual
         ? ManualSuiteReviewStatus(matrixCells)
-        : BenchmarkReviewStatusIds.NotApplicable
+        : BenchmarkReviewStatusIds.NotApplicable,
+      InfrastructureError: infrastructureError
     );
-    await _results.SaveAsync(suiteResult, CancellationToken.None);
+    try
+    {
+      await _results.SaveAsync(suiteResult, CancellationToken.None);
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+      _logger.LogError(exception, "Benchmark {RunId} result could not be persisted.", runId);
+      suiteResult = suiteResult with
+      {
+        PersistenceError = new BenchmarkError("benchmark-result-not-saved",
+          "The result could not be saved. Export the available evidence before closing the Host.",
+          "benchmark-persistence", true)
+      };
+      await _results.RetainUnsavedAsync(suiteResult, CancellationToken.None);
+    }
     Publish(progressSink, new BenchmarkProgressEvent(
       runId,
       BenchmarkProgressTypeIds.RunCompleted,
@@ -590,6 +646,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         tests.Count(test => !IsManualTest(test))
       );
       liveResults[liveKey] = partial;
+      if (result.RawResult.Error?.Code == "benchmark-execution-unsettled")
+        throw new BenchmarkExecutionUnsettledException(new InvalidOperationException(result.RawResult.Error.Message));
       Publish(progressSink, new BenchmarkProgressEvent(
         runId,
         BenchmarkProgressTypeIds.HarnessProgress,
@@ -800,7 +858,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         );
       }
       catch (Exception exception) when (
-        exception is IOException
+        exception is not BenchmarkExecutionUnsettledException && exception is IOException
           or InvalidOperationException
           or UnauthorizedAccessException
       )
@@ -828,9 +886,11 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         "Deterministic Host validation started.",
         BenchmarkActivityKindIds.HostValidation
       );
+      using var finalization = new CancellationTokenSource(TimeSpan.FromSeconds(30));
       var finalSnapshot = await CaptureFinalSnapshotAsync(
         workspace.WorkspacePath,
-        evidence
+        evidence,
+        finalization.Token
       );
       var raw = await test.ValidateAsync(
         new BenchmarkValidationContext(
@@ -841,7 +901,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           finalSnapshot.Evidence.Error,
           finalSnapshot.Evidence
         ),
-        CancellationToken.None
+        finalization.Token
       );
       raw = raw with { FailureCategory = ClassifyFailure(raw) };
       raw = raw with
@@ -882,6 +942,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           : BenchmarkReviewStatusIds.NotApplicable
       );
     }
+    catch (BenchmarkExecutionUnsettledException exception)
+    {
+      retainWorkspace = true;
+      result = PreparationFailure(testRunId, test, model, harness, availability, workspace,
+        startedAt, prompt, fingerprint, scoreWeights, manual, BenchmarkExecutionStatusIds.Failed,
+        new BenchmarkError("benchmark-execution-unsettled", exception.Message, "benchmark-shutdown", true));
+    }
     catch (OperationCanceledException)
     {
       result = PreparationFailure(
@@ -900,8 +967,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           ? BenchmarkExecutionStatusIds.Cancelled
           : BenchmarkExecutionStatusIds.Failed,
         new BenchmarkError(
-          "benchmark-cancelled",
-          "The benchmark was cancelled before final validation.",
+          runCancellationToken.IsCancellationRequested ? "benchmark-cancelled" : "benchmark-finalization-timeout",
+          runCancellationToken.IsCancellationRequested ? "The benchmark was cancelled before final validation."
+            : "Host finalization did not finish within its bounded deadline.",
           "benchmark-preparation",
           true
         )
@@ -938,8 +1006,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     {
       try
       {
+        using var cleanupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         cleanedUp = !retainWorkspace
-          && await _workspaces.CleanupAsync(workspace, CancellationToken.None);
+          && await _workspaces.CleanupAsync(workspace, cleanupTimeout.Token);
       }
       catch (Exception) when (result is not null)
       {
@@ -2491,13 +2560,14 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
 
   private async Task<FinalSnapshotResult> CaptureFinalSnapshotAsync(
     string workspacePath,
-    BenchmarkHarnessEvidence evidence
+    BenchmarkHarnessEvidence evidence,
+    CancellationToken cancellationToken
   )
   {
     try
     {
       return new FinalSnapshotResult(
-        await _workspaces.CaptureAsync(workspacePath, CancellationToken.None),
+        await _workspaces.CaptureAsync(workspacePath, cancellationToken),
         evidence
       );
     }

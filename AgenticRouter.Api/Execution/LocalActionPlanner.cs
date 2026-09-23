@@ -78,6 +78,9 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Re-evaluate the remaining work after every authoritative tool result and never repeat a "
     + "completed action. "
     + "Use exactly one native tool call when a local action is required. "
+    + "Before the first tool call in this turn, include one or two short user-facing sentences in "
+    + "the user's language that state how you understood the request and the immediate actions you "
+    + "will take. Do not claim results in that introduction. Later tool calls must not repeat it. "
     + "When a granted tool is needed, emit that tool call immediately. Do not draft, preview, "
     + "or repeat its arguments in reasoning before the call; place the complete arguments only "
     + "in the native tool call. "
@@ -591,13 +594,17 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       );
       throw new LocalActionException(
         OutputLimitStage,
-        $"The model exhausted the configured {outputLimit}-token output limit before emitting a valid native tool call.",
+        $"The model exhausted the configured {outputLimit}-token output limit before emitting a valid native tool call or final response.",
         new JsonException(
-          "Change to bounded incremental writes now. Do not call create_files for this recovery. "
-            + "Call create_file for one small file or scaffold only; keep its content under "
-            + $"{maximumContentCharacters} characters. For a longer file, retain a unique insertion "
-            + "marker and add one bounded chunk per subsequent replace_text call. Do not draft file "
-            + "content in reasoning."
+          availableTools.Any(tool => tool.Name == "create_file")
+            ? "Change to bounded incremental writes now. Do not call create_files for this recovery. "
+              + "Call create_file for one small file or scaffold only; keep its content under "
+              + $"{maximumContentCharacters} characters. For a longer file, retain a unique insertion "
+              + "marker and add one bounded chunk per subsequent replace_text call. Do not draft file "
+              + "content in reasoning."
+            : "On retry, do not draft or repeat the decision in reasoning. Return the concise final "
+              + "response in the required format before the output limit, or call one available "
+              + "native tool promptly if more evidence is needed."
         )
       );
     }
@@ -680,7 +687,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         canonicalTurn.IgnoredToolCallCount,
         response.ContextResolution,
         call.CallId,
-        response.Usage
+        response.Usage,
+        canonicalTurn.ActionIntroduction
       );
     }
     catch (JsonException exception)
@@ -1241,5 +1249,6 @@ public sealed record LocalActionPlanningResult(
   int IgnoredToolCallCount = 0,
   OllamaContextResolution? ContextResolution = null,
   string? CallId = null,
-  ProviderTokenUsage? Usage = null
+  ProviderTokenUsage? Usage = null,
+  string? ActionIntroduction = null
 );

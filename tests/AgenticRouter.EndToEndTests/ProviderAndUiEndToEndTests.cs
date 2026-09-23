@@ -2190,7 +2190,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     );
     await Expect(Page.Locator("#attach-image")).ToHaveAttributeAsync(
       "aria-label",
-      "Attach image"
+      new Regex("Attach image", RegexOptions.IgnoreCase)
     );
     await Expect(Page.Locator("#web-toggle")).ToHaveAttributeAsync(
       "aria-pressed",
@@ -4283,7 +4283,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.12.0_alpha"
+      "v0.13.0_alpha"
     );
     await Expect(
       Page.Locator(
@@ -5441,7 +5441,7 @@ baselineTotal!.Value
   {
     await Page.GotoAsync("/");
     Assert.IsTrue(await Page.EvaluateAsync<bool>(
-      "() => ['i18n.js', 'app.js'].every(name => [...document.scripts].some(script => script.src.endsWith('/' + name + '?v=20260916-harness-images')))"
+      "() => { const versions = ['i18n.js', 'app.js'].map(name => [...document.scripts].find(script => new URL(script.src).pathname.endsWith('/' + name))?.src.split('?v=')[1]); return versions.every(Boolean) && versions[0] === versions[1]; }"
     ));
     await Page.EvaluateAsync(
       """

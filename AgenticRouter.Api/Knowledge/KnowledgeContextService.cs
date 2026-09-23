@@ -110,11 +110,13 @@ public sealed class KnowledgeContextService : IKnowledgeContextService
     catch (KnowledgeProviderException exception)
     {
       _logger.LogWarning(
-        exception,
-        "Knowledge retrieval failed through {Provider} at {Stage}.",
+        "{Code}: Knowledge retrieval unavailable through {Provider} at {Stage}. {Message}",
+        exception.Code,
         exception.Provider,
-        exception.Stage
+        exception.Stage,
+        exception.Message
       );
+      _logger.LogDebug(exception, "Knowledge retrieval failure cause.");
       return Failed(
         provider.Definition.Id,
         selection.LibraryIds.Count,

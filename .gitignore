@@ -423,23 +423,10 @@ autom4te.cache/
 tarballs/
 test-results/
 tools/diagnostics/output/
-AgenticRouter.Api/data/settings.json
-AgenticRouter.Api/data/.settings-*.tmp
-AgenticRouter.Api/data/workspaces.json
-AgenticRouter.Api/data/.workspaces-*.tmp
-AgenticRouter.Api/data/workspaces/
-AgenticRouter.Api/data/usage/
-AgenticRouter.Api/data/incidents/
-AgenticRouter.Api/data/usage-aggregates/
-AgenticRouter.Api/data/secrets/
-AgenticRouter.Api/data/providers/
-AgenticRouter.Api/data/codex-runtime/
-AgenticRouter.Api/data/claude-code-runtime/
-AgenticRouter.Api/data/opencode-runtime/
-AgenticRouter.Api/data/qwen-code-runtime/
-AgenticRouter.Api/data/ollama-managed-servers/
-AgenticRouter.Api/data/benchmark-results/
-AgenticRouter.Api/data/benchmark-recommendations/
+# Runtime settings, benchmark evidence, usage and all other local AR data.
+AgenticRouter.Api/data/
+# Developer-specific URLs and environment settings are local to each checkout.
+AgenticRouter.Api/Properties/launchSettings.json
 /.artifacts/
 
 # content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
