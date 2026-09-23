@@ -20,6 +20,19 @@ public sealed class ApprovalPolicyService : IApprovalPolicyService
       return false;
     }
 
+    if (action.Tool is "download_file" or "download_files")
+    {
+      if (policy == "autonomous"
+        && action.DownloadConflicts?.Count > 0
+        && action.DownloadConflicts.Count == (action.Tool == "download_file"
+          ? 1
+          : action.Arguments.GetProperty("files").GetArrayLength()))
+      {
+        return false;
+      }
+      return true;
+    }
+
     if (string.Equals(
       policy,
       "ask",

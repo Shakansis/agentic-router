@@ -31,6 +31,8 @@ public static class ToolEffectRegistry
       [DiagnosticTraceCapability.ToolName] = ToolEffects.Inspected,
       ["create_file"] = ToolEffects.FileCreated,
       ["create_files"] = ToolEffects.FileCreated,
+      ["download_file"] = ToolEffects.FileCreated,
+      ["download_files"] = ToolEffects.FileCreated,
       ["write_file"] = ToolEffects.FileChanged,
       ["replace_text"] = ToolEffects.FileChanged,
       ["apply_patch"] = ToolEffects.FileChanged,

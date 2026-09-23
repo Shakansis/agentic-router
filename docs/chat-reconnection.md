@@ -30,10 +30,17 @@ and workspace identifiers for its latest attachment.
   A partial timeline is restored from the live journal exactly once. The original
   browser identity is reused for approvals and steering. Selecting the already
   attached conversation preserves the live view.
-- Browser startup reopens the latest known run. A dropped stream retries its GET
-  attachment up to three times using the last processed sequence. Consecutive text
+- Browser startup reopens the latest known run. A dropped stream or one that
+  delivers no incoming data for 75 seconds retries its GET attachment up to three times
+  using the last processed sequence. The retry count resets after a delivered
+  event. Consecutive text
   deltas carry the last merged sequence through the existing presentation writer.
   Replay yields to the browser and completed/error/cancelled events remain singular.
+- A new turn waits up to 30 seconds for cleanup of an earlier run that has already
+  published its terminal event. If admission still returns HTTP 409, the browser
+  restores a manually submitted draft or returns a buffered prompt to the front
+  of the queue and pauses it. A rejected optimistic turn is removed from the
+  editable conversation so it cannot be mistaken for saved history.
 - A new Qwen turn still subscribes without replaying old history. Within an accepted
   turn, EOF, transport failure, client eviction or stream error can reconnect up
   to three times, with the original client/session/prompt and last delivered event

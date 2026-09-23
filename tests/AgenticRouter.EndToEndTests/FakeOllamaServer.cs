@@ -1759,6 +1759,14 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       };
     }
 
+    var nativeDownloadApproval = current.Contains(
+      "native download approval only",
+      StringComparison.OrdinalIgnoreCase
+    );
+    var nativeBulkDownloadApproval = current.Contains(
+      "native bulk download approval only",
+      StringComparison.OrdinalIgnoreCase
+    );
     var nativeBatchCreation = current.Contains(
       "native create host batch files",
       StringComparison.OrdinalIgnoreCase
@@ -1772,6 +1780,39 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       ? CreateStructuredGuidance(
         current,
         CreateAgentBehaviorAction(current, completedBenchmarkActions)
+      )
+      : nativeBulkDownloadApproval
+        && !activeContent.Contains("download_files", StringComparison.Ordinal)
+      ? CreateStructuredGuidance(
+        current,
+        new
+        {
+          tool = "download_files",
+          arguments = new
+          {
+            files = new[]
+            {
+              new { url = "https://example.com/hero.glb", path = "assets/hero.glb" },
+              new { url = "https://example.com/npc.glb", path = "assets/npc.glb" }
+            }
+          },
+          explanation = "Request one Host approval for both downloads."
+        }
+      )
+      : nativeDownloadApproval
+        && !activeContent.Contains("download_file", StringComparison.Ordinal)
+      ? CreateStructuredGuidance(
+        current,
+        new
+        {
+          tool = "download_file",
+          arguments = new
+          {
+            url = "https://example.com/model.glb",
+            path = "assets/model.glb"
+          },
+          explanation = "Request one Host-approved public HTTPS asset download."
+        }
       )
       : nativeBatchCreation
       && !completedStructuredMutation
@@ -2625,7 +2666,42 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var planOnly = availableTools.Count == 1
       && availableTools[0] == "create_execution_plan";
 
-    if (trackedPlanFixture && current.Contains(
+    if (messages.Any(message => message.Content.Contains(
+      "PROGRESSIVE_ACTION_BUDGET_V1", StringComparison.Ordinal)))
+    {
+      var completed = messages.Count(message =>
+        message.Role == "tool" && message.ToolName == "create_file"
+        || message.Content.StartsWith("LOCAL_ACTION_RESULT", StringComparison.Ordinal)
+          && message.Content.Contains("Tool: create_file", StringComparison.Ordinal));
+      plan = completed < 22
+        ? new
+        {
+          tool = (string?)"create_file",
+          arguments = (object)new
+          {
+            path = $"progress-{completed + 1:00}.txt",
+            content = $"verified={completed + 1:00}"
+          },
+          explanation = "Create the next distinct verified artifact."
+        }
+        : new
+        {
+          tool = (string?)null,
+          arguments = (object)new { },
+          explanation = "All requested artifacts were created."
+        };
+    }
+    else if (messages.Any(message => message.Content.Contains(
+      "REPEATED_READ_NO_PROGRESS_V1", StringComparison.Ordinal)))
+    {
+      plan = new
+      {
+        tool = "read_file",
+        arguments = new { path = "loop.txt" },
+        explanation = "Repeat the same observation without changing the workspace."
+      };
+    }
+    else if (trackedPlanFixture && current.Contains(
       "automatic resource timeout takeover",
       StringComparison.OrdinalIgnoreCase
     ))
@@ -5298,6 +5374,22 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     ))
     {
       if (current.Contains(
+        "native download approval only",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        return new
+        {
+          tool = "download_file",
+          arguments = new
+          {
+            url = "https://example.com/model.glb",
+            path = "assets/model.glb"
+          },
+          explanation = "Keep the existing local asset and report its replacement URL."
+        };
+      }
+      if (current.Contains(
         "autonomous explicit delete",
         StringComparison.OrdinalIgnoreCase
       ))
@@ -6035,9 +6127,20 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       ? "hello.txt must contain keep this followed by fixed."
       : "hello.txt must contain the exact text hello world today.";
     const string autonomousDeleteCriterion = "obsolete.txt must be absent.";
+    const string autonomousExistingDownloadCriterion = "assets/model.glb stays unchanged and the replacement URL is reported.";
     var autonomousDelete = current.Contains(
       "autonomous explicit delete",
       StringComparison.OrdinalIgnoreCase
+    );
+    var autonomousExistingDownload = current.Contains(
+      "AUTONOMOUS_EXISTING_DOWNLOAD_V1",
+      StringComparison.Ordinal
+    ) || current.Contains(
+      "native download approval only",
+      StringComparison.OrdinalIgnoreCase
+    ) || current.Contains(
+      autonomousExistingDownloadCriterion,
+      StringComparison.Ordinal
     );
     var autonomousBoundary = current.Contains(
       "autonomous hard boundary",
@@ -6141,6 +6244,59 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         },
         CompactJsonOptions
       );
+      return true;
+    }
+    if (autonomousExistingDownload
+      && current.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
+    {
+      decision = JsonSerializer.Serialize(new
+      {
+        decision = "dispatch_work",
+        items = new[]
+        {
+          new
+          {
+            objective = "native download approval only",
+            acceptanceCriteria = new[] { autonomousExistingDownloadCriterion },
+            evidencePaths = new[] { "assets/model.glb" }
+          }
+        }
+      }, CompactJsonOptions);
+      return true;
+    }
+    if (autonomousExistingDownload
+      && current.Contains("SUPERVISION_AUTONOMOUS_DECISION_V1", StringComparison.Ordinal))
+    {
+      decision = JsonSerializer.Serialize(new
+      {
+        decision = "accept_work",
+        evidenceRevision = ExtractSupervisionEvidenceRevision(current),
+        coveredCriteria = new[] { autonomousExistingDownloadCriterion },
+        summary = "The Host kept the existing asset and reported its replacement URL."
+      }, CompactJsonOptions);
+      return true;
+    }
+    if (autonomousExistingDownload
+      && (current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
+        || current.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)))
+    {
+      decision = JsonSerializer.Serialize(new
+      {
+        decision = "accept_work",
+        evidenceRevision = ExtractSupervisionEvidenceRevision(current),
+        coveredCriteria = new[] { autonomousExistingDownloadCriterion },
+        summary = "The existing asset is unchanged, and Host evidence contains its replacement URL."
+      }, CompactJsonOptions);
+      return true;
+    }
+    if (autonomousExistingDownload
+      && current.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal))
+    {
+      decision = JsonSerializer.Serialize(new
+      {
+        decision = "complete_goal",
+        finalAnswer = "Kept assets/model.glb. Replacement URL: https://example.com/model.glb"
+      }, CompactJsonOptions);
       return true;
     }
     if (

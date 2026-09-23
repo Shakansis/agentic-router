@@ -738,6 +738,8 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       "get_trace_diagnostic",
       "create_file",
       "create_files",
+      "download_file",
+      "download_files",
       "write_file",
       "replace_text",
       "apply_patch",

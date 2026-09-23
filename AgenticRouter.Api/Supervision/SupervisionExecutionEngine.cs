@@ -1104,7 +1104,10 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         {
           ActiveRole = null,
           ActiveWorkItemId = null,
-          FinalAnswer = deterministicFinalAnswer,
+          FinalAnswer = IncludeKeptDownloadSources(
+            deterministicFinalAnswer,
+            runtime.CompletionSummary
+          ),
           LastFailure = null
         },
         telemetry => telemetry with
@@ -1261,7 +1264,10 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     {
       ActiveRole = null,
       ActiveWorkItemId = null,
-      FinalAnswer = Truncate(finalDecision.FinalAnswer, 16_384),
+      FinalAnswer = IncludeKeptDownloadSources(
+        Truncate(finalDecision.FinalAnswer, 16_384),
+        runtime.CompletionSummary
+      ),
       LastFailure = null
     };
     yield return Update(
@@ -2870,6 +2876,21 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       contexts[index] = context;
     }
     return runtime with { Contexts = contexts.ToArray() };
+  }
+
+  private static string IncludeKeptDownloadSources(
+    string answer,
+    IReadOnlyList<string>? completionSummary
+  )
+  {
+    var notices = (completionSummary ?? [])
+      .Where(line => line.StartsWith("Download kept existing:", StringComparison.Ordinal))
+      .Distinct(StringComparer.Ordinal)
+      .Where(line => !answer.Contains(line, StringComparison.Ordinal))
+      .ToArray();
+    return notices.Length == 0
+      ? answer
+      : answer.TrimEnd() + "\n\n" + string.Join("\n", notices);
   }
 
   private static SupervisionRuntimeView IncludeCompletionSummary(

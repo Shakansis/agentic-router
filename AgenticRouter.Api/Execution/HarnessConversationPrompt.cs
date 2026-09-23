@@ -54,6 +54,12 @@ internal static class HarnessConversationPromptBuilder
         "- The Agentic Router Host web_search tool is not offered in this turn. A harness-native web tool may still be available when it appears in the native tool inventory; do not infer that every web path is blocked merely because the Host tool is absent.\n"
       );
     }
+    if (request.HostCapabilities?.Allows("download_file") == true)
+    {
+      builder.Append(
+        "- The Host offers download_file and download_files for public HTTPS assets. web_search only finds links. Each request that transfers bytes waits for explicit user approval, even under auto. If a destination exists, the Host asks whether to keep or replace it; Autonomous may keep it and must report the replacement URL. The Host confines files to the trusted workspace and verifies their bytes. Do not claim that downloading is unavailable when these Host tools are offered.\n"
+      );
+    }
 
     if (capabilityNotes is not null)
     {

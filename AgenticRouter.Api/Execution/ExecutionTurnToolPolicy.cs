@@ -57,6 +57,8 @@ public static class ExecutionTurnToolPolicy
     UserInputProtocol.ToolName,
     "create_file",
     "create_files",
+    "download_file",
+    "download_files",
     "write_file",
     "replace_text",
     "apply_patch",
@@ -200,9 +202,10 @@ public static class ExecutionTurnToolPolicy
         ? "An accepted Host plan exists; revise_execution_plan and get_execution_plan are available, while create_execution_plan is not. "
         : "No Host plan exists; create_execution_plan is available, while revise_execution_plan and get_execution_plan are not. ")
       + "Only tools offered by the Host in the current request are valid. "
-      + "The approval selector is authoritative: ask requires approval before every mutation; auto executes a requested in-scope mutation after Host validation without a duplicate prompt. "
+      + "The approval selector is authoritative: ask requires approval before every mutation; auto executes a requested in-scope mutation after Host validation without a duplicate prompt, except downloads always need one explicit approval per call. "
       + "create_file and create_files create required parent directories, so do not create a directory solely as a file parent. "
-      + "Use create_files for two or more independent new text files so the Host can validate and apply the batch as one action.";
+      + "Use create_files for two or more independent new text files so the Host can validate and apply the batch as one action. "
+      + "web_search finds links; download_file and download_files save public HTTPS files after explicit approval. Existing destinations require a keep-or-replace choice; Autonomous keeps them and reports their source URLs.";
   }
 
   private static bool IsControlMessage(string? content)

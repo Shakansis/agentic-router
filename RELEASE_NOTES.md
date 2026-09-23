@@ -1,3 +1,47 @@
+# Agentic Router v0.14.0 alpha
+
+This alpha adds Host-governed HTTPS downloads for assets in a trusted
+workspace, keeps recovery decisions visible, and preserves queued prompts
+across silent stream interruptions and admission conflicts. The previously
+published `v0.13.0_alpha` remains available unchanged.
+
+Portable Windows x64 and Linux x64 packages include the .NET runtime. Ollama,
+local models, and optional harnesses are installed separately. This remains
+alpha evaluation software.
+
+## Execute downloads
+
+- The selected model can request one public HTTPS file or a batch of up to 50
+  files and 1 GiB total. Each request that transfers bytes requires explicit
+  approval, including Auto mode. The approval shows every URL and destination.
+- An existing destination offers Keep or Replace for that file. Autonomous
+  keeps the local file without a transfer; the final report includes the path
+  and replacement URL even if the Supervisor omits them.
+- Downloads stay within the trusted workspace. The Host validates redirects
+  and public addresses, streams to a temporary file, verifies bytes and hash,
+  and moves the result into place only after successful verification. A batch
+  keeps completed files and reports individual failures.
+
+## Continuity and recovery
+
+- Pending recovery decisions remain visible when activity arrives after the
+  user has scrolled away. Verified effects or new observations reset the
+  no-progress allowance, so useful work does not stop at a raw action count.
+- A silent Chat stream reconnects after a bounded idle period. When admission
+  meets an earlier run during cleanup, queued prompts and editable drafts are
+  preserved after HTTP 409 rather than discarded.
+
+## Validation and limits
+
+- The complete Release Playwright/API suite passed 572/572 with zero failures
+  and zero skipped tests. The Release solution build passed with zero warnings;
+  formatting, PowerShell syntax, JavaScript syntax, and diff checks passed.
+- A real HTTPS smoke download of the [Khronos Duck GLB](https://github.com/KhronosGroup/glTF-Sample-Assets/blob/main/Models/Duck/glTF-Binary/Duck.glb)
+  verified the saved bytes and replacement of an existing file. Browser/API
+  tests cover approval, per-file Keep, Autonomous reporting, and the batch UI.
+- The real GPU matrices recorded for `v0.13.0_alpha` below were not repeated
+  for this release candidate while an unrelated user execution remained active.
+
 # Agentic Router v0.13.0 alpha
 
 This alpha focuses on continuity and recovery in Chat, Execute, and Benchmark

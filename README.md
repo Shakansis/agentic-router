@@ -4,14 +4,14 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: `v0.13.0_alpha` strengthens accepted-work continuity across browser interruptions, bounded recovery in Execute and Benchmark, and local-runtime availability. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
+**Current Status**: `v0.14.0_alpha` adds Host-governed HTTPS asset downloads, keeps recovery decisions visible, and preserves queued prompts across connection conflicts. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.13.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-win-x64.zip.sha256) |
-| `v0.13.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.13.0_alpha/AgenticRouter-0.13.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.14.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-win-x64.zip.sha256) |
+| `v0.14.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -20,31 +20,21 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.13.0_alpha` is a pre-release intended for evaluation. The package is
+`0.14.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
 conversations by default and can be disabled or reopened from Local resources.
 
-### What's new in 0.13.0_alpha
+### What's new in 0.14.0_alpha
 
-- Chat can reattach to an accepted Host run after a browser refresh without
-  resending the prompt. Large saved conversations open in bounded pages while
-  the original transcript remains available.
-- Execute adds bounded recovery for missing Qwen sessions and supported context
-  failures, reconciles durable Supervisor checkpoints before explicit resume,
-  and keeps a workspace occupied while its execution task is still active.
-- Benchmark Lab restores current matrix state after a replay gap, retains
-  completed evidence when infrastructure or result storage fails, and reports
-  the specialist's final completion rather than an action introduction.
-- Benchmark Lab can also run an exact custom prompt for manual quality review;
-  technical completion is kept separate from the user's score.
-- Per-model GPU affinity takes precedence over legacy role preferences. Each
-  managed backend/device selection keeps a separate Ollama server, so switching
-  roles does not force an unrelated model off its device.
-- Managed Ollama startup has a bounded readiness retry and reports unavailable
-  external resources in the project sidebar without replacing the selected
-  model, harness, or GPU.
+- Execute can save public HTTPS assets with a single or batch download request
+  after explicit approval. Existing files offer Keep or Replace per destination;
+  Autonomous keeps local files and reports their replacement URLs.
+- A recovery decision remains visible while pending. Useful verified actions
+  reset the no-progress allowance instead of exhausting a fixed action count.
+- Silent streams reconnect after a bounded idle period. Prompts that meet an
+  earlier run during cleanup remain available after HTTP 409.
 
 See [release notes](RELEASE_NOTES.md) for scope and validation evidence.
 
@@ -195,7 +185,12 @@ recursively.
 - A failed checkpoint write pauses a durable run without replaying model actions;
   explicit resume reconciles the workspace against the last valid checkpoint.
 - Direct Execute remains available explicitly and has no supervision/checkpoint
-  overhead.
+  overhead. Verified actions and new Host observations can continue beyond 20
+  tool calls; the configured limit now counts consecutive attempts without new
+  evidence. A repeated successful read of unchanged data does not reset it.
+- A required recovery decision is shown in the active conversation. If the live
+  event stream stops delivering events, the browser reconnects from its last
+  received sequence without submitting the prompt again.
 
 ### Effort by supervised phase
 
@@ -234,6 +229,7 @@ reasoning, and unknown values are rejected atomically when settings are saved.
 - `delete_files` - Delete explicit bounded files with hash checks and undo evidence
 - `run_validation_profile` - Run configured validation profiles
 - `web_search` - Search current external sources when the effective route and configured Host integration support it
+- `download_file` / `download_files` - Save one or up to 50 public HTTPS files to trusted workspace paths (1 GiB per request) in interactive Execute. A transfer requires explicit approval, including Auto and Autonomous. Existing files receive a keep-or-replace choice; Autonomous keeps them and reports the replacement URL. Benchmark runs do not offer downloads because they cannot request an interactive decision.
 
 **Security Boundaries:**
 - All file paths are canonicalized and confined to the trusted workspace
@@ -245,6 +241,7 @@ reasoning, and unknown values are rejected atomically when settings are saved.
 - Batch creation validates every target before the first write, verifies every
   result, and rolls back files created by a failed batch
 - Deletion requires explicit paths, hash validation, and bounded recovery evidence
+- Downloads show every URL and destination before approval, require public IPv4 destinations (including redirects), stream with a byte limit, verify saved bytes, and preserve completed files while reporting failures in a batch
 
 **Git Delivery:**
 Execute mode includes a safe Git workflow for committing changes:

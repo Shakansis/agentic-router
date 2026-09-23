@@ -106,7 +106,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "you may request and call create_execution_plan with your own objective, titles, steps, and "
     + "dependencies. For a simple task, continue without a plan. The Host never invents plan steps. "
     + "When genuinely blocked on missing user information, request one atomic batch of 1 to 4 questions through request_user_input. Each question may provide up to 4 predefined options and always permits a custom answer. Wait for the complete batch response before continuing. "
-    + "The Host owns approval. Under ask, every mutation waits for approval; under auto, requested in-scope mutations execute after Host validation without a duplicate approval. "
+    + "The Host owns approval. Under ask, every mutation waits for approval; under auto, requested in-scope mutations execute after Host validation without a duplicate approval except download_file and download_files, which always require one explicit approval per call. "
+    + "web_search finds public links but does not save binary files. When downloads are needed, request download_file or download_files from the Host catalog; do not claim web access is unavailable when web_search is offered. If a download target already exists, the Host asks the user whether to keep or replace it; Autonomous keeps it and reports the replacement URL. "
     + "The application host is Windows. Use list_files to inspect directories; do not use "
     + "Unix commands such as ls, and do not invoke dir through a shell. Shell interpreters "
     + "are intentionally unavailable. "
@@ -803,6 +804,41 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         new
         {
           files = FileCreationArrayProperty()
+        },
+        ["files"]
+      ),
+      Tool(
+        "download_file",
+        "Download one HTTPS URL resolving to a public IPv4 address to a binary file in the trusted workspace. The Host shows URL and destination for explicit approval. For an existing file, the user chooses keep or replace; Autonomous keeps it and reports the source URL.",
+        new
+        {
+          url = StringProperty(),
+          path = StringProperty()
+        },
+        ["url", "path"]
+      ),
+      Tool(
+        "download_files",
+        "Download up to 50 HTTPS URLs resolving to public IPv4 addresses to files in the trusted workspace, with a combined 1 GiB limit. One explicit approval shows every URL, destination, and existing-file choice. Completed files are kept and failures are reported per item.",
+        new
+        {
+          files = new
+          {
+            type = "array",
+            minItems = 1,
+            maxItems = 50,
+            items = new
+            {
+              type = "object",
+              properties = new
+              {
+                url = StringProperty(),
+                path = StringProperty()
+              },
+              required = new[] { "url", "path" },
+              additionalProperties = false
+            }
+          }
         },
         ["files"]
       ),

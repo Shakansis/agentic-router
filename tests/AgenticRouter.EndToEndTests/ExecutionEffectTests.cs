@@ -567,6 +567,7 @@ public sealed class ExecutionEffectTests
         null!,
         null!,
         new ToolNameResolver(),
+        null!,
         null!
       );
       using var createArguments = JsonDocument.Parse(

@@ -2841,13 +2841,80 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
     await Expect(editor).ToHaveValueAsync("queued edited prompt");
 
+    await Page.Locator(".message.user").First.GetByRole(
+      AriaRole.Button, new() { Name = "Edit message", Exact = true }).ClickAsync();
     await Page.Locator(".message-buffer-action[data-action=\"save\"]").ClickAsync();
+    await Expect(Page.Locator(".message-buffer-item"))
+      .ToContainTextAsync("queued edited prompt");
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Page.Locator("#cancel-message-edit").ClickAsync();
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(2);
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
     await Expect(Page.Locator(".message.user .message-content").Last)
       .ToContainTextAsync("queued edited prompt");
     await Expect(Page.Locator("#message-buffer")).ToBeHiddenAsync();
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task RejectedBufferedPromptStaysQueuedWithoutAnEditablePhantomTurn()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (var enabled = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true }))
+      enabled.EnsureSuccessStatusCode();
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await StartMessageAsync("browser message buffer source");
+    await Page.Locator("#message-input").FillAsync("queued prompt must survive admission conflict");
+    await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator(".message-buffer-action[data-action=\"edit\"]").ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").First)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 15_000 });
+
+    var conversationId = await Page.EvaluateAsync<string>("state.conversationSessionId");
+    var browserId = await Page.EvaluateAsync<string>("state.browserSessionId");
+    var externalId = Guid.NewGuid().ToString();
+    var externalRequest = _environment.HttpClient.PostAsJsonAsync("api/chat/stream", new
+    {
+      message = "cancel stream external owner",
+      model = "alpha:latest",
+      interactionMode = "chat",
+      browserSessionId = browserId,
+      conversationSessionId = conversationId,
+      chatRunId = externalId
+    });
+    try
+    {
+      var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+      while (DateTimeOffset.UtcNow < deadline)
+      {
+        var active = await _environment.HttpClient.GetStringAsync("api/chat/runs");
+        if (active.Contains(externalId, StringComparison.Ordinal)) break;
+        await Task.Delay(50);
+      }
+      StringAssert.Contains(await _environment.HttpClient.GetStringAsync("api/chat/runs"), externalId);
+
+      await Page.Locator(".message-buffer-action[data-action=\"save\"]").ClickAsync();
+      await Expect(Page.Locator(".message-buffer-item"))
+        .ToContainTextAsync("queued prompt must survive admission conflict");
+      await Expect(Page.Locator(".message-buffer-item-error"))
+        .ToContainTextAsync("previous request is still finishing");
+      await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
+      await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+      Assert.AreEqual(2, await Page.EvaluateAsync<int>("state.history.length"));
+      Assert.IsTrue(await Page.EvaluateAsync<bool>("state.messageQueuePaused"));
+    }
+    finally
+    {
+      using var cancellation = await _environment.HttpClient.PostAsync(
+        $"api/chat/runs/{externalId}/cancel", null);
+      Assert.AreEqual(HttpStatusCode.Accepted, cancellation.StatusCode);
+      using var response = await externalRequest;
+      response.EnsureSuccessStatusCode();
+    }
   }
 
   [TestMethod]
@@ -4283,7 +4350,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.13.0_alpha"
+      "v0.14.0_alpha"
     );
     await Expect(
       Page.Locator(

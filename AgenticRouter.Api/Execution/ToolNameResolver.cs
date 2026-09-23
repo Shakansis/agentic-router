@@ -78,6 +78,8 @@ public sealed class ToolNameResolver : IToolNameResolver
     WebSearchCapability.ToolName,
     "create_file",
     "create_files",
+    "download_file",
+    "download_files",
     "write_file",
     "replace_text",
     "apply_patch",
@@ -109,6 +111,8 @@ public sealed class ToolNameResolver : IToolNameResolver
     UserInputProtocol.ToolName,
     "create_file",
     "create_files",
+    "download_file",
+    "download_files",
     "write_file",
     "replace_text",
     "apply_patch",
@@ -450,6 +454,7 @@ public sealed class ToolNameResolver : IToolNameResolver
       "read_file" => "file-read",
       "search_text" => "file-search",
       "create_file" or "create_files" or "write_file" or "replace_text" or "apply_patch"
+        or "download_file" or "download_files"
         or "delete_paths" or "rename_path" or "create_directory" => "file-mutation",
       "run_process" => "process-execution",
       "run_validation_profile" => "validation",
@@ -473,6 +478,7 @@ public sealed class ToolNameResolver : IToolNameResolver
     {
       "run_process" => "process-policy",
       var value when value is "create_file" or "create_files" or "write_file" or "replace_text"
+        or "download_file" or "download_files"
         or "apply_patch" or "delete_paths" or "rename_path" or "create_directory"
         || value.StartsWith("git_", StringComparison.Ordinal) => "workspace-and-approval-policy",
       _ => "current-mode-and-capability-policy"

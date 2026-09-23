@@ -733,7 +733,8 @@ public sealed record LocalActionEvent(
   string? Code = null,
   string? ArgumentsSha256 = null,
   string? ActionFingerprint = null,
-  IReadOnlyList<string>? RelativePaths = null
+  IReadOnlyList<string>? RelativePaths = null,
+  IReadOnlyList<DownloadConflict>? DownloadConflicts = null
 );
 
 public sealed record ToolNameResolutionEvidence(

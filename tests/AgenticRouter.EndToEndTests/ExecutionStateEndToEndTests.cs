@@ -242,6 +242,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(thinking).ToHaveAttributeAsync("data-delta-count", "30000");
     var text = await thinking.Locator(".assistant-reasoning-body").TextContentAsync();
     Assert.AreEqual(string.Concat(Enumerable.Range(0, 30_000).Select(index => $"Observation {index}. ")), text);
+    Assert.IsLessThan(100, await thinking.Locator(".assistant-reasoning-body")
+      .EvaluateAsync<int>("body => body.childNodes.length"),
+      "Large reasoning streams should not create one DOM node per delta.");
     Assert.IsGreaterThan(1, await Page.EvaluateAsync<int>("window.historyReplayFrames"),
       "The browser must paint during a single large message replay, not only after it finishes.");
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(2);
@@ -3298,6 +3301,56 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         )
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task VerifiedActionsContinuePastTheFormerTwentyActionLimit()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+    await StartMessageAsync("PROGRESSIVE_ACTION_BUDGET_V1 create 22 distinct files");
+
+    await Expect(Page.Locator(".execution-session-header"))
+      .ToContainTextAsync("22 actions", new() { Timeout = 60_000 });
+    Assert.IsTrue(File.Exists(Path.Combine(
+      _environment.WorkspaceDirectory, "progress-22.txt")));
+    await Expect(Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"]"
+    )).ToHaveCountAsync(0);
+
+    if (await Page.Locator("#cancel-request").IsVisibleAsync())
+      await Page.Locator("#cancel-request").ClickAsync();
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task RepeatedSuccessfulReadRequiresVisibleRecoveryDecision()
+  {
+    await File.WriteAllTextAsync(Path.Combine(
+      _environment.WorkspaceDirectory, "loop.txt"), "unchanged");
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+    await StartMessageAsync("REPEATED_READ_NO_PROGRESS_V1 keep reading loop.txt");
+
+    var decision = Page.Locator(
+      "[data-event-type=\"action.recovery-decision-required\"]"
+    );
+    await Expect(decision).ToBeInViewportAsync(new() { Timeout = 60_000 });
+    await Expect(Page.Locator(".assistant-current-activity"))
+      .ToContainTextAsync("Awaiting your recovery decision");
+    await Expect(decision).ToContainTextAsync(
+      "consecutive attempts without a new verified effect or observation");
+    await Page.ReloadAsync();
+    await Expect(decision).ToBeInViewportAsync();
+    await Expect(decision.Locator("[data-recovery-option=\"stop\"]"))
+      .ToBeEnabledAsync();
+    await decision.Locator("[data-recovery-option=\"stop\"]").ClickAsync();
+    await Expect(Page.Locator(
+      "[data-event-type=\"action.recovery-stopped\"]"
+    )).ToBeAttachedAsync();
   }
 
   [TestMethod]

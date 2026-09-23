@@ -87,6 +87,21 @@ public sealed class ChatController : ControllerBase
       await StreamCore(request, cancellationToken);
       return;
     }
+    if (request.ConversationSessionId is { } conversationId
+      && _chatRuns.FindConversation(conversationId) is { HasTerminal: true } previous)
+    {
+      using var completionTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+      completionTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+      try
+      {
+        await previous.WaitForCompletionAsync(completionTimeout.Token);
+      }
+      catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+      {
+        Response.StatusCode = StatusCodes.Status409Conflict;
+        return;
+      }
+    }
     _ownedRun = _chatRuns.Create(request);
     if (_ownedRun is null)
     {

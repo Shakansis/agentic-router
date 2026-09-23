@@ -7721,9 +7721,10 @@ async function* reconnectChatEvents(stream, id, signal) {
   let attempts = 0;
   while (true) {
     try {
-      for await (const event of readStreamEvents(stream)) {
+      for await (const event of readStreamEvents(stream, 75_000)) {
         if (event.chatRunSequence && event.chatRunSequence <= sequence) continue;
         sequence = event.chatRunSequence ?? sequence;
+        attempts = 0;
         if (event.conversationSessionId) rememberLiveChatRun(id, event.conversationSessionId);
         yield event;
         if (["response.completed", "error", "request.cancelled"].includes(event.type)) {
@@ -10284,7 +10285,7 @@ function renderSettingsSummaries() {
     `Git diff limit: ${formatBytes(state.settings.gitDelivery.maxDiffBytesPerFile)} per file\n`
     + `Git log limit: ${state.settings.gitDelivery.maxLogEntries} entries\n`
     + `Process history output: ${formatBytes(state.settings.sessionHistory.maxStoredProcessOutputBytesPerTurn)} per turn\n`
-    + `Execution tools: ${state.settings.execution.maxToolCallsPerTurn} per turn`;
+    + `No-progress attempts: ${state.settings.execution.maxToolCallsPerTurn} before recovery`;
 }
 
 function renderProcessPermissions() {
@@ -14330,7 +14331,8 @@ function renderMessageQueue() {
   );
   elements.messageBufferRun.hidden = Boolean(state.requestController)
     || state.messageQueue.length === 0
-    || Boolean(state.queueEditingId);
+    || Boolean(state.queueEditingId)
+    || Boolean(state.editingTurn);
 
   for (const item of state.messageQueue) {
     const row = document.createElement("article");
@@ -14503,6 +14505,7 @@ function scheduleMessageQueueDispatch() {
     state.requestController
     || state.conversationTransitioning
     || state.queueEditingId
+    || state.editingTurn
     || state.queuedDispatchMessage
     || state.messageQueuePaused
     || state.steeringMessage
@@ -14556,6 +14559,7 @@ function scheduleDiagnosticInvestigation() {
     !state.pendingDiagnosticInvestigation
     || state.requestController
     || state.conversationTransitioning
+    || state.messageQueuePaused
     || state.queuedDispatchMessage
   ) {
     return;
@@ -14823,6 +14827,16 @@ async function handleComposerSubmit(event) {
   }
 
   const queuedMessage = state.queuedDispatchMessage;
+  if (queuedMessage && state.editingTurn) {
+    state.queuedDispatchMessage = null;
+    if (queuedMessage.hidden) {
+      state.pendingDiagnosticInvestigation = queuedMessage;
+    } else {
+      state.messageQueue.unshift(queuedMessage);
+    }
+    renderMessageQueue();
+    return;
+  }
   state.queuedDispatchMessage = null;
   const message = queuedMessage?.message ?? elements.messageInput.value.trim();
   const hiddenUserMessage = queuedMessage?.hidden === true;
@@ -14861,6 +14875,16 @@ async function handleComposerSubmit(event) {
       declaredBytes: attachment.declaredBytes
     })
   );
+  const submissionSnapshot = {
+    history: state.history,
+    persistedMessageCount: state.persistedMessageCount,
+    persistedContext: state.persistedContext,
+    conversationState: state.conversationState,
+    persistenceStatus: state.persistenceStatus,
+    editingTurn: state.editingTurn,
+    autoFollow: state.autoFollow,
+    nodes: [...elements.messages.children]
+  };
   state.autoFollow = true;
   updateJumpControl();
   elements.emptyState?.remove();
@@ -14961,7 +14985,6 @@ async function handleComposerSubmit(event) {
   if (!queuedMessage) {
     elements.messageInput.value = "";
   }
-  clearAttachments();
   resizeComposer();
   state.requestController = controller;
   state.activeHarness = state.harness;
@@ -14973,6 +14996,7 @@ async function handleComposerSubmit(event) {
   state.compactContextNextRequest = false;
 
   let continueBufferedMessages = true;
+  let rejectedStatus = null;
   try {
     const response = await fetch(
       "/api/chat/stream",
@@ -15007,11 +15031,16 @@ async function handleComposerSubmit(event) {
       }
     );
 
-    if (!response.ok || !response.body) {
+    if (!response.ok) {
+      rejectedStatus = response.status;
+      throw new Error(`HTTP ${response.status}`);
+    }
+    if (!response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
 
     assistant.chatAccepted = true;
+    clearAttachments();
     if (assistant.cancelRequested) await cancelAcceptedChatRun(assistant);
 
     const outcome = await consumeEventStream(response.body, assistant, {
@@ -15080,7 +15109,45 @@ async function handleComposerSubmit(event) {
       await refreshSessions();
     }
   } catch (error) {
-    if (error.name === "AbortError") {
+    if (rejectedStatus !== null) {
+      cancelAnimationFrame(assistant.clockFrame);
+      stopSlowRequestTimer(assistant);
+      const originalNodes = new Set(submissionSnapshot.nodes);
+      for (const node of elements.messages.children) {
+        if (!originalNodes.has(node)) resizeObserver.unobserve(node);
+      }
+      elements.messages.replaceChildren(...submissionSnapshot.nodes);
+      submissionSnapshot.nodes.forEach(node => resizeObserver.observe(node));
+      state.history = submissionSnapshot.history;
+      state.persistedMessageCount = submissionSnapshot.persistedMessageCount;
+      state.persistedContext = submissionSnapshot.persistedContext;
+      state.conversationState = submissionSnapshot.conversationState;
+      setPersistenceStatus(submissionSnapshot.persistenceStatus);
+      state.editingTurn = submissionSnapshot.editingTurn;
+      state.autoFollow = submissionSnapshot.autoFollow;
+      elements.composer.classList.toggle("editing", Boolean(state.editingTurn));
+      updateJumpControl();
+      try {
+        const savedRun = JSON.parse(localStorage.getItem("agentic-router.live-chat-run") ?? "null");
+        if (savedRun?.id === chatRunId) localStorage.removeItem("agentic-router.live-chat-run");
+      } catch { /* A malformed marker must not discard the rejected message. */ }
+      const reason = rejectedStatus === 409
+        ? "The previous request is still finishing. Your message was kept."
+        : `The request was rejected (HTTP ${rejectedStatus}). Your message was kept.`;
+      if (queuedMessage?.hidden) {
+        state.pendingDiagnosticInvestigation = queuedMessage;
+      } else if (queuedMessage) {
+        queuedMessage.error = reason;
+        state.messageQueue.unshift(queuedMessage);
+      } else {
+        elements.messageInput.value = message;
+      }
+      state.messageQueuePaused = true;
+      continueBufferedMessages = false;
+      resizeComposer();
+      renderMessageQueue();
+      showToast(reason, "error");
+    } else if (error.name === "AbortError") {
       continueBufferedMessages = false;
       state.messageQueuePaused = true;
       if (state.conversationVersion === conversationVersion) {
@@ -15797,6 +15864,21 @@ function renderModelSelection(assistant, model, origin) {
   assistant.modelNotice.hidden = false;
 }
 
+function flushAssistantReasoning(reasoning, scrollToEnd) {
+  if (reasoning.pendingDeltas.length === 0) return;
+  const text = reasoning.pendingDeltas.join("");
+  reasoning.pendingDeltas.length = 0;
+  const last = reasoning.body.lastChild;
+  if (last?.nodeType === Node.TEXT_NODE && last.length + text.length <= 8192) {
+    last.appendData(text);
+  } else {
+    reasoning.body.append(document.createTextNode(text));
+  }
+  if (scrollToEnd) {
+    reasoning.body.scrollTop = reasoning.body.scrollHeight;
+  }
+}
+
 function appendAssistantReasoning(assistant, delta, contentBlockId = null) {
   if (!delta) {
     return;
@@ -15833,18 +15915,25 @@ function appendAssistantReasoning(assistant, delta, contentBlockId = null) {
       details,
       body,
       chunks: [],
-      contentBlockId
+      contentBlockId,
+      pendingDeltas: [],
+      flushFrame: null
     };
   }
 
-  assistant.activeReasoning.chunks.push(delta);
-  assistant.activeReasoning.body.append(document.createTextNode(delta));
-  if (!assistant.replayingHistory) {
-    assistant.activeReasoning.body.scrollTop =
-      assistant.activeReasoning.body.scrollHeight;
+  const reasoning = assistant.activeReasoning;
+  reasoning.chunks.push(delta);
+  reasoning.pendingDeltas.push(delta);
+  if (assistant.replayingHistory) {
+    flushAssistantReasoning(reasoning, false);
+  } else if (reasoning.flushFrame === null) {
+    reasoning.flushFrame = requestAnimationFrame(() => {
+      reasoning.flushFrame = null;
+      flushAssistantReasoning(reasoning, true);
+    });
   }
-  assistant.activeReasoning.details.dataset.deltaCount = String(
-    Number(assistant.activeReasoning.details.dataset.deltaCount) + 1
+  reasoning.details.dataset.deltaCount = String(
+    Number(reasoning.details.dataset.deltaCount) + 1
   );
   assistant.hasReasoning = true;
   assistant.progress.hidden = false;
@@ -15857,7 +15946,10 @@ function closeAssistantReasoning(assistant) {
     return;
   }
 
-  assistant.activeReasoning.details.open = false;
+  const reasoning = assistant.activeReasoning;
+  if (reasoning.flushFrame !== null) cancelAnimationFrame(reasoning.flushFrame);
+  flushAssistantReasoning(reasoning, false);
+  reasoning.details.open = false;
   assistant.activeReasoning = null;
 }
 
@@ -16282,6 +16374,8 @@ function renderCurrentActivity(assistant, streamEvent) {
     );
   } else if (type === "response.first-chunk" || type === "response.delta") {
     setCurrentActivity(assistant, "Writing response");
+  } else if (type === "action.recovery-decision-required") {
+    setCurrentActivity(assistant, "Awaiting your recovery decision", false);
   } else if (type.includes("recovery")) {
     setCurrentActivity(assistant, "Revising approach");
   } else if (type === "user-input.requested" || type === "approval.requested") {
@@ -16565,13 +16659,26 @@ function addUserInputTranscript(assistant, streamEvent) {
   assistant.workActivity.append(card);
 }
 
-async function* readStreamEvents(stream) {
+async function* readStreamEvents(stream, idleTimeoutMilliseconds = 0) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let idleTimer = null;
   try {
     while (true) {
-      const result = await reader.read();
+      const result = idleTimeoutMilliseconds > 0
+        ? await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            idleTimer = setTimeout(
+              () => reject(new Error("Live stream stopped delivering events.")),
+              idleTimeoutMilliseconds
+            );
+          })
+        ])
+        : await reader.read();
+      clearTimeout(idleTimer);
+      idleTimer = null;
 
       if (result.done) {
         break;
@@ -16595,7 +16702,11 @@ async function* readStreamEvents(stream) {
         yield JSON.parse(data);
       }
     }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
   } finally {
+    clearTimeout(idleTimer);
     reader.releaseLock();
   }
 }
@@ -16974,6 +17085,23 @@ async function consumeEventStream(stream, assistant, options = {}) {
         streamEvent,
         historical
       );
+    } else if (streamEvent.type === "action.recovery-resumed"
+      || streamEvent.type === "action.recovery-stopped") {
+      const pending = assistant.container.querySelector(
+        ".recovery-decision:not([data-decision])"
+      );
+      if (pending) {
+        pending.dataset.decision = streamEvent.type;
+        pending.querySelector(".approval-status").textContent =
+          streamEvent.type === "action.recovery-resumed" ? "Continuing" : "Stopped";
+        pending.querySelectorAll("button").forEach(button => { button.disabled = true; });
+        pending.open = false;
+      }
+      if (!historical && assistant.recoveryPreviousAutoFollow) {
+        resumeAutoFollow();
+      }
+      assistant.recoveryPreviousAutoFollow = null;
+      addActivity(assistant, streamEvent, false);
     } else if (streamEvent.type === "agent.toolset-requested") {
       addToolsetRequest(
         assistant,
@@ -19022,6 +19150,14 @@ function addApprovalActivity(assistant, streamEvent, historical = false) {
   if (command.host) {
     content.append(command.host);
   }
+  const downloadChoices = createDownloadConflictControls(action);
+  if (downloadChoices.host) {
+    content.append(downloadChoices.host);
+    downloadChoices.host.querySelectorAll("select").forEach(select => {
+      select.disabled = historical;
+    });
+  }
+  const decisionInput = downloadChoices.input ?? command.input;
 
   if (action.canRememberApproval) {
     const warning = document.createElement("p");
@@ -19046,7 +19182,9 @@ function addApprovalActivity(assistant, streamEvent, historical = false) {
   const approve = document.createElement("button");
   approve.className = "primary-button";
   approve.type = "button";
-  approve.textContent = "Approve";
+  approve.textContent = downloadChoices.input
+    ? "Continue with choices"
+    : "Approve";
   const remember = action.canRememberApproval
     ? document.createElement("button")
     : null;
@@ -19088,15 +19226,15 @@ function addApprovalActivity(assistant, streamEvent, historical = false) {
   );
   assistant.workActivity.append(row);
 
-  if (command.input) {
-    row.dataset.editableText = command.input.value;
-    command.input.readOnly = historical;
-    command.input.disabled = historical;
-    command.input.addEventListener(
+  if (decisionInput) {
+    row.dataset.editableText = decisionInput.value;
+    decisionInput.readOnly = historical;
+    decisionInput.disabled = historical;
+    decisionInput.addEventListener(
       "input",
       () => {
-        command.input.removeAttribute("aria-invalid");
-        status.textContent = command.input.value
+        decisionInput.removeAttribute("aria-invalid");
+        status.textContent = decisionInput.value
           === (row.dataset.editableText ?? "")
           ? "Waiting for decision"
           : "Change will be validated upon approval";
@@ -19114,7 +19252,7 @@ function addApprovalActivity(assistant, streamEvent, historical = false) {
       reject,
       status,
       row,
-      command.input,
+      decisionInput,
       false,
       remember
     )
@@ -19129,7 +19267,7 @@ function addApprovalActivity(assistant, streamEvent, historical = false) {
       reject,
       status,
       row,
-      command.input,
+      decisionInput,
       true,
       remember
     )
@@ -19144,11 +19282,60 @@ function addApprovalActivity(assistant, streamEvent, historical = false) {
       reject,
       status,
       row,
-      command.input,
+      decisionInput,
       false,
       remember
     )
   );
+}
+
+function createDownloadConflictControls(action) {
+  const conflicts = action.downloadConflicts;
+  if (!Array.isArray(conflicts) || conflicts.length === 0) {
+    return { host: null, input: null };
+  }
+  const host = document.createElement("div");
+  host.className = "download-conflict-decisions";
+  const heading = document.createElement("strong");
+  heading.textContent = "Existing files: choose what to do with each one";
+  const list = document.createElement("div");
+  list.className = "download-conflict-list";
+  const input = document.createElement("textarea");
+  input.hidden = true;
+  const choices = new Map();
+  const refresh = () => {
+    input.value = JSON.stringify({
+      decisions: [...choices].map(([path, choice]) => ({ path, choice }))
+    });
+    input.dispatchEvent(new Event("input"));
+  };
+  for (const conflict of conflicts) {
+    const row = document.createElement("label");
+    row.className = "download-conflict-row";
+    const description = document.createElement("span");
+    description.textContent = `${conflict.relativePath} (${conflict.bytes} bytes)`;
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", `Existing ${conflict.relativePath}`);
+    for (const [value, label] of [
+      ["keep", "Keep existing"],
+      ["replace", "Replace with download"]
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.append(option);
+    }
+    choices.set(conflict.relativePath, "keep");
+    select.addEventListener("change", () => {
+      choices.set(conflict.relativePath, select.value);
+      refresh();
+    });
+    row.append(description, select);
+    list.append(row);
+  }
+  refresh();
+  host.append(heading, list, input);
+  return { host, input };
 }
 
 function createTerminalCommand(action, title) {
@@ -19393,6 +19580,9 @@ async function decideAction(
   if (input) {
     input.disabled = true;
   }
+  approval.querySelectorAll(".download-conflict-row select").forEach(select => {
+    select.disabled = true;
+  });
   status.textContent = approved
     ? rememberForWorkspace
       ? "Approving and remembering…"
@@ -19469,6 +19659,9 @@ async function decideAction(
       input.disabled = false;
       input.setAttribute("aria-invalid", "true");
     }
+    approval.querySelectorAll(".download-conflict-row select").forEach(select => {
+      select.disabled = false;
+    });
     showToast(error.message);
     approveButton.disabled = false;
     rejectButton.disabled = false;
@@ -19489,6 +19682,7 @@ function addRecoveryDecisionActivity(assistant, streamEvent, historical = false)
   row.dataset.eventType = streamEvent.type;
   row.dataset.checkpointId = recovery.checkpointId;
   row.dataset.executionSessionId = recovery.executionSessionId;
+  row.setAttribute("aria-label", "Recovery decision required");
   const summary = document.createElement("summary");
   summary.className = "action-approval-summary";
   const time = document.createElement("span");
@@ -19574,7 +19768,17 @@ function addRecoveryDecisionActivity(assistant, streamEvent, historical = false)
       ? "This saved turn ended without a recovery decision."
       : "Automatic recovery has ended; choose how the task should continue."
   );
-  assistant.workActivity.append(row);
+  assistant.answer.insertAdjacentElement("afterend", row);
+  if (!historical && !state.readOnlyConversation) {
+    assistant.recoveryPreviousAutoFollow = state.autoFollow;
+    state.autoFollow = false;
+    updateJumpControl();
+    requestAnimationFrame(() => {
+      if (row.isConnected && !row.dataset.decision) {
+        row.scrollIntoView({ block: "center" });
+      }
+    });
+  }
 }
 
 async function decideRecovery(
@@ -19690,6 +19894,7 @@ function cancelMessageEdit() {
   resizeComposer();
   setStreamingState(false);
   elements.messageInput.focus();
+  scheduleMessageQueueDispatch();
 }
 
 function removeConversationFrom(element) {
@@ -19896,7 +20101,9 @@ function secureRenderedLinks(container) {
 }
 
 function handleConversationScroll() {
-  state.autoFollow = isNearBottom();
+  state.autoFollow = elements.messages.querySelector(
+    ".recovery-decision:not([data-decision]):not(.historical-approval)"
+  ) ? false : isNearBottom();
   updateJumpControl();
 }
 
@@ -19911,6 +20118,9 @@ function updateJumpControl() {
 }
 
 function scrollToBottom() {
+  if (!state.autoFollow) {
+    return;
+  }
   if (elements.messages.querySelector("#empty-state")) {
     elements.messages.scrollTo({
       top: 0,

@@ -181,6 +181,106 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
   }
 
   [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeDownloadRequiresExplicitApprovalEvenInAutoMode()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+
+    await StartMessageAsync("native download approval only");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("https://example.com/model.glb");
+    await Expect(approval).ToContainTextAsync("assets/model.glb");
+    Assert.IsFalse(File.Exists(Path.Combine(_environment.WorkspaceDirectory, "assets", "model.glb")));
+
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Reject" }).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    Assert.IsFalse(File.Exists(Path.Combine(_environment.WorkspaceDirectory, "assets", "model.glb")));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ExistingDownloadOffersKeepOrReplaceAndReportsKeptSource()
+  {
+    var target = Path.Combine(_environment.WorkspaceDirectory, "assets", "model.glb");
+    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+    await File.WriteAllTextAsync(target, "local asset");
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+
+    await StartMessageAsync("native download approval only");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("already exists");
+    var choice = approval.Locator(".download-conflict-row select");
+    await Expect(choice).ToHaveValueAsync("keep");
+    await Expect(choice.Locator("option")).ToHaveCountAsync(2);
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Continue with choices" }).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    Assert.AreEqual("local asset", await File.ReadAllTextAsync(target));
+    await Expect(Page.Locator(".message.assistant").Last)
+      .ToContainTextAsync("Replacement URL: https://example.com/model.glb");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutonomousExecuteKeepsExistingDownloadAndReportsSourceWithoutApproval()
+  {
+    var target = Path.Combine(_environment.WorkspaceDirectory, "assets", "model.glb");
+    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+    await File.WriteAllTextAsync(target, "local asset");
+    using var response = await _environment.HttpClient.PostAsJsonAsync(
+      "api/chat/stream",
+      new
+      {
+        message = "AUTONOMOUS_EXISTING_DOWNLOAD_V1",
+        model = "qwen3-coder:30b",
+        history = Array.Empty<object>(),
+        interactionMode = "execute",
+        harness = "native",
+        approvalPolicy = "ask",
+        executionStrategy = "autonomous",
+        browserSessionId = $"browser-autonomous-download-{Guid.NewGuid():N}"
+      }
+    );
+    response.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
+    Assert.IsFalse(events.Any(item => item["type"]?.GetValue<string>() == "action.awaiting-approval"));
+    Assert.IsTrue(events.Any(item => item["type"]?.GetValue<string>() == "action.download-kept"));
+    Assert.AreEqual("local asset", await File.ReadAllTextAsync(target));
+    var finalHtml = events.Last(item => item["type"]?.GetValue<string>() == "response.completed")
+      ["renderedHtml"]!.GetValue<string>();
+    StringAssert.Contains(finalHtml, "Download kept existing: assets\\model.glb");
+    StringAssert.Contains(finalHtml, "https://example.com/model.glb");
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeBulkDownloadShowsEveryUrlAndDestinationInOneApproval()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+
+    await StartMessageAsync("native bulk download approval only");
+    var approval = Page.Locator(".action-approval").Last;
+    await Expect(approval).ToBeVisibleAsync();
+    await Expect(approval).ToContainTextAsync("https://example.com/hero.glb");
+    await Expect(approval).ToContainTextAsync("assets/hero.glb");
+    await Expect(approval).ToContainTextAsync("https://example.com/npc.glb");
+    await Expect(approval).ToContainTextAsync("assets/npc.glb");
+    await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(1);
+    await approval.GetByRole(AriaRole.Button, new() { Name = "Reject" }).ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+  }
+
+  [TestMethod]
   [Timeout(120_000, CooperativeCancellation = true)]
   public async Task GlobalNativeFileCreationOutputLimitIsOptionalAndAppliesToEveryModel()
   {

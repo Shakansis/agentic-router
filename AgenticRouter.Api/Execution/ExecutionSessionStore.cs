@@ -2755,6 +2755,8 @@ public sealed class ExecutionSession
         lines.Add($"Validation: {step.Label} · {step.Status}");
       }
     }
+    lines.AddRange(_warnings.Where(warning =>
+      warning.StartsWith("Download kept existing:", StringComparison.Ordinal)));
     return lines;
   }
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -13,6 +14,7 @@ using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Knowledge;
 using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Observability;
+using AgenticRouter.Api.Platform;
 using AgenticRouter.Api.ProjectAwareness;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
@@ -1001,7 +1003,8 @@ public sealed class ChatStreamService
               tool,
               WebSearchCapability.ToolName,
               StringComparison.OrdinalIgnoreCase
-            ))
+            ) && (benchmarkContext is null
+              || tool is not "download_file" and not "download_files"))
             .Concat(
               request.WebSearchEnabled && capabilities.ApplicationWebSearch
                 ? [WebSearchCapability.ToolName]
@@ -3940,8 +3943,8 @@ public sealed class ChatStreamService
     }
 
     var exception = execution.Failure ?? new LocalActionException(
-      "action-execution",
-      "The Host batch action did not complete."
+      execution.Result?.Code ?? "action-execution",
+      execution.Result?.Output ?? "The Host action did not complete."
     );
     var failureOutput = execution.Result?.Output ?? FormatExecutionFailure(exception);
     session.RecordAction(action, "failed", failureOutput);
@@ -4282,18 +4285,19 @@ public sealed class ChatStreamService
     var semanticRepairAttempted = false;
     string? semanticFailureFingerprint = null;
 
-    var actionBudget = 0;
+    var noProgressAttempts = 0;
+    var observedSuccessfulActions = new HashSet<string>(StringComparer.Ordinal);
 
     while (true)
     {
-      if (actionBudget >= settings.MaxToolCallsPerTurn)
+      if (noProgressAttempts >= settings.MaxToolCallsPerTurn)
       {
         var checkpoint = CreateRecoveryCheckpoint(
           requestId,
           stopwatch,
           model,
           intention,
-          $"The execution used its bounded allowance of {settings.MaxToolCallsPerTurn} local actions before all planned work was completed.",
+          $"The execution made {settings.MaxToolCallsPerTurn} consecutive attempts without a new verified effect or observation.",
           cancellationToken
         );
         yield return checkpoint.Event;
@@ -4318,10 +4322,10 @@ public sealed class ChatStreamService
           yield break;
         }
 
-        actionBudget = 0;
+        noProgressAttempts = 0;
       }
 
-      actionBudget++;
+      noProgressAttempts++;
       yield return Event(
         requestId,
         "action.planning-started",
@@ -5380,7 +5384,7 @@ public sealed class ChatStreamService
             proposal,
             progress
           );
-          actionBudget--;
+          noProgressAttempts--;
 
           if (grant.Failure is not null)
           {
@@ -5961,6 +5965,12 @@ public sealed class ChatStreamService
 
           if (planFailure is null)
           {
+            if (observedSuccessfulActions.Add(
+              HostActionFingerprint.Action(proposal.Tool, proposal.Arguments)
+            ))
+            {
+              noProgressAttempts = 0;
+            }
             progress.RefreshPlanManagementTools(hasExecutionPlan: true);
             planningFailures = 0;
             _executionSession?.ResetPlanningFailures();
@@ -6819,6 +6829,26 @@ public sealed class ChatStreamService
       if (execution.Result?.Succeeded == true)
       {
         var result = execution.Result;
+        if (result.Changed == true && result.PostconditionSatisfied == true)
+        {
+          noProgressAttempts = 0;
+          observedSuccessfulActions.Clear();
+        }
+        else if (result.Outcome == HostActionOutcomes.Succeeded
+          && result.EffectState == HostActionEffectStates.Complete)
+        {
+          var fingerprint = HostActionFingerprint.Action(action.Tool, action.Arguments);
+          if (ToolEffectRegistry.ForTool(action.Tool) == ToolEffects.Inspected)
+          {
+            fingerprint += ":" + Convert.ToHexString(
+              SHA256.HashData(Encoding.UTF8.GetBytes(result.Output))
+            );
+          }
+          if (observedSuccessfulActions.Add(fingerprint))
+          {
+            noProgressAttempts = 0;
+          }
+        }
 
         if (result.Validation is not null)
         {
@@ -6947,9 +6977,14 @@ public sealed class ChatStreamService
       }
       else
       {
+        if (execution.Result?.Changed == true)
+        {
+          noProgressAttempts = 0;
+          observedSuccessfulActions.Clear();
+        }
         var exception = execution.Failure ?? new LocalActionException(
-          "process-execution",
-          "The process returned an unsuccessful result."
+          execution.Result?.Code ?? "action-execution",
+          execution.Result?.Output ?? "The Host action did not complete."
         );
         var failureOutput = execution.Result?.Output
           ?? FormatExecutionFailure(
@@ -9976,6 +10011,56 @@ public sealed class ChatStreamService
     CancellationToken cancellationToken
   )
   {
+    if (currentAction.Tool is "download_file" or "download_files"
+      && currentAction.DownloadConflicts?.Count > 0)
+    {
+      try
+      {
+        using var document = JsonDocument.Parse(editedText);
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+          || !document.RootElement.TryGetProperty("decisions", out var entries)
+          || entries.ValueKind != JsonValueKind.Array
+          || entries.GetArrayLength() != currentAction.DownloadConflicts.Count)
+        {
+          throw new LocalActionException("download-decision", "Provide one keep-or-replace choice for each existing destination.");
+        }
+        var remaining = currentAction.DownloadConflicts
+          .Select(conflict => conflict.RelativePath)
+          .ToHashSet(FileSystemPathSemantics.Comparer);
+        var decisions = new Dictionary<string, string>(FileSystemPathSemantics.Comparer);
+        foreach (var entry in entries.EnumerateArray())
+        {
+          if (entry.ValueKind != JsonValueKind.Object
+            || !entry.TryGetProperty("path", out var pathElement)
+            || pathElement.ValueKind != JsonValueKind.String
+            || !entry.TryGetProperty("choice", out var choiceElement)
+            || choiceElement.ValueKind != JsonValueKind.String)
+          {
+            throw new LocalActionException("download-decision", "Each existing destination needs a path and a keep-or-replace choice.");
+          }
+          var path = pathElement.GetString() ?? string.Empty;
+          var choice = choiceElement.GetString() ?? string.Empty;
+          if (!remaining.Remove(path) || choice is not "keep" and not "replace")
+          {
+            throw new LocalActionException("download-decision", "A download choice has an unknown path, duplicate path, or invalid value.");
+          }
+          decisions.Add(path, choice);
+        }
+        return new ApprovalRevisionValidation(
+          true,
+          currentAction with { DownloadDecisions = decisions }
+        );
+      }
+      catch (LocalActionException exception)
+      {
+        return new ApprovalRevisionValidation(false, null, exception.Message);
+      }
+      catch (JsonException)
+      {
+        return new ApprovalRevisionValidation(false, null, "The download choices are not valid JSON.");
+      }
+    }
+
     if (!IsEditableApprovalAction(
       currentAction
     ))
@@ -10414,6 +10499,8 @@ public sealed class ChatStreamService
     return profile.ToolScope.AvailableTools.Any(
       tool => tool is "create_file"
         or "create_files"
+        or "download_file"
+        or "download_files"
         or "write_file"
         or "replace_text"
         or "apply_patch"
@@ -10497,7 +10584,8 @@ public sealed class ChatStreamService
         },
         HostActionFingerprint.ArgumentsSha256(action.Arguments),
         HostActionFingerprint.Action(action.Tool, action.Arguments),
-        RelativeActionPaths(action)
+        RelativeActionPaths(action),
+        action.DownloadConflicts
       ),
       _executionSession?.CreateSummary()
     );
@@ -10509,6 +10597,14 @@ public sealed class ChatStreamService
       .Select(change => change.RelativePath)
       .Concat(action.PendingFileChange is null ? [] : [action.PendingFileChange.RelativePath])
       .ToList();
+    if (action.Tool == "download_files"
+      && action.Arguments.TryGetProperty("files", out var downloadFiles)
+      && downloadFiles.ValueKind == JsonValueKind.Array)
+    {
+      paths.AddRange(downloadFiles.EnumerateArray()
+        .Select(file => file.GetProperty("path").GetString())
+        .OfType<string>());
+    }
     if (paths.Count == 0
       && action.TargetPath is not null
       && _executionSession is not null)
@@ -12137,7 +12233,11 @@ public sealed class ChatStreamService
     {
       builder.AppendLine();
       builder.AppendLine("Warnings:");
-      foreach (var warning in review.Warnings.Take(10))
+      var downloadNotices = review.Warnings.Where(warning =>
+        warning.StartsWith("Download kept existing:", StringComparison.Ordinal));
+      var otherWarnings = review.Warnings.Where(warning =>
+        !warning.StartsWith("Download kept existing:", StringComparison.Ordinal)).Take(10);
+      foreach (var warning in downloadNotices.Concat(otherWarnings))
       {
         builder.AppendLine($"- {warning}");
       }

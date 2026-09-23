@@ -57,7 +57,7 @@ Older per-model JSON and YAML remain importable but are ignored.
 | Config group | Status | Current behavior |
 | --- | --- | --- |
 | `trustedWorkspacePath` | COMPATIBILITY | Preserved in the global payload for old clients. Active authority comes from the selected workspace profile. |
-| `execution.maxToolCallsPerTurn`, `maxConsecutiveToolFailures`, `maxRecoveryAttemptsPerTurn` | ACTIVE | Bounded specialist tool/recovery loop. |
+| `execution.maxToolCallsPerTurn`, `maxConsecutiveToolFailures`, `maxRecoveryAttemptsPerTurn` | ACTIVE | The first limits consecutive action attempts without new verified progress; the others bound failures and recovery. Productive actions do not exhaust the turn. |
 | `execution.fileCreationOutputTokenLimit` | ACTIVE | Optional global output limit used only while Native generates `create_file`/`create_files`; null preserves each model's normal limit. |
 | `execution.maxTrackedFilesPerSession`, `maxRollbackBytesPerFile`, `maxRollbackBytesPerSession` | ACTIVE | Review and rollback evidence limits. |
 | `execution.maxSearchFiles`, `maxSearchMatches`, `maxToolOutputTokens` | ACTIVE | Bounded Host search/tool-output limits. |

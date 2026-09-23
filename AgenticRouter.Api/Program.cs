@@ -218,6 +218,7 @@ builder.Services.AddSingleton<
   SpecialistToolingProtocol
 >();
 builder.Services.AddScoped<ILocalActionService, LocalActionService>();
+builder.Services.AddSingleton<IWebDownloadService, WebDownloadService>();
 builder.Services.AddScoped<IApprovalPolicyService, ApprovalPolicyService>();
 builder.Services.AddSingleton<IProcessExecutionService, ProcessExecutionService>();
 builder.Services.AddScoped<IProcessPolicyService, ProcessPolicyService>();

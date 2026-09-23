@@ -3889,7 +3889,7 @@ p {
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--panel-raised);
 }
 
 .validation-step-grid {
@@ -5098,8 +5098,10 @@ p {
 }
 
 .recovery-decision {
-  border-color: rgba(109, 141, 255, 0.42);
-  background: rgba(109, 141, 255, 0.07);
+  margin: 12px 0;
+  border: 2px solid rgba(109, 141, 255, 0.8);
+  background: var(--panel-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
 }
 
 .action-approval-summary {
@@ -5214,6 +5216,34 @@ p {
   min-width: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.download-conflict-decisions {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.download-conflict-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.download-conflict-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.download-conflict-row span {
+  overflow-wrap: anywhere;
+}
+
+.download-conflict-row select {
+  max-width: 210px;
 }
 
 .terminal-executable {

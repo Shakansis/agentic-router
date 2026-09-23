@@ -54,7 +54,15 @@ public sealed record ValidatedLocalAction(
   string PlanBindingState = HostPlanBindingStates.Unbound,
   string? RequestedPlanStepId = null,
   PendingRenameChange? PendingRename = null,
-  bool ProcessPermissionGranted = false
+  bool ProcessPermissionGranted = false,
+  IReadOnlyList<DownloadConflict>? DownloadConflicts = null,
+  IReadOnlyDictionary<string, string>? DownloadDecisions = null
+);
+
+public sealed record DownloadConflict(
+  string RelativePath,
+  long Bytes,
+  string OriginalHash
 );
 
 public sealed record LocalActionCorrection(
@@ -110,6 +118,7 @@ public sealed class LocalActionService : ILocalActionService
   private const int FileReadLimit = 128 * 1_024;
   private const int FileWriteLimit = 1024 * 1_024;
   private const int BatchWriteLimit = 5 * 1024 * 1_024;
+  private const long BatchDownloadLimit = 1024L * 1024 * 1024;
   private readonly ITrustedWorkspaceService _workspace;
   private readonly IProcessExecutionService _processExecution;
   private readonly IProcessPolicyService _processPolicy;
@@ -118,6 +127,7 @@ public sealed class LocalActionService : ILocalActionService
   private readonly IGitDeliveryService _gitDelivery;
   private readonly IToolNameResolver _toolNames;
   private readonly IIncidentJournal _incidents;
+  private readonly IWebDownloadService _webDownload;
   private readonly IExecutionLatencyTracker _latency;
   private readonly ProjectAwarenessCache? _projectAwarenessCache;
 
@@ -130,6 +140,7 @@ public sealed class LocalActionService : ILocalActionService
     IGitDeliveryService gitDelivery,
     IToolNameResolver toolNames,
     IIncidentJournal incidents,
+    IWebDownloadService webDownload,
     IExecutionLatencyTracker? latency = null,
     ProjectAwarenessCache? projectAwarenessCache = null
   )
@@ -142,6 +153,7 @@ public sealed class LocalActionService : ILocalActionService
     _gitDelivery = gitDelivery;
     _toolNames = toolNames;
     _incidents = incidents;
+    _webDownload = webDownload;
     _latency = latency ?? NullExecutionLatencyTracker.Instance;
     _projectAwarenessCache = projectAwarenessCache;
   }
@@ -298,6 +310,15 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    if (proposal.Tool is "download_file" or "download_files")
+    {
+      return AttachPlanBinding(
+        await ValidateDownloadAsync(proposal, executionSession, cancellationToken),
+        proposal,
+        executionSession
+      );
+    }
+
     var validated = proposal.Tool == "run_process"
       ? executionSession?.ProcessRefreshRequired == true
         ? throw new LocalActionException(
@@ -399,6 +420,11 @@ public sealed class LocalActionService : ILocalActionService
         ),
         "create_files" => await CreateFilesAsync(
           action,
+          cancellationToken
+        ),
+        "download_file" or "download_files" => await DownloadAsync(
+          action,
+          executionSession,
           cancellationToken
         ),
         "write_file" => await WriteFileAsync(
@@ -535,7 +561,7 @@ public sealed class LocalActionService : ILocalActionService
       if (
         executionSession is not null
         && !action.ReadOnly
-        && result.Succeeded
+        && (result.Succeeded || result.Changed == true)
       )
       {
         _projectAwarenessCache?.Invalidate(executionSession.WorkspacePath);
@@ -1769,6 +1795,266 @@ public sealed class LocalActionService : ILocalActionService
       null,
       PendingFileChanges: prepared,
       Corrections: corrections.Count == 0 ? null : corrections
+    );
+  }
+
+  private sealed record DownloadTarget(string Url, string Path);
+
+  private static IReadOnlyList<DownloadTarget> ReadDownloadTargets(
+    string tool,
+    JsonElement arguments
+  )
+  {
+    if (arguments.ValueKind != JsonValueKind.Object)
+    {
+      throw new LocalActionException("download-validation", "Download arguments must be an object.");
+    }
+    if (tool == "download_file")
+    {
+      return [new DownloadTarget(
+        GetRequiredString(arguments, "url"),
+        GetRequiredString(arguments, "path")
+      )];
+    }
+    if (!arguments.TryGetProperty("files", out var files)
+      || files.ValueKind != JsonValueKind.Array
+      || files.GetArrayLength() is < 1 or > 50)
+    {
+      throw new LocalActionException(
+        "download-validation",
+        "download_files requires between 1 and 50 explicit URL and path pairs."
+      );
+    }
+    var entries = new List<DownloadTarget>(files.GetArrayLength());
+    foreach (var file in files.EnumerateArray())
+    {
+      if (file.ValueKind != JsonValueKind.Object)
+      {
+        throw new LocalActionException("download-validation", "Each download entry must be an object.");
+      }
+      entries.Add(new DownloadTarget(
+        GetRequiredString(file, "url"),
+        GetRequiredString(file, "path")
+      ));
+    }
+    return entries;
+  }
+
+  private async Task<ValidatedLocalAction> ValidateDownloadAsync(
+    LocalActionProposal proposal,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      throw new LocalActionException("download-validation", "Downloads require an active execution session.");
+    }
+    var targets = ReadDownloadTargets(proposal.Tool, proposal.Arguments);
+    var canonical = new HashSet<string>(FileSystemPathSemantics.Comparer);
+    var normalized = new List<DownloadTarget>(targets.Count);
+    var conflicts = new List<DownloadConflict>();
+    foreach (var target in targets)
+    {
+      if (!Uri.TryCreate(target.Url, UriKind.Absolute, out var uri))
+      {
+        throw new LocalActionException("download-url", "The download URL is invalid.");
+      }
+      WebDownloadService.ValidatePublicHttpsUrl(uri);
+      var path = await _workspace.ResolveCreationPathAsync(target.Path, cancellationToken);
+      if (path.RelativePath == "." || path.RelativePath.Length > 512)
+      {
+        throw new LocalActionException("download-path", "The download destination must be a bounded file path inside the trusted workspace.");
+      }
+      if (IsProtectedInstructionFile(path.RelativePath)
+        && !executionSession.Objective.Contains(path.RelativePath, StringComparison.OrdinalIgnoreCase)
+        && !executionSession.Objective.Contains(Path.GetFileName(path.RelativePath), StringComparison.OrdinalIgnoreCase))
+      {
+        throw new LocalActionException(
+          "download-path",
+          $"{path.RelativePath}: the user must explicitly request this protected instruction file."
+        );
+      }
+      if (!canonical.Add(path.FullPath))
+      {
+        throw new LocalActionException("download-path", "A download batch contains the same destination more than once.");
+      }
+      if (Directory.Exists(path.FullPath))
+      {
+        throw new LocalActionException("target-conflict", $"{path.RelativePath}: the download destination is a directory.");
+      }
+      if (File.Exists(path.FullPath))
+      {
+        conflicts.Add(new DownloadConflict(
+          path.RelativePath,
+          new FileInfo(path.FullPath).Length,
+          await HashFileAsync(path.FullPath, cancellationToken)
+        ));
+      }
+      normalized.Add(new DownloadTarget(uri.AbsoluteUri, path.RelativePath.Replace('\\', '/')));
+    }
+    var conflictPaths = conflicts.Select(item => item.RelativePath.Replace('\\', '/'))
+      .ToHashSet(FileSystemPathSemantics.Comparer);
+    var preview = string.Join("\n", normalized.Select((item, index) =>
+      $"{index + 1}. {item.Url} → {item.Path}"
+        + (conflictPaths.Contains(item.Path) ? " (already exists)" : string.Empty)));
+    var arguments = proposal.Tool == "download_file"
+      ? JsonSerializer.SerializeToElement(new { url = normalized[0].Url, path = normalized[0].Path })
+      : JsonSerializer.SerializeToElement(new { files = normalized.Select(item => new { url = item.Url, path = item.Path }).ToArray() });
+    return new ValidatedLocalAction(
+      Guid.NewGuid().ToString("N"),
+      proposal.Tool,
+      arguments,
+      normalized.Count == 1 ? (await _workspace.ResolveCreationPathAsync(normalized[0].Path, cancellationToken)).FullPath : null,
+      executionSession.WorkspacePath,
+      $"{proposal.Tool}: {normalized.Count} file(s), up to 1 GiB total",
+      preview,
+      false,
+      true,
+      DownloadConflicts: conflicts,
+      DownloadDecisions: conflicts.ToDictionary(
+        conflict => conflict.RelativePath,
+        _ => "keep",
+        FileSystemPathSemantics.Comparer
+      )
+    );
+  }
+
+  private async Task<LocalActionResult> DownloadAsync(
+    ValidatedLocalAction action,
+    ExecutionSession? executionSession,
+    CancellationToken cancellationToken
+  )
+  {
+    if (executionSession is null)
+    {
+      throw new LocalActionException("download-validation", "Downloads require an active execution session.");
+    }
+    var targets = ReadDownloadTargets(action.Tool, action.Arguments);
+    var completed = new List<string>();
+    var completedPaths = new List<string>();
+    var kept = new List<string>();
+    var failed = new List<string>();
+    var retryableWithoutChange = true;
+    long bytes = 0;
+    foreach (var target in targets)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var destination = await _workspace.ResolveCreationPathAsync(target.Path, cancellationToken);
+      try
+      {
+        var conflict = action.DownloadConflicts?.FirstOrDefault(item =>
+          string.Equals(item.RelativePath, destination.RelativePath, FileSystemPathSemantics.Comparison));
+        if (Directory.Exists(destination.FullPath)
+          || (conflict is null && File.Exists(destination.FullPath)))
+        {
+          throw new LocalActionException(
+            "file-conflict",
+            $"{destination.RelativePath}: the destination appeared after approval; request a new keep-or-replace decision."
+          );
+        }
+        string? originalBinaryBase64 = null;
+        var undoAvailable = true;
+        string? undoDiagnostic = null;
+        if (conflict is not null)
+        {
+          if (!File.Exists(destination.FullPath)
+            || await HashFileAsync(destination.FullPath, cancellationToken) != conflict.OriginalHash)
+          {
+            throw new LocalActionException(
+              "file-conflict",
+              $"{destination.RelativePath}: the existing file changed after the decision; it was preserved."
+            );
+          }
+          var decision = action.DownloadDecisions?.GetValueOrDefault(destination.RelativePath) ?? "keep";
+          if (decision == "keep")
+          {
+            var notice = $"Download kept existing: {destination.RelativePath}. Replacement URL: {target.Url}";
+            kept.Add(notice);
+            executionSession.AddWarning(notice);
+            continue;
+          }
+          if (decision != "replace")
+          {
+            throw new LocalActionException("download-decision", "The existing file requires a valid keep-or-replace decision.");
+          }
+          undoAvailable = conflict.Bytes <= FileWriteLimit
+            && executionSession.CanTrackRollbackBatch(1, conflict.Bytes, out undoDiagnostic);
+          if (undoAvailable)
+          {
+            originalBinaryBase64 = Convert.ToBase64String(
+              await File.ReadAllBytesAsync(destination.FullPath, cancellationToken)
+            );
+          }
+          else
+          {
+            undoDiagnostic ??= "The original binary file exceeds the 1 MiB undo snapshot limit.";
+          }
+        }
+        var receipt = await _webDownload.DownloadAsync(
+          new Uri(target.Url),
+          destination.FullPath,
+          BatchDownloadLimit - bytes,
+          cancellationToken,
+          conflict?.OriginalHash
+        );
+        bytes += receipt.Bytes;
+        executionSession.RecordFileChange(new ExecutionFileChange(
+          destination.RelativePath,
+          conflict is null ? "created" : "modified",
+          conflict is not null,
+          conflict?.OriginalHash ?? Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant(),
+          receipt.Sha256,
+          null,
+          string.Empty,
+          receipt.Bytes,
+          DateTimeOffset.UtcNow,
+          true,
+          undoAvailable,
+          undoDiagnostic,
+          undoAvailable ? conflict?.Bytes ?? 0 : 0,
+          OriginalBinaryBase64: conflict is null ? string.Empty : originalBinaryBase64
+        ));
+        _projectAwarenessCache?.Invalidate(executionSession.WorkspacePath);
+        completedPaths.Add(destination.RelativePath);
+        completed.Add($"{destination.RelativePath}: {(conflict is null ? "created" : "replaced")}, {receipt.Bytes} bytes, SHA-256 {receipt.Sha256}");
+      }
+      catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+      {
+        failed.Add($"{destination.RelativePath}: download timed out");
+      }
+      catch (Exception exception) when (exception is LocalActionException
+        or HttpRequestException or IOException or UnauthorizedAccessException)
+      {
+        retryableWithoutChange &= exception is HttpRequestException
+          || exception is LocalActionException { Stage: "download-network" or "download-http-transient" };
+        var reason = exception is LocalActionException actionFailure
+          ? actionFailure.Message
+          : exception is HttpRequestException
+            ? "network request failed"
+            : "could not save the downloaded file";
+        failed.Add($"{destination.RelativePath}: {reason}");
+      }
+    }
+    var output = $"Downloaded {completed.Count}, kept {kept.Count}, failed {failed.Count} of {targets.Count} file(s); {bytes} bytes."
+      + (completed.Count == 0 ? string.Empty : $"\nCompleted:\n{string.Join("\n", completed)}")
+      + (kept.Count == 0 ? string.Empty : $"\nKept existing:\n{string.Join("\n", kept)}")
+      + (failed.Count == 0 ? string.Empty : $"\nFailed:\n{string.Join("\n", failed)}");
+    return new LocalActionResult(
+      output,
+      failed.Count > 0 ? "action.download-partial" : completed.Count > 0
+        ? "action.edit-applied" : "action.download-kept",
+      Succeeded: failed.Count == 0,
+      Code: failed.Count > 0 ? "download_partial" : completed.Count > 0
+        ? "download_completed" : "download_kept",
+      RetryUnchanged: completed.Count == 0 && retryableWithoutChange,
+      EffectState: failed.Count == 0 ? HostActionEffectStates.Complete : completed.Count == 0 && kept.Count == 0
+        ? HostActionEffectStates.None : HostActionEffectStates.Partial,
+      Outcome: failed.Count > 0 ? HostActionOutcomes.Recoverable : completed.Count > 0
+        ? HostActionOutcomes.Succeeded : HostActionOutcomes.NoOp,
+      Changed: completed.Count > 0,
+      PostconditionSatisfied: failed.Count == 0,
+      ChangedPaths: completedPaths
     );
   }
 
