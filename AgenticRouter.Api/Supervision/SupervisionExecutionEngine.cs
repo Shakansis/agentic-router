@@ -423,6 +423,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
         var workerPrompt = CreateWorkerPrompt(
           item,
+          checkpoint.Objective,
           IsAutonomous(checkpoint),
           correctionEvidence
         );
@@ -649,6 +650,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
             supervisor,
             CreateVerificationPrompt(
               item,
+              checkpoint.Objective,
               workerTurn.Answer,
               evidence,
               autonomous: IsAutonomous(checkpoint)
@@ -703,6 +705,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
                 supervisor,
                 CreateVerificationPrompt(
                   item,
+                  checkpoint.Objective,
                   workerTurn.Answer,
                   evidence,
                   requireValidation: true,
@@ -2241,7 +2244,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     return $$"""
       {{DecomposeMarker}}
       You are the focused supervisor. Decompose the original objective into the smallest ordered queue that can be independently verified. Do not mutate files.
-      Reason through dependencies, but do not draft the queue or its JSON in reasoning. Leave enough of the bounded output budget to return one complete, concise JSON decision before the limit is reached. A tool call is needed only when current workspace evidence must be inspected; call an available read-only tool promptly instead of expanding analysis without that evidence.
+      Map every explicit user requirement, including output shape and error cases, to a concise observable MUST criterion. Identify an executable first file change, then return the smallest complete ordered queue promptly. Do not rehearse alternative implementations before worker evidence exists or draft the queue or JSON in reasoning. Reserve deeper reflection for Host-verified effects; correct only observed gaps. Keep the complete JSON decision within the output budget. Call a read-only tool promptly only when current workspace evidence is essential.
       Every work item must deliver at least one durable Host-observable file change and list its concrete relative file path in evidencePaths. Never dispatch directory-only scaffolding, project structure, analysis, planning, test execution, verification, or review as a standalone work item. Combine required directories with the first file that uses them, and make test execution an acceptance criterion of the implementation item it validates. Empty evidencePaths and directory paths are not valid evidence for a mutation item.
       Original objective:
       {{objective}}
@@ -2259,6 +2262,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
   private static string CreateWorkerPrompt(
     SupervisionWorkItemView item,
+    string originalObjective,
     bool autonomous,
     SupervisorEvidence? correctionEvidence
   )
@@ -2276,6 +2280,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
       Active work item {{item.Id}}:
       {{item.Objective}}
 
+      Original user objective (preserve relevant details without expanding this item):
+      {{originalObjective}}
+
       Requirements and guidance:
       {{FormatCriteria(item)}}
 
@@ -2288,6 +2295,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
 
   private static string CreateVerificationPrompt(
     SupervisionWorkItemView item,
+    string originalObjective,
     string workerClaim,
     SupervisorEvidence evidence,
     bool requireValidation = false,
@@ -2300,9 +2308,11 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     );
     return $$"""
       {{marker}}
-      You are the focused read-only supervisor. The worker response is only a claim. Evaluate the current Host evidence below against every acceptance criterion.
+      You are the focused read-only supervisor. The worker response is only a claim. Evaluate the current Host evidence below against every acceptance criterion. Worker-authored tests passing do not prove the output contract. Inspect current files and independently compare exact output shapes and required edge cases with each MUST criterion; reject missing proof with one bounded corrective brief.
       Work item: {{item.Id}}
       Objective: {{item.Objective}}
+      Original user objective (compare the item and evidence with its relevant exact requirements):
+      {{originalObjective}}
       Requirements and guidance:
       {{FormatCriteria(item)}}
 
