@@ -4302,6 +4302,33 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task BenchmarkSelectionSummaryKeepsFiveCombinationsAndThirteenTestsWhileRunning()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-benchmarks").ClickAsync();
+    await SelectBenchmarkModelsAsync("alpha:latest");
+    foreach (var toggle in await Page.Locator("#benchmark-harness-list input").AllAsync())
+      await toggle.CheckAsync();
+    foreach (var toggle in await Page.Locator("#benchmark-suite-list input").AllAsync())
+      await toggle.CheckAsync();
+    await Page.Locator("#benchmark-custom-prompt").FillAsync("Build a browser game.");
+    await Expect(Page.Locator("#benchmark-selection-summary"))
+      .ToHaveTextAsync("5 combinations × 13 tests");
+
+    await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-model-list input:checked"))
+      .ToBeDisabledAsync();
+    await Expect(Page.Locator("#benchmark-selection-summary"))
+      .ToHaveTextAsync("5 combinations × 13 tests");
+    await Expect(Page.Locator("#benchmark-selection-total"))
+      .ToContainTextAsync("65 planned tests");
+    await Page.Locator("#cancel-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-status"))
+      .ToContainTextAsync("canceled", new() { Timeout = 30_000 });
+  }
+
+  [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
   public async Task BenchmarkUiKeepsThirtyCombinationsAndOpenEvidenceStableDuringLiveUpdates()
   {
     await Page.GotoAsync("/");
@@ -4312,10 +4339,15 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     );
     await Page.Locator("#benchmark-suite-list input[value=\"agent-behavior\"]").UncheckAsync();
     await Page.Locator("#benchmark-suite-list input[value=\"real-life-problem\"]").UncheckAsync();
+    await Page.Locator("#benchmark-suite-list input[value=\"manual\"]").UncheckAsync();
     await Page.Locator("#benchmark-timeout").FillAsync("60");
     await Expect(Page.Locator("#benchmark-selection-summary"))
       .ToHaveTextAsync("30 combinations × 4 tests");
     await Page.Locator("#run-benchmark").ClickAsync();
+    await Expect(Page.Locator("#benchmark-selection-summary"))
+      .ToHaveTextAsync("30 combinations × 4 tests");
+    await Expect(Page.Locator("#benchmark-selection-total"))
+      .ToContainTextAsync("120 planned tests");
     await Expect(Page.Locator("#benchmark-pane-execution")).ToBeVisibleAsync();
     var picker = Page.Locator("#benchmark-combination-select");
     await Expect(picker.Locator("option")).ToHaveCountAsync(30);

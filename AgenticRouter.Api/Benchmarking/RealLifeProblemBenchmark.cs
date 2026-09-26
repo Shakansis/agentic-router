@@ -53,7 +53,22 @@ public sealed partial class BenchmarkBrowserValidator : IBenchmarkBrowserValidat
     IBrowser? browser = null;
     try
     {
-      playwright = await Playwright.CreateAsync();
+      try
+      {
+        playwright = await Playwright.CreateAsync();
+      }
+      catch (NullReferenceException)
+      {
+        return new BenchmarkBrowserValidationResult(
+          false,
+          false,
+          "unavailable",
+          ["Browser validation is unavailable because the Playwright driver could not be started."],
+          scripts,
+          styles,
+          Elapsed(startedAt)
+        );
+      }
       browser = await LaunchInstalledBrowserAsync(playwright, cancellationToken);
       var context = await browser.NewContextAsync();
       var page = await context.NewPageAsync();

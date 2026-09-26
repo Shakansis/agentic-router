@@ -76,6 +76,7 @@ function New-PosixTarGzip {
       )
       $entry.Mode = if (
         $relativePath -eq 'AgenticRouter' `
+          -or $relativePath -eq '.playwright/node/linux-x64/node' `
           -or $relativePath.EndsWith('.sh', [System.StringComparison]::Ordinal)
       ) {
         [System.IO.UnixFileMode]493
@@ -200,6 +201,19 @@ try {
   & dotnet @publishArguments
   Assert-SuccessfulExitCode -Operation 'Portable publish'
 
+  $nodePlatform = if ($isLinuxPackage) { 'linux-x64' } else { 'win32_x64' }
+  $nodeFileName = if ($isLinuxPackage) { 'node' } else { 'node.exe' }
+  $publishedNode = Join-Path $stagingDirectory ".playwright\node\$nodePlatform\$nodeFileName"
+  if (-not (Test-Path -LiteralPath $publishedNode)) {
+    $builtNode = Join-Path $buildArtifactsDirectory "bin\.playwright\node\$nodePlatform\$nodeFileName"
+    if (-not (Test-Path -LiteralPath $builtNode)) {
+      throw "Playwright driver binary is missing from build output: $builtNode"
+    }
+    $nodeDirectory = Split-Path -Parent $publishedNode
+    New-Item -ItemType Directory -Path $nodeDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $builtNode -Destination $publishedNode
+  }
+
   foreach ($unneededFile in @(
     'appsettings.Development.json',
     'playwright.ps1',
@@ -241,6 +255,8 @@ exec "$root/AgenticRouter" "$@"
   $executableName = if ($isLinuxPackage) { 'AgenticRouter' } else { 'AgenticRouter.exe' }
   $requiredPaths = @(
     (Join-Path $stagingDirectory $executableName),
+    (Join-Path $stagingDirectory 'Microsoft.Playwright.dll'),
+    (Join-Path $stagingDirectory '.playwright\package\cli.js'),
     (Join-Path $stagingDirectory 'AgenticRouter.staticwebassets.endpoints.json'),
     (Join-Path $stagingDirectory 'appsettings.json'),
     (Join-Path $stagingDirectory 'LICENSE.txt'),
@@ -248,10 +264,14 @@ exec "$root/AgenticRouter" "$@"
   )
   if ($isLinuxPackage) {
     $requiredPaths += @(
+      (Join-Path $stagingDirectory '.playwright\node\linux-x64\node'),
       (Join-Path $stagingDirectory 'run-agentic-router.sh'),
       (Join-Path $stagingDirectory 'scripts\install-ollama-linux.sh'),
       (Join-Path $stagingDirectory 'scripts\switch-ollama-linux-profile.sh')
     )
+  }
+  else {
+    $requiredPaths += Join-Path $stagingDirectory '.playwright\node\win32_x64\node.exe'
   }
   foreach ($requiredPath in $requiredPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {

@@ -6,9 +6,11 @@
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
   <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=20260922-brand-header">
-  <link rel="stylesheet" href="/bootstrap.css?v=20260922-brand-header">
-  <link rel="stylesheet" href="/user-input.css">
+  <link rel="stylesheet" href="/styles.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/panels.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/benchmark.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/bootstrap.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/user-input.css?v=20260924-ui-domains">
 </head>
 <body class="bootstrapping">
   <div
@@ -74,8 +76,8 @@
             id="open-workspace"
             class="icon-button sidebar-expanded-only"
             type="button"
-            aria-label="Manage projects"
-            title="Manage projects"
+            aria-label="Add project"
+            title="Add project"
           >＋</button>
         </div>
         <button
@@ -870,7 +872,8 @@
                   </option>
                 </select>
               </label>
-              <div class="benchmark-table-shell">
+              <p class="benchmark-table-scroll-hint">Scroll the ranking table horizontally to see every metric.</p>
+              <div class="benchmark-table-shell" tabindex="0" role="region" aria-label="Benchmark ranking table; scroll horizontally for more metrics">
                 <table>
                   <thead>
                     <tr>
@@ -1487,7 +1490,7 @@
             </div>
             <div id="settings-workspace-summary" class="settings-summary-card"></div>
             <div class="settings-action-row">
-              <button id="settings-open-workspace" class="secondary-button" type="button">Manage workspaces</button>
+              <button id="settings-open-workspace" class="secondary-button" type="button">Open project settings</button>
               <button id="settings-open-recent" class="secondary-button" type="button">Open recent conversations</button>
             </div>
           </section>
@@ -1841,91 +1844,56 @@
     </form>
   </dialog>
 
-  <dialog id="workspace-dialog" class="settings-dialog workspace-dialog">
+  <dialog id="workspace-dialog" class="settings-dialog workspace-dialog" aria-labelledby="workspace-dialog-title">
     <form id="workspace-form" method="dialog">
       <header class="dialog-header">
         <div>
-          <span id="workspace-dialog-eyebrow" class="eyebrow">Controlled execution</span>
-          <h2 id="workspace-dialog-title">Trusted workspace</h2>
+          <span id="workspace-dialog-eyebrow" class="eyebrow">Projects</span>
+          <h2 id="workspace-dialog-title">Add project</h2>
           <p id="workspace-dialog-path" hidden></p>
+          <p id="workspace-dialog-description" class="workspace-dialog-description">Choose a folder to use as a trusted project.</p>
         </div>
         <button id="close-workspace" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
 
       <div class="dialog-body workspace-sections">
-        <section class="workspace-section-shell workspace-manager-section">
-          <div class="workspace-section-actions">
-            <button
-              class="information-button"
-              type="button"
-              aria-label="Information: only one workspace is active at a time."
-              data-tooltip="Only one workspace is active at a time."
-            >i</button>
-            <button
-              id="add-workspace"
-              class="add-workspace-button"
-              type="button"
-              aria-label="Add new workspace"
-              title="Add new workspace"
-            >+</button>
-          </div>
-          <details id="saved-workspaces-section" class="workspace-accordion" open>
-            <summary>Saved workspaces</summary>
-            <div class="workspace-section-panel">
-              <div id="workspace-profile-list" class="workspace-profile-list"></div>
-            </div>
-          </details>
-        </section>
-
         <section id="new-workspace-section" class="workspace-section-shell" hidden>
-          <div class="workspace-section-actions">
-            <button
-              class="information-button"
-              type="button"
-              aria-label="Information: in Execute mode, the agent is confined to the trusted folder and external paths are blocked."
-              data-tooltip="In Execute mode, the agent can read, create, edit, and run processes only inside this folder. External paths and escape attempts are blocked."
-            >i</button>
-          </div>
-          <details id="new-workspace-accordion" class="workspace-accordion" open>
-            <summary>New workspace</summary>
-            <div class="workspace-section-panel new-workspace-fields">
-              <label class="workspace-path-field">
-                <span>Workspace name</span>
-                <input
-                  id="workspace-profile-name"
-                  type="text"
-                  maxlength="80"
-                  autocomplete="off"
-                  placeholder="My project"
-                >
-              </label>
-              <label class="workspace-path-field">
-                <span>Folder path</span>
-                <span class="workspace-picker-row">
-                  <input
-                    id="trusted-workspace-path"
-                    type="text"
-                    autocomplete="off"
-                    placeholder="C:\my-project"
-                  >
-                  <button id="pick-workspace" class="secondary-button" type="button">
-                    Select folder
-                  </button>
-                </span>
-              </label>
-              <div id="workspace-validation" class="workspace-validation" role="status">
-                Not configured
-              </div>
-              <div class="workspace-form-actions">
-                <button id="cancel-new-workspace" class="secondary-button" type="button">
-                  Cancel
-                </button>
-                <button id="workspace-submit" class="primary-button" type="submit">
-                  Save workspace
-                </button>
+          <div class="workspace-section-panel new-workspace-fields">
+            <div class="workspace-form-heading">
+              <span class="project-icon" aria-hidden="true"></span>
+              <div>
+                <strong>Folder access</strong>
+                <p>The selected folder becomes the trusted workspace for this project.</p>
               </div>
             </div>
-          </details>
+            <label class="workspace-path-field">
+              <span>Project name</span>
+              <input
+                id="workspace-profile-name"
+                type="text"
+                maxlength="80"
+                autocomplete="off"
+                placeholder="My project"
+              >
+            </label>
+            <label class="workspace-path-field">
+              <span>Folder path</span>
+              <span class="workspace-picker-row">
+                <input
+                  id="trusted-workspace-path"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="C:\my-project"
+                >
+                <button id="pick-workspace" class="secondary-button" type="button">
+                  Select folder
+                </button>
+              </span>
+            </label>
+            <div id="workspace-validation" class="workspace-validation" role="status">
+              Select a trusted folder.
+            </div>
+          </div>
         </section>
 
         <section class="workspace-section-shell project-settings-section history-settings-card">
@@ -2073,11 +2041,13 @@
       </div>
 
       <footer class="dialog-footer">
-        <span id="workspace-save-status" class="save-status"></span>
+        <span id="workspace-save-status" class="save-status" role="status"></span>
         <button id="clear-workspace" class="secondary-button danger-button" type="button">
-          Remove active profile
+          Remove project
         </button>
+        <button id="rename-workspace" class="secondary-button" type="button">Rename project</button>
         <button id="cancel-workspace" class="secondary-button" type="button">Close</button>
+        <button id="workspace-submit" class="primary-button" type="submit">Add project</button>
       </footer>
     </form>
   </dialog>
@@ -2493,7 +2463,17 @@
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
-  <script src="/i18n.js?v=20260922-sidebar-availability"></script>
-  <script src="/app.js?v=20260922-sidebar-availability"></script>
+  <script defer src="/shared.js?v=20260924-ui-domains"></script>
+  <script defer src="/i18n.js?v=20260924-ui-domains"></script>
+  <script defer src="/app.js?v=20260924-ui-domains"></script>
+  <script defer src="/loading.js?v=20260924-ui-domains"></script>
+  <script defer src="/benchmark.js?v=20260924-ui-domains"></script>
+  <script defer src="/git.js?v=20260924-ui-domains"></script>
+  <script defer src="/projects-sessions.js?v=20260924-ui-domains"></script>
+  <script defer src="/settings-runtime.js?v=20260924-ui-domains"></script>
+  <script defer src="/conversation.js?v=20260924-ui-domains"></script>
+  <script defer src="/conversation-stream.js?v=20260924-ui-domains"></script>
+  <script defer src="/conversation-review.js?v=20260924-ui-domains"></script>
+  <script defer src="/conversation-render.js?v=20260924-ui-domains"></script>
 </body>
 </html>

@@ -5013,28 +5013,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.GotoAsync(
       "/"
     );
-    await Page.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Trusted workspace"
-      }
-    ).ClickAsync();
-
-    await Expect(
-      Page.Locator(
-        ".workspace-profile-entry"
-      )
-    ).ToHaveCountAsync(
-      1
-    );
-    await Expect(
-      Page.Locator(
-        ".workspace-profile-entry"
-      )
-    ).ToContainTextAsync(
-      "history disabled"
-    );
+    await Expect(Page.Locator(".project-accordion")).ToHaveCountAsync(1);
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await Expect(Page.Locator("#workspace-history-enabled")).Not.ToBeCheckedAsync();
+    await Page.Locator("#close-workspace").ClickAsync();
     Assert.IsTrue(
       File.Exists(
         Path.Combine(
@@ -5095,9 +5078,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#open-workspace"
     ).ClickAsync();
-    await Page.Locator(
-      "#add-workspace"
-    ).ClickAsync();
+    await Expect(Page.Locator("#new-workspace-section")).ToBeVisibleAsync();
     await Page.Locator(
       "#workspace-profile-name"
     ).FillAsync(
@@ -5108,17 +5089,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).FillAsync(
       secondPath
     );
-    await Page.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Save workspace"
-      }
-    ).ClickAsync();
+    await Page.Locator("#workspace-submit").ClickAsync();
 
     await Expect(
       Page.Locator(
-        ".workspace-profile-entry.active"
+        ".project-accordion.active"
       )
     ).ToContainTextAsync(
       "Second project"
@@ -5144,28 +5119,21 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       )
     ).ToHaveValueAsync("native");
 
-    await Page.Locator(
-      ".workspace-profile-entry.active"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Rename"
-      }
-    ).ClickAsync();
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await Page.Locator("#rename-workspace").ClickAsync();
     await Page.Locator("#app-modal-input").FillAsync("Renamed project");
     await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
-        ".workspace-profile-entry.active"
+        ".project-accordion.active"
       )
     ).ToContainTextAsync(
       "Renamed project"
     );
 
-    await Page.Locator(
-      "#add-workspace"
-    ).ClickAsync();
+    await Page.Locator("#close-workspace").ClickAsync();
+    await Page.Locator("#open-workspace").ClickAsync();
     await Page.Locator(
       "#workspace-profile-name"
     ).FillAsync(
@@ -5176,13 +5144,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).FillAsync(
       secondPath
     );
-    await Page.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Save workspace"
-      }
-    ).ClickAsync();
+    await Page.Locator("#workspace-submit").ClickAsync();
     await Expect(
       Page.Locator(
         "#workspace-validation"
@@ -7411,6 +7373,55 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         changedFile
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task OpeningHistoryKeepsLatestChangingSessionUndoPrecedence()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true }
+    );
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("command-r:latest");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("execute create file");
+
+    var sessions = await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/sessions");
+    var sessionId = sessions!["recent"]![0]!["id"]!.GetValue<string>();
+    var directory = Path.Combine(_environment.DataDirectory, "workspaces", workspaceId, "sessions");
+    var saved = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(directory, sessionId + ".json")))!;
+    Assert.IsGreaterThan(0, saved["executionRollbacks"]!.AsArray().Count);
+
+    var newerId = Guid.NewGuid().ToString("N");
+    var newer = saved.DeepClone();
+    newer["id"] = newerId;
+    newer["updatedAt"] = DateTimeOffset.UtcNow.AddMinutes(1);
+    newer["executionRollbacks"] = new JsonArray();
+    var newerPath = Path.Combine(directory, newerId + ".json");
+    await File.WriteAllTextAsync(newerPath, newer.ToJsonString());
+
+    async Task<bool> OpenAndCheckUndoAsync()
+    {
+      using var opened = await _environment.HttpClient.PostAsJsonAsync(
+        $"api/sessions/{sessionId}/open", new { browserSessionId = Guid.NewGuid().ToString("N") }
+      );
+      opened.EnsureSuccessStatusCode();
+      var view = JsonNode.Parse(await opened.Content.ReadAsStringAsync())!;
+      return view["executionReviews"]!.AsArray().Any(
+        review => review!["summary"]!["undoAvailable"]!.GetValue<bool>()
+      );
+    }
+
+    Assert.IsTrue(await OpenAndCheckUndoAsync(),
+      "A newer conversation without file changes must not take undo precedence.");
+    newer.AsObject().Remove("executionRollbacks");
+    newer["ExecutionRollbacks"] = saved["executionRollbacks"]!.DeepClone();
+    await File.WriteAllTextAsync(newerPath, newer.ToJsonString());
+    Assert.IsFalse(await OpenAndCheckUndoAsync(),
+      "A newer changing conversation must take undo precedence.");
   }
 
   [TestMethod]

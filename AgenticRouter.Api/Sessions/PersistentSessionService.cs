@@ -1338,22 +1338,16 @@ public sealed class PersistentSessionService : IPersistentSessionService
     var settings = await _settings.GetAsync(
       cancellationToken
     );
-    var allSessions = await _store.ReadAllAsync(
+    var latestChangingSessionId = await _store.FindLatestChangingSessionIdAsync(
       active.Id,
+      session,
       cancellationToken
     );
-    var latestChangingSession = allSessions.Where(
-      candidate => candidate.ExecutionRollbacks?.Any(
-        rollback => rollback.Files.Count > 0
-      ) == true
-    ).OrderByDescending(
-      candidate => candidate.UpdatedAt
-    ).FirstOrDefault();
     var reviews = session.ExecutionReviews;
 
     if (
       string.Equals(
-        latestChangingSession?.Id,
+      latestChangingSessionId,
         session.Id,
         StringComparison.Ordinal
       )

@@ -107,6 +107,7 @@ silently replaced.
 The archive contains:
 
 - `AgenticRouter.exe`, including the application and the .NET runtime;
+- `Microsoft.Playwright.dll` and `.playwright`, required by the Real Life Problem browser check;
 - `wwwroot`, containing browser assets required by ASP.NET Core;
 - `AgenticRouter.staticwebassets.endpoints.json`, the static-asset manifest;
 - `appsettings.json`, the editable runtime configuration;
@@ -126,6 +127,7 @@ click or from a different working directory.
 The tar.gz contains:
 
 - `AgenticRouter`, including the application and the .NET runtime;
+- `Microsoft.Playwright.dll` and `.playwright`, required by the Real Life Problem browser check;
 - `run-agentic-router.sh`, the terminal launcher;
 - `wwwroot` and the ASP.NET static-asset manifest;
 - `appsettings.json`, `README.txt`, and `LICENSE.txt`;

@@ -5759,125 +5759,25 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator(
       "#open-workspace"
     ).ClickAsync();
-    await Expect(
-      Page.Locator(
-        "#new-workspace-section"
-      )
-    ).ToBeHiddenAsync();
-    Assert.IsTrue(
-      await Page.Locator(
-        "#saved-workspaces-section"
-      ).EvaluateAsync<bool>(
-        "section => section.open"
-      )
+    await Expect(Page.Locator("#workspace-dialog")).ToHaveAttributeAsync(
+      "data-mode", "manage"
     );
-    Assert.IsTrue(
-      await Page.Locator(
-        "#local-history-section"
-      ).EvaluateAsync<bool>(
-        "section => section.open"
-      )
+    await Expect(Page.Locator("#workspace-dialog-title")).ToHaveTextAsync(
+      "Add project"
     );
-    Assert.IsFalse(
-      await Page.Locator(
-        "#project-profile-section"
-      ).EvaluateAsync<bool>(
-        "section => section.open"
-      )
-    );
-    Assert.IsFalse(
-      await Page.Locator(
-        "#validation-profile-section"
-      ).EvaluateAsync<bool>(
-        "section => section.open"
-      )
-    );
-    var workspaceFooter = Page.Locator(
-      "#workspace-dialog .dialog-footer"
-    );
-    var workspaceFooterTop = await workspaceFooter.EvaluateAsync<double>(
-      "element => element.getBoundingClientRect().top"
-    );
-    await Page.Locator(
-      "#project-profile-section, #validation-profile-section"
-    ).EvaluateAllAsync<bool>(
-      """
-      sections => {
-        sections.forEach(section => section.open = true);
-        return true;
-      }
-      """
-    );
-    Assert.IsTrue(
-      await Page.Locator(
-        "#workspace-dialog .dialog-body"
-      ).EvaluateAsync<bool>(
-        "body => body.scrollHeight > body.clientHeight"
-      )
-    );
-    await Page.Locator(
-      "#workspace-dialog .dialog-body"
-    ).EvaluateAsync(
-      "body => body.scrollTop = body.scrollHeight"
-    );
-    Assert.AreEqual(
-      workspaceFooterTop,
-      await workspaceFooter.EvaluateAsync<double>(
-        "element => element.getBoundingClientRect().top"
-      ),
-      1
-    );
-    Assert.AreEqual(
-      await Page.Locator(
-        "#workspace-dialog"
-      ).EvaluateAsync<double>(
-        "element => element.getBoundingClientRect().bottom"
-      ),
-      await workspaceFooter.EvaluateAsync<double>(
-        "element => element.getBoundingClientRect().bottom"
-      ),
-      1
-    );
-    await Page.Locator(
-      "#project-profile-section, #validation-profile-section"
-    ).EvaluateAllAsync<bool>(
-      """
-      sections => {
-        sections.forEach(section => section.open = false);
-        return true;
-      }
-      """
-    );
-    var workspaceInformation = Page.Locator(
-      ".information-button[data-tooltip="
-        + "'Only one workspace is active at a time.']"
-    );
-    await workspaceInformation.HoverAsync();
-    await Page.WaitForFunctionAsync(
-      """
-      () => getComputedStyle(
-        document.querySelector(
-          '.information-button[data-tooltip="Only one workspace is active at a time."]'
-        ),
-        '::after'
-      ).opacity === '1'
-      """
-    );
-    Assert.AreEqual(
-      "1",
-      await workspaceInformation.EvaluateAsync<string>(
-        "button => getComputedStyle(button, '::after').opacity"
-      )
-    );
-    StringAssert.Contains(
-      await workspaceInformation.EvaluateAsync<string>(
-        "button => getComputedStyle(button, '::after').content"
-      ),
-      "Only one workspace"
-    );
-    await Page.Locator(
-      "#add-workspace"
-    ).ClickAsync();
+    var addDialogSize = await Page.Locator("#workspace-dialog")
+      .EvaluateAsync<double[]>(
+        "element => { const box = element.getBoundingClientRect(); return [box.width, box.height]; }"
+      );
+    Assert.IsLessThanOrEqualTo(640, addDialogSize[0]);
+    Assert.IsLessThanOrEqualTo(560, addDialogSize[1]);
+    await Expect(Page.Locator("#new-workspace-section")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#local-history-section")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#project-profile-section")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#knowledge-section")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#validation-profile-section")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#clear-workspace")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#rename-workspace")).ToBeHiddenAsync();
     await Expect(
       Page.GetByRole(
         AriaRole.Button,
@@ -5902,7 +5802,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Save workspace",
+        Name = "Add project",
         Exact = true
       }
     ).ClickAsync();
@@ -5929,20 +5829,18 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       AriaRole.Button,
       new()
       {
-        Name = "Save workspace",
+        Name = "Add project",
         Exact = true
       }
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        ".workspace-profile-entry.active"
+        ".project-accordion.active"
       )
     ).ToContainTextAsync(
       "Workspace modal"
     );
-    await Page.Locator(
-      "#close-workspace"
-    ).ClickAsync();
+    await Expect(Page.Locator("#workspace-dialog")).ToBeHiddenAsync();
     await Page.ReloadAsync();
     await Expect(
       Page.Locator(
@@ -5951,16 +5849,14 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "Workspace modal"
     );
-    await Page.Locator(
-      "#open-workspace"
-    ).ClickAsync();
-    await Page.Locator(
-      "#clear-workspace"
-    ).ClickAsync();
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await Expect(Page.Locator("#clear-workspace")).ToBeVisibleAsync();
+    await Page.Locator("#clear-workspace").ClickAsync();
     await ConfirmAppModalAsync();
     await Expect(
       Page.Locator(
-        ".workspace-profile-entry.active"
+        ".project-accordion.active"
       )
     ).ToBeVisibleAsync(
     );
@@ -8296,9 +8192,9 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.GotoAsync(
       "/"
     );
-    await Page.Locator(
-      "#open-workspace"
-    ).ClickAsync();
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"workspaces\"]").ClickAsync();
+    await Page.Locator("#settings-open-validation").ClickAsync();
     await Page.Locator(
       "#validation-profile-section"
     ).EvaluateAsync(
@@ -8308,7 +8204,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       Page.Locator("#detected-validation-profile")
     ).ToContainTextAsync("Detected suggestion:");
     await Page.Locator(
-      "#reset-validation-profile"
+      "#use-detected-validation-empty"
     ).ClickAsync();
     await Page.Locator(
       "#validation-profile-name"
@@ -8333,9 +8229,9 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "Profile saved"
     );
     await Page.ReloadAsync();
-    await Page.Locator(
-      "#open-workspace"
-    ).ClickAsync();
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"workspaces\"]").ClickAsync();
+    await Page.Locator("#settings-open-validation").ClickAsync();
     await Page.Locator(
       "#validation-profile-section"
     ).EvaluateAsync(
@@ -8627,9 +8523,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "#open-workspace"
     ).ClickAsync();
     await Page.Locator(
-      "#add-workspace"
-    ).ClickAsync();
-    await Page.Locator(
       "#workspace-profile-name"
     ).FillAsync(
       "Git smoke"
@@ -8639,13 +8532,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).FillAsync(
       gitWorkspace
     );
-    await Page.GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Save workspace"
-      }
-    ).ClickAsync();
+    await Page.Locator("#workspace-submit").ClickAsync();
     await Expect(
       Page.Locator(
         "#git-summary"
@@ -8653,9 +8540,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToContainTextAsync(
       "main"
     );
-    await Page.Locator(
-      "#cancel-workspace"
-    ).ClickAsync();
+    await Expect(Page.Locator("#workspace-dialog")).ToBeHiddenAsync();
     await Page.Locator(
       "#git-card"
     ).ClickAsync();
@@ -8745,21 +8630,14 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       )
     ).ToBeEnabledAsync();
 
-    await Page.Locator(
-      "#open-workspace"
-    ).ClickAsync();
-    await Page.Locator(
-      $"[data-workspace-id=\"{plainWorkspaceId}\"]"
-    ).GetByRole(
-      AriaRole.Button,
-      new()
-      {
-        Name = "Enable"
-      }
-    ).ClickAsync();
+    var previousProject = Page.Locator(
+      $".project-accordion[data-workspace-id=\"{plainWorkspaceId}\"]"
+    );
+    await previousProject.EvaluateAsync("element => element.open = true");
+    await previousProject.Locator(".project-activate").ClickAsync();
     await Expect(
       Page.Locator(
-        $".workspace-profile-entry[data-workspace-id=\"{plainWorkspaceId}\"].active"
+        $".project-accordion[data-workspace-id=\"{plainWorkspaceId}\"].active"
       )
     ).ToBeVisibleAsync();
     await Expect(
@@ -8769,9 +8647,6 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToHaveTextAsync(
       "Not initialized"
     );
-    await Page.Locator(
-      "#cancel-workspace"
-    ).ClickAsync();
     await SetExecuteModeAsync(
       "ask"
     );

@@ -1,9 +1,9 @@
 .user-input-panel {
   margin: 0 0 0.65rem;
   padding: 0.85rem 1rem;
-  border: 1px solid var(--border-color, #343942);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: color-mix(in srgb, var(--surface-2, #202226) 94%, transparent);
+  background: color-mix(in srgb, var(--panel-raised) 94%, transparent);
   box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
 }
 
@@ -28,12 +28,12 @@
 .user-input-label,
 .user-input-navigation,
 .user-input-option-key {
-  color: var(--text-muted, #9ba3af);
+  color: var(--muted);
   font-size: 0.75rem;
 }
 
 .user-input-heading strong {
-  color: var(--text-primary, #f5f7fa);
+  color: var(--text);
   font-size: 0.9rem;
   line-height: 1.45;
 }
@@ -69,7 +69,7 @@
   padding: 0.45rem 0.35rem;
   border: 1px solid transparent;
   border-radius: 8px;
-  color: var(--text-primary, #f5f7fa);
+  color: var(--text);
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -78,7 +78,7 @@
 .user-input-option:hover,
 .user-input-option:focus-visible,
 .user-input-option[data-selected="true"] {
-  border-color: var(--accent, #718cff);
+  border-color: var(--accent);
   background: rgb(113 140 255 / 9%);
 }
 
@@ -89,7 +89,7 @@
 
 .user-input-option small,
 .user-input-expired {
-  color: var(--text-muted, #9ba3af);
+  color: var(--muted);
 }
 
 .user-input-expired {
@@ -108,7 +108,7 @@
 }
 
 .user-input-transcript-title {
-  color: var(--text-primary, #f5f7fa);
+  color: var(--text);
   font-size: 0.8rem;
 }
 
@@ -124,14 +124,14 @@
 
 .user-input-transcript-header,
 .user-input-transcript-answer > span {
-  color: var(--text-muted, #9ba3af);
+  color: var(--muted);
   font-size: 0.68rem;
   text-transform: uppercase;
 }
 
 .user-input-transcript-item p {
   margin: 0;
-  color: var(--text-primary, #f5f7fa);
+  color: var(--text);
   line-height: 1.45;
 }
 
@@ -145,7 +145,7 @@
 
 .user-input-transcript-answer strong {
   overflow-wrap: anywhere;
-  color: var(--accent, #718cff);
+  color: var(--accent);
 }
 
 @media (max-width: 720px) {

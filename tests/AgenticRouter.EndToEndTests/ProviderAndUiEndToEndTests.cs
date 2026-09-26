@@ -194,10 +194,8 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
   public async Task ProjectKnowledgeUiConfiguresLibrariesPreservesDisabledSelectionAndPreparesExecute()
   {
     await Page.GotoAsync("/");
-    await Page.Locator("#open-workspace").ClickAsync();
-    await Expect(
-      Page.Locator("#workspace-profile-list .workspace-profile-entry.active")
-    ).ToHaveCountAsync(1);
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
     await Page.Locator("#knowledge-section").EvaluateAsync(
       "element => element.open = true"
     );
@@ -219,7 +217,8 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     );
 
     await Page.Locator("#cancel-workspace").ClickAsync();
-    await Page.Locator("#open-workspace").ClickAsync();
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
     await Page.Locator("#knowledge-section").EvaluateAsync(
       "element => element.open = true"
     );
@@ -331,8 +330,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Expect(Page.Locator("#workspace-dialog-path")).ToHaveTextAsync(
       secondPath
     );
-    await Expect(Page.Locator("#saved-workspaces-section")).ToBeHiddenAsync();
-    await Expect(Page.Locator("#workspace-profile-list")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#new-workspace-section")).ToBeHiddenAsync();
     var projectSections = editor.Locator(".project-settings-section");
     await Expect(projectSections).ToHaveCountAsync(4);
     var editorWidth = await editor.EvaluateAsync<double>(
@@ -5487,15 +5485,14 @@ baselineTotal!.Value
     await Expect(modal).ToBeHiddenAsync();
 
     await Page.Locator("#open-workspace").ClickAsync();
-    await Page.Locator(
-      ".workspace-profile-entry.active"
-    ).GetByRole(
-      AriaRole.Button,
-      new() { Name = "Rename" }
-    ).ClickAsync();
+    await Expect(Page.Locator("#rename-workspace")).ToBeHiddenAsync();
+    await Page.Locator("#cancel-workspace").ClickAsync();
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await Page.Locator("#rename-workspace").ClickAsync();
     await Expect(modal).ToBeVisibleAsync();
-    await Expect(Page.Locator("#app-modal-title")).ToHaveTextAsync("Rename workspace");
-    await Expect(Page.Locator("#app-modal-label")).ToHaveTextAsync("Workspace name");
+    await Expect(Page.Locator("#app-modal-title")).ToHaveTextAsync("Rename project");
+    await Expect(Page.Locator("#app-modal-label")).ToHaveTextAsync("Project name");
     await Expect(Page.Locator("#app-modal-input")).ToBeVisibleAsync();
     await Expect(modal.Locator("input")).ToHaveCountAsync(1);
     await Expect(modal.Locator("textarea")).ToHaveCountAsync(0);

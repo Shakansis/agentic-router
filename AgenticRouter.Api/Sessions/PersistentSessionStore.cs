@@ -13,6 +13,12 @@ public interface IPersistentSessionStore
     CancellationToken cancellationToken
   );
 
+  Task<string?> FindLatestChangingSessionIdAsync(
+    string workspaceId,
+    ConversationSessionRecord openedSession,
+    CancellationToken cancellationToken
+  );
+
   Task<IReadOnlyList<ConversationSessionRecord>> ReadAllAsync(
     string workspaceId,
     CancellationToken cancellationToken
@@ -89,6 +95,20 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
     public string? SelectedHarness { get; init; }
     public string? LastExecutionStrategy { get; init; }
     public string? TranscriptId { get; init; }
+  }
+
+  private sealed record SessionChangeCandidateFile
+  {
+    public int SchemaVersion { get; init; }
+    public string? Id { get; init; }
+    public string? WorkspaceId { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+    public IReadOnlyList<SessionChangeRollbackFile>? ExecutionRollbacks { get; init; }
+  }
+
+  private sealed record SessionChangeRollbackFile
+  {
+    public JsonElement? Files { get; init; }
   }
 
   private static readonly JsonSerializerOptions JsonOptions = new(
@@ -169,6 +189,73 @@ public sealed class PersistentSessionStore : IPersistentSessionStore
       }
     }
     return sessions;
+  }
+
+  public async Task<string?> FindLatestChangingSessionIdAsync(
+    string workspaceId,
+    ConversationSessionRecord openedSession,
+    CancellationToken cancellationToken
+  )
+  {
+    ValidateId(workspaceId);
+    var directory = SessionDirectory(workspaceId);
+    if (!Directory.Exists(directory)) return null;
+
+    var candidates = new List<(string Id, DateTimeOffset UpdatedAt)>();
+    foreach (var path in Directory.EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly))
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var sessionId = Path.GetFileNameWithoutExtension(path);
+      try
+      {
+        ValidateId(sessionId);
+        await using var stream = File.OpenRead(path);
+        var stored = await JsonSerializer.DeserializeAsync<SessionChangeCandidateFile>(
+          stream, JsonOptions, cancellationToken
+        );
+        if (stored is null || stored.SchemaVersion != 1
+          || !string.Equals(stored.Id, sessionId, StringComparison.Ordinal)
+          || !string.Equals(stored.WorkspaceId, workspaceId, StringComparison.Ordinal))
+        {
+          throw new InvalidDataException("The session record identity is invalid.");
+        }
+        if (stored.ExecutionRollbacks?.Any(rollback =>
+          rollback.Files is { ValueKind: JsonValueKind.Array } files
+          && files.GetArrayLength() > 0) == true)
+        {
+          candidates.Add((sessionId, stored.UpdatedAt));
+        }
+      }
+      catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+        or JsonException or InvalidDataException or WorkspaceProfileException
+        or InvalidOperationException)
+      {
+        _logger.LogWarning(exception,
+          "Skipping invalid persisted session {SessionId} in workspace {WorkspaceId}; other sessions remain available.",
+          sessionId, workspaceId);
+      }
+    }
+
+    foreach (var candidate in candidates.OrderByDescending(item => item.UpdatedAt))
+    {
+      ConversationSessionRecord? session;
+      try
+      {
+        session = string.Equals(candidate.Id, openedSession.Id, StringComparison.Ordinal)
+          ? openedSession
+          : await ReadAsync(workspaceId, candidate.Id, cancellationToken);
+      }
+      catch (WorkspaceProfileException exception) when (exception.Code == "session-file-invalid")
+      {
+        _logger.LogWarning(exception,
+          "Skipping invalid persisted session {SessionId} in workspace {WorkspaceId}; other sessions remain available.",
+          candidate.Id, workspaceId);
+        continue;
+      }
+      if (session?.ExecutionRollbacks?.Any(rollback => rollback.Files.Count > 0) == true)
+        return candidate.Id;
+    }
+    return null;
   }
 
   public async Task<IReadOnlyList<ConversationSessionRecord>> ReadAllAsync(
