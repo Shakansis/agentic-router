@@ -735,6 +735,9 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
   )
   {
     var testRunId = Guid.NewGuid().ToString("N");
+    var seed = harness.Definition.Id == HarnessIds.Native
+      ? RandomNumberGenerator.GetInt32(1, int.MaxValue)
+      : (int?)null;
     var startedAt = DateTimeOffset.UtcNow;
     var workspace = await _workspaces.CreateAsync(testRunId, CancellationToken.None);
     var prompt = string.Join(
@@ -787,6 +790,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           workspace,
           contextTokens,
           gpu,
+          seed,
           timeoutSource.Token,
           progress
         );
@@ -1066,7 +1070,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       };
     }
     PublishTestTerminal(progress, finalResult);
-    return finalResult;
+    return finalResult with { Run = finalResult.Run with { Seed = seed } };
   }
 
   private BenchmarkRawResult RenderNarrativeMarkdown(BenchmarkRawResult raw)
@@ -1321,6 +1325,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     BenchmarkWorkspace workspace,
     int contextTokens,
     string gpu,
+    int? seed,
     CancellationToken cancellationToken,
     BenchmarkProgressContext? progress
   )
@@ -1360,6 +1365,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
         workspace,
         contextTokens,
         gpu,
+        seed,
         progress,
         test.Metadata.Suite == BenchmarkSuiteIds.Manual,
         cancellationToken
@@ -1433,6 +1439,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     BenchmarkWorkspace workspace,
     int contextTokens,
     string gpu,
+    int? seed,
     BenchmarkProgressContext? progress,
     bool preserveExactUserMessage,
     CancellationToken cancellationToken
@@ -1445,6 +1452,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       workspace,
       contextTokens,
       gpu,
+      seed,
       turn.Order,
       turn.Name,
       progress,

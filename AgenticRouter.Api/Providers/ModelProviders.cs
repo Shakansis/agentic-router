@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using AgenticRouter.Api.Configuration;
+
 namespace AgenticRouter.Api.Providers;
 
 public static class ModelEffortLevels
@@ -111,7 +114,9 @@ public sealed record ProviderModelCapabilities(
   int MaximumImageCount = 0,
   long MaximumImageBytes = 0,
   IReadOnlyList<string>? SupportedImageMimeTypes = null,
-  bool ToolProtocolConfirmed = false
+  bool ToolProtocolConfirmed = false,
+  IReadOnlyList<string>? AdapterGenerationParameters = null,
+  IReadOnlyList<string>? ThinkingModes = null
 );
 
 public sealed record ProviderImagePayload(
@@ -145,41 +150,70 @@ public sealed record ProviderGenerationProfile(
   double? TopP = null,
   double? RepeatPenalty = null,
   int? MaximumContextTokens = null,
-  int? MaximumOutputTokens = null
+  int? MaximumOutputTokens = null,
+  int? TopK = null,
+  double? MinP = null,
+  int? RepeatLastN = null,
+  string Thinking = InferenceThinkingModes.Auto,
+  int? Seed = null
 );
 
 public static class ProviderGenerationProfiles
 {
+  public static IReadOnlyList<string> ConfiguredParameters(ProviderGenerationProfile profile)
+  {
+    var parameters = new List<string> { "temperature" };
+    if (profile.TopP is not null) parameters.Add("topP");
+    if (profile.TopK is not null) parameters.Add("topK");
+    if (profile.MinP is not null) parameters.Add("minP");
+    if (profile.RepeatPenalty is not null) parameters.Add("repeatPenalty");
+    if (profile.RepeatLastN is not null) parameters.Add("repeatLastN");
+    if (profile.Thinking != InferenceThinkingModes.Auto) parameters.Add("thinking");
+    if (profile.Seed is not null) parameters.Add("seed");
+    if (profile.MaximumContextTokens is not null) parameters.Add("maximumContextTokens");
+    if (profile.MaximumOutputTokens is not null) parameters.Add("maximumOutputTokens");
+    return parameters;
+  }
+
   public static ProviderGenerationProfile Deterministic { get; } = new(
     "deterministic",
     0
   );
 
-  public static ProviderGenerationProfile RpgStorytelling { get; } = new(
-    "rpg-storytelling",
-    0.8,
-    0.92,
-    1.05,
-    16_384
-  );
-
   public static ProviderGenerationProfile Resolve(
+    IReadOnlyDictionary<string, InferenceProfileSettings> profiles,
     string intention,
-    string interactionMode
+    string interactionMode,
+    bool supervisedExecution,
+    double? requestTemperatureOverride = null,
+    string? requestThinkingOverride = null
   )
   {
-    return string.Equals(
-        interactionMode,
-        "chat",
-        StringComparison.Ordinal
-      )
-      && string.Equals(
-        intention,
-        "rpg-storytelling",
-        StringComparison.Ordinal
-      )
-        ? RpgStorytelling
-        : Deterministic;
+    if (!supervisedExecution
+      && !string.Equals(interactionMode, "chat", StringComparison.Ordinal))
+    {
+      return Deterministic with { Seed = RandomNumberGenerator.GetInt32(1, int.MaxValue) };
+    }
+    var id = supervisedExecution
+      ? InferenceProfileDefaults.Supervisor
+      : intention;
+    if (!profiles.TryGetValue(id, out var profile))
+    {
+      return Deterministic with { Seed = RandomNumberGenerator.GetInt32(1, int.MaxValue) };
+    }
+    return new ProviderGenerationProfile(
+      id,
+      requestTemperatureOverride ?? profile.Temperature,
+      profile.TopP,
+      profile.RepeatPenalty,
+      TopK: profile.TopK,
+      MinP: profile.MinP,
+      RepeatLastN: profile.RepeatLastN,
+      Thinking: supervisedExecution
+        ? InferenceThinkingModes.Auto
+        : requestThinkingOverride ?? profile.Thinking,
+      Seed: profile.Seed ?? RandomNumberGenerator.GetInt32(1, int.MaxValue)
+    );
   }
 }
 

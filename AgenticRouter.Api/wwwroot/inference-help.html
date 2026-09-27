@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inference Profiles Help · Agentic Router</title>
+  <link rel="stylesheet" href="/benchmark-help.css">
+</head>
+<body>
+<main>
+  <header>
+    <p>AGENTIC ROUTER / LOCAL HELP</p>
+    <h1>Inference Profiles Help</h1>
+    <p>Set how a use profile generates responses while choosing its model separately.</p>
+    <p>This guide opens separately so you can keep your current Settings draft.</p>
+  </header>
+  <nav aria-label="Help contents">
+    <a href="#profiles">Profiles</a><a href="#basic">Basic controls</a><a href="#context">Context and output</a><a href="#advanced">Advanced controls</a><a href="#support">Provider support</a>
+  </nav>
+  <section id="profiles">
+    <h2>Which profile applies?</h2>
+    <p>Chat uses the intent classified for the current request. A manual model choice changes the model, not the intent's inference profile. Execute uses the Supervisor profile for Supervisor and Worker turns when Supervisor is selected, including when Auto selects it. Direct Execute retains its existing deterministic settings.</p>
+    <p>These settings are saved with the use profile, not with a model. The same profile can therefore be used with Qwen, Gemma, or a cloud model. A provider or model may accept only some controls.</p>
+  </section>
+  <section id="basic">
+    <h2>Basic controls</h2>
+    <dl>
+      <dt>Temperature</dt><dd>Controls variation in the next token choice. Lower values tend toward the most likely wording; higher values allow more variation. Zero does not guarantee identical full answers across models, tools, or changing context.</dd>
+      <dt>Thinking</dt><dd>Controls whether and how much a compatible model reasons before answering. Auto sends no profile override and leaves the provider or model behavior in place. Disabled and Enabled toggle reasoning where supported; Low, Medium, High, and Max request a level. Available choices depend on the selected model and adapter. During Supervisor Execute, including Auto promotion, Effort by supervised phase controls reasoning for Plan, Work, Verify, Complete, and Recovery; this profile field is inactive.</dd>
+    </dl>
+  </section>
+  <section id="context">
+    <h2>Context and output for Ollama</h2>
+    <p>Set these values under Runtime and memory → Ollama context profiles. They belong to the Ollama execution role and its optional model override, independently of the inference profile. A model can therefore use one sampling profile while the Host applies the context profile for its actual role.</p>
+    <dl>
+      <dt>Minimum, target, and maximum context</dt><dd>The context window contains both input and generated output. The Host normally requests the target and can increase it when more space is required, up to the configured maximum and the model's declared limit. Minimum is the lowest allowed window for that role.</dd>
+      <dt>Output limit</dt><dd>The role's ceiling for one model response. The Runtime and memory response reserve and task-specific budgets may request a smaller amount. Multi-step Execute work can make several model calls; this is not a total task limit.</dd>
+      <dt>Keep-alive</dt><dd>How long Ollama should keep the model loaded after a request. It affects residency, not answer style.</dd>
+    </dl>
+  </section>
+  <section id="advanced">
+    <h2>Advanced controls</h2>
+    <dl>
+      <dt>Top P</dt><dd>Limits the candidate tokens by their combined probability. A lower value narrows the choices. Changing it together with temperature can make the result harder to predict.</dd>
+      <dt>Top K</dt><dd>Limits the number of candidate tokens considered at each step. A lower number narrows the choices. Some providers do not offer this control.</dd>
+      <dt>Min P</dt><dd>Filters candidates that are too unlikely relative to the leading token. Larger values filter more choices. Some providers do not offer this control.</dd>
+      <dt>Repeat penalty</dt><dd>Discourages repeating tokens. One is neutral; higher values can reduce repetition but may hurt names, code, or repeated structure.</dd>
+      <dt>Repetition window</dt><dd>How many recent tokens the repeat penalty examines. Zero disables the lookback; -1 uses the full context. Leave it blank to use the provider default. This control is currently available through the Ollama adapter.</dd>
+      <dt>Seed</dt><dd>A fixed integer requests a repeatable sampling path with the same model, prompt, and settings. Auto generates a fresh positive integer for each run and sends it when the provider accepts seeds. The requested value is recorded beside the run identity; providers without seed support are reported as unavailable. A provider may not guarantee identical output even with the same seed.</dd>
+    </dl>
+    <p>Blank optional fields leave that choice to the provider and existing runtime configuration. Start with one adjustment at a time and inspect the output.</p>
+  </section>
+  <section id="support">
+    <h2>Provider and harness support</h2>
+    <p>The Settings page shows what the configured model's adapter can send. Ollama accepts the sampling controls listed here. The current Groq, Cerebras, and Google AI Studio adapters send temperature and Top P. Their adapters do not send Top K, Min P, repeat penalty, or repetition window. A specific model may still reject a supported adapter field; its provider error is shown in the turn activity.</p>
+    <p>Harness-native Execute paths have their own runtime contracts. A sampling control is applied only when that harness can receive it; unavailable controls are reported in activity. Saving a profile does not silently reconfigure a model or provider.</p>
+  </section>
+</main>
+</body>
+</html>

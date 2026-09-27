@@ -289,11 +289,69 @@ public sealed class SettingsValidator : ISettingsValidator
       );
     }
 
+    ValidateInferenceProfiles(errors, settings.InferenceProfiles);
+
     return errors.ToDictionary(
       pair => pair.Key,
       pair => pair.Value.ToArray(),
       StringComparer.Ordinal
     );
+  }
+
+  private static void ValidateInferenceProfiles(
+    IDictionary<string, List<string>> errors,
+    IReadOnlyDictionary<string, InferenceProfileSettings>? profiles
+  )
+  {
+    if (profiles is null)
+    {
+      AddError(errors, "inferenceProfiles", "Inference profiles are required.");
+      return;
+    }
+    foreach (var name in InferenceProfileDefaults.Names)
+    {
+      if (!profiles.TryGetValue(name, out var profile) || profile is null)
+      {
+        AddError(errors, $"inferenceProfiles.{name}", "Inference profile is required.");
+        continue;
+      }
+
+      var field = $"inferenceProfiles.{name}";
+      if (!double.IsFinite(profile.Temperature) || profile.Temperature is < 0 or > 2)
+      {
+        AddError(errors, $"{field}.temperature", "Temperature must be between 0 and 2.");
+      }
+      if (!InferenceThinkingModes.All.Contains(profile.Thinking))
+      {
+        AddError(errors, $"{field}.thinking", "Thinking must be Auto, Disabled, Enabled, Low, Medium, High, or Max.");
+      }
+      if (profile.TopP is double topP && (!double.IsFinite(topP) || topP is <= 0 or > 1))
+      {
+        AddError(errors, $"{field}.topP", "Top P must be greater than 0 and at most 1.");
+      }
+      if (profile.TopK is int topK && topK is < 1 or > 1_000)
+      {
+        AddError(errors, $"{field}.topK", "Top K must be between 1 and 1000.");
+      }
+      if (profile.MinP is double minP && (!double.IsFinite(minP) || minP is < 0 or > 1))
+      {
+        AddError(errors, $"{field}.minP", "Min P must be between 0 and 1.");
+      }
+      if (profile.RepeatPenalty is double penalty
+        && (!double.IsFinite(penalty) || penalty is < 0.5 or > 2))
+      {
+        AddError(errors, $"{field}.repeatPenalty", "Repeat penalty must be between 0.5 and 2.");
+      }
+      if (profile.RepeatLastN is < -1)
+      {
+        AddError(errors, $"{field}.repeatLastN", "Repetition window must be -1, 0, or a positive token count.");
+      }
+    }
+
+    foreach (var name in profiles.Keys.Except(InferenceProfileDefaults.Names, StringComparer.Ordinal))
+    {
+      AddError(errors, $"inferenceProfiles.{name}", "Unknown inference profile.");
+    }
   }
 
   private static void ValidateSupervisorModel(

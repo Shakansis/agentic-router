@@ -10,7 +10,8 @@ public interface IBenchmarkExecutionScopeRegistry
     BenchmarkWorkspace workspace,
     string model,
     int contextTokens,
-    string gpu
+    string gpu,
+    int? seed
   );
 
   bool TryEnter(string token, out IDisposable? scope);
@@ -36,7 +37,8 @@ public sealed class BenchmarkExecutionScopeRegistry : IBenchmarkExecutionScopeRe
     BenchmarkWorkspace workspace,
     string model,
     int contextTokens,
-    string gpu
+    string gpu,
+    int? seed
   )
   {
     var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
@@ -56,7 +58,7 @@ public sealed class BenchmarkExecutionScopeRegistry : IBenchmarkExecutionScopeRe
     };
     var data = new BenchmarkExecutionScopeData(
       profile,
-      new BenchmarkExecutionContext(model, contextTokens, gpu)
+      new BenchmarkExecutionContext(model, contextTokens, gpu, seed)
     );
     if (!_profiles.TryAdd(token, data))
     {
@@ -106,7 +108,8 @@ public sealed class BenchmarkExecutionScopeRegistry : IBenchmarkExecutionScopeRe
 public sealed record BenchmarkExecutionContext(
   string Model,
   int ContextTokens,
-  string Gpu
+  string Gpu,
+  int? Seed
 );
 
 public interface IBenchmarkExecutionContextAccessor

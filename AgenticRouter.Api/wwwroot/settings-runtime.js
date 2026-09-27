@@ -1342,6 +1342,7 @@ function saveRuntimeOverrideDraft() {
     modelOverrides: overrides
   };
   state.settingsDirty = true;
+  elements.saveStatus.textContent = "";
   updateSettingsDirtyState();
   elements.runtimeProfileResult.textContent =
     `Override prepared for ${model.name}@${shortDigest(model.digest)} · ${runtimeRoleLabels[role]}. Save settings to apply it.`;
@@ -1380,6 +1381,7 @@ function removeRuntimeOverrideDraft() {
     )
   };
   state.settingsDirty = true;
+  elements.saveStatus.textContent = "";
   updateSettingsDirtyState();
   elements.runtimeProfileResult.textContent =
     "Override removed from the draft. Save settings to apply it.";
@@ -1732,6 +1734,8 @@ function renderSettings() {
     elements.intentionsGrid.append(createIntentionCard(name, intention));
   }
 
+  renderInferenceProfiles();
+
   renderModelDiagnostics();
   renderCloudProviders();
   renderModelOrganization();
@@ -1739,6 +1743,160 @@ function renderSettings() {
   renderModelChainPreview();
   renderSettingsSummaries();
   renderUsageSummary();
+}
+
+const inferenceProfileNames = [
+  ["general-chat", "General chat"],
+  ["documentation", "Documentation"],
+  ["software-development", "Software development"],
+  ["software-architecture", "Software architecture"],
+  ["rpg-storytelling", "RPG Storytelling"],
+  ["review-and-testing", "Review and testing"],
+  ["supervisor", "Supervisor"]
+];
+
+const inferenceFields = {
+  temperature: "inferenceTemperature",
+  thinking: "inferenceThinking",
+  seed: "inferenceSeed",
+  topP: "inferenceTopP",
+  topK: "inferenceTopK",
+  minP: "inferenceMinP",
+  repeatPenalty: "inferenceRepeatPenalty",
+  repeatLastN: "inferenceRepeatLastN"
+};
+
+const inferenceFieldLabels = {
+  temperature: "Temperature",
+  thinking: "Thinking",
+  seed: "Seed",
+  topP: "Top P",
+  topK: "Top K",
+  minP: "Min P",
+  repeatPenalty: "Repeat penalty",
+  repeatLastN: "Repetition window"
+};
+
+function renderInferenceProfiles() {
+  if (!state.inferenceProfileDrafts || !state.settingsDirty) {
+    state.inferenceProfileDrafts = structuredClone(state.settings.inferenceProfiles);
+  }
+  const selected = elements.inferenceProfileSelector.value || "general-chat";
+  replaceOptions(
+    elements.inferenceProfileSelector,
+    inferenceProfileNames.map(([value, label]) => ({ value, label })),
+    selected
+  );
+  renderSelectedInferenceProfile();
+}
+
+function renderSelectedInferenceProfile() {
+  const name = elements.inferenceProfileSelector.value;
+  const profile = state.inferenceProfileDrafts?.[name];
+  if (!profile) {
+    return;
+  }
+  for (const [field, elementName] of Object.entries(inferenceFields)) {
+    elements[elementName].value = profile[field] ?? (field === "thinking" ? "auto" : "");
+  }
+  elements.inferenceSeedMode.value = profile.seed == null ? "auto" : "fixed";
+  elements.inferenceSeed.hidden = profile.seed == null;
+  elements.inferenceSeed.required = profile.seed != null;
+  const supervisor = name === "supervisor";
+  elements.inferenceThinking.disabled = supervisor;
+  elements.inferenceThinking.closest(".inference-field")
+    .classList.toggle("inference-controlled", supervisor);
+  elements.inferenceThinkingNote.hidden = !supervisor;
+  elements.inferenceThinking.closest(".inference-field").querySelector(".information-button").dataset.tooltip = supervisor
+    ? "Supervisor uses the separate Effort by supervised phase settings for Plan, Work, Verify, Complete, and Recovery. This profile's Thinking value is ignored during Supervisor Execute."
+    : "Controls whether and how much a compatible model reasons before answering. Auto leaves the model or provider behavior unchanged.";
+  elements.inferenceProfileDescription.textContent = name === "supervisor"
+    ? "Used for Supervisor and Worker turns when Execute runs with Supervisor, including when Auto chooses it."
+    : "Used for this Chat intent with either automatic or manually selected models.";
+  renderInferenceSupport(name, profile);
+}
+
+function renderInferenceSupport(name, profile) {
+  const configured = name === "supervisor"
+    ? elements.supervisorModel.value
+    : elements.intentionsGrid.querySelector(
+      `[data-intention="${CSS.escape(name)}"] .intention-model`
+    )?.value;
+  const modelId = configured === "default"
+    ? elements.defaultModel.value
+    : configured;
+  const followsWorker = name === "supervisor" && modelId === "same-as-worker";
+  const model = state.models.find(item => item.name === modelId);
+  const adapterParameters = model?.capabilities?.adapterGenerationParameters
+    ?? model?.adapterGenerationParameters;
+  const supported = adapterParameters?.filter(field => Object.hasOwn(inferenceFields, field));
+  const set = new Set(supported ?? []);
+  const configuredFields = Object.keys(inferenceFields).filter(
+    field => field === "thinking" ? name !== "supervisor" && profile.thinking !== "auto"
+      : field === "temperature" || field === "seed" || profile[field] != null
+  );
+  const knownThinkingModes = model?.capabilities?.thinkingModes;
+  const modes = new Set(knownThinkingModes ?? []);
+  for (const option of elements.inferenceThinking.options) {
+    if (option.value === "auto") continue;
+    const label = option.value[0].toUpperCase() + option.value.slice(1);
+    option.textContent = !knownThinkingModes && model?.provider === "ollama-local"
+      ? `${label} · model support unverified`
+      : modes.has(option.value) ? label
+      : `${label} · unavailable for configured model`;
+  }
+  const unavailable = supported
+    ? configuredFields.filter(field => !set.has(field)
+      && !(field === "thinking" && !knownThinkingModes && model?.provider === "ollama-local"))
+    : [];
+  const route = model?.displayName ?? modelId ?? "the selected model";
+  elements.inferenceSupportSummary.textContent = followsWorker
+    ? "Provider compatibility · depends on Worker model"
+    : unavailable.length > 0
+      ? `Provider compatibility · ${unavailable.length} unavailable`
+      : "Provider compatibility";
+  elements.inferenceSupport.textContent = followsWorker
+    ? "Supervisor follows the Worker model. Adapter support varies with that route; turn activity shows unavailable controls."
+    : supported
+    ? `Configured route: ${route}. Available controls: ${supported.map(
+      field => inferenceFieldLabels[field] ?? field).join(", ")}.`
+      + (unavailable.length ? ` Unavailable here: ${unavailable.map(
+        field => inferenceFieldLabels[field] ?? field).join(", ")}.` : "")
+      + " Manual model choices may differ. Model-specific acceptance is checked during inference."
+      + (name === "supervisor"
+        ? " Native harnesses have separate controls; turn activity shows any unavailable options."
+        : "")
+    : "Adapter support is unavailable for the configured route. Unsupported options are reported in turn activity.";
+}
+
+function updateInferenceProfileDraft(target) {
+  if (!target.closest("#settings-inference") || target === elements.inferenceProfileSelector) {
+    return;
+  }
+  const name = elements.inferenceProfileSelector.value;
+  const profile = state.inferenceProfileDrafts?.[name];
+  if (!profile) {
+    return;
+  }
+  if (target === elements.inferenceSeedMode) {
+    const fixed = target.value === "fixed";
+    elements.inferenceSeed.hidden = !fixed;
+    elements.inferenceSeed.required = fixed;
+    if (fixed && elements.inferenceSeed.value === "") {
+      elements.inferenceSeed.value = "1";
+    }
+    profile.seed = fixed ? Number(elements.inferenceSeed.value) : null;
+    renderInferenceSupport(name, profile);
+    return;
+  }
+  for (const [field, elementName] of Object.entries(inferenceFields)) {
+    if (target === elements[elementName]) {
+      profile[field] = field === "thinking" ? target.value
+        : target.value === "" ? null : Number(target.value);
+      renderInferenceSupport(name, profile);
+      return;
+    }
+  }
 }
 
 function renderSettingsSummaries() {
@@ -1949,19 +2107,21 @@ function renderModelOrganization() {
     const badges = document.createElement("span");
     badges.className = "model-organization-badges";
 
-    for (const label of [
-      model.favorite ? "★ favorito" : null,
-      model.hidden ? "oculto" : null,
-      model.available ? "available" : "unavailable",
-      model.conformanceApproved ? "approved conformance" : null,
-      model.capabilities?.nativeTools ? "tools" : null,
-      model.capabilities?.webSearch ? "web" : null,
-      model.capabilities?.vision ? "vision" : null,
-      model.capabilities?.structuredOutput ? "structured" : null
+    for (const item of [
+      model.favorite ? { key: "model_organization.badge_favorite" } : null,
+      model.hidden ? { key: "model_organization.badge_hidden" } : null,
+      { label: model.available ? "available" : "unavailable" },
+      model.conformanceApproved ? { label: "approved conformance" } : null,
+      model.capabilities?.nativeTools ? { label: "tools" } : null,
+      model.capabilities?.webSearch ? { label: "web" } : null,
+      model.capabilities?.vision ? { label: "vision" } : null,
+      model.capabilities?.structuredOutput ? { label: "structured" } : null
     ].filter(Boolean)) {
       const badge = document.createElement("span");
       badge.className = "badge muted";
-      badge.textContent = label;
+      if (item.key) badge.dataset.i18n = item.key;
+      badge.textContent = item.key
+        ? window.AgenticRouterI18n.t(item.key) : item.label;
       badges.append(badge);
     }
 
@@ -2012,15 +2172,17 @@ function renderModelOrganization() {
     for (const action of [
       {
         value: "favorite",
-        label: model.favorite ? "Desfavoritar" : "Favoritar"
+        key: model.favorite
+          ? "model_organization.unfavorite" : "model_organization.favorite"
       },
       {
         value: "hidden",
-        label: model.hidden ? "Reexibir" : "Ocultar"
+        key: model.hidden
+          ? "model_organization.show" : "model_organization.hide"
       },
       {
         value: "save",
-        label: "Save alias and note"
+        key: "model_organization.save_alias_note"
       }
     ]) {
       const button = document.createElement("button");
@@ -2029,7 +2191,8 @@ function renderModelOrganization() {
       button.dataset.modelOrganizationAction = action.value;
       button.dataset.providerId = model.providerId;
       button.dataset.modelId = model.modelId;
-      button.textContent = action.label;
+      button.dataset.i18n = action.key;
+      button.textContent = window.AgenticRouterI18n.t(action.key);
       actions.append(button);
     }
 
@@ -2461,10 +2624,21 @@ function renderCloudProviders() {
   const localHealth = (state.providerHealth?.providers ?? []).find(
     provider => provider.providerId.startsWith("ollama")
   );
-  if (localHealth) {
-    elements.cloudProvidersList.append(
-      createProviderHealthCard(localHealth)
-    );
+  if (localHealth || state.webSearch) {
+    const localCard = createProviderHealthCard(localHealth ?? {
+      providerId: "ollama-local",
+      displayName: "Ollama Local",
+      connectionState: "unknown",
+      lastSuccessfulRequest: null,
+      totalLatencyMilliseconds: null,
+      quotaState: "local-no-provider-quota",
+      tokenUsageAccuracy: "unavailable",
+      diagnostic: { lastStatusCode: null, retryDecision: "not-evaluated" },
+      healthSource: "not-observed",
+      stale: true
+    });
+    renderOllamaWebSearchSettings(localCard.querySelector(".cloud-provider-body"));
+    elements.cloudProvidersList.append(localCard);
   }
 
   for (const provider of state.cloudProviders?.providers ?? []) {
@@ -2603,7 +2777,6 @@ function renderCloudProviders() {
     elements.cloudProvidersList.append(card);
   }
 
-  renderOllamaWebSearchSettings();
 }
 
 function createProviderHealthCard(provider) {
@@ -2658,25 +2831,18 @@ function createProviderHealthCard(provider) {
   return card;
 }
 
-function renderOllamaWebSearchSettings() {
+function renderOllamaWebSearchSettings(container) {
   const integration = state.webSearch;
 
   if (!integration) {
     return;
   }
 
-  const card = document.createElement("details");
-  card.className = "cloud-provider-card";
-  card.dataset.provider = integration.provider;
-  card.open = state.openCloudProviders.has(integration.provider);
-  card.addEventListener("toggle", () => {
-    if (card.open) {
-      state.openCloudProviders.add(integration.provider);
-    } else {
-      state.openCloudProviders.delete(integration.provider);
-    }
-  });
-  const summary = document.createElement("summary");
+  const section = document.createElement("section");
+  section.className = "ollama-web-search-settings";
+  section.dataset.provider = integration.provider;
+  const heading = document.createElement("div");
+  heading.className = "ollama-web-search-heading";
   const title = document.createElement("span");
   title.className = "cloud-provider-title";
   title.textContent = integration.displayName;
@@ -2687,10 +2853,10 @@ function renderOllamaWebSearchSettings() {
   status.textContent = integration.state === "available"
     ? "Available"
     : "Not configured";
-  summary.append(title, status);
+  heading.append(title, status);
 
   const body = document.createElement("div");
-  body.className = "cloud-provider-body";
+  body.className = "ollama-web-search-body";
   const note = document.createElement("p");
   note.className = "runtime-note";
   note.textContent =
@@ -2729,8 +2895,8 @@ function renderOllamaWebSearchSettings() {
   diagnostic.dataset.webSearchDiagnostic = "";
   diagnostic.textContent = integration.diagnostic ?? "";
   body.append(note, keyField, actions, diagnostic);
-  card.append(summary, body);
-  elements.cloudProvidersList.append(card);
+  section.append(heading, body);
+  container.append(section);
 }
 
 function cloudActionButton(provider, action, label, extraClass = "") {
@@ -3138,6 +3304,7 @@ function setModelGpuAffinity(modelIdentity, value, source = null) {
     }
   });
   state.settingsDirty = true;
+  elements.saveStatus.textContent = "";
   updateSettingsDirtyState();
 }
 
@@ -3278,6 +3445,7 @@ async function openSettings(section = "general") {
   elements.settingsErrors.hidden = true;
   elements.saveStatus.textContent = "";
   elements.modelTestResult.textContent = "";
+  state.inferenceProfileDrafts = null;
   renderSettings();
   elements.settingsDialog.showModal();
   state.settingsDirty = false;
@@ -3328,6 +3496,7 @@ async function saveSettings(event) {
   elements.settingsErrors.hidden = true;
   clearSettingsValidationMarkers();
   elements.saveStatus.textContent = "Saving…";
+  updateSettingsDirtyState();
   const intentions = {};
 
   for (const card of elements.intentionsGrid.querySelectorAll(".intention-card")) {
@@ -3356,6 +3525,7 @@ async function saveSettings(event) {
     },
     trustedWorkspacePath: state.settings.trustedWorkspacePath ?? null,
     intentions,
+    inferenceProfiles: structuredClone(state.inferenceProfileDrafts),
     context: {
       defaultContextTokens: Number(elements.defaultContextTokens.value),
       providerContextTokens: Number(elements.providerContextTokens.value),
@@ -3428,6 +3598,7 @@ async function saveSettings(event) {
     );
     elements.saveStatus.textContent = "Saved";
     state.settingsDirty = false;
+    state.inferenceProfileDrafts = null;
     updateSettingsDirtyState();
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
     renderSettings();
@@ -3441,9 +3612,10 @@ async function saveSettings(event) {
         .join("\n")
       : error.message;
     elements.settingsErrors.textContent = message;
+    elements.settingsErrors.hidden = false;
     markSettingsValidationErrors(errors ?? {});
-    showToast(message, "error", 30000);
-    elements.saveStatus.textContent = "";
+    elements.saveStatus.textContent = "Save failed";
+    updateSettingsDirtyState();
     navigateToSettingsError(
       Object.keys(errors ?? {})[0]
     );
@@ -3451,6 +3623,7 @@ async function saveSettings(event) {
 }
 
 function handleSettingsInput(event) {
+  updateInferenceProfileDraft(event.target);
   event.target.classList.remove("field-invalid");
   event.target.removeAttribute("aria-invalid");
   event.target.closest(".intention-card")?.classList.remove("field-invalid-card");
@@ -3463,6 +3636,7 @@ function handleSettingsInput(event) {
     return;
   }
   state.settingsDirty = true;
+  elements.saveStatus.textContent = "";
   updateSettingsDirtyState();
   renderModelChainPreview();
 }
@@ -3482,8 +3656,16 @@ function clearSettingsValidationMarkers() {
 function markSettingsValidationErrors(errors) {
   for (const field of Object.keys(errors)) {
     let control = null;
+    const inference = field.match(/^inferenceProfiles\.([^.]*)\.?([^.]*)/);
     const intention = field.match(/^intentions[.:]([^.:]+)/i)?.[1];
-    if (intention) {
+    if (inference) {
+      elements.inferenceProfileSelector.value = inference[1];
+      renderSelectedInferenceProfile();
+      control = elements[inferenceFields[inference[2]]] ?? elements.inferenceProfileSelector;
+      if (["seed", "topP", "topK", "minP", "repeatPenalty", "repeatLastN"].includes(inference[2])) {
+        elements.settingsForm.querySelector(".inference-advanced").open = true;
+      }
+    } else if (intention) {
       const card = elements.intentionsGrid.querySelector(
         `[data-intention="${CSS.escape(intention)}"]`
       );
@@ -3537,6 +3719,11 @@ function markSettingsValidationErrors(errors) {
 }
 
 function updateSettingsDirtyState() {
+  const saveMessage = elements.saveStatus.textContent.trim();
+  elements.settingsDirty.hidden = Boolean(saveMessage);
+  elements.saveStatus.hidden = !saveMessage;
+  elements.saveStatus.className = `badge ${saveMessage === "Saved"
+    ? "success" : saveMessage === "Save failed" ? "error" : "muted"}`;
   elements.settingsDirty.textContent = state.settingsDirty
     ? "Unsaved changes"
     : "No changes";
@@ -3800,6 +3987,20 @@ function selectSettingsSection(event) {
   );
 }
 
+function openSupervisorPhaseEffort(event) {
+  event.preventDefault();
+  setSettingsSection("general", false);
+  const target = document.getElementById("phase-effort-settings");
+  target.classList.remove("phase-effort-highlight");
+  void target.offsetWidth;
+  target.classList.add("phase-effort-highlight");
+  window.setTimeout(() => {
+    target.classList.remove("phase-effort-highlight");
+  }, 1700);
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.focus({ preventScroll: true });
+}
+
 function setSettingsSubsection(subsection, moveFocus) {
   const advancedSection = sectionElementById("settings-advanced");
   if (!advancedSection) {
@@ -3899,13 +4100,22 @@ function setSettingsSection(section, moveFocus) {
 }
 
 function navigateToSettingsError(field) {
+  const inference = field?.match(/^inferenceProfiles\.([^.]*)/);
+  if (inference) {
+    elements.inferenceProfileSelector.value = inference[1];
+    renderSelectedInferenceProfile();
+  }
   const section = !field
     ? "general"
     : field === "execution.maxDirectPlanSteps" || field.startsWith("execution.phaseEffort")
       ? "general"
+    : field.startsWith("ollamaRuntime")
+      ? "ollama-context"
     : field.startsWith("ollama")
       ? "general"
-      : field.startsWith("router") || field.startsWith("intentions")
+    : field.startsWith("inferenceProfiles")
+      ? "inference"
+    : field.startsWith("router") || field.startsWith("intentions")
         ? "models-routing"
         : field.startsWith("coordinator") || field.startsWith("action")
           ? "models-routing"

@@ -530,6 +530,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           parameter_size = "8B",
           quantization_level = "Q4_K_M"
         },
+        thinking = model is "qwen3.8:27b-gpu0"
+          ? new { values = new object[] { false, "low", "medium", "xhigh" }, @default = "xhigh" }
+          : model is "gpt-oss:20b"
+            ? new { values = new object[] { "low", "medium", "high" }, @default = "medium" }
+            : null,
         capabilities = model is "qwen3.8:27b-gpu0"
           ? new[]
           {
@@ -703,9 +708,25 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       )
         ? repeatPenaltyElement.GetDouble()
         : null;
+    int? topK = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty("top_k", out var topKElement)
+        ? topKElement.GetInt32()
+        : null;
+    int? repeatLastN = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty("repeat_last_n", out var repeatLastNElement)
+        ? repeatLastNElement.GetInt32()
+        : null;
+    double? minP = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty("min_p", out var minPElement)
+        ? minPElement.GetDouble()
+        : null;
+    int? seed = options.ValueKind == JsonValueKind.Object
+      && options.TryGetProperty("seed", out var seedElement)
+        ? seedElement.GetInt32()
+        : null;
     var think = document.RootElement.TryGetProperty("think", out var thinkElement)
-      && thinkElement.ValueKind == JsonValueKind.String
-        ? thinkElement.GetString()
+      && thinkElement.ValueKind is JsonValueKind.String or JsonValueKind.True or JsonValueKind.False
+        ? thinkElement.ToString()
         : null;
     var recorded = new RecordedChatRequest(
       model,
@@ -720,7 +741,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       temperature,
       topP,
       repeatPenalty,
-      think
+      repeatLastN,
+      topK,
+      minP,
+      think,
+      seed
     );
     _requests.Enqueue(
       recorded
@@ -7913,7 +7938,11 @@ internal sealed record RecordedChatRequest(
   double? Temperature,
   double? TopP,
   double? RepeatPenalty,
-  string? Think
+  int? RepeatLastN,
+  int? TopK,
+  double? MinP,
+  string? Think,
+  int? Seed
 );
 
 internal sealed record RecordedMessage(

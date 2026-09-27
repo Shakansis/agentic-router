@@ -553,6 +553,13 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.HasCount(12, allTests.Select(item => item.Run.WorkspacePath).Distinct().ToArray());
     Assert.HasCount(1, allTests.Select(item => item.Run.FixtureFingerprint).Distinct().ToArray());
     Assert.IsFalse(string.IsNullOrWhiteSpace(allTests[0].Run.FixtureFingerprint));
+    Assert.IsTrue(result.HarnessResults.Single(item => item.Harness == HarnessIds.Native)
+      .Tests.All(item => item.Run.Seed is > 0));
+    var nativeSeeds = result.HarnessResults.Single(item => item.Harness == HarnessIds.Native)
+      .Tests.Select(item => item.Run.Seed).ToHashSet();
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(item => nativeSeeds.Contains(item.Seed)));
+    Assert.IsTrue(result.HarnessResults.Where(item => item.Harness != HarnessIds.Native)
+      .SelectMany(item => item.Tests).All(item => item.Run.Seed is null));
     foreach (var harness in result.HarnessResults)
     {
       Assert.AreEqual(4, harness.Passed, harness.Harness);

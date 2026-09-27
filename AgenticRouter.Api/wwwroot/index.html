@@ -7,7 +7,7 @@
   <title>Agentic Router</title>
   <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
   <link rel="stylesheet" href="/styles.css?v=20260924-ui-domains">
-  <link rel="stylesheet" href="/panels.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/panels.css?v=20260926-settings-polish">
   <link rel="stylesheet" href="/benchmark.css?v=20260924-ui-domains">
   <link rel="stylesheet" href="/bootstrap.css?v=20260924-ui-domains">
   <link rel="stylesheet" href="/user-input.css?v=20260924-ui-domains">
@@ -1110,7 +1110,10 @@
           <h2>Settings</h2>
           <p>Models, execution, workspaces, Git, and local storage.</p>
         </div>
-        <span id="settings-dirty" class="badge muted">No changes</span>
+        <div class="settings-status" role="status" aria-live="polite">
+          <span id="settings-dirty" class="badge muted">No changes</span>
+          <span id="save-status" class="badge success" hidden></span>
+        </div>
         <button id="close-settings" class="icon-button" type="button" aria-label="Close">×</button>
       </header>
 
@@ -1119,8 +1122,11 @@
         <select id="settings-section-select">
           <option value="general">General</option>
           <option value="models-routing">Models and routing</option>
+          <option value="inference">Inference profiles</option>
           <option value="providers">Providers</option>
-          <option value="harnesses">Harnesses</option>
+          <option value="local-resources">Local resources</option>
+          <option value="harnesses">Runtime and memory</option>
+          <option value="ollama-context">Ollama context profiles</option>
           <option value="execution">Execution and approvals</option>
           <option value="workspaces">Workspaces and history</option>
           <option value="advanced">Advanced</option>
@@ -1131,8 +1137,11 @@
         <nav id="settings-navigation" class="settings-navigation" aria-label="Configuration sections">
           <button type="button" data-settings-target="general" aria-current="page">General</button>
           <button type="button" data-settings-target="models-routing">Models and routing</button>
+          <button type="button" data-settings-target="inference">Inference profiles</button>
           <button type="button" data-settings-target="providers">Providers</button>
-          <button type="button" data-settings-target="harnesses">Harnesses</button>
+          <button type="button" data-settings-target="local-resources">Local resources</button>
+          <button type="button" data-settings-target="harnesses">Runtime and memory</button>
+          <button type="button" class="settings-navigation-child" data-settings-target="ollama-context">Ollama context profiles</button>
           <button type="button" data-settings-target="execution">Execution and approvals</button>
           <button type="button" data-settings-target="workspaces">Workspaces and history</button>
           <button type="button" data-settings-target="advanced">Advanced</button>
@@ -1197,7 +1206,7 @@
                 >
                 <small id="file-creation-output-token-limit-help">Optional global limit for Native create_file/create_files generation across all models. Blank preserves each model's normal output limit.</small>
               </label>
-              <fieldset class="phase-effort-settings">
+              <fieldset id="phase-effort-settings" class="phase-effort-settings" tabindex="-1">
                 <legend>Effort by supervised phase</legend>
                 <small>Controls how much reasoning the selected model should spend in each phase. Unsupported native controls fall back to explicit prompt guidance.</small>
                 <div class="phase-effort-grid">
@@ -1296,6 +1305,76 @@
               >Refresh</button>
             </div>
             <div id="cloud-providers-list" class="cloud-providers-list"></div>
+            <div class="provider-health-heading">
+              <h4>Cloud usage</h4>
+            </div>
+            <button
+              id="cloud-usage-card"
+              class="secondary-button runtime-cloud-usage"
+              type="button"
+              aria-haspopup="dialog"
+              aria-controls="cloud-usage-dialog"
+            >
+              <span id="cloud-usage-summary">Cloud usage</span>
+              <span id="cloud-usage-badge" class="usage-accuracy-badge">loading</span>
+              <small id="cloud-usage-detail">Open to view quota, costs, and models.</small>
+            </button>
+          </section>
+
+          <section id="settings-inference" class="settings-section" data-settings-section="inference" tabindex="-1">
+            <div class="section-heading inference-heading">
+              <div>
+                <h3>Inference profiles</h3>
+                <p>Choose how a use profile generates answers. Model selection stays in Models and routing.</p>
+              </div>
+              <a class="secondary-button inference-help-link" href="/inference-help.html" target="_blank" rel="noopener">Help ↗</a>
+            </div>
+            <div class="inference-fields inference-overview">
+              <div class="inference-profile-column">
+                <label class="inference-profile-choice" for="inference-profile-selector">
+                  <span>Use profile</span>
+                  <select id="inference-profile-selector"></select>
+                </label>
+                <p id="inference-profile-description" class="runtime-note"></p>
+              </div>
+              <div class="inference-field"><div class="field-label-with-help"><label for="inference-temperature">Temperature</label><button class="information-button compact-information-button" type="button" aria-label="Temperature information" data-tooltip="Controls variation. Lower values tend to repeat the most likely wording; higher values explore more alternatives. Model behavior still varies.">?</button></div><input id="inference-temperature" type="number" min="0" max="2" step="any" required></div>
+              <div class="inference-field">
+                <div class="field-label-with-help"><label for="inference-thinking">Thinking</label><button class="information-button compact-information-button" type="button" aria-label="Thinking information" data-tooltip="Controls whether and how much a compatible model reasons before answering. Auto leaves the model or provider behavior unchanged.">?</button></div>
+                <select id="inference-thinking">
+                  <option value="auto">Auto</option>
+                  <option value="disabled">Disabled</option>
+                  <option value="enabled">Enabled</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="max">Max</option>
+                </select>
+                <p id="inference-thinking-note" class="runtime-note" hidden>
+                  <span data-i18n="inference.supervisor_thinking_controlled">Controlled by Supervisor phase effort (Plan, Work, Verify, Complete, Recovery).</span>
+                  <a id="inference-phase-effort-link" href="#phase-effort-settings" data-i18n="inference.open_phase_effort">Open phase effort settings</a>
+                </p>
+              </div>
+            </div>
+            <details class="inference-advanced">
+              <summary>Advanced · sampling and repetition</summary>
+              <div class="inference-fields">
+                <div class="inference-field"><div class="field-label-with-help"><label for="inference-top-p">Top P</label><button class="information-button compact-information-button" type="button" aria-label="Top P information" data-tooltip="Limits choices to a cumulative probability share. Smaller values narrow the choices. Leave blank to use the provider default.">?</button></div><input id="inference-top-p" type="number" min="0" max="1" step="any" placeholder="0.9"></div>
+                <div class="inference-field"><div class="field-label-with-help"><label for="inference-top-k">Top K</label><button class="information-button compact-information-button" type="button" aria-label="Top K information" data-tooltip="Limits the number of candidate next tokens. Smaller values narrow the choices. Leave blank to use the provider default.">?</button></div><input id="inference-top-k" type="number" min="1" max="1000" step="1" placeholder="40"></div>
+                <div class="inference-field"><div class="field-label-with-help"><label for="inference-min-p">Min P</label><button class="information-button compact-information-button" type="button" aria-label="Min P information" data-tooltip="Filters candidates whose probability is too small relative to the leading choice. Leave blank to use the provider default.">?</button></div><input id="inference-min-p" type="number" min="0" max="1" step="any" placeholder="0.05"></div>
+                <div class="inference-field"><div class="field-label-with-help"><label for="inference-repeat-penalty">Repeat penalty</label><button class="information-button compact-information-button" type="button" aria-label="Repeat penalty information" data-tooltip="Discourages repeated tokens. One is neutral; higher values may reduce repetition. Leave blank to use the provider default.">?</button></div><input id="inference-repeat-penalty" type="number" min="0.5" max="2" step="any" placeholder="1.1"></div>
+                <div class="inference-field"><div class="field-label-with-help"><label for="inference-repeat-last-n">Repetition window</label><button class="information-button compact-information-button" type="button" aria-label="Repetition window information" data-tooltip="How many recent tokens the repeat penalty considers. Zero disables that lookback; -1 considers the full context. Leave blank to use the provider default.">?</button></div><input id="inference-repeat-last-n" type="number" min="-1" step="1" placeholder="64"></div>
+                <div class="inference-field">
+                  <div class="field-label-with-help"><label for="inference-seed-mode">Seed</label><button class="information-button compact-information-button" type="button" aria-label="Seed information" data-tooltip="Auto generates a new seed for each run when the provider supports it. A fixed seed can help reproduce a generation with the same model, prompt, and settings.">?</button></div>
+                  <select id="inference-seed-mode"><option value="auto">Auto · new seed per run</option><option value="fixed">Fixed seed</option></select>
+                  <input id="inference-seed" type="number" step="1" aria-label="Fixed seed" placeholder="12345" hidden>
+                </div>
+              </div>
+              <p class="runtime-note">Blank advanced values use the provider default. The numbers shown in empty fields are examples.</p>
+            </details>
+            <details class="inference-compatibility">
+              <summary id="inference-support-summary">Provider compatibility</summary>
+              <p id="inference-support" class="runtime-note" role="status"></p>
+            </details>
           </section>
 
           <section id="settings-models" class="settings-section" data-settings-section="models" tabindex="-1">
@@ -1619,9 +1698,31 @@
               <select id="usage-ollama-plan"></select>
             </label>
             </div>
+            <div id="settings-usage-summary" class="settings-summary-card usage-summary-card">
+              <span id="settings-usage-accuracy" class="usage-accuracy-badge">
+                loading
+              </span>
+              <span id="settings-usage-details">Loading token usage…</span>
+            </div>
+            <div class="validation-profile-actions">
+              <button id="reconcile-usage" class="secondary-button" type="button">
+                Rebuild usage aggregates
+              </button>
+              <button id="purge-usage" class="secondary-button danger-button" type="button">
+                Delete usage history
+              </button>
+              <span id="usage-purge-status" class="runtime-note" role="status"></span>
+            </div>
+          </section>
+
+          <section id="settings-ollama-context" class="settings-section" data-settings-section="ollama-context" tabindex="-1">
+            <div class="section-heading">
+              <h3>Ollama context profiles</h3>
+              <p>Context windows and output limits for each Ollama execution role.</p>
+            </div>
             <section class="runtime-profile-panel" aria-labelledby="runtime-profile-heading">
               <div class="heading-title-row">
-                <h4 id="runtime-profile-heading">Ollama context profiles</h4>
+                <h4 id="runtime-profile-heading">Role settings</h4>
                 <button
                   class="information-button"
                   type="button"
@@ -1728,32 +1829,6 @@
               </details>
               <div id="runtime-shared-model-warnings" class="runtime-shared-warnings"></div>
             </section>
-            <div id="settings-usage-summary" class="settings-summary-card usage-summary-card">
-              <span id="settings-usage-accuracy" class="usage-accuracy-badge">
-                loading
-              </span>
-              <span id="settings-usage-details">Loading token usage…</span>
-            </div>
-            <button
-              id="cloud-usage-card"
-              class="secondary-button runtime-cloud-usage"
-              type="button"
-              aria-haspopup="dialog"
-              aria-controls="cloud-usage-dialog"
-            >
-              <span id="cloud-usage-summary">Cloud usage</span>
-              <span id="cloud-usage-badge" class="usage-accuracy-badge">loading</span>
-              <small id="cloud-usage-detail">Open to view quota, costs, and models.</small>
-            </button>
-            <div class="validation-profile-actions">
-              <button id="reconcile-usage" class="secondary-button" type="button">
-                Rebuild usage aggregates
-              </button>
-              <button id="purge-usage" class="secondary-button danger-button" type="button">
-                Delete usage history
-              </button>
-              <span id="usage-purge-status" class="runtime-note" role="status"></span>
-            </div>
           </section>
 
           <section id="settings-advanced" class="settings-section" data-settings-section="advanced" tabindex="-1">
@@ -1837,7 +1912,6 @@
       </div>
 
       <footer class="dialog-footer">
-        <span id="save-status" class="save-status"></span>
         <button id="cancel-settings" class="secondary-button" type="button">Cancel</button>
         <button id="save-settings" class="primary-button" type="submit">Save changes</button>
       </footer>
@@ -2464,15 +2538,15 @@
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
   <script defer src="/shared.js?v=20260924-ui-domains"></script>
-  <script defer src="/i18n.js?v=20260924-ui-domains"></script>
-  <script defer src="/app.js?v=20260924-ui-domains"></script>
+  <script defer src="/i18n.js?v=20260926-settings-polish"></script>
+  <script defer src="/app.js?v=20260926-settings-polish"></script>
   <script defer src="/loading.js?v=20260924-ui-domains"></script>
-  <script defer src="/benchmark.js?v=20260924-ui-domains"></script>
+  <script defer src="/benchmark.js?v=20260926-inference-profiles"></script>
   <script defer src="/git.js?v=20260924-ui-domains"></script>
   <script defer src="/projects-sessions.js?v=20260924-ui-domains"></script>
-  <script defer src="/settings-runtime.js?v=20260924-ui-domains"></script>
+  <script defer src="/settings-runtime.js?v=20260926-settings-polish"></script>
   <script defer src="/conversation.js?v=20260924-ui-domains"></script>
-  <script defer src="/conversation-stream.js?v=20260924-ui-domains"></script>
+  <script defer src="/conversation-stream.js?v=20260926-inference-profiles"></script>
   <script defer src="/conversation-review.js?v=20260924-ui-domains"></script>
   <script defer src="/conversation-render.js?v=20260924-ui-domains"></script>
 </body>

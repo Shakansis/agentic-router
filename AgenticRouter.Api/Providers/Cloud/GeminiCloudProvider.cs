@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Usage;
@@ -14,7 +15,10 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
 {
   private static readonly JsonSerializerOptions JsonOptions = new(
     JsonSerializerDefaults.Web
-  );
+  )
+  {
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+  };
 
   private readonly IHttpClientFactory _httpClientFactory;
   private readonly Uri _baseUri;
@@ -35,6 +39,33 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
   );
 
   public string ProtocolVersion => "gemini-developer-v1beta-2026-07";
+
+  private static IReadOnlyList<string> SupportedThinkingModes(string modelId) => modelId switch
+  {
+    "gemini-3.5-flash" or "gemini-3.5-flash-lite"
+      or "gemini-3.6-flash" or "gemini-3.7-flash"
+      or "gemini-3.8-flash" or "gemini-3.1-pro-preview"
+      => ["enabled", "low", "medium", "high"],
+    "gemini-3-pro-preview" => ["enabled", "low", "high"],
+    _ => []
+  };
+
+  private static void AddGenerationControls(
+    Dictionary<string, object?> config,
+    string modelId,
+    ProviderGenerationProfile profile
+  )
+  {
+    config["seed"] = profile.Seed;
+    if (SupportedThinkingModes(modelId).Contains(profile.Thinking, StringComparer.Ordinal))
+    {
+      config["thinkingConfig"] = new
+      {
+        thinkingLevel = profile.Thinking == "enabled"
+          ? "HIGH" : profile.Thinking.ToUpperInvariant()
+      };
+    }
+  }
 
   public async Task<IReadOnlyList<InstalledModel>> ListModelsAsync(
     string apiKey,
@@ -131,6 +162,12 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
         modelId
       );
 
+      var thinkingModes = SupportedThinkingModes(modelId);
+      var generationParameters = new List<string>
+      {
+        "temperature", "topP", "maximumOutputTokens", "seed"
+      };
+      if (thinkingModes.Count > 0) generationParameters.Add("thinking");
       result.Add(
         new InstalledModel(
           reference.Qualified,
@@ -158,6 +195,7 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
             "provider-model-metadata",
             inputModalities.Count > 0 || supportedTools.Count > 0,
             StructuredOutput: supportsChat,
+            Reasoning: thinkingModes.Count > 0,
             ProviderNativeWebSearch: webSearch,
             Citations: webSearch,
             MaximumImageCount: vision
@@ -168,7 +206,9 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
               : 0,
             SupportedImageMimeTypes: vision
               ? CapabilityLimits.ImageMimeTypes
-              : []
+              : [],
+            AdapterGenerationParameters: generationParameters,
+            ThinkingModes: thinkingModes
           ),
           supportsChat
         )
@@ -191,7 +231,8 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     options ??= ProviderChatOptions.Empty;
     var generationConfig = new Dictionary<string, object?>
     {
-      ["temperature"] = 0,
+      ["temperature"] = options.EffectiveGenerationProfile.Temperature,
+      ["topP"] = options.EffectiveGenerationProfile.TopP,
       ["responseMimeType"] = "application/json"
     };
 
@@ -203,6 +244,8 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     {
       generationConfig["maxOutputTokens"] = maximumOutputTokens;
     }
+    AddGenerationControls(generationConfig, modelId,
+      options.EffectiveGenerationProfile);
 
     using var request = CreateJsonRequest(
       $"models/{Uri.EscapeDataString(modelId)}:generateContent",
@@ -286,6 +329,7 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     {
       generationConfig["maxOutputTokens"] = maximumOutputTokens;
     }
+    AddGenerationControls(generationConfig, modelId, generationProfile);
     object payload = tools.Count == 0
       ? new
       {
@@ -371,6 +415,14 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
   )
   {
     options ??= ProviderChatOptions.Empty;
+    var generationConfig = new Dictionary<string, object?>
+    {
+      ["temperature"] = options.EffectiveGenerationProfile.Temperature,
+      ["topP"] = options.EffectiveGenerationProfile.TopP,
+      ["maxOutputTokens"] = options.EffectiveGenerationProfile.MaximumOutputTokens
+    };
+    AddGenerationControls(generationConfig, modelId,
+      options.EffectiveGenerationProfile);
     using var request = CreateJsonRequest(
       $"models/{Uri.EscapeDataString(modelId)}:streamGenerateContent?alt=sse",
       apiKey,
@@ -380,11 +432,7 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
           messages,
           options.Images
         ),
-        generationConfig = new
-        {
-          temperature = options.EffectiveGenerationProfile.Temperature,
-          topP = options.EffectiveGenerationProfile.TopP
-        },
+        generationConfig,
         tools = options.WebSearchEnabled
           ? new object[]
           {

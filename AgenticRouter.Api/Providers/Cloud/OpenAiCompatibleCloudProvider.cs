@@ -38,6 +38,48 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
 
   public abstract string ProtocolVersion { get; }
 
+  private bool SupportsSeed => ProviderId == ModelProviderIds.Groq;
+
+  private IReadOnlyList<string> SupportedThinkingModes(string? modelId)
+  {
+    if (ProviderId == ModelProviderIds.Groq && modelId is not null)
+    {
+      if (modelId.StartsWith("openai/gpt-oss-", StringComparison.Ordinal))
+      {
+        return ["enabled", "low", "medium", "high"];
+      }
+      if (modelId == "qwen/qwen3.8-27b")
+      {
+        return ["disabled", "enabled", "low", "medium", "high"];
+      }
+      if (modelId.StartsWith("qwen/qwen3-", StringComparison.Ordinal))
+      {
+        return ["disabled", "enabled"];
+      }
+    }
+    if (ProviderId == ModelProviderIds.Cerebras && modelId == "zai-glm-4.7")
+    {
+      return ["disabled"];
+    }
+    return [];
+  }
+
+  private string? ResolveThinking(string modelId, string thinking)
+  {
+    if (!SupportedThinkingModes(modelId).Contains(thinking, StringComparer.Ordinal))
+    {
+      return null;
+    }
+    if (thinking == "disabled") return "none";
+    if (thinking == "enabled")
+    {
+      return modelId.StartsWith("openai/gpt-oss-", StringComparison.Ordinal)
+        ? "medium"
+        : modelId == "qwen/qwen3.8-27b" ? "low" : "default";
+    }
+    return thinking;
+  }
+
   public virtual async Task<IReadOnlyList<InstalledModel>> ListModelsAsync(
     string apiKey,
     CancellationToken cancellationToken
@@ -175,7 +217,10 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         messages = options.Images.Count == 0
           ? messages
           : ToMultimodalMessages(messages, options.Images),
-        temperature = 0,
+        temperature = options.EffectiveGenerationProfile.Temperature,
+        top_p = options.EffectiveGenerationProfile.TopP,
+        seed = SupportsSeed ? options.EffectiveGenerationProfile.Seed : null,
+        reasoning_effort = ResolveThinking(modelId, options.EffectiveGenerationProfile.Thinking),
         max_tokens = options.EffectiveGenerationProfile.MaximumOutputTokens,
         stream = false,
         response_format = responseFormat
@@ -241,6 +286,8 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         ),
         temperature = generationProfile.Temperature,
         top_p = generationProfile.TopP,
+        seed = SupportsSeed ? generationProfile.Seed : null,
+        reasoning_effort = ResolveThinking(modelId, generationProfile.Thinking),
         max_tokens = generationProfile.MaximumOutputTokens,
         stream = false
       }
@@ -265,6 +312,8 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         tool_choice = "auto",
         temperature = generationProfile.Temperature,
         top_p = generationProfile.TopP,
+        seed = SupportsSeed ? generationProfile.Seed : null,
+        reasoning_effort = ResolveThinking(modelId, generationProfile.Thinking),
         max_tokens = generationProfile.MaximumOutputTokens,
         stream = false
       };
@@ -349,6 +398,9 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         ),
         temperature = options.EffectiveGenerationProfile.Temperature,
         top_p = options.EffectiveGenerationProfile.TopP,
+        seed = SupportsSeed ? options.EffectiveGenerationProfile.Seed : null,
+        reasoning_effort = ResolveThinking(modelId, options.EffectiveGenerationProfile.Thinking),
+        max_tokens = options.EffectiveGenerationProfile.MaximumOutputTokens,
         stream = true,
         citation_options = options.WebSearchEnabled
           ? "enabled"
@@ -968,6 +1020,14 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       "reasoning",
       "thinking"
     );
+    var modelId = ReadString(model, "id");
+    var thinkingModes = SupportedThinkingModes(modelId);
+    var generationParameters = new List<string>
+    {
+      "temperature", "topP", "maximumOutputTokens"
+    };
+    if (SupportsSeed) generationParameters.Add("seed");
+    if (thinkingModes.Count > 0) generationParameters.Add("thinking");
     var streaming = capabilities.ValueKind == JsonValueKind.Undefined
       || ReadCapability(
         capabilities,
@@ -996,7 +1056,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         : "provider-adapter-default",
       confirmed,
       StructuredOutput: structured,
-      Reasoning: reasoning,
+      Reasoning: reasoning || thinkingModes.Count > 0,
       ProviderNativeWebSearch: webSearch,
       Citations: webSearch,
       MaximumImageCount: vision
@@ -1007,7 +1067,9 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         : 0,
       SupportedImageMimeTypes: vision
         ? CapabilityLimits.ImageMimeTypes
-        : []
+        : [],
+      AdapterGenerationParameters: generationParameters,
+      ThinkingModes: thinkingModes
     );
   }
 

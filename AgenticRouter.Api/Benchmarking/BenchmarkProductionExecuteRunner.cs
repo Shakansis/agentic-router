@@ -21,6 +21,7 @@ public interface IBenchmarkProductionExecuteRunner
     BenchmarkWorkspace workspace,
     int contextTokens,
     string gpu,
+    int? seed,
     int turnNumber,
     string turnName,
     BenchmarkProgressContext? progress,
@@ -66,6 +67,7 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
     BenchmarkWorkspace workspace,
     int contextTokens,
     string gpu,
+    int? seed,
     int turnNumber,
     string turnName,
     BenchmarkProgressContext? progress,
@@ -85,7 +87,8 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       workspace,
       model,
       contextTokens,
-      gpu
+      gpu,
+      seed
     );
     using var client = _httpClients.CreateClient();
     client.BaseAddress = ResolveLoopbackAddress();

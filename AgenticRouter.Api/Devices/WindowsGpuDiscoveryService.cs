@@ -70,6 +70,21 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
           "DXGI graphics adapter discovery was unavailable."
         );
       }
+      if (windowsDevices.Any(device => device is
+        { Backend: "rocm", AffinitySelectable: true }))
+      {
+        try
+        {
+          UseStableAmdDeviceId(windowsDevices, DiscoverWindowsDevices());
+        }
+        catch (Exception exception)
+        {
+          _logger.LogDebug(
+            exception,
+            "A stable AMD graphics adapter ID was unavailable."
+          );
+        }
+      }
       if (windowsDevices.Count == 0)
       {
         try
@@ -332,6 +347,29 @@ public sealed class WindowsGpuDiscoveryService : IGpuDiscoveryService
         );
       }
     ).ToList();
+  }
+
+  private static void UseStableAmdDeviceId(
+    List<GraphicsDevice> dxgiDevices,
+    IReadOnlyList<GraphicsDevice> setupDevices
+  )
+  {
+    var amd = dxgiDevices.SingleOrDefault(device => device is
+    { Backend: "rocm", AffinitySelectable: true });
+    if (amd is null)
+    {
+      return;
+    }
+
+    var matches = setupDevices.Where(device =>
+      device.Available
+      && device.Id.StartsWith(@"PCI\VEN_1002&", StringComparison.OrdinalIgnoreCase)
+      && string.Equals(device.Name, amd.Name, StringComparison.OrdinalIgnoreCase)
+    ).Take(2).ToArray();
+    if (matches.Length == 1)
+    {
+      dxgiDevices[dxgiDevices.IndexOf(amd)] = amd with { Id = matches[0].Id };
+    }
   }
 
   private static bool SameAdapter(

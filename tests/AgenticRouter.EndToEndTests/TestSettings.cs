@@ -32,6 +32,18 @@ internal sealed record TestApplicationSettings
 
   public Dictionary<string, TestIntentionSettings> Intentions { get; init; } = [];
 
+  public Dictionary<string, TestInferenceProfileSettings> InferenceProfiles { get; init; } =
+    new(StringComparer.Ordinal)
+    {
+      ["general-chat"] = new(0.6),
+      ["documentation"] = new(0.25),
+      ["software-development"] = new(0.2),
+      ["software-architecture"] = new(0.35),
+      ["rpg-storytelling"] = new(0.8, 0.92, null, null, 1.05),
+      ["review-and-testing"] = new(0.1),
+      ["supervisor"] = new(0.1)
+    };
+
   public TestContextSettings Context { get; init; } = new();
 
   public TestRuntimeSettings Runtime { get; init; } = new();
@@ -120,6 +132,17 @@ internal sealed record TestIntentionSettings(
   string FallbackModel,
   string Gpu,
   string SystemPrompt
+);
+
+internal sealed record TestInferenceProfileSettings(
+  double Temperature = 0,
+  double? TopP = null,
+  int? TopK = null,
+  double? MinP = null,
+  double? RepeatPenalty = null,
+  int? RepeatLastN = null,
+  string Thinking = "auto",
+  int? Seed = null
 );
 
 internal sealed record TestContextSettings

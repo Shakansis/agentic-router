@@ -53,7 +53,8 @@ public interface ILocalActionPlanner
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     string? requestedEffort = null,
-    int? maximumOutputTokens = null
+    int? maximumOutputTokens = null,
+    ProviderGenerationProfile? generationProfile = null
   );
 }
 
@@ -259,7 +260,8 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     CancellationToken cancellationToken,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta = null,
     string? requestedEffort = null,
-    int? maximumOutputTokens = null
+    int? maximumOutputTokens = null,
+    ProviderGenerationProfile? generationProfile = null
   )
   {
     var request = CreatePlanningRequest(
@@ -282,10 +284,13 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       onThinkingDelta,
       requestedEffort: requestedEffort,
       generationProfile: maximumOutputTokens is null
-        ? null
-        : ProviderGenerationProfiles.Deterministic with
+        ? generationProfile
+        : (generationProfile ?? ProviderGenerationProfiles.Deterministic) with
         {
-          MaximumOutputTokens = maximumOutputTokens
+          MaximumOutputTokens = Math.Min(
+            maximumOutputTokens.Value,
+            generationProfile?.MaximumOutputTokens ?? maximumOutputTokens.Value
+          )
         }
     );
     var canonicalTurn = _toolingProtocol.Normalize(toolingProfile, response);

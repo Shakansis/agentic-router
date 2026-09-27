@@ -688,14 +688,30 @@ public sealed class ChatStreamService
         capabilities,
         images
       );
+      var generationProfile = ProviderGenerationProfiles.Resolve(
+        settings.InferenceProfiles,
+        intention,
+        request.InteractionMode,
+        string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal)
+          && invocation.Role != ExecutionContextRole.Direct
+      );
+      if (benchmarkContext?.Seed is int benchmarkSeed)
+      {
+        generationProfile = generationProfile with { Seed = benchmarkSeed };
+      }
       var chatOptions = new ProviderChatOptions(
         request.WebSearchEnabled && capabilities.ProviderNativeWebSearch,
         images,
-        GenerationProfile: ProviderGenerationProfiles.Resolve(
-          intention,
-          request.InteractionMode
-        )
+        GenerationProfile: generationProfile
       );
+      if (string.Equals(request.InteractionMode, "chat", StringComparison.Ordinal))
+      {
+        yield return InferenceProfileEvent(
+          requestId, stopwatch, selectedModel, intention,
+          chatOptions.EffectiveGenerationProfile,
+          capabilities.AdapterGenerationParameters
+        );
+      }
       yield return Event(
         requestId,
         "target.capabilities-resolved",
@@ -1091,6 +1107,13 @@ public sealed class ChatStreamService
 
         var harnessDefinition = cachedPreflight?.HarnessDefinition
           ?? GetHarnessDefinition(request.Harness);
+        yield return InferenceProfileEvent(
+          requestId, stopwatch, selectedModel, intention,
+          chatOptions.EffectiveGenerationProfile,
+          harnessDefinition.Id == HarnessIds.Native
+            ? capabilities.AdapterGenerationParameters
+            : ["maximumContextTokens"]
+        );
         _latency.SetHarness(harnessDefinition.Id);
         var harness = cachedPreflight?.Harness;
         if (
@@ -1193,6 +1216,7 @@ public sealed class ChatStreamService
               baseUri,
               workspace.Path,
               settings,
+              selectedModelRole,
               capabilities,
               context,
               knowledge.Context,
@@ -1544,6 +1568,7 @@ public sealed class ChatStreamService
     Uri baseUri,
     string workspacePath,
     ApplicationSettings settings,
+    string modelRole,
     ProviderModelCapabilities capabilities,
     ConversationContextResult context,
     string? managedContext,
@@ -1590,11 +1615,22 @@ public sealed class ChatStreamService
       );
     }
 
+    _usageModelRevisions.TryGetValue(selectedModel, out var modelDigest);
+    var contextResolution = OllamaRuntimeProfileResolver.Resolve(
+      settings,
+      selectedModel,
+      modelDigest,
+      _usageModelRoleOverride ?? modelRole,
+      capabilities.ContextTokens,
+      context.EstimatedInputTokens,
+      settings.Context.ReservedResponseTokens
+    );
     var contextUsage = CreateExternalHarnessContextUsage(
       context,
       capabilities,
       settings,
-      _usageRuntimeContextTokens
+      _usageRuntimeContextTokens,
+      contextResolution
     );
     yield return new ChatStreamEvent(
       requestId,
@@ -1706,7 +1742,8 @@ public sealed class ChatStreamService
     var selectedReference = ProviderModelReference.Parse(
       selectedModel
     );
-    var nativeEffortSupported = selectedReference.IsLocal && capabilities.Reasoning;
+    var nativeEffortSupported = capabilities.Reasoning
+      && capabilities.ThinkingModes?.Contains(requestedEffort, StringComparer.Ordinal) == true;
     yield return Event(
       requestId,
       nativeEffortSupported
@@ -1775,7 +1812,10 @@ public sealed class ChatStreamService
       {
         RequestedEffort = nativeEffortSupported
           ? requestedEffort
-          : null
+          : null,
+        GenerationProfile = executionRole != ExecutionContextRole.Direct && nativeEffortSupported
+          ? providerOptions.EffectiveGenerationProfile with { Thinking = requestedEffort }
+          : providerOptions.GenerationProfile
       },
       requestedEffort: requestedEffort
     );
@@ -4641,7 +4681,8 @@ public sealed class ChatStreamService
                       token
                     ),
                     requestedEffort: progress.ProviderOptions.RequestedEffort,
-                    maximumOutputTokens: fileCreationOutputLimit
+                    maximumOutputTokens: fileCreationOutputLimit,
+                    generationProfile: progress.ProviderOptions.EffectiveGenerationProfile
                   )
               );
             }
@@ -9118,18 +9159,17 @@ public sealed class ChatStreamService
     ConversationContextResult context,
     ProviderModelCapabilities capabilities,
     ApplicationSettings settings,
-    int? runtimeContextTokens
+    int? runtimeContextTokens,
+    OllamaContextResolution resolution
   )
   {
     var usage = CreateContextUsage(context, capabilities, settings, null);
-    var effectiveLimit = runtimeContextTokens ?? Math.Min(
-      usage.ApplicationLimit,
-      usage.ProviderMaximumTokens ?? usage.ConfiguredProviderLimit
-    );
+    var effectiveLimit = runtimeContextTokens ?? resolution.EffectiveContextTokens;
     return usage with
     {
       ConversationTokens = context.EstimatedInputTokens,
-      RequiredContextTokens = context.EstimatedInputTokens + usage.ReservedResponseTokens,
+      ReservedResponseTokens = resolution.OutputTokenLimit,
+      RequiredContextTokens = resolution.RequiredContextTokens,
       EffectiveLimitTokens = effectiveLimit,
       InferenceSequence = 1
     };
@@ -11951,6 +11991,46 @@ public sealed class ChatStreamService
       IncidentSequence: _trace.NextSequence(),
       Gpu: _usageGpu
     );
+  }
+
+  private ChatStreamEvent InferenceProfileEvent(
+    string requestId,
+    Stopwatch stopwatch,
+    string model,
+    string intention,
+    ProviderGenerationProfile profile,
+    IReadOnlyList<string>? supportedParameters
+  )
+  {
+    var configured = ProviderGenerationProfiles.ConfiguredParameters(profile);
+    var unsupported = supportedParameters is null
+      ? Array.Empty<string>()
+      : configured.Except(supportedParameters, StringComparer.Ordinal).ToArray();
+    var message = supportedParameters is null
+      ? $"Inference profile {profile.Id}: adapter parameter support is unverified."
+      : $"Inference profile {profile.Id}: adapter-supported controls: "
+        + string.Join(", ", configured.Except(unsupported))
+        + (unsupported.Length > 0
+          ? $"; unavailable controls: {string.Join(", ", unsupported)}."
+          : ".");
+    var seedSupported = supportedParameters?.Contains("seed", StringComparer.Ordinal) == true;
+    return Event(requestId, "inference.profile-selected", message,
+      stopwatch, model, intention) with
+    {
+      Inference = new InferenceRunMetadataView(
+        profile.Id,
+        profile.Temperature,
+        profile.Thinking,
+        seedSupported ? profile.Seed : null,
+        seedSupported && profile.Seed.HasValue ? "requested" : "unavailable",
+        profile.TopP,
+        profile.TopK,
+        profile.MinP,
+        profile.RepeatPenalty,
+        profile.RepeatLastN,
+        unsupported
+      )
+    };
   }
 
   private ChatStreamEvent Event(

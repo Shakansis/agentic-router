@@ -472,7 +472,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
     await Page.Locator("#open-settings").ClickAsync();
     await Page.Locator(
-      "[data-settings-target=\"harnesses\"]"
+      "[data-settings-target=\"local-resources\"]"
     ).ClickAsync();
     await Expect(Page.Locator(
       "#show-onboarding-before-conversation"
@@ -582,7 +582,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     )).ToHaveCountAsync(1);
 
     await Page.Locator("#open-settings").ClickAsync();
-    await Page.Locator("[data-settings-target=\"harnesses\"]").ClickAsync();
+    await Page.Locator("[data-settings-target=\"local-resources\"]").ClickAsync();
     var settingsSetup = Page.Locator("#settings-setup-surface");
     await Expect(settingsSetup).ToBeVisibleAsync();
     await Expect(settingsSetup).ToContainTextAsync("Codex Recommended for Execute");
@@ -767,8 +767,11 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#cloud-providers-list .cloud-provider-card"
       )
     ).ToHaveCountAsync(
-      5
+      4
     );
+    await Expect(Page.Locator(
+      "#cloud-providers-list > .cloud-provider-card[data-provider=\"ollama-local\"] .ollama-web-search-settings"
+    )).ToHaveCountAsync(1);
     await Expect(
       Page.Locator(
         "#cloud-providers-list"
@@ -3050,6 +3053,45 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CloudAdapterAppliesSupportedInferenceControlsAndReportsUnavailableOnes()
+  {
+    await ConnectFakeCloudAsync("groq", "gsk_inference_profile_test");
+    var settings = await GetSettingsJsonAsync();
+    var profile = settings["inferenceProfiles"]!["general-chat"]!.AsObject();
+    profile["temperature"] = 0.35;
+    profile["topP"] = 0.8;
+    profile["topK"] = 40;
+    profile["minP"] = 0.05;
+    profile["repeatPenalty"] = 1.1;
+    profile["repeatLastN"] = 64;
+    profile["thinking"] = "low";
+    profile["seed"] = 314159;
+    using (var saved = await PutSettingsJsonAsync(settings))
+    {
+      saved.EnsureSuccessStatusCode();
+    }
+
+    _environment.FakeCloud.Reset();
+    var events = await PostChatStreamAsync(
+      "Hello from the inference profile.", "groq::openai/gpt-oss-120b");
+    StringAssert.Contains(events, "inference.profile-selected");
+    StringAssert.Contains(events, "unavailable controls");
+    var request = _environment.FakeCloud.Requests.Last(item =>
+      item.Path == "/groq/openai/v1/chat/completions");
+    using var payload = JsonDocument.Parse(request.Body);
+    Assert.AreEqual(0.35, payload.RootElement.GetProperty("temperature").GetDouble());
+    Assert.AreEqual(0.8, payload.RootElement.GetProperty("top_p").GetDouble());
+    Assert.AreEqual("low", payload.RootElement.GetProperty("reasoning_effort").GetString());
+    Assert.AreEqual(314159, payload.RootElement.GetProperty("seed").GetInt32());
+    Assert.IsFalse(payload.RootElement.TryGetProperty("max_tokens", out _));
+    Assert.IsFalse(payload.RootElement.TryGetProperty("top_k", out _));
+    Assert.IsFalse(payload.RootElement.TryGetProperty("min_p", out _));
+    Assert.IsFalse(payload.RootElement.TryGetProperty("repeat_penalty", out _));
+    Assert.IsFalse(payload.RootElement.TryGetProperty("repeat_last_n", out _));
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CloudPrimaryRequiresOneUnambiguousInstalledLocalFallback()
   {
     await ConnectFakeCloudAsync(
@@ -3294,7 +3336,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
     await OpenSettingsAsync();
     await Page.Locator(
-      "[data-settings-target=\"harnesses\"]"
+      "[data-settings-target=\"providers\"]"
     ).ClickAsync();
     await Page.Locator(
       "#cloud-usage-card"
@@ -3686,8 +3728,10 @@ baselineTotal!.Value
     ).ToContainTextAsync(
       "primary"
     );
-    await Expect(Page.Locator("#settings-runtime #cloud-usage-card"))
+    await Page.Locator("[data-settings-target=\"providers\"]").ClickAsync();
+    await Expect(Page.Locator("#settings-cloud-providers #cloud-usage-card"))
       .ToBeVisibleAsync();
+    await Page.Locator("[data-settings-target=\"harnesses\"]").ClickAsync();
     await Page.Locator(
       "#purge-usage"
     ).ClickAsync();
@@ -4161,7 +4205,7 @@ baselineTotal!.Value
         "#cloud-providers-list .cloud-provider-card"
       )
     ).ToHaveCountAsync(
-      5
+      4
     );
     await Expect(
       Page.Locator(

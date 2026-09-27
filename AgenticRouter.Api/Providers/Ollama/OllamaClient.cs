@@ -92,7 +92,12 @@ public sealed class OllamaClient : IOllamaClient
           model.Name!,
           model.Size,
           model.ModifiedAt,
-          model.Digest
+          model.Digest,
+          AdapterGenerationParameters:
+          [
+            "temperature", "topP", "topK", "minP", "repeatPenalty", "repeatLastN", "seed",
+            "maximumContextTokens", "maximumOutputTokens"
+          ]
         )
       )
       .OrderBy(
@@ -334,7 +339,11 @@ public sealed class OllamaClient : IOllamaClient
           policy.OutputTokens,
           policy.MainGpu,
           generationProfile.TopP,
-          generationProfile.RepeatPenalty
+          generationProfile.RepeatPenalty,
+          generationProfile.TopK,
+          generationProfile.MinP,
+          generationProfile.RepeatLastN,
+          generationProfile.Seed
         ),
         null,
         tools.Count == 0
@@ -349,7 +358,8 @@ public sealed class OllamaClient : IOllamaClient
               )
             )
           ).ToArray(),
-        requestedEffort: requestedEffort
+        requestedEffort: ResolveThinking(generationProfile, requestedEffort,
+          policy.SupportsThinking, model, policy.ThinkingValues, policy.ThinkingDefault)
       );
       using var response = await SendChatAsync(
         policy.Endpoint,
@@ -655,11 +665,17 @@ public sealed class OllamaClient : IOllamaClient
           policy.OutputTokens,
           policy.MainGpu,
           options.EffectiveGenerationProfile.TopP,
-          options.EffectiveGenerationProfile.RepeatPenalty
+          options.EffectiveGenerationProfile.RepeatPenalty,
+          options.EffectiveGenerationProfile.TopK,
+          options.EffectiveGenerationProfile.MinP,
+          options.EffectiveGenerationProfile.RepeatLastN,
+          options.EffectiveGenerationProfile.Seed
         ),
         null,
         images: options.Images,
-        requestedEffort: options.RequestedEffort
+        requestedEffort: ResolveThinking(options.EffectiveGenerationProfile,
+          options.RequestedEffort, policy.SupportsThinking, model,
+          policy.ThinkingValues, policy.ThinkingDefault)
       );
       using var response = await SendChatAsync(
         policy.Endpoint,
@@ -802,7 +818,9 @@ public sealed class OllamaClient : IOllamaClient
         "tools",
         StringComparer.OrdinalIgnoreCase
       ),
-      ReadDeclaredContextTokens(payload.ModelInfo)
+      ReadDeclaredContextTokens(payload.ModelInfo),
+      ReadThinkingValues(payload.Thinking),
+      ReadThinkingDefault(payload.Thinking)
     );
   }
 
@@ -827,7 +845,12 @@ public sealed class OllamaClient : IOllamaClient
       payload.Details?.QuantizationLevel,
       payload.Details?.Format,
       payload.Details?.Family,
-      payload.Details?.Families ?? []
+      payload.Details?.Families ?? [],
+      ReadThinkingValues(payload.Thinking) is { } metadataThinkingValues
+        ? metadataThinkingValues.Any(value => value != "false")
+        : payload.Capabilities?.Any(capability => capability is "thinking" or "reasoning") == true,
+      ReadThinkingValues(payload.Thinking),
+      ReadThinkingDefault(payload.Thinking)
     );
   }
 
@@ -950,6 +973,19 @@ public sealed class OllamaClient : IOllamaClient
       StringComparer.OrdinalIgnoreCase
     );
 
+    var reasoning = inspected.ThinkingValues is { } thinkingValues
+      ? thinkingValues.Any(value => value != "false")
+      : capabilities.Contains("thinking", StringComparer.OrdinalIgnoreCase)
+        || capabilities.Contains("reasoning", StringComparer.OrdinalIgnoreCase);
+    var generationParameters = new List<string>
+    {
+      "temperature", "topP", "topK", "minP", "repeatPenalty",
+      "repeatLastN", "seed", "maximumContextTokens", "maximumOutputTokens"
+    };
+    if (reasoning)
+    {
+      generationParameters.Add("thinking");
+    }
     return new ProviderModelCapabilities(
       chat,
       chat,
@@ -960,13 +996,7 @@ public sealed class OllamaClient : IOllamaClient
       "ollama-api-show",
       true,
       StructuredOutput: chat,
-      Reasoning: capabilities.Contains(
-        "thinking",
-        StringComparer.OrdinalIgnoreCase
-      ) || capabilities.Contains(
-        "reasoning",
-        StringComparer.OrdinalIgnoreCase
-      ),
+      Reasoning: reasoning,
       MaximumImageCount: vision
         ? CapabilityLimits.MaximumImageCount
         : 0,
@@ -976,7 +1006,9 @@ public sealed class OllamaClient : IOllamaClient
       SupportedImageMimeTypes: vision
         ? CapabilityLimits.ImageMimeTypes
         : [],
-      ToolProtocolConfirmed: false
+      ToolProtocolConfirmed: false,
+      AdapterGenerationParameters: generationParameters,
+      ThinkingModes: SupportedThinkingModes(model, reasoning, inspected.ThinkingValues)
     );
   }
 
@@ -1336,11 +1368,17 @@ public sealed class OllamaClient : IOllamaClient
         policy.OutputTokens,
         policy.MainGpu,
         options.EffectiveGenerationProfile.TopP,
-        options.EffectiveGenerationProfile.RepeatPenalty
+        options.EffectiveGenerationProfile.RepeatPenalty,
+        options.EffectiveGenerationProfile.TopK,
+        options.EffectiveGenerationProfile.MinP,
+        options.EffectiveGenerationProfile.RepeatLastN,
+        options.EffectiveGenerationProfile.Seed
       ),
       null,
       images: options.Images,
-      requestedEffort: options.RequestedEffort
+      requestedEffort: ResolveThinking(options.EffectiveGenerationProfile,
+        options.RequestedEffort, policy.SupportsThinking, model,
+        policy.ThinkingValues, policy.ThinkingDefault)
     );
     using var response = await SendChatAsync(
       baseUri,
@@ -1714,7 +1752,10 @@ public sealed class OllamaClient : IOllamaClient
       resolution,
       resolution.OutputTokenLimit,
       endpoint.MainGpu,
-      endpoint.Endpoint
+      endpoint.Endpoint,
+      metadata.SupportsThinking,
+      metadata.ThinkingValues,
+      metadata.ThinkingDefault
     );
   }
 
@@ -1963,6 +2004,91 @@ public sealed class OllamaClient : IOllamaClient
       : singleLine[..1_000];
   }
 
+  private static IReadOnlyList<string>? ReadThinkingValues(OllamaThinkingMetadata? thinking) =>
+    thinking?.Values?.Select(value => value.ToString().ToLowerInvariant()).ToArray();
+
+  private static string? ReadThinkingDefault(OllamaThinkingMetadata? thinking) =>
+    thinking?.Default?.ToString().ToLowerInvariant();
+
+  private static IReadOnlyList<string> SupportedThinkingModes(
+    string model,
+    bool reasoning,
+    IReadOnlyList<string>? values
+  )
+  {
+    if (!reasoning) return [];
+    if (values is not null)
+    {
+      var modes = new List<string>();
+      if (values.Contains("false", StringComparer.Ordinal)) modes.Add("disabled");
+      if (values.Any(value => value != "false")) modes.Add("enabled");
+      foreach (var level in new[] { "low", "medium", "high" })
+      {
+        if (values.Contains(level, StringComparer.Ordinal)) modes.Add(level);
+      }
+      if (values.Contains("max", StringComparer.Ordinal)
+        || values.Contains("xhigh", StringComparer.Ordinal)) modes.Add("max");
+      return modes;
+    }
+    return model.StartsWith("gpt-oss:", StringComparison.OrdinalIgnoreCase)
+      ? ["enabled", "low", "medium", "high"]
+      : ["disabled", "enabled"];
+  }
+
+  private static object? ResolveThinking(
+    ProviderGenerationProfile profile,
+    string? requestedEffort,
+    bool supported,
+    string model,
+    IReadOnlyList<string>? values,
+    string? defaultValue
+  )
+  {
+    var modes = SupportedThinkingModes(model, supported, values);
+    if (modes.Count == 0)
+    {
+      return null;
+    }
+    if (profile.Id == ProviderGenerationProfiles.Deterministic.Id)
+    {
+      return requestedEffort is not null && modes.Contains(requestedEffort, StringComparer.Ordinal)
+        ? MapRequestedEffort(requestedEffort, values) : null;
+    }
+    if (profile.Id == InferenceProfileDefaults.Supervisor)
+    {
+      return requestedEffort is not null && modes.Contains(requestedEffort, StringComparer.Ordinal)
+        ? MapRequestedEffort(requestedEffort, values) : null;
+    }
+    if (!modes.Contains(profile.Thinking, StringComparer.Ordinal)) return null;
+    return profile.Thinking switch
+    {
+      InferenceThinkingModes.Auto => null,
+      InferenceThinkingModes.Disabled => false,
+      InferenceThinkingModes.Enabled => ResolveEnabledThinking(values, defaultValue, model),
+      InferenceThinkingModes.Max => values?.Contains("xhigh", StringComparer.Ordinal) == true
+        ? "xhigh" : "max",
+      _ => profile.Thinking
+    };
+  }
+
+  private static object MapRequestedEffort(string effort, IReadOnlyList<string>? values) =>
+    effort == "max" && values?.Contains("xhigh", StringComparer.Ordinal) == true
+      ? "xhigh" : effort;
+
+  private static object ResolveEnabledThinking(
+    IReadOnlyList<string>? values,
+    string? defaultValue,
+    string model
+  )
+  {
+    if (values?.Contains("true", StringComparer.Ordinal) == true) return true;
+    if (defaultValue is not null && defaultValue != "false") return defaultValue;
+    var firstEnabled = values?.FirstOrDefault(value => value != "false");
+    if (firstEnabled is not null) return firstEnabled;
+    return model.StartsWith("gpt-oss:", StringComparison.OrdinalIgnoreCase)
+      ? "medium" : true;
+  }
+
   private static OllamaChatRequest CreateRequest(
     string model,
     IReadOnlyList<ChatMessage> messages,
@@ -1972,7 +2098,7 @@ public sealed class OllamaClient : IOllamaClient
     int? keepAlive,
     IReadOnlyList<OllamaApiTool>? tools = null,
     IReadOnlyList<ProviderImagePayload>? images = null,
-    string? requestedEffort = null
+    object? requestedEffort = null
   )
   {
     var normalizedMessages = NormalizeSystemMessages(
@@ -2072,7 +2198,7 @@ public sealed class OllamaClient : IOllamaClient
     OllamaOptions? options,
     int? keepAlive,
     IReadOnlyList<OllamaApiTool>? tools = null,
-    string? requestedEffort = null
+    object? requestedEffort = null
   )
   {
     return new OllamaChatRequest(
@@ -2143,7 +2269,13 @@ public sealed class OllamaClient : IOllamaClient
     IReadOnlyList<string>? Capabilities,
     [property: JsonPropertyName("model_info")]
     IReadOnlyDictionary<string, JsonElement>? ModelInfo,
-    OllamaModelDetails? Details
+    OllamaModelDetails? Details,
+    OllamaThinkingMetadata? Thinking
+  );
+
+  private sealed record OllamaThinkingMetadata(
+    IReadOnlyList<JsonElement>? Values,
+    JsonElement? Default
   );
 
   private sealed record OllamaModelDetails(
@@ -2171,7 +2303,7 @@ public sealed class OllamaClient : IOllamaClient
     OllamaOptions? Options,
     [property: JsonPropertyName("keep_alive")] int? KeepAlive,
     IReadOnlyList<OllamaApiTool>? Tools,
-    string? Think
+    object? Think
   );
 
   private sealed record OllamaOptions(
@@ -2180,14 +2312,21 @@ public sealed class OllamaClient : IOllamaClient
     int? NumPredict,
     int? MainGpu,
     double? TopP = null,
-    double? RepeatPenalty = null
+    double? RepeatPenalty = null,
+    int? TopK = null,
+    double? MinP = null,
+    int? RepeatLastN = null,
+    int? Seed = null
   );
 
   private sealed record GenerationPolicy(
     OllamaContextResolution Resolution,
     int OutputTokens,
     int? MainGpu,
-    Uri Endpoint
+    Uri Endpoint,
+    bool SupportsThinking,
+    IReadOnlyList<string>? ThinkingValues,
+    string? ThinkingDefault
   );
 
   private sealed record StreamingToolResponse(

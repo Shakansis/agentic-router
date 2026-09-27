@@ -825,7 +825,12 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   );
   const message = document.createElement("span");
   message.className = "activity-message";
-  message.textContent = streamEvent.message;
+  const inference = streamEvent.inference;
+  message.textContent = inference
+    ? `${streamEvent.message}\nRun ID: ${streamEvent.chatRunId || streamEvent.requestId}`
+      + `\nSeed: ${inference.seedStatus === "requested" ? `${inference.seed} (requested)` : "unavailable"}`
+    : streamEvent.message;
+  if (inference) message.style.whiteSpace = "pre-line";
   row.append(time, icon, message);
   group.body.append(row);
   group.count++;

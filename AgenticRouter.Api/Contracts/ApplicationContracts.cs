@@ -15,7 +15,8 @@ public sealed record InstalledModel(
   string? DisplayName = null,
   ProviderModelCapabilities? Capabilities = null,
   bool Selectable = true,
-  ProviderModelPricing? Pricing = null
+  ProviderModelPricing? Pricing = null,
+  IReadOnlyList<string>? AdapterGenerationParameters = null
 );
 
 public sealed record ProviderError(
@@ -986,7 +987,22 @@ public sealed record ChatStreamEvent(
   string? SpecialistCompletion = null,
   UserInputRequestView? UserInput = null,
   string? ChatRunId = null,
-  long? ChatRunSequence = null
+  long? ChatRunSequence = null,
+  InferenceRunMetadataView? Inference = null
+);
+
+public sealed record InferenceRunMetadataView(
+  string ProfileId,
+  double Temperature,
+  string Thinking,
+  int? Seed,
+  string SeedStatus,
+  double? TopP,
+  int? TopK,
+  double? MinP,
+  double? RepeatPenalty,
+  int? RepeatLastN,
+  IReadOnlyList<string> UnavailableControls
 );
 
 public sealed record ValidationErrorsResponse(

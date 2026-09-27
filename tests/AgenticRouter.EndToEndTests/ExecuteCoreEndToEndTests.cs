@@ -1587,8 +1587,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     {
       ("general", new[] {"settings-general", "settings-ollama"}),
       ("models-routing", new[] {"settings-models", "settings-coordinator"}),
+      ("inference", new[] {"settings-inference"}),
       ("providers", new[] {"settings-cloud-providers"}),
-      ("harnesses", new[] {"settings-runtime", "settings-setup"}),
+      ("local-resources", new[] {"settings-setup"}),
+      ("harnesses", new[] {"settings-runtime"}),
+      ("ollama-context", new[] {"settings-ollama-context"}),
       ("execution", new[] {"settings-execution"}),
       ("workspaces", new[] {"settings-workspaces", "settings-git", "settings-validation"}),
       ("advanced", new[] {"settings-advanced"})
@@ -3226,7 +3229,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.AreEqual(0.8, request.Temperature);
     Assert.AreEqual(0.92, request.TopP);
     Assert.AreEqual(1.05, request.RepeatPenalty);
-    Assert.AreEqual(16_384, request.ContextTokens);
+    Assert.AreEqual(32_768, request.ContextTokens);
     Assert.IsTrue(
       request.Messages.Any(
         message => message.Role == "system"
@@ -3236,6 +3239,202 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           )
       )
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InferenceProfileEditorPersistsAndAppliesToManualChatModel()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"inference\"]").ClickAsync();
+    Assert.IsTrue(await Page.EvaluateAsync<bool>(
+      """
+      () => {
+      const section = document.querySelector('#settings-inference');
+      const heading = section.querySelector('.inference-heading').getBoundingClientRect();
+      const help = section.querySelector('.inference-help-link').getBoundingClientRect();
+      const input = section.querySelector('#inference-temperature').getBoundingClientRect();
+      return help.right >= heading.right - 24 && help.top <= heading.bottom
+        && input.height >= 36;
+      }
+      """), "Inference Help and controls should follow the Settings layout.");
+    await Page.Locator(".inference-advanced").EvaluateAsync("element => element.open = true");
+    var topPHelp = Page.Locator("button[aria-label=\"Top P information\"]");
+    await topPHelp.HoverAsync();
+    Assert.IsTrue(await topPHelp.EvaluateAsync<bool>(
+      """
+      button => {
+      const tooltip = getComputedStyle(button, '::after');
+      const buttonBox = button.getBoundingClientRect();
+      const navigation = document.querySelector('#settings-navigation').getBoundingClientRect();
+      const input = document.querySelector('#inference-top-p').getBoundingClientRect();
+      const tooltipLeft = buttonBox.left + parseFloat(tooltip.left);
+      const tooltipBottom = buttonBox.bottom - parseFloat(tooltip.bottom);
+      return tooltipLeft >= navigation.right && tooltipBottom < input.top;
+      }
+      """), "The Top P tooltip should remain above its input and clear of the menu.");
+    var initialTemperatures = new Dictionary<string, string>
+    {
+      ["general-chat"] = "0.6",
+      ["documentation"] = "0.25",
+      ["software-development"] = "0.2",
+      ["software-architecture"] = "0.35",
+      ["rpg-storytelling"] = "0.8",
+      ["review-and-testing"] = "0.1",
+      ["supervisor"] = "0.1"
+    };
+    foreach (var (profile, temperature) in initialTemperatures)
+    {
+      await Page.Locator("#inference-profile-selector").SelectOptionAsync(profile);
+      await Expect(Page.Locator("#inference-temperature")).ToHaveValueAsync(temperature);
+    }
+    await Page.Locator("#inference-profile-selector").SelectOptionAsync("rpg-storytelling");
+    await Expect(Page.Locator("#inference-temperature")).ToHaveValueAsync("0.8");
+    await Page.Locator("#inference-temperature").FillAsync("0.65");
+    await Expect(Page.Locator("#inference-maximum-context-tokens")).ToHaveCountAsync(0);
+    await Expect(Page.Locator("#inference-maximum-output-tokens")).ToHaveCountAsync(0);
+    await Page.Locator("#inference-top-k").FillAsync("40");
+    await Page.Locator("#inference-min-p").FillAsync("0.05");
+    await Page.Locator("#inference-repeat-last-n").FillAsync("64");
+    await Page.Locator("#inference-seed-mode").SelectOptionAsync("fixed");
+    await Page.Locator("#inference-seed").FillAsync("123456");
+    await Page.Locator("#inference-profile-selector").SelectOptionAsync("supervisor");
+    await Expect(Page.Locator("#inference-thinking")).ToBeDisabledAsync();
+    await Expect(Page.Locator("#inference-thinking-note"))
+      .ToContainTextAsync("Controlled by Supervisor phase effort");
+    await Page.Locator("#inference-profile-selector").SelectOptionAsync("rpg-storytelling");
+    await Expect(Page.Locator("#inference-top-k")).ToHaveValueAsync("40");
+    await Expect(Page.Locator("#inference-thinking")).ToBeEnabledAsync();
+    await Expect(Page.Locator("#inference-seed")).ToHaveValueAsync("123456");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+    await Page.Locator("#close-settings").ClickAsync();
+
+    var yaml = await _environment.HttpClient.GetStringAsync("api/settings/yaml");
+    StringAssert.Contains(yaml, "inference_profiles:");
+    StringAssert.Contains(yaml, "top_k: \"40\"");
+    StringAssert.Contains(yaml, "seed: \"123456\"");
+
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SendMessageAsync("Write an RPG story about an ancient observatory");
+    var request = _environment.FakeOllama.Requests.Last(
+      item => item.Model == "alpha:latest");
+    Assert.AreEqual(0.65, request.Temperature);
+    Assert.AreEqual(40, request.TopK);
+    Assert.AreEqual(0.05, request.MinP);
+    Assert.AreEqual(64, request.RepeatLastN);
+    Assert.AreEqual(123456, request.Seed);
+    Assert.AreEqual(32_768, request.ContextTokens);
+
+    using var imported = await _environment.HttpClient.PutAsJsonAsync(
+      "api/settings/yaml",
+      new { yaml = yaml.Replace("top_k: \"40\"", "top_k: \"41\"", StringComparison.Ordinal) });
+    imported.EnsureSuccessStatusCode();
+    using var restored = await _environment.HttpClient.GetAsync("api/settings");
+    restored.EnsureSuccessStatusCode();
+    using var restoredJson = JsonDocument.Parse(await restored.Content.ReadAsStringAsync());
+    Assert.AreEqual(41, restoredJson.RootElement.GetProperty("inferenceProfiles")
+      .GetProperty("rpg-storytelling").GetProperty("topK").GetInt32());
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task AutomaticSeedAndThinkingAreSentAndShownWithChatRunId()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"inference\"]").ClickAsync();
+    await Page.Locator("#inference-profile-selector").SelectOptionAsync("general-chat");
+    await Page.Locator("#inference-thinking").SelectOptionAsync("high");
+    await Page.Locator(".inference-advanced").EvaluateAsync("element => element.open = true");
+    await Page.Locator("#inference-seed-mode").SelectOptionAsync("auto");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+    await Page.Locator("#close-settings").ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("gpt-oss:20b");
+
+    await SendMessageAsync("Hello");
+    var first = _environment.FakeOllama.Requests.Last(item => item.Model == "gpt-oss:20b");
+    Assert.AreEqual("high", first.Think);
+    Assert.IsTrue(first.Seed is > 0);
+    await Expect(Page.Locator(".activity-row[data-event-type=\"inference.profile-selected\"]"))
+      .ToContainTextAsync($"Seed: {first.Seed}");
+    await Expect(Page.Locator(".activity-row[data-event-type=\"inference.profile-selected\"]"))
+      .ToContainTextAsync("Run ID:");
+
+    await SendMessageAsync("Hello again");
+    var second = _environment.FakeOllama.Requests.Last(item => item.Model == "gpt-oss:20b");
+    Assert.IsTrue(second.Seed is > 0);
+    Assert.AreNotEqual(first.Seed, second.Seed);
+
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"inference\"]").ClickAsync();
+    await Page.Locator("#inference-thinking").SelectOptionAsync("max");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+    await Page.Locator("#close-settings").ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SendMessageAsync("One more answer");
+    Assert.AreEqual("xhigh", _environment.FakeOllama.Requests
+      .Last(item => item.Model == "qwen3.8:27b-gpu0").Think);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task SettingsKeepsStatusCenteredAndLinksSupervisorEffort()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#open-settings").ClickAsync();
+    await Page.Locator("[data-settings-target=\"models-routing\"]").ClickAsync();
+    await Page.Locator(".model-organization-panel").First.Locator("summary").ClickAsync();
+    await Expect(Page.Locator(
+      "#model-organization-list [data-model-organization-action=\"favorite\"]"
+    ).First).ToHaveTextAsync(new Regex("^(Favorite|Remove favorite)$"));
+    await Expect(Page.Locator(
+      "#model-organization-list [data-model-organization-action=\"hidden\"]"
+    ).First).ToHaveTextAsync(new Regex("^(Hide|Show)$"));
+
+    await Page.Locator("[data-settings-target=\"providers\"]").ClickAsync();
+    await Expect(Page.Locator(
+      "#cloud-providers-list > .cloud-provider-card[data-provider=\"ollama-local\"] .ollama-web-search-settings"
+    )).ToHaveCountAsync(1);
+    await Expect(Page.Locator("#cloud-providers-list > .cloud-provider-card"))
+      .ToHaveCountAsync(4);
+
+    await Page.Locator("[data-settings-target=\"inference\"]").ClickAsync();
+    await Page.Locator("#inference-profile-selector").SelectOptionAsync("supervisor");
+    await Expect(Page.Locator("#inference-thinking")).ToBeDisabledAsync();
+    Assert.AreEqual("dashed", await Page.Locator("#inference-thinking")
+      .EvaluateAsync<string>("element => getComputedStyle(element).borderTopStyle"));
+    await Page.Locator("#inference-phase-effort-link").ClickAsync();
+    await Expect(Page.Locator("#settings-general")).ToHaveClassAsync(new Regex("active"));
+    await Expect(Page.Locator("#phase-effort-settings"))
+      .ToHaveClassAsync(new Regex("phase-effort-highlight"));
+    await Expect(Page.Locator("#phase-effort-settings")).ToBeInViewportAsync();
+
+    await Page.Locator("[data-settings-target=\"inference\"]").ClickAsync();
+    await Page.Locator("#inference-profile-selector").SelectOptionAsync("general-chat");
+    await Page.Locator("#inference-temperature").FillAsync("0.55");
+    await Expect(Page.Locator("#settings-dirty")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#settings-dirty")).ToHaveTextAsync("Unsaved changes");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+    await Expect(Page.Locator("#settings-dirty")).ToBeHiddenAsync();
+    Assert.IsTrue(await Page.EvaluateAsync<bool>(
+      """
+      () => {
+        const header = document.querySelector('#settings-dialog .dialog-header').getBoundingClientRect();
+        const status = document.querySelector('#save-status').getBoundingClientRect();
+        const center = box => (box.left + box.right) / 2;
+        return Math.abs(center(header) - center(status)) < 3
+          && parseFloat(getComputedStyle(document.querySelector('#save-status')).fontSize) >= 13;
+      }
+      """));
+    await Page.Locator("#inference-temperature").FillAsync("0.56");
+    await Expect(Page.Locator("#save-status")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#settings-dirty")).ToHaveTextAsync("Unsaved changes");
   }
 
   [TestMethod]
@@ -5351,7 +5550,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await OpenSettingsAsync();
     await Page.Locator(
-      "[data-settings-target=\"harnesses\"]"
+      "[data-settings-target=\"ollama-context\"]"
     ).ClickAsync();
     await Expect(
       Page.Locator(

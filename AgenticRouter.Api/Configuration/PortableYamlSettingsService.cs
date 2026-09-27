@@ -30,6 +30,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     "provider",
     "models",
     "routing",
+    "inference_profiles",
     "context",
     "runtime",
     "ollama_runtime",
@@ -186,6 +187,21 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         intentionName,
         settings.Intentions[intentionName].SystemPrompt
       );
+    }
+
+    yaml.AppendLine("inference_profiles:");
+    foreach (var name in InferenceProfileDefaults.Names)
+    {
+      var profile = settings.InferenceProfiles[name];
+      yaml.Append("  ").Append(name).AppendLine(":");
+      Scalar(yaml, 2, "temperature", profile.Temperature.ToString(CultureInfo.InvariantCulture));
+      Scalar(yaml, 2, "thinking", profile.Thinking);
+      Scalar(yaml, 2, "seed", profile.Seed?.ToString(CultureInfo.InvariantCulture) ?? "null");
+      Scalar(yaml, 2, "top_p", profile.TopP?.ToString(CultureInfo.InvariantCulture) ?? "null");
+      Scalar(yaml, 2, "top_k", profile.TopK?.ToString(CultureInfo.InvariantCulture) ?? "null");
+      Scalar(yaml, 2, "min_p", profile.MinP?.ToString(CultureInfo.InvariantCulture) ?? "null");
+      Scalar(yaml, 2, "repeat_penalty", profile.RepeatPenalty?.ToString(CultureInfo.InvariantCulture) ?? "null");
+      Scalar(yaml, 2, "repeat_last_n", profile.RepeatLastN?.ToString(CultureInfo.InvariantCulture) ?? "null");
     }
 
     yaml.AppendLine(
@@ -647,6 +663,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       settings,
       errors
     );
+    settings = ApplyInferenceProfiles(root, settings, errors);
     settings = ApplySimpleSections(
       root,
       settings,
@@ -659,6 +676,82 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         : null,
       errors
     );
+  }
+
+  private static ApplicationSettings ApplyInferenceProfiles(
+    YamlNode root,
+    ApplicationSettings settings,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    var section = Map(root, "inference_profiles", "inference_profiles", errors);
+    if (section is null)
+      return settings;
+
+    ValidateKeys(section, InferenceProfileDefaults.Names, "inference_profiles", errors);
+    var profiles = settings.InferenceProfiles.ToDictionary(
+      pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+    foreach (var name in InferenceProfileDefaults.Names)
+    {
+      var node = Map(section, name, $"inference_profiles.{name}", errors);
+      if (node is null)
+        continue;
+
+      var path = $"inference_profiles.{name}";
+      ValidateKeys(node,
+        ["temperature", "thinking", "seed", "top_p", "top_k", "min_p", "repeat_penalty", "repeat_last_n",
+          "maximum_context_tokens", "maximum_output_tokens"], path, errors);
+      var current = profiles[name];
+      profiles[name] = current with
+      {
+        Temperature = ReadInferenceDouble(node, "temperature", current.Temperature,
+          $"{path}.temperature", errors) ?? current.Temperature,
+        Thinking = ReadString(node, "thinking", current.Thinking,
+          $"{path}.thinking", errors),
+        Seed = ReadInferenceInt(node, "seed", current.Seed, $"{path}.seed", errors),
+        TopP = ReadInferenceDouble(node, "top_p", current.TopP, $"{path}.top_p", errors),
+        TopK = ReadInferenceInt(node, "top_k", current.TopK, $"{path}.top_k", errors),
+        MinP = ReadInferenceDouble(node, "min_p", current.MinP, $"{path}.min_p", errors),
+        RepeatPenalty = ReadInferenceDouble(node, "repeat_penalty", current.RepeatPenalty,
+          $"{path}.repeat_penalty", errors),
+        RepeatLastN = ReadInferenceInt(node, "repeat_last_n", current.RepeatLastN,
+          $"{path}.repeat_last_n", errors)
+      };
+    }
+    return settings with { InferenceProfiles = profiles };
+  }
+
+  private static double? ReadInferenceDouble(
+    YamlNode node, string key, double? fallback, string path,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    if (node.Children?.ContainsKey(key) != true)
+      return fallback;
+    var value = ReadString(node, key, "null", path, errors);
+    if (value == "null")
+      return null;
+    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+      && double.IsFinite(parsed))
+      return parsed;
+    AddError(errors, path, "Value must be a finite number or null.");
+    return fallback;
+  }
+
+  private static int? ReadInferenceInt(
+    YamlNode node, string key, int? fallback, string path,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    if (node.Children?.ContainsKey(key) != true)
+      return fallback;
+    var value = ReadString(node, key, "null", path, errors);
+    if (value == "null")
+      return null;
+    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+      return parsed;
+    AddError(errors, path, "Value must be an integer or null.");
+    return fallback;
   }
 
   private static ApplicationSettings ApplyProvider(

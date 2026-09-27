@@ -2795,6 +2795,8 @@ function renderBenchmarkHarnessDetail(harness, calculated, model = null) {
       ]),
       ["Host validation", test.rawResult.hostValidationResult],
       ["Duration", formatBenchmarkDuration(test.durationMilliseconds)],
+      ["Run ID", test.run.runId],
+      ["Seed", test.run.seed ?? "unavailable"],
       ["Workspace id", test.run.workspaceId],
       ["Fixture fingerprint", test.run.fixtureFingerprint],
       ["Workspace cleaned", test.workspaceCleanedUp],

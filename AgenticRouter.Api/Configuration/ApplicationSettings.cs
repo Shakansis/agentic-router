@@ -30,6 +30,9 @@ public sealed record ApplicationSettings
 
   public Dictionary<string, IntentionSettings> Intentions { get; init; } = [];
 
+  public Dictionary<string, InferenceProfileSettings> InferenceProfiles { get; init; } =
+    InferenceProfileDefaults.Create();
+
   public ContextSettings Context { get; init; } = new();
 
   public RuntimeSettings Runtime { get; init; } = new();
@@ -284,6 +287,92 @@ public sealed record IntentionSettings
   public string Gpu { get; init; } = "default";
 
   public string SystemPrompt { get; init; } = string.Empty;
+}
+
+public sealed record InferenceProfileSettings
+{
+  public double Temperature { get; init; }
+
+  public string Thinking { get; init; } = InferenceThinkingModes.Auto;
+
+  public int? Seed { get; init; }
+
+  public double? TopP { get; init; }
+
+  public int? TopK { get; init; }
+
+  public double? MinP { get; init; }
+
+  public double? RepeatPenalty { get; init; }
+
+  public int? RepeatLastN { get; init; }
+}
+
+public static class InferenceThinkingModes
+{
+  public const string Auto = "auto";
+  public const string Disabled = "disabled";
+  public const string Enabled = "enabled";
+  public const string Low = "low";
+  public const string Medium = "medium";
+  public const string High = "high";
+  public const string Max = "max";
+
+  public static readonly IReadOnlySet<string> All = new HashSet<string>(
+    [Auto, Disabled, Enabled, Low, Medium, High, Max], StringComparer.Ordinal
+  );
+}
+
+public static class InferenceProfileDefaults
+{
+  public const string Supervisor = "supervisor";
+
+  public static readonly IReadOnlyList<string> Names =
+    SettingsDefaults.IntentionNames.Concat([Supervisor]).ToArray();
+
+  public static Dictionary<string, InferenceProfileSettings> Create()
+  {
+    return Names.ToDictionary<string, string, InferenceProfileSettings>(
+      name => name,
+      name => name switch
+      {
+        "general-chat" => new() { Temperature = 0.6 },
+        "documentation" => new() { Temperature = 0.25 },
+        "software-development" => new() { Temperature = 0.2 },
+        "software-architecture" => new() { Temperature = 0.35 },
+        "rpg-storytelling" => new()
+        {
+          Temperature = 0.8,
+          TopP = 0.92,
+          RepeatPenalty = 1.05
+        },
+        "review-and-testing" => new() { Temperature = 0.1 },
+        Supervisor => new() { Temperature = 0.1 },
+        _ => new()
+      },
+      StringComparer.Ordinal
+    );
+  }
+
+  public static bool MatchesLegacyDefaults(
+    IReadOnlyDictionary<string, InferenceProfileSettings>? profiles
+  )
+  {
+    if (profiles?.Count != Names.Count)
+    {
+      return false;
+    }
+
+    return Names.All(name => profiles.TryGetValue(name, out var profile)
+      && profile == (name == "rpg-storytelling"
+        ? new InferenceProfileSettings
+        {
+          Temperature = 0.8,
+          TopP = 0.92,
+          RepeatPenalty = 1.05
+        }
+        : new InferenceProfileSettings()));
+  }
 }
 
 public static class OllamaGpuSelection

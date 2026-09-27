@@ -1710,6 +1710,22 @@ textarea.terminal-command-input {
   border-radius: 8px;
 }
 
+.phase-effort-settings.phase-effort-highlight {
+  animation: phase-effort-highlight 1.6s ease-out 1;
+}
+
+@keyframes phase-effort-highlight {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  38% { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phase-effort-settings.phase-effort-highlight {
+    animation: none;
+    border-color: var(--accent);
+  }
+}
+
 .phase-effort-settings legend {
   padding: 0 5px;
   color: var(--text);
@@ -2080,9 +2096,43 @@ textarea[readonly] {
 }
 
 .settings-dialog .dialog-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   z-index: 4;
   flex: 0 0 auto;
   background: var(--sidebar);
+}
+
+.settings-dialog .dialog-header > .icon-button {
+  justify-self: end;
+}
+
+.settings-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-status .badge {
+  font-size: 13px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.settings-status .badge[hidden] {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  .settings-dialog .dialog-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .settings-status {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 }
 
 .dialog-header p {
@@ -2100,6 +2150,8 @@ textarea[readonly] {
 }
 
 .settings-navigation {
+  position: relative;
+  z-index: 1;
   display: flex;
   min-height: 0;
   flex-direction: column;
@@ -2108,6 +2160,136 @@ textarea[readonly] {
   overflow-y: auto;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--sidebar) 90%, black);
+}
+
+.inference-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.inference-help-link {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 36px;
+  text-decoration: none;
+}
+
+.inference-fields {
+  display: grid;
+  max-width: 840px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 24px;
+  margin-top: 18px;
+}
+
+.inference-overview {
+  max-width: 1000px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.inference-profile-column,
+.inference-profile-choice,
+.inference-field {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+}
+
+.inference-profile-choice,
+.inference-field {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.inference-field .field-label-with-help {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.inference-field input,
+.inference-field select,
+.inference-profile-choice select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.inference-controlled label {
+  color: var(--subtle);
+}
+
+.inference-controlled select:disabled {
+  color: var(--subtle);
+  background: var(--surface-soft);
+  border-style: dashed;
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+#inference-thinking-note a {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.inference-profile-column .runtime-note {
+  margin: 0;
+}
+
+#settings-inference .information-button::after {
+  top: auto;
+  bottom: calc(100% + 9px);
+  right: auto;
+  left: 0;
+  transform: translateY(3px);
+}
+
+#settings-inference .information-button:hover,
+#settings-inference .information-button:focus-visible {
+  z-index: 100;
+}
+
+#settings-inference .information-button:hover::after,
+#settings-inference .information-button:focus-visible::after {
+  transform: translateY(0);
+}
+
+.inference-advanced,
+.inference-compatibility {
+  max-width: 840px;
+  margin-top: 22px;
+}
+
+.inference-advanced .runtime-note,
+.inference-compatibility .runtime-note {
+  margin-top: 10px;
+}
+
+.settings-navigation button.settings-navigation-child {
+  padding-left: 23px;
+  font-size: 11px;
+}
+
+@media (max-width: 700px) {
+  .inference-fields,
+  .inference-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .settings-navigation button {
@@ -2133,6 +2315,8 @@ textarea[readonly] {
 }
 
 .settings-content {
+  position: relative;
+  z-index: 2;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -2387,6 +2571,25 @@ textarea[readonly] {
   gap: 14px;
   padding: 0 14px 14px;
   border-top: 1px solid var(--border);
+}
+
+.ollama-web-search-settings {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.ollama-web-search-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ollama-web-search-body {
+  display: grid;
+  gap: 12px;
 }
 
 .cloud-provider-fields {

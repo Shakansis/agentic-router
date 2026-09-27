@@ -244,7 +244,8 @@ public sealed record BenchmarkRun(
   string FixtureId = BenchmarkSuiteIds.FixtureId,
   int FixtureVersion = BenchmarkSuiteIds.FixtureVersion,
   string Prompt = "",
-  string FixtureFingerprint = ""
+  string FixtureFingerprint = "",
+  int? Seed = null
 );
 
 public sealed record BenchmarkError(

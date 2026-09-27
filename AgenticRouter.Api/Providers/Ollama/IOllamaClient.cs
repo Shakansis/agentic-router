@@ -203,14 +203,19 @@ public sealed record OllamaModelMetadata(
   string? Quantization,
   string? Format,
   string? Family,
-  IReadOnlyList<string> Families
+  IReadOnlyList<string> Families,
+  bool SupportsThinking = false,
+  IReadOnlyList<string>? ThinkingValues = null,
+  string? ThinkingDefault = null
 );
 
 public sealed record OllamaModelCapabilities(
   string Model,
   IReadOnlyList<string> Capabilities,
   bool AdvertisedTools,
-  int? DeclaredContextTokens = null
+  int? DeclaredContextTokens = null,
+  IReadOnlyList<string>? ThinkingValues = null,
+  string? ThinkingDefault = null
 );
 
 public class OllamaProviderException : Exception

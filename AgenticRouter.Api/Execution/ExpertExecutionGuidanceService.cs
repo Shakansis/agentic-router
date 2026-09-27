@@ -273,7 +273,11 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
       {
         GenerationProfile = options.EffectiveGenerationProfile with
         {
-          MaximumOutputTokens = maximumOutputTokens
+          MaximumOutputTokens = Math.Min(
+            maximumOutputTokens.Value,
+            options.EffectiveGenerationProfile.MaximumOutputTokens
+              ?? maximumOutputTokens.Value
+          )
         }
       };
     }

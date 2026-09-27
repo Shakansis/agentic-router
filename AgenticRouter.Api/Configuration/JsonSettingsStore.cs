@@ -73,6 +73,17 @@ public sealed class JsonSettingsStore : ISettingsStore
       using var document = JsonDocument.Parse(
         json
       );
+      var inferenceDefaultsUpgraded = document.RootElement.TryGetProperty(
+        "inferenceProfiles",
+        out _
+      ) && InferenceProfileDefaults.MatchesLegacyDefaults(settings.InferenceProfiles);
+      if (inferenceDefaultsUpgraded)
+      {
+        settings = settings with
+        {
+          InferenceProfiles = InferenceProfileDefaults.Create()
+        };
+      }
       var runtimeProfileUpgraded = settings.OllamaRuntime.ProfileSchemaVersion == 1;
       if (runtimeProfileUpgraded)
       {
@@ -292,6 +303,9 @@ public sealed class JsonSettingsStore : ISettingsStore
         "knowledgeProviders",
         out _
       ) || !document.RootElement.TryGetProperty(
+        "inferenceProfiles",
+        out _
+      ) || !document.RootElement.TryGetProperty(
         "modelOrganization",
         out _
       ) || !document.RootElement.TryGetProperty(
@@ -322,7 +336,8 @@ public sealed class JsonSettingsStore : ISettingsStore
         || !hasPlanLimitsSchemaVersion
         || !hasSessionCompactionThreshold
         || !hasSessionCompactionTarget
-        || runtimeProfileUpgraded;
+        || runtimeProfileUpgraded
+        || inferenceDefaultsUpgraded;
 
       if (
         document.RootElement.TryGetProperty(

@@ -118,8 +118,11 @@ let resizeObserver;
 const settingsSectionGroups = {
   general: ["settings-general", "settings-ollama"],
   "models-routing": ["settings-models", "settings-coordinator"],
+  inference: ["settings-inference"],
   providers: ["settings-cloud-providers"],
-  harnesses: ["settings-setup", "settings-runtime"],
+  "local-resources": ["settings-setup"],
+  harnesses: ["settings-runtime"],
+  "ollama-context": ["settings-ollama-context"],
   execution: ["settings-execution"],
   workspaces: ["settings-workspaces", "settings-git", "settings-validation"],
   advanced: ["settings-advanced"]
@@ -133,6 +136,9 @@ const settingsSectionAliases = {
   coordinator: "models-routing",
   actions: "models-routing",
   runtime: "harnesses",
+  "ollama-runtime": "ollama-context",
+  "context-profiles": "ollama-context",
+  setup: "local-resources",
   execution: "execution",
   context: "harnesses",
   usage: "harnesses",
@@ -323,6 +329,21 @@ function bindElements() {
     "save-settings",
     "save-status",
     "intentions-grid",
+    "inference-profile-selector",
+    "inference-profile-description",
+    "inference-temperature",
+    "inference-thinking",
+    "inference-thinking-note",
+    "inference-phase-effort-link",
+    "inference-top-p",
+    "inference-top-k",
+    "inference-min-p",
+    "inference-repeat-penalty",
+    "inference-repeat-last-n",
+    "inference-seed-mode",
+    "inference-seed",
+    "inference-support-summary",
+    "inference-support",
     "ollama-url",
     "router-model",
     "router-gpu",
@@ -1071,6 +1092,8 @@ function bindEvents() {
     "change",
     event => setSettingsSection(event.target.value, true)
   );
+  elements.inferenceProfileSelector.addEventListener("change", renderSelectedInferenceProfile);
+  elements.inferencePhaseEffortLink.addEventListener("click", openSupervisorPhaseEffort);
   elements.settingsForm.addEventListener("input", handleSettingsInput);
   elements.settingsDialog.addEventListener("cancel", handleSettingsCancel);
   elements.settingsOpenWorkspace.addEventListener("click", openWorkspaceFromSettings);

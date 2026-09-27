@@ -318,6 +318,17 @@ public sealed class DurableSupervisionEndToEndTests
   {
     _environment.FakeOllama.Reset();
     ResetSupervisionFixture();
+    var inferenceProfiles = _environment.BaselineSettings.InferenceProfiles.ToDictionary(
+      pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+    inferenceProfiles["supervisor"] = inferenceProfiles["supervisor"] with
+    {
+      Temperature = 0.25,
+      TopK = 28,
+      Thinking = "max"
+    };
+    using var configured = await _environment.PutSettingsAsync(
+      _environment.BaselineSettings with { InferenceProfiles = inferenceProfiles });
+    configured.EnsureSuccessStatusCode();
     using var client = new HttpClient
     {
       BaseAddress = _environment.BaseUri,
@@ -369,6 +380,13 @@ public sealed class DurableSupervisionEndToEndTests
       1,
       automaticEvents.Where(item => item["type"]!.GetValue<string>() == "response.completed")
     );
+    Assert.IsTrue(automaticEvents.Any(item =>
+      item["type"]?.GetValue<string>() == "inference.profile-selected"
+      && item["message"]?.GetValue<string>()?.Contains("supervisor", StringComparison.Ordinal) == true));
+    Assert.IsTrue(_environment.FakeOllama.Requests.Any(request =>
+      request.Temperature == 0.25 && request.TopK == 28),
+      string.Join("; ", _environment.FakeOllama.Requests.Select(request =>
+        $"{request.Model}: temperature={request.Temperature}, topK={request.TopK}")));
 
     _environment.FakeOllama.Reset();
     ResetSupervisionFixture();
@@ -1214,6 +1232,7 @@ public sealed class DurableSupervisionEndToEndTests
       ["complete"] = "high",
       ["recovery"] = "medium"
     };
+    configured["inferenceProfiles"]!["supervisor"]!["thinking"] = "max";
 
     try
     {
