@@ -998,6 +998,10 @@ public sealed class ExecutionSession
   private string _completionStatus = "not-evaluated";
   private string? _forcedCompletionStatus;
   private ExecutionRoutingEvidence? _routingEvidence;
+  private ExecutionInferenceMetrics? _inferenceMetrics;
+  private readonly Dictionary<string, long?> _harnessOutputTokens = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, ExecutionInferenceMetrics> _harnessMetrics = new(StringComparer.Ordinal);
+
   private string? _authorizedDiagnosticTraceId;
   private long _workspaceRevision;
   private long _planStateRevision;
@@ -2671,6 +2675,33 @@ public sealed class ExecutionSession
     }
   }
 
+  public void RecordInference(ExecutionInferenceMetrics metrics)
+  {
+    lock (_gate)
+      _inferenceMetrics = ExecutionInferenceMetrics.Combine(_inferenceMetrics, metrics);
+  }
+
+  public void RecordHarnessOutput(string turnKey, long? outputTokens)
+  {
+    lock (_gate)
+      _harnessOutputTokens[turnKey] = outputTokens is >= 0 ? outputTokens : null;
+  }
+
+  private ExecutionInferenceMetrics? CreateInferenceMetricsUnsafe()
+  {
+    if (_harnessOutputTokens.Count == 0) return _inferenceMetrics;
+    var result = _inferenceMetrics;
+    foreach (var turn in _harnessOutputTokens)
+      result = ExecutionInferenceMetrics.Combine(result, _harnessMetrics.GetValueOrDefault(turn.Key)
+        ?? new ExecutionInferenceMetrics(turn.Value, null, null, null));
+    return result;
+  }
+
+  public void RecordHarnessMetrics(string turnKey, ExecutionInferenceMetrics metrics)
+  {
+    lock (_gate) _harnessMetrics[turnKey] = metrics;
+  }
+
   public ExecutionSessionSummary CreateSummary()
   {
     lock (_gate)
@@ -2700,7 +2731,8 @@ public sealed class ExecutionSession
         HandoffReason,
         _routingEvidence,
         CreateTimingUnsafe(),
-        State is "running" or "awaiting-user-input" ? null : CreateCompletionSummaryUnsafe()
+        State is "running" or "awaiting-user-input" ? null : CreateCompletionSummaryUnsafe(),
+        CreateInferenceMetricsUnsafe()
       );
     }
   }
@@ -2708,7 +2740,9 @@ public sealed class ExecutionSession
   private IReadOnlyList<string> CreateCompletionSummaryUnsafe()
   {
     var lines = new List<string>();
-    foreach (var file in _files.Where(file => file.Verified))
+    foreach (var file in _files.Where(file => file.Verified)
+      .GroupBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
+      .Select(group => group.Last()))
     {
       var operation = file.Operation switch
       {
@@ -2724,24 +2758,20 @@ public sealed class ExecutionSession
       }
     }
 
-    foreach (var process in _processes)
-    {
-      if (_validation?.Steps.Any(step =>
+    var processes = _processes.Where(process =>
+      _validation?.Steps.Any(step =>
         step.Executable == process.Executable
         && step.Arguments.SequenceEqual(process.Arguments)
         && step.ExitCode == process.ExitCode
         && step.DurationMilliseconds == process.DurationMilliseconds
         && step.TimedOut == process.TimedOut
         && step.Cancelled == process.Cancelled
-      ) == true)
-      {
-        continue;
-      }
-      var result = process.Cancelled ? "cancelled"
-        : process.TimedOut ? "timed out"
-        : process.ExitCode is { } exitCode ? $"exit {exitCode}"
-        : "exit unavailable";
-      lines.Add($"Process: {Path.GetFileName(process.Executable)} · {result}");
+      ) != true).ToArray();
+    if (processes.Length > 0)
+    {
+      var failed = processes.Count(process => process.Cancelled
+        || process.TimedOut || process.ExitCode != 0);
+      lines.Add($"Processes: {processes.Length} run · {processes.Length - failed} succeeded · {failed} failed");
     }
 
     if (_validation is null || _validation.Steps.Count == 0)
@@ -2866,6 +2896,7 @@ public sealed class ExecutionSession
       ConformanceIdentity = snapshot.Review.Summary.ConformanceIdentity;
       HandoffReason = snapshot.Review.Summary.HandoffReason;
       _routingEvidence = snapshot.Review.Summary.RoutingEvidence;
+      _inferenceMetrics = snapshot.Review.Summary.InferenceMetrics;
       State = snapshot.State is "completed" or "completed-with-warnings" or "blocked" or "awaiting-user-input"
         ? snapshot.State
         : "interrupted";

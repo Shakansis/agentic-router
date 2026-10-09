@@ -282,7 +282,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(120_000, CooperativeCancellation = true)]
-  public async Task GlobalNativeFileCreationOutputLimitIsOptionalAndAppliesToEveryModel()
+  public async Task GlobalExecuteOutputBudgetTakesPrecedenceOverOptionalFileCreationLimitForEveryModel()
   {
     Assert.IsNull(_environment.BaselineSettings.Execution.FileCreationOutputTokenLimit);
     var baselineYaml = await _environment.HttpClient.GetStringAsync("api/settings/yaml");
@@ -314,12 +314,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     StringAssert.Contains(yaml, "file_creation_output_token_limit: 12288");
 
     await Page.Locator("#close-settings").ClickAsync();
-    var normalOutputLimits = new Dictionary<string, int>(StringComparer.Ordinal)
-    {
-      ["alpha:latest"] = 4_096,
-      ["qwen3-coder:30b"] = 2_048
-    };
-    foreach (var model in normalOutputLimits.Keys)
+    foreach (var model in new[] { "alpha:latest", "qwen3-coder:30b" })
     {
       foreach (var file in new[] { "token-budget-a.txt", "token-budget-b.txt" })
       {
@@ -345,12 +340,23 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           ExpertExecutionGuidanceService.GuidanceMarker,
           StringComparison.Ordinal
         ))).ToArray();
-      Assert.IsTrue(plannerRequests.Any(request =>
-        request.PredictTokens == 12_288),
+      Assert.IsNotEmpty(plannerRequests, "Execute must invoke the selected model's planner.");
+      Assert.IsTrue(plannerRequests.All(request =>
+        request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2),
         $"{model}: planners={JsonSerializer.Serialize(plannerRequests.Select(request => new { request.Model, request.AvailableTools, request.PredictTokens }))}; all={JsonSerializer.Serialize(_environment.FakeOllama.Requests.Select(request => new { request.Model, request.AvailableTools, request.PredictTokens, Markers = request.Messages.Select(message => message.Content[..Math.Min(message.Content.Length, 80)]).ToArray() }))}");
       Assert.IsTrue(_environment.FakeOllama.Requests.Where(request =>
         !plannerRequests.Contains(request))
-        .All(request => request.PredictTokens == normalOutputLimits[model]), model);
+        .All(request => request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2), model);
+      Assert.AreEqual("first", await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "token-budget-a.txt")));
+      Assert.AreEqual("second", await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "token-budget-b.txt")));
+
+      _environment.FakeOllama.Reset();
+      await Page.GetByRole(AriaRole.Button, new() { Name = "Chat", Exact = true }).ClickAsync();
+      await SendMessageAsync("ordinary chat output budget");
+      Assert.IsNotEmpty(_environment.FakeOllama.Requests);
+      Assert.IsTrue(_environment.FakeOllama.Requests.All(request =>
+        request.PredictTokens == _environment.BaselineSettings.OllamaRuntime.RoleDefaults["primary"].OutputTokenLimit),
+        $"Chat must keep its configured output limit: {model}, requests={JsonSerializer.Serialize(_environment.FakeOllama.Requests.Select(request => new { request.Model, request.PredictTokens }))}");
     }
   }
 
@@ -728,8 +734,10 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator("#harness-selector").SelectOptionAsync("codex");
 
     await SendMessageAsync("delete codex file");
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Deleted: codex-delete.txt");
-    await Expect(Page.Locator(".execution-completion-summary")).Not.ToContainTextAsync("codex-delete-unrelated.txt");
+    await Expect(Page.GetByRole(AriaRole.Region, new() { Name = "Host completion summary", Exact = true }))
+      .ToContainTextAsync("Deleted: codex-delete.txt");
+    await Expect(Page.GetByRole(AriaRole.Region, new() { Name = "Host completion summary", Exact = true }))
+      .Not.ToContainTextAsync("codex-delete-unrelated.txt");
     await Expect(Page.Locator(".action-approval")).ToHaveCountAsync(0);
     Assert.IsFalse(File.Exists(target));
     Assert.AreEqual("preserve me", await File.ReadAllTextAsync(unrelated));
@@ -1491,9 +1499,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#toast-region .app-toast[data-tone=\"error\"]"
+        "#settings-errors[role=\"alert\"]"
       )
     ).ToBeVisibleAsync();
+    await Expect(Page.Locator("#settings-errors")).ToContainTextAsync(
+      "Default context tokens must not exceed the provider context limit.");
+    await Expect(Page.Locator("#settings-dirty")).ToHaveTextAsync("Unsaved changes");
+    var persistedSettings = await _environment.HttpClient.GetFromJsonAsync<TestApplicationSettings>("api/settings", TestJson.Options);
+    Assert.IsNotNull(persistedSettings);
+    Assert.AreEqual(_environment.BaselineSettings.Context, persistedSettings.Context,
+      "A rejected Save must not persist any of the invalid context values.");
     await Expect(
       Page.Locator(
         "#default-context-tokens"
@@ -3262,16 +3277,16 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await Page.Locator(".inference-advanced").EvaluateAsync("element => element.open = true");
     var topPHelp = Page.Locator("button[aria-label=\"Top P information\"]");
     await topPHelp.HoverAsync();
+    await Expect(Page.Locator("#settings-floating-tooltip")).ToBeVisibleAsync();
     Assert.IsTrue(await topPHelp.EvaluateAsync<bool>(
       """
       button => {
-      const tooltip = getComputedStyle(button, '::after');
-      const buttonBox = button.getBoundingClientRect();
+      const tooltip = document.querySelector('#settings-floating-tooltip');
+      const tooltipBox = tooltip.getBoundingClientRect();
       const navigation = document.querySelector('#settings-navigation').getBoundingClientRect();
       const input = document.querySelector('#inference-top-p').getBoundingClientRect();
-      const tooltipLeft = buttonBox.left + parseFloat(tooltip.left);
-      const tooltipBottom = buttonBox.bottom - parseFloat(tooltip.bottom);
-      return tooltipLeft >= navigation.right && tooltipBottom < input.top;
+      return tooltip.matches(':popover-open')
+        && tooltipBox.left >= navigation.right && tooltipBox.bottom < input.top;
       }
       """), "The Top P tooltip should remain above its input and clear of the menu.");
     var initialTemperatures = new Dictionary<string, string>
@@ -4466,7 +4481,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "#model-test-result"
       )
     ).ToContainTextAsync(
-      "Time to first chunk"
+      "TTFT"
     );
     await Expect(
       Page.Locator(
@@ -4489,10 +4504,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.IsTrue(
       _environment.FakeOllama.Requests[0].Stream
     );
-    Assert.AreEqual(
-      "Reply with exactly: OK",
-      _environment.FakeOllama.Requests[0].Messages.Last().Content
-    );
+    Assert.StartsWith("MODEL_TPS_PROBE_V2:",
+      _environment.FakeOllama.Requests[0].Messages.Last().Content);
   }
 
   [TestMethod]
@@ -6271,6 +6284,63 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
   }
 
   [TestMethod]
+  [DataRow("completes", null)]
+  [DataRow("remains empty", "chat-read-completion")]
+  [DataRow("requests tool", "chat-read-finalization")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ChatFinalizesEmptyReadResponseOnce(string outcome, string? expectedError)
+  {
+    var target = Path.Combine(_environment.WorkspaceDirectory, "chat-readable.txt");
+    const string evidence = "chat recovery workspace evidence";
+    await File.WriteAllTextAsync(target, evidence);
+    var prompt = $"chat workspace read request empty response {outcome}";
+
+    await Page.GotoAsync("/");
+    await SendMessageAsync(prompt);
+
+    await Expect(Page.Locator("[data-event-type=\"chat.read-only-empty-response-finalization\"]"))
+      .ToHaveCountAsync(1);
+    await Expect(Page.Locator("[data-event-type=\"chat.workspace-read-completed\"]"))
+      .ToHaveCountAsync(1);
+    await Expect(Page.Locator("[data-event-type=\"action.awaiting-approval\"]"))
+      .ToHaveCountAsync(0);
+    await Expect(Page.Locator("[data-event-type=\"error\"]"))
+      .ToHaveCountAsync(expectedError is null ? 0 : 1);
+    var answer = Page.Locator(".message.assistant .assistant-answer").Last;
+    await Expect(answer).Not.ToContainTextAsync("Non-terminal reasoning must not become the answer.");
+    if (expectedError is null)
+    {
+      await Expect(answer).ToContainTextAsync(evidence);
+    }
+    else
+    {
+      await Expect(Page.Locator(".message.assistant").Last).ToContainTextAsync(
+        expectedError == "chat-read-completion"
+          ? "neither a read request nor a final Chat response"
+          : "after the Host closed the bounded Chat read phase"
+      );
+    }
+
+    var requests = _environment.FakeOllama.Requests.Where(request => request.Messages.Any(
+      message => message.Role == "user" && message.Content == prompt)).ToArray();
+    Assert.HasCount(3, requests);
+    Assert.IsTrue(requests[0].HasTools);
+    Assert.IsTrue(requests[1].HasTools);
+    Assert.IsFalse(requests[2].HasTools);
+    var originalEvidence = requests[1].Messages.Single(message => message.Role == "tool");
+    var retainedEvidence = requests[2].Messages.Single(message => message.Role == "tool");
+    Assert.AreEqual(originalEvidence.Content, retainedEvidence.Content);
+    Assert.AreEqual(originalEvidence.ToolName, retainedEvidence.ToolName);
+    Assert.AreEqual(originalEvidence.ToolCallId, retainedEvidence.ToolCallId);
+    StringAssert.Contains(retainedEvidence.Content, evidence);
+    Assert.AreEqual(requests[1].Model, requests[2].Model);
+    Assert.AreEqual(requests[1].Temperature, requests[2].Temperature);
+    Assert.AreEqual(requests[1].Think, requests[2].Think);
+    Assert.AreEqual(requests[1].Seed, requests[2].Seed);
+    Assert.AreEqual(evidence, await File.ReadAllTextAsync(target));
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task ChatRejectsUnofferedMutationWithoutApproval()
   {
@@ -7075,9 +7145,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     await SetExecuteModeAsync(
       "auto"
     );
-    await SendMessageAsync(
-      ForkGameExecutionFixture.ExactRequest
-    );
+    await SendMessageAsync(ForkGameExecutionFixture.ExactRequest);
 
     var rootFiles = Directory.GetFiles(
       _environment.WorkspaceDirectory
@@ -7940,7 +8008,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         ".activity > summary"
       )
     ).ToContainTextAsync(
-      "Completed"
+      "Blocked"
     );
     Assert.IsFalse(
       File.Exists(
@@ -8367,8 +8435,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.IsNotEmpty(specialistRequests);
     Assert.IsTrue(
       specialistRequests.All(
-        request => request.ContextTokens == 24_576
-          && request.PredictTokens == 3_072
+        request => request.ContextTokens == 16_384
+          && request.PredictTokens == 8_192
       ),
       string.Join(
         ", ",

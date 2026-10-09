@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
@@ -350,6 +351,7 @@ public sealed class ManagedOllamaServerEndToEndTests
       httpClients,
       NullLogger<OllamaManagedServerManager>.Instance,
       new FakeGpuDiscoveryService(),
+      new JsonSettingsStore(dataDirectory, new SettingsValidator(), NullLogger<JsonSettingsStore>.Instance),
       executable,
       portOffset: 20_000
     );

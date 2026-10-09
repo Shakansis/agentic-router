@@ -86,7 +86,9 @@ public static class ProviderUsageMapper
       ),
       SumModalityTokens(
         usage
-      )
+      ),
+      // Gemini reports generated thoughts separately from candidate output.
+      GeneratedOutputTokens: output + (ReadInt64(usage, "thoughtsTokenCount") ?? 0)
     );
   }
 

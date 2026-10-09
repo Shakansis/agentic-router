@@ -1162,6 +1162,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       section,
       [
         "profile_schema_version",
+        "managed_kv_cache_type",
         "context_escalation_ladder",
         "role_defaults",
         "memory",
@@ -1386,6 +1387,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
             "provider",
             "model",
             "digest",
+            "performance",
             "roles"
           ],
           path,
@@ -1431,6 +1433,18 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
           }
         }
 
+        ModelRuntimePerformanceSettings? performance = null;
+        var performanceNode = Map(entry.Value, "performance", $"{path}.performance", errors);
+        if (performanceNode is not null)
+        {
+          ValidateKeys(performanceNode, ["draft_tokens", "batch_size"], $"{path}.performance", errors);
+          performance = new ModelRuntimePerformanceSettings
+          {
+            DraftTokens = ReadRuntimePerformanceValue(performanceNode, "draft_tokens", $"{path}.performance", errors),
+            BatchSize = ReadRuntimePerformanceValue(performanceNode, "batch_size", $"{path}.performance", errors)
+          };
+        }
+
         overrides.Add(
           new OllamaModelRuntimeOverride
           {
@@ -1455,7 +1469,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
               $"{path}.digest",
               errors
             ),
-            Overrides = overrideRoles
+            Overrides = overrideRoles,
+            Performance = performance
           }
         );
       }
@@ -1499,6 +1514,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
 
     var importedRuntime = current with
     {
+      ManagedKvCacheType = ReadString(section, "managed_kv_cache_type", current.ManagedKvCacheType,
+        "ollama_runtime.managed_kv_cache_type", errors),
       ProfileSchemaVersion = ReadInt(
         section,
         "profile_schema_version",
@@ -3006,6 +3023,26 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     );
   }
 
+  private static int? ReadRuntimePerformanceValue(
+    YamlNode node,
+    string key,
+    string path,
+    IDictionary<string, List<string>> errors
+  )
+  {
+    var value = ReadString(node, key, "auto", $"{path}.{key}", errors);
+    if (value == "auto")
+    {
+      return null;
+    }
+    if (int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var number))
+    {
+      return number;
+    }
+    AddError(errors, $"{path}.{key}", "Expected auto or an integer.");
+    return null;
+  }
+
   private static void ExportOllamaRuntime(
     StringBuilder yaml,
     OllamaRuntimeSettings runtime
@@ -3014,6 +3051,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     yaml.AppendLine(
       "ollama_runtime:"
     );
+    Scalar(yaml, 1, "managed_kv_cache_type", runtime.ManagedKvCacheType);
     Scalar(
       yaml,
       1,
@@ -3155,6 +3193,12 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         "digest",
         modelOverride.Digest
       );
+      if (modelOverride.Performance is { } performance)
+      {
+        yaml.AppendLine("      performance:");
+        Scalar(yaml, 4, "draft_tokens", performance.DraftTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "auto");
+        Scalar(yaml, 4, "batch_size", performance.BatchSize?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "auto");
+      }
       yaml.AppendLine(
         "      roles:"
       );

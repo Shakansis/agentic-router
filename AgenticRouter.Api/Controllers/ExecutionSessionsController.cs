@@ -12,16 +12,19 @@ public sealed class ExecutionSessionsController : ControllerBase
   private readonly IExecutionSessionStore _sessions;
   private readonly IValidationProfileService _validationProfiles;
   private readonly IWorkspaceProfileService _workspaceProfiles;
+  private readonly ExecutionReviewService _reviews;
 
   public ExecutionSessionsController(
     IExecutionSessionStore sessions,
     IValidationProfileService validationProfiles,
-    IWorkspaceProfileService workspaceProfiles
+    IWorkspaceProfileService workspaceProfiles,
+    ExecutionReviewService reviews
   )
   {
     _sessions = sessions;
     _validationProfiles = validationProfiles;
     _workspaceProfiles = workspaceProfiles;
+    _reviews = reviews;
   }
 
   [HttpPost("{executionSessionId}/validate")]
@@ -93,18 +96,20 @@ public sealed class ExecutionSessionsController : ControllerBase
   }
 
   [HttpGet("{executionSessionId}/review")]
-  public ActionResult<ExecutionSessionReview> Review(
-    string executionSessionId
+  public async Task<ActionResult<ExecutionSessionReview>> Review(
+    string executionSessionId,
+    [FromQuery] string? conversationSessionId,
+    [FromQuery] string? workspaceId,
+    CancellationToken cancellationToken
   )
   {
-    var review = _sessions.GetReview(
-      executionSessionId
+    var review = await _reviews.GetAsync(
+      executionSessionId,
+      conversationSessionId,
+      workspaceId,
+      cancellationToken
     );
-    return review is null
-      ? NotFound()
-      : Ok(
-        review
-      );
+    return review is null ? NotFound() : Ok(review);
   }
 
   [HttpPost("{executionSessionId}/undo")]
@@ -142,6 +147,13 @@ public sealed class ExecutionSessionsController : ControllerBase
           []
         )
       );
+    }
+
+    var current = await _reviews.GetAsync(executionSessionId, null, null, cancellationToken);
+    if (current is not null && !current.Summary.UndoAvailable)
+    {
+      return Conflict(new UndoExecutionResponse(false, executionSessionId,
+        current.Summary.UndoDiagnostic ?? "Undo is no longer available.", [], []));
     }
 
     var response = await _sessions.UndoAsync(

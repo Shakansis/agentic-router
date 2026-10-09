@@ -157,6 +157,25 @@ async function consumeEventStream(stream, assistant, options = {}) {
       streamEvent.executionSession,
       updateVisibleState
     );
+    if (streamEvent.chatSummary) updateChatSummary(assistant, streamEvent.chatSummary);
+    else if (historical && !assistant.executionSession
+      && (streamEvent.type === "interaction.chat" || assistant.chatSummary?.historicalFallback)) {
+      // Older timelines identify Chat but do not retain aggregate inference metrics.
+      updateChatSummary(assistant, {
+        historicalFallback: true,
+        state: streamEvent.type === "response.completed" ? "completed" : "running",
+        model: streamEvent.selectedModel ?? assistant.chatSummary?.model,
+        elapsedMilliseconds: streamEvent.elapsedMilliseconds ?? assistant.chatSummary?.elapsedMilliseconds ?? 0
+      });
+    }
+    if (streamEvent.completionCheckId) {
+      assistant.completionCheckId = streamEvent.completionCheckId;
+      assistant.completionConversationId = streamEvent.conversationSessionId ?? state.conversationSessionId;
+      assistant.completionWorkspaceId = state.conversationWorkspaceId ?? activeWorkspaceProfile()?.id;
+    }
+    if (streamEvent.completionReport) {
+      renderCompletionReport(assistant, streamEvent.completionReport);
+    }
     if (streamEvent.supervisionProgress) {
       renderSupervisionProgress(
         assistant,
@@ -222,7 +241,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
       );
     } else if (streamEvent.type === "response.completed") {
       completed = true;
-      terminalState = "completed";
+      terminalState = streamEvent.executionSession?.state === "blocked" ? "blocked"
+        : streamEvent.diagnostic?.terminalState ?? "completed";
       diagnostic = streamEvent.diagnostic ?? null;
       closeAssistantReasoning(assistant);
       const responseTail = streamEvent.responseTail ?? "";
@@ -244,7 +264,7 @@ async function consumeEventStream(stream, assistant, options = {}) {
             ?? "",
           `terminal:${streamEvent.requestId}`,
           aggregateAnswer,
-          true
+          !(specialistCompletion && answer.includes(specialistCompletion))
         );
         answerChunks = [aggregateAnswer];
         closeAssistantResponse(assistant);
@@ -278,7 +298,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
       assistant.answer.classList.remove("pending");
       addActivity(assistant, streamEvent, false);
       terminalSummary = terminalActivitySummary(
-        assistant.recovered ? "Recovered" : "Completed",
+        terminalState === "blocked" ? "Blocked" : terminalState === "partial" ? "Partial"
+          : assistant.recovered ? "Recovered" : "Completed",
         streamEvent.elapsedMilliseconds,
         diagnostic,
         assistant.selectedModel
@@ -380,18 +401,20 @@ async function consumeEventStream(stream, assistant, options = {}) {
       && streamEvent.userInput
     ) {
       addActivity(assistant, streamEvent, false);
-      await resolveGpuPlacementWarning(streamEvent.userInput);
+      if (!historical) await resolveGpuPlacementWarning(streamEvent.userInput);
     } else if (
       streamEvent.type === "user-input.requested"
       && streamEvent.userInput
     ) {
-      activateUserInput(streamEvent.userInput);
+      if (!historical && state.activeUserInput?.id !== streamEvent.userInput.id) {
+        activateUserInput(streamEvent.userInput);
+      }
     } else if (
       (streamEvent.type === "user-input.submitted"
         || streamEvent.type === "user-input.cancelled")
       && streamEvent.userInput
     ) {
-      if (state.activeUserInput?.id === streamEvent.userInput.id) {
+      if (!historical && state.activeUserInput?.id === streamEvent.userInput.id) {
         clearActiveUserInput();
       }
       if (streamEvent.type === "user-input.submitted") {
@@ -464,6 +487,14 @@ async function consumeEventStream(stream, assistant, options = {}) {
             || streamEvent.type.includes("warning")
         );
       }
+    } else if (streamEvent.type === "chat.model-progress") {
+      closeAssistantContent(assistant);
+      assistant.workActivity.hidden = false;
+      const message = document.createElement("p");
+      message.className = "assistant-work-narrative chat-model-progress";
+      message.textContent = streamEvent.message;
+      assistant.workActivity.append(message);
+      addActivity(assistant, streamEvent, false);
     } else if (streamEvent.message) {
       if (streamEvent.type === "target-request-recovered") {
         assistant.recovered = true;
@@ -1007,20 +1038,82 @@ function activityIconFor(type) {
   return "·";
 }
 
+function renderCompletionReport(assistant, report) {
+  const panel = assistant.completionReport;
+  if (!panel || !report) return;
+  assistant.completionReportResult = report;
+  panel.hidden = false;
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  heading.textContent = t("completion_report.title");
+  const note = document.createElement("p");
+  note.textContent = t("completion_report.advisory", { model: report.model });
+  const body = document.createElement("div");
+  body.className = "completion-report-text";
+  body.style.whiteSpace = "pre-wrap";
+  body.style.overflowWrap = "anywhere";
+  body.textContent = report.text;
+  details.append(heading, note, body);
+  panel.replaceChildren(details);
+}
+
 function renderCompletionSummary(assistant, lines) {
-  const completionLines = lines ?? [];
+  const filesByPath = new Map();
+  const otherLines = new Set();
+  let processCount = 0;
+  let processFailures = 0;
+  for (const line of lines ?? []) {
+    const file = /^(Created|Modified|Deleted|Deleted folder): (.+)$/.exec(line);
+    const processes = /^Processes: (\d+) run · \d+ succeeded · (\d+) failed$/.exec(line);
+    if (file) {
+      filesByPath.set(file[2], line);
+    } else if (processes) {
+      processCount += Number(processes[1]);
+      processFailures += Number(processes[2]);
+    } else if (line.startsWith("Process: ")) {
+      processCount++;
+      processFailures += line.endsWith("· exit 0") ? 0 : 1;
+    } else {
+      otherLines.add(line);
+    }
+  }
+  const completionLines = [...filesByPath.values()];
+  if (processCount) {
+    completionLines.push(
+      `Processes: ${processCount} run · ${processCount - processFailures} succeeded · ${processFailures} failed`
+    );
+  }
+  completionLines.push(...otherLines);
   assistant.completionSummary.hidden = completionLines.length === 0;
   assistant.completionSummary.replaceChildren();
   if (completionLines.length) {
-    const heading = document.createElement("strong");
-    heading.textContent = "Host summary";
+    const details = document.createElement("details");
+    const heading = document.createElement("summary");
+    const files = completionLines.filter(line => /^(Created|Modified|Deleted|Deleted folder): /.test(line));
+    heading.textContent = `Host summary · ${files.length} file${files.length === 1 ? "" : "s"}`;
     const list = document.createElement("ul");
     for (const line of completionLines) {
       const item = document.createElement("li");
-      item.textContent = line;
+      const file = /^(Created|Modified|Deleted|Deleted folder): (.+)$/.exec(line);
+      if (file || line.startsWith("Processes:")) {
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "text-link";
+        link.textContent = line;
+        link.addEventListener("click", () => void openChangeReview(
+          assistant.executionSession?.id,
+          file?.[2] ?? null,
+          null,
+          file ? null : "processes"
+        ));
+        item.append(link);
+      } else {
+        item.textContent = line;
+      }
       list.append(item);
     }
-    assistant.completionSummary.append(heading, list);
+    details.append(heading, list);
+    assistant.completionSummary.append(details);
   }
 }
 
@@ -1083,14 +1176,119 @@ function updateExecutionSession(assistant, session, updateVisibleState = true) {
   }
 }
 
+function updateChatSummary(assistant, summary) {
+  assistant.chatSummary = summary;
+  assistant.sessionHeader.hidden = false;
+  assistant.sessionHeader.classList.add("chat-session-header");
+  assistant.sessionFooter.classList.add("chat-session-footer");
+  assistant.sessionFooter.setAttribute("aria-label", "Final Chat status");
+  const status = document.createElement("strong");
+  status.textContent = summary.state;
+  const model = document.createElement("span");
+  model.textContent = `Model: ${summary.model || assistant.selectedModel || "resolving"} · Chat`;
+  const counts = document.createElement("span");
+  counts.textContent = [
+    Number.isInteger(summary.readCount) ? `${summary.readCount} ${summary.readCount === 1 ? "read" : "reads"}` : null,
+    Number.isInteger(summary.searchCount) ? `${summary.searchCount} ${summary.searchCount === 1 ? "search" : "searches"}` : null,
+    Number.isInteger(summary.toolFailureCount) ? `${summary.toolFailureCount} tool failures` : null,
+    formatElapsed(summary.elapsedMilliseconds)
+  ].filter(Boolean).join(" · ");
+  assistant.sessionHeader.replaceChildren(status, model, counts);
+  updateExecutionStatusPlacement(assistant);
+}
+
 function updateExecutionStatusPlacement(assistant) {
   const terminal = assistant.details.dataset.terminal === "true";
   assistant.sessionHeader.classList.toggle("is-live", !terminal && !assistant.sessionHeader.hidden);
   assistant.sessionFooter.hidden = !terminal || assistant.sessionHeader.hidden;
   if (!assistant.sessionFooter.hidden) {
-    assistant.sessionFooter.replaceChildren(
-      ...[...assistant.sessionHeader.childNodes].map(node => node.cloneNode(true))
-    );
+    renderExecutionFooter(assistant);
+  }
+}
+
+function renderExecutionFooter(assistant) {
+  const footer = assistant.sessionFooter;
+  const [stateLabel, route, counts] = assistant.sessionHeader.childNodes;
+  const identity = document.createElement("div");
+  identity.className = "execution-footer-identity";
+  if (stateLabel) {
+    const status = stateLabel.cloneNode(true);
+    status.classList.add("execution-footer-state");
+    identity.append(status);
+  }
+  const runtime = document.createElement("div");
+  runtime.className = "execution-footer-runtime";
+  runtime.title = route?.title || "";
+  for (const text of (route?.textContent || "").split(" · ")) {
+    const item = document.createElement("span");
+    item.textContent = text;
+    runtime.append(item);
+  }
+  identity.append(runtime);
+
+  const metrics = assistant.supervisionProgress
+    ? assistant.supervisionProgress.inferenceMetrics
+    : assistant.executionSession?.inferenceMetrics ?? assistant.chatSummary?.inferenceMetrics;
+  const badges = document.createElement("div");
+  badges.className = "execution-footer-metrics";
+  const addMetric = (key, value, label, icon, title) => {
+    if (!Number.isFinite(value) || value < 0) return;
+    const badge = document.createElement("span");
+    badge.className = "execution-footer-metric";
+    badge.dataset.metric = key;
+    badge.title = title;
+    const glyph = document.createElement("span");
+    glyph.className = "execution-footer-metric-icon";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = icon;
+    const number = document.createElement("strong");
+    number.textContent = key === "tokens"
+      ? new Intl.NumberFormat().format(value)
+      : key === "ttft" ? `${(value / 1000).toFixed(2)}s` : value.toFixed(2);
+    const unit = document.createElement("span");
+    unit.textContent = label;
+    badge.append(glyph, number, unit);
+    badges.append(badge);
+  };
+  addMetric("throughput", metrics?.tokensPerSecond, "tok/s", "↯",
+    ["stream", "mixed"].includes(metrics?.generationTimingSource)
+      ? "Output tokens divided by provider generation durations where reported, otherwise measured first-to-last token intervals. Excludes prefill, tools and waiting."
+      : "Output tokens divided by measured model generation time across the turn. Excludes tools and waiting.");
+  addMetric("tokens", metrics?.outputTokens, "tokens", "◫",
+    "Total output tokens reported by the models across this turn, including reasoning where reported.");
+  addMetric("ttft", metrics?.timeToFirstTokenMilliseconds, "TTFT", "◷",
+    metrics?.firstTokenTimingSource === "after-model-load"
+      ? "Time to the first output token after subtracting provider-reported model loading. Includes prompt processing and reasoning's first token."
+      : "From inference dispatch to the first output token. Model loading duration is unavailable; it has not been subtracted.");
+  if (metrics?.outputTokens > 0 && !Number.isFinite(metrics.tokensPerSecond)) {
+    const unavailable = document.createElement("span");
+    unavailable.className = "execution-footer-metric";
+    unavailable.dataset.metric = "throughput-unavailable";
+    unavailable.textContent = "↯ tok/s unavailable";
+    unavailable.title = "Generation time is unavailable for at least one inference. Total turn duration includes loading, prefill and tools and cannot replace generation time.";
+    badges.prepend(unavailable);
+  }
+
+  const activity = document.createElement("div");
+  activity.className = "execution-footer-activity";
+  for (const text of (counts?.textContent || "").split(" · ")) {
+    const item = document.createElement("span");
+    item.textContent = text;
+    activity.append(item);
+  }
+  // No freestanding dividers: every item can wrap without leaving a separator behind.
+  footer.replaceChildren(identity);
+  if (badges.childElementCount) footer.append(badges);
+  footer.append(activity);
+  if (assistant.completionCheckId || assistant.completionReportResult) {
+    const check = document.createElement("button");
+    check.type = "button";
+    check.className = "secondary-button completion-check";
+    check.textContent = assistant.completionChecking ? "Checking…" : "Completion check";
+    check.title = "Optional model review of recorded evidence. Does not execute or repair the task.";
+    check.disabled = Boolean(assistant.completionChecking);
+    check.addEventListener("click", () => void requestCompletionCheck(assistant));
+    footer.append(check);
   }
 }
 
@@ -1251,3 +1449,29 @@ function initializeComposerShellMetrics() {
   updateHeight();
 }
 
+
+async function requestCompletionCheck(assistant) {
+  if (assistant.completionChecking) return;
+  if (!assistant.completionReportResult) {
+    assistant.completionChecking = true;
+    renderExecutionFooter(assistant);
+    assistant.completionReport.hidden = false;
+    assistant.completionReport.textContent = "Checking the recorded result…";
+    try {
+      const report = await fetchJson(`/api/completion-checks/${encodeURIComponent(assistant.completionCheckId)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ browserSessionId: state.browserSessionId,
+          conversationSessionId: assistant.completionConversationId,
+          workspaceId: assistant.completionWorkspaceId })
+      });
+      renderCompletionReport(assistant, report);
+    } catch (error) {
+      assistant.completionReport.textContent = error.message;
+    } finally {
+      assistant.completionChecking = false;
+      renderExecutionFooter(assistant);
+    }
+  }
+  const details = assistant.completionReport.querySelector("details");
+  if (details) details.open = true;
+}

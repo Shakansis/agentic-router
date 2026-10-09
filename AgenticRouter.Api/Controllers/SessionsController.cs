@@ -527,6 +527,7 @@ public sealed class SessionsController : ControllerBase
 
   private ChatMessage PresentMessage(ChatMessage message)
   {
+    message = TerminalResponsePresentation.Normalize(message, _markdown);
     return message.Role == "assistant"
       ? message with
       {

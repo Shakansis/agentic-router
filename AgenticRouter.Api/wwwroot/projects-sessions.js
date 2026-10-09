@@ -55,6 +55,18 @@ function renderSupervisionRecovery() {
   elements.supervisionRecovery.hidden = recoverable.length === 0;
   elements.supervisionRecoveryList.replaceChildren();
 
+  const active = recoverable.find(run =>
+    run.conversationSessionId === state.conversationSessionId)
+    ?? recoverable[0];
+  elements.supervisionRecoveryNotice.hidden = !active;
+  elements.supervisionRecoveryResume.hidden = !active || !canResumeSupervisionRun(active);
+  elements.supervisionRecoveryResume.onclick = active
+    ? () => resumeSupervisionRun(active)
+    : null;
+  elements.supervisionRecoveryInstructions.textContent = active
+    ? `Automatic resume paused for “${active.objective.slice(0, 100)}”. ${active.waitReason ?? "Host reconciliation needs your review."} ${supervisionRecoveryInstructions(active)}`
+    : "";
+
   for (const run of recoverable) {
     const card = document.createElement("article");
     card.className = "supervision-recovery-card";
@@ -68,10 +80,11 @@ function renderSupervisionRecovery() {
     route.textContent = `${run.route.model} × ${benchmarkHarnessLabel(run.route.harness)}`;
 
     const progress = document.createElement("small");
-    progress.textContent = `${run.runtime?.completedItems ?? 0}/${run.runtime?.totalItems ?? 0} items · ${run.resumePolicy}`;
+    progress.textContent = `${run.runtime?.completedItems ?? 0}/${run.runtime?.totalItems ?? 0} items · automatic restart recovery`;
+    progress.title = `Stored policy: ${run.resumePolicy}`;
 
     const reason = document.createElement("p");
-    reason.textContent = run.waitReason ?? "The prior Host process stopped before completion.";
+    reason.textContent = `${run.waitReason ?? "The prior Host process stopped before completion."} ${supervisionRecoveryInstructions(run)}`;
     if (run.waitCode) {
       reason.title = run.waitCode;
     }
@@ -82,6 +95,7 @@ function renderSupervisionRecovery() {
     resume.type = "button";
     resume.className = "secondary-button";
     resume.textContent = "Resume";
+    resume.hidden = !canResumeSupervisionRun(run);
     resume.addEventListener("click", () => resumeSupervisionRun(run));
     const discard = document.createElement("button");
     discard.type = "button";
@@ -842,6 +856,35 @@ function showNewWorkspaceForm() {
   elements.workspaceValidation.textContent = "Select a trusted folder.";
   elements.workspaceValidation.className = "workspace-validation";
   elements.workspaceSaveStatus.textContent = "";
+}
+
+function supervisionRecoveryInstructions(run) {
+  switch (run.waitCode) {
+    case "supervision-recovery-worker-turn-ambiguous":
+      return "Review the current workspace changes, then choose Resume to reconcile the interrupted worker turn.";
+    case "supervision-recovery-approval-pending":
+      return "Choose Resume after reviewing the pending action; any required approval will be requested again.";
+    case "supervision-recovery-images-required":
+      return "Reattach the original images before choosing Resume.";
+    case "supervision-recovery-workspace-drift":
+    case "supervision-recovery-instructions-changed":
+      return "Review the changed files or repository instructions before choosing Resume. The Host will check for conflicts.";
+    case "supervision-recovery-route-ineligible":
+      return "Restore the original model, harness, and endpoint, then choose Resume.";
+    case "supervision-recovery-budget-exhausted":
+      return "Review the saved work and start a new objective for the remaining steps; this run exhausted its recovery budget.";
+    case "supervision-recovery-state-missing":
+      return "This checkpoint cannot be reconciled. Review the saved work, then start a new objective for the remaining steps.";
+    case "supervision-recovery-workspace-busy":
+      return "Wait for the active workspace run to finish, then choose Resume.";
+    default:
+      return "Review the saved work and choose Resume to ask the Host to reconcile it, or start a new objective after reviewing the files.";
+  }
+}
+
+function canResumeSupervisionRun(run) {
+  return run.waitCode !== "supervision-recovery-budget-exhausted"
+    && run.waitCode !== "supervision-recovery-state-missing";
 }
 
 function hideNewWorkspaceForm() {
@@ -1673,14 +1716,16 @@ async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) 
           }
         );
         await refreshSupervisionRuns();
-        const supervisionRun = session.interrupted
-          ? findAttachableSupervisionRun(session.id)
-          : null;
+        const supervisionRun = findAttachableSupervisionRun(session.id);
+        const recoveryRun = state.supervisionRuns.find(run =>
+          run.conversationSessionId === session.id
+          && (run.state === "awaiting-user" || run.state === "interrupted-recoverable"));
         if (!session.activeChatRun) await resetCloudImagePrivacy(state.browserSessionId);
         clearConversationUi();
         state.browserSessionId = session.activeChatRun?.browserSessionId ?? nextBrowserSessionId;
         persistBrowserSessionId(state.browserSessionId);
         state.conversationSessionId = session.id;
+        renderSupervisionRecovery();
         state.history = session.messages.map(
           message => ({
             role: message.role,
@@ -1730,7 +1775,7 @@ async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) 
         try {
           await renderRestoredConversation(
             session,
-            { suppressInterrupted: Boolean(supervisionRun || session.activeChatRun) }
+            { suppressInterrupted: Boolean(supervisionRun || recoveryRun || session.activeChatRun) }
           );
         } finally {
           state.autoFollow = true;
@@ -1742,6 +1787,8 @@ async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) 
         setPersistenceStatus(
           supervisionRun
             ? "Reconnecting"
+            : recoveryRun
+            ? "Recovery needs review"
             : session.interrupted
             ? "Interrupted"
             : "Saved locally"
@@ -1751,6 +1798,7 @@ async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) 
         updateComposerStatus();
         elements.messages.scrollTop = elements.messages.scrollHeight;
         updateJumpControl();
+        if (state.activeUserInput) renderActiveUserInput();
         hideConversationHistoryLoader();
         elements.messageInput.focus();
         elements.workspaceDialog.close();
@@ -1881,6 +1929,10 @@ function restoreConversationContextUsage(session) {
 }
 
 async function renderRestoredConversation(session, options = {}) {
+  if (!options.historyPage) {
+    state.savedExecutionReviews = session.executionReviews ?? [];
+    state.conversationWorkspaceId = session.workspaceId;
+  }
   elements.emptyState?.remove();
   const version = state.conversationVersion;
   const startIndex = options.startIndex ?? session.presentationOffset ?? 0;
@@ -1986,7 +2038,8 @@ async function renderRestoredConversation(session, options = {}) {
         assistant.details.open = false;
         assistant.summary.textContent = message.diagnostic?.terminalState === "failed"
           ? "Failed"
-          : "Completed";
+          : message.diagnostic?.terminalState === "blocked" ? "Blocked"
+            : message.diagnostic?.terminalState === "partial" ? "Partial" : "Completed";
         const blocks = message.contentBlocks ?? [];
         if (timeline.length > 0) {
           await replayConversationTimeline(
@@ -2032,10 +2085,12 @@ async function renderRestoredConversation(session, options = {}) {
         assistant.copyButton.disabled = false;
         if (message.diagnostic && timeline.length === 0) {
           const failed = message.diagnostic.terminalState === "failed";
+          const blocked = message.diagnostic.terminalState === "blocked";
+          const partial = message.diagnostic.terminalState === "partial";
           finishActivity(
             assistant,
             terminalActivitySummary(
-              failed ? "Failed" : "Completed",
+              failed ? "Failed" : blocked ? "Blocked" : partial ? "Partial" : "Completed",
               null,
               message.diagnostic,
               assistant.selectedModel
@@ -2118,7 +2173,10 @@ async function restoreLiveChatRun() {
   try { saved = JSON.parse(localStorage.getItem("agentic-router.live-chat-run") ?? "null"); } catch { return; }
   if (!saved?.id || state.requestController) return;
   try {
-    const run = await fetchJson(`/api/chat/runs/${encodeURIComponent(saved.id)}`);
+    const run = await retryServerConnection(
+      () => fetchJson(`/api/chat/runs/${encodeURIComponent(saved.id)}`),
+      null
+    );
     if (run.conversationSessionId && run.historyAvailable) {
       await openConversation(run.conversationSessionId, saved.workspaceId);
     } else {
@@ -2137,30 +2195,71 @@ async function restoreLiveChatRun() {
     }
     if (run.completed) localStorage.removeItem("agentic-router.live-chat-run");
   } catch (error) {
-    // A Host restart has no surviving in-memory execution. Saved history remains authoritative.
     if (error.status === 404 || error.message?.includes("404")) {
-      localStorage.removeItem("agentic-router.live-chat-run");
-      if (saved.conversationSessionId) await openConversation(saved.conversationSessionId, saved.workspaceId);
+      try {
+        await refreshSupervisionRuns();
+        const durable = await findSavedSupervisionRun(saved);
+        localStorage.removeItem("agentic-router.live-chat-run");
+        const conversationId = saved.conversationSessionId ?? durable?.conversationSessionId;
+        if (conversationId) await openConversation(conversationId, saved.workspaceId);
+        else if (durable?.state === "running") void attachSupervisionConversation(durable);
+        if (durable && durable.state !== "running") renderSupervisionRecovery();
+        if (durable?.terminal && durable.state !== "completed") {
+          showToast("The restored run is blocked. Review its saved work and failure details, then start a new objective for the remaining steps.", "error");
+        }
+      } catch (recoveryError) {
+        showToast(`Could not read the durable recovery state: ${recoveryError.message}. Retry opening the saved conversation.`, "error");
+      }
     } else showToast(`Could not reconnect: ${error.message}`, "error");
   }
 }
 
-function rememberLiveChatRun(id, conversationSessionId = state.conversationSessionId) {
+async function findSavedSupervisionRun(saved) {
+  if (saved.supervisionRunId) {
+    try {
+      return await fetchJson(`/api/supervision/runs/${encodeURIComponent(saved.supervisionRunId)}`);
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      return null;
+    }
+  }
+  const list = await fetchJson("/api/supervision/runs");
+  return (list.runs ?? [])
+    .filter(run => run.conversationSessionId === saved.conversationSessionId
+      && !run.terminal)
+    .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0]
+    ?? null;
+}
+
+function rememberLiveChatRun(id, conversationSessionId = state.conversationSessionId,
+  supervisionRunId = null, supervisionSequence = null) {
+  let previous = null;
+  try { previous = JSON.parse(localStorage.getItem("agentic-router.live-chat-run") ?? "null"); } catch { }
+  if (previous?.id !== id) previous = null;
   localStorage.setItem("agentic-router.live-chat-run", JSON.stringify({
-    id, conversationSessionId, workspaceId: activeWorkspaceProfile()?.id
+    id,
+    conversationSessionId,
+    workspaceId: activeWorkspaceProfile()?.id,
+    supervisionRunId: supervisionRunId ?? previous?.supervisionRunId ?? null,
+    supervisionSequence: supervisionSequence ?? previous?.supervisionSequence ?? 0
   }));
 }
 
 async function* reconnectChatEvents(stream, id, signal) {
   let sequence = 0;
-  let attempts = 0;
+  let supervisionSequence = 0;
+  let mode = "chat";
+  let durableRunId = null;
   while (true) {
     try {
       for await (const event of readStreamEvents(stream, 75_000)) {
-        if (event.chatRunSequence && event.chatRunSequence <= sequence) continue;
+        if (mode === "chat" && event.chatRunSequence && event.chatRunSequence <= sequence) continue;
         sequence = event.chatRunSequence ?? sequence;
-        attempts = 0;
-        if (event.conversationSessionId) rememberLiveChatRun(id, event.conversationSessionId);
+        supervisionSequence = event.supervisionProgress?.eventSequence ?? supervisionSequence;
+        if (event.conversationSessionId || event.supervisionProgress) {
+          rememberLiveChatRun(id, event.conversationSessionId ?? state.conversationSessionId,
+            event.supervisionProgress?.runId, supervisionSequence);
+        }
         yield event;
         if (["response.completed", "error", "request.cancelled"].includes(event.type)) {
           const saved = JSON.parse(localStorage.getItem("agentic-router.live-chat-run") ?? "null");
@@ -2172,16 +2271,41 @@ async function* reconnectChatEvents(stream, id, signal) {
       if (signal.aborted) throw error;
     }
     if (signal.aborted) throw new DOMException("Detached", "AbortError");
-    if (++attempts > 3) throw new Error("Connection lost. The Host keeps this request running; reopen the conversation to reconnect.");
-    await new Promise(resolve => setTimeout(resolve, attempts * 250));
-    try {
-      const response = await fetch(`/api/chat/runs/${encodeURIComponent(id)}/stream?afterSequence=${sequence}`, { signal });
-      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-      stream = response.body;
-    } catch (error) {
-      if (signal.aborted) throw error;
-      stream = new Blob([]).stream();
-    }
+    const connection = await retryServerConnection(async () => {
+      let response = await fetch(mode === "chat"
+        ? `/api/chat/runs/${encodeURIComponent(id)}/stream?afterSequence=${sequence}`
+        : `/api/chat/supervision/${encodeURIComponent(durableRunId)}/stream?afterSequence=${supervisionSequence}`,
+      { signal });
+      if (response.status === 404 && mode === "chat") {
+        const saved = JSON.parse(localStorage.getItem("agentic-router.live-chat-run") ?? "null");
+        const durable = await findSavedSupervisionRun(saved ?? {});
+        if (!durable) {
+          const missing = new Error("The Host restarted without a durable run for this turn. Open the saved conversation and review completed work before starting the remaining objective.");
+          missing.retryConnection = false;
+          throw missing;
+        }
+        await refreshSupervisionRuns();
+        if (durable.state === "awaiting-user" || durable.state === "interrupted-recoverable") {
+          const paused = new Error(`Automatic resume needs review. ${durable.waitReason ?? "The checkpoint needs reconciliation."} ${supervisionRecoveryInstructions(durable)}`);
+          paused.retryConnection = false;
+          throw paused;
+        }
+        mode = "supervision";
+        durableRunId = durable.runId;
+        rememberLiveChatRun(id, saved?.conversationSessionId, durable.runId, supervisionSequence);
+        response = await fetch(
+          `/api/chat/supervision/${encodeURIComponent(durable.runId)}/stream?afterSequence=${supervisionSequence}`,
+          { signal }
+        );
+      }
+      if (!response.ok || !response.body) {
+        const failed = new Error(`Server stream returned HTTP ${response.status}.`);
+        failed.retryConnection = response.status >= 500;
+        throw failed;
+      }
+      return response.body;
+    }, signal);
+    stream = connection;
   }
 }
 
@@ -2247,7 +2371,8 @@ async function attachSupervisionConversation(run) {
         },
         true
       );
-      assistant.answer.textContent ||= "Could not reattach. The Host may still be running this request.";
+      assistant.answer.textContent ||= error.message
+        || "Could not reattach. Open the saved conversation and review its recovery state.";
       assistant.answer.classList.add("error");
       assistant.answer.classList.remove("pending");
       finishActivity(

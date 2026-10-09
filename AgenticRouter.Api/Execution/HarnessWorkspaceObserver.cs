@@ -309,7 +309,8 @@ public sealed class HarnessWorkspaceObserver
         var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
         byte[]? bytes = info.Length <= maximumSnapshotBytes
           && capturedBytes + info.Length <= maximumTotalSnapshotBytes
-            ? await File.ReadAllBytesAsync(info.FullName, cancellationToken)
+            ? await ReadSnapshotBytesAsync(info.FullName,
+              Math.Min(maximumSnapshotBytes, maximumTotalSnapshotBytes - capturedBytes), cancellationToken)
             : null;
         if (bytes is not null)
         {
@@ -327,7 +328,7 @@ public sealed class HarnessWorkspaceObserver
           : Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         result[relative] = new HarnessFileSnapshot(
           hash,
-          info.Length,
+          bytes?.LongLength ?? info.Length,
           bytes,
           bytes is not null && IsText(bytes) ? Encoding.UTF8.GetString(bytes) : null
         );
@@ -422,14 +423,15 @@ public sealed class HarnessWorkspaceObserver
     EnsureNotReparsePoint(info.FullName);
     byte[]? bytes = info.Length <= maximumSnapshotBytes
       && otherCapturedBytes + info.Length <= maximumTotalSnapshotBytes
-        ? await File.ReadAllBytesAsync(info.FullName, cancellationToken)
+        ? await ReadSnapshotBytesAsync(info.FullName,
+          Math.Min(maximumSnapshotBytes, maximumTotalSnapshotBytes - otherCapturedBytes), cancellationToken)
         : null;
     var hash = bytes is null
       ? await HashFileAsync(info.FullName, cancellationToken)
       : Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     return new HarnessFileSnapshot(
       hash,
-      info.Length,
+      bytes?.LongLength ?? info.Length,
       bytes,
       bytes is not null && IsText(bytes) ? Encoding.UTF8.GetString(bytes) : null
     );
@@ -467,6 +469,26 @@ public sealed class HarnessWorkspaceObserver
         false
       );
     }
+  }
+
+  private static async Task<byte[]?> ReadSnapshotBytesAsync(
+    string path, long maximumBytes, CancellationToken cancellationToken)
+  {
+    // Match hashing's sharing mode: a readable log may still have an active writer.
+    await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+      FileShare.ReadWrite | FileShare.Delete, 65_536, true);
+    var initialLength = stream.Length;
+    if (initialLength > maximumBytes) return null;
+    using var snapshot = new MemoryStream((int)initialLength);
+    var buffer = new byte[65_536];
+    int count;
+    while ((count = await stream.ReadAsync(buffer, cancellationToken)) > 0)
+    {
+      // A live file can grow after its initial length was checked.
+      if (snapshot.Length + count > maximumBytes) return null;
+      snapshot.Write(buffer, 0, count);
+    }
+    return snapshot.ToArray();
   }
 
   private static async Task<string> HashFileAsync(string path, CancellationToken cancellationToken)

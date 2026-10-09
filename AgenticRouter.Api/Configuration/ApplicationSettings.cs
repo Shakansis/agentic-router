@@ -556,6 +556,8 @@ public sealed record RuntimeSettings
 
 public sealed record OllamaRuntimeSettings
 {
+  public string ManagedKvCacheType { get; init; } = "auto";
+
   public int ProfileSchemaVersion { get; init; } =
     OllamaRuntimeDefaults.CurrentProfileSchemaVersion;
 
@@ -606,6 +608,8 @@ public sealed record OllamaModelRuntimeOverride
   public string Model { get; init; } = string.Empty;
 
   public string Digest { get; init; } = string.Empty;
+
+  public ModelRuntimePerformanceSettings? Performance { get; init; }
 
   public Dictionary<string, OllamaRoleRuntimeSettings> Overrides
   {
@@ -717,9 +721,9 @@ public static class OllamaRuntimeDefaults
       ),
       [OllamaRuntimeRoleIds.ModelTest] = Profile(
         4_096,
-        4_096,
-        8_192,
-        512
+        16_384,
+        16_384,
+        8_192
       ),
       [OllamaRuntimeRoleIds.WebSearchSynthesis] = Profile(
         8_192,
@@ -934,4 +938,14 @@ public static class SettingsDefaults
       _ => string.Empty
     };
   }
+}
+
+public sealed record ModelRuntimePerformanceSettings
+{
+  public int? DraftTokens { get; init; }
+
+  public int? BatchSize { get; init; }
+
+  [System.Text.Json.Serialization.JsonIgnore]
+  public bool HasExplicitValues => DraftTokens is not null || BatchSize is not null;
 }

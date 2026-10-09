@@ -892,7 +892,7 @@ public sealed class SettingsValidator : ISettingsValidator
       AddError(
         errors,
         field,
-        "Effort must be low, medium, or high."
+        "Effort must be none, low, medium, or high."
       );
     }
   }
@@ -1586,6 +1586,8 @@ public sealed class SettingsValidator : ISettingsValidator
     int providerContextCeiling
   )
   {
+    if (runtime.ManagedKvCacheType is not ("auto" or "f16" or "q8_0" or "q4_0"))
+      AddError(errors, "ollamaRuntime.managedKvCacheType", "Choose Auto, F16, Q8_0 or Q4_0 for the managed Ollama KV cache.");
     if (
       runtime.ProfileSchemaVersion
       != OllamaRuntimeDefaults.CurrentProfileSchemaVersion
@@ -1723,7 +1725,17 @@ public sealed class SettingsValidator : ISettingsValidator
         );
       }
 
-      if (modelOverride.Overrides.Count == 0)
+      if (modelOverride.Performance?.DraftTokens is < 0
+        || modelOverride.Performance?.BatchSize is < 1)
+      {
+        AddError(
+          errors,
+          $"{prefix}.performance",
+          "Draft tokens must be Auto, 0 (Off), or a positive integer; batch size must be Auto or a positive integer."
+        );
+      }
+
+      if (modelOverride.Overrides.Count == 0 && modelOverride.Performance is null)
       {
         AddError(
           errors,

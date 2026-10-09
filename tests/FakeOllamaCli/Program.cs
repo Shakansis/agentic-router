@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 if (string.Equals(
   Path.GetFileNameWithoutExtension(Environment.ProcessPath),
@@ -126,6 +127,18 @@ while (true)
   {
     var body = new char[contentLength];
     if (contentLength > 0) await reader.ReadBlockAsync(body.AsMemory());
+    var progressFixture = requestPath == "/api/chat"
+      && new string(body).Contains("inference progress fixture", StringComparison.Ordinal);
+    if (progressFixture)
+    {
+      Console.Error.WriteLine("load_tensors: loading model tensors, this can take a while... (load_mode = mmap)");
+      await Task.Delay(1000);
+      Console.Error.WriteLine("slot update_slots: id 0 | task 1 | new prompt, n_ctx_slot = 131072");
+      Console.Error.WriteLine("slot print_timing: id 0 | task 1 | prompt processing, n_tokens = 512, progress = 0.25, t = 1.00 s");
+      await Task.Delay(1000);
+      Console.Error.WriteLine("slot print_timing: id 0 | task 1 | prompt processing, n_tokens = 1536, progress = 0.75, t = 2.00 s");
+      await Task.Delay(1000);
+    }
     using var proxy = new HttpClient();
     using var forwarded = new HttpRequestMessage(
       new HttpMethod(requestLine.Split(' ')[0]),
@@ -134,6 +147,14 @@ while (true)
     if (contentLength > 0) forwarded.Content = new StringContent(new string(body), Encoding.UTF8, "application/json");
     using var response = await proxy.SendAsync(forwarded);
     var forwardedBytes = await response.Content.ReadAsByteArrayAsync();
+    if (progressFixture && response.IsSuccessStatusCode)
+    {
+      var frames = Encoding.UTF8.GetString(forwardedBytes).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+        .Select(line => JsonNode.Parse(line)!.AsObject()).ToArray();
+      foreach (var frame in frames)
+        if (frame["done"]?.GetValue<bool>() == true) frame["load_duration"] = 1_000_000_000L;
+      forwardedBytes = Encoding.UTF8.GetBytes(string.Join('\n', frames.Select(frame => frame.ToJsonString())) + "\n");
+    }
     await stream.WriteAsync(Encoding.ASCII.GetBytes(
       $"HTTP/1.1 {(int)response.StatusCode} {response.ReasonPhrase}\r\n"
       + $"Content-Type: {response.Content.Headers.ContentType}\r\n"
@@ -173,6 +194,7 @@ while (true)
       vulkan = Environment.GetEnvironmentVariable("OLLAMA_VULKAN"),
       spread = Environment.GetEnvironmentVariable("OLLAMA_SCHED_SPREAD"),
       contextLength = Environment.GetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH"),
+      kvCacheType = Environment.GetEnvironmentVariable("OLLAMA_KV_CACHE_TYPE"),
       noCloud = Environment.GetEnvironmentVariable("OLLAMA_NO_CLOUD")
     }),
     _ => JsonSerializer.Serialize(new { error = "not found" })

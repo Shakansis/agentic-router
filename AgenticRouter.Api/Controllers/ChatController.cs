@@ -197,6 +197,14 @@ public sealed class ChatController : ControllerBase
     _trace.Link("requestId", requestId);
     _latency.Start(requestId);
 
+    if (request.Thinking is not null && !ModelEffortLevels.IsValid(request.Thinking))
+    {
+      await WriteErrorAsync(requestId, new ChatStageException("request-validation",
+        "Thinking must be none, low, medium, or high.", "Invalid thinking override.",
+        null, null, 400, true), cancellationToken);
+      _latency.Complete();
+      return;
+    }
     if (string.IsNullOrWhiteSpace(
       request.Message
     ))
@@ -403,10 +411,15 @@ public sealed class ChatController : ControllerBase
                   cancellationToken,
                   new TraceDiagnosticReference(
                     _trace.TraceId,
-                    "completed"
+                    ExecutionTerminalState.From(streamEvent)
                   ),
                   BuildContentBlocks(contentBlocks),
-                  _presentationTimeline
+                  [.. _presentationTimeline, streamEvent with
+                  {
+                    ConversationSessionId = _conversationSessionId,
+                    Diagnostic = new TraceDiagnosticReference(_trace.TraceId,
+                      ExecutionTerminalState.From(streamEvent))
+                  }]
                 );
                 if (persisted is not null)
                 {
@@ -830,10 +843,15 @@ public sealed class ChatController : ControllerBase
               cancellationToken,
               new TraceDiagnosticReference(
                 _trace.TraceId,
-                "completed"
+                ExecutionTerminalState.From(streamEvent)
               ),
               BuildContentBlocks(contentBlocks),
-              _presentationTimeline
+              [.. _presentationTimeline, streamEvent with
+              {
+                ConversationSessionId = _conversationSessionId,
+                Diagnostic = new TraceDiagnosticReference(_trace.TraceId,
+                  ExecutionTerminalState.From(streamEvent))
+              }]
             );
             if (persisted is not null)
             {
@@ -911,7 +929,8 @@ public sealed class ChatController : ControllerBase
           History: request.History,
           Images: request.Images,
           Takeover: takeover,
-          ExecutionStrategy: supervision.RequestedStrategy
+          ExecutionStrategy: supervision.RequestedStrategy,
+          Thinking: request.Thinking
         ),
         cancellationToken
       );
@@ -1360,7 +1379,9 @@ public sealed class ChatController : ControllerBase
           stopwatch.ElapsedMilliseconds,
           _markdown.Render(finalAnswer),
           null,
-          ContextUsage: latestContextUsage
+          ContextUsage: latestContextUsage,
+          CompletionReport: view.Runtime?.CompletionReport,
+          CompletionCheckId: view.Runtime?.CompletionCheckId
         );
         yield break;
       }
@@ -1461,7 +1482,8 @@ public sealed class ChatController : ControllerBase
         ?? view.Route.WorkerGpuDeviceName
         ?? view.Route.WorkerGpuSelection,
       view.Route.SupervisorRuntime ?? view.Route.WorkerRuntime,
-      view.Terminal ? view.Runtime?.CompletionSummary : null
+      view.Terminal ? view.Runtime?.CompletionSummary : null,
+      view.Runtime?.InferenceMetrics
     );
   }
 
@@ -1991,12 +2013,7 @@ public sealed class ChatController : ControllerBase
         {
           Diagnostic = new TraceDiagnosticReference(
             _trace.TraceId,
-            streamEvent.Type switch
-            {
-              "response.completed" => "completed",
-              "request.cancelled" => "cancelled",
-              _ => "failed"
-            },
+            ExecutionTerminalState.From(streamEvent),
             result.Persisted
           )
         };

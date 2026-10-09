@@ -23,6 +23,51 @@ The same fixed local `model × harness` pair performs every supervisor and worke
 Only one context may run at a time. These contexts are not subagents, do not execute
 concurrently, do not delegate recursively, and have no independent authority.
 
+Native harness session identity is resolved centrally in `ChatStreamService`
+before constructing `HarnessTurnRequest`. A supervised turn uses
+`supervision:{RunId}:{ContextId}`. The durable run ID scopes logical names such as
+`supervisor-001`, `worker-001` and `worker-002`; repeated turns, bounded recovery
+continuations and explicit resume keep the same logical session key. A native
+fresh-context recovery may replace that key's native session as before. Browser
+identity remains Host approval authority and is not part of supervised harness
+identity, so resuming from another browser does not merge or replace contexts.
+Direct turns retain `BrowserSessionId ?? ConversationSessionId`. Adapters consume
+the common key; the Host remains the only bridge of context and evidence between
+roles. No history replay or model turn is added.
+
+`HarnessTurnRequest.SessionGroupId` carries the durable run ID as native runtime
+affinity metadata. Qwen's tool inventory is daemon-scoped, so its adapter keeps the
+configured runtimes and their session mappings available within this group instead
+of restarting a daemon at each role transition. Each inventory retains its own
+isolated configuration directory and unchanged tool policy. The same Worker
+runtime still creates independent sessions from the common Host keys. Switching
+to another run or Direct Execute, workspace release and adapter disposal stop all
+owned runtimes from the preceding group. Direct's existing single-daemon behavior
+is unchanged. OpenCode, Claude Code and Codex need no adapter changes.
+
+`SupervisionSessionIsolationEndToEndTests` exercises the browser/API and all four
+external harness protocols with deterministic fakes: Supervisor reuse across
+Worker transitions, Worker reuse across correction turns, independent Worker
+sessions, independent runs in the same browser, resume from a new browser,
+direct browser identity/required browser ID,
+absence of redundant history hydration, and Qwen runtime cleanup at group changes.
+Existing context-recovery and durable resume coverage also applies.
+
+Isolation validation: all 16 new deterministic browser/API cases passed. The four
+failures initially reproduced without session isolation were subsequently fixed;
+reproduction with the old identity was not grounds for leaving them unresolved.
+The Claude fixture and assertions now exercise the common bounded continuation in
+the same Supervisor native session. Migration checks pause automatic recovery at
+an instructions-change boundary before asserting zero telemetry, then explicitly
+resume to completion. The 128k Qwen test configures its model/digest role runtime
+limits as well as the global ceiling. Codex assertions use the common guidance
+while retaining native-thread reuse and effect checks. See the validation audit in
+`global-execution-progress-and-recovery.md` for complete-suite evidence and the
+additional restoration regressions found by that audit.
+Final full deterministic validation passed all 648 browser/API E2E cases, with zero
+failures or skips; opt-in real-inference coverage was not run. The audit records
+the frozen-source build, source-hash comparison and complete TRX evidence.
+
 The Host remains the sole authority for trusted-workspace policy, approvals, action
 identity, effects, conflicts, validation, persistence, recovery budgets, and terminal
 state.
@@ -125,17 +170,19 @@ Every supervised run has an explicitly selected policy:
 resumePolicy: manual | auto-safe
 ```
 
-- `manual` is the default.
-- `auto-safe` is an explicit unattended/overnight authorization for this bounded local
-  run.
+- `manual` remains a stored policy value for existing runs. Startup now attempts the
+  same strict automatic reconciliation for both stored values. A run pauses with its
+  exact reason whenever that check cannot prove a safe continuation.
+- `auto-safe` remains an explicit unattended/overnight selection for this bounded
+  local run.
 - Autonomous selects `auto-safe` whenever durable history is enabled. Without durable
   history it remains a volatile run that can survive client disconnects, but not a Host
   restart.
 - Both policies allow the run to continue when the browser/SSE disconnects while the
   Host process remains alive.
-- After a Host process restart, `manual` waits for the user.
-- After a Host process restart, `auto-safe` resumes only when every deterministic
-  safety predicate in this plan passes.
+- After a Host process restart, either stored policy resumes only when every
+  deterministic safety predicate in this plan passes. An exceptional case stays
+  available for manual reconciliation with a concrete next step.
 - The policy expires when the run reaches a terminal state or is discarded.
 
 The existing approval policy remains authoritative inside the run:
@@ -176,6 +223,12 @@ Host-owned durable run
 Closing/reloading the browser or losing the SSE connection cancels only the event
 subscription. It does not cancel the run.
 
+The browser shows connection attempts `1/5` through `5/5`, five seconds apart. After
+five failures it checks API health every 30 seconds and repeats the five-attempt cycle
+when the API responds. On Host restart it reattaches to the persisted supervision run
+identity. A checkpoint that fails strict automatic reconciliation stays visible with
+the exact reason and a concrete next step outside the collapsible sidebar.
+
 The Host owns a cancellation token per run. Cancellation occurs only through explicit
 run cancellation, application shutdown handling, a terminal policy decision, or an
 unrecoverable infrastructure failure.
@@ -210,8 +263,8 @@ The Host resolves the route once before the first supervisor turn and records:
 - explicit/manual or Auto Model × Harness routing evidence.
 
 Every context dispatch must match this route. Missing or changed route components block
-manual resume and fail the `auto-safe` predicate. The Host never substitutes another
-local model or harness to obtain progress.
+automatic restart recovery and require review before manual resume. The Host never
+substitutes another local model or harness to obtain progress.
 
 ## Runtime flow
 
@@ -419,6 +472,8 @@ Failures are classified before retry:
 - identical strategy with no new fact;
 - exhausted budget.
 
+A decision may include a brief plain-text preamble followed by exactly one complete,
+unambiguous JSON object. The same schema, evidence, and decision validations apply.
 A malformed supervisor decision is not replayed unchanged. The Host may make exactly
 one bounded canonical-output recovery turn that explicitly forbids tools, repeated
 analysis, prose, and Markdown fences, and asks for the already-established decision as
@@ -569,7 +624,8 @@ Startup performs no inference until recovery policy is evaluated.
 For each non-terminal durable checkpoint, the Host validates schema/integrity and marks
 the prior process ownership interrupted.
 
-`auto-safe` may resume only when all are true:
+Automatic restart recovery, including checkpoints stored as `manual`, may resume only
+when all are true:
 
 - checkpoint revision and integrity are valid;
 - history/durability remains enabled;
@@ -778,8 +834,7 @@ No cloud request is permitted in any milestone.
 - checkpoint writes are atomic, bounded, monotonic, and schema-validated;
 - forbidden sensitive fields are absent;
 - startup recovery performs no model call in Milestone 0;
-- `manual` waits after restart;
-- `auto-safe` requires every predicate;
+- both stored policies attempt automatic restart recovery under every predicate;
 - drift, route change, pending approval, or ambiguous action waits for the user;
 - final review persists before checkpoint cleanup;
 - conversation deletion/retention removes related checkpoints.
@@ -925,8 +980,8 @@ No cloud request is permitted in any milestone.
   tracked artifacts, approvals, action effects, and remaining budgets before any
   inference. A failure while loading one recovery record is isolated to that run and
   becomes an exact awaiting-user reason rather than preventing API startup.
-- `manual` restart reconstructs fresh logical contexts only after explicit Resume.
-  `auto-safe` resumes only from a proven committed boundary. Pending approval,
+- Restart recovery reconstructs fresh logical contexts automatically only from a proven
+  committed boundary. Pending approval,
   instruction drift, workspace drift, an unproven worker turn, or an ambiguous action
   remains user-visible and is never replayed blindly. Manual acknowledgement does not
   erase an unresolved ambiguous action from future `auto-safe` evaluation.

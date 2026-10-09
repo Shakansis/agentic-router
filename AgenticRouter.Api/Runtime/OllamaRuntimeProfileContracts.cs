@@ -21,7 +21,8 @@ public sealed record OllamaContextResolution(
   bool ModelMaximumCapped,
   bool SharedModel,
   string? SharedModelWarning,
-  string Reason
+  string Reason,
+  ModelRuntimePerformanceSettings? Performance = null
 );
 
 public sealed record OllamaRuntimeProfileError(
@@ -216,7 +217,8 @@ public sealed record OllamaRuntimeMeasurementView(
   string RuntimeSettingSignature,
   string Status,
   string? Diagnostic,
-  bool Stale
+  bool Stale,
+  ModelRuntimePerformanceSettings? Performance = null
 );
 
 public interface IOllamaRuntimeProfileService

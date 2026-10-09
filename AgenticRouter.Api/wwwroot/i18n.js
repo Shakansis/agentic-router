@@ -1,6 +1,8 @@
 (() => {
   const catalogs = {
     en: Object.freeze({
+      "completion_report.title": "Completion report",
+      "completion_report.advisory": "One review by {model} of recorded evidence. Advisory; no automatic corrections.",
       "action.cancel": "Cancel",
       "action.cancel_response": "Cancel active response",
       "action.close": "Close",
@@ -15,7 +17,7 @@
       "model_organization.save_alias_note": "Save alias and note",
       "model_organization.badge_favorite": "★ favorite",
       "model_organization.badge_hidden": "hidden",
-      "inference.supervisor_thinking_controlled": "Controlled by Supervisor phase effort (Plan, Work, Verify, Complete, Recovery).",
+      "inference.supervisor_thinking_controlled": "Controlled by Supervisor phase effort (Plan, Verify, Complete, Recovery).",
       "inference.open_phase_effort": "Open phase effort settings",
       "buffer.title": "Queued messages",
       "buffer.empty": "No queued messages",
@@ -28,9 +30,9 @@
       "buffer.count": "{count} queued",
       "steer.action": "Steer",
       "steer.available": "Send this message into the active turn",
-      "steer.unavailable": "Steer is available only for Codex and Qwen Code",
-      "steer.unavailable_harness": "Steer is unavailable for {harness}. Use Codex or Qwen Code.",
-      "steer.no_active": "Steer requires an active Codex or Qwen Code turn",
+      "steer.unavailable": "Steer requires a harness with same-turn steering support",
+      "steer.unavailable_harness": "Steer is unavailable for {harness} in this integration. Keep this message queued.",
+      "steer.no_active": "Steer requires an active turn on a compatible harness",
       "steer.empty": "Type a message to steer the active turn",
       "steer.sending": "Sending steering message",
       "steer.accepted": "Steering submitted to the active {harness} turn",

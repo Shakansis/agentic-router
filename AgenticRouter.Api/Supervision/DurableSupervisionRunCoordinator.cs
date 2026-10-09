@@ -192,28 +192,18 @@ public sealed class DurableSupervisionRunCoordinator
           checkpoint.RunId
         );
       }
-      var autoSafe = string.Equals(
-        checkpoint.ResumePolicy,
-        SupervisionResumePolicies.AutoSafe,
-        StringComparison.Ordinal
-      );
-      var autoSafeEligible = autoSafe
-        && eligibility.Eligible
+      var automaticResumeEligible = eligibility.Eligible
         && reconciliation?.Eligible == true;
-      var stateId = autoSafeEligible
+      var stateId = automaticResumeEligible
         ? DurableSupervisionRunStates.Prepared
-        : autoSafe
-          ? DurableSupervisionRunStates.AwaitingUser
-          : DurableSupervisionRunStates.InterruptedRecoverable;
-      var eventType = autoSafeEligible
+        : DurableSupervisionRunStates.AwaitingUser;
+      var eventType = automaticResumeEligible
         ? SupervisionEventTypeIds.RecoveryEligible
-        : autoSafe
-          ? SupervisionEventTypeIds.ReconciliationRequired
-          : SupervisionEventTypeIds.InterruptedRecoverable;
+        : SupervisionEventTypeIds.ReconciliationRequired;
       var waitCode = eligibility.Eligible
         ? reconciliation?.WaitCode
         : recoveryFailureCode ?? "supervision-recovery-route-ineligible";
-      var message = autoSafeEligible
+      var message = automaticResumeEligible
         ? "The durable run passed every auto-safe route, workspace, instruction, action, approval, and budget predicate."
         : eligibility.Reason
           ?? reconciliation?.Reason
@@ -225,25 +215,23 @@ public sealed class DurableSupervisionRunCoordinator
         eventType,
         message,
         terminal: false,
-        autoResumeEligible: autoSafeEligible,
-        waitReason: autoSafeEligible
+        autoResumeEligible: automaticResumeEligible,
+        waitReason: automaticResumeEligible
           ? null
           : message,
         browserSessionId: null,
         cancellationToken,
-        runtime: autoSafeEligible ? reconciliation!.Runtime : restoredRuntime,
-        recovery: autoSafeEligible ? reconciliation!.Recovery : checkpoint.Recovery,
-        waitCode: autoSafeEligible
+        runtime: automaticResumeEligible ? reconciliation!.Runtime : restoredRuntime,
+        recovery: automaticResumeEligible ? reconciliation!.Recovery : checkpoint.Recovery,
+        waitCode: automaticResumeEligible
           ? null
-          : autoSafe
-            ? waitCode
-            : "supervision-recovery-manual-required",
+          : waitCode,
         captureRecovery: false,
-        retryReason: autoSafeEligible
+        retryReason: automaticResumeEligible
           ? SupervisionRetryReasons.CrashRecovery
           : null
       );
-      if (autoSafeEligible)
+      if (automaticResumeEligible)
       {
         _ = await StartAsync(checkpoint.RunId, cancellationToken);
       }
@@ -330,7 +318,7 @@ public sealed class DurableSupervisionRunCoordinator
       SupervisionRequestPolicy.Hash(
         request.Objective.Trim()
       ),
-      resolution.Route,
+      resolution.Route with { WorkerThinking = request.Thinking },
       approvalPolicy,
       resumePolicy,
       DurableSupervisionRunStates.Prepared,
@@ -978,6 +966,9 @@ public sealed class DurableSupervisionRunCoordinator
 
   private static void ValidateLiveInput(PrepareSupervisionRunRequest request)
   {
+    if (request.Thinking is not null && !ModelEffortLevels.IsValid(request.Thinking))
+      throw new SupervisionException("supervision-thinking-invalid", "supervision-prepare",
+        "Thinking must be none, low, medium, or high.", false);
     var executionStrategy = request.ExecutionStrategy?.Trim().ToLowerInvariant();
     if (executionStrategy is not SupervisionExecutionStrategies.Auto
       and not SupervisionExecutionStrategies.Autonomous

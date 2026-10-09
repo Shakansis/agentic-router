@@ -126,7 +126,7 @@
 .project-accordion > summary::before {
   width: 10px;
   color: var(--muted);
-  content: "›";
+  content: "â€º";
   transform: rotate(0deg);
   transition: transform 120ms ease;
 }
@@ -1357,7 +1357,7 @@ textarea.terminal-command-input {
 
 .terminal-execution-approval .approval-boundary-warning::before {
   flex: 0 0 auto;
-  content: "ⓘ";
+  content: "â“˜";
 }
 
 .terminal-execution-approval .approval-controls {
@@ -1848,9 +1848,86 @@ textarea[readonly] {
   background: rgba(244, 135, 113, 0.1);
 }
 
+
+.model-test-result:empty {
+  display: none;
+}
+
+.model-test-result > strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.model-test-result p {
+  margin: .65rem 0;
+}
+
+.model-test-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: .5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.model-test-stages li {
+  padding: .7rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  opacity: .55;
+}
+
+.model-test-stages li[data-state="active"] {
+  color: var(--text);
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+.model-test-stages li[data-state="done"] {
+  opacity: 1;
+}
+
+.model-test-stages li[data-state="done"]::before {
+  content: "✓ ";
+  color: var(--success);
+}
+
+.model-test-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .75rem;
+  margin: 1rem 0;
+}
+
+.model-test-metrics > div {
+  padding: .8rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+}
+
+.model-test-metrics dt {
+  font-size: .85rem;
+}
+
+.model-test-metrics dd {
+  margin: .3rem 0 0;
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.model-test-metrics > div:first-child dd {
+  color: var(--accent);
+}
+
+@media (max-width: 650px) {
+  .model-test-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .model-test-panel {
   display: grid;
-  grid-template-columns: minmax(180px, 260px) auto minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 320px) max-content;
   gap: 10px;
   align-items: end;
 }
@@ -1873,10 +1950,13 @@ textarea[readonly] {
 }
 
 .model-test-result {
+  display: block;
+  line-height: 1.5;
+  margin-top: 1rem;
   min-height: 34px;
   padding: 7px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: .95rem;
   overflow-wrap: anywhere;
 }
 
@@ -3724,8 +3804,8 @@ textarea[readonly] {
 
 .session-details-section {
   display: grid;
-  gap: 12px;
-  padding: 14px;
+  gap: 8px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--panel-soft);

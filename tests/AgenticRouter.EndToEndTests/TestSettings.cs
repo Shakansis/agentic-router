@@ -211,7 +211,8 @@ internal sealed record TestOllamaModelRuntimeOverride(
   string Provider,
   string Model,
   string Digest,
-  Dictionary<string, TestOllamaRoleRuntimeSettings> Overrides
+  Dictionary<string, TestOllamaRoleRuntimeSettings> Overrides,
+  AgenticRouter.Api.Configuration.ModelRuntimePerformanceSettings? Performance = null
 );
 
 internal sealed record TestOllamaRuntimeMemoryPolicy
@@ -276,9 +277,9 @@ internal static class TestOllamaRuntimeDefaults
       ),
       ["modelTest"] = Profile(
         4_096,
-        4_096,
-        8_192,
-        512
+        16_384,
+        16_384,
+        8_192
       ),
       ["webSearchSynthesis"] = Profile(
         8_192,

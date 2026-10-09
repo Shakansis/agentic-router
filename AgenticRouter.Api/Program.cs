@@ -240,8 +240,12 @@ builder.Services.AddSingleton(
 builder.Services.AddSingleton<IUserInputCoordinator, UserInputCoordinator>();
 builder.Services.AddSingleton<IRecoveryDecisionCoordinator, RecoveryDecisionCoordinator>();
 builder.Services.AddSingleton<IExecutionSessionStore, ExecutionSessionStore>();
+builder.Services.AddSingleton<ExecutionReviewService>();
 builder.Services.AddSingleton<HarnessWorkspaceBaselineCache>();
 builder.Services.AddSingleton<HarnessMcpHostBridge>();
+builder.Services.AddHttpClient(HarnessInferenceObserver.HttpClientName, client => client.Timeout = Timeout.InfiniteTimeSpan)
+  .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddSingleton<HarnessInferenceObserver>();
 builder.Services.AddSingleton<NativeHarnessAdapter>();
 builder.Services.AddSingleton<IAgentHarness>(
   services => services.GetRequiredService<NativeHarnessAdapter>()
@@ -453,6 +457,9 @@ builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
 builder.Services.AddSingleton<IModelRequestTracker, ModelRequestTracker>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
 builder.Services.AddSingleton<LiveChatRuns>();
+builder.Services.AddScoped<ExecutionCompletionReportService>();
+builder.Services.AddSingleton<CompletionCheckStore>();
+builder.Services.AddScoped<CompletionCheckService>();
 builder.Services.AddScoped<ChatStreamService>();
 builder.Services.AddScoped<IChatStreamService>(
   services => services.GetRequiredService<ChatStreamService>()

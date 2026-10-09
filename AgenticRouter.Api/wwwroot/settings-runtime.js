@@ -39,6 +39,9 @@ async function refreshRuntimeStatus() {
     elements.runtimeModelList.replaceChildren(
       diagnosticRow("Memory telemetry", error.message)
     );
+    if (error instanceof TypeError && !state.requestController && !initializationInProgress) {
+      startApplicationReconnect();
+    }
   }
 
   await refreshUsage();
@@ -1099,7 +1102,14 @@ const runtimeRoleLabels = {
 };
 
 function renderRuntimeProfilesEditor() {
+  if (!state.runtimePerformanceDrafts || !state.settingsDirty) {
+    state.runtimePerformanceDrafts = {};
+  }
   const runtime = state.settings?.ollamaRuntime;
+
+  if (runtime) {
+    document.getElementById("runtime-managed-kv-cache").value = runtime.managedKvCacheType ?? "auto";
+  }
 
   if (!runtime || !elements.runtimeRoleProfiles) {
     return;
@@ -1128,12 +1138,21 @@ function renderRuntimeProfilesEditor() {
     ]) {
       const fieldLabel = document.createElement("label");
       const caption = document.createElement("span");
-      caption.textContent = label;
+      caption.className = "runtime-field-caption";
+      caption.append(document.createTextNode(label + " "), runtimeHelpButton(label, {
+        minimumContextTokens: "Minimum context window in tokens for this role.",
+        targetContextTokens: "Preferred context window. The existing escalation ladder may increase it when needed.",
+        maximumContextTokens: "Role context ceiling, constrained by the provider and model limits.",
+        outputTokenLimit: "Maximum generated tokens reserved for this role.",
+        keepAlive: "Residency duration in seconds. -1 requests indefinite residency; 0 unloads after the request."
+      }[field]));
       const input = document.createElement("input");
       input.type = "number";
       input.min = field === "keepAlive" ? "-1" : "128";
       input.max = field === "keepAlive" ? "86400" : "131072";
       input.value = profile[field];
+      input.id = `runtime-role-${role}-${field}`;
+      fieldLabel.htmlFor = input.id;
       input.dataset.runtimeRole = role;
       input.dataset.runtimeField = field;
       fieldLabel.append(caption, input);
@@ -1180,7 +1199,9 @@ function renderRuntimeProfilesEditor() {
     })),
     elements.runtimeOverrideRole.value || "specialist"
   );
+  replaceOptions(elements.runtimePerformanceModel, localModels, elements.runtimeOverrideModel.value);
   loadRuntimeOverrideEditor();
+  loadRuntimePerformanceEditor();
   renderRuntimeProfileEvidence();
 }
 
@@ -1230,7 +1251,8 @@ function renderRuntimeDevicePolicies(memory) {
       if (!device.affinitySelectable) {
         name.title = "Detected for monitoring; exact Ollama affinity remains Auto.";
       }
-      enabledLabel.append(enabled, name);
+      enabledLabel.append(enabled, name, runtimeHelpButton("GPU memory override",
+        "Enable the existing memory headroom override for this physical GPU. Unchecked inherits global memory policy."));
 
       const fields = document.createElement("div");
       fields.className = "runtime-profile-fields runtime-device-policy-fields";
@@ -1240,23 +1262,31 @@ function renderRuntimeDevicePolicies(memory) {
       };
       const percentLabel = document.createElement("label");
       const percentCaption = document.createElement("span");
-      percentCaption.textContent = "Maximum usage (%)";
+      percentCaption.className = "runtime-field-caption";
+      percentCaption.append(document.createTextNode("Maximum usage (%) "), runtimeHelpButton("GPU maximum usage",
+        "Existing maximum usage target for this GPU. Overrides the global percentage while enabled."));
       const percent = document.createElement("input");
       percent.type = "number";
       percent.min = "50";
       percent.max = "100";
       percent.value = policy.targetMaximumUsagePercent;
+      percent.id = "runtime-device-percent-" + device.id;
+      percentLabel.htmlFor = percent.id;
       percent.dataset.runtimeDevicePercent = device.id;
       percent.disabled = !enabled.checked;
       percentLabel.append(percentCaption, percent);
       const freeLabel = document.createElement("label");
       const freeCaption = document.createElement("span");
-      freeCaption.textContent = "Free VRAM (GiB)";
+      freeCaption.className = "runtime-field-caption";
+      freeCaption.append(document.createTextNode("Free VRAM (GiB) "), runtimeHelpButton("GPU free VRAM",
+        "Existing free VRAM headroom for this GPU, in GiB. Overrides the global reserve while enabled."));
       const free = document.createElement("input");
       free.type = "number";
       free.min = "0";
       free.step = "0.25";
       free.value = bytesToGiB(policy.minimumFreeVramBytes);
+      free.id = "runtime-device-free-" + device.id;
+      freeLabel.htmlFor = free.id;
       free.dataset.runtimeDeviceFreeVram = device.id;
       free.disabled = !enabled.checked;
       freeLabel.append(freeCaption, free);
@@ -1377,7 +1407,7 @@ function removeRuntimeOverrideDraft() {
   state.settings.ollamaRuntime = {
     ...runtime,
     modelOverrides: overrides.filter(
-      item => Object.keys(item.overrides).length > 0
+      item => Object.keys(item.overrides).length > 0 || item.performance != null
     )
   };
   state.settingsDirty = true;
@@ -1432,6 +1462,8 @@ function collectOllamaRuntimeSettings() {
   return {
     ...runtime,
     roleDefaults: roles,
+    managedKvCacheType: document.getElementById("runtime-managed-kv-cache").value,
+    modelOverrides: collectRuntimePerformanceOverrides(runtime.modelOverrides),
     memory: {
       ...runtime.memory,
       targetMaximumGpuUsagePercent: Number(
@@ -1536,7 +1568,13 @@ async function measureRuntimeProfile() {
       + `estimated RAM ${formatGiB(measurement.estimatedRamSizeBytes)} · `
       + `${measurement.processor}\n`
       + `Load ${formatInteger(measurement.loadDurationMilliseconds)} ms · `
-      + `target was already loaded: ${result.targetWasAlreadyLoaded ? "yes" : "no"}`;
+      + `target was already loaded: ${result.targetWasAlreadyLoaded ? "yes" : "no"}`
+      + (measurement.performance
+        ? "\nConfigured performance · Draft: "
+          + (measurement.performance.draftTokens == null ? "Auto" : measurement.performance.draftTokens === 0 ? "Off" : measurement.performance.draftTokens)
+          + " · Batch: " + (measurement.performance.batchSize ?? "Auto")
+          + " · Effective runner values unconfirmed."
+        : "");
     state.runtimeProfiles = await fetchJson("/api/runtime/profiles");
     renderRuntimeProfileEvidence();
     await refreshRuntimeStatus();
@@ -1561,7 +1599,7 @@ function renderRuntimeProfileEvidence() {
     row.className = "runtime-shared-warning";
     const icon = document.createElement("span");
     icon.className = "information-button";
-    icon.textContent = "i";
+    icon.textContent = "?";
     icon.tabIndex = 0;
     icon.setAttribute("role", "img");
     icon.setAttribute("aria-label", warning.message);
@@ -1678,7 +1716,6 @@ function renderSettings() {
     state.settings.execution.fileCreationOutputTokenLimit ?? "";
   const phaseEffort = state.settings.execution.phaseEffort ?? {};
   elements.phaseEffortPlan.value = phaseEffort.plan ?? "high";
-  elements.phaseEffortWork.value = phaseEffort.work ?? "medium";
   elements.phaseEffortVerify.value = phaseEffort.verify ?? "medium";
   elements.phaseEffortComplete.value = phaseEffort.complete ?? "low";
   elements.phaseEffortRecovery.value = phaseEffort.recovery ?? "high";
@@ -1808,11 +1845,11 @@ function renderSelectedInferenceProfile() {
     .classList.toggle("inference-controlled", supervisor);
   elements.inferenceThinkingNote.hidden = !supervisor;
   elements.inferenceThinking.closest(".inference-field").querySelector(".information-button").dataset.tooltip = supervisor
-    ? "Supervisor uses the separate Effort by supervised phase settings for Plan, Work, Verify, Complete, and Recovery. This profile's Thinking value is ignored during Supervisor Execute."
+    ? "Supervisor uses the separate Effort by supervised phase settings for Plan, Verify, Complete, and Recovery. This profile's Thinking value is ignored during Supervisor Execute."
     : "Controls whether and how much a compatible model reasons before answering. Auto leaves the model or provider behavior unchanged.";
   elements.inferenceProfileDescription.textContent = name === "supervisor"
-    ? "Used for Supervisor and Worker turns when Execute runs with Supervisor, including when Auto chooses it."
-    : "Used for this Chat intent with either automatic or manually selected models.";
+    ? "Used only for Supervisor turns, including when Auto chooses supervision. Workers use their task inference profile."
+    : "Used for this task intent in Chat, direct Execute, and Worker turns with either automatic or manually selected models.";
   renderInferenceSupport(name, profile);
 }
 
@@ -3409,43 +3446,108 @@ function renderModelDiagnostics() {
 }
 
 async function testSelectedModel() {
+  if (!await validateRuntimePerformanceDrafts("Test unavailable")) return;
+  const draft = collectSelectedSettings();
+  const profile = elements.inferenceProfileSelector.value || "general-chat";
   const model = elements.modelTestSelector.value;
   elements.testModel.disabled = true;
-  elements.modelTestResult.textContent = `Testing ${model}…`;
+  const abort = new AbortController();
+  const started = performance.now();
+  const progress = createModelTestProgress(model, () => abort.abort());
+  const timer = setInterval(() => {
+    progress.elapsed.textContent = `${((performance.now() - started) / 1000).toFixed(0)} s elapsed`;
+  }, 1000);
 
   try {
-    const result = await fetchJson(
-      "/api/models/test",
+    const response = await fetch(
+      "/api/models/test/stream",
       {
         method: "POST",
+        signal: abort.signal,
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          model
-        })
+        body: JSON.stringify({ model, settings: draft, profile })
       }
     );
-    elements.modelTestResult.textContent = result.connected
-      ? `${result.model} · Completed · Time to first chunk: `
-        + `${result.timeToFirstChunkMilliseconds ?? "unavailable"} ms · `
-        + `Total duration: ${result.totalDurationMilliseconds} ms`
-      : `${result.model} · Failed · ${result.error} · Trace ID: ${result.traceId}`;
+    if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      throw new Error(error?.message || `Model test failed (HTTP ${response.status}).`);
+    }
+    let completed = false;
+    for await (const event of readStreamEvents(response.body)) {
+      if (event.type === "progress") progress.update(event.progress);
+      if (event.type === "result") {
+        completed = true;
+        renderModelTestResult(event.result);
+      }
+    }
+    if (!completed) throw new Error("The model test stream ended before results were received.");
     state.modelDiagnostics = await fetchJson("/api/models/diagnostics");
     renderModelDiagnostics();
   } catch (error) {
-    elements.modelTestResult.textContent = error.message;
+    elements.modelTestResult.textContent = abort.signal.aborted ? "Model test cancelled." : error.message;
   } finally {
+    clearInterval(timer);
     elements.testModel.disabled = false;
   }
+}
+
+function createModelTestProgress(model, cancel) {
+  const panel = elements.modelTestResult;
+  panel.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = `Testing ${model}`;
+  const stages = [
+    ["preparing", "Preparing selected settings"],
+    ["loading-prefill", "Loading model / processing input"],
+    ["generating", "Generating test response"],
+    ["collecting", "Collecting results"]
+  ];
+  const list = document.createElement("ol");
+  list.className = "model-test-stages";
+  for (const [stage, label] of stages) {
+    const item = document.createElement("li");
+    item.dataset.stage = stage;
+    item.textContent = label;
+    list.append(item);
+  }
+  const detail = document.createElement("p");
+  const elapsed = document.createElement("span");
+  elapsed.textContent = "0 s elapsed";
+  elapsed.setAttribute("aria-live", "off");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button";
+  button.textContent = "Cancel test";
+  button.addEventListener("click", cancel, { once: true });
+  panel.append(heading, list, detail, elapsed, document.createTextNode(" "), button);
+  const update = value => {
+    const index = stages.findIndex(([stage]) => stage === value.stage);
+    Array.from(list.children).forEach((item, i) => {
+      item.dataset.state = i < index ? "done" : i === index ? "active" : "pending";
+      if (i === index) item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+    });
+    detail.textContent = value.stage === "generating"
+      ? `${value.receivedCharacters.toLocaleString()} characters received, including thinking. Token counts and TPS arrive with the final metrics.`
+      : value.stage === "loading-prefill"
+        ? "Waiting for the first generated token. Ollama reports loading and prefill times when the test finishes."
+        : value.stage === "collecting" ? "Response received; assembling measured timings and token counts."
+          : "Validating the selected model and preparing the Native test. Settings are not saved.";
+  };
+  update({ stage: "preparing", receivedCharacters: 0 });
+  panel.scrollIntoView({ block: "nearest" });
+  return { elapsed, update };
 }
 
 async function openSettings(section = "general") {
   elements.runtimeDetails.open = false;
   elements.settingsErrors.hidden = true;
   elements.saveStatus.textContent = "";
-  elements.modelTestResult.textContent = "";
+  if (!elements.testModel.disabled) elements.modelTestResult.textContent = "";
   state.inferenceProfileDrafts = null;
+  state.runtimePerformanceDrafts = null;
   renderSettings();
   elements.settingsDialog.showModal();
   state.settingsDirty = false;
@@ -3465,7 +3567,7 @@ async function openSettings(section = "general") {
       fetchJson("/api/runtime/profiles")
     ]);
     renderModelDiagnostics();
-    renderRuntimeProfilesEditor();
+    if (!state.settingsDirty) renderRuntimeProfilesEditor();
   } catch (error) {
     elements.modelContextDiagnostic.textContent = error.message;
     elements.runtimeProfileResult.textContent = error.message;
@@ -3491,12 +3593,7 @@ async function closeSettings() {
   return true;
 }
 
-async function saveSettings(event) {
-  event.preventDefault();
-  elements.settingsErrors.hidden = true;
-  clearSettingsValidationMarkers();
-  elements.saveStatus.textContent = "Saving…";
-  updateSettingsDirtyState();
+function collectSelectedSettings() {
   const intentions = {};
 
   for (const card of elements.intentionsGrid.querySelectorAll(".intention-card")) {
@@ -3545,7 +3642,7 @@ async function saveSettings(event) {
         : Number(elements.fileCreationOutputTokenLimit.value),
       phaseEffort: {
         plan: elements.phaseEffortPlan.value,
-        work: elements.phaseEffortWork.value,
+        work: state.settings.execution.phaseEffort.work,
         verify: elements.phaseEffortVerify.value,
         complete: elements.phaseEffortComplete.value,
         recovery: elements.phaseEffortRecovery.value
@@ -3585,6 +3682,17 @@ async function saveSettings(event) {
     }
   };
 
+  return nextSettings;
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  elements.settingsErrors.hidden = true;
+  clearSettingsValidationMarkers();
+  if (!await validateRuntimePerformanceDrafts()) return;
+  elements.saveStatus.textContent = "Saving…";
+  updateSettingsDirtyState();
+  const nextSettings = collectSelectedSettings();
   try {
     state.settings = await fetchJson(
       "/api/settings",
@@ -3624,6 +3732,7 @@ async function saveSettings(event) {
 
 function handleSettingsInput(event) {
   updateInferenceProfileDraft(event.target);
+  updateRuntimePerformanceDraft(event.target);
   event.target.classList.remove("field-invalid");
   event.target.removeAttribute("aria-invalid");
   event.target.closest(".intention-card")?.classList.remove("field-invalid-card");
@@ -3700,7 +3809,6 @@ function markSettingsValidationErrors(errors) {
         "execution.maxDirectPlanSteps": elements.maxDirectPlanSteps,
         "execution.fileCreationOutputTokenLimit": elements.fileCreationOutputTokenLimit,
         "execution.phaseEffort.plan": elements.phaseEffortPlan,
-        "execution.phaseEffort.work": elements.phaseEffortWork,
         "execution.phaseEffort.verify": elements.phaseEffortVerify,
         "execution.phaseEffort.complete": elements.phaseEffortComplete,
         "execution.phaseEffort.recovery": elements.phaseEffortRecovery,
@@ -4775,3 +4883,181 @@ async function resetCloudImagePrivacy(browserSessionId) {
   }
 }
 
+
+let runtimePerformanceRequestId = 0;
+
+function runtimeHelpButton(label, message) {
+  const help = document.createElement("button");
+  help.type = "button";
+  help.className = "information-button";
+  help.textContent = "?";
+  help.setAttribute("aria-label", "Help: " + label);
+  help.dataset.tooltip = message;
+  return help;
+}
+
+function updateRuntimePerformanceInputs() {
+  const draftCustom = elements.runtimeDraftMode.value === "custom" && !elements.runtimeDraftMode.disabled;
+  const batchCustom = elements.runtimeBatchMode.value === "custom" && !elements.runtimeBatchMode.disabled;
+  elements.runtimeDraftValueField.hidden = !draftCustom;
+  elements.runtimeDraftValue.disabled = !draftCustom;
+  elements.runtimeBatchValueField.hidden = !batchCustom;
+  elements.runtimeBatchValue.disabled = !batchCustom;
+}
+
+async function loadRuntimePerformanceEditor() {
+  const requestId = ++runtimePerformanceRequestId;
+  const model = state.models.find(item => item.provider === "ollama-local"
+    && item.name === elements.runtimePerformanceModel.value);
+  const performance = state.settings?.ollamaRuntime?.modelOverrides.find(item =>
+    item.provider === "ollama-local" && item.model === model?.name
+      && item.digest === model?.digest)?.performance;
+  const draft = model && state.runtimePerformanceDrafts?.[runtimePerformanceKey(model)];
+  elements.runtimeDraftMode.value = draft?.draftMode ?? (performance?.draftTokens == null
+    ? "auto" : performance.draftTokens === 0 ? "off" : "custom");
+  elements.runtimeDraftValue.value = draft?.draftValue ?? (performance?.draftTokens > 0 ? performance.draftTokens : 4);
+  elements.runtimeBatchMode.value = draft?.batchMode ?? (performance?.batchSize == null ? "auto" : "custom");
+  elements.runtimeBatchValue.value = draft?.batchValue ?? performance?.batchSize ?? 512;
+  elements.runtimeDraftValue.setCustomValidity("");
+  elements.runtimeBatchValue.setCustomValidity("");
+  elements.runtimeDraftMode.disabled = !model?.digest;
+  elements.runtimeBatchMode.disabled = !model?.digest;
+  updateRuntimePerformanceInputs();
+  elements.runtimePerformanceStatus.textContent = model?.digest
+    ? "Configuration belongs to this model and digest, independently of role. Save changes to persist the settings draft."
+    : "An installed model with an exact digest is required.";
+  elements.runtimePerformanceCapabilities.textContent = model ? "Checking model capabilities…" : "No local model available.";
+  if (!model) return;
+  try {
+    const result = await fetchJson("/api/capabilities/model?model=" + encodeURIComponent(model.name));
+    if (requestId !== runtimePerformanceRequestId) return;
+    const options = result.capabilities?.runtimeOptions ?? [];
+    elements.runtimePerformanceCapabilities.replaceChildren(...["draftTokens", "batchSize"].map(id => {
+      const capability = options.find(item => item.id === id);
+      const support = capability?.support ?? "unknown";
+      const row = document.createElement("div");
+      row.className = "runtime-capability-row";
+      const badge = document.createElement("span");
+      badge.className = "runtime-capability-badge";
+      badge.dataset.support = support;
+      badge.textContent = support === "supported" ? "Supported"
+        : support === "unsupported" ? "Unavailable" : "Not confirmed";
+      const message = document.createElement("span");
+      message.textContent = (id === "draftTokens" ? "Draft tokens: " : "Batch size: ")
+        + (capability?.message ?? "Support cannot be confirmed. Explicit values may be rejected or ignored by the runtime.");
+      const control = id === "draftTokens" ? elements.runtimeDraftMode : elements.runtimeBatchMode;
+      control.disabled = !model.digest || support === "unsupported";
+      row.append(badge, message);
+      return row;
+    }));
+    updateRuntimePerformanceInputs();
+  } catch {
+    if (requestId !== runtimePerformanceRequestId) return;
+    elements.runtimePerformanceCapabilities.textContent =
+      "Support could not be inspected. Configuration remains available; the runtime may reject or ignore explicit values.";
+  }
+}
+
+function runtimePerformanceKey(model) {
+  return JSON.stringify([model.provider, model.name, model.digest]);
+}
+
+function updateRuntimePerformanceDraft(target) {
+  if (!["runtime-draft-mode", "runtime-draft-value", "runtime-batch-mode", "runtime-batch-value"].includes(target.id)) return;
+  const model = state.models.find(item => item.provider === "ollama-local"
+    && item.name === elements.runtimePerformanceModel.value);
+  if (!model?.digest) return;
+  updateRuntimePerformanceInputs();
+  elements.runtimeDraftValue.setCustomValidity("");
+  elements.runtimeBatchValue.setCustomValidity("");
+  state.runtimePerformanceDrafts ??= {};
+  state.runtimePerformanceDrafts[runtimePerformanceKey(model)] = {
+    provider: model.provider, model: model.name, digest: model.digest,
+    draftMode: elements.runtimeDraftMode.value, draftValue: elements.runtimeDraftValue.value,
+    batchMode: elements.runtimeBatchMode.value, batchValue: elements.runtimeBatchValue.value
+  };
+  elements.runtimePerformanceStatus.textContent = "Unsaved model performance changes. Save changes in the modal footer to persist them.";
+}
+
+function collectRuntimePerformanceOverrides(savedOverrides) {
+  const overrides = structuredClone(savedOverrides);
+  for (const draft of Object.values(state.runtimePerformanceDrafts ?? {})) {
+    let exact = overrides.find(item => item.provider === draft.provider
+      && item.model === draft.model && item.digest === draft.digest);
+    if (!exact) {
+      exact = { provider: draft.provider, model: draft.model, digest: draft.digest, overrides: {} };
+      overrides.push(exact);
+    }
+    exact.performance = {
+      draftTokens: draft.draftMode === "auto" ? null : draft.draftMode === "off" ? 0 : Number(draft.draftValue),
+      batchSize: draft.batchMode === "auto" ? null : Number(draft.batchValue)
+    };
+  }
+  return overrides;
+}
+
+async function validateRuntimePerformanceDrafts(failureLabel = "Save failed") {
+  for (const draft of Object.values(state.runtimePerformanceDrafts ?? {})) {
+    for (const [mode, value, field, label] of [
+      [draft.draftMode, draft.draftValue, elements.runtimeDraftValue, "Draft token count"],
+      [draft.batchMode, draft.batchValue, elements.runtimeBatchValue, "Tokens per batch"]
+    ]) {
+      const number = Number(value);
+      if (mode !== "custom" || (value.trim() !== "" && Number.isInteger(number) && number > 0 && number <= 2147483647)) continue;
+      elements.runtimePerformanceModel.value = draft.model;
+      elements.runtimeOverrideModel.value = draft.model;
+      loadRuntimeOverrideEditor();
+      await loadRuntimePerformanceEditor();
+      setSettingsSection("ollama-context", true);
+      const message = label + " must be a positive integer up to 2147483647.";
+      elements.settingsErrors.textContent = draft.model + ": " + message;
+      elements.settingsErrors.hidden = false;
+      elements.saveStatus.textContent = failureLabel;
+      updateSettingsDirtyState();
+      field.classList.add("field-invalid");
+      field.setAttribute("aria-invalid", "true");
+      field.setCustomValidity(message);
+      field.reportValidity();
+      return false;
+    }
+  }
+  return true;
+}
+
+function renderModelTestResult(result) {
+  const panel = elements.modelTestResult;
+  panel.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = `${result.model} · ${result.connected ? "Completed" : "Failed"}`;
+  panel.append(heading);
+  if (!result.connected) {
+    const error = document.createElement("p");
+    error.textContent = `${result.error} · Trace ID: ${result.traceId}`;
+    panel.append(error);
+    return;
+  }
+  const metrics = document.createElement("dl");
+  metrics.className = "model-test-metrics";
+  for (const [name, value] of [
+    ["Generation speed", Number.isFinite(result.inferenceMetrics?.tokensPerSecond) ? `${result.inferenceMetrics.tokensPerSecond.toFixed(2)} tok/s` : "Unavailable"],
+    ["Output tokens", result.inferenceMetrics?.outputTokens ?? "Unavailable"],
+    ["TTFT", result.timeToFirstChunkMilliseconds == null ? "Unavailable" : `${(result.timeToFirstChunkMilliseconds / 1000).toFixed(2)} s`],
+    ["Total duration", `${(result.totalDurationMilliseconds / 1000).toFixed(2)} s`],
+    ["Input tokens", result.inputTokens ?? "Unavailable"],
+    ["Loading", result.loadMilliseconds == null ? "Unavailable" : `${(result.loadMilliseconds / 1000).toFixed(2)} s`],
+    ["Prefill", result.prefillMilliseconds == null ? "Unavailable" : `${(result.prefillMilliseconds / 1000).toFixed(2)} s`],
+    ["Generation", result.inferenceMetrics?.generationMilliseconds == null ? "Unavailable" : `${(result.inferenceMetrics.generationMilliseconds / 1000).toFixed(2)} s`]
+  ]) {
+    const group = document.createElement("div");
+    const label = document.createElement("dt"); label.textContent = name;
+    const data = document.createElement("dd"); data.textContent = value;
+    group.append(label, data); metrics.append(group);
+  }
+  const options = document.createElement("p");
+  options.textContent = `Selected settings (not saved) · Profile: ${result.profile} · Thinking requested: ${result.thinking}`
+    + (result.runtime ? ` · Context: ${result.runtime.effectiveContextTokens} · Draft tokens: ${result.runtime.performance?.draftTokens ?? "Auto"} · Batch: ${result.runtime.performance?.batchSize ?? "Auto"}` : "");
+  const note = document.createElement("p");
+  note.textContent = `Native coding workload with a ${result.outputTokenBudget.toLocaleString()} output-token budget, including thinking. The model may finish before the budget; output tokens above are measured. TPS excludes loading and prefill; total duration includes them. Context and runtime values are requested, not proof of runner activation.`;
+  panel.append(metrics, options, note);
+  panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}

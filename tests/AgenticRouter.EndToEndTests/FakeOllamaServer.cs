@@ -75,6 +75,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
   private readonly ConcurrentQueue<RecordedChatRequest> _allRequests = new();
   private readonly ConcurrentQueue<string> _capabilityQueries = new();
   private readonly ConcurrentQueue<string> _errors = new();
+  public ConcurrentQueue<(string Fixture, string Protocol, int? Limit, int LimitFields, string? ContentType)> CompatibilityRequests { get; } = new();
   private readonly ConcurrentDictionary<string, RunningModel> _loaded = new(
     StringComparer.Ordinal
   );
@@ -119,6 +120,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
 
   public int TagQueryCount => Volatile.Read(ref _tagQueryCount);
 
+  private readonly ConcurrentDictionary<string, bool> _runtimeDraftModels = new();
+  private readonly ConcurrentDictionary<string, bool> _runtimeNonGenerativeModels = new();
+  public bool RejectRuntimePerformance { get; set; }
+
+  public void SetRuntimeModelCapabilities(string model, bool draft, bool generative = true)
+  {
+    _runtimeDraftModels[model] = draft;
+    _runtimeNonGenerativeModels[model] = !generative;
+  }
+
   public static FakeOllamaServer Start()
   {
     var server = new FakeOllamaServer(
@@ -131,9 +142,16 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     return server;
   }
 
+  public bool BooleanThinkingForQwen { get; set; }
+  public bool BooleanThinkingForGptOss { get; set; }
+
   public void Reset()
   {
     _requests.Clear();
+    CompatibilityRequests.Clear();
+    _runtimeDraftModels.Clear();
+    _runtimeNonGenerativeModels.Clear();
+    RejectRuntimePerformance = false;
     _capabilityQueries.Clear();
     _errors.Clear();
     _generationAttempts.Clear();
@@ -269,6 +287,82 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     try
     {
       var path = context.Request.Url?.AbsolutePath;
+
+      if (context.Request.HttpMethod == "POST"
+        && path is "/v1/responses" or "/v1/chat/completions" or "/v1/messages")
+      {
+        using var document = await JsonDocument.ParseAsync(context.Request.InputStream,
+          cancellationToken: cancellationToken);
+        var fixture = document.RootElement.GetProperty("fixture").GetString()!;
+        var limitNames = new[] { "max_tokens", "max_completion_tokens", "max_output_tokens" };
+        var limits = limitNames.Where(name => document.RootElement.TryGetProperty(name, out _)).ToArray();
+        CompatibilityRequests.Enqueue((fixture, path, limits.Length == 1
+          ? document.RootElement.GetProperty(limits[0]).GetInt32() : null, limits.Length, context.Request.ContentType));
+        var call = document.RootElement.GetProperty("call").GetInt32();
+        var output = call == 0 ? 40 : 60;
+        var usage = path == "/v1/chat/completions"
+          ? new JsonObject { ["completion_tokens"] = output }
+          : new JsonObject { ["output_tokens"] = output };
+        var final = new JsonObject();
+        if (fixture.Contains("global output fixture", StringComparison.Ordinal))
+        {
+          var reason = call == 0 ? "length" : "stop";
+          if (path == "/v1/chat/completions")
+            final["choices"] = new JsonArray(new JsonObject { ["finish_reason"] = reason });
+          else if (path == "/v1/messages")
+          {
+            final["type"] = "message_delta";
+            final["delta"] = new JsonObject { ["stop_reason"] = call == 0 ? "max_tokens" : "end_turn" };
+          }
+          else
+          {
+            final["status"] = call == 0 ? "incomplete" : "completed";
+            if (call == 0) final["incomplete_details"] = new JsonObject { ["reason"] = "max_output_tokens" };
+          }
+        }
+        if (!fixture.Contains("missing usage", StringComparison.Ordinal)) final["usage"] = usage;
+        if (!fixture.Contains("stream only", StringComparison.Ordinal))
+          final["timings"] = new JsonObject { ["predicted_ms"] = call == 0 ? 1000 : 3000 };
+        if (fixture.Contains("nonstream first", StringComparison.Ordinal) && call == 0)
+        {
+          await WriteJsonAsync(context.Response, HttpStatusCode.OK, final, cancellationToken);
+          return;
+        }
+        context.Response.ContentType = "text/event-stream";
+        context.Response.SendChunked = true;
+        async Task FrameAsync(object value)
+        {
+          var bytes = Encoding.UTF8.GetBytes("data: " + JsonSerializer.Serialize(value) + "\n\n");
+          await context.Response.OutputStream.WriteAsync(bytes, cancellationToken);
+          await context.Response.OutputStream.FlushAsync(cancellationToken);
+        }
+        await FrameAsync(new { type = "metadata" });
+        await Task.Delay(call == 0 ? 240 : 70, cancellationToken);
+        object Delta(string value) => path switch
+        {
+          "/v1/responses" => new { type = "response.reasoning_summary_text.delta", delta = value },
+          "/v1/messages" => new { type = "content_block_delta", delta = new { thinking = value } },
+          _ => new { choices = new[] { new { delta = new { reasoning = value } } } }
+        };
+        if (fixture.Contains("buffered", StringComparison.Ordinal))
+        {
+          var bytes = Encoding.UTF8.GetBytes(string.Join("", new object[]
+          {
+            Delta("first"), Delta("last"),
+            new JsonObject { ["type"] = "response.completed", ["response"] = final }
+          }.Select(value => "data: " + JsonSerializer.Serialize(value) + "\n\n")));
+          await context.Response.OutputStream.WriteAsync(bytes, cancellationToken);
+          context.Response.Close();
+          return;
+        }
+        await FrameAsync(Delta("first"));
+        await Task.Delay(150, cancellationToken);
+        await FrameAsync(Delta("last"));
+        await FrameAsync(path == "/v1/responses"
+          ? new JsonObject { ["type"] = "response.completed", ["response"] = final } : final);
+        context.Response.Close();
+        return;
+      }
 
       if (
         context.Request.HttpMethod == HttpMethod.Get.Method
@@ -511,6 +605,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       {
         model_info = new Dictionary<string, object>
         {
+          ["qwen3.nextn_predict_layers"] = _runtimeDraftModels.GetValueOrDefault(model) ? 1 : 0,
           ["general.context_length"] = string.Equals(
             model,
             "qwen3.8:27b-gpu0",
@@ -531,11 +626,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           quantization_level = "Q4_K_M"
         },
         thinking = model is "qwen3.8:27b-gpu0"
-          ? new { values = new object[] { false, "low", "medium", "xhigh" }, @default = "xhigh" }
+          ? new { values = BooleanThinkingForQwen ? new object[] { false, true } : new object[] { false, "low", "medium", "xhigh" }, @default = BooleanThinkingForQwen ? "true" : "xhigh" }
           : model is "gpt-oss:20b"
-            ? new { values = new object[] { "low", "medium", "high" }, @default = "medium" }
+            ? new { values = BooleanThinkingForGptOss ? new object[] { false, true } : new object[] { "low", "medium", "high" }, @default = BooleanThinkingForGptOss ? "true" : "medium" }
             : null,
-        capabilities = model is "qwen3.8:27b-gpu0"
+        capabilities = _runtimeNonGenerativeModels.GetValueOrDefault(model) ? new[] { "embedding" } : model is "qwen3.8:27b-gpu0"
           ? new[]
           {
             "completion",
@@ -745,7 +840,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       topK,
       minP,
       think,
-      seed
+      seed,
+      options.ValueKind == JsonValueKind.Object && options.TryGetProperty("draft_num_predict", out var draft) ? draft.GetInt32() : null,
+      options.ValueKind == JsonValueKind.Object && options.TryGetProperty("num_batch", out var batch) ? batch.GetInt32() : null
     );
     _requests.Enqueue(
       recorded
@@ -753,6 +850,13 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     _allRequests.Enqueue(
       recorded
     );
+
+    if (RejectRuntimePerformance && (recorded.DraftTokens is not null || recorded.BatchSize is not null))
+    {
+      await WriteJsonAsync(context.Response, HttpStatusCode.BadRequest,
+        new { error = "num_batch is unsupported by this runtime fixture" }, cancellationToken);
+      return;
+    }
 
     if (!Models.Any(
       candidate => candidate.Name == model
@@ -895,7 +999,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         hasTools,
         availableTools,
         true,
-        cancellationToken
+        cancellationToken,
+        predictTokens ?? 4_096
       );
       return;
     }
@@ -983,6 +1088,21 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    if (messages.Any(message => message.Role == "system"
+      && message.Content.StartsWith("EXECUTION_COMPLETION_REPORT_V1", StringComparison.Ordinal)))
+    {
+      var fail = messages.Any(message => message.Content.Contains("completion-report-failure-fixture", StringComparison.Ordinal));
+      await WriteJsonAsync(response, fail ? HttpStatusCode.BadRequest : HttpStatusCode.OK,
+        fail ? (object)new { error = "Report fixture unavailable" } : new
+        {
+          model,
+          message = new { role = "assistant", content = "Done: recorded file changes.\nMissing: CSV filters.\nNot verified: end-to-end export behavior. <script>window.reportInjected=true</script>" },
+          done = true,
+          prompt_eval_count = 100,
+          eval_count = 40
+        }, cancellationToken);
+      return;
+    }
     if (
       hasTools
       && IsNativeBenchmarkRequest(messages)
@@ -1546,6 +1666,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       entry => IsExecuteObjective(entry.message)
     ).Last();
     var current = currentEntry.message.Content;
+
     var activeMessages = messages.Skip(
       currentEntry.index + 1
     ).ToArray();
@@ -2311,7 +2432,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     bool hasTools,
     IReadOnlyList<string> availableTools,
     bool stream,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    int outputLimit = 4_096
   )
   {
     var currentEntry = messages.Select(
@@ -2320,6 +2442,59 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       entry => IsExecuteObjective(entry.message)
     ).Last();
     var current = currentEntry.message.Content;
+    if (stream && hasTools && current.Contains("footer inference metrics", StringComparison.OrdinalIgnoreCase))
+    {
+      var created = messages.Skip(currentEntry.index + 1).Any(message => message.ToolName == "create_file"
+        || message.Content.Contains("Tool: create_file", StringComparison.Ordinal))
+        || messages.Any(message => message.Content.StartsWith("APPLICATION_OWNED_EXECUTION_STATE_V1", StringComparison.Ordinal)
+          && message.Content.Contains(":completed:", StringComparison.Ordinal));
+      var inspected = messages.Skip(currentEntry.index + 1).Any(message => message.ToolName == "read_file"
+        || message.Content.Contains("Tool: read_file", StringComparison.Ordinal));
+      var final = created && inspected;
+      var read = created && !inspected;
+      var discover = !created && !availableTools.Contains("create_file", StringComparer.Ordinal);
+      var missing = current.Contains("missing usage", StringComparison.OrdinalIgnoreCase);
+      response.StatusCode = 200;
+      response.ContentType = "application/x-ndjson";
+      response.SendChunked = true;
+      // Metadata precedes the first actual token; it must not terminate TTFT.
+      await response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"message\":{\"content\":\"\"},\"done\":false}\n"), cancellationToken);
+      await response.OutputStream.FlushAsync(cancellationToken);
+      await Task.Delay(final ? 650 : 180, cancellationToken);
+      var payload = new JsonObject
+      {
+        ["message"] = JsonSerializer.SerializeToNode(new
+        {
+          role = "assistant",
+          content = final ? "The requested file was created." : "Creating the requested file.",
+          tool_calls = final ? null : new[]
+          {
+            new
+            {
+              id = discover ? "footer-tools" : read ? "footer-read" : "footer-file",
+              function = new
+              {
+                name = discover ? LocalActionPlanner.RequestToolsetTool : read ? "read_file" : "create_file",
+                arguments = discover
+                  ? JsonSerializer.SerializeToElement(new { tools = new[] { "create_file" }, reason = "Create the requested file." })
+                  : read ? JsonSerializer.SerializeToElement(new { path = "hello.txt" })
+                  : JsonSerializer.SerializeToElement(new { path = "hello.txt", content = "footer metrics" })
+              }
+            }
+          }
+        }, CompactJsonOptions),
+        ["done"] = true
+      };
+      if (!missing || !final)
+      {
+        payload["prompt_eval_count"] = 120;
+        payload["eval_count"] = discover ? 10 : read ? 20 : final ? 60 : 40;
+        payload["eval_duration"] = discover ? 100_000_000L : read ? 200_000_000L : final ? 1_200_000_000L : 400_000_000L;
+      }
+      await response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(payload.ToJsonString(CompactJsonOptions) + "\n"), cancellationToken);
+      await response.OutputStream.FlushAsync(cancellationToken);
+      return;
+    }
     if (
       current.Contains("supervision restart boundary", StringComparison.OrdinalIgnoreCase)
       && current.Contains("SUPERVISION_VERIFY_V1", StringComparison.Ordinal)
@@ -2435,7 +2610,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           null,
           0,
           cancellationToken,
-          4_096
+          outputLimit
         );
       }
       else
@@ -2453,7 +2628,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
             },
             done = true,
             prompt_eval_count = 120,
-            eval_count = 4_096
+            eval_count = outputLimit
           },
           cancellationToken
         );
@@ -2694,10 +2869,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     if (messages.Any(message => message.Content.Contains(
       "PROGRESSIVE_ACTION_BUDGET_V1", StringComparison.Ordinal)))
     {
-      var completed = messages.Count(message =>
-        message.Role == "tool" && message.ToolName == "create_file"
-        || message.Content.StartsWith("LOCAL_ACTION_RESULT", StringComparison.Ordinal)
-          && message.Content.Contains("Tool: create_file", StringComparison.Ordinal));
+      var completed = ObservedFixtureResults(model, current, "create_file").Count;
+      var inspected = ObservedFixtureResults(model, current, "read_file").Count;
       plan = completed < 22
         ? new
         {
@@ -2709,7 +2882,12 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
           },
           explanation = "Create the next distinct verified artifact."
         }
-        : new
+        : inspected < 22 ? new
+        {
+          tool = (string?)"read_file",
+          arguments = (object)new { path = $"progress-{inspected + 1:00}.txt" },
+          explanation = "Inspect each created artifact before completing."
+        } : new
         {
           tool = (string?)null,
           arguments = (object)new { },
@@ -2966,7 +3144,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     )
     {
       plan = CreateForkGameAction(
-        actionResults.Length
+        ObservedFixtureResults(model, current).Count
       );
     }
     else if (
@@ -4504,6 +4682,27 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       ',',
       StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
     )[0];
+  }
+
+  private IReadOnlyList<RecordedMessage> ObservedFixtureResults(string model, string objective, string? tool = null)
+  {
+    // These scripted fixtures must retain already-observed acknowledgements when
+    // the real Host compacts its next request. Never advance from a proposal alone.
+    return _requests.Where(request => request.Model == model)
+      .SelectMany(request => request.Messages.SkipWhile(message => message.Content != objective).Skip(1))
+      .Where(message => message.Role == "tool"
+        || message.Content.StartsWith("LOCAL_ACTION_RESULT", StringComparison.Ordinal))
+      .Where(message => message.Content.Contains("Status: completed", StringComparison.Ordinal)
+        || message.Content.Contains("\"status\":\"completed\"", StringComparison.Ordinal)
+        || message.Content.Contains("\"outcome\":\"succeeded\"", StringComparison.Ordinal))
+      .Where(message => message.ToolName is not LocalActionPlanner.RequestToolsetTool
+        and not "create_execution_plan" and not "revise_execution_plan"
+        && !message.Content.Contains($"Tool: {LocalActionPlanner.RequestToolsetTool}\n", StringComparison.Ordinal)
+        && !message.Content.Contains("Tool: create_execution_plan\n", StringComparison.Ordinal)
+        && !message.Content.Contains("Tool: revise_execution_plan\n", StringComparison.Ordinal))
+      .Where(message => tool is null || message.ToolName == tool
+        || message.Content.Contains($"Tool: {tool}\n", StringComparison.Ordinal))
+      .DistinctBy(message => message.Content, StringComparer.Ordinal).ToArray();
   }
 
   private static object CreateForkGameAction(int completedActionCount)
@@ -6542,6 +6741,37 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
         decision = "not-json";
         return true;
       }
+      if (current.Contains(
+        "ambiguous prefixed supervision decision",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = "First {\"decision\":\"dispatch_work\"} second {\"decision\":\"dispatch_work\"}";
+        return true;
+      }
+      if (current.Contains(
+        "prefixed supervision decision",
+        StringComparison.OrdinalIgnoreCase
+      ))
+      {
+        decision = "Here is the decision. " + JsonSerializer.Serialize(
+          new
+          {
+            decision = "dispatch_work",
+            items = new[]
+            {
+              new
+              {
+                objective = "create file hello.txt with content hello world today",
+                acceptanceCriteria = new[] { criterion },
+                evidencePaths = new[] { "hello.txt" }
+              }
+            }
+          },
+          CompactJsonOptions
+        );
+        return true;
+      }
       decision = JsonSerializer.Serialize(
         new
         {
@@ -6829,9 +7059,8 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       300,
       contextTokens
     );
-    var modelTestDelayMilliseconds = string.Equals(
-      current,
-      "Reply with exactly: OK",
+    var modelTestDelayMilliseconds = current.StartsWith(
+      "MODEL_TPS_PROBE_V2:",
       StringComparison.Ordinal
     )
       ? Interlocked.Exchange(
@@ -6946,6 +7175,9 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    if (messages.Any(message => message.Role == "user"
+      && message.Content.Contains("chat progress fixture", StringComparison.Ordinal)))
+      await Task.Delay(600, cancellationToken);
     var webSearchAttempt = messages.Any(
       message => message.Role == "user"
         && (
@@ -6990,6 +7222,26 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     var toolResultCount = messages.Count(
       message => message.Role == "tool"
     );
+    var emptyResponseAttempt = messages.Any(message => message.Role == "user"
+      && message.Content.Contains("chat workspace read request empty response", StringComparison.Ordinal));
+    var emptyResponseFinalization = messages.Any(message => message.Role == "system"
+      && message.Content.Contains("The previous generation returned no tool call and no user-facing answer.", StringComparison.Ordinal));
+    if (emptyResponseAttempt && toolResult is not null)
+    {
+      var remainsEmpty = messages.Any(message => message.Role == "user"
+        && message.Content.Contains("remains empty", StringComparison.Ordinal));
+      var requestsTool = emptyResponseFinalization && messages.Any(message => message.Role == "user"
+        && message.Content.Contains("requests tool", StringComparison.Ordinal));
+      await WriteStreamingToolResponseAsync(
+        response, model,
+        emptyResponseFinalization && !remainsEmpty && !requestsTool
+          ? $"Chat recovered from collected evidence. {toolResult.Content}" : string.Empty,
+        "Non-terminal reasoning must not become the answer.",
+        requestsTool ? new[] { new { function = new { name = "read_file", arguments = new { path = "chat-readable.txt" } } } } : null,
+        0, cancellationToken
+      );
+      return;
+    }
     var budgetFinalization = budgetAttempt && toolResultCount > 8;
     var content = budgetFinalization
       ? "Chat completed from the eight trusted-workspace reads already collected."
@@ -7115,7 +7367,7 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
     }
 
     if (current.Contains(
-      "Reply with exactly: OK",
+      "MODEL_TPS_PROBE_V2:",
       StringComparison.Ordinal
     ))
     {
@@ -7942,7 +8194,9 @@ internal sealed record RecordedChatRequest(
   int? TopK,
   double? MinP,
   string? Think,
-  int? Seed
+  int? Seed,
+  int? DraftTokens = null,
+  int? BatchSize = null
 );
 
 internal sealed record RecordedMessage(

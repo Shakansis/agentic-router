@@ -1,4 +1,6 @@
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Observability;
 
 namespace AgenticRouter.Api.Usage;
@@ -277,13 +279,15 @@ public sealed class UsageRecorder : IUsageRecorder
   private readonly IPricingCatalog _pricing;
   private readonly IIncidentJournal _incidentJournal;
   private readonly ILogger<UsageRecorder> _logger;
+  private readonly IExecutionSessionStore _sessions;
 
   public UsageRecorder(
     ISettingsStore settingsStore,
     IUsageLedger ledger,
     IPricingCatalog pricing,
     IIncidentJournal incidentJournal,
-    ILogger<UsageRecorder> logger
+    ILogger<UsageRecorder> logger,
+    IExecutionSessionStore sessions
   )
   {
     _settingsStore = settingsStore;
@@ -291,6 +295,7 @@ public sealed class UsageRecorder : IUsageRecorder
     _pricing = pricing;
     _incidentJournal = incidentJournal;
     _logger = logger;
+    _sessions = sessions;
   }
 
   public async Task RecordAsync(
@@ -298,6 +303,28 @@ public sealed class UsageRecorder : IUsageRecorder
     CancellationToken cancellationToken
   )
   {
+    if (request.Inference?.DispatchedAt is not null)
+    {
+      var usage = request.ProviderUsage;
+      var outputTokens = usage?.GeneratedOutputTokens ?? usage?.OutputTokens;
+      var loadMilliseconds = usage?.LoadDurationNanoseconds is >= 0
+        ? usage.LoadDurationNanoseconds / 1_000_000d : null;
+      var metrics = new ExecutionInferenceMetrics(
+        outputTokens is >= 0 ? outputTokens : null,
+        usage?.EvalDurationNanoseconds is >= 0
+          ? usage.EvalDurationNanoseconds.Value / 1_000_000d
+          : null,
+        request.Inference.DispatchedAt,
+        InferenceObservation.AfterModelLoad(request.Inference.TimeToFirstTokenMilliseconds, loadMilliseconds),
+        "provider",
+        request.Inference.TimeToFirstTokenMilliseconds,
+        loadMilliseconds,
+        loadMilliseconds is not null ? "after-model-load" : "dispatch"
+      );
+      if (request.Context.ExecutionSessionId is string sessionId)
+        _sessions.Get(sessionId)?.RecordInference(metrics);
+      request.Context.InferenceObserver?.Invoke(metrics);
+    }
     try
     {
       var settings = await _settingsStore.GetAsync(

@@ -17,6 +17,105 @@ namespace AgenticRouter.EndToEndTests;
 public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<ExecutionStateEndToEndTests>
 {
   [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
+  [DoNotParallelize]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task CompletionFooterAggregatesInferenceAndPreservesItInHistory(bool missingUsage)
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var history = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true });
+    history.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("ask");
+    await StartMessageAsync("footer inference metrics create file" + (missingUsage ? " missing usage" : ""));
+    var approve = Page.Locator(".action-approval").GetByRole(AriaRole.Button,
+      new() { Name = "Approve", Exact = true });
+    await Expect(approve).ToBeVisibleAsync();
+    await Page.WaitForTimeoutAsync(1800);
+    await approve.ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    var footer = Page.Locator(".execution-session-footer").Last;
+    await Expect(footer).ToBeVisibleAsync();
+    var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");
+    using var response = await _environment.HttpClient.GetAsync($"api/execution-sessions/{executionId}/review");
+    response.EnsureSuccessStatusCode();
+    var summary = JsonNode.Parse(await response.Content.ReadAsStringAsync())!["summary"]!;
+    var metrics = summary["inferenceMetrics"]!;
+    if (missingUsage)
+    {
+      Assert.IsNull(metrics["outputTokens"]);
+      Assert.IsNull(metrics["tokensPerSecond"]);
+      await Expect(footer.Locator("[data-metric=tokens], [data-metric=throughput]")).ToHaveCountAsync(0);
+    }
+    else
+    {
+      Assert.AreEqual(130L, metrics["outputTokens"]!.GetValue<long>());
+      Assert.AreEqual(1900d, metrics["generationMilliseconds"]!.GetValue<double>());
+      Assert.AreEqual(130_000d / 1900, metrics["tokensPerSecond"]!.GetValue<double>());
+      await Expect(footer.Locator("[data-metric=tokens]")).ToContainTextAsync("130");
+      await Expect(footer.Locator("[data-metric=throughput]")).ToContainTextAsync("68.42");
+    }
+    var ttft = metrics["timeToFirstTokenMilliseconds"]!.GetValue<double>();
+    Assert.IsGreaterThanOrEqualTo(150d, ttft, "Empty metadata must not count as a token.");
+    Assert.IsLessThan(600d, ttft, "TTFT must remain from the first inference.");
+    await Expect(footer.Locator("[data-metric=ttft]")).ToBeVisibleAsync();
+    await Expect(footer).ToContainTextAsync("Target:");
+    await Expect(footer).ToContainTextAsync("Specialist:");
+    await Expect(footer).ToContainTextAsync("1 files");
+    foreach (var width in new[] { 1280, 760, 390 })
+    {
+      await Page.SetViewportSizeAsync(width, 800);
+      Assert.IsTrue(await footer.EvaluateAsync<bool>("""
+        footer => {
+          const bounds = footer.getBoundingClientRect();
+          return [...footer.querySelectorAll('.execution-footer-metric, .execution-footer-activity > span')]
+            .every(item => item.getBoundingClientRect().right <= bounds.right + 1)
+            && !footer.querySelector('.divider')
+            && ![...footer.children].some(item => /^[|·]$/.test(item.textContent.trim()));
+        }
+        """), "Wrapping must preserve complete badges/items without orphan separators or overflow.");
+      await footer.ScreenshotAsync(new()
+      {
+        Path = Path.Combine(Path.GetTempPath(),
+        $"ar-completion-footer-{missingUsage}-{width}.png")
+      });
+    }
+    await Page.SetViewportSizeAsync(1280, 800);
+    await footer.ScrollIntoViewIfNeededAsync();
+    await Page.ScreenshotAsync(new()
+    {
+      Path = Path.Combine(Path.GetTempPath(),
+      $"ar-completion-footer-{missingUsage}.png"),
+      FullPage = true
+    });
+    var conversationId = await Page.EvaluateAsync<string>("() => state.conversationSessionId");
+    var saved = JsonNode.Parse(await _environment.HttpClient.GetStringAsync(
+      $"api/sessions/{conversationId}?workspaceId={workspaceId}"))!;
+    var savedAssistant = saved["messages"]!.AsArray().Last(item => item!["role"]!.GetValue<string>() == "assistant")!;
+    Assert.AreEqual("completed", saved["state"]!.GetValue<string>());
+    Assert.AreEqual(1, saved["messages"]!.AsArray().Count(item => item!["role"]!.GetValue<string>() == "assistant"));
+    var savedTerminal = savedAssistant["timeline"]!.AsArray().Single(item => item!["type"]!.GetValue<string>() == "response.completed")!;
+    Assert.AreEqual(metrics.ToJsonString(), savedTerminal["executionSession"]!["inferenceMetrics"]!.ToJsonString());
+    await _environment.RestartApplicationAsync();
+    await Page.ReloadAsync();
+    await Page.Locator("#recent-sessions").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id='{conversationId}'] .session-entry-content").ClickAsync();
+    footer = Page.Locator(".execution-session-footer").Last;
+    await Expect(footer.Locator("[data-metric=ttft]")).ToBeVisibleAsync();
+    await Expect(footer.Locator("[data-metric=tokens]")).ToHaveCountAsync(missingUsage ? 0 : 1);
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
+    await Page.Locator(".review-changes").Last.ClickAsync();
+    using var restored = await _environment.HttpClient.GetAsync($"api/execution-sessions/{executionId}/review");
+    restored.EnsureSuccessStatusCode();
+    Assert.AreEqual(metrics.ToJsonString(),
+      JsonNode.Parse(await restored.Content.ReadAsStringAsync())!["summary"]!["inferenceMetrics"]!.ToJsonString());
+  }
+
+  [TestMethod]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task DirectApprovalRetainsItsAuthorityAfterBrowserReload()
@@ -310,8 +409,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       await Expect(header).Not.ToHaveClassAsync(new Regex("is-live"));
       await Expect(footer).ToHaveCountAsync(1);
       await Expect(footer).ToBeVisibleAsync();
-      await Expect(footer).ToHaveTextAsync(await header.InnerTextAsync(), new() { UseInnerText = true });
-      await Expect(footer.Locator("strong")).ToHaveTextAsync(outcome);
+      foreach (var text in (await header.InnerTextAsync()).Split([" · ", "\n"], StringSplitOptions.RemoveEmptyEntries))
+        await Expect(footer).ToContainTextAsync(text, new() { IgnoreCase = true });
+      await Expect(footer.Locator(".execution-footer-state")).ToHaveTextAsync(outcome);
       Assert.AreEqual("static", await header.EvaluateAsync<string>("element => getComputedStyle(element).position"));
       Assert.AreEqual("static", await footer.EvaluateAsync<string>("element => getComputedStyle(element).position"));
       Assert.IsTrue(await footer.EvaluateAsync<bool>("element => element.previousElementSibling.classList.contains('activity') && element.nextElementSibling.classList.contains('message-actions')"));
@@ -1311,6 +1411,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         "#undo-execution"
       )
     ).ToBeDisabledAsync();
+    await Expect(Page.Locator("#undo-execution")).ToBeHiddenAsync();
+    await Expect(Page.Locator(".change-file-review"))
+      .ToContainTextAsync("No pending Git change");
     var commit = await RunGitTextAsync(
       _environment.WorkspaceDirectory,
       "rev-parse",
@@ -2352,8 +2455,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await Expect(
       Page.Locator(
-        ".verification-ok"
-      )
+        ".change-file-review .verification-ok"
+      ).First
     ).ToContainTextAsync(
       "Verified"
     );
@@ -2373,6 +2476,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         file
       )
     );
+    await Expect(Page.Locator(".change-file-review"))
+      .ToContainTextAsync("Changes rolled back");
+    await Expect(Page.Locator("#undo-execution")).ToBeHiddenAsync();
   }
 
   [TestMethod]
@@ -2399,17 +2505,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
-    await Page.Locator(
-      "#undo-execution"
-    ).ClickAsync();
-    await ConfirmAppModalAsync();
-    await Expect(
-      Page.Locator(
-        "#undo-status"
-      )
-    ).ToContainTextAsync(
-      "conflicts were detected"
-    );
+    await Expect(Page.Locator(".change-file-review"))
+      .ToContainTextAsync("File changed again");
+    await Expect(Page.Locator("#undo-execution")).ToBeHiddenAsync();
     Assert.AreEqual(
       "external change",
       await File.ReadAllTextAsync(
@@ -2480,7 +2578,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute run process"
     );
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Process: dotnet · exit 0");
+    await Expect(Page.Locator(".execution-completion-summary > details")).Not.ToHaveAttributeAsync(
+      "open", string.Empty);
+    await Page.Locator(".execution-completion-summary summary").ClickAsync();
+    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Processes: 1 run · 1 succeeded · 0 failed");
     var processAction = Page.Locator(".assistant-work .work-action", new() { HasText = "dotnet --version" });
     await processAction.Locator("summary").ClickAsync();
     await Expect(processAction.Locator(".work-action-preview")).ToContainTextAsync("dotnet --version");
@@ -2488,13 +2589,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       ".review-changes"
     ).ClickAsync();
-    await Expect(
-      Page.Locator(
-        ".process-review"
-      )
-    ).ToContainTextAsync(
-      "dotnet --version"
-    );
+    await Page.Locator(".process-review-entry summary").ClickAsync();
+    await Page.Locator(".process-review-tabs button", new() { HasText = "Command" }).ClickAsync();
+    await Expect(Page.Locator(".process-review-entry pre")).ToContainTextAsync("dotnet --version");
+    await Page.Locator(".process-review-tabs button", new() { HasText = "Response" }).ClickAsync();
+    await Expect(Page.Locator(".process-review-entry pre")).ToContainTextAsync("stdout:");
     await Expect(
       Page.Locator(
         "#undo-execution"
@@ -2699,7 +2798,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).Last;
     await Expect(
       activity.Locator(":scope > summary")
-    ).ToContainTextAsync("Completed");
+    ).ToContainTextAsync("Blocked");
+    var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");
+    var review = JsonNode.Parse(await _environment.HttpClient.GetStringAsync($"api/execution-sessions/{executionId}/review"))!;
+    Assert.AreEqual("blocked", review["summary"]!["state"]!.GetValue<string>());
     if (await activity.GetAttributeAsync("open") is null)
     {
       await activity.Locator(":scope > summary").ClickAsync();
@@ -3312,16 +3414,24 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SetExecuteModeAsync("auto");
     await StartMessageAsync("PROGRESSIVE_ACTION_BUDGET_V1 create 22 distinct files");
 
-    await Expect(Page.Locator(".execution-session-header"))
-      .ToContainTextAsync("22 actions", new() { Timeout = 60_000 });
-    Assert.IsTrue(File.Exists(Path.Combine(
-      _environment.WorkspaceDirectory, "progress-22.txt")));
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 60_000 });
+    var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");
+    var review = JsonNode.Parse(await _environment.HttpClient.GetStringAsync(
+      $"api/execution-sessions/{executionId}/review"))!;
+    Assert.AreEqual("completed", review["summary"]!["state"]!.GetValue<string>());
+    Assert.AreEqual(22, review["files"]!.AsArray().Count);
+    var actions = review["actions"]!.AsArray();
+    Assert.AreEqual(22, actions.Count(action => action!["tool"]!.GetValue<string>() == "create_file"
+      && action["state"]!.GetValue<string>() == "completed"));
+    Assert.AreEqual(22, actions.Count(action => action!["tool"]!.GetValue<string>() == "read_file"
+      && action["state"]!.GetValue<string>() == "completed"));
+    for (var index = 1; index <= 22; index++)
+      Assert.AreEqual($"verified={index:00}", await File.ReadAllTextAsync(
+        Path.Combine(_environment.WorkspaceDirectory, $"progress-{index:00}.txt")));
     await Expect(Page.Locator(
       "[data-event-type=\"action.recovery-decision-required\"]"
     )).ToHaveCountAsync(0);
-
-    if (await Page.Locator("#cancel-request").IsVisibleAsync())
-      await Page.Locator("#cancel-request").ClickAsync();
   }
 
   [TestMethod]
@@ -3878,10 +3988,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       ))).ToArray();
     Assert.IsTrue(planningRequests.Any(request =>
       request.AvailableTools.Contains("create_file", StringComparer.Ordinal)
-      && request.PredictTokens == 2_048));
+      && request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2));
     Assert.IsTrue(planningRequests.Where(request =>
       !request.AvailableTools.Contains("create_file", StringComparer.Ordinal))
-      .All(request => request.PredictTokens == 2_048));
+      .All(request => request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2));
   }
 
   [TestMethod]
@@ -5442,6 +5552,84 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
   }
 
   [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task HistoricalTerminalResponseDoesNotRepeatStreamedReport(bool withTimeline)
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var enabled = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true });
+    enabled.EnsureSuccessStatusCode();
+    var sessionId = $"terminal-report-{withTimeline}";
+    const string progress = "Inspection finished. ";
+    const string report = "Final **report** with `evidence`.";
+    const string thinking = "Thinking remains in its own block.";
+    const string status = "**Authoritative execution status:** Inspected only; no files were changed.";
+    var answer = progress + report;
+    var tail = answer + "\n\n---\n" + status;
+    var now = DateTimeOffset.UtcNow;
+    using var saved = await _environment.HttpClient.PutAsJsonAsync("api/sessions/current", new
+    {
+      sessionId,
+      messages = new object[]
+      {
+        new { role = "user", content = "Inspect and report." },
+        new
+        {
+          role = "assistant",
+          content = answer,
+          contentBlocks = new[]
+          {
+            new { kind = "response", content = progress, id = "progress" },
+            new { kind = "reasoning", content = thinking, id = "thinking" },
+            new { kind = "response", content = report, id = "report" },
+            new { kind = "response", content = tail, id = "terminal:fixture" }
+          },
+          timeline = withTimeline ? new object[]
+          {
+            new { requestId = "fixture", type = "response.delta", timestamp = now,
+              delta = progress, contentBlockId = "progress", renderedHtml = "<p>Inspection finished.</p>" },
+            new { requestId = "fixture", type = "reasoning.delta", timestamp = now,
+              reasoningDelta = thinking, contentBlockId = "thinking" },
+            new { requestId = "fixture", type = "response.delta", timestamp = now,
+              delta = report, contentBlockId = "report",
+              renderedHtml = "<p>Final <strong>report</strong> with <code>evidence</code>.</p>" },
+            new { requestId = "fixture", type = "response.completed", timestamp = now,
+              responseTail = tail, specialistCompletion = answer,
+              responseTailHtml = "<p>Inspection finished. Final <strong>report</strong> with <code>evidence</code>.</p><hr><p>Authoritative execution status: Inspected only; no files were changed.</p>" }
+          } : null
+        }
+      },
+      interactionMode = "execute",
+      selectedModel = "command-r:latest",
+      state = "completed",
+      approvalPolicy = "auto",
+      harness = "codex"
+    });
+    saved.EnsureSuccessStatusCode();
+    var sessionPath = Path.Combine(_environment.DataDirectory, "workspaces",
+      workspaceId, "sessions", sessionId + ".json");
+    var original = await File.ReadAllTextAsync(sessionPath);
+    using var presented = await _environment.HttpClient.GetAsync(
+      $"api/sessions/{sessionId}?workspaceId={workspaceId}");
+    presented.EnsureSuccessStatusCode();
+    Assert.AreEqual(original, await File.ReadAllTextAsync(sessionPath));
+
+    await Page.GotoAsync("/");
+    await Page.Locator("#session-history").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id=\"{sessionId}\"] .session-entry-content").ClickAsync();
+    var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".assistant-response strong", new() { HasText = "report" }))
+      .ToHaveCountAsync(1);
+    await Expect(assistant.Locator(".assistant-response code")).ToHaveTextAsync("evidence");
+    await Expect(assistant.Locator(".assistant-response", new() { HasText = "Authoritative execution status:" }))
+      .ToHaveCountAsync(1);
+    await Expect(assistant.Locator(".assistant-reasoning-body")).ToHaveTextAsync(thinking);
+    await Expect(assistant.Locator(".assistant-response")).ToHaveCountAsync(3);
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task NewExecuteHistoryRestoresTheCompleteVisibleTimeline()
   {
@@ -5478,6 +5666,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var originalModelNotice = await assistant.Locator(
       ".model-selection-note"
     ).InnerTextAsync();
+    await assistant.Locator(".execution-completion-summary summary").ClickAsync();
     var originalHostSummary = await assistant.Locator(".execution-completion-summary").InnerTextAsync();
     var originalStatus = await assistant.Locator(".execution-session-footer").InnerTextAsync();
     await Expect(assistant.Locator(".execution-session-header")).Not.ToHaveClassAsync(new Regex("is-live"));
@@ -5578,6 +5767,13 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     }
 
     await _environment.RestartApplicationAsync();
+    var savedReviewId = storedDocument.RootElement.GetProperty("executionReviews")
+      .EnumerateArray().Last().GetProperty("summary").GetProperty("id").GetString()!;
+    using (var historicalReview = await _environment.HttpClient.GetAsync(
+      $"api/execution-sessions/{savedReviewId}/review?conversationSessionId={sessionId}"))
+    {
+      historicalReview.EnsureSuccessStatusCode();
+    }
     await Page.GotoAsync("/");
     await Page.Locator("#session-history").EvaluateAsync(
       "element => element.open = true"
@@ -5586,6 +5782,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       $"#recent-sessions .session-entry[data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
     assistant = Page.Locator(".message.assistant").Last;
+    await assistant.Locator(".execution-completion-summary summary").ClickAsync();
     await Expect(assistant.Locator(".execution-session-footer")).ToHaveCountAsync(1);
     await Expect(assistant.Locator(".execution-session-footer")).ToHaveTextAsync(originalStatus, new() { UseInnerText = true });
     await Expect(assistant.Locator(".execution-session-header")).Not.ToHaveClassAsync(new Regex("is-live"));
@@ -5691,6 +5888,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       )
     );
     await Expect(assistant.Locator(".review-changes")).ToHaveCountAsync(1);
+    await assistant.Locator(".review-changes").ClickAsync();
+    await Expect(Page.Locator(".change-file-review")).ToContainTextAsync("hello.txt");
+    await Expect(Page.Locator("#change-review-body")).Not.ToContainTextAsync("HTTP 404");
     await Expect(
       Page.GetByRole(
         AriaRole.Button,
@@ -9892,7 +10092,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     {
       var profile = settings["ollamaRuntime"]!["roleDefaults"]![role]!.AsObject();
       profile["targetContextTokens"] = 8_192;
-      profile["maximumContextTokens"] = 8_192;
+      // Half of 12k remains sufficient for mandatory guidance while old history must compact.
+      profile["maximumContextTokens"] = 12_288;
     }
     using (var saved = await PutSettingsJsonAsync(settings))
     {

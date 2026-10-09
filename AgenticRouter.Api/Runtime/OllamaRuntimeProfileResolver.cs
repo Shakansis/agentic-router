@@ -15,7 +15,8 @@ public static class OllamaRuntimeProfileResolver
     long requiredInputTokens,
     int requestedOutputTokens,
     int? generationMaximumContextTokens = null,
-    int? outputTokenLimitOverride = null
+    int? outputTokenLimitOverride = null,
+    bool execution = false
   )
   {
     var role = NormalizeRole(
@@ -100,8 +101,10 @@ public static class OllamaRuntimeProfileResolver
       minimum,
       maximum
     );
-    var outputTokens = outputTokenLimitOverride
-      ?? Math.Min(requestedOutputTokens, profile.OutputTokenLimit);
+    if (execution) target = Math.Min(settings.Context.DefaultContextTokens, maximum);
+    var outputTokens = execution
+      ? Execution.ExecutionProgressPolicy.OutputTokenLimit(target)
+      : outputTokenLimitOverride ?? Math.Min(requestedOutputTokens, profile.OutputTokenLimit);
     var required = checked(
       (int)Math.Min(
         int.MaxValue,
@@ -175,7 +178,8 @@ public static class OllamaRuntimeProfileResolver
           ? $"Generation profile capped context at {maximum} tokens."
         : overridden
           ? "The exact model and digest override was applied."
-          : "The role default was inherited."
+          : "The role default was inherited.",
+      ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, model, digest)
     );
   }
 

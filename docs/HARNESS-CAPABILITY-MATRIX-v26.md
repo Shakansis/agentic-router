@@ -82,7 +82,7 @@ to normalize tool lists.
 | Effect verification and truthful terminal result | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Streaming/tool activity/cancellation | NATIVE | NATIVE | NATIVE | NATIVE |
 | Same-harness session resume | NATIVE | NATIVE | NATIVE | NATIVE |
-| Same-turn supplemental user steering | UNSUPPORTED | NATIVE | UNSUPPORTED | NATIVE |
+| Same-turn supplemental user steering | UNSUPPORTED | NATIVE | NATIVE | NATIVE |
 | Cross-harness canonical conversation hydration | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 | Typed rejection returned for materially different recovery | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE | HOST_BRIDGE |
 

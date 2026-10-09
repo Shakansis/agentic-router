@@ -1,7 +1,8 @@
 # Current harness capability matrix
 
 Audited from the registered `HarnessDefinition` and
-`HarnessCapabilityProjection` implementations on 2026-08-30. Executable
+`HarnessCapabilityProjection` implementations on 2026-08-30, with steering
+re-audited on 2026-10-09. Executable
 availability and version are discovered at runtime; a registered adapter is not
 proof that its CLI is installed or that a particular model behaves correctly.
 
@@ -20,7 +21,7 @@ harness.
 | Native sandbox | No | Yes | No | No | No |
 | Session diff | Yes | Yes | No | Yes | No |
 | Harness-native permission protocol | No | Yes | Yes | Yes | Yes |
-| Same-turn steering | No | Yes | No | No | Yes |
+| Same-turn steering | No | Yes | No | Yes | Yes |
 | Native web capability | No | Yes | Yes | Yes | Yes |
 | Subagents exposed by Agentic Router | No | No | No | No | No |
 
@@ -47,8 +48,15 @@ operation natively.
 
 - Web availability is derived from the effective provider/model/harness route;
   availability never triggers an eager search.
-- Codex and Qwen Code support same-turn steering. Native, Claude Code, and
-  OpenCode use the browser follow-up queue only.
+- Codex, Qwen Code, and OpenCode support same-turn steering. OpenCode appends
+  context through the legacy session API's `noReply` request without starting
+  another loop; native admission and terminal races are verified by the Host.
+  Native and Claude Code currently use the browser follow-up queue only.
+- Codex opts into `instant_interrupt` (introduced upstream in 0.159.0). Qwen and
+  OpenCode support injection at native loop boundaries, which does not imply
+  instant interruption of a model response. Qwen success now requires a matching
+  receipt and reconciled consumption; promotion out of the active turn is rejected.
+  See the [current audit](research/harness-steering-and-releases-2026-10-09.md).
 - Claude Code exposes Read/Glob/Grep/Edit/Write/WebSearch/WebFetch but not an
   ambient shell, plugins, skills, subagents, or unowned MCP configuration.
 - Unsupported ambient capabilities are not compensated with an unrestricted

@@ -555,7 +555,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
           );
         }
 
-        if (priorTarget?.ContextLength != candidate)
+        if (priorTarget?.ContextLength != candidate
+          || ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, installed.Name, installed.Digest)?.HasExplicitValues == true)
         {
           await _ollamaClient.SetModelResidencyAsync(
             baseUri,
@@ -642,7 +643,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
           candidate,
           measured.ContextLength,
           metadata,
-          version
+          version,
+          ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, installed.Name, installed.Digest)
         );
         var measurement = new OllamaRuntimeMeasurementView(
           MeasurementSchemaVersion,
@@ -668,7 +670,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
           settingSignature,
           "measured",
           null,
-          false
+          false,
+          ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, installed.Name, installed.Digest)
         );
         await SaveRecordAsync(
           measurement,
@@ -801,6 +804,12 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         [
           "The exact model ID and digest are not installed in the configured Ollama runtime."
         ];
+        continue;
+      }
+
+      // Performance-only settings do not require context metadata or force a model load.
+      if (modelOverride.Overrides.Count == 0)
+      {
         continue;
       }
 
@@ -1311,7 +1320,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       record.RequestedContext,
       record.ActualContext,
       null,
-      version
+      version,
+      ModelRuntimePerformance.Resolve(settings, record.Provider, record.Model, record.Digest)
     );
     return !string.Equals(
       expected,
@@ -1326,7 +1336,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     int requestedContext,
     int? actualContext,
     OllamaModelMetadata? metadata,
-    string version
+    string version,
+    ModelRuntimePerformanceSettings? performance = null
   )
   {
     return Hash(
@@ -1334,6 +1345,7 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         + $"parallel=unknown;flashAttention=unknown;kvCacheType=unknown;"
         + "quantization=identified-by-model-digest;"
         + $"runner={version}"
+        + ModelRuntimePerformance.Signature(performance)
     );
   }
 

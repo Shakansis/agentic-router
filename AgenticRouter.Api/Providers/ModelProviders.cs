@@ -5,12 +5,14 @@ namespace AgenticRouter.Api.Providers;
 
 public static class ModelEffortLevels
 {
+  public const string None = "none";
   public const string Low = "low";
   public const string Medium = "medium";
   public const string High = "high";
 
   public static readonly IReadOnlyList<string> All =
   [
+    None,
     Low,
     Medium,
     High
@@ -18,7 +20,7 @@ public static class ModelEffortLevels
 
   public static bool IsValid(string? value)
   {
-    return value is Low or Medium or High;
+    return value is None or Low or Medium or High;
   }
 }
 
@@ -116,7 +118,17 @@ public sealed record ProviderModelCapabilities(
   IReadOnlyList<string>? SupportedImageMimeTypes = null,
   bool ToolProtocolConfirmed = false,
   IReadOnlyList<string>? AdapterGenerationParameters = null,
-  IReadOnlyList<string>? ThinkingModes = null
+  IReadOnlyList<string>? ThinkingModes = null,
+  IReadOnlyList<ProviderRuntimeOptionCapability>? RuntimeOptions = null
+);
+
+public sealed record ProviderRuntimeOptionCapability(
+  string Id,
+  string Mechanism,
+  string Scope,
+  string Support,
+  string Source,
+  string Message
 );
 
 public sealed record ProviderImagePayload(
@@ -189,11 +201,6 @@ public static class ProviderGenerationProfiles
     string? requestThinkingOverride = null
   )
   {
-    if (!supervisedExecution
-      && !string.Equals(interactionMode, "chat", StringComparison.Ordinal))
-    {
-      return Deterministic with { Seed = RandomNumberGenerator.GetInt32(1, int.MaxValue) };
-    }
     var id = supervisedExecution
       ? InferenceProfileDefaults.Supervisor
       : intention;
@@ -211,7 +218,7 @@ public static class ProviderGenerationProfiles
       RepeatLastN: profile.RepeatLastN,
       Thinking: supervisedExecution
         ? InferenceThinkingModes.Auto
-        : requestThinkingOverride ?? profile.Thinking,
+        : requestThinkingOverride == ModelEffortLevels.None ? InferenceThinkingModes.Disabled : requestThinkingOverride ?? profile.Thinking,
       Seed: profile.Seed ?? RandomNumberGenerator.GetInt32(1, int.MaxValue)
     );
   }

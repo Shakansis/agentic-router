@@ -303,6 +303,7 @@ public sealed class OllamaClient : IOllamaClient
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;
     var stopwatch = Stopwatch.StartNew();
+    using var inference = new InferenceObservation(usageContext.ProgressObserver);
     var estimatedInput = _tokenEstimator.EstimateToolMessages(
       messages
     ) + _tokenEstimator.EstimateText(
@@ -343,7 +344,9 @@ public sealed class OllamaClient : IOllamaClient
           generationProfile.TopK,
           generationProfile.MinP,
           generationProfile.RepeatLastN,
-          generationProfile.Seed
+          generationProfile.Seed,
+          policy.Resolution.Performance?.DraftTokens,
+          policy.Resolution.Performance?.BatchSize
         ),
         null,
         tools.Count == 0
@@ -366,10 +369,11 @@ public sealed class OllamaClient : IOllamaClient
         payload,
         stage,
         cancellationToken,
-        onThinkingDelta is null
+        onThinkingDelta is null && onContentDelta is null
           ? HttpCompletionOption.ResponseContentRead
           : HttpCompletionOption.ResponseHeadersRead,
-        requestTimeout: Timeout.InfiniteTimeSpan
+        requestTimeout: Timeout.InfiniteTimeSpan,
+        inference: inference
       );
       OllamaToolResponse toolResponse;
 
@@ -434,6 +438,7 @@ public sealed class OllamaClient : IOllamaClient
           policy.Resolution,
           onThinkingDelta,
           onContentDelta,
+          inference,
           cancellationToken
         );
         toolResponse = streamed.Response;
@@ -469,7 +474,8 @@ public sealed class OllamaClient : IOllamaClient
         providerUsage,
         estimatedInput,
         estimatedOutput,
-        runtimeFailure: runtimeFailure
+        runtimeFailure: runtimeFailure,
+        inference: inference
       );
     }
   }
@@ -480,6 +486,7 @@ public sealed class OllamaClient : IOllamaClient
     OllamaContextResolution contextResolution,
     Func<string, CancellationToken, ValueTask>? onThinkingDelta,
     Func<string, CancellationToken, ValueTask>? onContentDelta,
+    InferenceObservation inference,
     CancellationToken cancellationToken
   )
   {
@@ -545,6 +552,11 @@ public sealed class OllamaClient : IOllamaClient
           (int)response.StatusCode
         );
       }
+
+      if (!string.IsNullOrEmpty(chunk.Message?.Thinking)
+        || !string.IsNullOrEmpty(chunk.Message?.Content)
+        || chunk.Message?.ToolCalls?.Count > 0)
+        inference.ObserveToken();
 
       if (!string.IsNullOrEmpty(
         chunk.Message?.Thinking
@@ -632,6 +644,7 @@ public sealed class OllamaClient : IOllamaClient
   {
     options ??= ProviderChatOptions.Empty;
     var stopwatch = Stopwatch.StartNew();
+    using var inference = new InferenceObservation(usageContext.ProgressObserver);
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
     ) + options.Images.Sum(
@@ -669,7 +682,9 @@ public sealed class OllamaClient : IOllamaClient
           options.EffectiveGenerationProfile.TopK,
           options.EffectiveGenerationProfile.MinP,
           options.EffectiveGenerationProfile.RepeatLastN,
-          options.EffectiveGenerationProfile.Seed
+          options.EffectiveGenerationProfile.Seed,
+          policy.Resolution.Performance?.DraftTokens,
+          policy.Resolution.Performance?.BatchSize
         ),
         null,
         images: options.Images,
@@ -682,7 +697,8 @@ public sealed class OllamaClient : IOllamaClient
         payload,
         stage,
         cancellationToken,
-        requestTimeout: Timeout.InfiniteTimeSpan
+        requestTimeout: Timeout.InfiniteTimeSpan,
+        inference: inference
       );
       var result = await response.Content.ReadFromJsonAsync<OllamaChatChunk>(
         JsonOptions,
@@ -739,7 +755,8 @@ public sealed class OllamaClient : IOllamaClient
         providerUsage,
         estimatedInput,
         estimatedOutput,
-        runtimeFailure: runtimeFailure
+        runtimeFailure: runtimeFailure,
+        inference: inference
       );
     }
   }
@@ -820,7 +837,8 @@ public sealed class OllamaClient : IOllamaClient
       ),
       ReadDeclaredContextTokens(payload.ModelInfo),
       ReadThinkingValues(payload.Thinking),
-      ReadThinkingDefault(payload.Thinking)
+      ReadThinkingDefault(payload.Thinking),
+      HasDraftLayers(payload.ModelInfo)
     );
   }
 
@@ -850,8 +868,16 @@ public sealed class OllamaClient : IOllamaClient
         ? metadataThinkingValues.Any(value => value != "false")
         : payload.Capabilities?.Any(capability => capability is "thinking" or "reasoning") == true,
       ReadThinkingValues(payload.Thinking),
-      ReadThinkingDefault(payload.Thinking)
+      ReadThinkingDefault(payload.Thinking),
+      HasDraftLayers(payload.ModelInfo)
     );
+  }
+
+  private static bool? HasDraftLayers(IReadOnlyDictionary<string, JsonElement>? modelInfo)
+  {
+    return modelInfo?.Any(pair => pair.Key.EndsWith(".nextn_predict_layers", StringComparison.Ordinal)
+      && pair.Value.ValueKind == JsonValueKind.Number
+      && pair.Value.TryGetInt32(out var layers) && layers > 0) == true ? true : null;
   }
 
   private static int? ReadDeclaredContextTokens(
@@ -1008,7 +1034,25 @@ public sealed class OllamaClient : IOllamaClient
         : [],
       ToolProtocolConfirmed: false,
       AdapterGenerationParameters: generationParameters,
-      ThinkingModes: SupportedThinkingModes(model, reasoning, inspected.ThinkingValues)
+      ThinkingModes: SupportedThinkingModes(model, reasoning, inspected.ThinkingValues),
+      RuntimeOptions:
+      [
+        new ProviderRuntimeOptionCapability(
+          "draftTokens", "request", "model-load",
+          !chat ? "unsupported" : inspected.HasDraftLayers == true ? "supported" : "unknown",
+          "ollama-api-show",
+          !chat ? "Draft tokens are unavailable for this non-generative model."
+            : inspected.HasDraftLayers == true
+              ? "Model metadata declares draft prediction layers. Activation still depends on the Ollama runtime."
+              : "Model metadata does not confirm draft support. You may configure it; the runtime can reject or ignore the option."
+        ),
+        new ProviderRuntimeOptionCapability(
+          "batchSize", "request", "model-load", chat ? "supported" : "unsupported",
+          "ollama-native-api",
+          chat ? "Batch size can be configured for this model. The effective runner value cannot be independently confirmed."
+            : "This LLM performance editor is unavailable for non-generative models."
+        )
+      ]
     );
   }
 
@@ -1192,18 +1236,28 @@ public sealed class OllamaClient : IOllamaClient
       settings.DefaultGpu,
       cancellationToken
     );
+    ModelRuntimePerformanceSettings? performance = null;
+    if (keepAlive != 0 && settings.OllamaRuntime.ModelOverrides.Any(
+      candidate => candidate.Model == model && candidate.Performance is not null))
+    {
+      var digest = (await GetModelsAsync(baseUri, cancellationToken)).FirstOrDefault(
+        candidate => candidate.Name == model)?.Digest;
+      performance = ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, model, digest);
+    }
     var payload = CreateRequest(
       model,
       Array.Empty<ChatMessage>(),
       false,
       null,
-      contextTokens is null || keepAlive == 0
+      keepAlive == 0 || (contextTokens is null && performance?.HasExplicitValues != true)
         ? null
         : new OllamaOptions(
           0,
           contextTokens,
           null,
-          endpoint.MainGpu
+          endpoint.MainGpu,
+          DraftNumPredict: performance?.DraftTokens,
+          NumBatch: performance?.BatchSize
         ),
       keepAlive
     );
@@ -1231,6 +1285,7 @@ public sealed class OllamaClient : IOllamaClient
   {
     options ??= ProviderChatOptions.Empty;
     var stopwatch = Stopwatch.StartNew();
+    using var inference = new InferenceObservation(usageContext.ProgressObserver);
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
     ) + options.Images.Sum(
@@ -1284,6 +1339,7 @@ public sealed class OllamaClient : IOllamaClient
       messages,
       policy,
       options,
+      inference,
       cancellationToken
     ).GetAsyncEnumerator(cancellationToken);
 
@@ -1343,7 +1399,8 @@ public sealed class OllamaClient : IOllamaClient
             image => image.Bytes.LongLength
           ),
           Accuracy: UsageAccuracy.Exact
-        )
+        ),
+        inference: inference
       );
     }
   }
@@ -1354,6 +1411,7 @@ public sealed class OllamaClient : IOllamaClient
     IReadOnlyList<ChatMessage> messages,
     GenerationPolicy policy,
     ProviderChatOptions options,
+    InferenceObservation inference,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -1372,9 +1430,11 @@ public sealed class OllamaClient : IOllamaClient
         options.EffectiveGenerationProfile.TopK,
         options.EffectiveGenerationProfile.MinP,
         options.EffectiveGenerationProfile.RepeatLastN,
-        options.EffectiveGenerationProfile.Seed
+        options.EffectiveGenerationProfile.Seed,
+        policy.Resolution.Performance?.DraftTokens,
+        policy.Resolution.Performance?.BatchSize
       ),
-      null,
+      policy.KeepAlive,
       images: options.Images,
       requestedEffort: ResolveThinking(options.EffectiveGenerationProfile,
         options.RequestedEffort, policy.SupportsThinking, model,
@@ -1386,7 +1446,8 @@ public sealed class OllamaClient : IOllamaClient
       "generation",
       cancellationToken,
       HttpCompletionOption.ResponseHeadersRead,
-      Timeout.InfiniteTimeSpan
+      Timeout.InfiniteTimeSpan,
+      inference
     );
     yield return new OllamaChatUpdate(
       true,
@@ -1452,6 +1513,10 @@ public sealed class OllamaClient : IOllamaClient
         );
       }
 
+      if (!string.IsNullOrEmpty(chunk.Message?.Thinking)
+        || !string.IsNullOrEmpty(chunk.Message?.Content))
+        inference.ObserveToken();
+
       if (!string.IsNullOrEmpty(
         chunk.Message?.Thinking
       ))
@@ -1494,7 +1559,8 @@ public sealed class OllamaClient : IOllamaClient
     string stage,
     CancellationToken cancellationToken,
     HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead,
-    TimeSpan? requestTimeout = null
+    TimeSpan? requestTimeout = null,
+    InferenceObservation? inference = null
   )
   {
     var json = JsonSerializer.Serialize(
@@ -1516,13 +1582,27 @@ public sealed class OllamaClient : IOllamaClient
       )
     };
 
-    return await SendAsync(
-      request,
-      stage,
-      cancellationToken,
-      completionOption,
-      requestTimeout
-    );
+    try
+    {
+      if (inference is not null)
+        inference.Progress ??= _managedServers.ObserveInference(baseUri, inference.ProgressObserver);
+      if (inference is not null)
+        inference.Progress ??= _managedServers.ObserveInference(baseUri, inference.ProgressObserver);
+      return await SendAsync(request, stage, cancellationToken, completionOption, requestTimeout, inference);
+    }
+    catch (OllamaProviderException exception) when (
+      (payload.Options?.DraftNumPredict is not null || payload.Options?.NumBatch is not null)
+      && (exception.TechnicalMessage.Contains("draft_num_predict", StringComparison.OrdinalIgnoreCase)
+        || exception.TechnicalMessage.Contains("num_batch", StringComparison.OrdinalIgnoreCase)))
+    {
+      throw new OllamaRuntimeProfileException(
+        "runtime-performance-rejected",
+        "Ollama rejected a configured model performance option. Review draft tokens and batch size.",
+        stage, payload.Model, null, "model", null, null, exception.Recoverable,
+        "A draft_num_predict or num_batch option was rejected by the runtime; saved settings were preserved.",
+        exception
+      );
+    }
   }
 
   private async Task<HttpResponseMessage> SendAsync(
@@ -1530,7 +1610,8 @@ public sealed class OllamaClient : IOllamaClient
     string stage,
     CancellationToken cancellationToken,
     HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead,
-    TimeSpan? requestTimeout = null
+    TimeSpan? requestTimeout = null,
+    InferenceObservation? inference = null
   )
   {
     HttpResponseMessage response;
@@ -1551,6 +1632,7 @@ public sealed class OllamaClient : IOllamaClient
 
     try
     {
+      inference?.Dispatch();
       response = await _httpClient.SendAsync(
         request,
         completionOption,
@@ -1618,7 +1700,7 @@ public sealed class OllamaClient : IOllamaClient
     CancellationToken cancellationToken
   )
   {
-    var settings = await _settingsStore.GetAsync(
+    var settings = usageContext.RuntimeSettingsOverride ?? await _settingsStore.GetAsync(
       cancellationToken
     );
 
@@ -1686,16 +1768,26 @@ public sealed class OllamaClient : IOllamaClient
       );
     }
 
+    var digest = usageContext.ModelRevision;
+    if (digest is null && settings.OllamaRuntime.ModelOverrides.Any(
+      candidate => candidate.Model == model && candidate.Performance is not null))
+    {
+      digest = (await GetModelsAsync(baseUri, cancellationToken)).FirstOrDefault(
+        candidate => candidate.Name == model)?.Digest;
+    }
     var resolution = OllamaRuntimeProfileResolver.Resolve(
       settings,
       model,
-      usageContext.ModelRevision,
+      digest,
       usageContext.ModelRole,
       metadata.DeclaredContextTokens,
       estimatedInputTokens,
       requestedOutput,
-      generationMaximumContextTokens,
-      generationMaximumOutputTokens
+      usageContext.ExecutionSessionId is not null && usageContext.RuntimeContextTokens is int executionContext
+        ? Math.Min(generationMaximumContextTokens ?? int.MaxValue, executionContext)
+        : generationMaximumContextTokens,
+      generationMaximumOutputTokens,
+      execution: usageContext.ExecutionSessionId is not null
     );
 
     if (usageContext.RuntimeContextTokens is not null)
@@ -1755,7 +1847,8 @@ public sealed class OllamaClient : IOllamaClient
       endpoint.Endpoint,
       metadata.SupportsThinking,
       metadata.ThinkingValues,
-      metadata.ThinkingDefault
+      metadata.ThinkingDefault,
+      usageContext.RuntimeSettingsOverride is null ? null : resolution.KeepAlive
     );
   }
 
@@ -1831,7 +1924,8 @@ public sealed class OllamaClient : IOllamaClient
     long estimatedInput,
     long estimatedOutput,
     ProviderActivityMetadata? activity = null,
-    OllamaRuntimeProfileError? runtimeFailure = null
+    OllamaRuntimeProfileError? runtimeFailure = null,
+    InferenceObservation? inference = null
   )
   {
     await _usageRecorder.RecordAsync(
@@ -1851,7 +1945,8 @@ public sealed class OllamaClient : IOllamaClient
         ReservedOutputTokens: runtimeFailure?.ReservedOutputTokens,
         RequiredContextTokens: runtimeFailure?.RequiredContextTokens,
         MaximumContextTokens: runtimeFailure?.MaximumContextTokens,
-        EffectiveContextTokens: runtimeFailure?.EffectiveContextTokens
+        EffectiveContextTokens: runtimeFailure?.EffectiveContextTokens,
+        Inference: inference
       ),
       CancellationToken.None
     );
@@ -2045,21 +2140,22 @@ public sealed class OllamaClient : IOllamaClient
   )
   {
     var modes = SupportedThinkingModes(model, supported, values);
+    if (requestedEffort == ModelEffortLevels.None) requestedEffort = InferenceThinkingModes.Disabled;
     if (modes.Count == 0)
     {
       return null;
     }
-    if (profile.Id == ProviderGenerationProfiles.Deterministic.Id)
+    var booleanOnly = modes.All(mode => mode is "disabled" or "enabled");
+    if (profile.Id == ProviderGenerationProfiles.Deterministic.Id
+      || profile.Id == InferenceProfileDefaults.Supervisor)
     {
       return requestedEffort is not null && modes.Contains(requestedEffort, StringComparer.Ordinal)
-        ? MapRequestedEffort(requestedEffort, values) : null;
+        ? MapRequestedEffort(requestedEffort, values)
+        : booleanOnly && requestedEffort is "low" or "medium" or "high" ? true : null;
     }
-    if (profile.Id == InferenceProfileDefaults.Supervisor)
-    {
-      return requestedEffort is not null && modes.Contains(requestedEffort, StringComparer.Ordinal)
-        ? MapRequestedEffort(requestedEffort, values) : null;
-    }
-    if (!modes.Contains(profile.Thinking, StringComparer.Ordinal)) return null;
+    if (!modes.Contains(profile.Thinking, StringComparer.Ordinal))
+      return profile.Thinking is "low" or "medium" or "high" && booleanOnly && modes.Contains("enabled")
+        ? ResolveEnabledThinking(values, defaultValue, model) : null;
     return profile.Thinking switch
     {
       InferenceThinkingModes.Auto => null,
@@ -2072,7 +2168,7 @@ public sealed class OllamaClient : IOllamaClient
   }
 
   private static object MapRequestedEffort(string effort, IReadOnlyList<string>? values) =>
-    effort == "max" && values?.Contains("xhigh", StringComparer.Ordinal) == true
+    effort == InferenceThinkingModes.Disabled ? false : effort == "max" && values?.Contains("xhigh", StringComparer.Ordinal) == true
       ? "xhigh" : effort;
 
   private static object ResolveEnabledThinking(
@@ -2316,7 +2412,9 @@ public sealed class OllamaClient : IOllamaClient
     int? TopK = null,
     double? MinP = null,
     int? RepeatLastN = null,
-    int? Seed = null
+    int? Seed = null,
+    int? DraftNumPredict = null,
+    int? NumBatch = null
   );
 
   private sealed record GenerationPolicy(
@@ -2326,7 +2424,8 @@ public sealed class OllamaClient : IOllamaClient
     Uri Endpoint,
     bool SupportsThinking,
     IReadOnlyList<string>? ThinkingValues,
-    string? ThinkingDefault
+    string? ThinkingDefault,
+    int? KeepAlive = null
   );
 
   private sealed record StreamingToolResponse(

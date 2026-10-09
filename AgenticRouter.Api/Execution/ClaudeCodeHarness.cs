@@ -7,6 +7,8 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
+using AgenticRouter.Api.Providers;
+
 namespace AgenticRouter.Api.Execution;
 
 public sealed record ClaudeCodeHarnessOptions(
@@ -357,10 +359,12 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       hostRelay = RelayHostEventsAsync(hostTurn.Events, active, cancellationToken);
 
       active.Write(Event(active, "turn.started", message: $"Claude Code session {session.NativeSessionId} started."));
-      active.Write(Event(
+      if (request.RequestedEffort is not null) active.Write(Event(
         active,
-        "effort.applied",
-        message: $"Applied {request.RequestedEffort} effort through the Claude Code CLI."
+        request.RequestedEffort == ModelEffortLevels.None ? "effort.unavailable" : "effort.applied",
+        message: request.RequestedEffort == ModelEffortLevels.None
+          ? "Claude Code has no reviewed None effort control; thinking was not disabled."
+          : $"Applied {request.RequestedEffort} effort through the Claude Code CLI."
       ));
       await WriteAsync(
         process.StandardInput,
@@ -499,8 +503,10 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
         errorCode: exception.Code,
         terminalState: exception.Code is "claude-code-executable-not-found"
           ? HarnessTerminalState.Unavailable
-          : HarnessTerminalState.Failed
-      ));
+          : exception.Code == "claude-code-output-token-limit"
+            ? HarnessTerminalState.Partial : HarnessTerminalState.Failed
+      ) with
+      { FinishReason = exception.Code == "claude-code-output-token-limit" ? "max_tokens" : null });
     }
     catch (Exception exception)
     {
@@ -527,7 +533,18 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       {
         await IgnoreCancellationAsync(errorDrain);
       }
-      process?.Dispose();
+      if (process is not null)
+      {
+        try
+        {
+          await process.WaitForExitAsync(CancellationToken.None);
+        }
+        catch (InvalidOperationException)
+        {
+          // Startup can fail before the Process has an operating-system handle.
+        }
+        process.Dispose();
+      }
       active.Finish();
     }
   }
@@ -586,7 +603,6 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       "--include-partial-messages",
       "--permission-prompt-tool", "stdio",
       "--model", request.Model,
-      "--effort", request.RequestedEffort,
       "--bare",
       "--disable-slash-commands",
       "--no-chrome",
@@ -597,6 +613,12 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     })
     {
       info.ArgumentList.Add(argument);
+    }
+
+    if (request.RequestedEffort is not null and not ModelEffortLevels.None)
+    {
+      info.ArgumentList.Add("--effort");
+      info.ArgumentList.Add(request.RequestedEffort);
     }
 
     var hostNames = HarnessCapabilityProjection.HostBridgeTools(
@@ -638,7 +660,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
 
     info.Environment["ANTHROPIC_AUTH_TOKEN"] = "ollama";
     info.Environment["ANTHROPIC_API_KEY"] = string.Empty;
-    info.Environment["ANTHROPIC_BASE_URL"] = request.ProviderEndpoint!.AbsoluteUri.TrimEnd('/');
+    info.Environment["ANTHROPIC_BASE_URL"] = (request.InferenceEndpoint ?? request.ProviderEndpoint!).AbsoluteUri.TrimEnd('/');
     info.Environment["ANTHROPIC_MODEL"] = request.Model;
     info.Environment["CLAUDE_CONFIG_DIR"] = _options.RuntimeDirectory;
     info.Environment["CLAUDE_CODE_ENTRYPOINT"] = "agentic-router";
@@ -866,14 +888,15 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
           var contextTokens = (Long(payload, "usage", "input_tokens") ?? 0)
             + (Long(payload, "usage", "cache_read_input_tokens") ?? 0)
             + (Long(payload, "usage", "cache_creation_input_tokens") ?? 0);
-          var outputTokens = Long(payload, "usage", "output_tokens") ?? 0;
-          if (contextTokens > 0)
+          var outputTokens = Long(payload, "usage", "output_tokens");
+          if (contextTokens > 0 || outputTokens is >= 0)
           {
             yield return Event(
               active,
               "usage.updated",
               contextInputTokens: contextTokens,
-              contextTotalTokens: contextTokens + Math.Max(0, outputTokens),
+              contextTotalTokens: contextTokens + Math.Max(0, outputTokens ?? 0),
+              outputTokens: outputTokens,
               native: payload
             );
           }
@@ -1648,7 +1671,8 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
     JsonElement? native = null,
     long? contextInputTokens = null,
     long? contextTotalTokens = null,
-    bool readOnlyPermission = false
+    bool readOnlyPermission = false,
+    long? outputTokens = null
   )
   {
     return new HarnessEvent(
@@ -1671,6 +1695,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       nativePayload: native?.Clone(),
       contextInputTokens: contextInputTokens,
       contextTotalTokens: contextTotalTokens,
+      outputTokens: outputTokens,
       readOnlyPermission: readOnlyPermission
     );
   }

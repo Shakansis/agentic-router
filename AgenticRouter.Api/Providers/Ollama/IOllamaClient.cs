@@ -206,7 +206,8 @@ public sealed record OllamaModelMetadata(
   IReadOnlyList<string> Families,
   bool SupportsThinking = false,
   IReadOnlyList<string>? ThinkingValues = null,
-  string? ThinkingDefault = null
+  string? ThinkingDefault = null,
+  bool? HasDraftLayers = null
 );
 
 public sealed record OllamaModelCapabilities(
@@ -215,7 +216,8 @@ public sealed record OllamaModelCapabilities(
   bool AdvertisedTools,
   int? DeclaredContextTokens = null,
   IReadOnlyList<string>? ThinkingValues = null,
-  string? ThinkingDefault = null
+  string? ThinkingDefault = null,
+  bool? HasDraftLayers = null
 );
 
 public class OllamaProviderException : Exception

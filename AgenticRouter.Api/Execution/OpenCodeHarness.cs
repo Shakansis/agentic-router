@@ -21,7 +21,7 @@ public sealed record OpenCodeHarnessOptions(
   TimeSpan RequestTimeout
 );
 
-public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAgentHarnessUserInputTransport
+public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTransport, IAgentHarnessUserInputTransport, IAgentHarnessSteeringTransport
 {
   private const string ProviderId = "agentic-router-ollama";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
@@ -43,7 +43,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       SupportsSandbox: false,
       SupportsSessionDiff: true,
       SupportsNativePermissions: true,
-      SupportsSteering: false,
+      SupportsSteering: true,
       SupportsNativeWebSearch: true,
       SupportsUserInput: true,
       SupportsImages: true
@@ -183,7 +183,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         bridgeTools,
         cancellationToken
       );
-      await EnsureStartedAsync(endpoint, request.Model, bridge, cancellationToken);
+      await EnsureStartedAsync(endpoint, request.Model, bridge, cancellationToken, request.InferenceEndpoint);
       var turnPrompt = HarnessConversationPromptBuilder.Create(
         request,
         request.ContextRecoveryInputBudget.HasValue ? null
@@ -197,7 +197,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
       var harnessSession = await GetOrCreateSessionAsync(request, cancellationToken);
       var sessionId = harnessSession.NativeSessionId;
-      active = new ActiveTurn(request.SessionId, sessionId, request.WorkingDirectory, turnId);
+      active = new ActiveTurn(request.SessionId, sessionId, request.WorkingDirectory, turnId,
+        request.Model, request.ModelSupportsReasoning ? request.RequestedEffort : null);
       _activeTurns[request.SessionId] = active;
       using var hostTurn = _hostTools.BeginTurn(
         HarnessIds.OpenCode,
@@ -212,7 +213,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         turnId,
         message: $"OpenCode session {sessionId} started."
       );
-      yield return Event(
+      if (request.RequestedEffort is not null) yield return Event(
         request.ModelSupportsReasoning
           ? "effort.applied"
           : "effort.prompt-guided",
@@ -261,6 +262,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
       var parts = new Dictionary<string, OpenCodePart>(StringComparer.Ordinal);
       var toolStates = new Dictionary<string, string>(StringComparer.Ordinal);
+      var outputByMessage = new Dictionary<string, long?>(StringComparer.Ordinal);
+      string? finishReason = null;
       var terminal = false;
       Task<string?>? lineRead = null;
       Task<HarnessEvent>? hostToolRead = null;
@@ -425,8 +428,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               {
                 var fullText = String(part, "text") ?? string.Empty;
                 if (
-                  partType == "text"
-                  && string.Equals(fullText, turnPrompt.Text, StringComparison.Ordinal)
+                  active.UserMessages.ContainsKey(String(part, "messageID") ?? string.Empty)
+                  || (partType == "text"
+                    && string.Equals(fullText, turnPrompt.Text, StringComparison.Ordinal))
                 )
                 {
                   parts[partId] = new OpenCodePart("user", fullText);
@@ -532,6 +536,12 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             }
           case "message.updated":
             {
+              if (properties.TryGetProperty("info", out var userInfo)
+                && String(userInfo, "role") == "user"
+                && String(userInfo, "id") is { } userId)
+              {
+                active.UserMessages.TryAdd(userId, 0);
+              }
               if (
                 properties.TryGetProperty("info", out var info)
                 && string.Equals(String(info, "role"), "assistant", StringComparison.Ordinal)
@@ -574,8 +584,13 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                   break;
                 }
 
+                var messageId = String(info, "id");
+                finishReason = String(info, "finish");
+                if (messageId is not null && !outputByMessage.ContainsKey(messageId))
+                  outputByMessage[messageId] = null;
                 if (!info.TryGetProperty("tokens", out var tokens))
                 {
+                  yield return Event("usage.updated", sessionId, turnId, native: payload);
                   yield return Event("native.event", sessionId, turnId, native: payload);
                   break;
                 }
@@ -583,13 +598,26 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                   + CacheTokens(tokens, "read")
                   + CacheTokens(tokens, "write");
                 var outputTokens = Number(tokens, "output");
-                if (inputTokens > 0)
+                if (messageId is not null)
+                {
+                  // Each message is an absolute usage snapshot. Repeated updates replace it.
+                  outputByMessage[messageId] = info.TryGetProperty("time", out var time)
+                    && time.TryGetProperty("completed", out var completedTime)
+                    && completedTime.ValueKind == JsonValueKind.Number
+                    && tokens.TryGetProperty("output", out var reportedOutput)
+                    && reportedOutput.TryGetInt64(out var generated) && generated >= 0
+                    ? generated + Number(tokens, "reasoning") : null;
+                }
+                if (inputTokens > 0 || messageId is not null)
                 {
                   yield return Event(
                     "usage.updated",
                     sessionId,
                     turnId,
                     native: payload,
+                    outputTokens: outputByMessage.Count > 0
+                      && outputByMessage.Values.All(value => value is not null)
+                      ? outputByMessage.Values.Sum(value => value!.Value) : null,
                     contextInputTokens: inputTokens,
                     contextTotalTokens: inputTokens + Math.Max(0, outputTokens)
                   );
@@ -673,6 +701,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
               break;
             }
           case "session.error":
+            active.Completed = true;
             yield return Event(
               "turn.failed",
               sessionId,
@@ -686,6 +715,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             break;
           case "session.idle":
             {
+              active.Completed = true;
               var diff = await GetDiffAsync(sessionId, request.WorkingDirectory, cancellationToken);
               if (diff is { ValueKind: JsonValueKind.Array } && diff.GetArrayLength() > 0)
               {
@@ -703,19 +733,22 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                 turnId,
                 message: "OpenCode session became idle.",
                 terminal: HarnessTerminalState.Completed,
-                native: payload
+                native: payload,
+                finishReason: finishReason
               );
               terminal = true;
               break;
             }
           case "session.status" when StatusType(properties) == "idle":
+            active.Completed = true;
             yield return Event(
               "turn.completed",
               sessionId,
               turnId,
               message: "OpenCode session became idle.",
               terminal: HarnessTerminalState.Completed,
-              native: payload
+              native: payload,
+              finishReason: finishReason
             );
             terminal = true;
             break;
@@ -732,6 +765,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     }
     finally
     {
+      if (active is not null) active.Completed = true;
+      if (active is not null) await active.SteeringGate.WaitAsync(CancellationToken.None);
       try
       {
         if (cancellationToken.IsCancellationRequested)
@@ -766,6 +801,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       }
       finally
       {
+        active?.SteeringGate.Release();
         _turnGate.Release();
       }
     }
@@ -855,6 +891,101 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     );
   }
 
+  public async Task<HarnessSteerResult> SteerTurnAsync(
+    HarnessSteerRequest request,
+    CancellationToken cancellationToken
+  )
+  {
+    if (!_activeTurns.TryGetValue(request.SessionId, out var active))
+      throw Failure("opencode-steer-stale", "OpenCode has no active turn for this session.");
+
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(_options.RequestTimeout);
+    var acquired = false;
+    try
+    {
+      await active.SteeringGate.WaitAsync(timeout.Token);
+      acquired = true;
+      if (active.Completed || !ReferenceEquals(_activeTurns.GetValueOrDefault(request.SessionId), active))
+        throw Failure("opencode-steer-stale", "The OpenCode turn has already ended.");
+      if (active.AcceptedMessages.TryGetValue(request.MessageId, out var accepted))
+      {
+        if (!string.Equals(accepted, request.Message, StringComparison.Ordinal))
+          throw Failure("opencode-steer-conflict", "This steering identifier already belongs to a different message.");
+        return new(HarnessIds.OpenCode, request.SessionId, active.TurnId, request.MessageId, true);
+      }
+      if (!await IsNativeTurnBusyAsync(active, timeout.Token) || active.Completed)
+        throw Failure("opencode-steer-stale", "The OpenCode native session is no longer active.");
+
+      // noReply appends context for the existing legacy loop; it never starts another loop.
+      // Omitting tools preserves the Host-configured native permission rules.
+      var receipt = await SendAsync(HttpMethod.Post,
+        $"session/{EncodePath(active.OpenCodeSessionId)}/message?directory={Encode(active.WorkingDirectory)}",
+        new
+        {
+          noReply = true,
+          model = new { providerID = ProviderId, modelID = active.Model },
+          variant = active.Variant,
+          agent = "build",
+          parts = new[] { new { type = "text", text = request.Message } }
+        }, timeout.Token);
+      if (receipt.ValueKind != JsonValueKind.Object
+        || !receipt.TryGetProperty("info", out var info)
+        || String(info, "id") is not { Length: > 0 } nativeMessageId
+        || String(info, "sessionID") != active.OpenCodeSessionId
+        || String(info, "role") != "user"
+        || !receipt.TryGetProperty("parts", out var parts)
+        || parts.ValueKind != JsonValueKind.Array
+        || !parts.EnumerateArray().Any(part => String(part, "type") == "text"
+          && String(part, "text") == request.Message))
+        throw Failure("opencode-steer-unverified", "OpenCode did not confirm the supplemental message in the active session.");
+      active.UserMessages.TryAdd(nativeMessageId, 0);
+
+      if (!await IsNativeTurnBusyAsync(active, timeout.Token))
+      {
+        // A fast turn can finish between admission and its receipt. Accept only if an
+        // assistant step consumed this user message; otherwise remove the orphan.
+        var messages = await SendAsync(HttpMethod.Get,
+          $"session/{EncodePath(active.OpenCodeSessionId)}/message?directory={Encode(active.WorkingDirectory)}",
+          null, timeout.Token);
+        var consumed = messages.ValueKind == JsonValueKind.Array
+          && messages.EnumerateArray().Any(message => message.ValueKind == JsonValueKind.Object
+            && message.TryGetProperty("info", out var assistant)
+            && String(assistant, "role") == "assistant"
+            && String(assistant, "parentID") == nativeMessageId);
+        if (!consumed)
+        {
+          await SendAsync(HttpMethod.Delete,
+            $"session/{EncodePath(active.OpenCodeSessionId)}/message/{EncodePath(nativeMessageId)}?directory={Encode(active.WorkingDirectory)}",
+            null, timeout.Token);
+          throw Failure("opencode-steer-stale", "OpenCode ended before consuming the message. Keep it queued for a follow-up turn.");
+        }
+      }
+      active.AcceptedMessages[request.MessageId] = request.Message;
+      return new(HarnessIds.OpenCode, request.SessionId, active.TurnId, request.MessageId, true);
+    }
+    catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException
+      || exception is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+    {
+      throw new HarnessException("opencode-steer-transport", "OpenCode steering could not be confirmed.",
+        "OpenCode steering could not be confirmed. Keep this message queued.", true,
+        harnessId: HarnessIds.OpenCode, innerException: exception);
+    }
+    finally
+    {
+      if (acquired) active.SteeringGate.Release();
+    }
+  }
+
+  private async Task<bool> IsNativeTurnBusyAsync(ActiveTurn active, CancellationToken cancellationToken)
+  {
+    var statuses = await SendAsync(HttpMethod.Get,
+      $"session/status?directory={Encode(active.WorkingDirectory)}", null, cancellationToken);
+    return statuses.ValueKind == JsonValueKind.Object
+      && statuses.TryGetProperty(active.OpenCodeSessionId, out var status)
+      && String(status, "type") is "busy" or "retry";
+  }
+
   public async Task CancelTurnAsync(
     string sessionId,
     CancellationToken cancellationToken
@@ -864,6 +995,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     {
       return;
     }
+    active.Completed = true;
     await SendAsync(
       HttpMethod.Post,
       $"session/{EncodePath(active.OpenCodeSessionId)}/abort?directory={Encode(active.WorkingDirectory)}",
@@ -902,7 +1034,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     Uri ollamaEndpoint,
     string model,
     HarnessMcpClientConfiguration bridge,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Uri? inferenceEndpoint = null
   )
   {
     await _lifecycleGate.WaitAsync(cancellationToken);
@@ -915,7 +1048,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       }
       await StopOwnedProcessAsync();
       Directory.CreateDirectory(_options.RuntimeDirectory);
-      await WriteConfigurationAsync(ollamaEndpoint, model, bridge, cancellationToken);
+      await WriteConfigurationAsync(inferenceEndpoint ?? ollamaEndpoint, model, bridge, cancellationToken);
       var port = ReservePort();
       var executable = ResolveExecutable();
       _password = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
@@ -1138,7 +1271,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         {
           npm = "@ai-sdk/openai-compatible",
           name = "Agentic Router Ollama",
-          options = new { baseURL = $"{endpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1" },
+          options = new { baseURL = HarnessInferenceObserver.V1Endpoint(endpoint) },
           models = new Dictionary<string, object>
           {
             [model] = new
@@ -1360,7 +1493,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     bool readOnlyPermission = false
     ,
     string? userInputId = null,
-    IReadOnlyList<UserInputQuestionView>? userInputQuestions = null
+    IReadOnlyList<UserInputQuestionView>? userInputQuestions = null,
+    long? outputTokens = null,
+    string? finishReason = null
   )
   {
     return new HarnessEvent(
@@ -1383,6 +1518,8 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       nativePayload: native,
       contextInputTokens: contextInputTokens,
       contextTotalTokens: contextTotalTokens,
+      outputTokens: outputTokens,
+      finishReason: finishReason,
       readOnlyPermission: readOnlyPermission,
       userInputId: userInputId,
       userInputQuestions: userInputQuestions
@@ -1615,8 +1752,16 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     string ConversationId,
     string OpenCodeSessionId,
     string WorkingDirectory,
-    string TurnId
-  );
+    string TurnId,
+    string Model,
+    string? Variant
+  )
+  {
+    public volatile bool Completed;
+    public SemaphoreSlim SteeringGate { get; } = new(1, 1);
+    public Dictionary<string, string> AcceptedMessages { get; } = new(StringComparer.Ordinal);
+    public ConcurrentDictionary<string, byte> UserMessages { get; } = new(StringComparer.Ordinal);
+  }
 
   private sealed class HarnessSessionState(string nativeSessionId)
   {

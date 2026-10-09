@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
@@ -14,9 +15,10 @@ public interface IModelDiagnosticService
   );
 
   Task<ModelTestResult> TestAsync(
-    string model,
+    ModelTestRequest request,
     string traceId,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Func<ModelTestProgress, Task>? onProgress = null
   );
 }
 
@@ -115,12 +117,15 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
   }
 
   public async Task<ModelTestResult> TestAsync(
-    string model,
+    ModelTestRequest request,
     string traceId,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    Func<ModelTestProgress, Task>? onProgress = null
   )
   {
     var stopwatch = Stopwatch.StartNew();
+    var model = request.Model;
+    var requestCancellation = cancellationToken;
 
     if (string.IsNullOrWhiteSpace(
       model
@@ -136,9 +141,16 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
 
     try
     {
-      var settings = await _settingsStore.GetAsync(
-        cancellationToken
-      );
+      async Task ReportAsync(string stage, long characters = 0)
+      {
+        if (onProgress is not null)
+          await onProgress(new ModelTestProgress(stage, stopwatch.ElapsedMilliseconds, characters));
+      }
+      await ReportAsync("preparing");
+      var settings = request.Settings ?? await _settingsStore.GetAsync(cancellationToken);
+      using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+      timeout.CancelAfter(TimeSpan.FromSeconds(settings.Runtime.GenerationTimeoutSeconds));
+      cancellationToken = timeout.Token;
       var baseUri = new Uri(
         settings.OllamaUrl,
         UriKind.Absolute
@@ -164,7 +176,16 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
         );
       }
 
-      long? firstChunk = null;
+      ExecutionInferenceMetrics? metrics = null;
+      ProviderTokenUsage? usage = null;
+      OllamaContextResolution? runtime = null;
+      var profile = ProviderGenerationProfiles.Resolve(settings.InferenceProfiles,
+        request.Profile, "chat", false) with
+      { MaximumOutputTokens = 8192 };
+
+      await ReportAsync("loading-prefill");
+      long receivedCharacters = 0;
+      long lastProgressMilliseconds = -1000;
 
       await foreach (var update in _ollamaClient.StreamChatAsync(
         baseUri,
@@ -172,7 +193,12 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
         [
           new ChatMessage(
             "user",
-            "Reply with exactly: OK"
+            "MODEL_TPS_PROBE_V2: Implement a complete local task queue in C# with bounded concurrency, "
+              + "cancellation, retries, durable JSON state, graceful shutdown and an HTTP API. "
+              + "Include the full implementation, meaningful integration tests, usage examples and a detailed "
+              + "discussion of failure recovery and performance. Work entirely in your response, without tools. "
+              + "Write at least 9000 tokens of substantive code and explanation. Do not abbreviate files, "
+              + "use placeholders or stop at an outline. Continue until every component and test is complete."
           )
         ],
         new ProviderCallContext(
@@ -181,32 +207,52 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
           traceId,
           null,
           UsageModelRoles.ModelTest,
-          "model-connectivity-test"
+          "model-throughput-test",
+          InferenceObserver: value => metrics = ExecutionInferenceMetrics.Combine(metrics, value),
+          RuntimeSettingsOverride: settings
         ),
-        null,
+        new ProviderChatOptions(false, [], GenerationProfile: profile),
         cancellationToken
       ))
       {
-        if (
-          firstChunk is null
-          && !string.IsNullOrEmpty(
-            update.Delta
-          )
-        )
+        runtime ??= update.ContextResolution;
+        usage = update.Usage ?? usage;
+        receivedCharacters += (update.Delta?.Length ?? 0) + (update.ThinkingDelta?.Length ?? 0);
+        if (receivedCharacters > 0 && stopwatch.ElapsedMilliseconds - lastProgressMilliseconds >= 500)
         {
-          firstChunk = stopwatch.ElapsedMilliseconds;
+          await ReportAsync("generating", receivedCharacters);
+          lastProgressMilliseconds = stopwatch.ElapsedMilliseconds;
         }
       }
+
+      await ReportAsync("collecting", receivedCharacters);
 
       return new ModelTestResult(
         model,
         true,
-        firstChunk,
+        metrics?.TimeToFirstTokenMilliseconds is double ttft ? (long)Math.Round(ttft) : null,
         stopwatch.ElapsedMilliseconds,
         "Completed",
         null,
-        null
+        null,
+        metrics,
+        runtime,
+        profile.Id,
+        profile.Thinking,
+        usage?.InputTokens,
+        usage?.LoadDurationNanoseconds / 1_000_000d,
+        usage?.PromptEvalDurationNanoseconds / 1_000_000d,
+        profile.MaximumOutputTokens ?? 8192
       );
+    }
+    catch (OllamaRuntimeProfileException exception)
+    {
+      var message = exception.Error.Code == "request-context-does-not-fit"
+        ? $"The 8K output test needs {exception.Error.RequiredContextTokens} context tokens, "
+          + $"but the selected maximum is {exception.Error.MaximumContextTokens}. "
+          + "Increase the Model test maximum context (and any model override) in Ollama context settings, then test again without saving."
+        : exception.Message;
+      return Failure(model, stopwatch, traceId, message);
     }
     catch (OllamaProviderException exception)
     {
@@ -223,7 +269,9 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
         model,
         stopwatch,
         traceId,
-        "The model test was cancelled."
+        requestCancellation.IsCancellationRequested
+          ? "The model test was cancelled."
+          : "The model test exceeded the selected generation timeout. Increase it in Runtime settings for longer tests."
       );
     }
   }

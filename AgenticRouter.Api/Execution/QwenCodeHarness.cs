@@ -86,10 +86,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private readonly ConcurrentDictionary<string, QwenSession> _sessions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, PendingPermission> _permissions = new(StringComparer.Ordinal);
   private readonly ConcurrentDictionary<string, ActiveTurn> _activeTurns = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, DormantRuntime> _dormantRuntimes = new(StringComparer.Ordinal);
   private Process? _process;
   private Uri? _serverUri;
   private string? _token;
   private string? _configurationKey;
+  private string? _sessionGroupId;
+  private string? _activeRuntimeDirectory;
   private HarnessAvailability? _cachedAvailability;
   private long _sessionUseSequence;
   private bool _disposed;
@@ -209,7 +212,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         hostProfile,
         hostBridgeTools,
         request.UseMinimalToolInventory,
-        cancellationToken
+        request.SessionGroupId,
+        cancellationToken,
+        request.InferenceEndpoint
       );
       var nativeCapabilities = request.UseMinimalToolInventory
         ? ActiveNativeTools(hostProfile).Concat(MinimalCoreTools(hostProfile))
@@ -264,7 +269,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           : $"Qwen Code session {session.SessionId} started."
       );
 
-      if (request.ModelSupportsReasoning)
+      if (request.ModelSupportsReasoning && request.RequestedEffort is not null)
       {
         await SendAsync(
           HttpMethod.Post,
@@ -278,7 +283,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           cancellationToken
         );
       }
-      yield return Event(
+      if (request.RequestedEffort is not null) yield return Event(
         request.ModelSupportsReasoning
           ? "effort.applied"
           : "effort.prompt-guided",
@@ -511,7 +516,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
                     ? HarnessTerminalState.Partial
                     : HarnessTerminalState.Failed,
                   native: payload
-                );
+                ) with
+                { FinishReason = stopReason };
               }
               yield break;
             }
@@ -725,6 +731,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         "The Qwen Code turn is no longer available for steering."
       );
     }
+    if (active.RetiredSteeringIds.ContainsKey(request.MessageId))
+      throw Failure("qwen-code-steer-retired", "This steering identifier was already released. Review the turn before submitting a new message.");
 
     var result = await SendAsync(
       HttpMethod.Post,
@@ -749,35 +757,73 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       );
     }
 
-    var returnedMessageId = String(result, "messageId") ?? request.MessageId;
-    var reconciliation = await SendAsync(
-      HttpMethod.Get,
-      $"session/{EncodePath(active.QwenSessionId)}/mid-turn-messages",
-      null,
-      active.ClientId,
-      cancellationToken
-    );
-    if (StringArrayContains(reconciliation, "promotedMessageIds", returnedMessageId))
+    var returnedMessageId = String(result, "messageId");
+    if (returnedMessageId is null || !string.Equals(returnedMessageId, request.MessageId, StringComparison.Ordinal))
     {
-      await SendAsync(
-        HttpMethod.Delete,
-        $"session/{EncodePath(active.QwenSessionId)}/mid-turn-messages/{EncodePath(returnedMessageId)}",
-        null,
-        active.ClientId,
-        cancellationToken
-      );
       throw Failure(
-        "qwen-code-steer-promoted",
-        "The Qwen Code turn ended before it could receive the steering message. The message remains in the composer so it can be queued explicitly."
+        "qwen-code-steer-unverified",
+        "Qwen Code did not acknowledge the requested steering message identifier."
       );
     }
-    return new HarnessSteerResult(
-      HarnessIds.QwenCode,
-      request.SessionId,
-      active.PromptId,
-      returnedMessageId,
-      true
-    );
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(_options.RequestTimeout);
+    try
+    {
+      while (true)
+      {
+        var reconciliation = await SendAsync(
+          HttpMethod.Get,
+          $"session/{EncodePath(active.QwenSessionId)}/mid-turn-messages",
+          null,
+          active.ClientId,
+          timeout.Token
+        );
+        if (reconciliation.ValueKind != JsonValueKind.Object)
+          throw Failure("qwen-code-steer-unverified", "Qwen Code returned an invalid steering reconciliation receipt.");
+        if (StringArrayContains(reconciliation, "promotedMessageIds", returnedMessageId))
+          throw Failure("qwen-code-steer-promoted",
+            "Qwen Code promoted the message out of the active turn. Same-turn steering was not confirmed; review the turn before resending.");
+        // Admission only transfers ownership to the daemon. The settled ring is
+        // evidence of injection here because this call has not deleted the ID.
+        if (StringArrayContains(reconciliation, "settledMessageIds", returnedMessageId))
+          return new(HarnessIds.QwenCode, request.SessionId, active.PromptId, returnedMessageId, true);
+        if (!ReferenceEquals(_activeTurns.GetValueOrDefault(request.SessionId), active))
+          throw Failure("qwen-code-steer-stale", "Qwen Code ended before steering consumption could be confirmed.");
+        if (!reconciliation.TryGetProperty("messages", out var queued)
+          || queued.ValueKind != JsonValueKind.Array
+          || !queued.EnumerateArray().Any(message => String(message, "messageId") == returnedMessageId))
+          throw Failure("qwen-code-steer-unverified", "Qwen Code did not retain or confirm consumption of the steering message.");
+        await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
+      }
+    }
+    catch (Exception exception) when (exception is HarnessException or OperationCanceledException or HttpRequestException or JsonException)
+    {
+      active.RetiredSteeringIds.TryAdd(returnedMessageId, 0);
+      // Release any undrained admission, including a late promotion, before the
+      // browser offers an explicit retry. Never use the caller's cancelled token.
+      using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+      try
+      {
+        var removal = await SendAsync(HttpMethod.Delete,
+          $"session/{EncodePath(active.QwenSessionId)}/mid-turn-messages/{EncodePath(returnedMessageId)}",
+          null, active.ClientId, cleanup.Token);
+        if (removal.ValueKind != JsonValueKind.Object || !removal.TryGetProperty("removed", out var removed)
+          || removed.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+          throw Failure("qwen-code-steer-cleanup-unverified", "Qwen Code did not confirm the steering cleanup result.");
+      }
+      catch (Exception cleanupException)
+      {
+        _logger.LogWarning(cleanupException, "Qwen Code steering admission cleanup could not be confirmed.");
+        throw Failure("qwen-code-steer-cleanup-unverified",
+          "Qwen Code still may own the steering message. Review the turn before resending.");
+      }
+      if (exception is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        throw Failure("qwen-code-steer-timeout", "Qwen Code did not confirm steering consumption within the request timeout.");
+      if (exception is HttpRequestException or JsonException)
+        throw new HarnessException("qwen-code-steer-transport", "Qwen Code steering consumption could not be confirmed.",
+          "The steering reconciliation request failed.", true, exception, HarnessIds.QwenCode);
+      throw;
+    }
   }
 
   private async Task ReleaseWorkspaceAsync()
@@ -785,7 +831,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     await _lifecycleGate.WaitAsync(CancellationToken.None);
     try
     {
-      await StopOwnedProcessAsync();
+      await StopAllOwnedProcessesAsync();
     }
     finally
     {
@@ -800,7 +846,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       return;
     }
     _disposed = true;
-    await StopOwnedProcessAsync();
+    await StopAllOwnedProcessesAsync();
     _availabilityGate.Dispose();
     _lifecycleGate.Dispose();
     _turnGate.Dispose();
@@ -965,7 +1011,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     HostCapabilityProfile hostProfile,
     IReadOnlyList<CanonicalToolDefinition> hostBridgeTools,
     bool useMinimalToolInventory,
-    CancellationToken cancellationToken
+    string? sessionGroupId,
+    CancellationToken cancellationToken,
+    Uri? inferenceEndpoint = null
   )
   {
     await _lifecycleGate.WaitAsync(cancellationToken);
@@ -980,20 +1028,50 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           hostBridgeTools.Select(tool => tool.Name).Order(StringComparer.Ordinal)
         );
       var key = $"{ollamaEndpoint.GetLeftPart(UriPartial.Authority)}|{model}|{contextWindowTokens}|{Path.GetFullPath(workingDirectory)}|{toolInventoryKey}";
+      if (!string.Equals(sessionGroupId, _sessionGroupId, StringComparison.Ordinal))
+      {
+        await StopAllOwnedProcessesAsync();
+        _sessionGroupId = sessionGroupId;
+      }
       if (_process is { HasExited: false } && string.Equals(key, _configurationKey, StringComparison.Ordinal))
       {
         return;
       }
-      await StopOwnedProcessAsync();
-      Directory.CreateDirectory(_options.RuntimeDirectory);
+      if (sessionGroupId is not null && _process is { HasExited: false }
+        && _configurationKey is not null && _serverUri is not null && _token is not null)
+      {
+        // Qwen's inventory is daemon-scoped. Preserve each existing inventory
+        // and its native sessions while a supervised run alternates contexts.
+        _dormantRuntimes.Add(_configurationKey, new DormantRuntime(
+          _process, _serverUri, _token, _activeRuntimeDirectory!, _sessions.ToArray()));
+        _process = null;
+        _sessions.Clear();
+      }
+      else
+      {
+        await StopOwnedProcessAsync();
+      }
+      if (_dormantRuntimes.Remove(key, out var dormant))
+      {
+        ActivateRuntime(key, dormant);
+        if (_process is { HasExited: false }) return;
+        await StopOwnedProcessAsync();
+      }
+      var runtimeDirectory = sessionGroupId is null
+        ? _options.RuntimeDirectory
+        : Path.Combine(_options.RuntimeDirectory, "supervised", Convert.ToHexString(
+          SHA256.HashData(Encoding.UTF8.GetBytes(key))));
+      _activeRuntimeDirectory = runtimeDirectory;
+      Directory.CreateDirectory(runtimeDirectory);
       await WriteConfigurationAsync(
-        ollamaEndpoint,
+        inferenceEndpoint ?? ollamaEndpoint,
         model,
         contextWindowTokens,
         bridge,
         hostProfile,
         hostBridgeTools,
         useMinimalToolInventory,
+        runtimeDirectory,
         cancellationToken
       );
       var port = ReservePort();
@@ -1020,7 +1098,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       {
         startInfo.ArgumentList.Add(argument);
       }
-      SetRuntimeEnvironment(startInfo, _token, bridge.AuthorizationToken);
+      SetRuntimeEnvironment(startInfo, _token, bridge.AuthorizationToken, runtimeDirectory);
       var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
       ClearProcessOutput();
       if (!process.Start())
@@ -1239,7 +1317,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         providers,
         currentModel,
         request.Model,
-        request.ProviderEndpoint!,
+        request.InferenceEndpoint ?? request.ProviderEndpoint!,
         request.WorkingDirectory
       );
       _sessions[request.SessionId] = session;
@@ -1476,11 +1554,12 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     HostCapabilityProfile hostProfile,
     IReadOnlyList<CanonicalToolDefinition> hostBridgeTools,
     bool useMinimalToolInventory,
+    string runtimeDirectory,
     CancellationToken cancellationToken
   )
   {
-    Directory.CreateDirectory(_options.RuntimeDirectory);
-    var path = Path.Combine(_options.RuntimeDirectory, "settings.json");
+    Directory.CreateDirectory(runtimeDirectory);
+    var path = Path.Combine(runtimeDirectory, "settings.json");
     var hostMcpServer = new
     {
       httpUrl = bridge.Endpoint.AbsoluteUri,
@@ -1512,7 +1591,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
             id = model,
             name = model,
             envKey = "OLLAMA_API_KEY",
-            baseUrl = $"{endpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1",
+            baseUrl = HarnessInferenceObserver.V1Endpoint(endpoint),
             generationConfig = new
             {
               contextWindowSize = contextWindowTokens,
@@ -1602,7 +1681,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       return false;
     }
     var expected = new Uri(
-      $"{providerEndpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1",
+      HarnessInferenceObserver.V1Endpoint(providerEndpoint),
       UriKind.Absolute
     );
     return Uri.Compare(
@@ -1746,12 +1825,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   private void SetRuntimeEnvironment(
     ProcessStartInfo info,
     string? token,
-    string? hostBridgeToken
+    string? hostBridgeToken,
+    string? runtimeDirectory = null
   )
   {
-    info.Environment["QWEN_HOME"] = _options.RuntimeDirectory;
+    info.Environment["QWEN_HOME"] = runtimeDirectory ?? _options.RuntimeDirectory;
     info.Environment["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = Path.Combine(
-      _options.RuntimeDirectory,
+      runtimeDirectory ?? _options.RuntimeDirectory,
       "settings.json"
     );
     info.Environment["OLLAMA_API_KEY"] = "ollama";
@@ -1807,6 +1887,34 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     return ["web_fetch", "web_search"];
   }
 
+  private void ActivateRuntime(string key, DormantRuntime runtime)
+  {
+    _configurationKey = key;
+    _process = runtime.Process;
+    _serverUri = runtime.ServerUri;
+    _token = runtime.Token;
+    _activeRuntimeDirectory = runtime.Directory;
+    _sessions.Clear();
+    foreach (var session in runtime.Sessions) _sessions[session.Key] = session.Value;
+    ClearProcessOutput();
+  }
+
+  private async Task StopAllOwnedProcessesAsync()
+  {
+    await StopOwnedProcessAsync();
+    foreach (var runtime in _dormantRuntimes)
+    {
+      ActivateRuntime(runtime.Key, runtime.Value);
+      await StopOwnedProcessAsync();
+    }
+    _dormantRuntimes.Clear();
+    _sessionGroupId = null;
+  }
+
+  private sealed record DormantRuntime(
+    Process Process, Uri ServerUri, string Token, string Directory,
+    KeyValuePair<string, QwenSession>[] Sessions);
+
   private async Task StopOwnedProcessAsync()
   {
     var process = _process;
@@ -1836,6 +1944,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     _serverUri = null;
     _token = null;
     _configurationKey = null;
+    _activeRuntimeDirectory = null;
     if (process is null)
     {
       return;
@@ -1892,54 +2001,68 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     CancellationToken cancellationToken
   )
   {
-    var deadline = DateTimeOffset.UtcNow + _options.RequestTimeout;
-    var fallbackDelay = TimeSpan.FromMilliseconds(250);
-    var attempt = 0;
-    while (true)
+    try
     {
-      attempt++;
-      using var request = CreateRequest(
-        HttpMethod.Post,
-        $"session/{EncodePath(session.SessionId)}/prompt",
-        session.ClientId
-      );
-      request.Content = new StringContent(
-        JsonSerializer.Serialize(body),
-        Encoding.UTF8,
-        "application/json"
-      );
-      using var response = await Client().SendAsync(request, cancellationToken);
-      var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-      if (response.StatusCode == HttpStatusCode.Accepted)
+      var deadline = DateTimeOffset.UtcNow + _options.RequestTimeout;
+      var fallbackDelay = TimeSpan.FromMilliseconds(250);
+      var attempt = 0;
+      while (true)
       {
-        using var document = JsonDocument.Parse(bytes);
-        return document.RootElement.Clone();
-      }
-      if (!IsPromptQueueFull(response, bytes, session.SessionId))
-      {
-        throw Failure(
-          "qwen-code-http",
-          $"Qwen Code returned HTTP {(int)response.StatusCode} ({response.StatusCode}). {Truncate(Encoding.UTF8.GetString(bytes))}"
+        attempt++;
+        using var request = CreateRequest(
+          HttpMethod.Post,
+          $"session/{EncodePath(session.SessionId)}/prompt",
+          session.ClientId
         );
-      }
+        request.Content = new StringContent(
+          JsonSerializer.Serialize(body),
+          Encoding.UTF8,
+          "application/json"
+        );
+        using var response = await Client().SendAsync(request, cancellationToken);
+        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        if (response.StatusCode == HttpStatusCode.Accepted)
+        {
+          using var document = JsonDocument.Parse(bytes);
+          return document.RootElement.Clone();
+        }
+        if (!IsPromptQueueFull(response, bytes, session.SessionId))
+        {
+          throw Failure(
+            "qwen-code-http",
+            $"Qwen Code returned HTTP {(int)response.StatusCode} ({response.StatusCode}). {Truncate(Encoding.UTF8.GetString(bytes))}"
+          );
+        }
 
-      var delay = PromptQueueRetryDelay(response, fallbackDelay);
-      if (DateTimeOffset.UtcNow + delay > deadline)
-      {
-        throw Failure(
-          "qwen-code-prompt-queue-timeout",
-          $"Qwen Code session {session.SessionId} remained busy until the configured request timeout."
+        var delay = PromptQueueRetryDelay(response, fallbackDelay);
+        if (DateTimeOffset.UtcNow + delay > deadline)
+        {
+          throw Failure(
+            "qwen-code-prompt-queue-timeout",
+            $"Qwen Code session {session.SessionId} remained busy until the configured request timeout."
+          );
+        }
+        _logger.LogInformation(
+          "Qwen Code prompt queue is full for session {SessionId}; retrying submission after {DelayMilliseconds} ms (attempt {Attempt}).",
+          session.SessionId,
+          delay.TotalMilliseconds,
+          attempt
+        );
+        await Task.Delay(delay, cancellationToken);
+        fallbackDelay = TimeSpan.FromMilliseconds(
+          Math.Min(fallbackDelay.TotalMilliseconds * 2, 2_000)
         );
       }
-      _logger.LogInformation(
-        "Qwen Code prompt queue is full for session {SessionId}; retrying submission after {DelayMilliseconds} ms (attempt {Attempt}).",
-        session.SessionId,
-        delay.TotalMilliseconds,
-        attempt
-      );
-      await Task.Delay(delay, cancellationToken);
-      fallbackDelay = TimeSpan.FromMilliseconds(
-        Math.Min(fallbackDelay.TotalMilliseconds * 2, 2_000)
+    }
+    catch (Exception exception) when (exception is HttpRequestException or IOException)
+    {
+      throw new HarnessException(
+        "qwen-code-prompt-transport",
+        "Qwen Code prompt submission failed before acceptance could be confirmed; the prompt was not resubmitted.",
+        Truncate(exception.Message),
+        false,
+        exception,
+        HarnessIds.QwenCode
       );
     }
   }
@@ -2434,5 +2557,7 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     public string WorkingDirectory { get; }
 
     public string? PromptId { get; set; }
+
+    public ConcurrentDictionary<string, byte> RetiredSteeringIds { get; } = new(StringComparer.Ordinal);
   }
 }

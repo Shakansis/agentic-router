@@ -23,7 +23,9 @@ approval, while keeping every mutation and process capability unavailable.
 - Buffer model content while structured tools remain available. When a valid
   tool call accompanies non-terminal text, withhold that preamble, execute only
   the Host-validated call, and expose an activity event without leaking the
-  preamble into the user-facing answer.
+  preamble into the user-facing answer. As authorized on 2026-10-04, show that
+  non-thinking text separately as bounded progress commentary and expose the
+  read/search calls and bounded results using the existing action cards.
 
 ## Implementation steps
 

@@ -9,6 +9,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
+using AgenticRouter.Api.Usage;
 using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Supervision;
@@ -108,6 +109,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
   private readonly IWorkspaceProfileService _workspaces;
   private readonly ITrustedWorkspaceService _workspace;
   private readonly ISupervisionRouteResolver _routes;
+  private readonly CompletionCheckStore _completionReports;
   private TimeSpan _turnStatusInterval = TimeSpan.FromSeconds(30);
   private string _recoveryEffort = ModelEffortLevels.Medium;
 
@@ -117,7 +119,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     ISettingsStore settings,
     IWorkspaceProfileService workspaces,
     ITrustedWorkspaceService workspace,
-    ISupervisionRouteResolver routes
+    ISupervisionRouteResolver routes,
+    CompletionCheckStore completionReports
   )
   {
     _turns = turns;
@@ -126,9 +129,38 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     _workspaces = workspaces;
     _workspace = workspace;
     _routes = routes;
+    _completionReports = completionReports;
   }
 
   public async IAsyncEnumerable<SupervisionExecutionUpdate> ExecuteAsync(
+    SupervisionExecutionInput input,
+    [EnumeratorCancellation] CancellationToken cancellationToken
+  )
+  {
+    await foreach (var update in ExecuteCoreAsync(input, cancellationToken))
+    {
+      if (update.Terminal && update.State == DurableSupervisionRunStates.Completed
+        && update.Runtime.CompletionReport is null)
+      {
+        var checkpoint = input.Checkpoint;
+        var route = checkpoint.Route;
+        var reviews = (update.Runtime.InferenceMetricsBySession?.Keys ?? [])
+          .Select(_sessions.GetReview).OfType<ExecutionSessionReview>().ToArray();
+        _completionReports.Register(new CompletionCheckContext(checkpoint.RunId,
+          checkpoint.BrowserSessionId, checkpoint.Objective, update.Runtime.FinalAnswer ?? string.Empty,
+          route.Model, new ProviderCallContext(checkpoint.WorkspaceId, checkpoint.ConversationSessionId,
+            checkpoint.RunId, null, UsageModelRoles.Summary, "execution-completion-report",
+            route.ModelDigest, Gpu: route.WorkerGpuSelection), reviews,
+          [.. update.Runtime.CompletionSummary ?? [],
+            .. update.Runtime.WorkItems.Select(item =>
+              $"Work item ({item.Status}): {item.Objective}; criteria: {string.Join("; ", item.AcceptanceCriteria)}")]));
+        yield return update with { Runtime = update.Runtime with { CompletionCheckId = checkpoint.RunId } };
+      }
+      else yield return update;
+    }
+  }
+
+  private async IAsyncEnumerable<SupervisionExecutionUpdate> ExecuteCoreAsync(
     SupervisionExecutionInput input,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -434,12 +466,11 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           input.History,
           item.AttemptCount == 1 ? input.Images : [],
           validationAvailable,
-          string.IsNullOrWhiteSpace(item.LastDiscrepancy)
-            ? settings.Execution.PhaseEffort.Work
-            : settings.Execution.PhaseEffort.Recovery,
+          ModelEffortLevels.Medium,
           input.ActionJournal,
           input.ProgressSink,
-          cancellationToken
+          cancellationToken,
+          inferenceObjective: item.Objective
         );
         runtime = IncludeCompletionSummary(runtime, workerTurn);
         workerTimer.Stop();
@@ -1293,7 +1324,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     string requestedEffort,
     IExecutionActionJournal? actionJournal,
     ISupervisionTurnProgressSink? progressSink,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? inferenceObjective = null
   )
   {
     var supervisor = string.Equals(context.Role, "supervisor", StringComparison.Ordinal);
@@ -1328,7 +1360,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         checkpoint.BrowserSessionId,
         checkpoint.ConversationSessionId,
         Images: images,
-        ExecutionStrategy: SupervisionExecutionStrategies.Direct
+        ExecutionStrategy: SupervisionExecutionStrategies.Direct,
+        Thinking: supervisor ? null : checkpoint.Route.WorkerThinking
       );
       string? roleResult = null;
       ExecutionPreflightMeasurement? preflight = null;
@@ -1345,7 +1378,9 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
           ? checkpoint.Route.SupervisorGpuSelection
             ?? checkpoint.Route.WorkerGpuSelection
           : checkpoint.Route.WorkerGpuSelection,
-        ContextRecoveryBudget: contextRecoveryBudget
+        ContextRecoveryBudget: contextRecoveryBudget,
+        SupervisionRunId: checkpoint.RunId,
+        InferenceObjective: inferenceObjective
       );
       var answer = new StringBuilder();
       ProviderError? failure = null;
@@ -2468,11 +2503,29 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     }
     try
     {
-      return JsonSerializer.Deserialize<SupervisionDecision>(json, DecisionJson)
-        ?? throw InvalidDecision("The supervisor decision was empty.");
+      return DeserializeDecision(json);
     }
     catch (JsonException exception)
     {
+      var objectStart = json.IndexOf('{');
+      if (objectStart is > 0 and <= 256
+        && json.AsSpan(0, objectStart).IndexOfAny("{}[]".AsSpan()) < 0)
+      {
+        try
+        {
+          var candidate = json[objectStart..];
+          using var document = JsonDocument.Parse(candidate);
+          if (document.RootElement.ValueKind == JsonValueKind.Object
+            && !HasDuplicateProperties(document.RootElement))
+          {
+            return DeserializeDecision(candidate);
+          }
+        }
+        catch (JsonException)
+        {
+          // A prefix is accepted only when exactly one complete JSON object follows it.
+        }
+      }
       throw new SupervisionException(
         "supervision-decision-malformed",
         "supervision-decision",
@@ -2482,6 +2535,27 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         exception
       );
     }
+  }
+
+  private static SupervisionDecision DeserializeDecision(string json)
+  {
+    return JsonSerializer.Deserialize<SupervisionDecision>(json, DecisionJson)
+      ?? throw InvalidDecision("The supervisor decision was empty.");
+  }
+
+  private static bool HasDuplicateProperties(JsonElement element)
+  {
+    if (element.ValueKind == JsonValueKind.Array)
+    {
+      return element.EnumerateArray().Any(HasDuplicateProperties);
+    }
+    if (element.ValueKind != JsonValueKind.Object)
+    {
+      return false;
+    }
+    var names = new HashSet<string>(StringComparer.Ordinal);
+    return element.EnumerateObject().Any(property =>
+      !names.Add(property.Name) || HasDuplicateProperties(property.Value));
   }
 
   private static void ValidateDecomposition(
@@ -2907,7 +2981,12 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     {
       lines = lines.Where(line => line != "Validation: not run").ToArray();
     }
-    return runtime with { CompletionSummary = lines };
+    var metrics = new Dictionary<string, ExecutionInferenceMetrics>(
+      runtime.InferenceMetricsBySession ?? new Dictionary<string, ExecutionInferenceMetrics>(),
+      StringComparer.Ordinal);
+    if (turn.Review?.Summary is { InferenceMetrics: not null } summary)
+      metrics[summary.Id] = summary.InferenceMetrics;
+    return runtime with { CompletionSummary = lines, InferenceMetricsBySession = metrics };
   }
 
   private static SupervisionExecutionUpdate Update(

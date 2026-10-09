@@ -121,7 +121,8 @@ public sealed record PrepareSupervisionRunRequest(
   IReadOnlyList<ChatMessage>? History = null,
   IReadOnlyList<ChatImageAttachment>? Images = null,
   SupervisionTakeoverSnapshot? Takeover = null,
-  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised
+  string ExecutionStrategy = SupervisionExecutionStrategies.Supervised,
+  string? Thinking = null
 );
 
 public sealed record ResumeSupervisionRunRequest(
@@ -253,9 +254,18 @@ public sealed record SupervisionRuntimeView(
   bool RecoverableInCurrentProcess,
   SupervisionTelemetryView? Telemetry = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  IReadOnlyList<string>? CompletionSummary = null
+  IReadOnlyList<string>? CompletionSummary = null,
+  IReadOnlyDictionary<string, ExecutionInferenceMetrics>? InferenceMetricsBySession = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  ExecutionCompletionReport? CompletionReport = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? CompletionCheckId = null
 )
 {
+  [JsonIgnore]
+  public ExecutionInferenceMetrics? InferenceMetrics => InferenceMetricsBySession?.Values.Aggregate(
+    (ExecutionInferenceMetrics?)null, ExecutionInferenceMetrics.Combine);
+
   public static SupervisionRuntimeView Empty(bool recoverableInCurrentProcess = true)
   {
     return new SupervisionRuntimeView(
@@ -298,7 +308,9 @@ public sealed record SupervisionRouteSnapshot(
   string? SupervisorRuntime = null,
   bool GpuPlacementConflict = false,
   string? WorkerInheritedGpuSelection = null,
-  string? SupervisorInheritedGpuSelection = null
+  string? SupervisorInheritedGpuSelection = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? WorkerThinking = null
 )
 {
   [JsonIgnore]

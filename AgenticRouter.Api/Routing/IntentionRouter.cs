@@ -31,7 +31,7 @@ public sealed class IntentionRouter : IIntentionRouter
     Rule(
       "software-development",
       "software-development",
-      "implement|program|refactor|compile|build|create file|edit file|write file|write (?:some )?code|implem|program|refator|compil|crie (?:um )?arquivo|editar? (?:um )?arquivo|escrev(?:a|er) (?:um )?arquivo|escrev(?:a|er) (?:algum )?codigo"
+      "implement|program|refactor|compile|build|create (?:a |an |the )?game|crie (?:um |o )?jogo|create file|edit file|write file|write (?:some )?code|implem|program|refator|compil|crie (?:um )?arquivo|editar? (?:um )?arquivo|escrev(?:a|er) (?:um )?arquivo|escrev(?:a|er) (?:algum )?codigo"
     ),
     Rule(
       "software-architecture",

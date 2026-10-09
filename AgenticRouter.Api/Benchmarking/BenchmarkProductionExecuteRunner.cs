@@ -147,7 +147,9 @@ public sealed class BenchmarkProductionExecuteRunner : IBenchmarkProductionExecu
       while (true)
       {
         cancellationToken.ThrowIfCancellationRequested();
-        var line = await reader.ReadLineAsync().WaitAsync(cancellationToken);
+        // Cancel the underlying read; abandoning its waiter can leave it consuming
+        // the pooled connection when the settled execution's review is requested.
+        var line = await reader.ReadLineAsync(cancellationToken);
         if (line is null)
         {
           break;

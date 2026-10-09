@@ -220,13 +220,14 @@ public sealed class JsonlIncidentJournal : IIncidentJournal
       var truncated = projected.Count < matches.Count;
       var failure = matches.LastOrDefault(item => item.Status == "failed");
       var last = matches[^1];
+      var terminal = matches.LastOrDefault(item => item.Status is "failed" or "completed" or "blocked" or "partial" or "cancelled");
       var context = matches.LastOrDefault(item => item.ContextFit is not null)?.ContextFit;
       var completed = matches.Any(item => item.Completed == true);
       var review = matches.Any(item => item.ReviewAvailable == true);
       RecordLookup(lookupStarted, lookupFiles, lookupRecords);
       return new IncidentTraceReport(
         traceId,
-        failure is not null ? "failed" : completed ? "completed" : last.Status,
+        failure is not null ? "failed" : completed ? "completed" : terminal?.Status ?? last.Status,
         failure?.Code,
         failure?.Stage,
         failure?.Provider ?? last.Provider,

@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 
 namespace AgenticRouter.Api.Observability;
 
@@ -26,7 +27,9 @@ public static class IncidentEventFactory
     var links = trace.SnapshotLinks();
     var summary = source.Type == "error"
       ? "The request reached a typed terminal failure."
-      : SummaryFor(source.Type);
+      : source.Type == "response.completed" && ExecutionTerminalState.From(source) != "completed"
+        ? "The response ended with an incomplete Host execution result."
+        : SummaryFor(source.Type);
     var details = error?.Details;
     var contextFit = source.IncidentContextFit is null
       ? CreateContextFit(details, source.ContextUsage)
@@ -47,13 +50,7 @@ public static class IncidentEventFactory
       Category = CategoryFor(source.Type),
       Stage = error?.Stage ?? source.Type,
       Code = Detail(details, "code") ?? source.Type,
-      Status = source.Type switch
-      {
-        "error" => "failed",
-        "response.completed" => "completed",
-        "request.cancelled" => "cancelled",
-        _ => "observed"
-      },
+      Status = ExecutionTerminalState.From(source),
       Summary = summary,
       RequestId = source.RequestId,
       ConversationId = source.ConversationSessionId,
@@ -75,7 +72,7 @@ public static class IncidentEventFactory
       Role = SafeIdentifier(source.SupervisionProgress?.Role),
       ContextId = SafeIdentifier(source.SupervisionProgress?.ContextId),
       WorkItemId = SafeIdentifier(source.SupervisionProgress?.WorkItemId),
-      Completed = source.Type == "response.completed",
+      Completed = ExecutionTerminalState.From(source) == "completed",
       ReviewAvailable = source.ExecutionSession?.ReviewAvailable,
       ContextFit = contextFit
     };

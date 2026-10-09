@@ -1073,7 +1073,7 @@ public sealed class SupervisionCheckpointStore : ISupervisionCheckpointStore
           && file.Verified
         )
         && takeover.DirectCompletionStatus is { Length: <= 128 }
-        && takeover.ValidationStatus?.Length <= 128
+        && takeover.ValidationStatus is null or { Length: <= 128 }
       );
   }
 

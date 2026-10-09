@@ -3,6 +3,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.GitDelivery;
 using AgenticRouter.Api.Providers;
+using AgenticRouter.Api.Runtime;
 
 namespace AgenticRouter.Api.Contracts;
 
@@ -141,7 +142,8 @@ public sealed record ChatRequest(
   int? ReplaceFromMessageIndex = null,
   string? SupervisionRunId = null,
   bool PreserveExactUserMessage = false,
-  string? ChatRunId = null
+  string? ChatRunId = null,
+  string? Thinking = null
 );
 
 public sealed record HarnessSteerInput(
@@ -778,8 +780,48 @@ public sealed record ExecutionSessionSummary(
   string? HandoffReason = null,
   ExecutionRoutingEvidence? RoutingEvidence = null,
   ExecutionTimingView? Timing = null,
-  IReadOnlyList<string>? CompletionSummary = null
+  IReadOnlyList<string>? CompletionSummary = null,
+  ExecutionInferenceMetrics? InferenceMetrics = null
 );
+
+public sealed record ExecutionInferenceMetrics(
+  long? OutputTokens,
+  double? GenerationMilliseconds,
+  DateTimeOffset? FirstInferenceDispatchedAt,
+  double? TimeToFirstTokenMilliseconds,
+  string? GenerationTimingSource = null,
+  double? DispatchToFirstTokenMilliseconds = null,
+  double? ModelLoadMilliseconds = null,
+  string? FirstTokenTimingSource = null
+)
+{
+  public double? TokensPerSecond => OutputTokens is > 0 && GenerationMilliseconds is > 0
+    ? OutputTokens.Value * 1000d / GenerationMilliseconds.Value
+    : null;
+
+  public static ExecutionInferenceMetrics? Combine(
+    ExecutionInferenceMetrics? previous,
+    ExecutionInferenceMetrics? next
+  )
+  {
+    if (previous is null) return next;
+    if (next is null) return previous;
+    var first = previous.FirstInferenceDispatchedAt is null
+      || previous.FirstInferenceDispatchedAt <= next.FirstInferenceDispatchedAt
+      || next.FirstInferenceDispatchedAt is null ? previous : next;
+    return new ExecutionInferenceMetrics(
+      previous.OutputTokens + next.OutputTokens,
+      previous.GenerationMilliseconds + next.GenerationMilliseconds,
+      first.FirstInferenceDispatchedAt,
+      first.TimeToFirstTokenMilliseconds,
+      previous.GenerationTimingSource == next.GenerationTimingSource
+        ? previous.GenerationTimingSource : "mixed",
+      first.DispatchToFirstTokenMilliseconds,
+      first.ModelLoadMilliseconds,
+      first.FirstTokenTimingSource
+    );
+  }
+}
 
 public sealed record ExecutionTimingView(
   DateTimeOffset StartedAt,
@@ -851,7 +893,8 @@ public sealed record ExecutionSessionReview(
   ValidationRunView? Validation = null,
   GitDeliveryStateView? Delivery = null,
   IReadOnlyList<ToolNameResolutionEvidence>? ToolNameResolutions = null,
-  IReadOnlyList<ExecutionActionRecord>? Actions = null
+  IReadOnlyList<ExecutionActionRecord>? Actions = null,
+  bool Historical = false
 );
 
 public sealed record UndoExecutionRequest(
@@ -886,7 +929,15 @@ public sealed record ModelDiagnosticsResponse(
 );
 
 public sealed record ModelTestRequest(
-  string Model
+  string Model,
+  ApplicationSettings? Settings = null,
+  string Profile = "general-chat"
+);
+
+public sealed record ModelTestProgress(
+  string Stage,
+  long ElapsedMilliseconds,
+  long ReceivedCharacters = 0
 );
 
 public sealed record ModelConformanceBenchmarkRequest(
@@ -907,7 +958,15 @@ public sealed record ModelTestResult(
   long TotalDurationMilliseconds,
   string CompletionStatus,
   string? TraceId,
-  string? Error
+  string? Error,
+  ExecutionInferenceMetrics? InferenceMetrics = null,
+  OllamaContextResolution? Runtime = null,
+  string? Profile = null,
+  string? Thinking = null,
+  long? InputTokens = null,
+  double? LoadMilliseconds = null,
+  double? PrefillMilliseconds = null,
+  int OutputTokenBudget = 8192
 );
 
 public sealed record ModelConformanceBenchmarkResult(
@@ -955,8 +1014,11 @@ public sealed record SupervisionProgressView(
   string? SupervisorModel = null,
   string? SupervisorGpu = null,
   string? SupervisorRuntime = null,
-  IReadOnlyList<string>? CompletionSummary = null
+  IReadOnlyList<string>? CompletionSummary = null,
+  ExecutionInferenceMetrics? InferenceMetrics = null
 );
+
+public sealed record ExecutionCompletionReport(string Status, string Model, string Text);
 
 public sealed record ChatStreamEvent(
   string RequestId,
@@ -988,7 +1050,32 @@ public sealed record ChatStreamEvent(
   UserInputRequestView? UserInput = null,
   string? ChatRunId = null,
   long? ChatRunSequence = null,
-  InferenceRunMetadataView? Inference = null
+  InferenceRunMetadataView? Inference = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  ExecutionCompletionReport? CompletionReport = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  ChatTurnSummary? ChatSummary = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? CompletionCheckId = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  InferenceProgressView? InferenceProgress = null
+);
+
+public sealed record InferenceProgressView(
+  string Stage,
+  double? Percent,
+  string Source,
+  string? UnavailableReason = null
+);
+
+public sealed record ChatTurnSummary(
+  string State,
+  string? Model,
+  int ReadCount,
+  int SearchCount,
+  int ToolFailureCount,
+  long ElapsedMilliseconds,
+  ExecutionInferenceMetrics? InferenceMetrics
 );
 
 public sealed record InferenceRunMetadataView(

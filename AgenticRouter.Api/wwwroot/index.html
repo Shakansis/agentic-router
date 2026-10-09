@@ -6,10 +6,11 @@
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
   <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/styles.css?v=20261009-inference-progress">
   <link rel="stylesheet" href="/panels.css?v=20260926-settings-polish">
-  <link rel="stylesheet" href="/benchmark.css?v=20260924-ui-domains">
-  <link rel="stylesheet" href="/bootstrap.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/benchmark.css?v=20261001-runtime-performance">
+  <link rel="stylesheet" href="/model-runtime.css?v=20261001-runtime-performance">
+  <link rel="stylesheet" href="/bootstrap.css?v=20260927-restart-recovery">
   <link rel="stylesheet" href="/user-input.css?v=20260924-ui-domains">
 </head>
 <body class="bootstrapping">
@@ -53,6 +54,11 @@
   <div id="safe-mode-banner" class="safe-mode-banner" role="status" hidden>
     <strong>Safe mode</strong>
     <span id="safe-mode-reason">Execute, cloud, and configuration changes are disabled.</span>
+  </div>
+  <output id="server-connection-status" class="server-connection-status" role="status" aria-live="polite" hidden></output>
+  <div id="supervision-recovery-notice" class="supervision-recovery-notice" role="status" hidden>
+    <span id="supervision-recovery-instructions"></span>
+    <button id="supervision-recovery-resume" class="secondary-button" type="button">Resume</button>
   </div>
   <aside id="sidebar" class="sidebar" aria-label="Projects and conversations">
     <div class="brand">
@@ -469,6 +475,16 @@
             </span>
             <select id="harness-selector" aria-label="Execution harness">
               <option value="native" selected>Native</option>
+            </select>
+          </label>
+          <label class="model-field thinking-field">
+            <span>Thinking</span>
+            <select id="thinking-selector" aria-label="Thinking effort" title="Applies to this Chat or Execute worker. Supervisor phases use their own settings. Boolean models use On for Low/Medium/High; native levels depend on the model and harness.">
+              <option value="" selected>Profile default</option>
+              <option value="none">None</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
             </select>
           </label>
           <span id="composer-status" class="composer-status">Press Enter to send</span>
@@ -1126,7 +1142,7 @@
           <option value="providers">Providers</option>
           <option value="local-resources">Local resources</option>
           <option value="harnesses">Runtime and memory</option>
-          <option value="ollama-context">Ollama context profiles</option>
+          <option value="ollama-context">Model runtime</option>
           <option value="execution">Execution and approvals</option>
           <option value="workspaces">Workspaces and history</option>
           <option value="advanced">Advanced</option>
@@ -1141,7 +1157,7 @@
           <button type="button" data-settings-target="providers">Providers</button>
           <button type="button" data-settings-target="local-resources">Local resources</button>
           <button type="button" data-settings-target="harnesses">Runtime and memory</button>
-          <button type="button" class="settings-navigation-child" data-settings-target="ollama-context">Ollama context profiles</button>
+          <button type="button" class="settings-navigation-child" data-settings-target="ollama-context">Model runtime</button>
           <button type="button" data-settings-target="execution">Execution and approvals</button>
           <button type="button" data-settings-target="workspaces">Workspaces and history</button>
           <button type="button" data-settings-target="advanced">Advanced</button>
@@ -1208,19 +1224,12 @@
               </label>
               <fieldset id="phase-effort-settings" class="phase-effort-settings" tabindex="-1">
                 <legend>Effort by supervised phase</legend>
-                <small>Controls how much reasoning the selected model should spend in each phase. Unsupported native controls fall back to explicit prompt guidance.</small>
+                <small>Controls Supervisor reasoning in each phase. Workers use their task inference profile. Unsupported native controls fall back to explicit prompt guidance.</small>
                 <div class="phase-effort-grid">
                   <label>
                     <span>Plan</span>
                     <select id="phase-effort-plan" name="phaseEffortPlan">
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Work</span>
-                    <select id="phase-effort-work" name="phaseEffortWork">
+                      <option value="none">None</option>
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
                       <option value="high">High</option>
@@ -1229,6 +1238,7 @@
                   <label>
                     <span>Verify</span>
                     <select id="phase-effort-verify" name="phaseEffortVerify">
+                      <option value="none">None</option>
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
                       <option value="high">High</option>
@@ -1237,6 +1247,7 @@
                   <label>
                     <span>Complete</span>
                     <select id="phase-effort-complete" name="phaseEffortComplete">
+                      <option value="none">None</option>
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
                       <option value="high">High</option>
@@ -1245,6 +1256,7 @@
                   <label>
                     <span>Recovery</span>
                     <select id="phase-effort-recovery" name="phaseEffortRecovery">
+                      <option value="none">None</option>
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
                       <option value="high">High</option>
@@ -1274,7 +1286,9 @@
                 <select id="model-test-selector"></select>
               </label>
               <button id="test-model" class="secondary-button" type="button">Test model</button>
-              <output id="model-test-result" class="model-test-result"></output>
+              </div>
+            <p class="runtime-note">Tests the selected settings without saving, using Native and the profile selected in Inference profiles. Coding workload with an 8,192-output-token budget including thinking; actual output may be shorter. May take several minutes.</p>
+            <div id="model-test-result" class="model-test-result" role="status" aria-live="polite">
             </div>
           </section>
 
@@ -1350,7 +1364,7 @@
                   <option value="max">Max</option>
                 </select>
                 <p id="inference-thinking-note" class="runtime-note" hidden>
-                  <span data-i18n="inference.supervisor_thinking_controlled">Controlled by Supervisor phase effort (Plan, Work, Verify, Complete, Recovery).</span>
+                  <span data-i18n="inference.supervisor_thinking_controlled">Controlled by Supervisor phase effort (Plan, Verify, Complete, Recovery).</span>
                   <a id="inference-phase-effort-link" href="#phase-effort-settings" data-i18n="inference.open_phase_effort">Open phase effort settings</a>
                 </p>
               </div>
@@ -1717,18 +1731,45 @@
 
           <section id="settings-ollama-context" class="settings-section" data-settings-section="ollama-context" tabindex="-1">
             <div class="section-heading">
-              <h3>Ollama context profiles</h3>
-              <p>Context windows and output limits for each Ollama execution role.</p>
+              <h3>Model runtime</h3>
+              <p>Model performance, context windows, memory policy and runtime evidence.</p>
             </div>
+            <section class="runtime-performance-panel" aria-labelledby="runtime-cache-heading">
+              <div class="runtime-card-heading">
+                <h4 id="runtime-cache-heading">KV cache</h4>
+                <a class="secondary-button inference-help-link" href="/inference-help.html#kv-cache" target="_blank" rel="noopener">Help ↗</a>
+              </div>
+              <div class="settings-grid">
+              <label for="runtime-managed-kv-cache"><span class="runtime-field-caption">Managed Ollama cache precision <button type="button" class="information-button" aria-label="Help: KV cache precision" data-tooltip="KV cache stores attention state for the context, independently of model weights such as Q4_K_M. Auto inherits the environment. F16 preserves 16-bit cache values and uses more memory. Q8_0 and Q4_0 reduce cache memory with increasing precision loss. Quantized cache requires Flash Attention. Smaller cache does not guarantee faster inference; measure at your actual context size.">?</button></span>
+                <select id="runtime-managed-kv-cache" aria-describedby="runtime-managed-kv-note"><option value="auto">Auto — inherit environment</option><option value="f16">F16 — 16-bit cache</option><option value="q8_0">Q8_0 — 8-bit cache</option><option value="q4_0">Q4_0 — 4-bit cache</option></select>
+              </label>
+              </div>
+              <p id="runtime-managed-kv-note" class="runtime-note">Applies to every model on AR-owned Ollama servers. Save and restart AR to apply to existing servers. External servers and unsaved model tests retain their current cache.</p>
+            </section>
+            <section class="runtime-performance-panel" aria-labelledby="runtime-performance-heading">
+              <div class="runtime-card-heading">
+                <div><h4 id="runtime-performance-heading">Performance by model</h4><p class="runtime-note">Shared by every role using this exact model. Auto preserves provider defaults.</p></div>
+                <button type="button" class="information-button" aria-label="Help: model performance" data-tooltip="These options configure the loaded model runner independently of sampling profiles. Explicit values are forwarded through native Ollama requests and preloads. Compatibility APIs used by external harnesses may not forward them.">?</button>
+              </div>
+              <div class="settings-grid runtime-performance-fields">
+                <label class="runtime-performance-model" for="runtime-performance-model"><span class="runtime-field-caption">Installed local model <button type="button" class="information-button" aria-label="Help: Installed local model" data-tooltip="Select an exact installed model. Settings match provider, model name and digest.">?</button></span><select id="runtime-performance-model" data-ignore-settings-dirty></select></label>
+                <label for="runtime-draft-mode"><span class="runtime-field-caption">Draft tokens <button type="button" class="information-button" aria-label="Help: draft tokens" data-tooltip="Speculative decoding predicts draft tokens that the main model verifies. Auto omits draft_num_predict and retains the runtime or model default. Off sends 0. Custom sends a positive count. Compatible model and runtime support are required; a successful request alone does not confirm activation.">?</button></span><select id="runtime-draft-mode"><option value="auto">Auto</option><option value="off">Off</option><option value="custom">Custom</option></select></label>
+                <label id="runtime-draft-value-field" hidden for="runtime-draft-value"><span class="runtime-field-caption">Draft token count <button type="button" class="information-button" aria-label="Help: draft token count" data-tooltip="Positive draft token count sent as draft_num_predict. Used only in Custom mode; Auto sends nothing and Off sends 0.">?</button></span><input id="runtime-draft-value" required type="number" min="1" max="2147483647" step="1" value="4" disabled></label>
+                <label for="runtime-batch-mode"><span class="runtime-field-caption">Batch size <button type="button" class="information-button" aria-label="Help: batch size" data-tooltip="Maximum input token batch processed by the runner. Larger batches may improve prompt throughput and use more memory. Auto omits num_batch; Custom sends a positive integer. Changing load options may reload the runner.">?</button></span><select id="runtime-batch-mode"><option value="auto">Auto</option><option value="custom">Custom</option></select></label>
+                <label id="runtime-batch-value-field" hidden for="runtime-batch-value"><span class="runtime-field-caption">Tokens per batch <button type="button" class="information-button" aria-label="Help: tokens per batch" data-tooltip="Positive input token batch size sent as num_batch when Custom is selected. Auto leaves the runner default unchanged.">?</button></span><input id="runtime-batch-value" required type="number" min="1" max="2147483647" step="1" value="512" disabled></label>
+              </div>
+              <div id="runtime-performance-capabilities" class="runtime-performance-capabilities" role="status"></div>
+              <output id="runtime-performance-status" class="runtime-note" role="status"></output>
+            </section>
             <section class="runtime-profile-panel" aria-labelledby="runtime-profile-heading">
               <div class="heading-title-row">
-                <h4 id="runtime-profile-heading">Role settings</h4>
+                <h4 id="runtime-profile-heading">Context by role</h4>
                 <button
                   class="information-button"
                   type="button"
                   aria-label="Context-profile information"
                   data-tooltip="Each role inherits a profile. Overrides use the exact model ID and digest. The Host sends num_ctx in /api/chat and verifies residency in /api/ps."
-                >i</button>
+                >?</button>
               </div>
               <p class="runtime-note">
                 Specialist, primary, fallback, benchmark, model-test, web-search-synthesis, and vision roles use independent context profiles. Legacy router and resident role IDs remain readable but are not active request routes.
@@ -1736,34 +1777,34 @@
               <div id="runtime-role-profiles" class="runtime-role-profiles"></div>
 
               <details class="runtime-profile-subsection">
-                <summary>Override by model and digest</summary>
+                <summary><span>Override by model and digest</span> <button type="button" class="information-button" aria-label="Help: override by model and digest" data-tooltip="Override context, output and keep-alive for one role and exact model digest. Applying updates the settings draft; Save changes persists it. Removing a role override restores the default and keeps performance settings.">?</button></summary>
                 <div class="settings-grid context-settings-grid">
-                  <label>
-                    <span>Installed local model</span>
+                  <label for="runtime-override-model">
+                    <span class="runtime-field-caption">Installed local model <button type="button" class="information-button" aria-label="Help: Installed local model" data-tooltip="Select an exact installed model. Settings match provider, model name and digest.">?</button></span>
                     <select id="runtime-override-model"></select>
                   </label>
-                  <label>
-                    <span>Role</span>
+                  <label for="runtime-override-role">
+                    <span class="runtime-field-caption">Role <button type="button" class="information-button" aria-label="Help: Role" data-tooltip="Context and output apply to this role. Performance settings apply across roles.">?</button></span>
                     <select id="runtime-override-role"></select>
                   </label>
-                  <label>
-                    <span>Minimum</span>
+                  <label for="runtime-override-minimum">
+                    <span class="runtime-field-caption">Minimum <button type="button" class="information-button" aria-label="Help: Minimum" data-tooltip="Smallest allowed context window in tokens for this role.">?</button></span>
                     <input id="runtime-override-minimum" type="number" min="1024" max="131072">
                   </label>
-                  <label>
-                    <span>Target</span>
+                  <label for="runtime-override-target">
+                    <span class="runtime-field-caption">Target <button type="button" class="information-button" aria-label="Help: Target" data-tooltip="Preferred context window in tokens. The existing escalation ladder may increase it when needed.">?</button></span>
                     <input id="runtime-override-target" type="number" min="1024" max="131072">
                   </label>
-                  <label>
-                    <span>Maximum</span>
+                  <label for="runtime-override-maximum">
+                    <span class="runtime-field-caption">Maximum <button type="button" class="information-button" aria-label="Help: Maximum" data-tooltip="Maximum context window for this role, constrained by provider and model limits.">?</button></span>
                     <input id="runtime-override-maximum" type="number" min="1024" max="131072">
                   </label>
-                  <label>
-                    <span>Output limit</span>
+                  <label for="runtime-override-output">
+                    <span class="runtime-field-caption">Output limit <button type="button" class="information-button" aria-label="Help: Output limit" data-tooltip="Maximum generated tokens reserved for this role.">?</button></span>
                     <input id="runtime-override-output" type="number" min="128" max="32768">
                   </label>
-                  <label>
-                    <span>Keep-alive (seconds; -1 keeps the selected role loaded)</span>
+                  <label for="runtime-override-keep-alive">
+                    <span class="runtime-field-caption">Keep-alive (seconds; -1 keeps the selected role loaded) <button type="button" class="information-button" aria-label="Help: Keep-alive (seconds; -1 keeps the selected role loaded)" data-tooltip="Residency duration in seconds. -1 requests indefinite residency; 0 unloads after the request.">?</button></span>
                     <input id="runtime-override-keep-alive" type="number" min="-1" max="86400">
                   </label>
                 </div>
@@ -1778,27 +1819,27 @@
               </details>
 
               <details class="runtime-profile-subsection">
-                <summary>Memory policy</summary>
+                <summary><span>Memory policy</span> <button type="button" class="information-button" aria-label="Help: memory policy" data-tooltip="Existing RAM and VRAM headroom policy and GPU-specific overrides. These controls retain their current behavior; performance settings do not change placement or offload policy.">?</button></summary>
                 <div class="settings-grid context-settings-grid">
-                  <label>
-                    <span>Target maximum GPU usage (%)</span>
+                  <label for="runtime-memory-gpu-percent">
+                    <span class="runtime-field-caption">Target maximum GPU usage (%) <button type="button" class="information-button" aria-label="Help: Target maximum GPU usage (%)" data-tooltip="Existing GPU usage target used by runtime memory policy and warnings.">?</button></span>
                     <input id="runtime-memory-gpu-percent" type="number" min="1" max="100">
                   </label>
-                  <label>
-                    <span>Minimum free VRAM (GiB)</span>
+                  <label for="runtime-memory-free-vram">
+                    <span class="runtime-field-caption">Minimum free VRAM (GiB) <button type="button" class="information-button" aria-label="Help: Minimum free VRAM (GiB)" data-tooltip="Existing free GPU memory headroom, in GiB. GPU-specific overrides take precedence.">?</button></span>
                     <input id="runtime-memory-free-vram" type="number" min="0" step="0.25">
                   </label>
-                  <label>
-                    <span>Minimum free RAM (GiB)</span>
+                  <label for="runtime-memory-free-ram">
+                    <span class="runtime-field-caption">Minimum free RAM (GiB) <button type="button" class="information-button" aria-label="Help: Minimum free RAM (GiB)" data-tooltip="Existing system RAM headroom, in GiB.">?</button></span>
                     <input id="runtime-memory-free-ram" type="number" min="0" step="0.25">
                   </label>
-                  <label class="checkbox-label">
+                  <label class="checkbox-label" for="runtime-memory-cpu-offload">
                     <input id="runtime-memory-cpu-offload" type="checkbox">
-                    <span>Allow CPU offload</span>
+                    <span class="runtime-field-caption">Allow CPU offload <button type="button" class="information-button" aria-label="Help: Allow CPU offload" data-tooltip="Existing CPU offload preference. Performance settings do not change its semantics.">?</button></span>
                   </label>
-                  <label class="checkbox-label">
+                  <label class="checkbox-label" for="runtime-memory-prefer-full-gpu">
                     <input id="runtime-memory-prefer-full-gpu" type="checkbox">
-                    <span>Prefer the entire primary model on GPU</span>
+                    <span class="runtime-field-caption">Prefer the entire primary model on GPU <button type="button" class="information-button" aria-label="Help: Prefer the entire primary model on GPU" data-tooltip="Existing preference for full GPU residency of the primary model.">?</button></span>
                   </label>
                 </div>
                 <div>
@@ -1811,7 +1852,7 @@
               </details>
 
               <details class="runtime-profile-subsection">
-                <summary>Analysis and measurement</summary>
+                <summary><span>Analysis and measurement</span> <button type="button" class="information-button" aria-label="Help: analysis and measurement" data-tooltip="Analyze reads metadata without loading a model. Measure requires explicit permission, loads the selected context-override model, records its runtime signature and attempts to restore prior residency.">?</button></summary>
                 <p class="runtime-note">
                   Analyze uses metadata only and does not load the model. Measure loads the model and requires explicit confirmation because it may use GPU and RAM.
                 </p>
@@ -2453,9 +2494,6 @@
       <div id="change-review-body" class="dialog-body change-review-body"></div>
       <footer class="dialog-footer">
         <span id="undo-status" class="save-status"></span>
-        <button id="validate-changes" class="secondary-button" type="button">
-          Validate changes
-        </button>
         <button id="undo-execution" class="secondary-button danger-button" type="button">
           Undo changes
         </button>
@@ -2538,16 +2576,16 @@
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
   <script defer src="/shared.js?v=20260924-ui-domains"></script>
-  <script defer src="/i18n.js?v=20260926-settings-polish"></script>
-  <script defer src="/app.js?v=20260926-settings-polish"></script>
-  <script defer src="/loading.js?v=20260924-ui-domains"></script>
+  <script defer src="/i18n.js?v=20261004-completion-report"></script>
+  <script defer src="/app.js?v=20261009-inference-progress"></script>
+  <script defer src="/loading.js?v=20260927-restart-recovery"></script>
   <script defer src="/benchmark.js?v=20260926-inference-profiles"></script>
   <script defer src="/git.js?v=20260924-ui-domains"></script>
-  <script defer src="/projects-sessions.js?v=20260924-ui-domains"></script>
-  <script defer src="/settings-runtime.js?v=20260926-settings-polish"></script>
-  <script defer src="/conversation.js?v=20260924-ui-domains"></script>
-  <script defer src="/conversation-stream.js?v=20260926-inference-profiles"></script>
-  <script defer src="/conversation-review.js?v=20260924-ui-domains"></script>
+  <script defer src="/projects-sessions.js?v=20260930-review-summary"></script>
+  <script defer src="/settings-runtime.js?v=20261009-inference-progress"></script>
+  <script defer src="/conversation.js?v=20261009-inference-progress"></script>
+  <script defer src="/conversation-stream.js?v=20261009-inference-progress"></script>
+  <script defer src="/conversation-review.js?v=20260930-review-summary"></script>
   <script defer src="/conversation-render.js?v=20260924-ui-domains"></script>
 </body>
 </html>

@@ -23,6 +23,21 @@ and validation requires a passing validation record. A mutation objective with
 no verified mutation is terminally blocked. The Host generates the final Execute
 answer from the stored review and does not ask a model to restate those facts.
 
+When a harness has already streamed its answer, the terminal `ResponseTail`
+contains only the Host status supplement. The existing answer and Thinking
+blocks retain their chronological positions. Historical presentation removes an
+exact repeated answer prefix from legacy terminal tails without rewriting saved
+sessions or deduplicating distinct model content.
+
+## Workspace snapshot reads
+
+External-harness workspace snapshots use the same read/write/delete sharing as
+file hashing. A server holding a readable log open must not prevent baseline
+capture or observation. Snapshot reads remain bounded by both rollback budgets,
+including files that grow during the read; hashes are computed from the captured
+bytes when available. Files are not skipped merely because another process has
+them open, and exclusive locks still prevent reading.
+
 ## Structured deletion
 
 `delete_files` accepts only an explicit bounded path array. Every file must exist

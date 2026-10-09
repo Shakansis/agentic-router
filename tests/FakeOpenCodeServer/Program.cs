@@ -23,6 +23,10 @@ var app = builder.Build();
 var subscribers = new ConcurrentDictionary<Guid, Channel<string>>();
 var prompts = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 var selections = new ConcurrentDictionary<string, ModelSelection>(StringComparer.Ordinal);
+var statuses = new ConcurrentDictionary<string, object>(StringComparer.Ordinal);
+var promptCounts = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+var steeringSignals = new ConcurrentDictionary<string, TaskCompletionSource<string>>(StringComparer.Ordinal);
+var steeringParents = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 var permissions = new ConcurrentDictionary<string, PendingPermission>(StringComparer.Ordinal);
 var questions = new ConcurrentDictionary<string, TaskCompletionSource<string[][]?>>(StringComparer.Ordinal);
 var sessionNumber = 0;
@@ -73,6 +77,71 @@ app.Use(async (context, next) =>
 });
 
 app.MapGet("/global/health", () => Results.Json(new { healthy = true, version = "1.18.18-fake" }));
+app.MapGet("/session/status", () => Results.Json(statuses));
+app.MapGet("/session/{sessionId}/message", (string sessionId) => Results.Json(
+  steeringParents.TryGetValue(sessionId, out var parent)
+    ? new object[] { new { info = new { role = "assistant", parentID = parent } } }
+    : Array.Empty<object>()));
+app.MapDelete("/session/{sessionId}/message/{messageId}", async (string sessionId, string messageId) =>
+{
+  await File.WriteAllTextAsync(Path.Combine(runtime!, "fake-opencode-steer-removed.json"),
+    JsonSerializer.Serialize(new { sessionId, messageId }));
+  return Results.Json(true);
+});
+app.MapPost("/session/{sessionId}/message", async (string sessionId, HttpContext context) =>
+{
+  using var body = await JsonDocument.ParseAsync(context.Request.Body);
+  var selection = selections[sessionId];
+  if (!body.RootElement.GetProperty("noReply").GetBoolean()
+    || body.RootElement.TryGetProperty("tools", out _)
+    || body.RootElement.GetProperty("model").GetProperty("modelID").GetString() != selection.Model
+    || body.RootElement.GetProperty("model").GetProperty("providerID").GetString() != selection.Provider)
+  {
+    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+    return;
+  }
+  var message = body.RootElement.GetProperty("parts")[0].GetProperty("text").GetString()!;
+  if (prompts[sessionId].Contains("steering null receipt", StringComparison.Ordinal))
+  {
+    await context.Response.WriteAsync("null");
+    return;
+  }
+  var messageId = $"msg_steer_{Guid.NewGuid():N}";
+  var info = new { id = messageId, sessionID = sessionId, role = "user" };
+  var part = new { id = $"prt_{messageId}", messageID = messageId, sessionID = sessionId, type = "text", text = message };
+  await File.AppendAllTextAsync(Path.Combine(runtime!, "fake-opencode-steer.jsonl"),
+    JsonSerializer.Serialize(new
+    {
+      sessionId,
+      messageId,
+      message,
+      noReply = true,
+      model = selection.Model,
+      provider = selection.Provider,
+      promptCount = promptCounts[sessionId]
+    }) + "\n");
+  await EmitAsync("message.updated", new { sessionID = sessionId, info });
+  await EmitAsync("message.part.updated", new { sessionID = sessionId, part });
+  await EmitAsync("message.part.delta", new
+  {
+    sessionID = sessionId,
+    messageID = messageId,
+    partID = part.id,
+    field = "text",
+    delta = message
+  });
+  if (prompts[sessionId].Contains("steering race", StringComparison.Ordinal))
+    await EmitAsync("session.idle", new { sessionID = sessionId });
+  await context.Response.WriteAsJsonAsync(new { info, parts = new[] { part } });
+  await context.Response.CompleteAsync();
+  if (!prompts[sessionId].Contains("steering race", StringComparison.Ordinal))
+  {
+    steeringParents[sessionId] = messageId;
+    if (!prompts[sessionId].Contains("steering hold", StringComparison.Ordinal))
+      steeringSignals.GetOrAdd(sessionId, _ => new(TaskCreationOptions.RunContinuationsAsynchronously))
+        .TrySetResult(message);
+  }
+});
 app.MapGet("/event", async (HttpContext context) =>
 {
   var subscriberId = Guid.NewGuid();
@@ -162,6 +231,8 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
     return;
   }
   prompts[sessionId] = text;
+  promptCounts.AddOrUpdate(sessionId, 1, (_, count) => count + 1);
+  statuses[sessionId] = new { type = "busy" };
   selections[sessionId] = new ModelSelection(provider, model);
   if (runtime is not null)
   {
@@ -181,6 +252,72 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
   }
   context.Response.StatusCode = StatusCodes.Status204NoContent;
   await context.Response.CompleteAsync();
+  var isolatedReply = await SupervisionSessionFixture.RespondAsync(
+    text, sessionId, runtime!, context.Request.Query["directory"].ToString());
+  if (isolatedReply is not null)
+  {
+    await CompleteAsync(sessionId, isolatedReply, includeReadTool: false);
+    return;
+  }
+  if (text.Contains("global output fixture", StringComparison.Ordinal))
+  {
+    var recovering = text.Contains("HOST_OUTPUT_LIMIT_RECOVERY_V1", StringComparison.Ordinal);
+    using var providerConfig = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(runtime!, "config", "opencode", "opencode.json")));
+    var inferenceUrl = providerConfig.RootElement.GetProperty("provider").GetProperty("agentic-router-ollama")
+      .GetProperty("options").GetProperty("baseURL").GetString();
+    using var inferenceClient = new HttpClient();
+    using var inferenceResponse = await inferenceClient.PostAsJsonAsync(inferenceUrl + "/chat/completions",
+      new { model, fixture = text, call = recovering ? 1 : 0, max_tokens = 32000 });
+    inferenceResponse.EnsureSuccessStatusCode();
+    await inferenceResponse.Content.ReadAsStringAsync();
+    var directory = context.Request.Query["directory"].ToString();
+    await File.AppendAllTextAsync(Path.Combine(runtime!, "fake-output-recovery.jsonl"),
+      JsonSerializer.Serialize(new { sessionId, recovering, model, text }) + "\n");
+    if (text.Contains("no cutoff", StringComparison.Ordinal))
+    {
+      await CompleteAsync(sessionId, "No action performed.", includeReadTool: false);
+      return;
+    }
+    if (!recovering && text.Contains("committed effect", StringComparison.Ordinal))
+      await File.AppendAllTextAsync(Path.Combine(directory, "output-before.txt"), "once\n");
+    if (recovering && !text.Contains("always fail", StringComparison.Ordinal))
+    {
+      await File.WriteAllTextAsync(Path.Combine(directory, "output-recovered.txt"), "recovered incrementally");
+      await CompleteAsync(sessionId, "Recovered with a small write.", includeReadTool: false);
+    }
+    else
+    {
+      if (text.Contains("unresolved tool", StringComparison.Ordinal))
+        await EmitAsync("message.part.updated", new
+        {
+          sessionID = sessionId,
+          part = new
+          {
+            id = "pending-output",
+            type = "tool",
+            tool = "edit",
+            callID = "pending-output",
+            state = new { status = "running" }
+          }
+        });
+      await EmitAsync("message.updated", new
+      {
+        sessionID = sessionId,
+        info = new
+        {
+          id = "output-cutoff",
+          role = "assistant",
+          providerID = provider,
+          modelID = model,
+          finish = "length",
+          time = new { completed = 1 },
+          tokens = new { input = 8833, output = 32000, reasoning = 0 }
+        }
+      });
+      await EmitAsync("session.idle", new { sessionID = sessionId });
+    }
+    return;
+  }
   if (text.Contains("reactive context fixture", StringComparison.Ordinal))
   {
     var recovering = text.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
@@ -435,6 +572,19 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
       field = "text",
       delta = "Inspecting long OpenCode task."
     });
+    if (text.Contains("steering", StringComparison.Ordinal)
+      && !text.Contains("steering race", StringComparison.Ordinal)
+      && !text.Contains("steering hold", StringComparison.Ordinal))
+    {
+      // Release the HTTP request while the existing fake loop awaits its context.
+      // Kestrel cannot process a later request on this connection until this handler returns.
+      _ = Task.Run(async () =>
+      {
+        var message = await steeringSignals.GetOrAdd(sessionId,
+          _ => new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+        await CompleteAsync(sessionId, "OpenCode steering accepted: " + message, includeReadTool: false);
+      });
+    }
     return;
   }
   if (text.Contains("permission opencode", StringComparison.Ordinal))
@@ -1052,6 +1202,7 @@ async Task CompleteAsync(
       id = "msg_assistant",
       sessionID = sessionId,
       role = "assistant",
+      time = new { completed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
       providerID = prompts.TryGetValue(sessionId, out var prompt)
         && prompt.Contains("reroute opencode", StringComparison.Ordinal)
           ? "unexpected-cloud-provider"
@@ -1146,6 +1297,7 @@ async Task CompleteBenchmarkAsync(string sessionId, string answer)
       id = $"msg_benchmark_{sessionId}",
       sessionID = sessionId,
       role = "assistant",
+      time = new { completed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
       providerID = selections[sessionId].Provider,
       modelID = selections[sessionId].Model,
       tokens = new
@@ -1197,6 +1349,11 @@ async Task PrepareBenchmarkOutcomeAsync(string directory, string model, string r
 
 async Task EmitAsync(string type, object properties)
 {
+  if (type == "session.idle")
+  {
+    var sessionId = JsonSerializer.SerializeToElement(properties).GetProperty("sessionID").GetString()!;
+    statuses.TryRemove(sessionId, out _);
+  }
   var payload = JsonSerializer.Serialize(new
   {
     id = $"evt_{Guid.NewGuid():N}",

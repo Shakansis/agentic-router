@@ -16,6 +16,50 @@ public sealed class OllamaStartupRecoveryEndToEndTests
   private const string DiscoveryUrl = "http://127.0.0.2:11434";
   private string _executable = string.Empty;
 
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InferenceProgressUsesRuntimePercentAndSubtractsModelLoadFromTtft()
+  {
+    var settings = await GetSettingsJsonAsync();
+    settings["ollamaRuntime"]!["managedKvCacheType"] = "f16";
+    using (var saved = await PutSettingsJsonAsync(settings)) saved.EnsureSuccessStatusCode();
+    await ConfigureAsync([0]);
+    var response = await Page.RunAndWaitForResponseAsync(
+      () => StartMessageAsync("inference progress fixture"),
+      item => item.Url.Contains("/api/chat/stream", StringComparison.Ordinal));
+    var indicator = Page.Locator(".assistant-running-indicator").Last;
+    await Expect(indicator).ToHaveAttributeAsync("data-inference-stage", "loading-model");
+    await Expect(indicator.Locator(".assistant-current-activity")).ToContainTextAsync("Loading model");
+    await Expect(Page.Locator(".assistant-progress").Last).ToContainTextAsync("Loading model");
+    await Expect(indicator.Locator(".assistant-inference-percent")).ToBeHiddenAsync();
+    Assert.AreEqual("rgb(255, 255, 255)", await indicator.Locator("svg").EvaluateAsync<string>("e => getComputedStyle(e).stroke"));
+    await Expect(indicator.Locator(".assistant-inference-percent")).ToHaveTextAsync("25%");
+    await Expect(indicator.Locator(".assistant-current-activity")).ToContainTextAsync("Processing prompt");
+    await Expect(Page.Locator(".assistant-progress").Last).ToContainTextAsync("Processing prompt");
+    await Expect(indicator.Locator(".assistant-inference-percent")).ToHaveTextAsync("75%");
+    Assert.AreEqual("75%", await indicator.EvaluateAsync<string>("e => e.style.getPropertyValue('--inference-percent')"));
+    var screenshot = Path.Combine(TestContext.TestResultsDirectory!, "inference-prompt-progress.png");
+    await Page.ScreenshotAsync(new() { Path = screenshot });
+    TestContext.AddResultFile(screenshot);
+    await AssertCompletedAsync();
+    var lease = JsonNode.Parse(await File.ReadAllTextAsync(Directory.GetFiles(
+      Path.Combine(_environment.DataDirectory, "ollama-managed-servers"), "*.json").Single()))!;
+    using var client = new HttpClient();
+    var environment = JsonNode.Parse(await client.GetStringAsync(lease["endpoint"]!.GetValue<string>().TrimEnd('/') + "/test/environment"))!;
+    Assert.AreEqual("f16", environment["kvCacheType"]!.GetValue<string>());
+    var events = (await response.TextAsync()).Split("\n\n", StringSplitOptions.RemoveEmptyEntries)
+      .Where(block => block.StartsWith("data: ", StringComparison.Ordinal))
+      .Select(block => JsonNode.Parse(block[6..])!).ToArray();
+    var metrics = events.Last(item => item["chatSummary"]?["inferenceMetrics"] is not null)["chatSummary"]!["inferenceMetrics"]!;
+    Assert.AreEqual(1000d, metrics["modelLoadMilliseconds"]!.GetValue<double>());
+    Assert.AreEqual("after-model-load", metrics["firstTokenTimingSource"]!.GetValue<string>());
+    Assert.AreEqual(metrics["dispatchToFirstTokenMilliseconds"]!.GetValue<double>() - 1000,
+      metrics["timeToFirstTokenMilliseconds"]!.GetValue<double>());
+    await Expect(Page.Locator(".chat-session-footer [data-metric=ttft]")).ToHaveAttributeAsync("title",
+      "Time to the first output token after subtracting provider-reported model loading. Includes prompt processing and reasoning's first token.");
+    await Expect(indicator).ToBeHiddenAsync();
+  }
+
   [TestCleanup]
   public async Task RestoreManagedConfigurationAsync()
   {

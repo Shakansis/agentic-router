@@ -501,7 +501,13 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
           requestedHarnesses,
           contextTokens,
           gpu,
-          request.CustomPrompt
+          request.CustomPrompt,
+          string.Join("", models.Select(item =>
+          {
+            var signature = ModelRuntimePerformance.Signature(ModelRuntimePerformance.Resolve(
+              settings, ModelProviderIds.OllamaLocal, item.RequestedName, item.Installed?.Digest));
+            return signature.Length == 0 ? string.Empty : $"\nmodel={item.RequestedName};digest={item.Installed?.Digest}{signature}";
+          }))
         ),
         contextTokens,
         gpu,
@@ -2030,7 +2036,8 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
     IReadOnlyList<string> harnesses,
     int configuredContextTokens,
     string gpu,
-    string? customPrompt
+    string? customPrompt,
+    string performanceSignature
   )
   {
     var canonical = string.Join("\n", new[]
@@ -2047,7 +2054,7 @@ public sealed class BenchmarkEngine : IBenchmarkEngine
       $"harnesses={string.Join('|', harnesses)}",
       $"promptSha256={(customPrompt is null ? "none" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(customPrompt))).ToLowerInvariant())}"
     });
-    return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+    return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical + performanceSignature)))
       .ToLowerInvariant();
   }
 

@@ -75,6 +75,7 @@ public sealed class ChatStreamService
   private readonly IUserInputCoordinator _userInput;
   private readonly IRecoveryDecisionCoordinator _recoveryDecisions;
   private readonly IExecutionSessionStore _executionSessions;
+  private readonly HarnessInferenceObserver _harnessInference;
   private readonly IProjectAwarenessService _projectAwareness;
   private readonly IRepositoryInstructionService _repositoryInstructions;
   private readonly IExecutionPlanService _executionPlans;
@@ -92,7 +93,10 @@ public sealed class ChatStreamService
   private readonly IExecutionLatencyTracker _latency;
   private readonly IHostApplicationLifetime _applicationLifetime;
   private readonly ILogger<ChatStreamService> _logger;
+  private readonly CompletionCheckStore _completionReports;
   private readonly ITraceContext _trace;
+  private Action<ExecutionInferenceMetrics>? _chatInferenceObserver;
+  private Action<InferenceProgressView>? _inferenceProgressObserver;
   private ExecutionSession? _executionSession;
   private ExecutionContextRecoveryBudget? _contextRecoveryBudget;
   private string? _usageWorkspaceId;
@@ -130,6 +134,7 @@ public sealed class ChatStreamService
     IUserInputCoordinator userInput,
     IRecoveryDecisionCoordinator recoveryDecisions,
     IExecutionSessionStore executionSessions,
+    HarnessInferenceObserver harnessInference,
     IProjectAwarenessService projectAwareness,
     IRepositoryInstructionService repositoryInstructions,
     IExecutionPlanService executionPlans,
@@ -147,7 +152,8 @@ public sealed class ChatStreamService
     HarnessWorkspaceBaselineCache workspaceBaselines,
     IExecutionLatencyTracker latency,
     IHostApplicationLifetime applicationLifetime,
-    ILogger<ChatStreamService> logger
+    ILogger<ChatStreamService> logger,
+    CompletionCheckStore completionReports
   )
   {
     _settingsStore = settingsStore;
@@ -171,6 +177,7 @@ public sealed class ChatStreamService
     _userInput = userInput;
     _recoveryDecisions = recoveryDecisions;
     _executionSessions = executionSessions;
+    _harnessInference = harnessInference;
     _projectAwareness = projectAwareness;
     _repositoryInstructions = repositoryInstructions;
     _executionPlans = executionPlans;
@@ -189,20 +196,55 @@ public sealed class ChatStreamService
     _latency = latency;
     _applicationLifetime = applicationLifetime;
     _logger = logger;
+    _completionReports = completionReports;
   }
 
-  public IAsyncEnumerable<ChatStreamEvent> StreamAsync(
+  public async IAsyncEnumerable<ChatStreamEvent> StreamAsync(
     ChatRequest request,
     string requestId,
-    CancellationToken cancellationToken
+    [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    return StreamCoreAsync(
-      request,
-      requestId,
-      ExecutionSpecialistTurnInvocation.Direct,
-      cancellationToken
-    );
+    var answer = new StringBuilder();
+    var isChat = request.InteractionMode == "chat";
+    ExecutionInferenceMetrics? chatMetrics = null;
+    if (isChat) _chatInferenceObserver = metrics =>
+      chatMetrics = ExecutionInferenceMetrics.Combine(chatMetrics, metrics);
+    var chatClock = Stopwatch.StartNew();
+    var readCount = 0;
+    var searchCount = 0;
+    var toolFailures = 0;
+    string? chatModel = null;
+    await foreach (var item in StreamCoreAsync(request, requestId,
+      ExecutionSpecialistTurnInvocation.Direct, cancellationToken))
+    {
+      if (item.Type == "response.delta") answer.Append(item.Delta);
+      if (item.Type == "response.completed" && request.InteractionMode == "execute"
+        && item.SelectedModel is { } model)
+      {
+        var review = _executionSession?.CreateReview();
+        _completionReports.Register(new CompletionCheckContext(requestId,
+          request.BrowserSessionId ?? string.Empty, request.Message,
+          answer.ToString() + item.ResponseTail, model,
+          UsageContext(model, UsageModelRoles.Summary, "execution-completion-report") with { InferenceObserver = null },
+          review is null ? [] : [review], null));
+        yield return item with { CompletionCheckId = requestId };
+      }
+      else if (isChat && item.Type is not "reasoning.delta" and not "response.delta")
+      {
+        chatModel = item.SelectedModel ?? chatModel;
+        if (item.Type == "chat.workspace-read-completed") readCount++;
+        if (item.Type == "web.search-completed") searchCount++;
+        if (item.Type is "chat.workspace-read-failed" or "chat.workspace-read-rejected" or "web.search-failed") toolFailures++;
+        yield return item with
+        {
+          ChatSummary = new ChatTurnSummary(
+            item.Type == "response.completed" ? "completed" : "running", chatModel,
+            readCount, searchCount, toolFailures, chatClock.ElapsedMilliseconds, chatMetrics)
+        };
+      }
+      else yield return item;
+    }
   }
 
   public IAsyncEnumerable<ChatStreamEvent> RunAsync(
@@ -337,14 +379,10 @@ public sealed class ChatStreamService
         model => model.Digest,
         StringComparer.OrdinalIgnoreCase
       );
-      var routedIntention = string.Equals(
-        request.InteractionMode,
-        "chat",
-        StringComparison.Ordinal
-      )
-        ? _intentionRouter.Route(request)
-        : null;
-      var intention = routedIntention?.Decision.Intention ?? GeneralChat;
+      var routedIntention = _intentionRouter.Route(invocation.InferenceObjective is { } inferenceObjective
+        ? request with { Message = inferenceObjective }
+        : request);
+      var intention = routedIntention.Decision.Intention;
       var selectedModel = request.Model.Trim();
       var selectedModelRole = UsageModelRoles.Primary;
       var images = _imageValidator.Validate(
@@ -693,7 +731,8 @@ public sealed class ChatStreamService
         intention,
         request.InteractionMode,
         string.Equals(request.InteractionMode, "execute", StringComparison.Ordinal)
-          && invocation.Role != ExecutionContextRole.Direct
+          && invocation.Role == ExecutionContextRole.Supervisor,
+        requestThinkingOverride: request.Thinking
       );
       if (benchmarkContext?.Seed is int benchmarkSeed)
       {
@@ -709,7 +748,8 @@ public sealed class ChatStreamService
         yield return InferenceProfileEvent(
           requestId, stopwatch, selectedModel, intention,
           chatOptions.EffectiveGenerationProfile,
-          capabilities.AdapterGenerationParameters
+          capabilities.AdapterGenerationParameters,
+          capabilities.ThinkingModes
         );
       }
       yield return Event(
@@ -1112,7 +1152,8 @@ public sealed class ChatStreamService
           chatOptions.EffectiveGenerationProfile,
           harnessDefinition.Id == HarnessIds.Native
             ? capabilities.AdapterGenerationParameters
-            : ["maximumContextTokens"]
+            : ["maximumContextTokens"],
+          harnessDefinition.Id == HarnessIds.Native ? capabilities.ThinkingModes : null
         );
         _latency.SetHarness(harnessDefinition.Id);
         var harness = cachedPreflight?.Harness;
@@ -1159,14 +1200,21 @@ public sealed class ChatStreamService
           )
         );
 
-        yield return Event(
-          requestId,
-          "execution-effort-requested",
-          $"Host requested {invocation.RequestedEffort} effort for this {invocation.Role.ToString().ToLowerInvariant()} turn.",
-          stopwatch,
-          selectedModel,
-          intention
-        );
+        var requestedEffort = invocation.Role == ExecutionContextRole.Supervisor
+          ? invocation.RequestedEffort
+          : request.Thinking == ModelEffortLevels.None
+            ? ModelEffortLevels.None
+          : chatOptions.EffectiveGenerationProfile.Thinking is "low" or "medium" or "high" or "max"
+            ? chatOptions.EffectiveGenerationProfile.Thinking
+            : null;
+        if (requestedEffort is not null)
+        {
+          yield return Event(requestId, "execution-effort-requested",
+            $"Requested {requestedEffort} effort for this {invocation.Role.ToString().ToLowerInvariant()} turn from "
+              + (invocation.Role == ExecutionContextRole.Supervisor ? "Supervisor phase settings."
+                : request.Thinking is not null ? "the turn Thinking selection." : $"inference profile {generationProfile.Id}."),
+            stopwatch, selectedModel, intention);
+        }
 
         if (harnessDefinition.Id == HarnessIds.Native)
         {
@@ -1200,7 +1248,7 @@ public sealed class ChatStreamService
             invocation.Role,
             invocation.CaptureRoleResult,
             invocation.ActionJournal,
-            invocation.RequestedEffort,
+            requestedEffort,
             stopwatch,
             nativeCancellationToken
           ),
@@ -1222,10 +1270,10 @@ public sealed class ChatStreamService
               knowledge.Context,
               hostCapabilities,
               invocation.UseMinimalToolInventory,
-              invocation.Role,
+              invocation,
               invocation.CaptureRoleResult,
               invocation.ActionJournal,
-              invocation.RequestedEffort,
+              requestedEffort,
               stopwatch,
               externalCancellationToken
             )
@@ -1574,10 +1622,10 @@ public sealed class ChatStreamService
     string? managedContext,
     HostCapabilityProfile hostCapabilities,
     bool useMinimalToolInventory,
-    ExecutionContextRole executionRole,
+    ExecutionSpecialistTurnInvocation invocation,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
-    string requestedEffort,
+    string? requestedEffort,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -1671,7 +1719,7 @@ public sealed class ChatStreamService
       hostCapabilities,
       images,
       useMinimalToolInventory,
-      executionRole,
+      invocation,
       captureRoleResult,
       actionJournal,
       requestedEffort,
@@ -1704,7 +1752,7 @@ public sealed class ChatStreamService
     ExecutionContextRole executionRole,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
-    string requestedEffort,
+    string? requestedEffort,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
@@ -1720,12 +1768,10 @@ public sealed class ChatStreamService
         )
       )
     ).ToArray();
-    messages = messages.Prepend(
-      new ChatMessage(
-        "system",
-        CreateEffortGuidance(requestedEffort)
-      )
-    ).ToArray();
+    if (requestedEffort is not null)
+    {
+      messages = messages.Prepend(new ChatMessage("system", CreateEffortGuidance(requestedEffort))).ToArray();
+    }
 
     var coordinatorModel = selectedModel;
     var executionMessages = messages.ToList();
@@ -1742,9 +1788,13 @@ public sealed class ChatStreamService
     var selectedReference = ProviderModelReference.Parse(
       selectedModel
     );
-    var nativeEffortSupported = capabilities.Reasoning
-      && capabilities.ThinkingModes?.Contains(requestedEffort, StringComparer.Ordinal) == true;
-    yield return Event(
+    var nativeThinking = requestedEffort == ModelEffortLevels.None ? InferenceThinkingModes.Disabled : requestedEffort;
+    var nativeEffortSupported = nativeThinking is not null && capabilities.Reasoning
+      && capabilities.ThinkingModes?.Contains(nativeThinking, StringComparer.Ordinal) == true;
+    var booleanEffortSupported = requestedEffort is "low" or "medium" or "high"
+      && capabilities.Reasoning && capabilities.ThinkingModes is { Count: > 0 } modes
+      && modes.All(mode => mode is "disabled" or "enabled");
+    if (requestedEffort is not null) yield return Event(
       requestId,
       nativeEffortSupported
         ? "execution-effort-applied"
@@ -1810,11 +1860,11 @@ public sealed class ChatStreamService
       manualCompactionRequested: request.CompactContext,
       providerOptions: providerOptions with
       {
-        RequestedEffort = nativeEffortSupported
+        RequestedEffort = nativeEffortSupported || booleanEffortSupported
           ? requestedEffort
           : null,
-        GenerationProfile = executionRole != ExecutionContextRole.Direct && nativeEffortSupported
-          ? providerOptions.EffectiveGenerationProfile with { Thinking = requestedEffort }
+        GenerationProfile = executionRole == ExecutionContextRole.Supervisor && nativeEffortSupported
+          ? providerOptions.EffectiveGenerationProfile with { Thinking = nativeThinking! }
           : providerOptions.GenerationProfile
       },
       requestedEffort: requestedEffort
@@ -1928,12 +1978,7 @@ public sealed class ChatStreamService
 
   private static string CreateEffortGuidance(string requestedEffort)
   {
-    return requestedEffort switch
-    {
-      ModelEffortLevels.High => "Host effort target: high. Reason carefully about dependencies and risks before acting, then execute the bounded objective.",
-      ModelEffortLevels.Low => "Host effort target: low. Use established facts, avoid unnecessary analysis, and complete the bounded objective directly.",
-      _ => "Host effort target: medium. Use only the reasoning needed for a reliable result and proceed to action without repeated analysis."
-    };
+    return $"Host effort target: {requestedEffort}. {ExecutionProgressPolicy.EffortGuidance(requestedEffort)}";
   }
 
   private static HarnessConversationContext CreateHarnessConversationContext(
@@ -1975,10 +2020,10 @@ public sealed class ChatStreamService
     HostCapabilityProfile hostCapabilities,
     IReadOnlyList<ProviderImagePayload> images,
     bool useMinimalToolInventory,
-    ExecutionContextRole executionRole,
+    ExecutionSpecialistTurnInvocation invocation,
     Action<string>? captureRoleResult,
     IExecutionActionJournal? actionJournal,
-    string requestedEffort,
+    string? requestedEffort,
     bool modelSupportsReasoning,
     Stopwatch stopwatch,
     [EnumeratorCancellation] CancellationToken cancellationToken
@@ -1987,6 +2032,7 @@ public sealed class ChatStreamService
     var session = _executionSession ?? throw new InvalidOperationException(
       "The selected harness requires an active execution session."
     );
+    var executionRole = invocation.Role;
     var conversationId = request.BrowserSessionId
       ?? request.ConversationSessionId
       ?? throw new ChatStageException(
@@ -1998,6 +2044,19 @@ public sealed class ChatStreamService
         400,
         true
       );
+    // Context IDs are local to a durable supervision run. Keep browser identity
+    // exclusively for Host continuity and approvals, including after resume.
+    var harnessSessionId = conversationId;
+    if (executionRole != ExecutionContextRole.Direct)
+    {
+      var runId = invocation.SupervisionRunId ?? throw new InvalidOperationException(
+        "A supervised harness turn requires a run ID."
+      );
+      var contextId = invocation.ContextId ?? throw new InvalidOperationException(
+        "A supervised harness turn requires a context ID."
+      );
+      harnessSessionId = $"supervision:{runId}:{contextId}";
+    }
     _latency.Mark("workspace-observer-capture-start");
     var observerStarted = Stopwatch.GetTimestamp();
     var observer = await _workspaceBaselines.CaptureAsync(
@@ -2019,6 +2078,7 @@ public sealed class ChatStreamService
     var nativeActions = new Dictionary<string, HarnessEvent>(StringComparer.Ordinal);
     var unidentifiedNativeAction = false;
     var contextRecoveryAttempted = false;
+    var outputLimitRecoveryAttempted = false;
     IReadOnlyList<ExecutionFileChange>? contextRecoveryObserved = null;
     HarnessEvent? terminalFailure = null;
     IReadOnlyList<ProviderCitation>? webCitations = null;
@@ -2076,7 +2136,7 @@ public sealed class ChatStreamService
     );
     var harnessTurnRequest = new HarnessTurnRequest(
       harnessDefinition.Id,
-      conversationId,
+      harnessSessionId,
       model,
       ModelProviderIds.OllamaLocal,
       workspacePath,
@@ -2101,17 +2161,25 @@ public sealed class ChatStreamService
         ? null
         : [managedContext],
       RequestedEffort: requestedEffort,
-      ModelSupportsReasoning: modelSupportsReasoning
+      ModelSupportsReasoning: modelSupportsReasoning,
+      SessionGroupId: invocation.SupervisionRunId
     );
     var automaticContinuationAttempts = 0;
   StartHarnessTurn:
     terminalFailure = null;
+    var harnessUsageKey = Guid.NewGuid().ToString("N");
+    session.RecordHarnessOutput(harnessUsageKey, null);
     _latency.MarkOnce("harness-turn-start");
-    await foreach (var harnessEvent in contextRecoveryAttempted
-      ? RunContextRecoveryAsync(harness, harnessTurnRequest, cancellationToken)
-      : harness.StartTurnAsync(harnessTurnRequest, cancellationToken))
+    await foreach (var harnessEvent in ObserveHarnessInferenceAsync(
+      harness, harnessTurnRequest, session, harnessUsageKey, contextRecoveryAttempted,
+      outputLimitRecoveryAttempted, cancellationToken))
     {
       session.RecordHarnessActivity();
+      if (harnessEvent.Type == "usage.updated")
+        session.RecordHarnessOutput(harnessUsageKey, harnessEvent.OutputTokens);
+      if (harnessEvent.IsTerminal && harnessEvent.TerminalState != HarnessTerminalState.Completed
+        && harnessDefinition.Id is HarnessIds.Codex or HarnessIds.OpenCode)
+        session.RecordHarnessOutput(harnessUsageKey, null);
       if (!string.Equals(
         harnessEvent.HarnessId,
         harnessDefinition.Id,
@@ -2688,6 +2756,13 @@ public sealed class ChatStreamService
             intention
           );
           break;
+        case "output-budget.applied":
+          yield return Event(requestId, "harness.output-budget.applied", harnessEvent.Message, stopwatch, model, intention);
+          break;
+        case "runtime.performance-unavailable":
+          session.AddWarning(harnessEvent.Message ?? "Runtime performance options are unavailable on this harness path.");
+          yield return Event(requestId, harnessEvent.Type, harnessEvent.Message, stopwatch, model, intention);
+          break;
         case "effort.applied":
         case "effort.prompt-guided":
           yield return Event(
@@ -2769,6 +2844,61 @@ public sealed class ChatStreamService
           break;
       }
     }
+
+    if (terminalFailure is not null && ExecutionProgressPolicy.IsOutputLimit(terminalFailure))
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var recoveryObserved = await ObserveHarnessWorkspaceAsync(observer, harnessDefinition,
+        approvedDeletionPaths, !hostCapabilities.MutationRequiresApproval || approvedNativeMutation, cancellationToken);
+      RecordHarnessObservations(session, recoveryObserved, contextRecoveryObserved);
+      contextRecoveryObserved = recoveryObserved;
+      if (automaticContinuationAttempts > 0 || _contextRecoveryBudget?.Consumed == true)
+        throw new HarnessException(ExecutionProgressPolicy.Exhausted,
+          "The output-token limit was reached after the bounded Host recovery budget was consumed.",
+          $"Original protocol code: {terminalFailure.ErrorCode}; finish reason: {terminalFailure.FinishReason}. "
+            + "Verified effects were retained for review; no identical retry was started.", false,
+          harnessId: harnessDefinition.Id);
+
+      var pendingJournal = (actionJournal as IExecutionActionJournalStateReader)?.GetState();
+      var review = session.CreateReview();
+      if (unidentifiedNativeAction
+        || nativeActions.Values.Any(action => action.Type is "tool.started" or "tool.output"
+          && action.State is not ("completed" or "failed" or "cancelled"))
+        || review.Actions?.Any(action => action.State is not ("completed" or "failed" or "rejected" or "cancelled")) == true
+        || pendingJournal is { HasUnresolvedAction: true } or { HasUnresolvedApproval: true } or { HasPendingValidation: true }
+        || _userInput.HasPendingForExecution(session.Id))
+        throw new HarnessException(ExecutionProgressPolicy.Unavailable,
+          "Output-limit recovery cannot continue with unresolved actions or decisions.",
+          "The existing context and verified effects were retained for reconciliation.", false,
+          harnessId: harnessDefinition.Id);
+      if (_contextRecoveryBudget is not null && !_contextRecoveryBudget.TryConsume())
+        throw new HarnessException(ExecutionProgressPolicy.Exhausted,
+          "The Host recovery budget is exhausted.", "No additional inference was dispatched.", false,
+          harnessId: harnessDefinition.Id);
+      automaticContinuationAttempts++;
+      outputLimitRecoveryAttempted = true;
+      var canWrite = executionRole != ExecutionContextRole.Supervisor
+        && hostCapabilities.ToolScope.AvailableTools.Any(tool => tool is "create_file" or "write_file"
+          or "replace_text" or "apply_patch" or "create_files");
+      harnessTurnRequest = ExecutionProgressPolicy.Continue(harnessTurnRequest, review, canWrite);
+      yield return Event(requestId, "harness.output-limit-recovery-started",
+        "Host output-limit recovery 1/1: continuing the same model, harness and native session with a bounded incremental-write correction.",
+        stopwatch, model, intention);
+      roleResultSegment.Clear();
+      responseSegment.Clear();
+      activeResponseItemId = null;
+      liveContextBase = latestContextUsage;
+      liveOutputCharacters = 0;
+      lastPublishedLiveOutputTokens = 0;
+      lastLiveContextUpdateMilliseconds = stopwatch.ElapsedMilliseconds;
+      goto StartHarnessTurn;
+    }
+
+    if (outputLimitRecoveryAttempted)
+      yield return Event(requestId, terminalFailure is null
+        ? "harness.output-limit-recovery-completed" : "harness.output-limit-recovery-exhausted",
+        terminalFailure is null ? "Host output-limit recovery completed; effects still require Host verification."
+          : "Host output-limit recovery ended with a typed failure.", stopwatch, model, intention);
 
     if (terminalFailure is not null && HarnessContextRecovery.IsContextFailure(terminalFailure))
     {
@@ -3021,8 +3151,8 @@ public sealed class ChatStreamService
       ResponseSegmentHtml: responseSegment.Length == 0
         ? null
         : _markdownRenderer.Render(responseSegment.ToString()),
-      ResponseTail: visibleAnswer,
-      ResponseTailHtml: _markdownRenderer.Render(visibleAnswer),
+      ResponseTail: responseTail,
+      ResponseTailHtml: _markdownRenderer.Render(responseTail),
       SpecialistCompletion: answer.ToString()
     );
   }
@@ -3036,10 +3166,41 @@ public sealed class ChatStreamService
         && previous.Operation == change.Operation && previous.FinalHash == change.FinalHash)).ToArray());
   }
 
+  private async IAsyncEnumerable<HarnessEvent> ObserveHarnessInferenceAsync(
+    IAgentHarnessTransport harness, HarnessTurnRequest request, ExecutionSession session, string turnKey,
+    bool recovery, bool outputLimitRecovery, [EnumeratorCancellation] CancellationToken cancellationToken)
+  {
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    if (request.Provider == ModelProviderIds.OllamaLocal
+      && _usageModelRevisions.TryGetValue(request.Model, out var digest)
+      && ModelRuntimePerformance.Resolve(settings, request.Provider, request.Model, digest)?.HasExplicitValues == true)
+    {
+      yield return new HarnessEvent(
+        "runtime.performance-unavailable",
+        "Configured draft tokens and batch size cannot be enforced through this harness compatibility API. Native Ollama requests and model preloads support these options; runner activation is not confirmed.",
+        harnessId: request.HarnessId
+      );
+    }
+    using var observation = await _harnessInference.BeginAsync(
+      request.HarnessId, request.ProviderEndpoint!, session, turnKey, cancellationToken,
+      request.ContextWindowTokens is > 0 ? ExecutionProgressPolicy.OutputTokenLimit(request.ContextWindowTokens.Value) : null,
+      _inferenceProgressObserver);
+    yield return new HarnessEvent("output-budget.applied",
+      $"Host Execute output limit: 50% of context ({request.ContextWindowTokens / 2} tokens per generation).",
+      harnessId: request.HarnessId);
+    request = request with { InferenceEndpoint = observation.Endpoint };
+    await foreach (var item in recovery || outputLimitRecovery
+      ? RunContextRecoveryAsync(harness, request, cancellationToken,
+        outputLimitRecovery ? ExecutionProgressPolicy.Exhausted : HarnessContextRecovery.Exhausted)
+      : harness.StartTurnAsync(request, cancellationToken))
+      yield return ExecutionProgressPolicy.Normalize(item, observation.FinishReason);
+  }
+
   private async IAsyncEnumerable<HarnessEvent> RunContextRecoveryAsync(
     IAgentHarnessTransport harness,
     HarnessTurnRequest request,
-    [EnumeratorCancellation] CancellationToken cancellationToken)
+    [EnumeratorCancellation] CancellationToken cancellationToken,
+    string failureCode = HarnessContextRecovery.Exhausted)
   {
     await using var stream = harness.StartTurnAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
     while (true)
@@ -3053,7 +3214,7 @@ public sealed class ChatStreamService
         // Rejoin normal effect observation before emitting the one public terminal error.
         failure = new HarnessEvent("turn.failed",
           message: $"The single Host context recovery attempt failed: {exception.Message}",
-          errorCode: HarnessContextRecovery.Exhausted, harnessId: request.HarnessId,
+          errorCode: failureCode, harnessId: request.HarnessId,
           sessionId: request.SessionId, terminalState: HarnessTerminalState.Failed);
       }
       if (failure is not null) { yield return failure; yield break; }
@@ -5081,19 +5242,19 @@ public sealed class ChatStreamService
             maximumPlanningAttempts,
             requestId
           );
-          if (
-            executionRole == ExecutionContextRole.Worker
-            && repeatedCount > 1
-          )
+          var outputLimitFailure = planning.Failure is LocalActionException
           {
-            var outputLimitRepeated = planning.Failure is LocalActionException
-            {
-              Stage: LocalActionPlanner.OutputLimitStage
-            };
+            Stage: LocalActionPlanner.OutputLimitStage
+          };
+          if (outputLimitFailure && _contextRecoveryBudget is not null && !_contextRecoveryBudget.TryConsume())
+            repeatedCount = Math.Max(2, repeatedCount);
+          if (repeatedCount > 1 && (executionRole == ExecutionContextRole.Worker || outputLimitFailure))
+          {
+            var outputLimitRepeated = outputLimitFailure;
             progress.Failure = outputLimitRepeated
               ? new ChatStageException(
                 "local-action-output-limit",
-                "The worker exhausted its output-token limit again after the Host supplied one bounded incremental-write correction.",
+                "The specialist exhausted its output-token limit after the bounded Host correction budget was consumed.",
                 "No proposal was executed. Increasing the configured model output limit or changing the implementation transport is required before retrying this work item.",
                 model,
                 intention,
@@ -5243,6 +5404,13 @@ public sealed class ChatStreamService
             yield return contextEvent;
           }
 
+          progress.RuntimeContextReported = true;
+        }
+        else if (!progress.RuntimeContextReported
+          && _usageModelRevisions.TryGetValue(model, out var performanceDigest)
+          && ModelRuntimePerformance.Resolve(await _settingsStore.GetAsync(cancellationToken), ModelProviderIds.OllamaLocal, model, performanceDigest) is { } performance)
+        {
+          yield return RuntimePerformanceEvent(requestId, stopwatch, model, intention, performance);
           progress.RuntimeContextReported = true;
         }
 
@@ -7325,6 +7493,14 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    var progress = Channel.CreateBounded<InferenceProgressView>(new BoundedChannelOptions(1)
+    {
+      FullMode = BoundedChannelFullMode.DropOldest,
+      SingleReader = true,
+      SingleWriter = false
+    });
+    _inferenceProgressObserver = value => progress.Writer.TryWrite(value);
+    var progressReady = progress.Reader.WaitToReadAsync(requestLifetime.Token).AsTask();
     var stopwatch = Stopwatch.StartNew();
     var criticalAfter = TimeSpan.FromTicks(
       checked(warningAfter.Ticks * 2)
@@ -7334,6 +7510,8 @@ public sealed class ChatStreamService
     var warningSent = false;
     var criticalSent = false;
     var inactivityRecoveryAttempted = false;
+    using var steeringLifetime = CancellationTokenSource.CreateLinkedTokenSource(requestLifetime.Token);
+    Task<HarnessSteerResult?>? pendingSteering = null;
     var heartbeatInterval = TimeSpan.FromSeconds(Math.Clamp(
       warningAfter.TotalSeconds / 3,
       1,
@@ -7361,7 +7539,8 @@ public sealed class ChatStreamService
       var moveNext = enumerator.MoveNextAsync().AsTask();
       while (true)
       {
-        var candidates = new List<Task> { moveNext, heartbeatDelay, safetyDelay };
+        var candidates = new List<Task> { moveNext, heartbeatDelay, safetyDelay, progressReady };
+        if (pendingSteering is not null) candidates.Insert(0, pendingSteering);
         if (!warningSent)
         {
           candidates.Add(warningDelay);
@@ -7371,6 +7550,25 @@ public sealed class ChatStreamService
           candidates.Add(criticalDelay);
         }
         var completed = await Task.WhenAny(candidates);
+        if (completed == progressReady)
+        {
+          if (await progressReady && progress.Reader.TryRead(out var currentProgress))
+            yield return Event(requestId, "inference.progress", null, stopwatch, selectedModel)
+              with
+            { InferenceProgress = currentProgress };
+          progressReady = progress.Reader.WaitToReadAsync(requestLifetime.Token).AsTask();
+          continue;
+        }
+        if (completed == pendingSteering)
+        {
+          var result = await pendingSteering!;
+          pendingSteering = null;
+          if (result?.Accepted == true)
+            yield return Event(requestId, "request.inactivity-recovery",
+              $"The Host prompted {selectedHarness} to continue after sustained inactivity.",
+              stopwatch, selectedModel);
+          continue;
+        }
         if (
           completed == heartbeatDelay
           && heartbeatDelay.Status == TaskStatus.RanToCompletion
@@ -7421,36 +7619,14 @@ public sealed class ChatStreamService
           )
           {
             inactivityRecoveryAttempted = true;
-            HarnessSteerResult? result = null;
-            try
-            {
-              result = await steering.SteerTurnAsync(
+            // Keep consuming tool/terminal events while the transport confirms
+            // delivery. Some harnesses drain steering only between tool batches.
+            pendingSteering = SendInactivitySteeringAsync(steering,
                 new HarnessSteerRequest(
                   steeringSessionId,
                   "Host recovery: no meaningful progress crossed the Host boundary within the configured interval. Re-check the current objective and workspace state, then take the next concrete permitted action. Do not repeat completed actions. If progress is impossible, report the exact blocker and finish truthfully.",
                   $"host-inactivity-{Guid.NewGuid():N}"
-                ),
-                requestLifetime.Token
-              );
-            }
-            catch (HarnessException exception)
-            {
-              _logger.LogDebug(
-                exception,
-                "Harness {Harness} could not accept the bounded inactivity recovery prompt.",
-                selectedHarness
-              );
-            }
-            if (result?.Accepted == true)
-            {
-              yield return Event(
-                requestId,
-                "request.inactivity-recovery",
-                $"The Host prompted {selectedHarness} to continue after sustained inactivity.",
-                stopwatch,
-                selectedModel
-              );
-            }
+                ));
           }
           continue;
         }
@@ -7564,6 +7740,23 @@ public sealed class ChatStreamService
     {
       activityLifetime.Cancel();
       activityLifetime.Dispose();
+      _inferenceProgressObserver = null;
+      progress.Writer.TryComplete();
+      steeringLifetime.Cancel();
+      if (pendingSteering is not null) await pendingSteering;
+    }
+
+    async Task<HarnessSteerResult?> SendInactivitySteeringAsync(
+      IAgentHarnessSteeringTransport transport, HarnessSteerRequest input)
+    {
+      try { return await transport.SteerTurnAsync(input, steeringLifetime.Token); }
+      catch (HarnessException exception)
+      {
+        _logger.LogDebug(exception,
+          "Harness {Harness} could not accept the bounded inactivity recovery prompt.", selectedHarness);
+        return null;
+      }
+      catch (OperationCanceledException) when (steeringLifetime.IsCancellationRequested) { return null; }
     }
   }
 
@@ -7946,6 +8139,7 @@ public sealed class ChatStreamService
       + (applicationWebSearchAvailable
         ? "web_search queries the public web through the Agentic Router Host and returns untrusted bounded evidence; call it only when current external information materially improves the answer. "
         : string.Empty)
+      + "When requesting a tool, include a brief user-facing progress sentence in content describing what you will inspect. Keep internal reasoning separate. "
       + "After gathering enough evidence, return the final user-facing answer without a tool call.";
     var toolMessages = new[]
     {
@@ -7991,7 +8185,8 @@ public sealed class ChatStreamService
     );
 
     var completionRequired = false;
-    for (var attempt = 1; attempt <= MaximumChatReadToolCalls + 2; attempt++)
+    var maximumAttempts = MaximumChatReadToolCalls + 2;
+    for (var attempt = 1; attempt <= maximumAttempts; attempt++)
     {
       var bufferedContent = new StringBuilder();
       var streamed = Channel.CreateUnbounded<ChatReadStreamDelta>(
@@ -8189,10 +8384,17 @@ public sealed class ChatStreamService
         )
       )
       {
+        var commentary = response.Content?.Trim();
+        if (!string.IsNullOrWhiteSpace(commentary))
+        {
+          yield return Event(requestId, "chat.model-progress",
+            commentary.Length > 2_000 ? commentary[..2_000] : commentary,
+            stopwatch, model, intention);
+        }
         yield return Event(
           requestId,
           "chat.tool-preamble-withheld",
-          "The Host withheld non-terminal model text that accompanied a structured tool call.",
+          "The Host kept tool-call commentary separate from the final Chat answer.",
           stopwatch,
           model,
           intention
@@ -8219,6 +8421,27 @@ public sealed class ChatStreamService
           completion
         ))
         {
+          if (!completionRequired)
+          {
+            toolMessages.Add(new OllamaToolMessage(
+              "system",
+              "The previous generation returned no tool call and no user-facing answer. "
+                + "No more tools are available in this turn. Complete the user-facing answer now "
+                + "using only the evidence already returned, and state any remaining evidence limitation."
+            ));
+            completionRequired = true;
+            maximumAttempts = Math.Max(maximumAttempts, attempt + 1);
+            yield return Event(
+              requestId,
+              "chat.read-only-empty-response-finalization",
+              "The model returned no read request or final answer; tools were closed and one final response synthesis was requested from the collected evidence.",
+              stopwatch,
+              model,
+              intention
+            );
+            continue;
+          }
+
           progress.Failure = new LocalActionException(
             "chat-read-completion",
             "The selected model returned neither a read request nor a final Chat response."
@@ -8362,7 +8585,11 @@ public sealed class ChatStreamService
           stopwatch,
           model,
           intention
-        );
+        ) with
+        {
+          LocalAction = new LocalActionEvent(call.CallId, call.Name, "Search public web",
+            call.Arguments.GetRawText(), "executing", false)
+        };
         var search = await TryWebSearchAsync(
           call.Arguments,
           model,
@@ -8396,7 +8623,13 @@ public sealed class ChatStreamService
             stopwatch,
             model,
             intention
-          );
+          ) with
+          {
+            LocalAction = new LocalActionEvent(call.CallId, call.Name, "Search public web",
+              null, "completed", false,
+              ResultOutput: web.UntrustedContext.Length > 16_000
+                ? web.UntrustedContext[..16_000] + "\n[tool result truncated]" : web.UntrustedContext)
+          };
         }
         else
         {
@@ -8424,7 +8657,11 @@ public sealed class ChatStreamService
             stopwatch,
             model,
             intention
-          );
+          ) with
+          {
+            LocalAction = new LocalActionEvent(call.CallId, call.Name, "Search public web",
+              null, "failed", false, ResultOutput: failure.Message)
+          };
         }
         continue;
       }
@@ -8541,7 +8778,11 @@ public sealed class ChatStreamService
         stopwatch,
         model,
         intention
-      );
+      ) with
+      {
+        LocalAction = new LocalActionEvent(call.CallId, action.Tool, action.Summary,
+          null, "executing", false)
+      };
       var execution = await TryExecuteAsync(
         () => _actionService.ExecuteAsync(
           action,
@@ -8580,7 +8821,12 @@ public sealed class ChatStreamService
         stopwatch,
         model,
         intention
-      );
+      ) with
+      {
+        LocalAction = new LocalActionEvent(call.CallId, action.Tool, action.Summary,
+          null, succeeded ? "completed" : "failed", false,
+          ResultOutput: output.Length > 16_000 ? output[..16_000] + "\n[tool result truncated]" : output)
+      };
     }
 
     progress.Failure ??= new LocalActionException(
@@ -10963,7 +11209,8 @@ public sealed class ChatStreamService
       null,
       0,
       settings.Execution.MaxToolOutputTokens,
-      outputTokenLimitOverride: outputTokenLimitOverride
+      outputTokenLimitOverride: outputTokenLimitOverride,
+      execution: true
     );
     var effectiveLimit = _usageRuntimeContextTokens ?? new[]
     {
@@ -10973,9 +11220,9 @@ public sealed class ChatStreamService
       providerMaximumTokens ?? int.MaxValue
     }.Min();
     return new CoordinatorInputBudget(
-      Math.Max(1, effectiveLimit - resolution.OutputTokenLimit),
+      Math.Max(1, effectiveLimit - ExecutionProgressPolicy.OutputTokenLimit(effectiveLimit)),
       effectiveLimit,
-      resolution.OutputTokenLimit,
+      ExecutionProgressPolicy.OutputTokenLimit(effectiveLimit),
       _usageRuntimeContextTokens is not null
         ? effectiveLimit
         : Math.Min(
@@ -11090,6 +11337,11 @@ public sealed class ChatStreamService
       )
     };
 
+    if (resolution.Performance is { } performance)
+    {
+      events.Add(RuntimePerformanceEvent(requestId, stopwatch, model, intention, performance));
+    }
+
     if (resolution.Escalated)
     {
       events.Add(
@@ -11107,6 +11359,18 @@ public sealed class ChatStreamService
 
     return events;
   }
+
+  private ChatStreamEvent RuntimePerformanceEvent(
+    string requestId, Stopwatch stopwatch, string model, string? intention,
+    ModelRuntimePerformanceSettings performance
+  ) => Event(
+    requestId,
+    "runtime.performance-configured",
+    $"Model performance: draft tokens={performance.DraftTokens?.ToString() ?? "Auto"}; "
+      + $"batch size={performance.BatchSize?.ToString() ?? "Auto"}. "
+      + "Explicit values were included in the native Ollama request; Auto is omitted. Effective runner values are not independently confirmed.",
+    stopwatch, model, intention
+  );
 
   private static OllamaToolMessage ToToolMessage(
     ChatMessage message
@@ -11989,7 +12253,9 @@ public sealed class ChatStreamService
       ProviderAttemptId: Guid.NewGuid().ToString("N"),
       IncidentEventId: Guid.NewGuid().ToString("N"),
       IncidentSequence: _trace.NextSequence(),
-      Gpu: _usageGpu
+      Gpu: _usageGpu,
+      InferenceObserver: requestPurpose == "target-response" ? _chatInferenceObserver : null,
+      ProgressObserver: _inferenceProgressObserver
     );
   }
 
@@ -11999,18 +12265,26 @@ public sealed class ChatStreamService
     string model,
     string intention,
     ProviderGenerationProfile profile,
-    IReadOnlyList<string>? supportedParameters
+    IReadOnlyList<string>? supportedParameters,
+    IReadOnlyList<string>? supportedThinkingModes = null
   )
   {
     var configured = ProviderGenerationProfiles.ConfiguredParameters(profile);
     var unsupported = supportedParameters is null
-      ? Array.Empty<string>()
-      : configured.Except(supportedParameters, StringComparer.Ordinal).ToArray();
+      ? new List<string>()
+      : configured.Except(supportedParameters, StringComparer.Ordinal).ToList();
+    if (profile.Thinking != InferenceThinkingModes.Auto
+      && supportedParameters?.Contains("thinking", StringComparer.Ordinal) == true
+      && supportedThinkingModes is not null
+      && !supportedThinkingModes.Contains(profile.Thinking, StringComparer.Ordinal))
+    {
+      unsupported.Add("thinking");
+    }
     var message = supportedParameters is null
       ? $"Inference profile {profile.Id}: adapter parameter support is unverified."
       : $"Inference profile {profile.Id}: adapter-supported controls: "
         + string.Join(", ", configured.Except(unsupported))
-        + (unsupported.Length > 0
+        + (unsupported.Count > 0
           ? $"; unavailable controls: {string.Join(", ", unsupported)}."
           : ".");
     var seedSupported = supportedParameters?.Contains("seed", StringComparer.Ordinal) == true;
@@ -12521,7 +12795,7 @@ public sealed class ChatStreamService
       int omittedMessages = 0,
       bool manualCompactionRequested = false,
       ProviderChatOptions? providerOptions = null,
-      string requestedEffort = ModelEffortLevels.Medium
+      string? requestedEffort = null
     )
     {
       Messages = messages;
@@ -12561,7 +12835,7 @@ public sealed class ChatStreamService
 
     public ProviderChatOptions ProviderOptions { get; }
 
-    public string RequestedEffort { get; }
+    public string? RequestedEffort { get; }
 
     public SpecialistToolingProfile ToolingProfile { get; }
 

@@ -44,6 +44,14 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     await _environment.ResetSettingsAsync();
   }
 
+  [TestCleanup]
+  public void CaptureFailedApiOutput()
+  {
+    if (TestContext.CurrentTestOutcome != UnitTestOutcome.Failed) return;
+    var apiOutput = _environment.ApiOutput;
+    TestContext.WriteLine(apiOutput.Length > 16_000 ? apiOutput[^16_000..] : apiOutput);
+  }
+
   public override BrowserNewContextOptions ContextOptions()
   {
     return new BrowserNewContextOptions

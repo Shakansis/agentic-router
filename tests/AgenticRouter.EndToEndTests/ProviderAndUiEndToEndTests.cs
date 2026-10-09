@@ -1556,6 +1556,12 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       answer,
       "https://example.test/ollama-source-1"
     );
+    var completedSearch = events.Single(item => item["type"]!.GetValue<string>() == "web.search-completed");
+    Assert.AreEqual("completed", completedSearch["localAction"]!["state"]!.GetValue<string>());
+    StringAssert.Contains(completedSearch["localAction"]!["resultOutput"]!.GetValue<string>(),
+      "https://example.test/ollama-source-1");
+    var terminal = events.Single(item => item["type"]!.GetValue<string>() == "response.completed");
+    Assert.AreEqual(1, terminal["chatSummary"]!["searchCount"]!.GetValue<int>());
     Assert.DoesNotContain(
       "This non-terminal preamble must never become visible.",
       answer
@@ -3123,7 +3129,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     ).ClickAsync();
     await Expect(
       Page.Locator(
-        "#toast-region .app-toast[data-tone=\"error\"]"
+        "#settings-errors[role=\"alert\"]"
       )
     ).ToBeVisibleAsync();
     await Expect(generalCard).ToHaveClassAsync(
@@ -3140,6 +3146,8 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
     var settings = await GetSettingsJsonAsync();
     var general = settings["intentions"]!["general-chat"]!.AsObject();
+    Assert.AreEqual(_environment.BaselineSettings.Intentions["general-chat"].Model, general["model"]!.GetValue<string>(),
+      "Invalid fallback settings must not be partially saved.");
     general["model"] = "groq::openai/gpt-oss-120b";
     general["fallbackModel"] = "none";
 

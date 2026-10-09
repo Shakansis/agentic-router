@@ -27,7 +27,10 @@ if (!int.TryParse(port, out var parsedPort) || parsedPort <= 0 || workspace.Leng
 }
 
 var token = Environment.GetEnvironmentVariable("QWEN_SERVER_TOKEN") ?? string.Empty;
-var runtime = Environment.GetEnvironmentVariable("QWEN_HOME") ?? string.Empty;
+var qwenHome = Environment.GetEnvironmentVariable("QWEN_HOME") ?? string.Empty;
+var runtime = Directory.GetParent(qwenHome)?.Name == "supervised"
+  ? Directory.GetParent(qwenHome)!.Parent!.FullName : qwenHome;
+var settingsPath = Path.Combine(qwenHome, "settings.json");
 Directory.CreateDirectory(runtime);
 await File.WriteAllTextAsync(
   Path.Combine(runtime, "fake-qwen-process-id.txt"),
@@ -150,7 +153,6 @@ app.MapPost("/session", async (HttpContext context) =>
     File.Delete(failedRecoverySetup);
     return Results.Json(new { code = "fixture_setup_failed" }, statusCode: 500);
   }
-  var settingsPath = Path.Combine(runtime, "settings.json");
   using var settings = JsonDocument.Parse(await File.ReadAllTextAsync(settingsPath));
   var selectedAuthType = settings.RootElement
     .GetProperty("security")
@@ -184,7 +186,7 @@ app.MapPost("/session", async (HttpContext context) =>
   {
     return Results.BadRequest(new { code = "workspace_mismatch" });
   }
-  var id = $"qwen-session-{Interlocked.Increment(ref sessionNumber)}";
+  var id = $"qwen-session-{Environment.ProcessId}-{Interlocked.Increment(ref sessionNumber)}";
   var requestedClientId = context.Request.Headers["X-Qwen-Client-Id"].ToString();
   var clientId = $"client_{Guid.NewGuid():D}";
   var model = settings.RootElement.GetProperty("model").GetProperty("name").GetString()
@@ -212,7 +214,7 @@ app.MapPost("/session", async (HttpContext context) =>
     providerEnvKey,
     providerCredentialConfigured,
     args,
-    qwenHome = runtime,
+    qwenHome,
     systemSettingsPath = Environment.GetEnvironmentVariable("QWEN_CODE_SYSTEM_SETTINGS_PATH")
   });
   await WriteMarkerAsync("fake-qwen-model.json", new
@@ -258,7 +260,7 @@ app.MapGet("/workspace/providers", async () =>
     });
   }
   using var settings = JsonDocument.Parse(
-    await File.ReadAllTextAsync(Path.Combine(runtime, "settings.json"))
+    await File.ReadAllTextAsync(settingsPath)
   );
   var baseUrl = settings.RootElement.GetProperty("modelProviders")
     .GetProperty("openai")[0]
@@ -502,6 +504,14 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
   await context.Response.WriteAsJsonAsync(new { promptId, lastEventId = session.EventId });
   await context.Response.CompleteAsync();
 
+  var isolatedReply = await SupervisionSessionFixture.RespondAsync(
+    text, sessionId, runtime, session.Cwd);
+  if (isolatedReply is not null)
+  {
+    await CompleteAsync(session, promptId, isolatedReply, includeReadTool: false);
+    return Results.Empty;
+  }
+
   if (text.Contains("reconnect native fixture", StringComparison.Ordinal))
   {
     await File.AppendAllTextAsync(Path.Combine(runtime, "reconnect-native-prompts.txt"), promptId + "\n");
@@ -533,6 +543,33 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
     if (outcome == "completed") await CompleteAsync(session, promptId, "Final verified fixture response.", includeReadTool: false);
     else if (outcome != "cancelled")
       await EmitAsync(session, "turn_error", new { sessionId, promptId, message = "Sticky status fixture failure." });
+    return Results.Empty;
+  }
+
+  if (text.Contains("global output fixture", StringComparison.Ordinal))
+  {
+    var recovering = text.Contains("HOST_OUTPUT_LIMIT_RECOVERY_V1", StringComparison.Ordinal);
+    using var providerSettings = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(runtime, "settings.json")));
+    var inferenceUrl = providerSettings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]!
+      .GetProperty("baseUrl").GetString();
+    using var inferenceClient = new HttpClient();
+    using var inferenceResponse = await inferenceClient.PostAsJsonAsync(inferenceUrl + "/chat/completions",
+      new { model = session.Model, fixture = text, call = recovering ? 1 : 0, max_completion_tokens = 4096 });
+    inferenceResponse.EnsureSuccessStatusCode();
+    await inferenceResponse.Content.ReadAsStringAsync();
+    await File.AppendAllTextAsync(Path.Combine(runtime, "fake-output-recovery.jsonl"),
+      JsonSerializer.Serialize(new { sessionId, recovering, model = session.Model, text }) + "\n");
+    if (!recovering && text.Contains("committed effect", StringComparison.Ordinal))
+      await File.AppendAllTextAsync(Path.Combine(session.Cwd, "output-before.txt"), "once\n");
+    if (recovering && text.Contains("pause recovery", StringComparison.Ordinal))
+      return Results.Empty;
+    if (recovering && !text.Contains("always fail", StringComparison.Ordinal))
+    {
+      await File.WriteAllTextAsync(Path.Combine(session.Cwd, "output-recovered.txt"), "recovered incrementally");
+      await CompleteAsync(session, promptId, "Recovered with a small write.", includeReadTool: false);
+    }
+    else
+      await EmitAsync(session, "turn_complete", new { sessionId, promptId, stopReason = "max_tokens" });
     return Results.Empty;
   }
 
@@ -1133,6 +1170,16 @@ app.MapPost("/session/{sessionId}/mid-turn-message", async (string sessionId, Ht
     messageId,
     message
   });
+  if (message.StartsWith("malformed steering receipt", StringComparison.Ordinal))
+    return Results.Json(new { accepted = true, messageId = "wrong-message" });
+  if (message.StartsWith("missing steering receipt", StringComparison.Ordinal))
+    return Results.Json(new { accepted = true });
+  if (message.StartsWith("delayed steering consumption", StringComparison.Ordinal)
+    || message.StartsWith("promoted steering receipt", StringComparison.Ordinal))
+  {
+    session.PendingSteerIds[messageId] = message;
+    return Results.Json(new { accepted = true, messageId });
+  }
   session.SettledSteerIds[messageId] = 0;
   var promptId = session.ActivePromptId;
   _ = Task.Run(async () =>
@@ -1148,7 +1195,7 @@ app.MapPost("/session/{sessionId}/mid-turn-message", async (string sessionId, Ht
   return Results.Json(new { accepted = true, messageId });
 });
 
-app.MapGet("/session/{sessionId}/mid-turn-messages", (string sessionId, HttpContext context) =>
+app.MapGet("/session/{sessionId}/mid-turn-messages", async (string sessionId, HttpContext context) =>
 {
   if (!sessions.TryGetValue(sessionId, out var session))
   {
@@ -1158,12 +1205,35 @@ app.MapGet("/session/{sessionId}/mid-turn-messages", (string sessionId, HttpCont
   {
     return InvalidClient(session, context);
   }
+  if (!session.PendingSteerIds.IsEmpty && Interlocked.Increment(ref session.SteerQueries) >= 2)
+  {
+    foreach (var entry in session.PendingSteerIds.ToArray())
+    {
+      session.PendingSteerIds.TryRemove(entry.Key, out _);
+      if (entry.Value.StartsWith("promoted steering receipt", StringComparison.Ordinal))
+        session.PromotedSteerIds[entry.Key] = 0;
+      else
+        session.SettledSteerIds[entry.Key] = 0;
+    }
+  }
+  await WriteMarkerAsync("fake-qwen-steer-queries.json", new { count = session.SteerQueries });
   return Results.Json(new
   {
-    messages = Array.Empty<object>(),
+    messages = session.PendingSteerIds.Select(entry => new { messageId = entry.Key, text = entry.Value }).ToArray(),
     settledMessageIds = session.SettledSteerIds.Keys.ToArray(),
-    promotedMessageIds = Array.Empty<string>()
+    promotedMessageIds = session.PromotedSteerIds.Keys.ToArray()
   });
+});
+
+app.MapDelete("/session/{sessionId}/mid-turn-messages/{messageId}", async (string sessionId, string messageId, HttpContext context) =>
+{
+  if (!sessions.TryGetValue(sessionId, out var session)) return Results.NotFound();
+  if (!HasRegisteredClient(context, session)) return InvalidClient(session, context);
+  var removed = session.PendingSteerIds.TryRemove(messageId, out _)
+    | session.PromotedSteerIds.TryRemove(messageId, out _);
+  if (removed) session.SettledSteerIds[messageId] = 0;
+  await WriteMarkerAsync("fake-qwen-steer-removed.json", new { messageId, removed });
+  return Results.Json(new { removed });
 });
 
 app.MapPost("/permission/{requestId}", async (string requestId, HttpContext context) =>
@@ -1750,6 +1820,12 @@ sealed class FakeSession
   public List<(long Id, string Payload)> Replay { get; } = [];
 
   public ConcurrentDictionary<string, byte> SettledSteerIds { get; } = new(StringComparer.Ordinal);
+
+  public ConcurrentDictionary<string, string> PendingSteerIds { get; } = new(StringComparer.Ordinal);
+
+  public ConcurrentDictionary<string, byte> PromotedSteerIds { get; } = new(StringComparer.Ordinal);
+
+  public int SteerQueries;
 
   public ConcurrentDictionary<Guid, Channel<string>> Subscribers { get; } = new();
 }

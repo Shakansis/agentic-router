@@ -104,6 +104,8 @@ Tool and capability identifiers must use exact canonical names or explicitly rev
 
 Protocol or transport failures must be typed. After a deterministic failure, change strategy instead of repeating an identical request.
 
+Host-owned execution improvements must be defined in the common Host layer and apply to Native, every current external harness, and future harness integrations. This includes progress guidance, recovery decisions and budgets, effect verification, and completion authority. Adapters translate native protocol facts and capabilities; they must not own separate copies of Host policy. A missing native protocol signal or control must be explicit, never silently disable a global Host improvement or be presented as supported.
+
 ## 6. Execute Mode
 
 Execute is goal-driven and constrained to a user-approved trusted workspace.

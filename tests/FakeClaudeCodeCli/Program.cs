@@ -139,6 +139,35 @@ await EmitAsync(new
   capabilities = new[] { "interrupt_receipt_v1" }
 });
 
+if (prompt.Contains("global output fixture", StringComparison.Ordinal))
+{
+  var recovering = prompt.Contains("HOST_OUTPUT_LIMIT_RECOVERY_V1", StringComparison.Ordinal);
+  using var inferenceClient = new HttpClient();
+  using var inferenceResponse = await inferenceClient.PostAsJsonAsync(baseUrl!.TrimEnd('/') + "/v1/messages",
+    new { model, fixture = prompt, call = recovering ? 1 : 0, max_tokens = 4096 });
+  inferenceResponse.EnsureSuccessStatusCode();
+  await inferenceResponse.Content.ReadAsStringAsync();
+  await File.AppendAllTextAsync(Path.Combine(runtime, "fake-output-recovery.jsonl"),
+    JsonSerializer.Serialize(new { sessionId = nativeSessionId, recovering, model, text = prompt }) + "\n");
+  if (!recovering && prompt.Contains("committed effect", StringComparison.Ordinal))
+    await File.AppendAllTextAsync(Path.Combine(cwd, "output-before.txt"), "once\n");
+  if (recovering && !prompt.Contains("always fail", StringComparison.Ordinal))
+  {
+    await File.WriteAllTextAsync(Path.Combine(cwd, "output-recovered.txt"), "recovered incrementally");
+    await EmitAsync(new
+    {
+      type = "result",
+      subtype = "success",
+      is_error = false,
+      result = "Recovered with a small write.",
+      session_id = nativeSessionId
+    });
+  }
+  else
+    await EmitSyntheticApiErrorAsync("API Error: Claude's response exceeded the 32000 output token maximum.");
+  return;
+}
+
 if (prompt.Contains("reactive context fixture", StringComparison.Ordinal))
 {
   var recovering = prompt.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
@@ -241,9 +270,14 @@ if (prompt.Contains("claude live context usage", StringComparison.OrdinalIgnoreC
   await Task.Delay(1_500);
 }
 var finalText = "Claude Code streamed with " + model;
+var isolatedReply = await SupervisionSessionFixture.RespondAsync(prompt, nativeSessionId, runtime, cwd);
 var suppressFinalText = false;
 
-if (
+if (isolatedReply is not null)
+{
+  finalText = isolatedReply;
+}
+else if (
   prompt.Contains(
     "claude supervision recovers output ceiling",
     StringComparison.OrdinalIgnoreCase
@@ -258,6 +292,14 @@ if (
     "claude supervision repeats output ceiling",
     StringComparison.OrdinalIgnoreCase
   );
+  var outputRecovery = prompt.Contains("HOST_OUTPUT_LIMIT_RECOVERY_V1", StringComparison.Ordinal);
+  await File.AppendAllTextAsync(Path.Combine(runtime, "fake-claude-supervisor-output.jsonl"),
+    JsonSerializer.Serialize(new
+    {
+      nativeSessionId,
+      outputRecovery,
+      worker = prompt.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal)
+    }) + "\n");
   if (prompt.Contains("SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal))
   {
     finalText = JsonSerializer.Serialize(new
@@ -306,10 +348,7 @@ if (
     || prompt.Contains("SUPERVISION_VERIFY_WITH_VALIDATION_V1", StringComparison.Ordinal)
   )
   {
-    var recovery = prompt.Contains(
-      "SUPERVISION_HARNESS_RECOVERY_V1",
-      StringComparison.Ordinal
-    );
+    var recovery = outputRecovery;
     if (!recovery || repeatedFailure)
     {
       await EmitSyntheticApiErrorAsync(

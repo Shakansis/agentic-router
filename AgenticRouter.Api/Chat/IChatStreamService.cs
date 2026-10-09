@@ -23,7 +23,9 @@ public sealed record ExecutionSpecialistTurnInvocation(
   string RequestedEffort = ModelEffortLevels.Medium,
   Action<ExecutionPreflightMeasurement>? CapturePreflight = null,
   string? Gpu = null,
-  ExecutionContextRecoveryBudget? ContextRecoveryBudget = null
+  ExecutionContextRecoveryBudget? ContextRecoveryBudget = null,
+  string? SupervisionRunId = null,
+  string? InferenceObjective = null
 )
 {
   public static ExecutionSpecialistTurnInvocation Direct { get; } = new(

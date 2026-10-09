@@ -1070,6 +1070,23 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
           "name"
         ).GetString()
       : null;
+    var plannerRequest = body.Contains("SPECIALIST_TOOL_LOOP_V2", StringComparison.Ordinal);
+    if (plannerRequest && functionName is not null)
+    {
+      var results = root.GetProperty("contents").EnumerateArray()
+        .SelectMany(content => content.GetProperty("parts").EnumerateArray())
+        .Where(part => part.TryGetProperty("functionResponse", out _))
+        .Select(part => part.GetProperty("functionResponse").GetProperty("name").GetString()).ToArray();
+      var needsRead = body.Contains("The latest changed files have not all been inspected after their latest mutation:", StringComparison.Ordinal);
+      var requestedTool = needsRead ? "read_file" : "create_file";
+      var names = tools[0].GetProperty("functionDeclarations").EnumerateArray()
+        .Select(declaration => declaration.GetProperty("name").GetString()).ToArray();
+      var created = results.Contains("create_file") || body.Contains("Created hello.txt", StringComparison.Ordinal);
+      var read = results.Contains("read_file") || body.Contains("Read file: hello.txt", StringComparison.Ordinal)
+        || body.Contains("Output:\nhello from agent", StringComparison.Ordinal);
+      functionName = created && (!needsRead || read) ? null
+        : names.Contains(requestedTool) ? requestedTool : LocalActionPlanner.RequestToolsetTool;
+    }
     var chatWorkspaceRead = body.Contains(
       "CHAT_READ_ONLY_WORKSPACE_V1",
       StringComparison.Ordinal
@@ -1092,6 +1109,22 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
       "\"googleSearch\"",
       StringComparison.Ordinal
     );
+    var toolParts = new List<object>();
+    if (functionName is not null)
+    {
+      if (plannerRequest && !root.GetProperty("contents").EnumerateArray()
+        .SelectMany(content => content.GetProperty("parts").EnumerateArray())
+        .Any(part => part.TryGetProperty("functionResponse", out _)))
+        toolParts.Add(new { text = "Vou criar o arquivo solicitado e verificar o resultado com as ferramentas disponÃ­veis." });
+      toolParts.Add(new
+      {
+        functionCall = new
+        {
+          name = functionName,
+          args = JsonSerializer.Deserialize<JsonElement>(ToolArguments(functionName))
+        }
+      });
+    }
     object response = functionName is null
       ? new
       {
@@ -1106,7 +1139,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
               {
                 new
                 {
-                  text = chatWorkspaceRead
+                  text = plannerRequest ? "Completed from the authoritative Host result." : chatWorkspaceRead
                     ? "gemini cloud answer"
                     : path.Contains(
                     "streamGenerateContent",
@@ -1159,21 +1192,7 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
             content = new
             {
               role = "model",
-              parts = new object[]
-              {
-                new
-                {
-                  functionCall = new
-                  {
-                    name = functionName,
-                    args = JsonSerializer.Deserialize<JsonElement>(
-                      ToolArguments(
-                        functionName
-                      )
-                    )
-                  }
-                }
-              }
+              parts = toolParts
             }
           }
         },
@@ -1272,6 +1291,8 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
   {
     return tool switch
     {
+      LocalActionPlanner.RequestToolsetTool =>
+        "{\"tools\":[\"create_file\",\"read_file\"],\"reason\":\"Create and inspect the requested file.\"}",
       "benchmark_echo" => "{\"value\":\"ok\"}",
       "benchmark_plan" =>
         "{\"objective\":\"verify\",\"steps\":[{\"title\":\"one\"},{\"title\":\"two\"}]}",

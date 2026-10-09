@@ -1,5 +1,6 @@
 namespace AgenticRouter.Api.Usage;
 
+using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Providers;
 
 public static class UsageModelRoles
@@ -136,7 +137,13 @@ public sealed record ProviderCallContext(
   string? ProviderAttemptId = null,
   string? IncidentEventId = null,
   long? IncidentSequence = null,
-  string? Gpu = null
+  string? Gpu = null,
+  [property: System.Text.Json.Serialization.JsonIgnore]
+  Action<ExecutionInferenceMetrics>? InferenceObserver = null,
+  [property: System.Text.Json.Serialization.JsonIgnore]
+  Configuration.ApplicationSettings? RuntimeSettingsOverride = null,
+  [property: System.Text.Json.Serialization.JsonIgnore]
+  Action<InferenceProgressView>? ProgressObserver = null
 );
 
 public sealed record ProviderTokenUsage(
@@ -148,7 +155,8 @@ public sealed record ProviderTokenUsage(
   long? TotalDurationNanoseconds = null,
   long? LoadDurationNanoseconds = null,
   long? PromptEvalDurationNanoseconds = null,
-  long? EvalDurationNanoseconds = null
+  long? EvalDurationNanoseconds = null,
+  long? GeneratedOutputTokens = null
 );
 
 public sealed record UsageRecordRequest(
@@ -170,7 +178,8 @@ public sealed record UsageRecordRequest(
   int? RequiredContextTokens = null,
   int? MaximumContextTokens = null,
   int? EffectiveContextTokens = null,
-  string? IncidentEventId = null
+  string? IncidentEventId = null,
+  InferenceObservation? Inference = null
 );
 
 public sealed record PricingSnapshot(

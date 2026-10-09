@@ -45,8 +45,11 @@ public sealed class DurableSupervisionEndToEndTests
       _ = await EnableHistoryAsync();
       var prepared = await PrepareAsync("manual");
       runId = prepared["runId"]!.GetValue<string>();
+      var instructionsPath = Path.Combine(_environment.WorkspaceDirectory, "AGENTS.md");
+      await File.WriteAllTextAsync(instructionsPath, "# Changed after checkpoint\n");
       await _environment.RestartApplicationAsync();
-      await WaitForStateAsync(runId, "interrupted-recoverable", TimeSpan.FromSeconds(10));
+      await WaitForStateAsync(runId, "awaiting-user", TimeSpan.FromSeconds(10));
+      File.Delete(instructionsPath);
       await Page.GotoAsync("/");
       await PostFromBrowserAsync($"/api/supervision/runs/{runId}/resume", new
       {
@@ -314,7 +317,9 @@ public sealed class DurableSupervisionEndToEndTests
 
   [TestMethod]
   [Timeout(90_000, CooperativeCancellation = true)]
-  public async Task AutoPromotesSixStructuredItemsWhileDirectOverrideKeepsThemDirect()
+  [DataRow("low")]
+  [DataRow("auto")]
+  public async Task AutoPromotesSixStructuredItemsWhileDirectOverrideKeepsThemDirect(string workerThinking)
   {
     _environment.FakeOllama.Reset();
     ResetSupervisionFixture();
@@ -325,6 +330,17 @@ public sealed class DurableSupervisionEndToEndTests
       Temperature = 0.25,
       TopK = 28,
       Thinking = "max"
+    };
+    inferenceProfiles["software-development"] = inferenceProfiles["software-development"] with
+    {
+      Temperature = 0.57,
+      TopP = 0.81,
+      TopK = 17,
+      MinP = 0.04,
+      RepeatPenalty = 1.13,
+      RepeatLastN = 96,
+      Seed = 271828,
+      Thinking = workerThinking
     };
     using var configured = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with { InferenceProfiles = inferenceProfiles });
@@ -352,7 +368,7 @@ public sealed class DurableSupervisionEndToEndTests
         new
         {
           message = objective,
-          model = "qwen3-coder:30b",
+          model = "gpt-oss:20b",
           history = Array.Empty<object>(),
           interactionMode = "execute",
           harness = "native",
@@ -388,6 +404,21 @@ public sealed class DurableSupervisionEndToEndTests
       string.Join("; ", _environment.FakeOllama.Requests.Select(request =>
         $"{request.Model}: temperature={request.Temperature}, topK={request.TopK}")));
 
+    var workers = _environment.FakeOllama.Requests.Where(request => request.Messages.Any(message =>
+      message.Content.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal))).ToArray();
+    Assert.IsNotEmpty(workers);
+    foreach (var worker in workers)
+    {
+      Assert.AreEqual(0.57, worker.Temperature);
+      Assert.AreEqual(0.81, worker.TopP);
+      Assert.AreEqual(17, worker.TopK);
+      Assert.AreEqual(0.04, worker.MinP);
+      Assert.AreEqual(1.13, worker.RepeatPenalty);
+      Assert.AreEqual(96, worker.RepeatLastN);
+      Assert.AreEqual(271828, worker.Seed);
+      Assert.AreEqual(workerThinking == "auto" ? null : workerThinking, worker.Think);
+    }
+
     _environment.FakeOllama.Reset();
     ResetSupervisionFixture();
     const string directObjective = """
@@ -404,7 +435,7 @@ public sealed class DurableSupervisionEndToEndTests
       new
       {
         message = "/direct " + directObjective,
-        model = "qwen3-coder:30b",
+        model = "gpt-oss:20b",
         history = Array.Empty<object>(),
         interactionMode = "execute",
         harness = "native",
@@ -435,6 +466,7 @@ public sealed class DurableSupervisionEndToEndTests
   {
     _environment.FakeOllama.Reset();
     ResetSupervisionFixture();
+    var workspaceId = await EnableHistoryAsync();
     using var client = new HttpClient
     {
       BaseAddress = _environment.BaseUri,
@@ -486,6 +518,11 @@ public sealed class DurableSupervisionEndToEndTests
         StringComparison.OrdinalIgnoreCase
       )
     );
+    Assert.IsTrue(run["durable"]!.GetValue<bool>());
+    Assert.IsNull(run["takeover"]!["validationStatus"]);
+    var checkpointPath = Path.Combine(_environment.DataDirectory, "workspaces", workspaceId,
+      "supervision", run["conversationSessionId"]!.GetValue<string>(), run["runId"]!.GetValue<string>() + ".json");
+    Assert.IsTrue(File.Exists(checkpointPath), "The takeover must pass checkpoint validation and persist.");
     Assert.AreEqual(6, run["takeover"]!["detectedPlanSteps"]!.GetValue<int>());
     Assert.AreEqual(5, run["takeover"]!["maximumDirectPlanSteps"]!.GetValue<int>());
     Assert.AreEqual(
@@ -1144,13 +1181,12 @@ public sealed class DurableSupervisionEndToEndTests
       var limit = Page.Locator("#max-direct-plan-steps");
       await Expect(limit).ToHaveValueAsync("5");
       await Expect(Page.Locator("#phase-effort-plan")).ToHaveValueAsync("high");
-      await Expect(Page.Locator("#phase-effort-work")).ToHaveValueAsync("medium");
+      await Expect(Page.Locator("#phase-effort-work")).ToHaveCountAsync(0);
       await Expect(Page.Locator("#phase-effort-verify")).ToHaveValueAsync("medium");
       await Expect(Page.Locator("#phase-effort-complete")).ToHaveValueAsync("low");
       await Expect(Page.Locator("#phase-effort-recovery")).ToHaveValueAsync("high");
       await limit.FillAsync("6");
       await Page.Locator("#phase-effort-plan").SelectOptionAsync("low");
-      await Page.Locator("#phase-effort-work").SelectOptionAsync("high");
       await Page.Locator("#phase-effort-verify").SelectOptionAsync("low");
       await Page.Locator("#phase-effort-complete").SelectOptionAsync("high");
       await Page.Locator("#phase-effort-recovery").SelectOptionAsync("medium");
@@ -1168,7 +1204,7 @@ public sealed class DurableSupervisionEndToEndTests
       );
       var effort = saved["execution"]!["phaseEffort"]!;
       Assert.AreEqual("low", effort["plan"]!.GetValue<string>());
-      Assert.AreEqual("high", effort["work"]!.GetValue<string>());
+      Assert.AreEqual(original["execution"]!["phaseEffort"]!["work"]!.GetValue<string>(), effort["work"]!.GetValue<string>());
       Assert.AreEqual("low", effort["verify"]!.GetValue<string>());
       Assert.AreEqual("high", effort["complete"]!.GetValue<string>());
       Assert.AreEqual("medium", effort["recovery"]!.GetValue<string>());
@@ -1214,9 +1250,11 @@ public sealed class DurableSupervisionEndToEndTests
   }
 
   [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
   [DoNotParallelize]
   [Timeout(90_000, CooperativeCancellation = true)]
-  public async Task SupervisionAppliesConfiguredEffortToEachPhaseAndRecovery()
+  public async Task SupervisorPhaseEffortAndWorkerTaskThinkingStaySeparateDuringRecovery(bool none)
   {
     using var originalResponse = await _environment.HttpClient.GetAsync("api/settings");
     originalResponse.EnsureSuccessStatusCode();
@@ -1226,13 +1264,15 @@ public sealed class DurableSupervisionEndToEndTests
     var configured = original.DeepClone().AsObject();
     configured["execution"]!["phaseEffort"] = new JsonObject
     {
-      ["plan"] = "low",
+      ["plan"] = none ? "none" : "low",
       ["work"] = "high",
-      ["verify"] = "low",
+      ["verify"] = none ? "none" : "low",
       ["complete"] = "high",
-      ["recovery"] = "medium"
+      ["recovery"] = none ? "none" : "medium"
     };
     configured["inferenceProfiles"]!["supervisor"]!["thinking"] = "max";
+    configured["inferenceProfiles"]!["software-development"]!["thinking"] = "low";
+    configured["inferenceProfiles"]!["software-development"]!["temperature"] = 0.47;
 
     try
     {
@@ -1243,12 +1283,14 @@ public sealed class DurableSupervisionEndToEndTests
       saveResponse.EnsureSuccessStatusCode();
       _environment.FakeOllama.Reset();
       ResetSupervisionFixture();
+      _environment.FakeOllama.BooleanThinkingForGptOss = none;
       using var prepareResponse = await _environment.HttpClient.PostAsJsonAsync(
         "api/supervision/runs/prepare",
         new
         {
           objective = "create file hello.txt with exact text hello world today",
           model = "gpt-oss:20b",
+          thinking = none ? "none" : (string?)null,
           harness = "native",
           approvalPolicy = "auto",
           resumePolicy = "manual",
@@ -1281,10 +1323,14 @@ public sealed class DurableSupervisionEndToEndTests
       Assert.IsTrue(run["terminal"]!.GetValue<bool>(), run.ToJsonString());
       Assert.AreEqual("completed", run["state"]!.GetValue<string>());
       var requests = _environment.FakeOllama.Requests;
-      AssertEffort("SUPERVISION_DECOMPOSE_V1", "low");
-      AssertEffort("SUPERVISION_WORKER_V1", "high");
-      AssertEffort("SUPERVISION_VERIFY_V1", "low");
-      AssertEffort("SUPERVISION_CORRECTION_V1", "medium");
+      AssertEffort("SUPERVISION_DECOMPOSE_V1", none ? "False" : "low");
+      AssertEffort("SUPERVISION_WORKER_V1", none ? "False" : "low");
+      AssertEffort("SUPERVISION_VERIFY_V1", none ? "False" : "low");
+      AssertEffort("SUPERVISION_CORRECTION_V1", none ? "False" : "low");
+      Assert.IsTrue(requests.Where(request => request.Messages.Any(message =>
+        message.Content.Contains("SUPERVISION_WORKER_V1", StringComparison.Ordinal)
+          || message.Content.Contains("SUPERVISION_CORRECTION_V1", StringComparison.Ordinal)))
+        .All(request => request.Temperature == 0.47));
       Assert.IsFalse(requests.Any(request => request.Messages.Any(message =>
         message.Content.Contains("SUPERVISION_COMPLETE_V1", StringComparison.Ordinal)
       )));
@@ -1304,6 +1350,7 @@ public sealed class DurableSupervisionEndToEndTests
     }
     finally
     {
+      _environment.FakeOllama.BooleanThinkingForGptOss = false;
       using var restoreResponse = await _environment.HttpClient.PutAsJsonAsync(
         "api/settings",
         original
@@ -1836,7 +1883,7 @@ public sealed class DurableSupervisionEndToEndTests
     );
     StringAssert.Contains(
       run["runtime"]!["lastFailure"]!.GetValue<string>(),
-      "output-token limit again"
+      "bounded Host correction budget"
     );
     Assert.HasCount(
       2,
@@ -2142,6 +2189,17 @@ public sealed class DurableSupervisionEndToEndTests
 
     var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
     Assert.AreEqual("completed", completed["state"]!.GetValue<string>());
+    var inferenceBySession = completed["runtime"]!["inferenceMetricsBySession"]!.AsObject();
+    Assert.IsGreaterThanOrEqualTo(3, inferenceBySession.Count,
+      "Decomposition, worker and verification inference must all contribute.");
+    var outputTokens = inferenceBySession.Sum(item => item.Value!["outputTokens"]!.GetValue<long>());
+    var generationMilliseconds = inferenceBySession.Sum(item => item.Value!["generationMilliseconds"]!.GetValue<double>());
+    var expectedThroughput = (outputTokens * 1000d / generationMilliseconds)
+      .ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+    await Expect(Page.Locator(".execution-session-footer [data-metric=tokens]").Last)
+      .ToContainTextAsync(outputTokens.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    await Expect(Page.Locator(".execution-session-footer [data-metric=throughput]").Last)
+      .ToContainTextAsync(expectedThroughput);
     using var sessionsResponse = await _environment.HttpClient.GetAsync("api/sessions");
     sessionsResponse.EnsureSuccessStatusCode();
     var sessions = JsonNode.Parse(
@@ -2190,6 +2248,51 @@ public sealed class DurableSupervisionEndToEndTests
     Assert.AreEqual(runId, completedRuns[0]["runId"]!.GetValue<string>());
     Assert.AreEqual("completed", completedRuns[0]["state"]!.GetValue<string>());
     Assert.IsTrue(completedRuns[0]["terminal"]!.GetValue<bool>());
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task BrowserReattachesDurableSupervisionAfterHostRestart()
+  {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
+    _ = await EnableHistoryAsync();
+    await Page.GotoAsync("/");
+    await Page.GetByRole(AriaRole.Button, new() { Name = "Execute", Exact = true })
+      .ClickAsync();
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await Page.Locator("#message-input").FillAsync(
+      "/supervisor supervision restart boundary"
+    );
+    await Page.Locator("#send-button").ClickAsync();
+
+    JsonObject? active = null;
+    var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+    do
+    {
+      var runs = await _environment.HttpClient.GetFromJsonAsync<JsonObject>(
+        "api/supervision/runs"
+      );
+      active = runs?["runs"]?.AsArray().Select(item => item!.AsObject())
+        .FirstOrDefault(run => run["objective"]?.GetValue<string>()
+          == "supervision restart boundary"
+          && run["phase"]?.GetValue<string>() == "verifying");
+      if (active is not null) break;
+      await Task.Delay(50);
+    } while (DateTimeOffset.UtcNow < deadline);
+    Assert.IsNotNull(active);
+    var runId = active["runId"]!.GetValue<string>();
+
+    await _environment.RestartApplicationAsync();
+    var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(40));
+    Assert.AreEqual("completed", completed["state"]!.GetValue<string>());
+    await Expect(Page.Locator(".assistant-answer").Last).ToContainTextAsync(
+      "Completed and verified from current Host evidence",
+      new() { Timeout = 40_000 }
+    );
+    await Expect(Page.Locator("#server-connection-status")).ToBeHiddenAsync();
+    await DiscardAsync(runId);
   }
 
   [TestMethod]
@@ -2592,6 +2695,40 @@ public sealed class DurableSupervisionEndToEndTests
 
   [TestMethod]
   [Timeout(40_000, CooperativeCancellation = true)]
+  public async Task BriefPreambleBeforeOneCanonicalDecisionIsAccepted()
+  {
+    _environment.FakeOllama.Reset();
+    var runId = await StartNativeSupervisionAsync("prefixed supervision decision");
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+
+    Assert.AreEqual("completed", run["state"]!.GetValue<string>(), run.ToJsonString());
+    using var eventResponse = await _environment.HttpClient.GetAsync(
+      $"api/supervision/runs/{runId}/events?follow=false"
+    );
+    eventResponse.EnsureSuccessStatusCode();
+    var events = ParseSseEvents(await eventResponse.Content.ReadAsStringAsync());
+    Assert.IsFalse(events.Any(item => item["type"]!.GetValue<string>()
+      == "supervision.turn-canonical-recovery"));
+  }
+
+  [TestMethod]
+  [Timeout(40_000, CooperativeCancellation = true)]
+  public async Task MultipleObjectsAfterPreambleRemainMalformed()
+  {
+    _environment.FakeOllama.Reset();
+    var runId = await StartNativeSupervisionAsync("ambiguous prefixed supervision decision");
+    var run = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+
+    Assert.AreEqual("blocked", run["state"]!.GetValue<string>());
+    Assert.AreEqual("supervision-decision-malformed", run["waitCode"]!.GetValue<string>());
+    var decompositionRequests = _environment.FakeOllama.Requests.Count(request =>
+      request.Messages.Any(message => message.Content.Contains(
+        "SUPERVISION_DECOMPOSE_V1", StringComparison.Ordinal)));
+    Assert.AreEqual(2, decompositionRequests);
+  }
+
+  [TestMethod]
+  [Timeout(40_000, CooperativeCancellation = true)]
   public async Task InvalidVerificationDecisionUsesOneCanonicalCorrection()
   {
     _environment.FakeOllama.Reset();
@@ -2887,9 +3024,11 @@ public sealed class DurableSupervisionEndToEndTests
 
   [TestMethod]
   [Timeout(45_000, CooperativeCancellation = true)]
-  public async Task ClaudeCodeSupervisorRecoversOutputTokenLimitInFreshNativeSession()
+  public async Task ClaudeCodeSupervisorRecoversOutputTokenLimitInTheSameNativeSession()
   {
     ResetSupervisionFixture();
+    var promptLog = Path.Combine(_environment.DataDirectory, "claude-code-runtime", "fake-claude-supervisor-output.jsonl");
+    if (File.Exists(promptLog)) File.Delete(promptLog);
     using var response = await _environment.HttpClient.PostAsJsonAsync(
       "api/chat/stream",
       new
@@ -2908,11 +3047,13 @@ public sealed class DurableSupervisionEndToEndTests
     var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
 
     Assert.HasCount(
-      1,
+      0,
       events.Where(item =>
         item["type"]!.GetValue<string>() == "supervision.turn-harness-recovery"
       )
     );
+    Assert.HasCount(1, events.Where(item => item["type"]!.GetValue<string>() == "harness.output-limit-recovery-started"));
+    Assert.HasCount(1, events.Where(item => item["type"]!.GetValue<string>() == "harness.output-limit-recovery-completed"));
     Assert.HasCount(0, events.Where(item => item["type"]!.GetValue<string>() == "error"));
     Assert.HasCount(
       1,
@@ -2929,15 +3070,23 @@ public sealed class DurableSupervisionEndToEndTests
       "claude-code-runtime",
       "fake-claude-harness-recovery.json"
     )));
-    Assert.IsFalse(recoveryMarker.RootElement.GetProperty("resumed").GetBoolean());
+    Assert.IsTrue(recoveryMarker.RootElement.GetProperty("resumed").GetBoolean());
     Assert.IsTrue(
       recoveryMarker.RootElement.GetProperty("promptContainsRecoveryMarker").GetBoolean()
     );
+    var prompts = (await File.ReadAllLinesAsync(promptLog)).Select(line => JsonNode.Parse(line)!).ToArray();
+    Assert.HasCount(5, prompts, "One worker turn and four Supervisor turns, including one bounded continuation.");
+    Assert.HasCount(1, prompts.Where(prompt => prompt["worker"]!.GetValue<bool>()));
+    Assert.HasCount(1, prompts.Where(prompt => prompt["outputRecovery"]!.GetValue<bool>()));
+    var supervisors = prompts.Where(prompt => !prompt["worker"]!.GetValue<bool>()).ToArray();
+    Assert.HasCount(1, supervisors.Select(prompt => prompt["nativeSessionId"]!.GetValue<string>()).Distinct());
+    Assert.AreNotEqual(supervisors[0]["nativeSessionId"]!.GetValue<string>(),
+      prompts.Single(prompt => prompt["worker"]!.GetValue<bool>())["nativeSessionId"]!.GetValue<string>());
   }
 
   [TestMethod]
   [Timeout(45_000, CooperativeCancellation = true)]
-  public async Task RepeatedClaudeCodeOutputTokenLimitRetainsTypedTerminalCode()
+  public async Task RepeatedClaudeCodeOutputTokenLimitUsesGlobalRecoveryAndTypedTerminalCode()
   {
     ResetSupervisionFixture();
     using var response = await _environment.HttpClient.PostAsJsonAsync(
@@ -2958,7 +3107,7 @@ public sealed class DurableSupervisionEndToEndTests
     var events = ParseSseEvents(await response.Content.ReadAsStringAsync());
 
     Assert.HasCount(
-      1,
+      0,
       events.Where(item =>
         item["type"]!.GetValue<string>() == "supervision.turn-harness-recovery"
       )
@@ -2966,17 +3115,17 @@ public sealed class DurableSupervisionEndToEndTests
     var terminal = events.Single(item => item["type"]!.GetValue<string>() == "error");
     var error = terminal["error"]!.AsObject();
     Assert.AreEqual(
-      "claude-code-output-token-limit",
+      "harness-output-limit-exhausted",
       error["code"]!.GetValue<string>()
     );
     StringAssert.Contains(
       error["message"]!.GetValue<string>(),
-      "exceeded its configured output-token limit"
+      "recovery budget was consumed"
     );
     var runId = error["details"]!["runId"]!.GetValue<string>();
     var run = await GetRunAsync(runId);
     Assert.AreEqual(
-      "claude-code-output-token-limit",
+      "harness-output-limit-exhausted",
       run["waitCode"]!.GetValue<string>()
     );
     using var traceResponse = await _environment.HttpClient.GetAsync(
@@ -2985,7 +3134,7 @@ public sealed class DurableSupervisionEndToEndTests
     traceResponse.EnsureSuccessStatusCode();
     var trace = JsonNode.Parse(await traceResponse.Content.ReadAsStringAsync())!.AsObject();
     Assert.AreEqual(
-      "claude-code-output-token-limit",
+      "harness-output-limit-exhausted",
       trace["failureCode"]!.GetValue<string>()
     );
   }
@@ -3318,7 +3467,7 @@ public sealed class DurableSupervisionEndToEndTests
   [TestMethod]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task DurableManualRunRestoresInterruptedAndResumesToCompletion()
+  public async Task DurableManualRunAutoResumesWhenReconciliationIsSafe()
   {
     _environment.FakeOllama.Reset();
     var workspaceId = await EnableHistoryAsync();
@@ -3385,34 +3534,6 @@ public sealed class DurableSupervisionEndToEndTests
     Assert.IsFalse(checkpointText.Contains("originalContent", StringComparison.OrdinalIgnoreCase));
 
     await _environment.RestartApplicationAsync();
-    var restored = await WaitForStateAsync(
-      runId,
-      "interrupted-recoverable",
-      TimeSpan.FromSeconds(10)
-    );
-    Assert.AreEqual(
-      "interrupted-recoverable",
-      restored["state"]!.GetValue<string>()
-    );
-    Assert.IsFalse(
-      restored["autoResumeEligible"]!.GetValue<bool>()
-    );
-    Assert.HasCount(0, _environment.FakeOllama.Requests);
-
-    using var resumedResponse = await _environment.HttpClient.PostAsJsonAsync(
-      $"api/supervision/runs/{runId}/resume",
-      new
-      {
-        browserSessionId = Guid.NewGuid().ToString("N")
-      }
-    );
-    resumedResponse.EnsureSuccessStatusCode();
-    var resumed = JsonNode.Parse(
-      await resumedResponse.Content.ReadAsStringAsync()
-    )!.AsObject();
-    Assert.IsTrue(
-      resumed["state"]!.GetValue<string>() is "running" or "completed"
-    );
     var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
     Assert.AreEqual("completed", completed["state"]!.GetValue<string>());
     Assert.IsGreaterThan(0, _environment.FakeOllama.Requests.Count);
@@ -3726,14 +3847,16 @@ public sealed class DurableSupervisionEndToEndTests
     _ = await EnableHistoryAsync();
     var prepared = await PrepareAsync("manual");
     var runId = prepared["runId"]!.GetValue<string>();
+    var instructionsPath = Path.Combine(_environment.WorkspaceDirectory, "AGENTS.md");
+    await File.WriteAllTextAsync(instructionsPath, "# Changed after checkpoint\n");
 
     await _environment.RestartApplicationAsync();
     var restored = await WaitForStateAsync(
       runId,
-      "interrupted-recoverable",
+      "awaiting-user",
       TimeSpan.FromSeconds(10)
     );
-    Assert.AreEqual("interrupted-recoverable", restored["state"]!.GetValue<string>());
+    Assert.AreEqual("awaiting-user", restored["state"]!.GetValue<string>());
     await Page.GotoAsync("/");
 
     var browserRuns = await Page.EvaluateAsync<string>(
@@ -3748,6 +3871,12 @@ public sealed class DurableSupervisionEndToEndTests
     await Expect(card).ToContainTextAsync("qwen3-coder:30b × Native");
     await Expect(card.GetByRole(AriaRole.Button, new() { Name = "Resume" }))
       .ToBeVisibleAsync();
+    await Expect(Page.Locator("#supervision-recovery-notice")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#supervision-recovery-instructions"))
+      .ToContainTextAsync("Review the changed files or repository instructions");
+    await Page.Locator("#toggle-sidebar").ClickAsync();
+    await Expect(Page.Locator("#supervision-recovery-notice")).ToBeVisibleAsync();
+    await Page.Locator("#toggle-sidebar").ClickAsync();
 
     await card.GetByRole(AriaRole.Button, new() { Name = "Discard" }).ClickAsync();
     await Expect(Page.Locator("#app-modal")).ToBeVisibleAsync();
@@ -3764,6 +3893,30 @@ public sealed class DurableSupervisionEndToEndTests
     );
     Assert.AreEqual(HttpStatusCode.NotFound, missing.StatusCode);
     Assert.HasCount(0, _environment.FakeOllama.Requests);
+    File.Delete(instructionsPath);
+  }
+
+  [TestMethod]
+  [DoNotParallelize]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task BrowserRetriesServerFiveTimesThenHealthChecksAndReconnects()
+  {
+    await Page.GotoAsync("/");
+    const string path = "**/api/recovery/status";
+    await Page.RouteAsync(path, route => route.AbortAsync());
+    await Page.ReloadAsync();
+
+    await Expect(Page.Locator("#app-loader-detail"))
+      .ToContainTextAsync("1/5", new() { Timeout = 10_000 });
+    await Expect(Page.Locator("#app-loader-detail"))
+      .ToContainTextAsync("5/5", new() { Timeout = 30_000 });
+    await Expect(Page.Locator("#app-loader-detail"))
+      .ToContainTextAsync("every 30 seconds", new() { Timeout = 10_000 });
+
+    await Page.UnrouteAsync(path);
+    await Expect(Page.Locator("#app-loader"))
+      .ToBeHiddenAsync(new() { Timeout = 45_000 });
+    await Expect(Page.Locator("#server-connection-status")).ToBeHiddenAsync();
   }
 
   [TestMethod]
@@ -3771,6 +3924,8 @@ public sealed class DurableSupervisionEndToEndTests
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task VersionFourCheckpointMigratesWithoutLosingRecoveryState()
   {
+    _environment.FakeOllama.Reset();
+    ResetSupervisionFixture();
     var workspaceId = await EnableHistoryAsync();
     var conversationId = Guid.NewGuid().ToString("N");
     var prepared = await PrepareAsync("manual", conversationId);
@@ -3811,24 +3966,42 @@ public sealed class DurableSupervisionEndToEndTests
       }
     ));
     StringAssert.Contains(persisted, "+00:00");
-    await _environment.RestartApplicationAsync(
-      () => File.WriteAllTextAsync(checkpointPath, persisted)
-    );
+    var instructionsPath = Path.Combine(_environment.WorkspaceDirectory, "AGENTS.md");
+    var originalInstructions = File.Exists(instructionsPath) ? await File.ReadAllBytesAsync(instructionsPath) : null;
+    JsonObject restored;
+    try
+    {
+      await _environment.RestartApplicationAsync(async () =>
+      {
+        await File.WriteAllTextAsync(checkpointPath, persisted);
+        // Stop at an existing instruction-drift boundary so migration can be
+        // checked before automatic resume legitimately increments telemetry.
+        await File.WriteAllTextAsync(instructionsPath, "# Changed at migration verification boundary\n");
+      });
+      restored = await WaitForStateAsync(runId, "awaiting-user", TimeSpan.FromSeconds(10));
+      Assert.AreEqual("supervision-recovery-instructions-changed", restored["waitCode"]!.GetValue<string>());
+      Assert.AreEqual(runId, restored["runId"]!.GetValue<string>());
+      Assert.AreEqual(conversationId, restored["conversationSessionId"]!.GetValue<string>());
+      Assert.IsNotNull(restored["runtime"]!["telemetry"]);
+      Assert.AreEqual(0, restored["runtime"]!["telemetry"]!["workerAttemptCount"]!.GetValue<int>());
+      Assert.HasCount(0, _environment.FakeOllama.Requests);
+      var migrated = JsonNode.Parse(await File.ReadAllTextAsync(checkpointPath))!;
+      Assert.AreEqual(5, migrated["schemaVersion"]!.GetValue<int>());
+      Assert.IsFalse(string.IsNullOrWhiteSpace(migrated["integritySha256"]!.GetValue<string>()));
+    }
+    finally
+    {
+      if (originalInstructions is null) File.Delete(instructionsPath);
+      else await File.WriteAllBytesAsync(instructionsPath, originalInstructions);
+    }
 
-    using var restoredResponse = await _environment.HttpClient.GetAsync(
-      $"api/supervision/runs/{runId}"
-    );
-    Assert.AreEqual(
-      HttpStatusCode.OK,
-      restoredResponse.StatusCode,
-      _environment.ApiOutput
-    );
-    var restored = JsonNode.Parse(
-      await restoredResponse.Content.ReadAsStringAsync()
-    )!.AsObject();
-    Assert.AreEqual("interrupted-recoverable", restored["state"]!.GetValue<string>());
-    Assert.IsNotNull(restored["runtime"]!["telemetry"]);
-    Assert.AreEqual(0, restored["runtime"]!["telemetry"]!["workerAttemptCount"]!.GetValue<int>());
+    using var resumed = await _environment.HttpClient.PostAsJsonAsync($"api/supervision/runs/{runId}/resume",
+      new { browserSessionId = Guid.NewGuid().ToString("N") });
+    resumed.EnsureSuccessStatusCode();
+    var completed = await WaitForTerminalAsync(runId, TimeSpan.FromSeconds(30));
+    Assert.AreEqual("completed", completed["state"]!.GetValue<string>(), completed.ToJsonString());
+    Assert.IsTrue(File.Exists(Path.Combine(_environment.WorkspaceDirectory, "hello.txt")));
+    await DiscardAsync(runId);
   }
 
   [TestMethod]

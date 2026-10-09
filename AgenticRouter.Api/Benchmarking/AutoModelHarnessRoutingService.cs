@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers;
@@ -18,8 +19,21 @@ public interface IAutoModelHarnessRoutingService
 
 public sealed class AutoModelHarnessRoutingService : IAutoModelHarnessRoutingService
 {
-  public const string RouterVersion = "auto-model-harness-router-v2";
+  public const string RouterVersion = "auto-model-harness-router-v3";
   private const int MaximumRetainedSessionRoutes = 100;
+
+  // Only an affirmative request about our response/execution expresses a speed
+  // preference. Performance of the application under review is task subject matter.
+  private static readonly Regex ExecutionSpeedPreference = new(
+    @"(?:^|[.;!?,\r\n])\s*(?:please\s+|por\s+favor\s+)?(?:"
+      + @"respond\s+(?:quickly|fast)|responda\s+(?:rapidamente|r[aá]pido)"
+      + @"|prioritize\s+(?:response|execution)\s+speed"
+      + @"|priorize\s+(?:a\s+)?(?:velocidade|rapidez)\s+(?:da|de)\s+(?:resposta|execu[cç][aã]o)"
+      + @"|(?:use|choose)\s+the\s+fastest\s+harness"
+      + @"|(?:use|escolha)\s+o\s+harness\s+mais\s+r[aá]pido)\b",
+    RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+    TimeSpan.FromMilliseconds(50)
+  );
 
   private static readonly (string Category, string[] Terms)[] CategoryTerms =
   [
@@ -34,10 +48,6 @@ public sealed class AutoModelHarnessRoutingService : IAutoModelHarnessRoutingSer
     (
       BenchmarkRecommendationCategoryIds.ExactFilesystem,
       ["file", "folder", "directory", "rename", "delete", "create", "edit", "path", "arquivo", "pasta", "diretório", "renome", "exclu", "crie", "edite", "caminho"]
-    ),
-    (
-      BenchmarkRecommendationCategoryIds.EfficiencyFirst,
-      ["fast", "faster", "speed", "efficient", "performance", "rápid", "veloc", "efici", "desempenho"]
     ),
     (
       BenchmarkRecommendationCategoryIds.TerminalityFirst,
@@ -201,6 +211,10 @@ public sealed class AutoModelHarnessRoutingService : IAutoModelHarnessRoutingSer
   internal static string Classify(string task)
   {
     var normalized = task.Trim().ToLowerInvariant();
+    if (ExecutionSpeedPreference.IsMatch(normalized))
+    {
+      return BenchmarkRecommendationCategoryIds.EfficiencyFirst;
+    }
     foreach (var (category, terms) in CategoryTerms)
     {
       if (terms.Any(term => ContainsTerm(normalized, term)))

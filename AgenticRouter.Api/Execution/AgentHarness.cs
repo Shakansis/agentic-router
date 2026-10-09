@@ -264,6 +264,9 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         request.WorkingDirectory,
         hostBridgeTools
       );
+      active.UsageState = harnessSession;
+      active.OutputTokensAtStart = harnessSession.OutputTokens;
+      harnessSession.OutputTokens = null;
 
       if (!_activeByThread.TryAdd(threadId, active))
       {
@@ -285,7 +288,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         ["runtimeWorkspaceRoots"] = new[] { request.WorkingDirectory },
         ["model"] = request.Model
       };
-      if (request.ModelSupportsReasoning)
+      if (request.ModelSupportsReasoning && request.RequestedEffort is not null)
       {
         turnParameters["effort"] = request.RequestedEffort;
       }
@@ -312,7 +315,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         ),
         turnResult
       );
-      yield return CreateEvent(
+      if (request.RequestedEffort is not null) yield return CreateEvent(
         active,
         new HarnessEvent(
           request.ModelSupportsReasoning
@@ -536,35 +539,54 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       );
     }
 
-    var result = await SendRequestAsync(
-      "turn/steer",
-      new
-      {
-        threadId = active.ThreadId,
-        input = CreateTurnInput(request.Message, null),
-        expectedTurnId = active.TurnId
-      },
-      _options.InterruptTimeout,
-      cancellationToken
-    );
-    var returnedTurnId = RequiredString(result, "turnId");
-    if (!string.Equals(returnedTurnId, active.TurnId, StringComparison.Ordinal))
+    await active.SteeringGate.WaitAsync(cancellationToken);
+    try
     {
-      throw new HarnessException(
-        "codex-steer-turn-mismatch",
-        "Codex accepted steering for a different turn.",
-        $"Expected turn {active.TurnId}, received {returnedTurnId}.",
-        false
+      if (active.Completed || !ReferenceEquals(_activeByThread.GetValueOrDefault(active.ThreadId), active))
+        throw new HarnessException("codex-steer-stale", "The Codex turn has already ended.", "The active turn is no longer available.", true);
+      if (active.AcceptedMessages.TryGetValue(request.MessageId, out var accepted))
+      {
+        if (!string.Equals(accepted, request.Message, StringComparison.Ordinal))
+          throw new HarnessException("codex-steer-conflict", "This steering identifier already belongs to a different message.", "The steering message identifier was reused with different content.", true);
+        return new(HarnessIds.Codex, request.SessionId, active.TurnId, request.MessageId, true);
+      }
+
+      var result = await SendRequestAsync(
+        "turn/steer",
+        new
+        {
+          threadId = active.ThreadId,
+          input = CreateTurnInput(request.Message, null),
+          clientUserMessageId = request.MessageId,
+          expectedTurnId = active.TurnId
+        },
+        _options.InterruptTimeout,
+        cancellationToken
+      );
+      var returnedTurnId = GetString(result, "turnId");
+      if (returnedTurnId is null || !string.Equals(returnedTurnId, active.TurnId, StringComparison.Ordinal))
+      {
+        throw new HarnessException(
+          "codex-steer-turn-mismatch",
+          "Codex accepted steering for a different turn.",
+          $"Expected turn {active.TurnId}, received {returnedTurnId}.",
+          false
+        );
+      }
+
+      active.AcceptedMessages[request.MessageId] = request.Message;
+      return new HarnessSteerResult(
+        HarnessIds.Codex,
+        request.SessionId,
+        returnedTurnId,
+        request.MessageId,
+        true
       );
     }
-
-    return new HarnessSteerResult(
-      HarnessIds.Codex,
-      request.SessionId,
-      returnedTurnId,
-      request.MessageId,
-      true
-    );
+    finally
+    {
+      active.SteeringGate.Release();
+    }
   }
 
   public async ValueTask DisposeAsync()
@@ -656,7 +678,9 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       startInfo.Environment["CODEX_HOME"] = _options.RuntimeDirectory;
       var ollamaAuthority = ollamaUrl.GetLeftPart(UriPartial.Authority);
       startInfo.Environment["OLLAMA_HOST"] = ollamaAuthority;
-      startInfo.Environment["CODEX_OSS_BASE_URL"] = $"{ollamaAuthority.TrimEnd('/')}/v1";
+      startInfo.Environment["CODEX_OSS_BASE_URL"] = request.InferenceEndpoint is null
+        ? $"{ollamaAuthority.TrimEnd('/')}/v1"
+        : HarnessInferenceObserver.V1Endpoint(request.InferenceEndpoint);
 
       var process = new Process
       {
@@ -1298,13 +1322,19 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
             "last",
             "totalTokens"
           );
-          if (contextInputTokens is > 0 || contextTotalTokens is > 0)
+          var totalOutputTokens = GetInt64(parameters, "tokenUsage", "total", "outputTokens");
+          var outputTokens = totalOutputTokens >= active.OutputTokensAtStart
+            ? totalOutputTokens - active.OutputTokensAtStart : null;
+          if (totalOutputTokens is >= 0 && active.UsageState is not null)
+            active.UsageState.OutputTokens = totalOutputTokens.Value;
+          if (contextInputTokens is > 0 || contextTotalTokens is > 0 || totalOutputTokens is not null)
           {
             active.Events.Writer.TryWrite(CreateEvent(
               active,
               new HarnessEvent(
                 "usage.updated",
                 "Codex reported live active-context usage.",
+                outputTokens: outputTokens,
                 contextInputTokens: contextInputTokens,
                 contextTotalTokens: contextTotalTokens,
                 contextWindowTokens: GetInt64(
@@ -1621,6 +1651,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       + "[feedback]\n"
       + "enabled = false\n\n"
       + "[features]\n"
+      + "instant_interrupt = true\n"
       + "shell_tool = false\n"
       + "unified_exec = false\n"
       + "memories = false\n"
@@ -1689,6 +1720,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
             effort,
             description = effort switch
             {
+              ModelEffortLevels.None => "Disable optional reasoning where the model supports it",
               ModelEffortLevels.Low => "Fast execution with lighter reasoning",
               ModelEffortLevels.High => "Greater reasoning depth for complex phases",
               _ => "Balanced reasoning for ordinary work"
@@ -2318,6 +2350,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     public CodexContextConfiguration ContextConfiguration { get; } = contextConfiguration;
 
     public long? SynchronizedThroughVersion { get; set; }
+    public long? OutputTokens { get; set; } = 0;
   }
 
   private sealed record CodexContextConfiguration(
@@ -2341,6 +2374,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
   private sealed class ActiveHarnessTurn
   {
+    public HarnessSessionState? UsageState { get; set; }
+    public long? OutputTokensAtStart { get; set; }
     public ActiveHarnessTurn(
       string sessionId,
       string threadId,
@@ -2380,6 +2415,12 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 
     private int _terminalWritten;
 
+    public bool Completed => Volatile.Read(ref _terminalWritten) != 0;
+
+    public SemaphoreSlim SteeringGate { get; } = new(1, 1);
+
+    public Dictionary<string, string> AcceptedMessages { get; } = new(StringComparer.Ordinal);
+
     public bool TryComplete(HarnessEvent terminalEvent)
     {
       if (!terminalEvent.IsTerminal)
@@ -2392,6 +2433,9 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       {
         return false;
       }
+
+      if (terminalEvent.TerminalState != HarnessTerminalState.Completed && UsageState is not null)
+        UsageState.OutputTokens = null;
 
       Events.Writer.TryWrite(terminalEvent);
       Events.Writer.TryComplete();

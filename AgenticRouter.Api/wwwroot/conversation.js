@@ -208,14 +208,7 @@ function handleHarnessChange() {
 }
 
 function harnessDisplayLabel(definition) {
-  if (!definition.experimental) {
-    return definition.displayName;
-  }
-  return definition.id === "opencode"
-    || definition.id === "qwen-code"
-    || definition.id === "claude-code"
-    ? `${definition.displayName} [Experimental]`
-    : `${definition.displayName} (Experimental)`;
+  return definition.displayName;
 }
 
 function renderHarnesses() {
@@ -460,6 +453,8 @@ async function beginEmptyConversation() {
 
 function clearConversationUi() {
   state.latestSavedExecutionReview = null;
+  state.savedExecutionReviews = [];
+  state.conversationWorkspaceId = null;
   state.conversationVersion++;
   state.readOnlyConversation = false;
   state.history = [];
@@ -1511,7 +1506,8 @@ function activeHarnessSupportsSteering() {
     return false;
   }
   const harnessId = state.activeHarness ?? state.harness;
-  return harnessId === "codex" || harnessId === "qwen-code";
+  return state.harnesses?.find(item => item.definition.id === harnessId)
+    ?.definition?.capabilities?.supportsSteering === true;
 }
 
 async function steerBufferedMessage(id) {
@@ -1912,7 +1908,7 @@ async function handleComposerSubmit(event) {
     : null;
   const chatRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
   assistant.chatRunId = chatRunId;
-  rememberLiveChatRun(chatRunId);
+  rememberLiveChatRun(chatRunId, state.conversationSessionId, supervisionRunId);
   assistant.supervisionRunId = supervisionRunId;
   assistant.requestedExecutionStrategy = requestInteractionMode === "execute"
     ? state.executionStrategy
@@ -1946,6 +1942,7 @@ async function handleComposerSubmit(event) {
           model: selectedModel,
           history: modelHistory,
           interactionMode: requestInteractionMode,
+          thinking: elements.thinkingSelector.value || null,
           harness: state.harness,
           approvalPolicy: state.approvalPolicy,
           browserSessionId: state.browserSessionId,
@@ -2343,11 +2340,19 @@ function createRunningIndicator() {
     path.setAttribute("d", pathData);
     svg.append(path);
   }
+  const fill = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  fill.classList.add("assistant-brain-fill");
+  for (const path of [...svg.children]) fill.append(path.cloneNode(true));
+  svg.append(fill);
+
+  const percent = document.createElement("span");
+  percent.className = "assistant-inference-percent";
+  percent.hidden = true;
 
   const activity = document.createElement("span");
   activity.className = "assistant-current-activity";
   activity.textContent = "Thinking…";
-  indicator.append(svg, activity);
+  indicator.append(svg, percent, activity);
   return indicator;
 }
 
@@ -2395,6 +2400,9 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
   completionSummary.className = "execution-completion-summary";
   completionSummary.setAttribute("aria-label", "Host completion summary");
   completionSummary.hidden = true;
+  const completionReport = document.createElement("section");
+  completionReport.className = "execution-completion-summary execution-completion-report";
+  completionReport.hidden = true;
   const workActivity = document.createElement("section");
   workActivity.className = "assistant-work";
   workActivity.hidden = true;
@@ -2430,6 +2438,7 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
     answer,
     runningIndicator,
     completionSummary,
+    completionReport,
     sources,
     details,
     sessionFooter,
@@ -2477,7 +2486,8 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
     reviewButton,
     executionSession: options.executionSession ?? null,
     runningIndicator,
-    completionSummary
+    completionSummary,
+    completionReport
   });
   copyButton.addEventListener(
     "click",
@@ -2550,8 +2560,13 @@ function startElapsedClock(assistant) {
           `${strategy} · ${supervisionPhaseLabel(assistant.supervisionProgress.phase)} · `
           + formatElapsed(elapsedSince(assistant));
       } else {
+        const preparation = {
+          "loading-model": "Loading model",
+          "processing-prompt": "Processing prompt",
+          waiting: "Waiting for model"
+        }[assistant.inferenceProgress?.stage];
         assistant.progress.textContent =
-          `${assistant.activeReasoning ? "Thinking" : "Thinking…"} · `
+          `${preparation ?? (assistant.activeReasoning ? "Thinking" : "Thinking…")} · `
           + formatElapsed(elapsedSince(assistant));
       }
       assistant.lastClockUpdate = timestamp;
@@ -3232,6 +3247,38 @@ function completedActionActivity(kind) {
 }
 
 function renderCurrentActivity(assistant, streamEvent) {
+  const progress = streamEvent.inferenceProgress;
+  const indicator = assistant.runningIndicator;
+  if (progress) {
+    assistant.inferenceProgress = progress;
+    const preparing = progress.stage !== "generating";
+    indicator.classList.toggle("inference-preparing", preparing);
+    indicator.dataset.inferenceStage = progress.stage;
+    const percent = preparing && Number.isFinite(progress.percent)
+      ? Math.max(0, Math.min(100, progress.percent)) : null;
+    indicator.style.setProperty("--inference-percent", `${percent ?? 0}%`);
+    const value = indicator.querySelector(".assistant-inference-percent");
+    value.hidden = percent === null;
+    value.textContent = percent === null ? "" : `${Math.round(percent)}%`;
+    indicator.title = progress.unavailableReason ?? "";
+    setCurrentActivity(assistant, {
+      "loading-model": "Loading model",
+      "processing-prompt": "Processing prompt",
+      waiting: "Waiting for model",
+      generating: "Thinking"
+    }[progress.stage] ?? "Thinking", false);
+    return;
+  }
+  if (["response.delta", "reasoning.delta", "response.completed", "error", "request.cancelled"].includes(streamEvent.type)
+    || streamEvent.localAction) {
+    indicator.classList.remove("inference-preparing");
+    assistant.inferenceProgress = null;
+    delete indicator.dataset.inferenceStage;
+    indicator.querySelector(".assistant-inference-percent").hidden = true;
+    indicator.title = "";
+  } else if (indicator.classList.contains("inference-preparing")) {
+    return;
+  }
   const label = assistant.runningIndicator.querySelector(".assistant-current-activity");
   const action = streamEvent.localAction;
   if (action && ["proposed", "approved", "executing", "awaiting-approval"].includes(action.state)) {
@@ -3594,4 +3641,3 @@ function addUserInputTranscript(assistant, streamEvent) {
   });
   assistant.workActivity.append(card);
 }
-

@@ -29,15 +29,16 @@ internal static class HarnessConversationPromptBuilder
       "- Report only actions and results that actually occurred.\n"
     );
     builder.Append(
-      "- When a granted tool is needed, call it immediately. Do not draft, preview, or repeat the tool arguments in reasoning or visible prose; place the complete arguments only in the tool call.\n"
+      "- " + ExecutionProgressPolicy.ImmediateToolGuidance + "\n"
     );
+    builder.Append("- ").Append(ExecutionProgressPolicy.EarlyWriteGuidance).Append('\n');
     builder.Append(
-      "- Before the first action, briefly tell the user in their language how you understood the request and which immediate actions you will take. Keep this to one or two sentences, do not claim results, and do not repeat it before later actions.\n"
+      "- " + ExecutionProgressPolicy.ActionIntroductionGuidance + "\n"
     );
-    builder.Append("- Host effort target for this turn: ")
+    if (request.RequestedEffort is not null) builder.Append("- Host effort target for this turn: ")
       .Append(request.RequestedEffort)
       .Append(". ")
-      .Append(EffortGuidance(request.RequestedEffort))
+      .Append(ExecutionProgressPolicy.EffortGuidance(request.RequestedEffort))
       .Append('\n');
     builder.Append(
       "- If the Host denies one native action, treat that action as rejected, use the returned tool result and Host constraints to propose a materially different safe action, and continue the objective unless no safe alternative remains.\n"
@@ -147,13 +148,4 @@ internal static class HarnessConversationPromptBuilder
     );
   }
 
-  private static string EffortGuidance(string effort)
-  {
-    return effort switch
-    {
-      ModelEffortLevels.High => "Reason carefully about dependencies and risks before acting, then execute the bounded objective.",
-      ModelEffortLevels.Low => "Use established facts, avoid unnecessary analysis, and complete the bounded objective directly.",
-      _ => "Use only the reasoning needed for a reliable result and proceed to action without repeated analysis."
-    };
-  }
 }

@@ -144,9 +144,11 @@ public sealed record HarnessTurnRequest(
   IReadOnlyList<HarnessImageInput>? Images = null,
   bool IsRecoveryContinuation = false,
   IReadOnlyList<string>? ManagedContext = null,
-  string RequestedEffort = Providers.ModelEffortLevels.Medium,
+  string? RequestedEffort = Providers.ModelEffortLevels.Medium,
   bool ModelSupportsReasoning = false,
-  int? ContextRecoveryInputBudget = null
+  int? ContextRecoveryInputBudget = null,
+  Uri? InferenceEndpoint = null,
+  string? SessionGroupId = null
 );
 
 public sealed record HarnessEvent
@@ -178,7 +180,9 @@ public sealed record HarnessEvent
     bool recoveryExhausted = false,
     bool readOnlyPermission = false,
     string? userInputId = null,
-    IReadOnlyList<UserInputQuestionView>? userInputQuestions = null
+    IReadOnlyList<UserInputQuestionView>? userInputQuestions = null,
+    long? outputTokens = null,
+    string? finishReason = null
   )
   {
     Type = type;
@@ -208,9 +212,13 @@ public sealed record HarnessEvent
     ContextWindowTokens = contextWindowTokens;
     UserInputId = userInputId;
     UserInputQuestions = userInputQuestions;
+    OutputTokens = outputTokens;
+    FinishReason = finishReason;
   }
 
   public string Type { get; init; }
+  public long? OutputTokens { get; init; }
+  public string? FinishReason { get; init; }
 
   public string? Message { get; init; }
 

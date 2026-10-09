@@ -1,27 +1,44 @@
-async function openChangeReview(executionSessionId, focusRelativePath = null, savedReview = null) {
+async function openChangeReview(executionSessionId, focusRelativePath = null,
+  savedReview = null, focusSection = null) {
   if (!executionSessionId) {
     return;
   }
 
+  savedReview ??= state.savedExecutionReviews?.find(
+    review => review.summary.id === executionSessionId) ?? null;
   elements.changeReviewBody.textContent = "Loading review…";
   elements.undoStatus.textContent = "";
   elements.undoExecution.disabled = true;
+  elements.undoExecution.hidden = true;
   if (!elements.changeReviewDialog.open) {
     elements.changeReviewDialog.showModal();
   }
 
   try {
+    const parameters = new URLSearchParams();
+    if (savedReview && state.conversationSessionId) {
+      parameters.set("conversationSessionId", state.conversationSessionId);
+      if (state.conversationWorkspaceId) {
+        parameters.set("workspaceId", state.conversationWorkspaceId);
+      }
+    }
+    const query = parameters.size ? `?${parameters}` : "";
     const review = await fetchJson(
-      `/api/execution-sessions/${encodeURIComponent(executionSessionId)}/review`
+      `/api/execution-sessions/${encodeURIComponent(executionSessionId)}/review${query}`
     );
     state.activeReview = review;
-    renderChangeReview(review, focusRelativePath);
-    await loadGitDelivery(review);
+    renderChangeReview(review, focusRelativePath, focusSection);
+    if (!review.historical) {
+      await loadGitDelivery(review);
+    }
   } catch (error) {
     if (error.status === 404 && savedReview?.summary.id === executionSessionId) {
       // Older persisted reviews may have no live execution session after restart.
       state.activeReview = savedReview;
-      renderChangeReview(savedReview, focusRelativePath);
+      renderChangeReview({ ...savedReview,
+        summary: { ...savedReview.summary, undoAvailable: false,
+          undoDiagnostic: "The current execution session is no longer available." }
+      }, focusRelativePath, focusSection);
     } else {
       elements.changeReviewBody.textContent = error.message;
     }
@@ -69,7 +86,7 @@ function closeChangeReview() {
   elements.changeReviewDialog.close();
 }
 
-function renderChangeReview(review, focusRelativePath = null) {
+function renderChangeReview(review, focusRelativePath = null, focusSection = null) {
   elements.changeReviewBody.replaceChildren();
   const summary = document.createElement("section");
   summary.className = "change-review-summary";
@@ -207,7 +224,15 @@ function renderChangeReview(review, focusRelativePath = null) {
       section.append(diff);
     }
 
-    if (!file.undoAvailable && file.undoDiagnostic) {
+    if (file.currentGitStatus) {
+      const current = document.createElement("p");
+      current.className = file.undoAvailable ? "verification-ok" : "verification-warning";
+      current.textContent = file.currentGitStatus;
+      section.append(current);
+    }
+
+    if (!file.undoAvailable && file.undoDiagnostic
+      && file.undoDiagnostic !== file.currentGitStatus) {
       const warning = document.createElement("p");
       warning.className = "verification-warning";
       warning.textContent = file.undoDiagnostic;
@@ -232,24 +257,52 @@ function renderChangeReview(review, focusRelativePath = null) {
     heading.textContent = "Processes";
     processes.append(heading);
 
-    for (const process of review.processes) {
-      const entry = document.createElement("pre");
+    for (const [index, process] of review.processes.entries()) {
+      const entry = document.createElement("details");
+      entry.className = "process-review-entry";
+      const title = document.createElement("summary");
+      title.textContent = `${index + 1}. ${process.executable.split(/[\\/]/).at(-1)} · `
+        + (process.timedOut ? "timeout" : process.cancelled ? "cancelled"
+          : `exit ${process.exitCode ?? "unavailable"}`);
+      const tabs = document.createElement("div");
+      tabs.className = "process-review-tabs";
+      const commandTab = document.createElement("button");
+      commandTab.type = "button";
+      commandTab.textContent = "Command";
+      const responseTab = document.createElement("button");
+      responseTab.type = "button";
+      responseTab.textContent = "Response";
+      const content = document.createElement("pre");
       const flags = [
         process.timedOut ? "timeout" : null,
         process.cancelled ? "cancelled" : null,
         process.standardOutputTruncated ? "stdout truncated" : null,
         process.standardErrorTruncated ? "stderr truncated" : null
       ].filter(Boolean);
-      entry.textContent =
+      const command =
         `${process.executable} ${process.arguments.join(" ")}\n`
         + `cwd: ${process.workingDirectory}\n`
         + `exit: ${process.exitCode} · ${process.durationMilliseconds} ms`
-        + `${flags.length ? ` · ${flags.join(", ")}` : ""}\n`
-        + `${process.standardOutput}${process.standardError}`;
+        + `${flags.length ? ` · ${flags.join(", ")}` : ""}`;
+      const showTab = tab => {
+        commandTab.setAttribute("aria-pressed", String(tab === "command"));
+        responseTab.setAttribute("aria-pressed", String(tab === "response"));
+        content.textContent = tab === "command" ? command
+          : `stdout:\n${process.standardOutput || "[empty]"}\n\nstderr:\n${process.standardError || "[empty]"}`;
+      };
+      commandTab.addEventListener("click", () => showTab("command"));
+      responseTab.addEventListener("click", () => showTab("response"));
+      tabs.append(commandTab, responseTab);
+      showTab("response");
+      entry.append(title, tabs, content);
       processes.append(entry);
     }
 
     elements.changeReviewBody.append(processes);
+    if (focusSection === "processes") {
+      processes.querySelector("details").open = true;
+      requestAnimationFrame(() => processes.scrollIntoView({ block: "start" }));
+    }
   }
 
   if (review.validation) {
@@ -291,9 +344,9 @@ function renderChangeReview(review, focusRelativePath = null) {
     elements.changeReviewBody.append(warning);
   }
 
+  elements.undoExecution.hidden = !review.summary.undoAvailable;
   elements.undoExecution.disabled = !review.summary.undoAvailable;
   elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
-  elements.validateChanges.disabled = review.files.length === 0;
 }
 
 async function openRoutingEvidence(runId) {
@@ -784,15 +837,14 @@ async function executePendingDeliveryAction(confirmed) {
       }
     );
     state.pendingDeliveryAction = null;
-    renderGitDelivery(state.activeDelivery);
     const review = await fetchJson(
       `/api/execution-sessions/${encodeURIComponent(
         state.activeReview.summary.id
       )}/review`
     );
     state.activeReview = review;
-    elements.undoExecution.disabled = !review.summary.undoAvailable;
-    elements.undoExecution.title = review.summary.undoDiagnostic ?? "";
+    renderChangeReview(review);
+    renderGitDelivery(state.activeDelivery);
     elements.undoStatus.textContent =
       `Git ${pending.operation} completed and repository status refreshed.`;
     await refreshGit();
@@ -852,6 +904,16 @@ async function undoExecution() {
   } catch (error) {
     elements.undoStatus.textContent = error.message;
 
+    try {
+      const refreshed = await fetchJson(
+        `/api/execution-sessions/${encodeURIComponent(review.summary.id)}/review`
+      );
+      state.activeReview = refreshed;
+      renderChangeReview(refreshed);
+    } catch {
+      elements.undoExecution.hidden = true;
+      elements.undoExecution.disabled = true;
+    }
     if (error.payload) {
       const warning = document.createElement("p");
       warning.className = "verification-warning";
@@ -861,53 +923,6 @@ async function undoExecution() {
       ].join(" ");
       elements.changeReviewBody.prepend(warning);
     }
-
-    elements.undoExecution.disabled = false;
-  }
-}
-
-async function validateChanges() {
-  const review = state.activeReview;
-
-  if (!review || review.files.length === 0) {
-    return;
-  }
-
-  const confirmed = state.approvalPolicy !== "ask"
-    || await showAppConfirm(
-      "Run every structured step in the saved validation profile now?",
-      { title: "Run validation?", confirmLabel: "Run" }
-    );
-
-  if (!confirmed) {
-    return;
-  }
-
-  elements.validateChanges.disabled = true;
-  elements.undoStatus.textContent = "Running validation…";
-
-  try {
-    const result = await fetchJson(
-      `/api/execution-sessions/${encodeURIComponent(review.summary.id)}/validate`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          browserSessionId: state.browserSessionId,
-          confirmed
-        })
-      }
-    );
-    await openChangeReview(
-      review.summary.id
-    );
-    elements.undoStatus.textContent =
-      `Validation ${result.state}.`;
-  } catch (error) {
-    elements.undoStatus.textContent = error.message;
-    elements.validateChanges.disabled = false;
   }
 }
 

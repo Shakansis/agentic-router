@@ -1,4 +1,5 @@
 using AgenticRouter.Api.Devices;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Recovery;
@@ -21,6 +22,7 @@ internal static class PlatformServiceCollectionExtensions
         provider.GetRequiredService<IHttpClientFactory>(),
         provider.GetRequiredService<ILogger<OllamaManagedServerManager>>(),
         provider.GetRequiredService<IGpuDiscoveryService>(),
+        provider.GetRequiredService<ISettingsStore>(),
         executableOverride: provider.GetRequiredService<IConfiguration>()["AgenticRouter:ManagedOllama:ExecutablePath"],
         portOffset: provider.GetRequiredService<IConfiguration>().GetValue("AgenticRouter:ManagedOllama:PortOffset", 1_000),
         startupOptions: provider.GetRequiredService<IConfiguration>()

@@ -8,6 +8,7 @@ using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Providers.Ollama;
 
@@ -15,6 +16,7 @@ namespace AgenticRouter.Api.Runtime;
 
 public interface IOllamaManagedServerManager
 {
+  InferenceProgressSource.Subscription ObserveInference(Uri endpoint, Action<InferenceProgressView>? observer);
   OllamaEndpointResolution Plan(
     Uri configuredEndpoint,
     string? selection,
@@ -71,6 +73,15 @@ public sealed class OllamaManagedServerManager :
   IHostedService,
   IAsyncDisposable
 {
+  public InferenceProgressSource.Subscription ObserveInference(Uri endpoint, Action<InferenceProgressView>? observer)
+  {
+    lock (_servers)
+    {
+      var server = _servers.Values.FirstOrDefault(candidate =>
+        candidate.Endpoint.GetLeftPart(UriPartial.Authority) == endpoint.GetLeftPart(UriPartial.Authority));
+      return server?.Progress.Subscribe(observer) ?? InferenceProgressSource.Subscription.Unavailable(observer);
+    }
+  }
   private const int DefaultManagedPortOffset = 1_000;
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
@@ -86,6 +97,7 @@ public sealed class OllamaManagedServerManager :
   private readonly ILogger<OllamaManagedServerManager> _logger;
   private readonly string? _executableOverride;
   private readonly IGpuDiscoveryService _gpuDiscovery;
+  private readonly ISettingsStore _settingsStore;
   private readonly int _portOffset;
   private readonly TimeSpan _startupTimeout;
   private readonly TimeSpan _recoveryTimeout;
@@ -101,6 +113,7 @@ public sealed class OllamaManagedServerManager :
     IHttpClientFactory httpClients,
     ILogger<OllamaManagedServerManager> logger,
     IGpuDiscoveryService gpuDiscovery,
+    ISettingsStore settingsStore,
     string? executableOverride = null,
     int portOffset = DefaultManagedPortOffset,
     OllamaStartupOptions? startupOptions = null
@@ -110,6 +123,7 @@ public sealed class OllamaManagedServerManager :
     _httpClients = httpClients;
     _logger = logger;
     _gpuDiscovery = gpuDiscovery;
+    _settingsStore = settingsStore;
     _executableOverride = executableOverride;
     _portOffset = portOffset;
     startupOptions ??= new OllamaStartupOptions();
@@ -486,6 +500,8 @@ public sealed class OllamaManagedServerManager :
     startInfo.Environment["OLLAMA_HOST"] = $"127.0.0.1:{port}";
     startInfo.Environment["OLLAMA_LLM_LIBRARY"] = library;
     startInfo.Environment["OLLAMA_NO_CLOUD"] = "1";
+    var cacheType = (await _settingsStore.GetAsync(cancellationToken)).OllamaRuntime.ManagedKvCacheType;
+    if (cacheType != "auto") startInfo.Environment["OLLAMA_KV_CACHE_TYPE"] = cacheType;
     if (contextLength is not null)
     {
       startInfo.Environment["OLLAMA_CONTEXT_LENGTH"] = contextLength.Value.ToString(
@@ -524,6 +540,7 @@ public sealed class OllamaManagedServerManager :
     var startedAt = new DateTimeOffset(process.StartTime.ToUniversalTime());
     var leasePath = LeasePath(target.Selection);
     var output = new ConcurrentQueue<string>();
+    var progress = new InferenceProgressSource();
     var server = new ManagedServer(
       target,
       endpoint,
@@ -533,8 +550,9 @@ public sealed class OllamaManagedServerManager :
       contextLength,
       leasePath,
       output,
-      DrainAsync(process.StandardOutput, target.Selection, output),
-      DrainAsync(process.StandardError, target.Selection, output)
+      progress,
+      DrainAsync(process.StandardOutput, target.Selection, output, progress),
+      DrainAsync(process.StandardError, target.Selection, output, progress)
     );
     process.Exited += (_, _) => HandleExit(server);
 
@@ -1065,13 +1083,15 @@ public sealed class OllamaManagedServerManager :
   private async Task DrainAsync(
     StreamReader reader,
     string selection,
-    ConcurrentQueue<string> output
+    ConcurrentQueue<string> output,
+    InferenceProgressSource progress
   )
   {
     try
     {
       while (await reader.ReadLineAsync() is { } line)
       {
+        progress.Observe(line);
         // Repeated readiness probes must not evict backend/loader diagnostics
         // before a long startup timeout can report them.
         if (!line.StartsWith("[GIN]", StringComparison.Ordinal)
@@ -1439,6 +1459,7 @@ public sealed class OllamaManagedServerManager :
     int? ContextLength,
     string LeasePath,
     ConcurrentQueue<string> Output,
+    InferenceProgressSource Progress,
     Task StandardOutput,
     Task StandardError
   );

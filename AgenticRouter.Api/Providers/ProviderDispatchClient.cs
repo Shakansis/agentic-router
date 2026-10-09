@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
+using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;
@@ -19,6 +21,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
   private readonly IOllamaWebSearchService _webSearch;
   private readonly IProviderRetryPolicy _retryPolicy;
   private readonly IProviderHealthMonitor _health;
+  private readonly ISettingsStore _settingsStore;
 
   public ProviderDispatchClient(
     OllamaClient ollama,
@@ -27,7 +30,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     ITokenEstimator tokenEstimator,
     IOllamaWebSearchService webSearch,
     IProviderRetryPolicy retryPolicy,
-    IProviderHealthMonitor health
+    IProviderHealthMonitor health,
+    ISettingsStore settingsStore
   )
   {
     _ollama = ollama;
@@ -37,6 +41,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
     _webSearch = webSearch;
     _retryPolicy = retryPolicy;
     _health = health;
+    _settingsStore = settingsStore;
   }
 
   public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
@@ -256,6 +261,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     }
 
     var operationStopwatch = Stopwatch.StartNew();
+    generationProfile = await ApplyExecutionOutputBudgetAsync(reference, usageContext,
+      generationProfile ?? ProviderGenerationProfiles.Deterministic, cancellationToken);
     var estimatedInput = _tokenEstimator.EstimateToolMessages(
       messages
     ) + tools.Sum(
@@ -273,6 +280,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
     for (var attempt = 1; ; attempt++)
     {
       var attemptStopwatch = Stopwatch.StartNew();
+      using var inference = new InferenceObservation(usageContext.ProgressObserver);
       CloudCallResult<OllamaToolResponse>? result = null;
 
       try
@@ -281,6 +289,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
           reference.ProviderId,
           cancellationToken
         );
+        inference.Dispatch();
         result = await session.Adapter.GenerateToolCallAsync(
           session.ApiKey,
           reference.ModelId,
@@ -300,7 +309,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           _tokenEstimator.EstimateToolResponse(
             result.Value
           ),
-          result.RateLimit
+          result.RateLimit,
+          inference: inference
         );
         _health.ObserveSuccess(
           reference.ProviderId,
@@ -352,7 +362,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           0,
           exception.RateLimit,
           exception.Code,
-          exception.HttpStatus
+          exception.HttpStatus,
+          inference: inference
         );
         _health.ObserveFailure(
           reference.ProviderId,
@@ -398,7 +409,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           result?.Usage,
           estimatedInput,
           0,
-          result?.RateLimit
+          result?.RateLimit,
+          inference: inference
         );
         throw;
       }
@@ -780,6 +792,11 @@ public sealed class ProviderDispatchClient : IOllamaClient
       yield break;
     }
 
+    options = options with
+    {
+      GenerationProfile = await ApplyExecutionOutputBudgetAsync(
+      reference, usageContext, options.EffectiveGenerationProfile, cancellationToken)
+    };
     var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
@@ -791,6 +808,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
     for (var attempt = 1; ; attempt++)
     {
       var attemptStopwatch = Stopwatch.StartNew();
+      using var inference = new InferenceObservation(usageContext.ProgressObserver);
       var output = new System.Text.StringBuilder();
       ProviderTokenUsage? providerUsage = null;
       ProviderRateLimitSnapshot? rateLimit = null;
@@ -828,6 +846,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
 
         try
         {
+          if (updates is not null) inference.Dispatch();
           if (updates is null || !await updates.MoveNextAsync())
           {
             completed = true;
@@ -858,7 +877,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
             _tokenEstimator.EstimateText(
               output.ToString()
             ),
-            rateLimit
+            rateLimit,
+            inference: inference
           );
           throw;
         }
@@ -869,6 +889,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         }
 
         timeToFirstChunk ??= attemptStopwatch.Elapsed;
+        if (!string.IsNullOrEmpty(update.Delta) || !string.IsNullOrEmpty(update.ThinkingDelta))
+          inference.ObserveToken();
 
         if (!string.IsNullOrEmpty(
           update.Delta
@@ -921,7 +943,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           providerUsage,
           failure,
           cancellationToken,
-          rateLimit
+          rateLimit,
+          inference: inference
         );
         _health.ObserveFailure(
           reference.ProviderId,
@@ -968,7 +991,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         activity: MergeActivity(
           activity,
           options
-        )
+        ),
+        inference: inference
       );
       _health.ObserveSuccess(
         reference.ProviderId,
@@ -984,6 +1008,20 @@ public sealed class ProviderDispatchClient : IOllamaClient
     }
   }
 
+  private async Task<ProviderGenerationProfile> ApplyExecutionOutputBudgetAsync(
+    ProviderModelReference reference, ProviderCallContext usageContext,
+    ProviderGenerationProfile profile, CancellationToken cancellationToken)
+  {
+    if (usageContext.ExecutionSessionId is null) return profile;
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    var models = await _cloudProviders.GetCachedModelsAsync(reference.ProviderId, cancellationToken);
+    var declaredContext = models.FirstOrDefault(model => model.Name == reference.Qualified)?.Capabilities?.ContextTokens;
+    var contextTokens = new[] { usageContext.RuntimeContextTokens ?? settings.Context.DefaultContextTokens,
+      settings.Context.ProviderContextTokens, declaredContext ?? int.MaxValue,
+      profile.MaximumContextTokens ?? int.MaxValue }.Min();
+    return profile with { MaximumOutputTokens = ExecutionProgressPolicy.OutputTokenLimit(contextTokens) };
+  }
+
   private async Task<string> GenerateCloudStructuredAsync(
     ProviderModelReference reference,
     IReadOnlyList<ChatMessage> messages,
@@ -996,6 +1034,11 @@ public sealed class ProviderDispatchClient : IOllamaClient
   )
   {
     options ??= ProviderChatOptions.Empty;
+    options = options with
+    {
+      GenerationProfile = await ApplyExecutionOutputBudgetAsync(
+      reference, usageContext, options.EffectiveGenerationProfile, cancellationToken)
+    };
     var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
       messages
@@ -1005,6 +1048,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
     for (var attempt = 1; ; attempt++)
     {
       var attemptStopwatch = Stopwatch.StartNew();
+      using var inference = new InferenceObservation(usageContext.ProgressObserver);
       CloudCallResult<string>? result = null;
 
       try
@@ -1013,6 +1057,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
           reference.ProviderId,
           cancellationToken
         );
+        inference.Dispatch();
         result = await session.Adapter.GenerateStructuredAsync(
           session.ApiKey,
           reference.ModelId,
@@ -1032,7 +1077,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           _tokenEstimator.EstimateText(
             result.Value
           ),
-          result.RateLimit
+          result.RateLimit,
+          inference: inference
         );
         _health.ObserveSuccess(
           reference.ProviderId,
@@ -1069,7 +1115,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           0,
           exception.RateLimit,
           exception.Code,
-          exception.HttpStatus
+          exception.HttpStatus,
+          inference: inference
         );
         _health.ObserveFailure(
           reference.ProviderId,
@@ -1103,7 +1150,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           result?.Usage,
           estimatedInput,
           0,
-          result?.RateLimit
+          result?.RateLimit,
+          inference: inference
         );
         throw;
       }
@@ -1121,7 +1169,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     ProviderRateLimitSnapshot? rateLimit,
     string? errorCode = null,
     int? httpStatus = null,
-    ProviderActivityMetadata? activity = null
+    ProviderActivityMetadata? activity = null,
+    InferenceObservation? inference = null
   )
   {
     return _usageRecorder.RecordAsync(
@@ -1137,7 +1186,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
         rateLimit,
         errorCode,
         httpStatus,
-        activity
+        activity,
+        Inference: inference
       ),
       CancellationToken.None
     );
@@ -1170,7 +1220,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     ProviderTokenUsage? usage,
     CloudProviderException exception,
     CancellationToken cancellationToken,
-    ProviderRateLimitSnapshot? observedRateLimit = null
+    ProviderRateLimitSnapshot? observedRateLimit = null,
+    InferenceObservation? inference = null
   )
   {
     return RecordAsync(
@@ -1186,7 +1237,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
       exception.RateLimit
         ?? observedRateLimit,
       exception.Code,
-      exception.HttpStatus
+      exception.HttpStatus,
+      inference: inference
     );
   }
 }

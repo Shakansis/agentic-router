@@ -127,6 +127,7 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - **Specialist Ownership**: The selected specialist reasons, calls one tool, observes the Host result, and continues without a resident translation model
 - **Optional Progress**: A semantic plan is not required before ordinary workspace actions
 - **Effect-Based Completion**: Actions count as completed only after the Host observes the required effect
+- **Completion Report**: After a finished Execute attempt, one tool-free review by the selected model lists what was done, missing, or not verified in a collapsed report. It never starts corrections or changes Host status. See [report behavior and limits](docs/execution-completion-report.md).
 - **Boundary-Based Approval**: Trusted-workspace actions are automatic by default; real external or elevated-risk effects remain explicit
 - **Exact Process Permission**: An eligible approved process can be remembered only as its resolved executable, exact arguments, and workspace-relative working directory; saved permissions are scoped to one workspace and revocable in Settings
 - **Tool Effect Registry**: Post-resolution effect typing (inspection, file creation, modification, deletion, etc.)

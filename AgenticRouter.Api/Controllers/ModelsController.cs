@@ -111,14 +111,39 @@ public sealed class ModelsController : ControllerBase
   }
 
   [HttpPost("test")]
+  [HttpPost("test/stream")]
   public async Task<ActionResult<ModelTestResult>> Test(
     [FromBody] ModelTestRequest request,
+    [FromServices] ISettingsValidator validator,
     CancellationToken cancellationToken
   )
   {
+    if (request.Settings is { } draft)
+    {
+      var errors = validator.Validate(draft);
+      if (errors.Count > 0) return BadRequest(new ValidationErrorsResponse("The selected settings are invalid.", errors));
+    }
+    if (!InferenceProfileDefaults.Names.Contains(request.Profile, StringComparer.Ordinal))
+      return BadRequest(new ValidationErrorsResponse("Select a valid inference profile.",
+        new Dictionary<string, string[]> { ["profile"] = ["Unknown inference profile."] }));
+    if (Request.Path.Value?.EndsWith("/stream", StringComparison.Ordinal) == true)
+    {
+      Response.ContentType = "text/event-stream";
+      Response.Headers.CacheControl = "no-cache";
+      var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+      async Task WriteEventAsync(object value)
+      {
+        await Response.WriteAsync($"data: {System.Text.Json.JsonSerializer.Serialize(value, jsonOptions)}\n\n", cancellationToken);
+        await Response.Body.FlushAsync(cancellationToken);
+      }
+      var result = await _diagnostics.TestAsync(request, HttpContext.TraceIdentifier, cancellationToken,
+        progress => WriteEventAsync(new { type = "progress", progress }));
+      await WriteEventAsync(new { type = "result", result });
+      return new EmptyResult();
+    }
     return Ok(
       await _diagnostics.TestAsync(
-        request.Model,
+        request,
         HttpContext.TraceIdentifier,
         cancellationToken
       )

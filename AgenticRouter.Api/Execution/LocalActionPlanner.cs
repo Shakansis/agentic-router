@@ -79,17 +79,9 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "Re-evaluate the remaining work after every authoritative tool result and never repeat a "
     + "completed action. "
     + "Use exactly one native tool call when a local action is required. "
-    + "Before the first tool call in this turn, include one or two short user-facing sentences in "
-    + "the user's language that state how you understood the request and the immediate actions you "
-    + "will take. Do not claim results in that introduction. Later tool calls must not repeat it. "
-    + "When a granted tool is needed, emit that tool call immediately. Do not draft, preview, "
-    + "or repeat its arguments in reasoning before the call; place the complete arguments only "
-    + "in the native tool call. "
-    + "Keep every write call comfortably within the model output budget. For multi-file or long "
-    + "source output, do not batch the implementation through create_files. Create one small file "
-    + "at a time. If one source file may not fit in a single response, create a small valid scaffold "
-    + "containing a unique insertion marker, then expand that marker through multiple bounded "
-    + "replace_text calls and remove it only with the final chunk. "
+    + ExecutionProgressPolicy.ActionIntroductionGuidance
+    + ExecutionProgressPolicy.ImmediateToolGuidance
+    + ExecutionProgressPolicy.EarlyWriteGuidance
     + "When the user says to use, reuse, integrate, or inspect an existing file, dependency, or "
     + "asset, inspect it instead of creating or overwriting it. If the stated path does not "
     + "exist, list its parent directory and inspect the actual candidate. Never create a "
@@ -594,24 +586,11 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     )
     {
       var outputLimit = response.ContextResolution!.OutputTokenLimit;
-      var maximumContentCharacters = Math.Min(
-        6_000,
-        Math.Max(2_000, outputLimit * 2)
-      );
       throw new LocalActionException(
         OutputLimitStage,
         $"The model exhausted the configured {outputLimit}-token output limit before emitting a valid native tool call or final response.",
-        new JsonException(
-          availableTools.Any(tool => tool.Name == "create_file")
-            ? "Change to bounded incremental writes now. Do not call create_files for this recovery. "
-              + "Call create_file for one small file or scaffold only; keep its content under "
-              + $"{maximumContentCharacters} characters. For a longer file, retain a unique insertion "
-              + "marker and add one bounded chunk per subsequent replace_text call. Do not draft file "
-              + "content in reasoning."
-            : "On retry, do not draft or repeat the decision in reasoning. Return the concise final "
-              + "response in the required format before the output limit, or call one available "
-              + "native tool promptly if more evidence is needed."
-        )
+        new JsonException(ExecutionProgressPolicy.Correction(
+          availableTools.Any(tool => tool.Name == "create_file"), outputLimit))
       );
     }
 

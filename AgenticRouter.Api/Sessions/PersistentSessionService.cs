@@ -9,6 +9,9 @@ namespace AgenticRouter.Api.Sessions;
 
 public interface IPersistentSessionService
 {
+  Task SaveCompletionReportAsync(string workspaceId, string sessionId, string checkId,
+    ExecutionCompletionReport report, CancellationToken cancellationToken);
+
   Task RecoverInterruptedAsync(
     CancellationToken cancellationToken
   );
@@ -907,6 +910,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
       var messages = session.Messages.ToList();
       if (turnIndex >= 0)
       {
+        // The completed assistant now owns the timeline formerly saved on the pending user turn.
+        messages[turnIndex] = messages[turnIndex] with { Timeline = null };
         var existingAssistantIndex = messages.FindIndex(
           turnIndex + 1,
           candidate => candidate.Role == "assistant"
@@ -934,7 +939,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
         || turnIndex == FindLastUserIndex(session.Messages);
       var completed = session with
       {
-        State = isLatestTurn ? "completed" : session.State,
+        State = isLatestTurn ? diagnostic?.TerminalState == "blocked" ? "failed" : "completed" : session.State,
         Interrupted = isLatestTurn ? false : session.Interrupted,
         UpdatedAt = updatedAt,
         LastInteractionMode = isLatestTurn
@@ -1198,6 +1203,28 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       _gate.Release();
     }
+  }
+
+  public async Task SaveCompletionReportAsync(string workspaceId, string sessionId, string checkId,
+    ExecutionCompletionReport report, CancellationToken cancellationToken)
+  {
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      var workspaces = await _profiles.GetAllAsync(cancellationToken);
+      if (!workspaces.Profiles.Any(workspace => workspace.Id == workspaceId && workspace.HistoryEnabled)) return;
+      var session = await _store.ReadAsync(workspaceId, sessionId, cancellationToken);
+      if (session is null) return;
+      var messages = session.Messages.Select(message => message with
+      {
+        Timeline = message.Timeline?.Select(item => item.Type == "response.completed" && item.CompletionCheckId == checkId
+          ? item with { CompletionReport = report } : item).ToArray()
+      }).ToArray();
+      var limits = (await _settings.GetAsync(cancellationToken)).SessionHistory;
+      await _store.WriteAsync(session with { Messages = messages, UpdatedAt = DateTimeOffset.UtcNow },
+        limits.SessionCompactionThresholdBytes, limits.SessionCompactionTargetBytes, cancellationToken);
+    }
+    finally { _gate.Release(); }
   }
 
   private static IReadOnlyList<ChatStreamEvent>? CoalesceTimeline(

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net.Http.Json;
 using System.Text.Json;
 
 if (args.SequenceEqual(new[] { "--version" }, StringComparer.Ordinal))
@@ -31,6 +32,7 @@ if (!args.SequenceEqual(expectedArguments, StringComparer.Ordinal))
 
 var outputGate = new SemaphoreSlim(1, 1);
 var turns = new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
+var footerOutputTotals = new ConcurrentDictionary<string, long>(StringComparer.Ordinal);
 var steerMessages = new ConcurrentDictionary<string, TaskCompletionSource<string>>(StringComparer.Ordinal);
 var approvals = new ConcurrentDictionary<long, TaskCompletionSource<bool>>();
 var toolResponses = new ConcurrentDictionary<long, TaskCompletionSource<(bool Success, string Text)>>();
@@ -142,10 +144,15 @@ while (await Console.In.ReadLineAsync() is { } line)
           }.Order(StringComparer.Ordinal),
           StringComparer.Ordinal
         );
+        var supervisorTools = new[] { "list_files", "read_file", "get_file_info", "search_text" };
+        var supervisorProjection = uniqueDynamicTools.Order(StringComparer.Ordinal).SequenceEqual(
+          supervisorTools.Order(StringComparer.Ordinal), StringComparer.Ordinal)
+          || uniqueDynamicTools.Order(StringComparer.Ordinal).SequenceEqual(
+            supervisorTools.Append("run_validation_profile").Order(StringComparer.Ordinal), StringComparer.Ordinal);
         if (dynamicToolNames.Length > 0
           && (
             uniqueDynamicTools.Length != dynamicToolNames.Length
-            || (!fullProjection && !benchmarkProjection)
+            || (!fullProjection && !benchmarkProjection && !supervisorProjection)
           ))
         {
           await SendAsync(new { id = id.GetInt64(), error = new { code = -32600, message = "Expected the projected Agentic Router Host capability tools." } });
@@ -414,8 +421,15 @@ while (await Console.In.ReadLineAsync() is { } line)
         {
           await File.WriteAllTextAsync(
             Path.Combine(codexHome, "fake-app-server-steer.json"),
-            JsonSerializer.Serialize(new { threadId, turnId, message })
+            JsonSerializer.Serialize(new { threadId, turnId, message, clientUserMessageId = parameters.GetProperty("clientUserMessageId").GetString() })
           );
+          await File.AppendAllTextAsync(Path.Combine(codexHome, "fake-app-server-steer-requests.jsonl"),
+            JsonSerializer.Serialize(new { threadId, turnId, message }) + Environment.NewLine);
+        }
+        if (message.StartsWith("malformed steering receipt", StringComparison.Ordinal))
+        {
+          await SendAsync(new { id = id.GetInt64(), result = new { turnId = "wrong-turn" } });
+          break;
         }
         pendingSteer.TrySetResult(message);
         await SendAsync(new
@@ -573,7 +587,7 @@ static bool TryValidateModelCatalog(
   );
   var validReasoning = exposesReasoning
     ? string.Equals(defaultReasoningLevel.GetString(), "medium", StringComparison.Ordinal)
-      && efforts.SequenceEqual(new[] { "low", "medium", "high" }, StringComparer.Ordinal)
+      && efforts.SequenceEqual(new[] { "none", "low", "medium", "high" }, StringComparer.Ordinal)
     : efforts.Length == 0;
   var valid = entry.GetProperty("context_window").GetInt32() == contextWindowTokens
     && entry.GetProperty("max_context_window").GetInt32() == contextWindowTokens
@@ -609,6 +623,61 @@ async Task RunTurnAsync(
     );
     await SendAsync(new { method = "turn/started", @params = new { threadId, turn = new { id = turnId, status = "inProgress" } } });
     await SendAsync(new { method = "item/reasoning/summaryTextDelta", @params = new { threadId, turnId, itemId = $"reason-{turnId}", delta = "Inspecting — revisão " } });
+
+    var isolatedReply = await SupervisionSessionFixture.RespondAsync(input, threadId, codexHome!, cwd);
+    if (isolatedReply is not null)
+    {
+      await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = $"isolation-{turnId}", delta = isolatedReply } });
+      await SendAsync(new { method = "turn/completed", @params = new { threadId, turn = new { id = turnId, status = "completed" } } });
+      turns.TryRemove(turnId, out _);
+      return;
+    }
+
+    if (input.Contains("global output fixture", StringComparison.Ordinal))
+    {
+      var recovering = input.Contains("HOST_OUTPUT_LIMIT_RECOVERY_V1", StringComparison.Ordinal);
+      await File.AppendAllTextAsync(Path.Combine(codexHome!, "fake-output-recovery.jsonl"),
+        JsonSerializer.Serialize(new { sessionId = threadId, recovering, model, text = input }) + "\n");
+      if (!recovering && input.Contains("committed effect", StringComparison.Ordinal))
+        await File.AppendAllTextAsync(Path.Combine(cwd, "output-before.txt"), "once\n");
+      using var http = new HttpClient();
+      var protocol = input.Contains("messages protocol", StringComparison.Ordinal) ? "messages"
+        : input.Contains("responses protocol", StringComparison.Ordinal) ? "responses" : "chat/completions";
+      var succeeded = recovering && !input.Contains("always fail", StringComparison.Ordinal);
+      using var response = await http.PostAsJsonAsync(
+        Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL") + "/" + protocol,
+        new { model, fixture = input, call = succeeded ? 1 : 0 }, cancellationToken);
+      response.EnsureSuccessStatusCode();
+      await response.Content.ReadAsStringAsync(cancellationToken);
+      if (!recovering && input.Contains("native recovery", StringComparison.Ordinal))
+      {
+        using var continued = await http.PostAsJsonAsync(
+          Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL") + "/" + protocol,
+          new { model, fixture = input, call = 1 }, cancellationToken);
+        continued.EnsureSuccessStatusCode();
+        await continued.Content.ReadAsStringAsync(cancellationToken);
+        succeeded = true;
+      }
+      if (succeeded)
+      {
+        await File.WriteAllTextAsync(Path.Combine(cwd, "output-recovered.txt"), "recovered incrementally", cancellationToken);
+        await SendAsync(new
+        {
+          method = "item/agentMessage/delta",
+          @params = new
+          { threadId, turnId, itemId = "output-answer", delta = "Recovered with a small write." }
+        });
+      }
+      // Deliberately report lifecycle success even on a cutoff: the common Host observer must catch it.
+      await SendAsync(new
+      {
+        method = "turn/completed",
+        @params = new
+        { threadId, turn = new { id = turnId, status = "completed" } }
+      });
+      turns.TryRemove(turnId, out _);
+      return;
+    }
 
     if (input.Contains("reactive context fixture", StringComparison.Ordinal))
     {
@@ -674,6 +743,70 @@ async Task RunTurnAsync(
         }
       });
       await Task.Delay(1_500, cancellationToken);
+    }
+
+    if (currentRequest.Contains("harness HTTP metrics", StringComparison.OrdinalIgnoreCase))
+    {
+      using var http = new HttpClient();
+      var protocol = currentRequest.Contains("messages", StringComparison.Ordinal) ? "messages"
+        : currentRequest.Contains("completions", StringComparison.Ordinal) ? "chat/completions" : "responses";
+      for (var call = 0; call < 2; call++)
+      {
+        using var request = new HttpRequestMessage(HttpMethod.Post,
+          Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL") + "/" + protocol)
+        {
+          Content = new StringContent(JsonSerializer.Serialize(new
+          {
+            model = "alpha:latest",
+            fixture = currentRequest,
+            call
+          }), System.Text.Encoding.UTF8, "application/json")
+        };
+        using var response = await http.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        await response.Content.ReadAsStringAsync(cancellationToken);
+        if (call == 0) await Task.Delay(600, cancellationToken);
+      }
+      // Native notifications must not be added to HTTP-observed inference usage.
+      await SendAsync(new
+      {
+        method = "thread/tokenUsage/updated",
+        @params = new
+        {
+          threadId,
+          turnId,
+          tokenUsage = new
+          {
+            last = new { outputTokens = 999 },
+            total = new { outputTokens = 999 },
+            modelContextWindow = 32768
+          }
+        }
+      });
+    }
+
+    if (currentRequest.Contains("codex footer token totals", StringComparison.OrdinalIgnoreCase))
+    {
+      foreach (var generated in new[] { 120L, 80L })
+      {
+        var total = footerOutputTotals.AddOrUpdate(threadId, generated, (_, previous) => previous + generated);
+        for (var duplicate = 0; duplicate < 2; duplicate++)
+          await SendAsync(new
+          {
+            method = "thread/tokenUsage/updated",
+            @params = new
+            {
+              threadId,
+              turnId,
+              tokenUsage = new
+              {
+                last = new { inputTokens = 1000, outputTokens = generated, totalTokens = 1000 + generated },
+                total = new { outputTokens = total },
+                modelContextWindow = 32768
+              }
+            }
+          });
+      }
     }
 
     if (currentRequest.Contains("crash codex child", StringComparison.OrdinalIgnoreCase))
@@ -877,6 +1010,8 @@ async Task RunTurnAsync(
     if (currentRequest.Contains("long codex turn", StringComparison.OrdinalIgnoreCase))
     {
       var steering = await steerMessages[turnId].Task.WaitAsync(cancellationToken);
+      if (currentRequest.Contains("hold after steer", StringComparison.OrdinalIgnoreCase))
+        await Task.Delay(Timeout.Infinite, cancellationToken);
       await SendAsync(new
       {
         method = "item/reasoning/summaryTextDelta",

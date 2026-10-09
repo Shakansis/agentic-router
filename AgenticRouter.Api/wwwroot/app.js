@@ -31,6 +31,7 @@ const state = {
   sessions: null,
   sessionsLoadError: null,
   conversationSessionId: null,
+  conversationWorkspaceId: null,
   conversationState: "completed",
   persistenceStatus: "Unsaved",
   pendingConversationAction: null,
@@ -41,6 +42,7 @@ const state = {
   activeGitDiff: null,
   latestExecutionSessionId: null,
   latestSavedExecutionReview: null,
+  savedExecutionReviews: [],
   settingsDirty: false,
   settingsSection: "general",
   settingsSubsection: "portable-yaml",
@@ -189,6 +191,10 @@ function bindElements() {
     "app-loader",
     "app-loader-detail",
     "app-loader-retry",
+    "server-connection-status",
+    "supervision-recovery-notice",
+    "supervision-recovery-instructions",
+    "supervision-recovery-resume",
     "external-app-warnings",
     "external-app-warnings-summary",
     "external-app-warnings-list",
@@ -202,6 +208,7 @@ function bindElements() {
     "message-input",
     "model-selector",
     "harness-selector",
+    "thinking-selector",
     "send-button",
     "send-button-label",
     "send-strategy-control",
@@ -379,7 +386,6 @@ function bindElements() {
     "max-direct-plan-steps",
     "file-creation-output-token-limit",
     "phase-effort-plan",
-    "phase-effort-work",
     "phase-effort-verify",
     "phase-effort-complete",
     "phase-effort-recovery",
@@ -402,6 +408,15 @@ function bindElements() {
     "usage-purge-status",
     "reconcile-usage",
     "runtime-role-profiles",
+    "runtime-performance-model",
+    "runtime-draft-mode",
+    "runtime-draft-value",
+    "runtime-draft-value-field",
+    "runtime-batch-mode",
+    "runtime-batch-value",
+    "runtime-batch-value-field",
+    "runtime-performance-capabilities",
+    "runtime-performance-status",
     "runtime-override-model",
     "runtime-override-role",
     "runtime-override-minimum",
@@ -589,7 +604,6 @@ function bindElements() {
     "close-change-review",
     "dismiss-change-review",
     "undo-execution",
-    "validate-changes",
     "undo-status",
     "image-review-dialog",
     "image-review-title",
@@ -681,7 +695,10 @@ function bindEvents() {
   elements.externalAppWarnings.addEventListener("toggle", () => {
     requestAnimationFrame(refreshProjectScrollIndicators);
   });
-  elements.appLoaderRetry.addEventListener("click", loadInitialApplicationState);
+  elements.appLoaderRetry.addEventListener("click", () => {
+    startupReconnectController?.abort();
+    void loadInitialApplicationState();
+  });
   elements.composer.addEventListener("submit", handleComposerSubmit);
   elements.openBenchmarks.addEventListener("click", openBenchmarks);
   elements.benchmarkForm.addEventListener("submit", runBenchmarkSuite);
@@ -890,12 +907,23 @@ function bindEvents() {
   );
   elements.runtimeOverrideModel.addEventListener(
     "change",
-    loadRuntimeOverrideEditor
+    () => {
+      loadRuntimeOverrideEditor();
+      elements.runtimePerformanceModel.value = elements.runtimeOverrideModel.value;
+      loadRuntimePerformanceEditor();
+    }
   );
   elements.runtimeOverrideRole.addEventListener(
     "change",
     loadRuntimeOverrideEditor
   );
+  elements.runtimePerformanceModel.addEventListener("change", () => {
+    elements.runtimeOverrideModel.value = elements.runtimePerformanceModel.value;
+    loadRuntimeOverrideEditor();
+    loadRuntimePerformanceEditor();
+  });
+  elements.runtimeDraftMode.addEventListener("change", updateRuntimePerformanceInputs);
+  elements.runtimeBatchMode.addEventListener("change", updateRuntimePerformanceInputs);
   elements.runtimeMemoryDevicePolicies.addEventListener(
     "change",
     handleRuntimeDevicePolicyChange
@@ -1031,7 +1059,6 @@ function bindEvents() {
     }
   );
   elements.undoExecution.addEventListener("click", undoExecution);
-  elements.validateChanges.addEventListener("click", validateChanges);
   elements.gitCard.addEventListener("click", openGitPanel);
   elements.gitInitializeQuick.addEventListener("click", initializeGitRepositoryQuick);
   elements.gitCommitQuick.addEventListener("click", commitProjectChanges);
@@ -1095,6 +1122,10 @@ function bindEvents() {
   elements.inferenceProfileSelector.addEventListener("change", renderSelectedInferenceProfile);
   elements.inferencePhaseEffortLink.addEventListener("click", openSupervisorPhaseEffort);
   elements.settingsForm.addEventListener("input", handleSettingsInput);
+  installFloatingTooltips(elements.settingsDialog, ".information-button[data-tooltip]",
+    "settings-floating-tooltip", "settings-floating-tooltip");
+  installFloatingTooltips(elements.messageBuffer, ".message-buffer-action-tooltip[data-tooltip]",
+    "message-buffer-floating-tooltip", "message-buffer-floating-tooltip");
   elements.settingsDialog.addEventListener("cancel", handleSettingsCancel);
   elements.settingsOpenWorkspace.addEventListener("click", openWorkspaceFromSettings);
   elements.settingsOpenRecent.addEventListener("click", openRecentFromSettings);
@@ -1528,4 +1559,81 @@ async function loadApplicationState() {
     await refreshSessions();
   }
   await refreshGit();
+}
+
+function installFloatingTooltips(container, selector, id, className) {
+  let trigger = null;
+  let previousDescription = null;
+  const tooltip = document.createElement("div");
+  tooltip.id = id;
+  tooltip.className = className;
+  tooltip.setAttribute("popover", "manual");
+  tooltip.setAttribute("role", "tooltip");
+  container.append(tooltip);
+
+  function hide() {
+    if (trigger) {
+      if (previousDescription) trigger.setAttribute("aria-describedby", previousDescription);
+      else trigger.removeAttribute("aria-describedby");
+    }
+    if (tooltip.matches(":popover-open")) tooltip.hidePopover();
+    trigger = null;
+  }
+
+  function show(event) {
+    const target = event.target.closest?.(selector);
+    if (!target || !container.contains(target) || target === trigger) return;
+    if (event.type === "focusin") {
+      // Finish keyboard focus scrolling before opening the tooltip; otherwise
+      // the smooth-scroll event immediately closes the newly opened popover.
+      target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      requestAnimationFrame(() => {
+        if (document.activeElement === target && container.contains(target)) showTarget(target);
+      });
+      return;
+    }
+    showTarget(target);
+  }
+
+  function showTarget(target) {
+    if (target === trigger) return;
+    hide();
+    trigger = target;
+    previousDescription = target.getAttribute("aria-describedby");
+    tooltip.textContent = target.dataset.tooltip;
+    tooltip.showPopover();
+    const anchor = target.getBoundingClientRect();
+    const box = tooltip.getBoundingClientRect();
+    tooltip.style.left = `${Math.max(12, Math.min(anchor.left, window.innerWidth - box.width - 12))}px`;
+    const preferredTop = anchor.top - box.height - 8;
+    const top = preferredTop >= 12 ? preferredTop : anchor.bottom + 8;
+    tooltip.style.top = `${Math.max(12, Math.min(top, window.innerHeight - box.height - 12))}px`;
+    target.setAttribute("aria-describedby", [previousDescription, tooltip.id].filter(Boolean).join(" "));
+  }
+
+  function leave(event) {
+    if (trigger && trigger.contains(event.target)
+      && !trigger.contains(event.relatedTarget)
+      && !trigger.matches(":focus-visible")) hide();
+  }
+
+  container.addEventListener("pointerover", show);
+  container.addEventListener("focusin", show);
+  container.addEventListener("pointerout", leave);
+  container.addEventListener("focusout", event => {
+    if (trigger && trigger.contains(event.target)) hide();
+  });
+  container.addEventListener("close", hide);
+  container.addEventListener("scroll", hide, true);
+  window.addEventListener("resize", hide);
+  container.addEventListener("keydown", event => {
+    if (event.key === "Escape" && trigger) {
+      hide();
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
+  new MutationObserver(() => {
+    if (trigger && (!container.contains(trigger) || container.hidden)) hide();
+  }).observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
 }

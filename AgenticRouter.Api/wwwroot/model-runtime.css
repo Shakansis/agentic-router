@@ -1,0 +1,138 @@
+/* Ollama runtime context profiles */
+.runtime-profile-panel {
+  display: grid;
+  gap: 0.9rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.runtime-profile-panel h4 {
+  margin: 0;
+}
+
+.runtime-role-profiles {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.runtime-role-profile {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.runtime-profile-fields {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(5.8rem, 1fr));
+  gap: 0.55rem;
+}
+
+.runtime-profile-fields label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.runtime-profile-fields span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.runtime-profile-subsection {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+}
+
+.runtime-profile-subsection > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.runtime-profile-subsection[open] > summary {
+  margin-bottom: 0.8rem;
+}
+
+.runtime-shared-warnings {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.runtime-memory-device-policies {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.runtime-device-policy {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+}
+
+.runtime-device-policy-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.runtime-shared-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+
+/* Model runtime settings share the AR theme and retain the existing controls. */
+#settings-ollama-context { display: none; }
+#settings-ollama-context.active { display: grid; gap: 1.1rem; }
+#settings-ollama-context .section-heading h3 { margin: 0; }
+#settings-ollama-context .section-heading p { margin-bottom: 0; line-height: 1.6; }
+.runtime-performance-panel, .runtime-profile-panel {
+  min-width: 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--panel), color-mix(in srgb, var(--panel-raised) 45%, var(--panel)));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 2%);
+}
+.runtime-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.runtime-card-heading h4 { margin: 0; font-size: .92rem; }
+.runtime-note { line-height: 1.65; }
+.runtime-performance-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: .9rem 0; }
+.runtime-performance-model { grid-column: 1 / -1; }
+.runtime-field-caption { display: inline-flex; align-items: center; gap: .4rem; }
+.runtime-field-caption .information-button { flex: 0 0 20px; width: 20px; height: 20px; font-family: inherit; }
+.runtime-role-profile { gap: .85rem; padding: .9rem; background: color-mix(in srgb, var(--panel-raised) 45%, transparent); }
+.runtime-role-profile > strong { font-size: .82rem; }
+.runtime-profile-fields input {
+  box-sizing: border-box; width: 100%; min-width: 0; min-height: 36px; padding: .45rem .55rem;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  color: var(--text); background: var(--bg); font: inherit; font-variant-numeric: tabular-nums;
+}
+.runtime-profile-fields input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.runtime-profile-subsection { padding: .9rem; background: color-mix(in srgb, var(--panel-raised) 30%, transparent); }
+.runtime-profile-subsection > summary { display: flex; align-items: center; gap: .5rem; font-size: .84rem; }
+.runtime-performance-capabilities { display: grid; gap: .55rem; color: var(--muted); font-size: .75rem; line-height: 1.65; }
+.runtime-capability-row { display: flex; align-items: flex-start; gap: .6rem; }
+.runtime-capability-badge { flex: 0 0 auto; padding: .15rem .5rem; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-raised); font-size: .68rem; }
+.runtime-capability-badge[data-support="unsupported"] { color: var(--warning); }
+.runtime-capability-badge[data-support="supported"] { color: var(--success); }
+#settings-dialog .information-button::after { display: none; }
+.settings-floating-tooltip {
+  position: fixed; inset: auto; margin: 0; box-sizing: border-box;
+  max-width: min(340px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+  overflow: auto; padding: .75rem .85rem; border: 1px solid var(--border-strong); border-radius: 10px;
+  color: var(--text); background: var(--panel-raised); box-shadow: 0 12px 30px rgb(0 0 0 / 35%);
+  font: 12px/1.65 "Segoe UI", sans-serif; text-align: left; white-space: normal; pointer-events: none;
+}
+.settings-floating-tooltip::backdrop { background: transparent; pointer-events: none; }
+@media (max-width: 900px) { .runtime-profile-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 600px) {
+  .runtime-performance-fields, .runtime-profile-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-capability-row { flex-direction: column; gap: .25rem; }
+  .runtime-performance-panel, .runtime-profile-panel { padding: .8rem; }
+}
