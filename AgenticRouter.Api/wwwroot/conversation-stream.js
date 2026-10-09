@@ -828,7 +828,8 @@ function renderTraceDiagnostic(report) {
 }
 
 function addActivity(assistant, streamEvent, isWarningOrError) {
-  if (!streamEvent.message) {
+  // Context telemetry feeds the dedicated indicator, not the tool/activity report.
+  if (!streamEvent.message || streamEvent.type === "context.usage") {
     return;
   }
 

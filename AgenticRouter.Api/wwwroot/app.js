@@ -410,6 +410,7 @@ function bindElements() {
     "runtime-role-profiles",
     "runtime-performance-model",
     "runtime-draft-mode",
+    "runtime-kv-cache",
     "runtime-draft-value",
     "runtime-draft-value-field",
     "runtime-batch-mode",

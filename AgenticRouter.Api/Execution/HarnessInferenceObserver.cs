@@ -52,7 +52,8 @@ public sealed class HarnessInferenceObserver(
     await client.Gate.WaitAsync(cancellationToken);
     var turn = new Turn(new Uri(_baseUri!, client.Key + "/"), upstream, session, turnKey,
       CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token),
-      () => { client.Active = null; client.Gate.Release(); }, outputTokenLimit, progressObserver);
+      () => { client.Active = null; client.Gate.Release(); }, outputTokenLimit, progressObserver)
+    { IsCodex = harness == HarnessIds.Codex };
     client.Active = turn;
     return turn;
   }
@@ -94,19 +95,20 @@ public sealed class HarnessInferenceObserver(
       var inference = context.Request.HttpMethod == "POST"
         && inferencePath is "/v1/responses" or "/v1/chat/completions" or "/v1/messages" or "/api/chat" or "/api/generate";
       using var request = new HttpRequestMessage(new HttpMethod(context.Request.HttpMethod), target);
+      CodexApplyPatchWireAdapter? patchWire = null;
       if (context.Request.HasEntityBody)
       {
-        if (inference && turn.OutputTokenLimit is int outputLimit)
+        if (inference && (turn.OutputTokenLimit is not null || turn.IsCodex && inferencePath == "/v1/responses"))
         {
           if (await JsonNode.ParseAsync(context.Request.InputStream, cancellationToken: cancellationToken) is not JsonObject body)
             throw new JsonException("The harness inference request must be a JSON object.");
-          if (inferencePath is "/api/chat" or "/api/generate")
+          if (turn.OutputTokenLimit is int outputLimit && inferencePath is "/api/chat" or "/api/generate")
           {
             var options = body["options"] as JsonObject ?? new JsonObject();
             options["num_predict"] = outputLimit;
             body["options"] = options;
           }
-          else
+          else if (turn.OutputTokenLimit is int compatibleOutputLimit)
           {
             var outputField = inferencePath == "/v1/responses" ? "max_output_tokens"
               : inferencePath == "/v1/chat/completions" && body.ContainsKey("max_completion_tokens")
@@ -114,8 +116,10 @@ public sealed class HarnessInferenceObserver(
             body.Remove("max_tokens");
             body.Remove("max_completion_tokens");
             body.Remove("max_output_tokens");
-            body[outputField] = outputLimit;
+            body[outputField] = compatibleOutputLimit;
           }
+          if (turn.IsCodex && inferencePath == "/v1/responses")
+            patchWire = CodexApplyPatchWireAdapter.AdaptRequest(body);
           request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8);
         }
         else request.Content = new StreamContent(context.Request.InputStream);
@@ -134,6 +138,17 @@ public sealed class HarnessInferenceObserver(
       context.Response.ContentType = response.Content.Headers.ContentType?.ToString();
       context.Response.SendChunked = true;
       await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+      if (patchWire is not null && response.IsSuccessStatusCode)
+      {
+        if (response.Content.Headers.ContentType?.MediaType != "text/event-stream")
+          throw new JsonException("codex-apply-patch-protocol: Expected a Responses event stream.");
+        await patchWire.ForwardAsync(input, context.Response.OutputStream, bytes =>
+        {
+          observation?.ReadFrame(bytes, observation.ElapsedMilliseconds, true);
+          turn.Publish();
+        }, cancellationToken);
+        return;
+      }
       var sse = response.Content.Headers.ContentType?.MediaType is "text/event-stream" or "application/x-ndjson";
       var buffer = new byte[16_384];
       // Observation is bounded; forwarding is not truncated when a telemetry frame is large.
@@ -210,6 +225,7 @@ public sealed class HarnessInferenceObserver(
     }
     public Uri Endpoint { get; } = endpoint;
     internal int? OutputTokenLimit { get; } = outputTokenLimit;
+    internal bool IsCodex { get; init; }
     internal Action<InferenceProgressView>? ProgressObserver { get; } = progressObserver;
     internal Uri Upstream { get; } = upstream;
     internal CancellationToken Cancellation { get; } = lifetime.Token;

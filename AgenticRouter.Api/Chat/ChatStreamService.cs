@@ -1701,7 +1701,8 @@ public sealed class ChatStreamService
     {
       yield return startupEvent;
     }
-    var harnessEndpoint = _managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu);
+    var harnessEndpoint = _managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu,
+      ModelRuntimePerformance.ResolveKvCacheType(settings, selectedModel, modelDigest));
     await foreach (var streamEvent in ExecuteExternalHarnessAsync(
       harness,
       harnessDefinition,
@@ -3173,7 +3174,7 @@ public sealed class ChatStreamService
     var settings = await _settingsStore.GetAsync(cancellationToken);
     if (request.Provider == ModelProviderIds.OllamaLocal
       && _usageModelRevisions.TryGetValue(request.Model, out var digest)
-      && ModelRuntimePerformance.Resolve(settings, request.Provider, request.Model, digest)?.HasExplicitValues == true)
+      && ModelRuntimePerformance.Resolve(settings, request.Provider, request.Model, digest)?.HasRequestOptions == true)
     {
       yield return new HarnessEvent(
         "runtime.performance-unavailable",
@@ -4224,9 +4225,15 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    if (ProviderModelReference.Parse(selectedModel).ProviderId != ModelProviderIds.OllamaLocal
-      || !_managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu).Managed)
+    if (ProviderModelReference.Parse(selectedModel).ProviderId != ModelProviderIds.OllamaLocal) yield break;
+    var cache = ModelRuntimePerformance.ResolveKvCacheType(settings, selectedModel,
+      _usageModelRevisions.GetValueOrDefault(selectedModel));
+    if (!_managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu, cache).Managed)
     {
+      if (cache != "auto")
+        yield return Event(requestId, "runtime.kv-cache-unavailable",
+          $"Requested KV cache: {cache}. This external Ollama server keeps its own cache configuration; AR cannot apply this setting.",
+          stopwatch, selectedModel, intention);
       yield break;
     }
 
@@ -4260,8 +4267,13 @@ public sealed class ChatStreamService
           ))
         );
         await _managedOllamaServers.ResolveWithRecoveryAsync(
-          baseUri, _usageGpu, settings.DefaultGpu, contextLength, recovery, lifetime.Token
+          baseUri, _usageGpu, settings.DefaultGpu, contextLength, recovery, lifetime.Token,
+          ModelRuntimePerformance.ResolveKvCacheType(settings, selectedModel,
+            _usageModelRevisions.GetValueOrDefault(selectedModel))
         );
+        updates.Writer.TryWrite(Event(requestId, "runtime.kv-cache-configured",
+          $"Managed Ollama server KV cache: {cache}. Server configuration applied; effective runner precision is not independently confirmed.",
+          stopwatch, selectedModel, intention));
         updates.Writer.TryComplete();
       }
       catch (Exception exception)
@@ -7574,6 +7586,7 @@ public sealed class ChatStreamService
           && heartbeatDelay.Status == TaskStatus.RanToCompletion
         )
         {
+          TryStartInactivityRecovery();
           yield return Event(
             requestId,
             "request.heartbeat",
@@ -7606,28 +7619,7 @@ public sealed class ChatStreamService
             lastActivityAt,
             stopwatch.ElapsedMilliseconds
           );
-          if (
-            !inactivityRecoveryAttempted
-            && activeTool is null
-            && TryResolveInactivitySteering(
-              request,
-              selectedHarness,
-              executionRole,
-              out var steering,
-              out var steeringSessionId
-            )
-          )
-          {
-            inactivityRecoveryAttempted = true;
-            // Keep consuming tool/terminal events while the transport confirms
-            // delivery. Some harnesses drain steering only between tool batches.
-            pendingSteering = SendInactivitySteeringAsync(steering,
-                new HarnessSteerRequest(
-                  steeringSessionId,
-                  "Host recovery: no meaningful progress crossed the Host boundary within the configured interval. Re-check the current objective and workspace state, then take the next concrete permitted action. Do not repeat completed actions. If progress is impossible, report the exact blocker and finish truthfully.",
-                  $"host-inactivity-{Guid.NewGuid():N}"
-                ));
-          }
+          TryStartInactivityRecovery();
           continue;
         }
         if (
@@ -7744,6 +7736,22 @@ public sealed class ChatStreamService
       progress.Writer.TryComplete();
       steeringLifetime.Cancel();
       if (pendingSteering is not null) await pendingSteering;
+    }
+
+    void TryStartInactivityRecovery()
+    {
+      if (!warningSent || inactivityRecoveryAttempted || activeTool is not null
+        || _userInput.HasPendingForExecution(_executionSession?.Id)
+        || !TryResolveInactivitySteering(request, selectedHarness, executionRole,
+          out var steering, out var steeringSessionId)
+        || !steering.IsSteeringReady(steeringSessionId)) return;
+      inactivityRecoveryAttempted = true;
+      // Startup is not a consumed recovery attempt. Continue reading native
+      // events while delivery is reconciled, including tool/terminal boundaries.
+      pendingSteering = SendInactivitySteeringAsync(steering,
+        new HarnessSteerRequest(steeringSessionId,
+          "Host recovery: no meaningful progress crossed the Host boundary within the configured interval. Re-check the current objective and workspace state, then take the next concrete permitted action. Do not repeat completed actions. If progress is impossible, report the exact blocker and finish truthfully.",
+          $"host-inactivity-{Guid.NewGuid():N}"));
     }
 
     async Task<HarnessSteerResult?> SendInactivitySteeringAsync(
@@ -11367,8 +11375,8 @@ public sealed class ChatStreamService
     requestId,
     "runtime.performance-configured",
     $"Model performance: draft tokens={performance.DraftTokens?.ToString() ?? "Auto"}; "
-      + $"batch size={performance.BatchSize?.ToString() ?? "Auto"}. "
-      + "Explicit values were included in the native Ollama request; Auto is omitted. Effective runner values are not independently confirmed.",
+      + $"batch size={performance.BatchSize?.ToString() ?? "Auto"}; KV cache={performance.KvCacheType ?? "inherit"}. "
+      + "Explicit draft/batch values were included in the native Ollama request; Auto is omitted. KV cache applies at AR-owned server startup only. Effective runner values are not independently confirmed.",
     stopwatch, model, intention
   );
 

@@ -474,6 +474,8 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
       statusCode: StatusCodes.Status503ServiceUnavailable
     );
   }
+  if (text.Contains("delayed admission long qwen code", StringComparison.Ordinal))
+    await Task.Delay(TimeSpan.FromMilliseconds(1500), context.RequestAborted);
   var promptId = $"{sessionId}########{Interlocked.Increment(ref session.PromptNumber)}";
   if (text.Contains("AGENTIC_ROUTER_PERSISTED_HISTORY_COMPACTION_V1", StringComparison.Ordinal))
   {

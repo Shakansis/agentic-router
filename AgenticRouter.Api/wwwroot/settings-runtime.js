@@ -4918,6 +4918,8 @@ async function loadRuntimePerformanceEditor() {
   elements.runtimeDraftValue.value = draft?.draftValue ?? (performance?.draftTokens > 0 ? performance.draftTokens : 4);
   elements.runtimeBatchMode.value = draft?.batchMode ?? (performance?.batchSize == null ? "auto" : "custom");
   elements.runtimeBatchValue.value = draft?.batchValue ?? performance?.batchSize ?? 512;
+  elements.runtimeKvCache.value = draft?.kvCacheType ?? performance?.kvCacheType ?? "inherit";
+  elements.runtimeKvCache.disabled = !model?.digest;
   elements.runtimeDraftValue.setCustomValidity("");
   elements.runtimeBatchValue.setCustomValidity("");
   elements.runtimeDraftMode.disabled = !model?.digest;
@@ -4963,7 +4965,7 @@ function runtimePerformanceKey(model) {
 }
 
 function updateRuntimePerformanceDraft(target) {
-  if (!["runtime-draft-mode", "runtime-draft-value", "runtime-batch-mode", "runtime-batch-value"].includes(target.id)) return;
+  if (!["runtime-draft-mode", "runtime-draft-value", "runtime-batch-mode", "runtime-batch-value", "runtime-kv-cache"].includes(target.id)) return;
   const model = state.models.find(item => item.provider === "ollama-local"
     && item.name === elements.runtimePerformanceModel.value);
   if (!model?.digest) return;
@@ -4974,6 +4976,7 @@ function updateRuntimePerformanceDraft(target) {
   state.runtimePerformanceDrafts[runtimePerformanceKey(model)] = {
     provider: model.provider, model: model.name, digest: model.digest,
     draftMode: elements.runtimeDraftMode.value, draftValue: elements.runtimeDraftValue.value,
+    kvCacheType: elements.runtimeKvCache.value,
     batchMode: elements.runtimeBatchMode.value, batchValue: elements.runtimeBatchValue.value
   };
   elements.runtimePerformanceStatus.textContent = "Unsaved model performance changes. Save changes in the modal footer to persist them.";
@@ -4990,7 +4993,8 @@ function collectRuntimePerformanceOverrides(savedOverrides) {
     }
     exact.performance = {
       draftTokens: draft.draftMode === "auto" ? null : draft.draftMode === "off" ? 0 : Number(draft.draftValue),
-      batchSize: draft.batchMode === "auto" ? null : Number(draft.batchValue)
+      batchSize: draft.batchMode === "auto" ? null : Number(draft.batchValue),
+      kvCacheType: draft.kvCacheType === "inherit" ? null : draft.kvCacheType
     };
   }
   return overrides;

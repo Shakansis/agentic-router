@@ -49,9 +49,10 @@ await WriteMarkerAsync("fake-claude-invocation.json", new
   ),
   apiTimeoutMs = Environment.GetEnvironmentVariable("API_TIMEOUT_MS"),
   streamIdleTimeoutMs = Environment.GetEnvironmentVariable("CLAUDE_STREAM_IDLE_TIMEOUT_MS"),
+  subprocessEnvScrub = Environment.GetEnvironmentVariable("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"),
   claudeConfigDir = runtime,
   hostTokenConfigured = !string.IsNullOrWhiteSpace(
-    Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_TOKEN")
+    Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_HEADER")
   ),
   resumed = resume is not null,
   nativeSessionId,
@@ -837,7 +838,7 @@ async Task<string> InvokeHostToolAsync(string name, object arguments)
   using var config = JsonDocument.Parse(mcpConfig);
   var endpoint = config.RootElement.GetProperty("mcpServers").GetProperty("agentic_router")
     .GetProperty("url").GetString()!;
-  var token = Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_TOKEN");
+  var token = Environment.GetEnvironmentVariable("AGENTIC_ROUTER_MCP_HEADER");
   using var client = new HttpClient();
   client.DefaultRequestHeaders.Authorization = new("Bearer", token);
   using var initializeResponse = await client.PostAsJsonAsync(

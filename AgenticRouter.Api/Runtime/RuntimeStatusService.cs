@@ -98,7 +98,7 @@ public sealed class RuntimeStatusService : IRuntimeStatusService
           var placement = new OllamaGpuPlacementSnapshot(
             server.Backend,
             "managed",
-            $"Agentic Router owns PID {server.ProcessId} at {server.Endpoint} and forced the {BackendLabel(server.Backend)} backend for '{server.Selection}'."
+            $"Agentic Router owns PID {server.ProcessId} at {server.Endpoint} and forced the {BackendLabel(server.Backend)} backend for '{server.Selection}'. KV cache configuration: {server.KvCacheType}; effective runner precision is not independently confirmed."
           );
           mapped.AddRange(
             running.Select(

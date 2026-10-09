@@ -23,7 +23,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
 {
   private const int AutoCompactPercentage = 98;
   private const int MaximumActivityText = 8_192;
-  private const string PermissionProfileId = ":workspace";
+  private const string PermissionProfileId = ":read-only";
   private const string HostWebSearchAlias = "agentic_router_web_search";
   private const string HostUserInputAlias = "agentic_router_request_user_input";
   private static readonly TimeSpan AvailabilityCacheDuration = TimeSpan.FromMinutes(1);
@@ -283,7 +283,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         ["threadId"] = threadId,
         ["input"] = CreateTurnInput(turnPrompt.Text, request.Images),
         ["cwd"] = request.WorkingDirectory,
-        ["approvalPolicy"] = request.ApprovalPolicy == "ask" ? "on-request" : "never",
+        ["approvalPolicy"] = "on-request",
         ["permissions"] = PermissionProfileId,
         ["runtimeWorkspaceRoots"] = new[] { request.WorkingDirectory },
         ["model"] = request.Model
@@ -519,6 +519,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       await StopOwnedProcessAsync();
     }
   }
+
+  public bool IsSteeringReady(string sessionId)
+    => _threadsByConversation.TryGetValue(sessionId, out var session)
+      && _activeByThread.TryGetValue(session.NativeSessionId, out var active)
+      && !active.Completed && !string.IsNullOrWhiteSpace(active.TurnId);
 
   public async Task<HarnessSteerResult> SteerTurnAsync(
     HarnessSteerRequest request,
@@ -776,7 +781,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
             model = request.Model,
             modelProvider = "ollama",
             cwd = request.WorkingDirectory,
-            approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
+            approvalPolicy = "on-request",
             permissions = PermissionProfileId,
             runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
             config = CreateThreadConfig(contextConfiguration)
@@ -807,7 +812,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         model = request.Model,
         modelProvider = "ollama",
         cwd = request.WorkingDirectory,
-        approvalPolicy = request.ApprovalPolicy == "ask" ? "on-request" : "never",
+        approvalPolicy = "on-request",
         permissions = PermissionProfileId,
         runtimeWorkspaceRoots = new[] { request.WorkingDirectory },
         serviceName = "agentic_router",
@@ -857,11 +862,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
         false
       );
     }
-    if (!string.Equals(sandboxType, "workspaceWrite", StringComparison.Ordinal))
+    if (!string.Equals(sandboxType, "readOnly", StringComparison.Ordinal))
     {
       throw new HarnessException(
         "codex-sandbox-incompatible",
-        "Codex did not activate the required workspace-write sandbox.",
+        "Codex did not activate the required Host-approved native-write sandbox.",
         $"App Server reported sandbox type '{sandboxType}'.",
         false
       );
@@ -1640,6 +1645,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     var content = "model_provider = \"ollama\"\n"
       + "oss_provider = \"ollama\"\n"
       + $"model_catalog_json = \"{TomlPath(catalogPath)}\"\n"
+      // Every native patch crosses Host validation. The Host alone decides
+      // whether the user's auto/ask mode needs a visible approval.
       + "approval_policy = \"on-request\"\n"
       + $"default_permissions = \"{PermissionProfileId}\"\n"
       + "check_for_update_on_startup = false\n"
@@ -1728,6 +1735,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
           }
         ).ToArray(),
         shell_type = "shell_command",
+        apply_patch_tool_type = "freeform",
         visibility = "list",
         supported_in_api = true,
         priority = index + 1,
@@ -1839,7 +1847,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
       }
 
       return Directory.EnumerateDirectories(root)
-        .Select(directory => Path.Combine(directory, "codex.exe"))
+        .SelectMany(directory => new[]
+        {
+          Path.Combine(directory, "codex.exe"),
+          Path.Combine(directory, "bin", "codex.exe")
+        })
         .Where(File.Exists)
         .Select(path => new FileInfo(path))
         .OrderByDescending(file => file.LastWriteTimeUtc)
@@ -2078,7 +2090,8 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
   {
     return item.TryGetProperty("changes", out var changes)
       && changes.ValueKind == JsonValueKind.Array
-      && changes.EnumerateArray().Any(change => string.Equals(GetString(change, "kind"), "delete", StringComparison.OrdinalIgnoreCase));
+      && changes.EnumerateArray().Any(change =>
+        (GetString(change, "kind", "type") ?? GetString(change, "kind")) == "delete");
   }
 
   private static IReadOnlyList<string>? FileChangePaths(JsonElement? item)
@@ -2087,7 +2100,11 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     {
       return null;
     }
-    return changes.EnumerateArray().Select(change => GetString(change, "path")).Where(path => !string.IsNullOrWhiteSpace(path)).Select(path => path!).ToArray();
+    return changes.EnumerateArray().SelectMany(change => new[]
+      {
+        GetString(change, "path"),
+        GetString(change, "kind", "move_path")
+      }).Where(path => !string.IsNullOrWhiteSpace(path)).Select(path => path!).ToArray();
   }
 
   private static bool FileChangeIsWorkspaceConfined(JsonElement? item, string workspacePath)
@@ -2106,13 +2123,9 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     {
       var workspaceRoot = Path.GetFullPath(workspacePath);
       var rootPrefix = workspaceRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-      foreach (var change in entries)
+      if (entries.Any(change => string.IsNullOrWhiteSpace(GetString(change, "path")))) return false;
+      foreach (var path in FileChangePaths(item)!)
       {
-        var path = GetString(change, "path");
-        if (string.IsNullOrWhiteSpace(path))
-        {
-          return false;
-        }
         var full = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(workspaceRoot, path));
         if (!full.StartsWith(rootPrefix, FileSystemPathSemantics.Comparison))
         {
@@ -2222,7 +2235,7 @@ public sealed class CodexHarnessAdapter : IAgentHarness, IAgentHarnessTransport,
     {
       return "Codex file change";
     }
-    var labels = changes.EnumerateArray().Take(5).Select(change => $"{GetString(change, "kind") ?? "change"}: {GetString(change, "path") ?? "unknown"}").ToArray();
+    var labels = changes.EnumerateArray().Take(5).Select(change => $"{GetString(change, "kind", "type") ?? GetString(change, "kind") ?? "change"}: {GetString(change, "path") ?? "unknown"}").ToArray();
     return Truncate(labels.Length == 0 ? "Codex file change" : string.Join(", ", labels));
   }
 

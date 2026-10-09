@@ -594,6 +594,10 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
   {
     var executable = ResolveExecutable();
     var info = BaseStartInfo(executable, request.WorkingDirectory);
+    // Claude's subprocess scrub blanks the default MCP token variable. Use a
+    // dedicated bridge variable while retaining credential scrubbing; never put
+    // the bearer value in argv or persist it in a configuration file.
+    bridge = bridge with { AuthorizationEnvironmentVariable = "AGENTIC_ROUTER_MCP_HEADER" };
     foreach (var argument in new[]
     {
       "--print",
@@ -604,6 +608,7 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       "--permission-prompt-tool", "stdio",
       "--model", request.Model,
       "--bare",
+      "--settings", "{\"enabledPlugins\":{\"cc-plugin-agents-md@builtin\":false,\"cc-plugin-plugin-authoring@builtin\":false}}",
       "--disable-slash-commands",
       "--no-chrome",
       "--strict-mcp-config",

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -60,10 +61,67 @@ public sealed class OllamaStartupRecoveryEndToEndTests
     await Expect(indicator).ToBeHiddenAsync();
   }
 
+  [TestMethod]
+  [DataRow("native")]
+  [DataRow("codex")]
+  [DataRow("claude-code")]
+  [DataRow("qwen-code")]
+  [DataRow("opencode")]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task ModelCacheOverridesSelectIsolatedReusableServersAcrossHarnesses(string harness)
+  {
+    await ConfigureAsync([0]);
+    var models = await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/models");
+    var digest = models!["models"]!.AsArray().First(item => item!["name"]!.GetValue<string>() == "alpha:latest")!["digest"]!.GetValue<string>();
+    var settings = await GetSettingsJsonAsync();
+    settings["ollamaRuntime"]!["managedKvCacheType"] = "f16";
+    settings["ollamaRuntime"]!["modelOverrides"] = new JsonArray(new JsonObject
+    {
+      ["provider"] = "ollama-local",
+      ["model"] = "alpha:latest",
+      ["digest"] = digest,
+      ["performance"] = new JsonObject { ["kvCacheType"] = "q8_0" },
+      ["overrides"] = new JsonObject()
+    });
+    using (var saved = await PutSettingsJsonAsync(settings)) saved.EnsureSuccessStatusCode();
+    await Page.ReloadAsync();
+    if (harness != "native") await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    await Expect(Page.Locator("[data-event-type='runtime.kv-cache-configured']").Last).ToContainTextAsync("q8_0");
+    var first = (await EnvironmentsAsync()).Single(item => item["kvCacheType"]?.GetValue<string>() == "q8_0");
+    Assert.AreEqual("1", first["flashAttention"]!.GetValue<string>());
+    var firstPid = first["processId"]!.GetValue<int>();
+    await Page.Locator("#model-selector").SelectOptionAsync("command-r:latest");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    await Expect(Page.Locator("[data-event-type='runtime.kv-cache-configured']").Last).ToContainTextAsync("f16");
+    var second = await EnvironmentsAsync();
+    Assert.IsTrue(second.Any(item => item["kvCacheType"]?.GetValue<string>() == "f16"));
+    Assert.IsTrue(second.Any(item => item["processId"]!.GetValue<int>() == firstPid), "Another cache configuration must preserve the existing server.");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    Assert.AreEqual(firstPid, (await EnvironmentsAsync()).Single(item => item["kvCacheType"]?.GetValue<string>() == "q8_0")["processId"]!.GetValue<int>());
+    await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
+
+    async Task<JsonNode[]> EnvironmentsAsync()
+    {
+      using var client = new HttpClient();
+      var values = new List<JsonNode>();
+      foreach (var path in Directory.GetFiles(Path.Combine(_environment.DataDirectory, "ollama-managed-servers"), "*.json"))
+      {
+        var lease = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
+        values.Add(JsonNode.Parse(await client.GetStringAsync(lease["endpoint"]!.GetValue<string>().TrimEnd('/') + "/test/environment"))!);
+      }
+      return values.ToArray();
+    }
+  }
+
   [TestCleanup]
   public async Task RestoreManagedConfigurationAsync()
   {
     if (_discovery is null) return;
+    if (TestContext.CurrentTestOutcome == UnitTestOutcome.Failed) TestContext.WriteLine(_environment.ApiOutput);
     await _environment.SetManagedOllamaAndRestartAsync(null);
     if (!_discovery.HasExited)
     {
@@ -231,10 +289,7 @@ public sealed class OllamaStartupRecoveryEndToEndTests
     }
     await File.WriteAllTextAsync(Path.ChangeExtension(_executable, ".startup-plan.json"), JsonSerializer.Serialize(readinessPlan));
     await File.WriteAllTextAsync(Path.ChangeExtension(_executable, ".forward-url"), _environment.FakeOllama.BaseUrl);
-    using var port = new TcpListener(IPAddress.Loopback, 0);
-    port.Start();
-    var managedPort = ((IPEndPoint)port.LocalEndpoint).Port;
-    port.Stop();
+    var managedPort = FindAvailableCachePorts();
     await _environment.SetManagedOllamaAndRestartAsync(_executable, managedPort - 11_434, attemptSeconds, recoverySeconds);
     var settings = await GetSettingsJsonAsync();
     settings["ollamaUrl"] = DiscoveryUrl;
@@ -244,6 +299,36 @@ public sealed class OllamaStartupRecoveryEndToEndTests
     saved.EnsureSuccessStatusCode();
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+  }
+
+  private static int FindAvailableCachePorts()
+  {
+    // The ephemeral base alone does not prove that its derived cache ports are
+    // free or outside Windows excluded ranges. Check all routes before launch.
+    for (var candidate = 20_000; candidate < 30_000; candidate++)
+    {
+      var listeners = new List<TcpListener>();
+      try
+      {
+        var initial = new TcpListener(IPAddress.Loopback, candidate);
+        listeners.Add(initial);
+        initial.Start();
+        var port = ((IPEndPoint)initial.LocalEndpoint).Port;
+        for (var cache = 1; cache <= 3; cache++)
+        {
+          var listener = new TcpListener(IPAddress.Loopback, 1024 + (port - 1024 + cache * 4096) % (65_536 - 1024));
+          listeners.Add(listener);
+          listener.Start();
+        }
+        return port;
+      }
+      catch (SocketException) { }
+      finally
+      {
+        foreach (var listener in listeners) listener.Stop();
+      }
+    }
+    throw new InvalidOperationException("No available set of managed cache ports was found.");
   }
 
   private async Task AwaitWarningAsync()

@@ -3929,7 +3929,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(Page.Locator("#benchmark-harness-list input[value=\"qwen-code\"]"))
       .ToBeCheckedAsync();
     await Expect(Page.Locator("#benchmark-harness-list"))
-      .ToContainTextAsync("Qwen Code [Experimental]");
+      .ToContainTextAsync("Qwen Code");
     await Expect(Page.Locator("#benchmark-harness-list"))
       .ToContainTextAsync("0.21.13-fake");
     await Expect(Page.Locator("#benchmark-harness-list"))
@@ -4699,10 +4699,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       {
         "Auto Model × Harness",
         "Native",
-        "Claude Code [Experimental]",
-        "Codex (Experimental)",
-        "OpenCode [Experimental]",
-        "Qwen Code [Experimental]"
+        "Claude Code",
+        "Codex",
+        "OpenCode",
+        "Qwen Code"
       }
     );
     await Expect(harness.Locator("option[value=\"codex\"]"))
@@ -4712,7 +4712,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(harness).ToBeEnabledAsync();
     await harness.SelectOptionAsync("codex");
     await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
-      "Codex (Experimental)"
+      "Codex"
     );
     await Expect(Page.Locator("#web-toggle")).ToHaveAttributeAsync(
       "data-state",
@@ -4734,11 +4734,11 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     }
     await harness.SelectOptionAsync("opencode");
     await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
-      "OpenCode [Experimental]"
+      "OpenCode"
     );
     await harness.SelectOptionAsync("claude-code");
     await Expect(Page.Locator("#composer-status")).ToContainTextAsync(
-      "Claude Code [Experimental]"
+      "Claude Code"
     );
   }
 
@@ -4889,10 +4889,19 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Assert.AreEqual(JsonValueKind.Null, invocation.RootElement.GetProperty("claudeCodeUseFoundry").ValueKind);
       Assert.AreEqual("1", invocation.RootElement.GetProperty("nonessentialTrafficDisabled").GetString());
       Assert.IsTrue(invocation.RootElement.GetProperty("hostTokenConfigured").GetBoolean());
+      Assert.AreEqual("1", invocation.RootElement.GetProperty("subprocessEnvScrub").GetString());
       var arguments = invocation.RootElement.GetProperty("args")
         .EnumerateArray().Select(item => item.GetString()).ToArray();
       CollectionAssert.Contains(arguments, "stream-json");
       CollectionAssert.Contains(arguments, "--strict-mcp-config");
+      var settingsIndex = Array.IndexOf(arguments, "--settings");
+      Assert.IsGreaterThanOrEqualTo(0, settingsIndex);
+      using var isolatedSettings = JsonDocument.Parse(arguments[settingsIndex + 1]!);
+      var plugins = isolatedSettings.RootElement.GetProperty("enabledPlugins");
+      Assert.IsFalse(plugins.GetProperty("cc-plugin-agents-md@builtin").GetBoolean());
+      Assert.IsFalse(plugins.GetProperty("cc-plugin-plugin-authoring@builtin").GetBoolean());
+      StringAssert.Contains(invocation.RootElement.GetProperty("mcpConfig").GetString(),
+        "${AGENTIC_ROUTER_MCP_HEADER}");
       var effortIndex = Array.IndexOf(arguments, "--effort");
       Assert.IsGreaterThanOrEqualTo(0, effortIndex);
       Assert.AreEqual("medium", arguments[effortIndex + 1]);
@@ -5037,6 +5046,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   [DataRow(HarnessIds.Codex, "long codex turn")]
   [DataRow(HarnessIds.OpenCode, "long opencode steering")]
   [DataRow(HarnessIds.QwenCode, "long qwen code")]
+  [DataRow(HarnessIds.QwenCode, "delayed admission long qwen code")]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task DirectExecutePromptsSteerableHarnessOnceAfterSustainedInactivity(string harnessId, string prompt)
   {
@@ -5477,10 +5487,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
         .GetProperty("variants");
       Assert.AreEqual(JsonValueKind.Object, variants.ValueKind);
       CollectionAssert.AreEqual(
-        new[] { "low", "medium", "high" },
+        new[] { "none", "low", "medium", "high" },
         variants.EnumerateObject().Select(item => item.Name).ToArray()
       );
-      foreach (var effort in new[] { "low", "medium", "high" })
+      foreach (var effort in new[] { "none", "low", "medium", "high" })
       {
         Assert.AreEqual(
           effort,
@@ -5974,6 +5984,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .EnumerateArray()
       .Select(item => item.GetString())
       .ToArray();
+    Assert.IsFalse(
+      settings.RootElement.GetProperty("agents").GetProperty("crossSessionMessaging")
+        .GetBoolean()
+    );
     Assert.IsFalse(
       settings.RootElement.GetProperty("tools").GetProperty("computerUse")
         .GetProperty("enabled").GetBoolean()
@@ -7320,7 +7334,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var codexConfig = await File.ReadAllTextAsync(Path.Combine(codexRuntime, "config.toml"));
     StringAssert.Contains(codexConfig, "model_provider = \"ollama\"");
     StringAssert.Contains(codexConfig, "model_catalog_json = \"");
-    StringAssert.Contains(codexConfig, "default_permissions = \":workspace\"");
+    StringAssert.Contains(codexConfig, "default_permissions = \":read-only\"");
+    StringAssert.Contains(codexConfig, "approval_policy = \"on-request\"");
     StringAssert.Contains(codexConfig, "web_search = \"live\"");
     StringAssert.Contains(codexConfig, "web_search = true");
     StringAssert.Contains(codexConfig, "shell_tool = false");
@@ -7390,6 +7405,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       Assert.AreEqual(32_768, alphaMetadata.GetProperty("max_context_window").GetInt32());
       Assert.AreEqual(100, alphaMetadata.GetProperty("effective_context_window_percent").GetInt32());
       Assert.AreEqual("shell_command", alphaMetadata.GetProperty("shell_type").GetString());
+      Assert.AreEqual("freeform", alphaMetadata.GetProperty("apply_patch_tool_type").GetString());
       Assert.IsFalse(alphaMetadata.TryGetProperty("default_reasoning_level", out _));
       Assert.HasCount(
         0,
@@ -7527,7 +7543,9 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var initialAssistant = Page.Locator("#messages > .message.assistant").Last;
     await Expect(initialAssistant.Locator(".assistant-running-indicator"))
       .ToBeVisibleAsync();
-    await Expect(initialAssistant.Locator(".assistant-running-brain path"))
+    await Expect(initialAssistant.Locator(".assistant-running-brain > path"))
+      .ToHaveCountAsync(3);
+    await Expect(initialAssistant.Locator(".assistant-brain-fill > path"))
       .ToHaveCountAsync(3);
     await Expect(initialAssistant.Locator(".assistant-reasoning-body"))
       .ToContainTextAsync("Inspecting", new() { Timeout = 10_000 });
@@ -8564,14 +8582,16 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CodexManagedInstallDiscoverySurvivesVersionedPathChanges()
+  [DataRow(false)]
+  [DataRow(true)]
+  public async Task CodexManagedInstallDiscoverySurvivesVersionedPathChanges(bool packagedLayout)
   {
     if (!OperatingSystem.IsWindows())
     {
       Assert.Inconclusive("Managed Codex discovery is a Windows integration.");
     }
 
-    await _environment.UseManagedCodexInstallAndRestartAsync();
+    await _environment.UseManagedCodexInstallAndRestartAsync(packagedLayout);
 
     try
     {

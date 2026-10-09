@@ -1725,6 +1725,11 @@ public sealed class SettingsValidator : ISettingsValidator
         );
       }
 
+      if (modelOverride.Performance?.KvCacheType is not (null or "f16" or "q8_0" or "q4_0"))
+      {
+        AddError(errors, $"{prefix}.performance.kvCacheType", "Choose Inherit, F16, Q8_0 or Q4_0 for the model KV cache.");
+      }
+
       if (modelOverride.Performance?.DraftTokens is < 0
         || modelOverride.Performance?.BatchSize is < 1)
       {

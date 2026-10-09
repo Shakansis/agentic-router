@@ -716,6 +716,10 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     );
   }
 
+  public bool IsSteeringReady(string sessionId)
+    => _activeTurns.TryGetValue(sessionId, out var active)
+      && !string.IsNullOrWhiteSpace(active.PromptId);
+
   public async Task<HarnessSteerResult> SteerTurnAsync(
     HarnessSteerRequest request,
     CancellationToken cancellationToken
@@ -1643,6 +1647,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         }
       },
       ["privacy"] = new { usageStatisticsEnabled = false },
+      // The isolated Host session must not discover or accept messages from
+      // ambient Qwen sessions (enabled by default in newer Qwen releases).
+      ["agents"] = new { crossSessionMessaging = false },
       ["general"] = new
       {
         enableAutoUpdate = false,

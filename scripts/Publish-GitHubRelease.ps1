@@ -42,7 +42,7 @@ function Invoke-GitHubCli {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.14.0_alpha.'
+  throw 'VersionLabel must use the form 0.15.0_alpha.'
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'Repository must use the OWNER/NAME form.'
@@ -182,6 +182,14 @@ foreach ($sourcePath in $publicFiles.Values) {
 $temporaryRoot = Join-Path (
   [System.IO.Path]::GetTempPath()
 ) "agentic-router-public-release-$PID-$([Guid]::NewGuid().ToString('N'))"
+$temporaryRoot = [System.IO.Path]::GetFullPath($temporaryRoot)
+$temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd(
+  [System.IO.Path]::DirectorySeparatorChar,
+  [System.IO.Path]::AltDirectorySeparatorChar
+) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $temporaryRoot.StartsWith($temporaryParent, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Refusing to create or clean a release checkout outside the temporary directory: $temporaryRoot"
+}
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
 
 try {

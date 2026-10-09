@@ -1230,26 +1230,20 @@ public sealed class OllamaClient : IOllamaClient
       gpuSelection ?? settings.DefaultGpu,
       cancellationToken
     );
+    string? digest = null;
+    if (settings.OllamaRuntime.ModelOverrides.Any(candidate => candidate.Model == model && candidate.Performance is not null))
+      digest = (await GetModelsAsync(baseUri, cancellationToken)).FirstOrDefault(candidate => candidate.Name == model)?.Digest;
+    var performance = ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, model, digest);
     var endpoint = await _managedServers.ResolveAsync(
-      baseUri,
-      resolvedGpu,
-      settings.DefaultGpu,
-      cancellationToken
+      baseUri, resolvedGpu, settings.DefaultGpu, cancellationToken,
+      ModelRuntimePerformance.ResolveKvCacheType(settings, model, digest)
     );
-    ModelRuntimePerformanceSettings? performance = null;
-    if (keepAlive != 0 && settings.OllamaRuntime.ModelOverrides.Any(
-      candidate => candidate.Model == model && candidate.Performance is not null))
-    {
-      var digest = (await GetModelsAsync(baseUri, cancellationToken)).FirstOrDefault(
-        candidate => candidate.Name == model)?.Digest;
-      performance = ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, model, digest);
-    }
     var payload = CreateRequest(
       model,
       Array.Empty<ChatMessage>(),
       false,
       null,
-      keepAlive == 0 || (contextTokens is null && performance?.HasExplicitValues != true)
+      keepAlive == 0 || (contextTokens is null && performance?.HasRequestOptions != true)
         ? null
         : new OllamaOptions(
           0,
@@ -1715,11 +1709,16 @@ public sealed class OllamaClient : IOllamaClient
       roleGpuSelection,
       cancellationToken
     );
+    var digest = usageContext.ModelRevision;
+    if (digest is null && settings.OllamaRuntime.ModelOverrides.Any(
+      candidate => candidate.Model == model && candidate.Performance is not null))
+    {
+      digest = (await GetModelsAsync(baseUri, cancellationToken)).FirstOrDefault(
+        candidate => candidate.Name == model)?.Digest;
+    }
     var endpoint = await _managedServers.ResolveAsync(
-      baseUri,
-      gpuSelection,
-      settings.DefaultGpu,
-      cancellationToken
+      baseUri, gpuSelection, settings.DefaultGpu, cancellationToken,
+      ModelRuntimePerformance.ResolveKvCacheType(settings, model, digest)
     );
     OllamaModelMetadata metadata;
 
@@ -1768,13 +1767,6 @@ public sealed class OllamaClient : IOllamaClient
       );
     }
 
-    var digest = usageContext.ModelRevision;
-    if (digest is null && settings.OllamaRuntime.ModelOverrides.Any(
-      candidate => candidate.Model == model && candidate.Performance is not null))
-    {
-      digest = (await GetModelsAsync(baseUri, cancellationToken)).FirstOrDefault(
-        candidate => candidate.Name == model)?.Digest;
-    }
     var resolution = OllamaRuntimeProfileResolver.Resolve(
       settings,
       model,

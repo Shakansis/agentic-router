@@ -195,6 +195,7 @@ while (true)
       spread = Environment.GetEnvironmentVariable("OLLAMA_SCHED_SPREAD"),
       contextLength = Environment.GetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH"),
       kvCacheType = Environment.GetEnvironmentVariable("OLLAMA_KV_CACHE_TYPE"),
+      flashAttention = Environment.GetEnvironmentVariable("OLLAMA_FLASH_ATTENTION"),
       noCloud = Environment.GetEnvironmentVariable("OLLAMA_NO_CLOUD")
     }),
     _ => JsonSerializer.Serialize(new { error = "not found" })

@@ -563,6 +563,8 @@ body.resizing-sidebar {
 }
 
 .chat-header {
+  position: relative;
+  z-index: 10;
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(0, auto) minmax(120px, 1fr);
   gap: 12px;

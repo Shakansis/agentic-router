@@ -170,10 +170,10 @@ while (await Console.In.ReadLineAsync() is { } line)
           break;
         }
         if (
-          parameters.GetProperty("approvalPolicy").GetString() is not ("on-request" or "never")
+          parameters.GetProperty("approvalPolicy").GetString() != "on-request"
           || !string.Equals(
             parameters.GetProperty("permissions").GetString(),
-            ":workspace",
+            ":read-only",
             StringComparison.Ordinal
           )
           || parameters.TryGetProperty("sandbox", out _)
@@ -223,10 +223,10 @@ while (await Console.In.ReadLineAsync() is { } line)
           result = new
           {
             model,
-            activePermissionProfile = new { id = ":workspace" },
+            activePermissionProfile = new { id = ":read-only" },
             sandbox = new
             {
-              type = "workspaceWrite"
+              type = "readOnly"
             },
             thread = new
             {
@@ -251,7 +251,7 @@ while (await Console.In.ReadLineAsync() is { } line)
           break;
         }
         if (
-          !string.Equals(parameters.GetProperty("permissions").GetString(), ":workspace", StringComparison.Ordinal)
+          !string.Equals(parameters.GetProperty("permissions").GetString(), ":read-only", StringComparison.Ordinal)
           || parameters.TryGetProperty("sandbox", out _)
           || !HasExactRuntimeWorkspaceRoot(parameters)
         )
@@ -297,8 +297,8 @@ while (await Console.In.ReadLineAsync() is { } line)
           result = new
           {
             model,
-            activePermissionProfile = new { id = ":workspace" },
-            sandbox = new { type = "workspaceWrite" },
+            activePermissionProfile = new { id = ":read-only" },
+            sandbox = new { type = "readOnly" },
             thread = new
             {
               id = threadId,
@@ -356,10 +356,10 @@ while (await Console.In.ReadLineAsync() is { } line)
         var cwd = parameters.GetProperty("cwd").GetString()!;
         var model = parameters.GetProperty("model").GetString()!;
         if (
-          parameters.GetProperty("approvalPolicy").GetString() is not ("on-request" or "never")
+          parameters.GetProperty("approvalPolicy").GetString() != "on-request"
           || !string.Equals(
             parameters.GetProperty("permissions").GetString(),
-            ":workspace",
+            ":read-only",
             StringComparison.Ordinal
           )
           || parameters.TryGetProperty("sandboxPolicy", out _)

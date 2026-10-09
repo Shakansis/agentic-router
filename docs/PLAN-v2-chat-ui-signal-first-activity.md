@@ -49,3 +49,21 @@ All automated validation uses the deterministic fake-provider browser/API path. 
 - Solution formatter: all changed C# files except `ChatStreamService.cs` pass. The solution-wide check continues to report the same four pre-existing whitespace findings in that file, shifted to lines 6229-6232 by this change.
 - Full E2E validation did not complete cleanly: `ConformantGroqTargetCoordinatesBeforeFailedResidentIsEvaluated` and `GroqTargetCoordinatesDirectlyWithoutResidentConformanceBridge` remained non-terminal for 20 seconds, and an earlier bounded run also surfaced `StructuredSpecialistRepairsOneSemanticFailureBeforeExecution`. The focused signal-first suite remains green; no passing full-suite claim is made.
 - Real Ollama/GPU inference and real cloud calls: not run.
+
+## Context telemetry report cleanup (2026-10-09)
+
+`context.usage` snapshots update the dedicated context indicator and remain in
+Host telemetry/history, but are omitted from activity/tool-call report rows and
+counts. The same rendering rule applies to live streams and historical replay,
+including older saved messages. Estimated, live and provider-reported usage do
+not produce repeated report lines. Context warnings, limits, compaction and
+recovery events retain their existing presentation.
+
+Validation: the three focused browser/API E2E cases passed in
+`TestResults/context-report-final.trx`, covering live report filtering, ordered
+API snapshots, exact context indication, retained history telemetry and replay.
+The existing history test now identifies the Host completion region by its
+accessible name rather than a CSS class shared with a hidden completion report.
+Release build (isolated `bin/kv-cache/`, no shared compilation) passed with zero
+warnings/errors; scoped `dotnet format --verify-no-changes`, `node --check` for
+conversation-stream.js and `git diff --check` passed. No real inference was used.

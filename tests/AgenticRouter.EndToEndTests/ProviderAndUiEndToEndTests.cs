@@ -4400,7 +4400,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.14.0_alpha"
+      "v0.15.0_alpha"
     );
     await Expect(
       Page.Locator(

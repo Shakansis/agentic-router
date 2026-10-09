@@ -767,16 +767,17 @@ internal sealed class TestEnvironment : IAsyncDisposable
     await RestartApplicationAsync();
   }
 
-  public async Task UseManagedCodexInstallAndRestartAsync()
+  public async Task UseManagedCodexInstallAndRestartAsync(bool packagedLayout = false)
   {
     var managedRoot = Path.Combine(
       _temporaryRoot,
-      "managed-codex"
+      packagedLayout ? "managed-codex-packaged" : "managed-codex"
     );
     var managedVersion = Path.Combine(
       managedRoot,
       "current-test-version"
     );
+    if (packagedLayout) managedVersion = Path.Combine(managedVersion, "bin");
     Directory.CreateDirectory(managedVersion);
     var sourceDirectory = Path.GetDirectoryName(FakeCodexExecutablePath)
       ?? throw new InvalidOperationException(

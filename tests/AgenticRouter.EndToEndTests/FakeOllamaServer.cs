@@ -10,7 +10,7 @@ using AgenticRouter.Api.Supervision;
 
 namespace AgenticRouter.EndToEndTests;
 
-internal sealed class FakeOllamaServer : IAsyncDisposable
+internal sealed partial class FakeOllamaServer : IAsyncDisposable
 {
   private static readonly JsonSerializerOptions CompactJsonOptions = new(
     JsonSerializerDefaults.Web
@@ -293,6 +293,11 @@ internal sealed class FakeOllamaServer : IAsyncDisposable
       {
         using var document = await JsonDocument.ParseAsync(context.Request.InputStream,
           cancellationToken: cancellationToken);
+        if (InstalledHarnessProbe)
+        {
+          await HandleInstalledHarnessProbeAsync(context, document.RootElement, cancellationToken);
+          return;
+        }
         var fixture = document.RootElement.GetProperty("fixture").GetString()!;
         var limitNames = new[] { "max_tokens", "max_completion_tokens", "max_output_tokens" };
         var limits = limitNames.Where(name => document.RootElement.TryGetProperty(name, out _)).ToArray();

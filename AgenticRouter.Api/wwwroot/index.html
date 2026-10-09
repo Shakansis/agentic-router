@@ -6,12 +6,12 @@
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
   <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=20261009-inference-progress">
-  <link rel="stylesheet" href="/panels.css?v=20260926-settings-polish">
-  <link rel="stylesheet" href="/benchmark.css?v=20261001-runtime-performance">
-  <link rel="stylesheet" href="/model-runtime.css?v=20261001-runtime-performance">
-  <link rel="stylesheet" href="/bootstrap.css?v=20260927-restart-recovery">
-  <link rel="stylesheet" href="/user-input.css?v=20260924-ui-domains">
+  <link rel="stylesheet" href="/styles.css?v=0.15.0_alpha">
+  <link rel="stylesheet" href="/panels.css?v=0.15.0_alpha">
+  <link rel="stylesheet" href="/benchmark.css?v=0.15.0_alpha">
+  <link rel="stylesheet" href="/model-runtime.css?v=0.15.0_alpha">
+  <link rel="stylesheet" href="/bootstrap.css?v=0.15.0_alpha">
+  <link rel="stylesheet" href="/user-input.css?v=0.15.0_alpha">
 </head>
 <body class="bootstrapping">
   <div
@@ -145,7 +145,7 @@
       <ul id="external-app-warnings-list" class="project-conversation-list" tabindex="0" aria-label="Availability warnings"></ul>
     </details>
 
-    <span class="app-version sidebar-expanded-only">v0.14.0_alpha</span>
+    <span class="app-version sidebar-expanded-only">v0.15.0_alpha</span>
   </aside>
 
   <div
@@ -1576,8 +1576,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.14.0."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.14.0."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.15.0."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.15.0."
                 >i</button>
               </div>
             </div>
@@ -1744,7 +1744,7 @@
                 <select id="runtime-managed-kv-cache" aria-describedby="runtime-managed-kv-note"><option value="auto">Auto — inherit environment</option><option value="f16">F16 — 16-bit cache</option><option value="q8_0">Q8_0 — 8-bit cache</option><option value="q4_0">Q4_0 — 4-bit cache</option></select>
               </label>
               </div>
-              <p id="runtime-managed-kv-note" class="runtime-note">Applies to every model on AR-owned Ollama servers. Save and restart AR to apply to existing servers. External servers and unsaved model tests retain their current cache.</p>
+              <p id="runtime-managed-kv-note" class="runtime-note">Default for models without a KV cache override. Saved changes select a compatible AR-owned server on the next request. External Ollama servers retain their own configuration.</p>
             </section>
             <section class="runtime-performance-panel" aria-labelledby="runtime-performance-heading">
               <div class="runtime-card-heading">
@@ -1753,11 +1753,13 @@
               </div>
               <div class="settings-grid runtime-performance-fields">
                 <label class="runtime-performance-model" for="runtime-performance-model"><span class="runtime-field-caption">Installed local model <button type="button" class="information-button" aria-label="Help: Installed local model" data-tooltip="Select an exact installed model. Settings match provider, model name and digest.">?</button></span><select id="runtime-performance-model" data-ignore-settings-dirty></select></label>
+                <label for="runtime-kv-cache"><span class="runtime-field-caption">KV cache precision</span><select id="runtime-kv-cache" aria-describedby="runtime-kv-cache-note"><option value="inherit">Inherit global default</option><option value="f16">F16 — 16-bit cache</option><option value="q8_0">Q8_0 — 8-bit cache</option><option value="q4_0">Q4_0 — 4-bit cache</option></select></label>
                 <label for="runtime-draft-mode"><span class="runtime-field-caption">Draft tokens <button type="button" class="information-button" aria-label="Help: draft tokens" data-tooltip="Speculative decoding predicts draft tokens that the main model verifies. Auto omits draft_num_predict and retains the runtime or model default. Off sends 0. Custom sends a positive count. Compatible model and runtime support are required; a successful request alone does not confirm activation.">?</button></span><select id="runtime-draft-mode"><option value="auto">Auto</option><option value="off">Off</option><option value="custom">Custom</option></select></label>
                 <label id="runtime-draft-value-field" hidden for="runtime-draft-value"><span class="runtime-field-caption">Draft token count <button type="button" class="information-button" aria-label="Help: draft token count" data-tooltip="Positive draft token count sent as draft_num_predict. Used only in Custom mode; Auto sends nothing and Off sends 0.">?</button></span><input id="runtime-draft-value" required type="number" min="1" max="2147483647" step="1" value="4" disabled></label>
                 <label for="runtime-batch-mode"><span class="runtime-field-caption">Batch size <button type="button" class="information-button" aria-label="Help: batch size" data-tooltip="Maximum input token batch processed by the runner. Larger batches may improve prompt throughput and use more memory. Auto omits num_batch; Custom sends a positive integer. Changing load options may reload the runner.">?</button></span><select id="runtime-batch-mode"><option value="auto">Auto</option><option value="custom">Custom</option></select></label>
                 <label id="runtime-batch-value-field" hidden for="runtime-batch-value"><span class="runtime-field-caption">Tokens per batch <button type="button" class="information-button" aria-label="Help: tokens per batch" data-tooltip="Positive input token batch size sent as num_batch when Custom is selected. Auto leaves the runner default unchanged.">?</button></span><input id="runtime-batch-value" required type="number" min="1" max="2147483647" step="1" value="512" disabled></label>
               </div>
+              <p id="runtime-kv-cache-note" class="runtime-note">Applies across roles and harnesses on AR-owned Ollama servers. Different cache precisions use separate servers; loaded models consume memory until unloaded. Quantized cache requires Flash Attention. Server configuration is reported separately from verified runner activation.</p>
               <div id="runtime-performance-capabilities" class="runtime-performance-capabilities" role="status"></div>
               <output id="runtime-performance-status" class="runtime-note" role="status"></output>
             </section>
@@ -2016,8 +2018,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.14.0."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.14.0. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.15.0."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.15.0. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
@@ -2575,17 +2577,17 @@
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
-  <script defer src="/shared.js?v=20260924-ui-domains"></script>
-  <script defer src="/i18n.js?v=20261004-completion-report"></script>
-  <script defer src="/app.js?v=20261009-inference-progress"></script>
-  <script defer src="/loading.js?v=20260927-restart-recovery"></script>
-  <script defer src="/benchmark.js?v=20260926-inference-profiles"></script>
-  <script defer src="/git.js?v=20260924-ui-domains"></script>
-  <script defer src="/projects-sessions.js?v=20260930-review-summary"></script>
-  <script defer src="/settings-runtime.js?v=20261009-inference-progress"></script>
-  <script defer src="/conversation.js?v=20261009-inference-progress"></script>
-  <script defer src="/conversation-stream.js?v=20261009-inference-progress"></script>
-  <script defer src="/conversation-review.js?v=20260930-review-summary"></script>
-  <script defer src="/conversation-render.js?v=20260924-ui-domains"></script>
+  <script defer src="/shared.js?v=0.15.0_alpha"></script>
+  <script defer src="/i18n.js?v=0.15.0_alpha"></script>
+  <script defer src="/app.js?v=0.15.0_alpha"></script>
+  <script defer src="/loading.js?v=0.15.0_alpha"></script>
+  <script defer src="/benchmark.js?v=0.15.0_alpha"></script>
+  <script defer src="/git.js?v=0.15.0_alpha"></script>
+  <script defer src="/projects-sessions.js?v=0.15.0_alpha"></script>
+  <script defer src="/settings-runtime.js?v=0.15.0_alpha"></script>
+  <script defer src="/conversation.js?v=0.15.0_alpha"></script>
+  <script defer src="/conversation-stream.js?v=0.15.0_alpha"></script>
+  <script defer src="/conversation-review.js?v=0.15.0_alpha"></script>
+  <script defer src="/conversation-render.js?v=0.15.0_alpha"></script>
 </body>
 </html>

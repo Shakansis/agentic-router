@@ -1,3 +1,68 @@
+# Agentic Router v0.15.0 alpha
+
+This alpha improves harness steering, per-model runtime tuning and execution
+feedback. Windows x64 and Linux x64 packages include the .NET runtime; Ollama,
+models and optional harness CLIs remain separate installations. The previous
+`v0.14.0_alpha` release and its assets remain unchanged.
+
+## Harness integration and steering
+
+- Codex opts into instant interruption where supported. Qwen steering tracks
+  native delivery and rejects promotion as proof of same-turn consumption.
+  Native and Claude Code retain their explicit transport limitations.
+- Inactivity steering waits for native turn admission before consuming its
+  single recovery attempt, including when harness startup is delayed.
+- The upgraded CLI integration was exercised with Codex 0.162.0, Claude Code
+  2.1.295, OpenCode 1.18.35 and Qwen Code 0.25.0. These versions are not bundled.
+- Codex native freeform patches bridge to Ollama tools while retaining Host
+  approvals and validation of source and move destinations. CRLF preservation,
+  workspace-escape rejection and Ask mode are covered by real-CLI fixtures.
+- Claude isolated settings keep its environment scrub enabled while preserving
+  Host MCP authentication. Qwen cross-session messaging is disabled in the
+  isolated harness configuration.
+
+## Runtime tuning and performance evidence
+
+- Performance by model saves draft depth, batch size and KV precision for an
+  exact model/digest through the existing Settings footer Save and portable YAML.
+  Cache precision can inherit the global default or select F16, Q8_0 or Q4_0.
+- On AR-managed Windows Ollama runtimes, GPU/cache-compatible requests reuse a
+  server. Distinct cache types use separate servers; existing keep-alive rules
+  still govern loaded-model memory. External servers keep their own configuration.
+  Quantized cache enables Flash Attention in the owned process.
+- Context measurements and benchmark fingerprints include the resolved cache
+  configuration. Configured server precision is distinguished from independently
+  verified runner activation; throughput improvement is workload-dependent.
+- Inference progress and completion metrics distinguish model loading, prompt
+  processing, generation and missing evidence. TTFT subtracts reported loading
+  when available, while preserving its raw interval and source.
+
+## Execution and UI
+
+- Host progress/recovery and completion remain grounded in observed effects,
+  with bounded recovery rather than treating intermediate failures as completion.
+- The resource popover renders above the live sticky execution header on desktop
+  and mobile. Repeated context-usage snapshots no longer inflate tool/activity
+  reports or their event counts; context indicators and saved telemetry remain.
+- Static assets share the release cache version, and the project sidebar's
+  collapse indicator renders correctly.
+- Conversation export and the accumulated execution/benchmark continuity work
+  since v0.14 are included.
+
+## Validation
+
+- Complete deterministic browser/API E2E suite: **711/711 passed**, with zero
+  failed or skipped tests after correcting the first-run failures.
+- Installed harness CLI integration: **8/8 passed** with an isolated simulated
+  provider, covering all four external harnesses and Codex native patch policy.
+- Release build: zero warnings/errors. Formatting, JavaScript/PowerShell syntax
+  and intended-diff checks passed.
+- Portable Windows x64 and Linux x64 (Ubuntu WSL) smoke checks passed: application
+  page and Settings API returned HTTP 200, archive checksums matched, and Linux
+  executable/launcher permissions were verified.
+- Real GPU inference and throughput matrices were not repeated for this release.
+  CLI integration results above do not claim real-model quality or performance.
+
 # Agentic Router v0.14.0 alpha
 
 This alpha adds Host-governed HTTPS downloads for assets in a trusted

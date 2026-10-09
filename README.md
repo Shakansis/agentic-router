@@ -4,14 +4,14 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: `v0.14.0_alpha` adds Host-governed HTTPS asset downloads, keeps recovery decisions visible, and preserves queued prompts across connection conflicts. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
+**Current Status**: `v0.15.0_alpha` improves harness steering, per-model runtime controls, execution evidence and UI performance. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.14.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-win-x64.zip.sha256) |
-| `v0.14.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.14.0_alpha/AgenticRouter-0.14.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.15.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-win-x64.zip.sha256) |
+| `v0.15.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -20,21 +20,23 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.14.0_alpha` is a pre-release intended for evaluation. The package is
+`0.15.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
 conversations by default and can be disabled or reopened from Local resources.
 
-### What's new in 0.14.0_alpha
+### What's new in 0.15.0_alpha
 
-- Execute can save public HTTPS assets with a single or batch download request
-  after explicit approval. Existing files offer Keep or Replace per destination;
-  Autonomous keeps local files and reports their replacement URLs.
-- A recovery decision remains visible while pending. Useful verified actions
-  reset the no-progress allowance instead of exhausting a fixed action count.
-- Silent streams reconnect after a bounded idle period. Prompts that meet an
-  earlier run during cleanup remain available after HTTP 409.
+- Steer supported running harnesses with explicit delivery evidence. Codex opts
+  into instant interruption; Qwen distinguishes queued input from same-turn delivery.
+- Tune draft tokens, batch size and KV cache per exact local model. KV overrides
+  inherit the global default and share settings across roles; compatible AR-owned
+  Ollama servers are reused without replacing another cache configuration.
+- Inspect inference progress, throughput and TTFT with their measurement source.
+  Completion and recovery remain based on Host-observed effects.
+- Updated harness protocol integration, native Codex patch validation, cleaner
+  activity reports and corrected resource-panel layering.
 
 See [release notes](RELEASE_NOTES.md) for scope and validation evidence.
 

@@ -319,3 +319,14 @@ contracts and four existing harness adapters. Settings descriptions, phase contr
 local Help, and the configuration inventory were updated together. E2E coverage
 was added in `InferenceProfileExecutionEndToEndTests.cs` and updated in the existing
 DurableSupervision, ExecutionProgress, and BenchmarkAndHarness suites.
+
+## Startup and inactivity steering admission (0.15)
+
+The one-shot inactivity steering budget is consumed only after the adapter has
+local evidence that its native turn was admitted. Process/session startup is not
+steering readiness. Codex exposes its active turn id, Qwen its admitted prompt id,
+and OpenCode its accepted prompt response. The Host checks readiness again on
+heartbeats after an inactivity warning, so a silent admitted turn can still be
+nudged even when startup crossed the first warning deadline. Delivery remains
+asynchronous and reconciled; approval waits and active tools remain excluded.
+The per-turn one-shot budget and final cancellation behavior are unchanged.

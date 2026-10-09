@@ -126,7 +126,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         var planned = _managedOllamaServers.Plan(
           baseUri,
           affinity.GpuSelection,
-          settings.DefaultGpu
+          settings.DefaultGpu,
+          ModelRuntimePerformance.ResolveKvCacheType(settings, exact.Name, exact.Digest)
         );
         running = planned.Managed
           && !_managedOllamaServers.GetActiveServers().Any(server => server.Endpoint == planned.Endpoint)
@@ -284,21 +285,22 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
     var affinity = await _modelGpuAffinities.ResolveAsync(
       settings, request.Model, settings.DefaultGpu, cancellationToken
     );
-    var planned = _managedOllamaServers.Plan(
-      baseUri,
-      affinity.GpuSelection,
-      settings.DefaultGpu
-    );
-    IReadOnlyList<OllamaRunningModel> runningBefore = planned.Managed
-      && !_managedOllamaServers.GetActiveServers().Any(server => server.Endpoint == planned.Endpoint)
-        ? []
-        : await _ollamaClient.GetRunningModelsAsync(planned.Endpoint, cancellationToken);
     var installed = await RequireInstalledAsync(
       baseUri,
       request.Model,
       role,
       cancellationToken
     );
+    var planned = _managedOllamaServers.Plan(
+      baseUri,
+      affinity.GpuSelection,
+      settings.DefaultGpu,
+      ModelRuntimePerformance.ResolveKvCacheType(settings, installed.Name, installed.Digest)
+    );
+    IReadOnlyList<OllamaRunningModel> runningBefore = planned.Managed
+      && !_managedOllamaServers.GetActiveServers().Any(server => server.Endpoint == planned.Endpoint)
+        ? []
+        : await _ollamaClient.GetRunningModelsAsync(planned.Endpoint, cancellationToken);
     var metadata = await RequireMetadataAsync(
       baseUri,
       installed,
@@ -513,7 +515,8 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         baseUri,
         gpuSelection,
         settings.DefaultGpu,
-        cancellationToken
+        cancellationToken,
+        ModelRuntimePerformance.ResolveKvCacheType(settings, installed.Name, installed.Digest)
       )).Endpoint;
       var version = await _ollamaClient.GetVersionAsync(
         runtimeUri,

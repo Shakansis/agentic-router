@@ -399,12 +399,14 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     var workerEndpoint = _managedOllamaServers.Plan(
       ollamaEndpoint,
       workerGpu.GpuSelection,
-      settings.DefaultGpu
+      settings.DefaultGpu,
+      ModelRuntimePerformance.ResolveKvCacheType(settings, model.Name, model.Digest)
     );
     var supervisorEndpoint = _managedOllamaServers.Plan(
       ollamaEndpoint,
       supervisorGpu.GpuSelection,
-      settings.DefaultGpu
+      settings.DefaultGpu,
+      ModelRuntimePerformance.ResolveKvCacheType(settings, supervisorModel.Name, supervisorModel.Digest)
     );
     var workerRuntime = workerEndpoint.Backend ?? workerGpu.Backend ?? "auto";
     var supervisorRuntime = supervisorEndpoint.Backend
@@ -622,12 +624,14 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
       var workerEndpoint = _managedOllamaServers.Plan(
         endpoint,
         workerGpu.GpuSelection,
-        settings.DefaultGpu
+        settings.DefaultGpu,
+        ModelRuntimePerformance.ResolveKvCacheType(settings, checkpoint.Route.Model, checkpoint.Route.ModelDigest)
       );
       var supervisorEndpoint = _managedOllamaServers.Plan(
         endpoint,
         supervisorGpu.GpuSelection,
-        settings.DefaultGpu
+        settings.DefaultGpu,
+        ModelRuntimePerformance.ResolveKvCacheType(settings, checkpoint.Route.EffectiveSupervisorModel, checkpoint.Route.EffectiveSupervisorModelDigest)
       );
       if (!string.Equals(
         NormalizeEndpoint(

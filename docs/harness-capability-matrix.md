@@ -44,6 +44,13 @@ trusted-workspace confinement, approvals, effect proof, recovery bounds, and
 terminal truth remain authoritative even when a harness performs part of the
 operation natively.
 
+Codex's local-model catalog enables its native freeform patch engine. The
+provider wire adapter translates that exact tool to Ollama JSON functions and
+back. Its native profile is read-only with on-request approvals so every patch
+reaches Host path validation; the user's AR auto/ask setting still controls
+whether a browser approval is required. Source and move destination are both
+validated, including paths under ambient temporary directories.
+
 ## Important route distinctions
 
 - Web availability is derived from the effective provider/model/harness route;
@@ -57,6 +64,11 @@ operation natively.
   instant interruption of a model response. Qwen success now requires a matching
   receipt and reconciled consumption; promotion out of the active turn is rejected.
   See the [current audit](research/harness-steering-and-releases-2026-10-09.md).
+- The six Useful now upstream fixes were adopted with Codex 0.162.0,
+  OpenCode 1.18.35, Qwen Code 0.25.0 and Claude Code 2.1.295. The adapters preserve
+  isolation across changed defaults: Qwen cross-session messaging is disabled;
+  Claude's two new built-in plugins are disabled and its dedicated MCP credential
+  variable works with subprocess credential scrubbing still enabled.
 - Claude Code exposes Read/Glob/Grep/Edit/Write/WebSearch/WebFetch but not an
   ambient shell, plugins, skills, subagents, or unowned MCP configuration.
 - Unsupported ambient capabilities are not compensated with an unrestricted

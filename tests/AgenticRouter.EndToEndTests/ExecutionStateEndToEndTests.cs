@@ -402,6 +402,22 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       Assert.IsLessThanOrEqualTo(2d, metrics[0], "The running status must stay at the chat viewport top.");
       Assert.IsLessThanOrEqualTo(1d, metrics[1]);
       Assert.IsLessThanOrEqualTo(1d, metrics[2]);
+      await Page.Locator("#runtime-details > summary").ClickAsync();
+      await Expect(Page.Locator(".runtime-popover")).ToBeVisibleAsync();
+      Assert.IsTrue(await header.EvaluateAsync<bool>("""
+        header => {
+          const popover = document.querySelector('.runtime-popover');
+          const a = header.getBoundingClientRect(), b = popover.getBoundingClientRect();
+          const left = Math.max(a.left, b.left), right = Math.min(a.right, b.right);
+          const top = Math.max(a.top, b.top), bottom = Math.min(a.bottom, b.bottom);
+          if (right <= left || bottom <= top) return false;
+          return popover.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2));
+        }
+        """), "The resource panel must receive pointer hits above the overlapping live execution header.");
+      var layeringScreenshot = Path.Combine(TestContext.TestResultsDirectory!, $"resources-above-execution-{width}-{outcome}.png");
+      await Page.ScreenshotAsync(new() { Path = layeringScreenshot });
+      TestContext.AddResultFile(layeringScreenshot);
+      await Page.Locator("#runtime-details > summary").ClickAsync();
       await Expect(assistant.Locator(".assistant-reasoning")).ToContainTextAsync("Preserved thinking content");
       if (outcome == "cancelled") await Page.Locator("#cancel-request").ClickAsync();
       await File.WriteAllTextAsync(release, outcome);
@@ -2289,10 +2305,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute write file coding task validate"
     );
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Modified: Program.cs");
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Validation: Build sample project · passed");
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Validation: Test sample project · passed");
-    await Expect(Page.Locator(".execution-completion-summary li")).ToHaveCountAsync(3);
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync("Modified: Program.cs");
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync("Validation: Build sample project · passed");
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync("Validation: Test sample project · passed");
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary'] li")).ToHaveCountAsync(3);
     await Expect(Page.Locator(".work-action-label", new() { HasText = "Write" })).ToHaveCountAsync(1);
     Assert.AreEqual(
       "Console.WriteLine(\"fixed\");\n",
@@ -2374,9 +2390,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute create file validate"
     );
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Created: hello.txt");
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Validation: Build missing project · failed");
-    await Expect(Page.Locator(".execution-completion-summary")).Not.ToContainTextAsync("· passed");
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync("Created: hello.txt");
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync("Validation: Build missing project · failed");
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).Not.ToContainTextAsync("· passed");
     await Expect(
       Page.Locator(
         "[data-event-type=\"validation-completed\"]"
@@ -2418,7 +2434,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     await Expect(Page.Locator(".message.assistant > .execution-session-header")).ToBeVisibleAsync();
     await Expect(Page.Locator(".activity .execution-session-header")).ToHaveCountAsync(0);
-    await Expect(Page.Locator(".execution-completion-summary li")).ToHaveTextAsync(
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary'] li")).ToHaveTextAsync(
       new[] { "Created: hello.txt", "Validation: not run" }
     );
     await Expect(Page.Locator(".assistant-running-indicator")).ToBeHiddenAsync();
@@ -2578,10 +2594,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await SendMessageAsync(
       "execute run process"
     );
-    await Expect(Page.Locator(".execution-completion-summary > details")).Not.ToHaveAttributeAsync(
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary'] > details")).Not.ToHaveAttributeAsync(
       "open", string.Empty);
-    await Page.Locator(".execution-completion-summary summary").ClickAsync();
-    await Expect(Page.Locator(".execution-completion-summary")).ToContainTextAsync("Processes: 1 run · 1 succeeded · 0 failed");
+    await Page.Locator(".execution-completion-summary[aria-label='Host completion summary'] summary").ClickAsync();
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync("Processes: 1 run · 1 succeeded · 0 failed");
     var processAction = Page.Locator(".assistant-work .work-action", new() { HasText = "dotnet --version" });
     await processAction.Locator("summary").ClickAsync();
     await Expect(processAction.Locator(".work-action-preview")).ToContainTextAsync("dotnet --version");
@@ -4239,7 +4255,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.GotoAsync("/");
     await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
     await SetExecuteModeAsync("auto");
-    await SendMessageAsync("execute create file");
+    var response = await Page.RunAndWaitForResponseAsync(
+      () => SendMessageAsync("execute create file"),
+      response => response.Url.Contains("/api/chat/stream", StringComparison.Ordinal));
 
     await Expect(Page.Locator("#context-usage-summary")).ToContainTextAsync("exact");
     await Page.Locator("#context-usage > summary").ClickAsync();
@@ -4263,10 +4281,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       await Expect(details).ToContainTextAsync(category);
     }
     await Page.Locator("#context-usage-advanced > summary").ClickAsync();
-    var contextEvents = Page.Locator("[data-event-type=\"context.usage\"]");
-    Assert.IsGreaterThanOrEqualTo(4, await contextEvents.CountAsync());
-    await Expect(contextEvents.First).ToContainTextAsync("Specialist inference 1");
-    await Expect(contextEvents.Last).ToContainTextAsync("provider-reported input");
+    await Expect(Page.Locator("[data-event-type=\"context.usage\"]")).ToHaveCountAsync(0);
+    var contextEvents = ParseSseEvents(await response.TextAsync()).Where(item =>
+      item["type"]!.GetValue<string>() == "context.usage" && item["message"] is not null).ToArray();
+    Assert.IsGreaterThanOrEqualTo(4, contextEvents.Length);
+    StringAssert.Contains(contextEvents.First()["message"]!.GetValue<string>(), "Specialist inference 1");
+    StringAssert.Contains(contextEvents.Last()["message"]!.GetValue<string>(), "provider-reported input");
     Assert.IsGreaterThanOrEqualTo(
       2,
       _environment.FakeOllama.Requests.Where(
@@ -4337,7 +4357,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     ).ToBeVisibleAsync();
     await Expect(Page.Locator(".message.assistant > .execution-session-header")).ToBeVisibleAsync();
     await Expect(Page.Locator(".assistant-current-activity")).ToHaveTextAsync("Awaiting approval…");
-    await Expect(Page.Locator(".execution-completion-summary")).ToBeHiddenAsync();
+    await Expect(Page.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToBeHiddenAsync();
     Assert.IsTrue(
       File.Exists(
         file
@@ -5660,14 +5680,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       1,
       new() { Timeout = 20_000 }
     );
+    await Expect(assistant.Locator("[data-event-type=\"context.usage\"]")).ToHaveCountAsync(0);
     var originalSummary = await assistant.Locator(
       ".activity > summary"
     ).InnerTextAsync();
     var originalModelNotice = await assistant.Locator(
       ".model-selection-note"
     ).InnerTextAsync();
-    await assistant.Locator(".execution-completion-summary summary").ClickAsync();
-    var originalHostSummary = await assistant.Locator(".execution-completion-summary").InnerTextAsync();
+    await assistant.Locator(".execution-completion-summary[aria-label='Host completion summary'] summary").ClickAsync();
+    var originalHostSummary = await assistant.GetByRole(AriaRole.Region, new() { Name = "Host completion summary" }).InnerTextAsync();
     var originalStatus = await assistant.Locator(".execution-session-footer").InnerTextAsync();
     await Expect(assistant.Locator(".execution-session-header")).Not.ToHaveClassAsync(new Regex("is-live"));
     StringAssert.Contains(originalHostSummary, "Created: hello.txt");
@@ -5729,6 +5750,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       streamEvent => streamEvent.GetProperty("type").GetString()
     ).OfType<string>().ToArray();
     Assert.Contains("response.completed", persistedEventTypes);
+    Assert.Contains("context.usage", persistedEventTypes);
     Assert.IsTrue(
       persistedEventTypes.Any(type => type?.StartsWith(
         "action.",
@@ -5737,7 +5759,6 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     string[] replaceableTimelineTypes =
     [
-      "context.usage",
       "request.heartbeat",
       "usage.updated",
       "harness.progress"
@@ -5782,11 +5803,11 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       $"#recent-sessions .session-entry[data-session-id=\"{sessionId}\"] .session-entry-content"
     ).ClickAsync();
     assistant = Page.Locator(".message.assistant").Last;
-    await assistant.Locator(".execution-completion-summary summary").ClickAsync();
+    await assistant.Locator(".execution-completion-summary[aria-label='Host completion summary'] summary").ClickAsync();
     await Expect(assistant.Locator(".execution-session-footer")).ToHaveCountAsync(1);
     await Expect(assistant.Locator(".execution-session-footer")).ToHaveTextAsync(originalStatus, new() { UseInnerText = true });
     await Expect(assistant.Locator(".execution-session-header")).Not.ToHaveClassAsync(new Regex("is-live"));
-    await Expect(assistant.Locator(".execution-completion-summary")).ToHaveTextAsync(
+    await Expect(assistant.GetByRole(AriaRole.Region, new() { Name = "Host completion summary" })).ToHaveTextAsync(
       originalHostSummary,
       new() { UseInnerText = true }
     );
@@ -5824,6 +5845,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       "data-terminal",
       "true"
     );
+    await Expect(assistant.Locator("[data-event-type=\"context.usage\"]")).ToHaveCountAsync(0);
     var restoredActivityTypes = await assistant.Locator(
       "[data-event-type]"
     ).EvaluateAllAsync<string[]>(

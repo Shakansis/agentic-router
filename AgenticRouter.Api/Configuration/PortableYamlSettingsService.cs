@@ -1437,9 +1437,10 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         var performanceNode = Map(entry.Value, "performance", $"{path}.performance", errors);
         if (performanceNode is not null)
         {
-          ValidateKeys(performanceNode, ["draft_tokens", "batch_size"], $"{path}.performance", errors);
+          ValidateKeys(performanceNode, ["draft_tokens", "batch_size", "kv_cache_type"], $"{path}.performance", errors);
           performance = new ModelRuntimePerformanceSettings
           {
+            KvCacheType = ReadString(performanceNode, "kv_cache_type", "inherit", $"{path}.performance.kv_cache_type", errors) is var cache && cache != "inherit" ? cache : null,
             DraftTokens = ReadRuntimePerformanceValue(performanceNode, "draft_tokens", $"{path}.performance", errors),
             BatchSize = ReadRuntimePerformanceValue(performanceNode, "batch_size", $"{path}.performance", errors)
           };
@@ -3198,6 +3199,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
         yaml.AppendLine("      performance:");
         Scalar(yaml, 4, "draft_tokens", performance.DraftTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "auto");
         Scalar(yaml, 4, "batch_size", performance.BatchSize?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "auto");
+        Scalar(yaml, 4, "kv_cache_type", performance.KvCacheType ?? "inherit");
       }
       yaml.AppendLine(
         "      roles:"

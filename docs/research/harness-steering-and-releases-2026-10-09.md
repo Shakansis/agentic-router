@@ -206,3 +206,146 @@ pre-existing Ollama service PID 9120 remained running.
 All unrelated dirty changes present at the start were preserved. Audit diffs
 against the initial file copies and local diagnostic evidence are under
 `.artifacts/harness-steering-audit/` (ignored; not part of the product).
+
+## Adoption of the six Useful now items
+
+The user subsequently authorized implementation and CLI upgrades immediately,
+after the performance task completed. The earlier no-upgrade statement describes
+the first audit only. The versions below were downloaded from the official npm
+packages, tested in isolation, then installed locally on 2026-10-09.
+
+| Harness | Installed version | Adopted upstream functionality | AR integration change |
+| --- | --- | --- | --- |
+| Codex | 0.162.0 stable | CRLF-preserving `apply_patch` | Enables the native patch tool in the local-model catalog, translates its custom-tool wire format to Ollama JSON functions, and accepts the official `bin/codex.exe` installation layout. Existing `instant_interrupt` remains enabled. |
+| OpenCode | 1.18.35 | Qwen sampling / unsupported `textVerbosity` compatibility | Uses the upstream implementation; no duplicate sampling policy in AR. |
+| OpenCode | 1.18.35 | Network and unknown finish-reason recovery | Uses upstream recovery while preserving Host recovery budgets and terminal evidence. |
+| OpenCode | 1.18.35 | Empty move-path permission metadata and diagnostic redaction | Uses upstream fixes; Host path/approval validation remains unchanged. |
+| Qwen Code | 0.25.0 | Extension isolation and orphan cleanup | Explicitly disables `agents.crossSessionMessaging` in AR's isolated configuration, preserving the existing session boundary despite the new upstream default. |
+| Claude Code | 2.1.295 | Headless MCP reconnection and backoff | Corrected authenticated MCP startup under credential scrubbing and disabled newly default-enabled built-in plugins in the isolated AR session. |
+
+The versions include all six approved upstream fixes. No Useful later or
+Probably unnecessary item was added, and no background updater was introduced.
+
+### Compatibility findings
+
+The real Codex patch probe initially returned `unsupported call: apply_patch`:
+the existing local-model catalog omitted `apply_patch_tool_type`, so the actual
+native inventory lacked a tool AR's capability projection already advertised.
+The catalog now explicitly enables `freeform`, the only variant in the
+[0.162.0 native model contract](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/protocol/src/openai_models.rs).
+Ollama's direct Responses endpoint uses function calls, so
+`CodexApplyPatchWireAdapter` translates only the canonical `apply_patch` tool,
+its matching history/results, and its streamed response items. It preserves the
+native patch grammar in the function schema and leaves execution, approval and
+workspace validation in the existing native/Host path. It does not run patches
+itself, add a shell, normalize other tool names, or create another model call.
+The real native patch then passed the exact-byte CRLF check.
+
+The subsequent negative native test found that Codex's default `:workspace`
+profile permits ambient temporary directories, allowing a patch outside AR's
+trusted root when that root was itself under the OS temporary directory. The
+adapter now selects `:read-only` plus native `on-request` so every patch reaches
+Host validation before execution. AR still applies the user's auto/ask choice:
+automatic mode approves valid actions internally; ask mode waits in the existing
+browser approval UI. This preserves the established product boundary instead of
+delegating it to the broader native profile. The adapter also reads the current
+structured `kind.type` / `kind.move_path` metadata so both source and destination
+are validated, and deletions retain their destructive classification. Built-in
+profile semantics are documented in the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+The real Claude 2.1.295 executable exposed two issues that the older fake CLI
+could not detect:
+
+- `--bare` still reports `cc-plugin-agents-md@builtin` and
+  `cc-plugin-plugin-authoring@builtin`. AR now explicitly sets both to false
+  through `--settings`. The existing rejection of unexpected plugins remains.
+- With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, MCP expansion blanked the
+  `AGENTIC_ROUTER_MCP_TOKEN` credential. A local fake HTTP server reproduced this
+  with both inline and file-based MCP configuration. A dedicated
+  `AGENTIC_ROUTER_MCP_HEADER` variable expands correctly with scrubbing still on.
+  The token stays in the process environment, never literal argv or a saved
+  configuration file. The Host's bearer authentication remains required.
+
+These are adapter compatibility corrections, not a broader plugin or authority
+change. See the official [MCP credential expansion documentation](https://code.claude.com/docs/en/mcp#credential-variables-that-read-as-empty)
+and [plugin configuration reference](https://code.claude.com/docs/en/plugins-reference).
+
+### Upgrade validation and operational notes
+
+The opt-in `InstalledHarnessUpgradeEndToEndTests` exercises the real installed
+CLIs through Playwright, the running AR API and its actual isolation/MCP startup.
+Only the provider HTTP boundary is scripted. Ordinary E2E runs do not invoke
+installed harnesses unless `AGENTIC_ROUTER_INSTALLED_HARNESS_E2E=1` is set along
+with the executable overrides used by `TestEnvironment`.
+
+The first four-CLI run passed Codex, OpenCode and Qwen and correctly rejected
+Claude's unexpected plugins. After the compatibility correction, all four
+passed with authenticated MCP startup and the exact selected model. A separate
+Codex fixture directs the real native `apply_patch` through the Host approval
+path and compares the resulting CRLF file byte for byte.
+
+An authorized real-model edit probe was cancelled when a new user conversation
+started on the shared runtime. It is not counted as a passing inference test.
+The existing real-model steering evidence earlier in this report applies to
+the earlier CLI versions. These upgrade checks do not independently reproduce
+every upstream fault scenario (extended MCP outage, unknown network finish,
+extension concurrency, or redaction of every native diagnostic field).
+
+Initial deterministic regression found two stale expectations from the other
+completed work: OpenCode now offers the documented `none` effort, and the
+running-brain SVG has three outline paths plus three progress-fill paths.
+Assertions were updated to verify both actual contracts. One Qwen inactivity
+test hit the existing 10-second client limit during concurrent validation;
+the isolated three-harness rerun passed without changed limits or assertions.
+
+The running user AR was preserved. The updated adapters are built separately
+under `bin/harness-useful-now/Release/net10.0`; a new AR process built from this
+source is required to use the adapter changes. Do not run the old adapter build
+against the new Claude version: it still has the old MCP/plugin configuration.
+The test data directory is isolated and must not replace the user's settings.
+
+Codex was installed alongside the previous executable under
+`%LOCALAPPDATA%/OpenAI/Codex/bin/ar-0.162.0`, retaining the official package layout.
+OpenCode and Qwen were updated using pinned global npm installs. Claude was
+updated using `claude install 2.1.295`; the previous 2.1.234 executable was copied
+to `.artifacts/harness-useful-now/rollback/` before installation. All other local
+evidence and the pinned package lock are under `.artifacts/harness-useful-now/`.
+The existing Codex installation was not overwritten. To reverse npm upgrades,
+the previous versions were `opencode-ai@1.18.18` and
+`@qwen-code/qwen-code@0.21.13`.
+
+### Final upgrade evidence
+
+- Release solution build: **zero warnings and errors** using
+  `dotnet build AgenticRouter.slnx -c Release --no-restore -m:1 -p:BaseOutputPath=bin/harness-useful-now/ -p:UseSharedCompilation=false -nodeReuse:false`.
+- Scoped `dotnet format AgenticRouter.slnx --no-restore --verify-no-changes`,
+  `git diff --check`, and intended-diff inspection passed.
+- **80/80 deterministic E2E passed** after the final native approval correction:
+  `TestResults/harness-upgrade-regression-complete.trx`.
+- **8/8 E2E with actual CLIs and a simulated provider passed**:
+  `TestResults/harness-upgrade-native-complete.trx`. Four harness startup/stream
+  cases plus Codex CRLF, direct workspace escape rejection, move destination
+  escape rejection, and an actual browser ask/approve interaction. The file
+  remains unchanged before approval; auto mode completes without an extra click.
+- Installed CLI/entrypoint SHA-256 hashes match the staged tested files. An
+  isolated AR using default executable discovery reported all four target
+  versions available, without test executable overrides.
+- Test Hosts, harness children, fake providers and browser test processes were
+  stopped. The user's AR PID 73504 and Ollama PIDs 9120/86688 were preserved.
+
+The final regression filter was:
+
+```text
+(FullyQualifiedName~Steer|FullyQualifiedName~QwenCode|FullyQualifiedName~CodexHarness|FullyQualifiedName~CodexManaged|FullyQualifiedName~ClaudeCode|FullyQualifiedName~OpenCode|FullyQualifiedName~CompletionMetrics|FullyQualifiedName~OutputToken)&FullyQualifiedName!~Real&FullyQualifiedName!~Installed
+```
+
+Tests used the isolated Release DLL and `playwright.runsettings`, with the
+existing `AGENTIC_ROUTER_E2E_API_PATH` / four harness executable overrides.
+The native matrix instead selected `FullyQualifiedName~InstalledHarnessUpgrade`
+with the real staged CLIs and explicit installed-harness opt-in. Reproduction
+commands are saved locally in `.artifacts/harness-useful-now/run-e2e.ps1`.
+
+Production changes are in `AgentHarness.cs`, `CodexApplyPatchWireAdapter.cs`,
+`HarnessInferenceObserver.cs`, `ClaudeCodeHarness.cs` and `QwenCodeHarness.cs`.
+Test changes cover native protocol fixtures, CLI discovery, preserved isolation,
+approval behavior, byte-level patch effects and negative workspace boundaries.

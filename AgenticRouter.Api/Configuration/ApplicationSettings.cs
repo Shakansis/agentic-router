@@ -946,6 +946,12 @@ public sealed record ModelRuntimePerformanceSettings
 
   public int? BatchSize { get; init; }
 
+  // Null inherits the global managed-server default.
+  public string? KvCacheType { get; init; }
+
   [System.Text.Json.Serialization.JsonIgnore]
-  public bool HasExplicitValues => DraftTokens is not null || BatchSize is not null;
+  public bool HasRequestOptions => DraftTokens is not null || BatchSize is not null;
+
+  [System.Text.Json.Serialization.JsonIgnore]
+  public bool HasExplicitValues => HasRequestOptions || KvCacheType is not null;
 }

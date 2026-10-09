@@ -8,7 +8,7 @@ open help; Escape, scroll, dialog close and resize dismiss it.
 
 ## Configuration
 
-Only draft tokens and input batch size are added. The typed performance object is
+Draft tokens, input batch size and managed Ollama KV cache precision are configured. The typed performance object is
 attached to the existing exact provider/model/digest identity, alongside role
 overrides, and applies across roles. Sampling profiles, GPU placement, memory
 policy, context limits, approval and recovery semantics are unchanged.
@@ -16,6 +16,8 @@ policy, context limits, approval and recovery semantics are unchanged.
 - Missing performance settings preserve the old request behavior.
 - Draft tokens: null means Auto (omit); 0 means Off; positive integers are explicit.
 - Batch size: null means Auto (omit); positive integers are explicit.
+- KV cache: null inherits the global `managedKvCacheType`; explicit values are
+  `f16`, `q8_0`, and `q4_0`. Global Auto inherits the server environment.
 - Field edits remain pending per exact model, including when navigating models or
   sections. Only the modal footer's Save changes persists them, together with the
   other settings. There is no separate performance apply button.
@@ -25,7 +27,7 @@ policy, context limits, approval and recovery semantics are unchanged.
 - Removing a context role override preserves model performance configuration.
 - JSON persistence and portable YAML carry the optional performance object.
   YAML uses performance.draft_tokens and performance.batch_size with auto or an
-  integer. Measured hardware records remain local.
+  integer, and performance.kv_cache_type with inherit or an explicit cache type. Measured hardware records remain local.
 
 ## Provider capability and application evidence
 
@@ -121,3 +123,65 @@ Verification: isolated Release build with zero warnings/errors, format
 passed. Thirteen fake-provider browser/API E2E tests passed (eight runtime
 performance tests and five existing settings/runtime/inference/YAML tests).
 No real-model, GPU or cloud-provider workload was used.
+
+## Per-model cache and resource layering (2026-10-09)
+
+The exact provider/model/digest cache override is shared by roles. The global
+setting remains an inherited default; existing saved F16 settings are preserved.
+The managed server identity and lease now include GPU selection and cache type.
+Compatible requests reuse a server; different precisions select separate endpoints
+without stopping the existing cache configuration. Quantized cache also sets
+OLLAMA_FLASH_ATTENTION=1 in that child only. Existing keep-alive and unload policy
+still controls loaded models; concurrent servers do not imply free model memory.
+Context-driven server replacement retains its existing behavior within the same
+GPU/cache identity. This change does not add role-specific cache settings.
+
+Native generation, preloads, measurement, external-harness endpoints and durable
+supervision route identity resolve the same exact-model setting. External servers
+remain unchanged and report cache application as unavailable. Activity and resource
+placement evidence distinguish applied server environment from unverified effective
+runner precision. Cache-only settings do not produce the compatibility warning
+reserved for draft tokens and batch size. Resolved global cache defaults and model
+overrides participate in measurement and benchmark signatures.
+
+The header's backdrop filter creates a stacking context. Its explicit stacking
+order now puts the resource popover above the live sticky Execute header. Browser
+coverage checks actual overlapping pointer hits, preserving the sticky behavior,
+at desktop and mobile widths, and records screenshots.
+
+### Validation for the cache/layering follow-up
+
+- Release: `dotnet build AgenticRouter.slnx -c Release --no-restore
+  -p:BaseOutputPath=bin/kv-cache/ -p:UseSharedCompilation=false -nodeReuse:false
+  -m:1` passed with zero warnings and errors. The isolated output preserves the
+  normal app build and user processes.
+- `dotnet format AgenticRouter.slnx --verify-no-changes --no-restore --include
+  <changed C# files>`, `node --check` for app.js/settings-runtime.js and
+  `git diff --check` passed.
+- 36 distinct selected scenarios have passing evidence across the final applicable
+  runs: 14 runtime performance/settings cases (`TestResults/kv-cache-performance-final.trx`),
+  14 managed startup cases (`TestResults/kv-cache-startup-final.trx`), and the eight
+  unaffected passing sticky UI, managed lifecycle and supervision cases in
+  `TestResults/kv-cache-final.trx`.
+- The managed-cache browser test covers Native Chat and Execute through Codex,
+  Claude Code, Qwen Code and OpenCode, with fake external providers. It verifies
+  the child process environment, quantized-cache Flash Attention, global F16
+  inheritance, Q8 override, distinct live processes and PID reuse after switching
+  models back. No real inference or throughput benchmark was run.
+- An initial YAML assertion was corrected to match quoted YAML scalars. The native
+  selection case uses Chat because its generic report prompt has no fake Execute
+  completion fixture. The wider run exposed Windows socket access failures on
+  derived cache ports; the test now probes the whole port set before starting
+  processes and preserves failure logs before teardown. Assertions and timeouts
+  were not weakened. Earlier failed TRX files remain available for diagnosis.
+- Desktop/mobile resource layering screenshots are in
+  `.artifacts/kv-cache-review/resources-desktop.png` and `resources-mobile.png`.
+  Existing saved global F16 configuration was not changed. Release publication
+  remains pending user review.
+
+Changed components for this follow-up: ApplicationSettings, SettingsValidator,
+PortableYamlSettingsService, ModelRuntimePerformance, OllamaManagedServerManager,
+OllamaClient, OllamaRuntimeProfileService, RuntimeStatusService,
+SupervisionRouteResolver and ChatStreamService; the Settings HTML/JS and shared
+header CSS; inference help; RuntimePerformance, OllamaStartupRecovery and
+ExecutionState browser tests plus FakeOllamaCli environment evidence.

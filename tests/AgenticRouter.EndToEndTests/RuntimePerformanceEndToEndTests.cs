@@ -23,6 +23,7 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
     await help.CloseAsync();
     await Expect(Page.Locator("#runtime-managed-kv-cache")).ToHaveValueAsync("f16");
     await Expect(Page.Locator("#runtime-performance-capabilities")).ToContainTextAsync("Not confirmed");
+    await Page.Locator("#runtime-kv-cache").SelectOptionAsync("q8_0");
     await Page.Locator("#runtime-draft-mode").SelectOptionAsync("off");
     await Page.Locator("#runtime-batch-mode").SelectOptionAsync("custom");
     await Page.Locator("#runtime-batch-value").FillAsync("256");
@@ -33,11 +34,13 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
     await Expect(Page.Locator("#settings-dirty")).ToBeHiddenAsync();
     var saved = await SettingsAsync();
     Assert.AreEqual("f16", saved["ollamaRuntime"]!["managedKvCacheType"]!.GetValue<string>());
+    Assert.AreEqual("q8_0", saved["ollamaRuntime"]!["modelOverrides"]![0]!["performance"]!["kvCacheType"]!.GetValue<string>());
     Assert.AreEqual(0, saved["ollamaRuntime"]!["modelOverrides"]![0]!["performance"]!["draftTokens"]!.GetValue<int>());
     Assert.AreEqual(256, saved["ollamaRuntime"]!["modelOverrides"]![0]!["performance"]!["batchSize"]!.GetValue<int>());
     Assert.AreEqual(0, saved["ollamaRuntime"]!["modelOverrides"]![0]!["overrides"]!.AsObject().Count);
 
     var yaml = await _environment.HttpClient.GetStringAsync("api/settings/yaml");
+    StringAssert.Contains(yaml, "kv_cache_type: \"q8_0\"");
     StringAssert.Contains(yaml, "draft_tokens:");
     await _environment.RestartApplicationAsync();
     var reloaded = await SettingsAsync();
@@ -52,6 +55,7 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
     await Page.Locator("[data-settings-target=ollama-context]").ClickAsync();
     await Expect(Page.Locator("#runtime-draft-mode")).ToHaveValueAsync("off");
     await Expect(Page.Locator("#runtime-managed-kv-cache")).ToHaveValueAsync("f16");
+    await Expect(Page.Locator("#runtime-kv-cache")).ToHaveValueAsync("q8_0");
     await Expect(Page.Locator("#runtime-batch-value")).ToHaveValueAsync("256");
   }
 
@@ -77,15 +81,18 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
   public async Task RuntimePerformanceFooterSavesEditsAcrossModelsAndSections()
   {
     await OpenRuntimeAsync();
+    await Page.Locator("#runtime-kv-cache").SelectOptionAsync("f16");
     await Page.Locator("#runtime-draft-mode").SelectOptionAsync("custom");
     await Page.Locator("#runtime-draft-value").FillAsync("3");
     await Page.Locator("#runtime-batch-mode").SelectOptionAsync("custom");
     await Page.Locator("#runtime-batch-value").FillAsync("128");
     await SelectRuntimeModelAsync("command-r:latest");
+    await Page.Locator("#runtime-kv-cache").SelectOptionAsync("q4_0");
     await Page.Locator("#runtime-draft-mode").SelectOptionAsync("off");
     await Page.Locator("#runtime-batch-mode").SelectOptionAsync("custom");
     await Page.Locator("#runtime-batch-value").FillAsync("512");
     await SelectRuntimeModelAsync("alpha:latest");
+    await Expect(Page.Locator("#runtime-kv-cache")).ToHaveValueAsync("f16");
     await Expect(Page.Locator("#runtime-draft-value")).ToHaveValueAsync("3");
     await Expect(Page.Locator("#runtime-batch-value")).ToHaveValueAsync("128");
     Assert.AreEqual(0, (await SettingsAsync())["ollamaRuntime"]!["modelOverrides"]!.AsArray().Count);
@@ -97,6 +104,8 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
     Assert.AreEqual(2, overrides.Count);
     var alpha = overrides.Single(item => item!["model"]!.GetValue<string>() == "alpha:latest")!;
     var command = overrides.Single(item => item!["model"]!.GetValue<string>() == "command-r:latest")!;
+    Assert.AreEqual("f16", alpha["performance"]!["kvCacheType"]!.GetValue<string>());
+    Assert.AreEqual("q4_0", command["performance"]!["kvCacheType"]!.GetValue<string>());
     Assert.AreEqual(3, alpha["performance"]!["draftTokens"]!.GetValue<int>());
     Assert.AreEqual(128, alpha["performance"]!["batchSize"]!.GetValue<int>());
     Assert.AreEqual(0, command["performance"]!["draftTokens"]!.GetValue<int>());
@@ -105,6 +114,13 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
     await SelectRuntimeModelAsync("command-r:latest");
     await Expect(Page.Locator("#runtime-draft-mode")).ToHaveValueAsync("off");
     await Expect(Page.Locator("#runtime-batch-value")).ToHaveValueAsync("512");
+    await Expect(Page.Locator("#runtime-kv-cache")).ToHaveValueAsync("q4_0");
+    await Page.Locator("#runtime-kv-cache").SelectOptionAsync("inherit");
+    await Page.Locator("#save-settings").ClickAsync();
+    await Expect(Page.Locator("#save-status")).ToHaveTextAsync("Saved");
+    var inherited = (await SettingsAsync())["ollamaRuntime"]!["modelOverrides"]!.AsArray()
+      .Single(item => item!["model"]!.GetValue<string>() == "command-r:latest")!;
+    Assert.IsNull(inherited["performance"]!["kvCacheType"]);
   }
 
   [TestMethod]
@@ -334,6 +350,30 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
       $"api/benchmarks/comparisons?baselineRunId={first.RunId}&candidateRunId={second.RunId}");
     Assert.IsNotNull(comparison);
     StringAssert.Contains(comparison.ToJsonString(), "Relevant benchmark configuration differs.");
+  }
+
+  [TestMethod]
+  [DataRow("auto")]
+  [DataRow("bf16")]
+  [DataRow("")]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InvalidModelCacheDoesNotPartiallySaveSettings(string cache)
+  {
+    await OpenRuntimeAsync();
+    var before = await SettingsAsync();
+    var draft = before.DeepClone();
+    draft["ollamaRuntime"]!["modelOverrides"] = new JsonArray(new JsonObject
+    {
+      ["provider"] = "ollama-local",
+      ["model"] = "alpha:latest",
+      ["digest"] = "sha256:alpha",
+      ["performance"] = new JsonObject { ["kvCacheType"] = cache },
+      ["overrides"] = new JsonObject()
+    });
+    using var response = await _environment.HttpClient.PutAsJsonAsync("api/settings", draft);
+    Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
+    StringAssert.Contains(await response.Content.ReadAsStringAsync(), "kvCacheType");
+    Assert.IsTrue(JsonNode.DeepEquals(before, await SettingsAsync()));
   }
 
   private async Task OpenRuntimeAsync()

@@ -1090,7 +1090,7 @@ public sealed class DurableSupervisionEndToEndTests
     await Expect(assistant.Locator(".assistant-response")).ToContainTextAsync(
       finalAnswer
     );
-    await Expect(assistant.Locator(".execution-completion-summary")).ToContainTextAsync($"Created: {relativePath}");
+    await Expect(assistant.Locator(".execution-completion-summary[aria-label='Host completion summary']")).ToContainTextAsync($"Created: {relativePath}");
     var commentary = assistant.Locator(
       ".activity-row[data-event-type=\"supervision.turn-commentary\"]"
     );

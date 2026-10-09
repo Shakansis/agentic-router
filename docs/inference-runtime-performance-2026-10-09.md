@@ -12,9 +12,11 @@ AR-owned Ollama servers. Auto preserves inherited environment settings. Explicit
 values set only the child process's `OLLAMA_KV_CACHE_TYPE`; they do not change
 Windows environment variables or an externally managed Ollama server. The setting
 uses the existing Settings footer Save and YAML import/export. It takes effect
-when AR starts an owned server; existing servers require an AR restart. Unsaved
-model-test drafts do not reconfigure an existing server. Model/digest-specific
-draft-token settings remain independent of this server-wide cache setting.
+when AR selects an owned server. Performance by model can override this default
+for an exact model/digest. Different cache types select separate reusable servers,
+so saved changes do not require an AR restart or stop another cache configuration.
+See [model runtime performance](model-runtime-performance.md) for inheritance,
+measurement identity and application evidence.
 
 F16 consumes more memory. Select cache format and draft depth from measured results
 at the intended context window, and verify the resulting runner arguments. A saved

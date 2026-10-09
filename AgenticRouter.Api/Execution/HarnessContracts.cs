@@ -324,6 +324,9 @@ public interface IAgentHarnessTransport
 
 public interface IAgentHarnessSteeringTransport
 {
+  // Local protocol evidence only; admission is distinct from process/session startup.
+  bool IsSteeringReady(string sessionId);
+
   Task<HarnessSteerResult> SteerTurnAsync(
     HarnessSteerRequest request,
     CancellationToken cancellationToken

@@ -20,14 +20,16 @@ public interface IOllamaManagedServerManager
   OllamaEndpointResolution Plan(
     Uri configuredEndpoint,
     string? selection,
-    string defaultSelection
+    string defaultSelection,
+    string? kvCacheType = null
   );
 
   Task<OllamaEndpointResolution> ResolveAsync(
     Uri configuredEndpoint,
     string? selection,
     string defaultSelection,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? kvCacheType = null
   );
 
   Task<OllamaEndpointResolution> ResolveAsync(
@@ -35,7 +37,8 @@ public interface IOllamaManagedServerManager
     string? selection,
     string defaultSelection,
     int contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? kvCacheType = null
   );
 
   IReadOnlyList<OllamaManagedServerStatus> GetActiveServers();
@@ -46,7 +49,8 @@ public interface IOllamaManagedServerManager
     string defaultSelection,
     int? contextLength,
     OllamaStartupRecovery recovery,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? kvCacheType = null
   );
 }
 
@@ -65,7 +69,8 @@ public sealed record OllamaManagedServerStatus(
   int? BackendIndex,
   int ProcessId,
   DateTimeOffset StartedAt,
-  int? ContextLength
+  int? ContextLength,
+  string KvCacheType
 );
 
 public sealed class OllamaManagedServerManager :
@@ -156,7 +161,8 @@ public sealed class OllamaManagedServerManager :
     Uri configuredEndpoint,
     string? selection,
     string defaultSelection,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? kvCacheType = null
   )
   {
     return await ResolveCoreAsync(
@@ -164,14 +170,16 @@ public sealed class OllamaManagedServerManager :
       selection,
       defaultSelection,
       null,
-      cancellationToken
+      cancellationToken,
+      kvCacheType: kvCacheType
     );
   }
 
   public OllamaEndpointResolution Plan(
     Uri configuredEndpoint,
     string? selection,
-    string defaultSelection
+    string defaultSelection,
+    string? kvCacheType = null
   )
   {
     var target = OllamaGpuSelection.ResolveTarget(selection, defaultSelection);
@@ -198,7 +206,7 @@ public sealed class OllamaManagedServerManager :
     }
 
     return new OllamaEndpointResolution(
-      ManagedEndpoint(configuredEndpoint, target),
+      ManagedEndpoint(configuredEndpoint, target, kvCacheType ?? "auto"),
       ManagedMainGpu(target),
       true,
       target.Backend,
@@ -211,7 +219,8 @@ public sealed class OllamaManagedServerManager :
     string? selection,
     string defaultSelection,
     int contextLength,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? kvCacheType = null
   )
   {
     if (contextLength <= 0)
@@ -227,7 +236,8 @@ public sealed class OllamaManagedServerManager :
       selection,
       defaultSelection,
       contextLength,
-      cancellationToken
+      cancellationToken,
+      kvCacheType: kvCacheType
     );
   }
 
@@ -237,10 +247,12 @@ public sealed class OllamaManagedServerManager :
     string defaultSelection,
     int? contextLength,
     CancellationToken cancellationToken,
-    OllamaStartupRecovery? recovery = null
+    OllamaStartupRecovery? recovery = null,
+    string? kvCacheType = null
   )
   {
-    var planned = Plan(configuredEndpoint, selection, defaultSelection);
+    kvCacheType ??= (await _settingsStore.GetAsync(cancellationToken)).OllamaRuntime.ManagedKvCacheType;
+    var planned = Plan(configuredEndpoint, selection, defaultSelection, kvCacheType);
     if (!planned.Managed)
     {
       return planned;
@@ -253,7 +265,7 @@ public sealed class OllamaManagedServerManager :
     try
     {
       server = await GetOrStartAsync(
-        configuredEndpoint, target, contextLength, cancellationToken, recovery
+        configuredEndpoint, target, contextLength, cancellationToken, recovery, kvCacheType
       );
     }
     catch (StartupNotReadyException exception)
@@ -281,7 +293,8 @@ public sealed class OllamaManagedServerManager :
           server.Target.AllDevices ? null : server.Target.Index,
           server.Process.Id,
           server.StartedAt,
-          server.ContextLength
+          server.ContextLength,
+          server.KvCacheType
         )
       ).ToArray();
     }
@@ -293,7 +306,8 @@ public sealed class OllamaManagedServerManager :
     string defaultSelection,
     int? contextLength,
     OllamaStartupRecovery recovery,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? kvCacheType = null
   )
   {
     if (contextLength is <= 0)
@@ -302,7 +316,7 @@ public sealed class OllamaManagedServerManager :
     }
     return ResolveCoreAsync(
       configuredEndpoint, selection, defaultSelection, contextLength,
-      cancellationToken, recovery
+      cancellationToken, recovery, kvCacheType
     );
   }
 
@@ -324,13 +338,15 @@ public sealed class OllamaManagedServerManager :
     OllamaGpuTarget target,
     int? contextLength,
     CancellationToken cancellationToken,
-    OllamaStartupRecovery? recovery
+    OllamaStartupRecovery? recovery,
+    string kvCacheType
   )
   {
+    var key = ServerKey(target, kvCacheType);
     // An unrelated startup recovery must not block healthy servers.
     lock (_servers)
     {
-      if (_servers.TryGetValue(target.Selection, out var active)
+      if (_servers.TryGetValue(key, out var active)
         && !active.Process.HasExited
         && (contextLength is null || active.ContextLength == contextLength))
       {
@@ -352,14 +368,14 @@ public sealed class OllamaManagedServerManager :
       lock (_servers)
       {
         if (
-          _servers.TryGetValue(target.Selection, out var existing)
+          _servers.TryGetValue(key, out var existing)
           && !existing.Process.HasExited
           && (contextLength is null || existing.ContextLength == contextLength)
         )
         {
           return existing;
         }
-        _servers.Remove(target.Selection, out replaced);
+        _servers.Remove(key, out replaced);
       }
 
       if (replaced is not null)
@@ -372,7 +388,8 @@ public sealed class OllamaManagedServerManager :
         target,
         contextLength,
         cancellationToken,
-        recovery
+        recovery,
+        kvCacheType
       );
     }
     finally
@@ -386,12 +403,13 @@ public sealed class OllamaManagedServerManager :
     OllamaGpuTarget target,
     int? contextLength,
     CancellationToken cancellationToken,
-    OllamaStartupRecovery? recovery
+    OllamaStartupRecovery? recovery,
+    string kvCacheType
   )
   {
     var executable = ResolveOllamaExecutable();
     var library = ResolveLibrary(executable, target.Backend);
-    var port = ManagedEndpoint(configuredEndpoint, target).Port;
+    var port = ManagedEndpoint(configuredEndpoint, target, kvCacheType).Port;
     string? vulkanOrder = null;
 
     if (target.PreferredDevice is not null)
@@ -404,7 +422,8 @@ public sealed class OllamaManagedServerManager :
         null,
         contextLength,
         cancellationToken,
-        recovery
+        recovery,
+        kvCacheType
       );
       try
       {
@@ -428,7 +447,8 @@ public sealed class OllamaManagedServerManager :
       vulkanOrder,
       contextLength,
       cancellationToken,
-      recovery
+      recovery,
+      kvCacheType
     );
   }
 
@@ -440,7 +460,8 @@ public sealed class OllamaManagedServerManager :
     string? vulkanOrder,
     int? contextLength,
     CancellationToken cancellationToken,
-    OllamaStartupRecovery? recovery
+    OllamaStartupRecovery? recovery,
+    string kvCacheType
   )
   {
     for (var attempt = 1; ; attempt++)
@@ -453,7 +474,7 @@ public sealed class OllamaManagedServerManager :
       {
         return await StartServerProcessAsync(
           target, executable, library, port, vulkanOrder, contextLength,
-          cancellationToken, attempt == 2 ? recovery : null
+          cancellationToken, attempt == 2 ? recovery : null, kvCacheType
         );
       }
       catch (OllamaProviderException exception) when (
@@ -482,7 +503,8 @@ public sealed class OllamaManagedServerManager :
     string? vulkanOrder,
     int? contextLength,
     CancellationToken cancellationToken,
-    OllamaStartupRecovery? recovery
+    OllamaStartupRecovery? recovery,
+    string kvCacheType
   )
   {
     await TakeOverPortAsync(port, executable, cancellationToken);
@@ -500,8 +522,8 @@ public sealed class OllamaManagedServerManager :
     startInfo.Environment["OLLAMA_HOST"] = $"127.0.0.1:{port}";
     startInfo.Environment["OLLAMA_LLM_LIBRARY"] = library;
     startInfo.Environment["OLLAMA_NO_CLOUD"] = "1";
-    var cacheType = (await _settingsStore.GetAsync(cancellationToken)).OllamaRuntime.ManagedKvCacheType;
-    if (cacheType != "auto") startInfo.Environment["OLLAMA_KV_CACHE_TYPE"] = cacheType;
+    if (kvCacheType != "auto") startInfo.Environment["OLLAMA_KV_CACHE_TYPE"] = kvCacheType;
+    if (kvCacheType is "q8_0" or "q4_0") startInfo.Environment["OLLAMA_FLASH_ATTENTION"] = "1";
     if (contextLength is not null)
     {
       startInfo.Environment["OLLAMA_CONTEXT_LENGTH"] = contextLength.Value.ToString(
@@ -538,7 +560,7 @@ public sealed class OllamaManagedServerManager :
     }
 
     var startedAt = new DateTimeOffset(process.StartTime.ToUniversalTime());
-    var leasePath = LeasePath(target.Selection);
+    var leasePath = LeasePath(ServerKey(target, kvCacheType));
     var output = new ConcurrentQueue<string>();
     var progress = new InferenceProgressSource();
     var server = new ManagedServer(
@@ -548,6 +570,7 @@ public sealed class OllamaManagedServerManager :
       process,
       startedAt,
       contextLength,
+      kvCacheType,
       leasePath,
       output,
       progress,
@@ -569,7 +592,7 @@ public sealed class OllamaManagedServerManager :
       }
       lock (_servers)
       {
-        _servers[target.Selection] = server;
+        _servers[ServerKey(target, kvCacheType)] = server;
       }
       _logger.LogInformation(
         "Started Agentic Router-owned Ollama server {Selection} on {Endpoint} with PID {ProcessId}.",
@@ -1128,11 +1151,11 @@ public sealed class OllamaManagedServerManager :
     lock (_servers)
     {
       if (
-        _servers.TryGetValue(server.Target.Selection, out var current)
+        _servers.TryGetValue(ServerKey(server.Target, server.KvCacheType), out var current)
         && ReferenceEquals(current, server)
       )
       {
-        _servers.Remove(server.Target.Selection);
+        _servers.Remove(ServerKey(server.Target, server.KvCacheType));
         ownsLease = true;
       }
     }
@@ -1149,7 +1172,9 @@ public sealed class OllamaManagedServerManager :
       && endpoint.Port == 11_434;
   }
 
-  private Uri ManagedEndpoint(Uri configuredEndpoint, OllamaGpuTarget target)
+  private static string ServerKey(OllamaGpuTarget target, string kvCacheType) => $"{target.Selection}-{kvCacheType}";
+
+  private Uri ManagedEndpoint(Uri configuredEndpoint, OllamaGpuTarget target, string kvCacheType)
   {
     // Six slots per device index keep backend/affinity endpoints stable across
     // planning, restarts and request order. Slot 5 is the all-device Vulkan route.
@@ -1163,6 +1188,9 @@ public sealed class OllamaManagedServerManager :
           "rocm" => 1,
           _ => 2
         });
+    var cacheSlot = kvCacheType switch { "auto" => 0, "f16" => 1, "q8_0" => 2, "q4_0" => 3, _ => throw new ArgumentOutOfRangeException(nameof(kvCacheType)) };
+    // Disjoint ranges retain legacy Auto ports while isolating cache configurations.
+    if (slot >= 4096) throw new ArgumentOutOfRangeException(nameof(target));
     var port = configuredEndpoint.Port + (long)_portOffset + slot;
     if (port is < 1 or > 65_535)
     {
@@ -1171,6 +1199,7 @@ public sealed class OllamaManagedServerManager :
         $"GPU selection '{target.Selection}' cannot be assigned a managed port."
       );
     }
+    if (cacheSlot > 0) port = 1024 + (port - 1024 + cacheSlot * 4096) % (65_536 - 1024);
     return new Uri(
       $"http://127.0.0.1:{port}",
       UriKind.Absolute
@@ -1457,6 +1486,7 @@ public sealed class OllamaManagedServerManager :
     Process Process,
     DateTimeOffset StartedAt,
     int? ContextLength,
+    string KvCacheType,
     string LeasePath,
     ConcurrentQueue<string> Output,
     InferenceProgressSource Progress,

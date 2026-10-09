@@ -1,8 +1,8 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
-using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Runtime;

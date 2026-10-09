@@ -255,6 +255,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         cancellationToken,
         expectedStatus: HttpStatusCode.NoContent
       );
+      active.PromptAccepted = true;
       // Accepted input is already in native history, even if generation later fails.
       harnessSession.SynchronizedThroughVersion = turnPrompt.SynchronizedThroughVersion;
 
@@ -890,6 +891,9 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
       cancellationToken
     );
   }
+
+  public bool IsSteeringReady(string sessionId)
+    => _activeTurns.TryGetValue(sessionId, out var active) && active.PromptAccepted && !active.Completed;
 
   public async Task<HarnessSteerResult> SteerTurnAsync(
     HarnessSteerRequest request,
@@ -1758,6 +1762,7 @@ public sealed class OpenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
   )
   {
     public volatile bool Completed;
+    public volatile bool PromptAccepted;
     public SemaphoreSlim SteeringGate { get; } = new(1, 1);
     public Dictionary<string, string> AcceptedMessages { get; } = new(StringComparer.Ordinal);
     public ConcurrentDictionary<string, byte> UserMessages { get; } = new(StringComparer.Ordinal);

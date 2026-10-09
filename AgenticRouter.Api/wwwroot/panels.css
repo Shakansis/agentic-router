@@ -126,7 +126,7 @@
 .project-accordion > summary::before {
   width: 10px;
   color: var(--muted);
-  content: "â€º";
+  content: "\203A";
   transform: rotate(0deg);
   transition: transform 120ms ease;
 }
