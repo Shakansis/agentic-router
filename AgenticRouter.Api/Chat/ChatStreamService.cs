@@ -40,6 +40,7 @@ public sealed class ChatStreamService
   [
     "list_files",
     "read_file",
+    "read_files",
     "get_file_info",
     "search_text"
   ];
@@ -47,6 +48,7 @@ public sealed class ChatStreamService
     [
       "list_files",
       "read_file",
+      "read_files",
       "get_file_info",
       "search_text",
       "get_execution_plan"
@@ -55,6 +57,8 @@ public sealed class ChatStreamService
   );
 
   private readonly ISettingsStore _settingsStore;
+  private readonly HostFileReadPolicy _fileReads;
+  private readonly AgenticRouter.Api.Sessions.ConversationHistoryFiles _historyFiles;
   private readonly IOllamaClient _ollamaClient;
   private readonly IMarkdownRenderer _markdownRenderer;
   private readonly IModelRequestTracker _requestTracker;
@@ -96,6 +100,7 @@ public sealed class ChatStreamService
   private readonly CompletionCheckStore _completionReports;
   private readonly ITraceContext _trace;
   private Action<ExecutionInferenceMetrics>? _chatInferenceObserver;
+  public ChatTurnSummary? CurrentChatSummary { get; private set; }
   private Action<InferenceProgressView>? _inferenceProgressObserver;
   private ExecutionSession? _executionSession;
   private ExecutionContextRecoveryBudget? _contextRecoveryBudget;
@@ -153,7 +158,9 @@ public sealed class ChatStreamService
     IExecutionLatencyTracker latency,
     IHostApplicationLifetime applicationLifetime,
     ILogger<ChatStreamService> logger,
-    CompletionCheckStore completionReports
+    CompletionCheckStore completionReports,
+    HostFileReadPolicy fileReads,
+    AgenticRouter.Api.Sessions.ConversationHistoryFiles historyFiles
   )
   {
     _settingsStore = settingsStore;
@@ -197,6 +204,8 @@ public sealed class ChatStreamService
     _applicationLifetime = applicationLifetime;
     _logger = logger;
     _completionReports = completionReports;
+    _fileReads = fileReads;
+    _historyFiles = historyFiles;
   }
 
   public async IAsyncEnumerable<ChatStreamEvent> StreamAsync(
@@ -208,13 +217,18 @@ public sealed class ChatStreamService
     var answer = new StringBuilder();
     var isChat = request.InteractionMode == "chat";
     ExecutionInferenceMetrics? chatMetrics = null;
-    if (isChat) _chatInferenceObserver = metrics =>
-      chatMetrics = ExecutionInferenceMetrics.Combine(chatMetrics, metrics);
     var chatClock = Stopwatch.StartNew();
     var readCount = 0;
     var searchCount = 0;
     var toolFailures = 0;
     string? chatModel = null;
+    CurrentChatSummary = null;
+    if (isChat) _chatInferenceObserver = metrics =>
+    {
+      chatMetrics = ExecutionInferenceMetrics.Combine(chatMetrics, metrics);
+      CurrentChatSummary = new ChatTurnSummary("running", chatModel,
+        readCount, searchCount, toolFailures, chatClock.ElapsedMilliseconds, chatMetrics);
+    };
     await foreach (var item in StreamCoreAsync(request, requestId,
       ExecutionSpecialistTurnInvocation.Direct, cancellationToken))
     {
@@ -236,11 +250,12 @@ public sealed class ChatStreamService
         if (item.Type == "chat.workspace-read-completed") readCount++;
         if (item.Type == "web.search-completed") searchCount++;
         if (item.Type is "chat.workspace-read-failed" or "chat.workspace-read-rejected" or "web.search-failed") toolFailures++;
+        CurrentChatSummary = new ChatTurnSummary(
+          item.Type == "response.completed" ? "completed" : "running", chatModel,
+          readCount, searchCount, toolFailures, chatClock.ElapsedMilliseconds, chatMetrics);
         yield return item with
         {
-          ChatSummary = new ChatTurnSummary(
-            item.Type == "response.completed" ? "completed" : "running", chatModel,
-            readCount, searchCount, toolFailures, chatClock.ElapsedMilliseconds, chatMetrics)
+          ChatSummary = CurrentChatSummary
         };
       }
       else yield return item;
@@ -1220,7 +1235,11 @@ public sealed class ChatStreamService
         {
           await foreach (var startupEvent in PrepareManagedOllamaAsync(
             requestId, selectedModel, intention, baseUri, settings,
-            null, stopwatch, cancellationToken
+            OllamaRuntimeProfileResolver.Resolve(settings, selectedModel,
+              models.First(model => model.Name == selectedModel).Digest, _usageModelRoleOverride ?? selectedModelRole,
+              capabilities.ContextTokens, context.EstimatedInputTokens, settings.Context.ReservedResponseTokens,
+              execution: true).EffectiveContextTokens,
+            stopwatch, cancellationToken
           ))
           {
             yield return startupEvent;
@@ -1671,7 +1690,8 @@ public sealed class ChatStreamService
       _usageModelRoleOverride ?? modelRole,
       capabilities.ContextTokens,
       context.EstimatedInputTokens,
-      settings.Context.ReservedResponseTokens
+      settings.Context.ReservedResponseTokens,
+      execution: true
     );
     var contextUsage = CreateExternalHarnessContextUsage(
       context,
@@ -1717,6 +1737,7 @@ public sealed class ChatStreamService
       context,
       managedContext,
       contextUsage,
+      contextResolution,
       hostCapabilities,
       images,
       useMinimalToolInventory,
@@ -2018,6 +2039,7 @@ public sealed class ChatStreamService
     ConversationContextResult context,
     string? managedContext,
     ContextUsageView initialContextUsage,
+    OllamaContextResolution contextResolution,
     HostCapabilityProfile hostCapabilities,
     IReadOnlyList<ProviderImagePayload> images,
     bool useMinimalToolInventory,
@@ -2034,6 +2056,8 @@ public sealed class ChatStreamService
       "The selected harness requires an active execution session."
     );
     var executionRole = invocation.Role;
+    var fileReadOutputReserve = (await _settingsStore.GetAsync(cancellationToken)).Context.ReservedResponseTokens;
+    var fileReadContextRecoveryRequested = false;
     var conversationId = request.BrowserSessionId
       ?? request.ConversationSessionId
       ?? throw new ChatStageException(
@@ -2084,6 +2108,7 @@ public sealed class ChatStreamService
     HarnessEvent? terminalFailure = null;
     IReadOnlyList<ProviderCitation>? webCitations = null;
     var latestContextUsage = initialContextUsage;
+    long pendingHostResultTokens = 0;
     var liveContextBase = initialContextUsage;
     long liveOutputCharacters = 0;
     long lastPublishedLiveOutputTokens = 0;
@@ -2172,7 +2197,7 @@ public sealed class ChatStreamService
     session.RecordHarnessOutput(harnessUsageKey, null);
     _latency.MarkOnce("harness-turn-start");
     await foreach (var harnessEvent in ObserveHarnessInferenceAsync(
-      harness, harnessTurnRequest, session, harnessUsageKey, contextRecoveryAttempted,
+      harness, harnessTurnRequest, session, harnessUsageKey, contextResolution, contextRecoveryAttempted,
       outputLimitRecoveryAttempted, cancellationToken))
     {
       session.RecordHarnessActivity();
@@ -2383,6 +2408,7 @@ public sealed class ChatStreamService
             harnessEvent.ContextTotalTokens,
             harnessEvent.ContextWindowTokens
           );
+          pendingHostResultTokens = 0;
           liveContextBase = latestContextUsage;
           liveOutputCharacters = 0;
           lastPublishedLiveOutputTokens = 0;
@@ -2460,6 +2486,12 @@ public sealed class ChatStreamService
           responseSegment.Clear();
           roleResultSegment.Clear();
           activeResponseItemId = null;
+          var availableFileReadTokens = Math.Max(0,
+            _fileReads.AvailableTokens(latestContextUsage, fileReadOutputReserve) - pendingHostResultTokens);
+          if (harnessEvent.Tool is "read_file" or "read_files")
+            _logger.LogInformation("Host file read budget {ExecutionSessionId}: limit {ContextLimit}, input {InputTokens}, active {ActiveTokens}, reserved output {ReservedTokens}, pending results {PendingTokens}, available {AvailableTokens}.",
+              session.Id, latestContextUsage.EffectiveLimitTokens, latestContextUsage.InputTokens,
+              latestContextUsage.ActiveContextTokens, fileReadOutputReserve, pendingHostResultTokens, availableFileReadTokens);
           await foreach (var hostToolEvent in ExecuteHarnessHostToolAsync(
             harness,
             harnessDefinition,
@@ -2480,9 +2512,14 @@ public sealed class ChatStreamService
               webCitations,
               citations
             ),
+            availableFileReadTokens,
             cancellationToken
           ))
           {
+            if (hostToolEvent.LocalAction?.Code == "FILE_READ_CONTEXT_EXHAUSTED")
+              fileReadContextRecoveryRequested = true;
+            if (hostToolEvent.Type == "action.output" && hostToolEvent.LocalAction?.ResultOutput is string hostOutput)
+              pendingHostResultTokens += _fileReads.MeasureResult(hostOutput);
             yield return hostToolEvent;
           }
           break;
@@ -2650,6 +2687,15 @@ public sealed class ChatStreamService
               request.ApprovalPolicy is "auto" or "autonomous"
             )
             {
+              var snapshotFailure = await TryCaptureNativeMutationAsync(requestId, approvedPaths, cancellationToken);
+              if (snapshotFailure is not null)
+              {
+                await harness.ResolveApprovalAsync(harnessEvent.ApprovalId, false, cancellationToken);
+                session.AddWarning(snapshotFailure);
+                yield return HarnessApprovalEvent(requestId, "action.rejected", snapshotFailure,
+                  action, model, intention, stopwatch, session.Id, "rejected");
+                break;
+              }
               await harness.ResolveApprovalAsync(
                 harnessEvent.ApprovalId,
                 true,
@@ -2705,6 +2751,18 @@ public sealed class ChatStreamService
             );
             var decision = await decisionTask;
             session.RecordApprovalResolved(action.ActionId);
+            if (decision.Approved)
+            {
+              var snapshotFailure = await TryCaptureNativeMutationAsync(requestId, approvedPaths, cancellationToken);
+              if (snapshotFailure is not null)
+              {
+                await harness.ResolveApprovalAsync(harnessEvent.ApprovalId, false, cancellationToken);
+                session.AddWarning(snapshotFailure);
+                yield return HarnessApprovalEvent(requestId, "action.rejected", snapshotFailure,
+                  action, model, intention, stopwatch, session.Id, "rejected");
+                break;
+              }
+            }
             await harness.ResolveApprovalAsync(
               harnessEvent.ApprovalId,
               decision.Approved,
@@ -2759,6 +2817,9 @@ public sealed class ChatStreamService
           break;
         case "output-budget.applied":
           yield return Event(requestId, "harness.output-budget.applied", harnessEvent.Message, stopwatch, model, intention);
+          break;
+        case "runtime.performance-configured":
+          yield return Event(requestId, harnessEvent.Type, harnessEvent.Message, stopwatch, model, intention);
           break;
         case "runtime.performance-unavailable":
           session.AddWarning(harnessEvent.Message ?? "Runtime performance options are unavailable on this harness path.");
@@ -2844,6 +2905,18 @@ public sealed class ChatStreamService
           );
           break;
       }
+      if (fileReadContextRecoveryRequested && !unidentifiedNativeAction
+        && nativeActions.Values.All(action => action.State is "completed" or "failed" or "cancelled"))
+        break;
+    }
+
+    if (fileReadContextRecoveryRequested)
+    {
+      terminalFailure = new HarnessEvent("turn.failed",
+        message: "Host file reading needs context compaction before continuation.",
+        errorCode: HostFileReadPolicy.ContextRecoveryRequired, harnessId: harnessDefinition.Id,
+        terminalState: HarnessTerminalState.Failed);
+      fileReadContextRecoveryRequested = false;
     }
 
     if (terminalFailure is not null && ExecutionProgressPolicy.IsOutputLimit(terminalFailure))
@@ -2926,8 +2999,10 @@ public sealed class ChatStreamService
           "Context recovery cannot replace a session with unresolved actions or decisions.",
           "The original Host context and recorded effects were retained.", false, harnessId: harnessDefinition.Id);
 
+      var recoveryReserve = terminalFailure.ErrorCode == HostFileReadPolicy.ContextRecoveryRequired
+        ? fileReadOutputReserve : initialContextUsage.ReservedResponseTokens;
       var recoveryRequest = HarnessContextRecovery.Prepare(
-        harnessTurnRequest, session.CreateReview(), initialContextUsage.ReservedResponseTokens,
+        harnessTurnRequest, session.CreateReview(), recoveryReserve,
         terminalFailure.Message, request.History, nativeActions.Values.ToArray(), out var recoveryInputTokens);
       if (_contextRecoveryBudget is not null && !_contextRecoveryBudget.TryConsume())
         throw new HarnessException(HarnessContextRecovery.Exhausted, "The context recovery budget is exhausted.",
@@ -2935,13 +3010,27 @@ public sealed class ChatStreamService
       automaticContinuationAttempts++;
       contextRecoveryAttempted = true;
       yield return Event(requestId, "harness.context-recovery-started",
-        $"Host context recovery 1/1 for {harnessDefinition.DisplayName}: deterministic continuity; estimated base Host envelope {recoveryInputTokens} tokens, input budget {recoveryRequest.ContextRecoveryInputBudget}, output reserve {initialContextUsage.ReservedResponseTokens}. Adapter notes are checked before replacement; native-only overhead remains unknown.",
+        $"Host context recovery 1/1 for {harnessDefinition.DisplayName}: deterministic continuity; estimated base Host envelope {recoveryInputTokens} tokens, input budget {recoveryRequest.ContextRecoveryInputBudget}, output reserve {recoveryReserve}. Adapter notes are checked before replacement; native-only overhead remains unknown.",
         stopwatch, model, intention);
       answer.Clear();
       responseSegment.Clear();
       roleResultSegment.Clear();
       activeResponseItemId = null;
-      liveContextBase = initialContextUsage;
+      latestContextUsage = initialContextUsage with
+      {
+        InputTokens = recoveryInputTokens,
+        OutputTokens = 0,
+        ActiveContextTokens = recoveryInputTokens,
+        RequiredContextTokens = recoveryInputTokens + recoveryReserve,
+        ReservedResponseTokens = recoveryReserve,
+        Compacted = true,
+        BeforeCompactionTokens = latestContextUsage.ActiveContextTokens,
+        AfterCompactionTokens = recoveryInputTokens
+      };
+      if (terminalFailure.ErrorCode == HostFileReadPolicy.ContextRecoveryRequired)
+        session.ClearFileReadContextFailures();
+      pendingHostResultTokens = 0;
+      liveContextBase = latestContextUsage;
       liveOutputCharacters = 0;
       lastPublishedLiveOutputTokens = 0;
       lastLiveContextUpdateMilliseconds = stopwatch.ElapsedMilliseconds;
@@ -3168,24 +3257,18 @@ public sealed class ChatStreamService
   }
 
   private async IAsyncEnumerable<HarnessEvent> ObserveHarnessInferenceAsync(
-    IAgentHarnessTransport harness, HarnessTurnRequest request, ExecutionSession session, string turnKey,
+    IAgentHarnessTransport harness, HarnessTurnRequest request, ExecutionSession session, string turnKey, OllamaContextResolution runtime,
     bool recovery, bool outputLimitRecovery, [EnumeratorCancellation] CancellationToken cancellationToken)
   {
-    var settings = await _settingsStore.GetAsync(cancellationToken);
-    if (request.Provider == ModelProviderIds.OllamaLocal
-      && _usageModelRevisions.TryGetValue(request.Model, out var digest)
-      && ModelRuntimePerformance.Resolve(settings, request.Provider, request.Model, digest)?.HasRequestOptions == true)
-    {
-      yield return new HarnessEvent(
-        "runtime.performance-unavailable",
-        "Configured draft tokens and batch size cannot be enforced through this harness compatibility API. Native Ollama requests and model preloads support these options; runner activation is not confirmed.",
-        harnessId: request.HarnessId
-      );
-    }
+    if (runtime.Performance?.HasRequestOptions == true)
+      yield return new HarnessEvent("runtime.performance-configured",
+        $"Host native Ollama translation preserves configured draft tokens={runtime.Performance.DraftTokens?.ToString() ?? "Auto"}, batch size={runtime.Performance.BatchSize?.ToString() ?? "Auto"}, context={runtime.EffectiveContextTokens}, keep_alive={runtime.KeepAlive}.",
+        harnessId: request.HarnessId);
     using var observation = await _harnessInference.BeginAsync(
       request.HarnessId, request.ProviderEndpoint!, session, turnKey, cancellationToken,
       request.ContextWindowTokens is > 0 ? ExecutionProgressPolicy.OutputTokenLimit(request.ContextWindowTokens.Value) : null,
-      _inferenceProgressObserver);
+      _inferenceProgressObserver, runtime,
+      disableThinking: request.ModelSupportsReasoning && request.RequestedEffort == ModelEffortLevels.None);
     yield return new HarnessEvent("output-budget.applied",
       $"Host Execute output limit: 50% of context ({request.ContextWindowTokens / 2} tokens per generation).",
       harnessId: request.HarnessId);
@@ -3382,7 +3465,7 @@ public sealed class ChatStreamService
   {
     return tool is not null && tool.ToLowerInvariant() is
       "read" or "list" or "glob" or "grep" or "lsp"
-      or "read_file" or "list_directory" or "grep_search";
+      or "read_file" or "read_files" or "list_directory" or "grep_search";
   }
 
   private static IReadOnlyList<ProviderCitation> MergeCitations(
@@ -3442,6 +3525,7 @@ public sealed class ChatStreamService
     IExecutionActionJournal? actionJournal,
     ExecutionContextRole executionRole,
     Action<IReadOnlyList<ProviderCitation>> captureCitations,
+    long availableFileReadTokens,
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
@@ -4054,7 +4138,7 @@ public sealed class ChatStreamService
       );
     }
     var execution = await TryExecuteAsync(
-      () => _actionService.ExecuteAsync(action, session, cancellationToken)
+      () => _actionService.ExecuteAsync(action, session, cancellationToken, availableFileReadTokens)
     );
     session.RecordHostOrchestration(
       Math.Max(0, execution.DurationMilliseconds - (execution.Result?.Process?.DurationMilliseconds ?? 0))
@@ -7040,7 +7124,9 @@ public sealed class ChatStreamService
         () => _actionService.ExecuteAsync(
           action,
           _executionSession,
-          cancellationToken
+          cancellationToken,
+          action.Tool is "read_file" or "read_files"
+            ? ExecutionFileReadBudget(progress, applicationSettings, model, providerMaximumTokens, structuredCoordination) : null
         )
       );
       _executionSession?.RecordHostOrchestration(
@@ -8139,7 +8225,24 @@ public sealed class ChatStreamService
       toolingProfile,
       canonicalDefinitions
     );
-    var chatReadInstructions = ChatReadOnlyWorkspaceMarker + "\n"
+    var readSettings = await _settingsStore.GetAsync(cancellationToken);
+    var readRuntime = selectedReference.ProviderId == ModelProviderIds.OllamaLocal
+      ? OllamaRuntimeProfileResolver.Resolve(readSettings, model, selectedIdentity?.Digest,
+        modelRole, capabilities.ContextTokens, 0, readSettings.Context.ReservedResponseTokens,
+        options.EffectiveGenerationProfile.MaximumContextTokens,
+        options.EffectiveGenerationProfile.MaximumOutputTokens) : null;
+    var readContextLimit = new[]
+    {
+      _usageRuntimeContextTokens ?? int.MaxValue,
+      readRuntime?.MaximumContextTokens ?? int.MaxValue,
+      options.EffectiveGenerationProfile.MaximumContextTokens ?? int.MaxValue,
+      capabilities.ContextTokens ?? int.MaxValue,
+      readSettings.Context.DefaultContextTokens,
+      readSettings.Context.ProviderContextTokens
+    }.Min();
+    var readOutputReserve = Math.Max(readSettings.Context.ReservedResponseTokens,
+      readRuntime?.OutputTokenLimit ?? options.EffectiveGenerationProfile.MaximumOutputTokens ?? 0);
+    var chatReadInstructions = ChatReadOnlyWorkspaceMarker + "\n" + HostFileReadPolicy.Guidance + "\n"
       + "Only the read-only tools supplied in this request are available. "
       + (workspaceReadsAvailable
         ? "Workspace tools use paths relative to the trusted root; never request a mutation, process, shell, or external path. "
@@ -8779,6 +8882,15 @@ public sealed class ChatStreamService
       }
 
       var action = validation.Action;
+      var readContextFit = _fileReads.FitContextForRead(toolMessages, toolDefinitions, readContextLimit, readOutputReserve);
+      if (readContextFit.Compacted)
+      {
+        toolMessages.Clear();
+        toolMessages.AddRange(readContextFit.Messages);
+        yield return Event(requestId, "chat.context-compacted",
+          $"Host compacted active read context from {readContextFit.BeforeTokens} to {readContextFit.AfterTokens} estimated tokens; original activity remains available.",
+          stopwatch, model, intention);
+      }
       yield return Event(
         requestId,
         "chat.workspace-read-started",
@@ -8795,7 +8907,8 @@ public sealed class ChatStreamService
         () => _actionService.ExecuteAsync(
           action,
           null,
-          cancellationToken
+          cancellationToken,
+          readContextFit.AvailableTokens
         )
       );
       var succeeded = execution.Failure is null
@@ -8833,7 +8946,8 @@ public sealed class ChatStreamService
       {
         LocalAction = new LocalActionEvent(call.CallId, action.Tool, action.Summary,
           null, succeeded ? "completed" : "failed", false,
-          ResultOutput: output.Length > 16_000 ? output[..16_000] + "\n[tool result truncated]" : output)
+          ResultOutput: action.Tool is "read_file" or "read_files" || output.Length <= 16_000
+            ? output : output[..16_000] + "\n[tool result truncated]")
       };
     }
 
@@ -9407,6 +9521,21 @@ public sealed class ChatStreamService
       PromptEvalDurationNanoseconds = providerUsage?.PromptEvalDurationNanoseconds,
       EvalDurationNanoseconds = providerUsage?.EvalDurationNanoseconds
     };
+  }
+
+  private async Task<string?> TryCaptureNativeMutationAsync(string requestId, IReadOnlyList<string> targets,
+    CancellationToken cancellationToken)
+  {
+    try
+    {
+      await _historyFiles.CaptureBeforeMutationAsync(requestId, targets, cancellationToken);
+      return null;
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or WorkspaceProfileException)
+    {
+      _logger.LogWarning(exception, "Native mutation snapshot failed for {RequestId}; mutation was not approved.", requestId);
+      return "snapshot-capture-failed: the original file bytes could not be persisted; mutation was declined. Try a different permitted action.";
+    }
   }
 
   private static ContextUsageView CreateExternalHarnessContextUsage(
@@ -11200,6 +11329,33 @@ public sealed class ChatStreamService
     );
   }
 
+  private long ExecutionFileReadBudget(ExecutionProgress progress, ApplicationSettings settings,
+    string model, int? providerMaximumTokens, bool structured)
+  {
+    var budget = GetCoordinatorInputBudget(settings, model, providerMaximumTokens);
+    var used = structured ? _expertGuidance.MeasureRequest(progress.Messages).InputTokens
+      : _actionPlanner.MeasureRequest(progress.ToolMessages, progress.ToolingProfile,
+        progress.GrantedTools, progress.ToolScope.HasExecutionPlan, 1).InputTokens;
+    var available = _fileReads.AvailableTokens(budget.MaximumContextTokens, settings.Context.ReservedResponseTokens, used);
+    if (!structured && available < 1024)
+    {
+      var definitions = LocalActionPlanner.GetToolDefinitions(progress.GrantedTools);
+      var plannerOverhead = Math.Max(0, used - _fileReads.MeasureRequest(progress.ToolMessages, definitions));
+      var fit = _fileReads.FitContextForRead(progress.ToolMessages, definitions,
+        Math.Max(0, budget.MaximumContextTokens - plannerOverhead), settings.Context.ReservedResponseTokens);
+      if (fit.Compacted)
+      {
+        progress.ToolMessages.Clear();
+        progress.ToolMessages.AddRange(fit.Messages);
+        used = _actionPlanner.MeasureRequest(progress.ToolMessages, progress.ToolingProfile,
+          progress.GrantedTools, progress.ToolScope.HasExecutionPlan, 1).InputTokens;
+        available = _fileReads.AvailableTokens(budget.MaximumContextTokens, settings.Context.ReservedResponseTokens, used);
+        _executionSession?.AddWarning($"Host compacted active file-read context from {fit.BeforeTokens} to {fit.AfterTokens} estimated tokens; original activity was retained.");
+      }
+    }
+    return available;
+  }
+
   private CoordinatorInputBudget GetCoordinatorInputBudget(
     ApplicationSettings settings,
     string model,
@@ -11228,9 +11384,9 @@ public sealed class ChatStreamService
       providerMaximumTokens ?? int.MaxValue
     }.Min();
     return new CoordinatorInputBudget(
-      Math.Max(1, effectiveLimit - ExecutionProgressPolicy.OutputTokenLimit(effectiveLimit)),
+      Math.Max(1, effectiveLimit - settings.Context.ReservedResponseTokens),
       effectiveLimit,
-      ExecutionProgressPolicy.OutputTokenLimit(effectiveLimit),
+      settings.Context.ReservedResponseTokens,
       _usageRuntimeContextTokens is not null
         ? effectiveLimit
         : Math.Min(

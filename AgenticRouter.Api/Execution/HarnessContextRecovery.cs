@@ -5,7 +5,7 @@ using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;
 
-// Failure-only policy. Native retains its existing context-fit recovery.
+// Failure/Host read-pressure policy. Native retains its existing context-fit recovery.
 internal static class HarnessContextRecovery
 {
   public const string Marker = "HOST_CONTEXT_RECOVERY_V1";
@@ -14,6 +14,7 @@ internal static class HarnessContextRecovery
 
   public static bool IsContextFailure(HarnessEvent failure)
   {
+    if (failure.ErrorCode == HostFileReadPolicy.ContextRecoveryRequired) return true;
     if (failure.HarnessId == HarnessIds.Codex)
       return failure.ErrorCode == "contextWindowExceeded";
     if (failure.HarnessId == HarnessIds.OpenCode)

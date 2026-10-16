@@ -327,7 +327,8 @@ public sealed class LocalBackupService : ILocalBackupService
         ResolveDataPath(
           entry.Path
         )
-      )
+      ) || entry.Category == "conversations" && entry.Path.EndsWith(".json", StringComparison.Ordinal)
+        && File.Exists(ResolveDataPath(entry.Path) + ".gz")
     ).Select(
       entry => entry.Path
     ).ToArray();
@@ -406,6 +407,14 @@ public sealed class LocalBackupService : ILocalBackupService
             cancellationToken
           )
           : null;
+        if (file.Category == "conversations" && file.Path.EndsWith(".json", StringComparison.Ordinal))
+          foreach (var suffix in new[] { ".gz", ".index" })
+          {
+            var companion = file.Path + suffix;
+            var companionPath = ResolveDataPath(companion);
+            current[companion] = File.Exists(companionPath)
+              ? await File.ReadAllBytesAsync(companionPath, cancellationToken) : null;
+          }
       }
 
       await WriteCurrentBackupAsync(
@@ -426,6 +435,11 @@ public sealed class LocalBackupService : ILocalBackupService
             file.Content,
             cancellationToken
           );
+          if (file.Category == "conversations" && file.Path.EndsWith(".json", StringComparison.Ordinal))
+          {
+            File.Delete(ResolveDataPath(file.Path + ".gz"));
+            File.Delete(ResolveDataPath(file.Path + ".index"));
+          }
         }
       }
       catch
@@ -552,9 +566,11 @@ public sealed class LocalBackupService : ILocalBackupService
             _dataDirectory,
             "workspaces"
           ),
-          "*.json",
+          "*.json*",
           SearchOption.AllDirectories
-        )
+        ).Where(path => path.EndsWith(".json", StringComparison.Ordinal) || path.EndsWith(".json.gz", StringComparison.Ordinal))
+          .OrderBy(path => path.EndsWith(".gz", StringComparison.Ordinal))
+          .DistinctBy(path => path.EndsWith(".gz", StringComparison.Ordinal) ? path[..^3] : path)
         : [])
       {
         cancellationToken.ThrowIfCancellationRequested();
@@ -562,17 +578,14 @@ public sealed class LocalBackupService : ILocalBackupService
           new BackupFile(
             Path.GetRelativePath(
               _dataDirectory,
-              path
+              path.EndsWith(".gz", StringComparison.Ordinal) ? path[..^3] : path
             ).Replace(
               '\\',
               '/'
             ),
             "conversations",
             SanitizeJson(
-              await File.ReadAllBytesAsync(
-                path,
-                cancellationToken
-              ),
+              await ReadConversationBackupAsync(path, cancellationToken),
               options.IncludeSessionSummaries,
               options.IncludeReviewData
             )
@@ -619,6 +632,24 @@ public sealed class LocalBackupService : ILocalBackupService
     }
 
     return files;
+  }
+
+  private static async Task<byte[]> ReadConversationBackupAsync(string path, CancellationToken token)
+  {
+    await using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+    await using Stream input = path.EndsWith(".gz", StringComparison.Ordinal)
+      ? new GZipStream(source, CompressionMode.Decompress) : source;
+    using var output = new MemoryStream();
+    var buffer = new byte[81_920];
+    int read;
+    while ((read = await input.ReadAsync(buffer, token)) > 0)
+    {
+      // Keep the existing backup entry limit; never silently omit or truncate history.
+      if (output.Length + read > 52_428_800)
+        throw new InvalidDataException("A conversation exceeds the existing backup entry size limit.");
+      await output.WriteAsync(buffer.AsMemory(0, read), token);
+    }
+    return output.ToArray();
   }
 
   private static byte[] SanitizeJson(

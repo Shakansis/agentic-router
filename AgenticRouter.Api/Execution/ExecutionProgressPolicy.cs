@@ -31,6 +31,15 @@ internal static class ExecutionProgressPolicy
 
   public static int OutputTokenLimit(int contextTokens) => Math.Max(1, contextTokens / 2);
 
+  public static int OutputTokenLimit(int contextTokens, long inputTokens)
+  {
+    var ceiling = OutputTokenLimit(contextTokens);
+    var remaining = contextTokens - Math.Max(0, inputTokens);
+    // Oversized mandatory input uses the existing context recovery, not a fabricated
+    // one-token generation. Positive headroom caps output without changing the window.
+    return remaining > 0 ? (int)Math.Min(ceiling, remaining) : ceiling;
+  }
+
   public static bool IsOutputLimit(string? reason) => reason is "length" or "max_tokens" or "max_output_tokens";
 
   public static string EffortGuidance(string effort) => effort switch

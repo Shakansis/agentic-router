@@ -325,7 +325,16 @@ app.MapGet("/session/{sessionId}/context", (string sessionId, HttpContext contex
         availableModels = new[] { new { modelId = session.ModelRouteId, name = session.Model } }
       },
       modes = new { },
-      configOptions = Array.Empty<object>()
+      configOptions = File.Exists(Path.Combine(runtime, "fake-qwen-no-reasoning.txt"))
+        ? Array.Empty<object>()
+        : new object[]
+        {
+          new
+          {
+            id = "reasoning_effort",
+            options = new[] { "none", "low", "medium", "high" }.Select(value => new { value }).ToArray()
+          }
+        }
     }
   });
 });
@@ -404,7 +413,7 @@ app.MapPost("/session/{sessionId}/config-option", async (string sessionId, HttpC
   var configId = body.RootElement.GetProperty("configId").GetString();
   var value = body.RootElement.GetProperty("value").GetString();
   if (!string.Equals(configId, "reasoning_effort", StringComparison.Ordinal)
-    || value is not "low" and not "medium" and not "high")
+    || value is not "none" and not "low" and not "medium" and not "high")
   {
     return Results.BadRequest(new { error = "invalid reasoning effort" });
   }
@@ -575,6 +584,53 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
     return Results.Empty;
   }
 
+  if (text.Contains("host read pressure fixture", StringComparison.Ordinal))
+  {
+    var fixture = System.Text.RegularExpressions.Regex.Match(text,
+      @"host read pressure fixture (batch|single) (exhausted|headroom)",
+      System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+    var recovering = text.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
+    var exhausted = fixture.Groups[2].Value == "exhausted";
+    var used = recovering ? 8192 : exhausted ? 130_900 : 78_397;
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "usage_update",
+      used,
+      size = 131_072
+    });
+    var tool = fixture.Groups[1].Value == "batch" ? "read_files" : "read_file";
+    object arguments = tool == "read_files"
+      ? new { files = new[] { new { path = "context-read.txt", offsetBytes = 29800, lengthBytes = 512 } } }
+      : new { path = "context-read.txt", offsetBytes = 29800, lengthBytes = 512 };
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "tool_call",
+      toolCallId = "pressure-read",
+      title = "Read context-read.txt",
+      kind = "read",
+      status = "in_progress",
+      rawInput = arguments,
+      _meta = new { toolName = tool }
+    });
+    var result = await InvokeHostToolAsync(tool, arguments);
+    await File.AppendAllTextAsync(Path.Combine(runtime, "host-read-pressure.jsonl"),
+      JsonSerializer.Serialize(new { sessionId, recovering, succeeded = result.Succeeded, output = result.Output }) + "\n");
+    await EmitSessionUpdateAsync(session, new
+    {
+      sessionUpdate = "tool_call_update",
+      toolCallId = "pressure-read",
+      title = "Read context-read.txt",
+      kind = "read",
+      status = result.Succeeded ? "completed" : "failed",
+      rawOutput = result.Output,
+      _meta = new { toolName = tool }
+    });
+    if (result.Succeeded) await CompleteAsync(session, promptId, "PARTIAL_READ_OK", includeReadTool: false);
+    else if (exhausted) return Results.Empty;
+    else await CompleteAsync(session, promptId, "READ_BLOCKED", includeReadTool: false);
+    return Results.Empty;
+  }
+
   if (text.Contains("reactive context fixture", StringComparison.Ordinal))
   {
     var recovering = text.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal);
@@ -653,6 +709,10 @@ app.MapPost("/session/{sessionId}/prompt", async (string sessionId, HttpContext 
     }
     await ActivityAsync("discovery-details", "tool_search", "ToolSearch",
       new { query = "select:mcp__agentic_router__search_text" }, "Loaded 1 tool(s)");
+    await ActivityAsync("invocation-details", "tool_call", "ToolCall",
+      new { tool = "search_text" }, "Dispatched search_text");
+    await ActivityAsync("invocation-alias-details", "ToolCall", "ToolCall",
+      new { tool = "read_file" }, "Dispatched read_file");
     await ActivityAsync("search-details", "search_text", "Search activity.txt",
       new { path = "activity.txt", query = "needle" }, "activity.txt:3: needle found");
     await ActivityAsync("read-details", "read_file", "Read activity.txt",

@@ -319,7 +319,13 @@ public sealed class UsageRecorder : IUsageRecorder
         "provider",
         request.Inference.TimeToFirstTokenMilliseconds,
         loadMilliseconds,
-        loadMilliseconds is not null ? "after-model-load" : "dispatch"
+        loadMilliseconds is not null ? "after-model-load" : "dispatch",
+        usage?.PromptEvalDurationNanoseconds is >= 0 ? usage.PromptEvalDurationNanoseconds / 1_000_000d : null,
+        outputTokens is >= 0 && usage?.EvalDurationNanoseconds is >= 0 ? null
+          : request.Status == UsageStatuses.Cancellation ? "Inference cancelled before final usage."
+          : request.Status == UsageStatuses.Failure ? request.HttpStatus is int status
+            ? $"Inference HTTP {status}; final usage unavailable." : "Inference failed before final usage."
+          : null
       );
       if (request.Context.ExecutionSessionId is string sessionId)
         _sessions.Get(sessionId)?.RecordInference(metrics);

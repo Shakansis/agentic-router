@@ -7,7 +7,13 @@ section of the project sidebar, with links to the relevant existing settings.
 The sidebar uses Host availability evidence for configured knowledge providers,
 Ollama, harnesses, enabled model providers, configured web search, Git in an active
 workspace, and runtime profiles. Unconfigured knowledge/cloud integrations do not
-produce connection warnings. Existing settings and feature-specific recovery and
+produce connection warnings. Knowledge availability is checked automatically only
+when the active project enables that provider. Disabled projects retain their
+saved connection and library selection, skip outbound AnythingLLM discovery,
+and display a neutral disabled status without sidebar or backend warnings.
+Explicit Refresh and Save connection still check the connection for setup;
+unavailability warnings remain scoped to projects that enable the provider.
+Existing settings and feature-specific recovery and
 execution restrictions remain authoritative. No provider, harness, or GPU is
 silently replaced.
 
@@ -18,7 +24,8 @@ button is removed. A saved review remains accessible there after restart even
 when its live execution session has expired, with Host-provided Undo eligibility
 preserved.
 
-Expected AnythingLLM/Ollama connection failures and unavailable GPU diagnostics
+Expected AnythingLLM connection failures for enabled projects, Ollama connection
+failures, and unavailable GPU diagnostics
 produce actionable backend warnings with stable codes. These two HTTP clients
 use provider-owned logging instead of the default raw HTTP exception logger.
 Original exceptions remain attached to typed failures and logged at Debug level.
@@ -84,7 +91,7 @@ not restarted, and no real model inference or GPU workload was used.
 
 Follow-up validation for the sidebar and logging changes:
 
-- `AnythingLlmKnowledgeProvider`, `OllamaClient`, `KnowledgeContextService`,
+- `KnowledgeProvidersController`, `OllamaClient`, `KnowledgeContextService`,
   `ModelsController`, and `OllamaRuntimeProfileService` now own the explanatory
   warnings; `Program.cs` scopes the HTTP logger change to AnythingLLM and Ollama.
 - The two cases of `ReviewAndUndoRemainEligibleAfterExplicitResume` verify the

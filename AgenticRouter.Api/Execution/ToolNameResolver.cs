@@ -72,6 +72,7 @@ public sealed class ToolNameResolver : IToolNameResolver
   [
     "list_files",
     "read_file",
+    "read_files",
     "get_file_info",
     "search_text",
     DiagnosticTraceCapability.ToolName,
@@ -104,6 +105,7 @@ public sealed class ToolNameResolver : IToolNameResolver
   [
     "list_files",
     "read_file",
+    "read_files",
     "get_file_info",
     "search_text",
     DiagnosticTraceCapability.ToolName,
@@ -451,7 +453,7 @@ public sealed class ToolNameResolver : IToolNameResolver
       "create_execution_plan" or "revise_execution_plan" or "get_execution_plan" => "plan-state",
       "request_toolset" => "capability-query",
       "list_files" or "get_file_info" => "workspace-inspection",
-      "read_file" => "file-read",
+      "read_file" or "read_files" => "file-read",
       "search_text" => "file-search",
       "create_file" or "create_files" or "write_file" or "replace_text" or "apply_patch"
         or "download_file" or "download_files"

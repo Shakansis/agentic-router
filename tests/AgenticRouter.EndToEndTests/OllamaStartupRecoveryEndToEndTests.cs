@@ -18,6 +18,35 @@ public sealed class OllamaStartupRecoveryEndToEndTests
   private string _executable = string.Empty;
 
   [TestMethod]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task NativeClaudeNativePreservesTheManagedProcessAndContext()
+  {
+    await ConfigureAsync([0]);
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    var leasePath = Directory.GetFiles(Path.Combine(_environment.DataDirectory, "ollama-managed-servers"), "*.json").Single();
+    var first = JsonNode.Parse(await File.ReadAllTextAsync(leasePath))!;
+    using var client = new HttpClient();
+    var firstEnvironment = JsonNode.Parse(await client.GetStringAsync(first["endpoint"]!.GetValue<string>() + "test/environment"))!;
+    Assert.IsFalse(string.IsNullOrEmpty(firstEnvironment["contextLength"]?.GetValue<string>()));
+    foreach (var harness in new[] { "claude-code", "native" })
+    {
+      await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+      await SendMessageAsync(harness == "native" ? "Report runtime configuration without modifying files." : "claude code deterministic turn");
+      var next = JsonNode.Parse(await File.ReadAllTextAsync(leasePath))!;
+      Assert.AreEqual(first["processId"]!.GetValue<int>(), next["processId"]!.GetValue<int>());
+      Assert.AreEqual(first["endpoint"]!.GetValue<string>(), next["endpoint"]!.GetValue<string>());
+      var environment = JsonNode.Parse(await client.GetStringAsync(next["endpoint"]!.GetValue<string>() + "test/environment"))!;
+      Assert.AreEqual(firstEnvironment["contextLength"]?.GetValue<string>(), environment["contextLength"]?.GetValue<string>());
+      Assert.AreEqual(firstEnvironment["kvCacheType"]?.GetValue<string>(), environment["kvCacheType"]?.GetValue<string>());
+    }
+    Assert.HasCount(1, StartedPids());
+    Assert.IsFalse(_environment.FakeOllama.Requests.Any(request => request.KeepAlive == 0));
+    await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task InferenceProgressUsesRuntimePercentAndSubtractsModelLoadFromTtft()
   {
@@ -121,7 +150,15 @@ public sealed class OllamaStartupRecoveryEndToEndTests
   public async Task RestoreManagedConfigurationAsync()
   {
     if (_discovery is null) return;
-    if (TestContext.CurrentTestOutcome == UnitTestOutcome.Failed) TestContext.WriteLine(_environment.ApiOutput);
+    if (TestContext.CurrentTestOutcome == UnitTestOutcome.Failed)
+    {
+      TestContext.WriteLine(_environment.ApiOutput);
+      TestContext.WriteLine(string.Join("\n", _environment.FakeOllama.Errors));
+      var errors = Path.ChangeExtension(_executable, ".errors");
+      if (File.Exists(errors)) TestContext.WriteLine(await File.ReadAllTextAsync(errors));
+      var traffic = Path.ChangeExtension(_executable, ".traffic");
+      if (File.Exists(traffic)) TestContext.WriteLine(await File.ReadAllTextAsync(traffic));
+    }
     await _environment.SetManagedOllamaAndRestartAsync(null);
     if (!_discovery.HasExited)
     {

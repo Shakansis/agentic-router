@@ -9,6 +9,8 @@ namespace AgenticRouter.Api.GitDelivery;
 
 public interface IGitRepositoryService
 {
+  Task<string> GetIndexFingerprintAsync(string workspacePath, CancellationToken cancellationToken);
+  Task StageInitialStateAsync(string workspacePath, CancellationToken cancellationToken);
   Task<GitWorkspaceOverviewView> GetWorkspaceOverviewAsync(
     string workspaceId,
     string workspacePath,
@@ -125,6 +127,22 @@ public interface IGitRepositoryService
 
 public sealed class GitRepositoryService : IGitRepositoryService
 {
+  public async Task StageInitialStateAsync(string workspacePath, CancellationToken cancellationToken)
+  {
+    var status = await GetStatusAsync(workspacePath, false, cancellationToken);
+    if (status.Head is not null)
+      throw new GitDeliveryException("git-initial-state-conflict", "git-initialize", "The repository already has a commit.");
+    await RunAsync(RequireWorkspaceRoot(workspacePath), ["add", "--all"], "git-initial-stage", cancellationToken);
+  }
+  public async Task<string> GetIndexFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
+  {
+    // Read-only and valid for unmerged indexes. Hash the complete stream even
+    // when the retained diagnostic text exceeds the normal process output limit.
+    var result = await RunAsync(RequireWorkspaceRoot(workspacePath), ["ls-files", "--stage", "-z"],
+      "git-index-snapshot", cancellationToken, captureOutputDigest: true);
+    return result.StandardOutputDigest
+      ?? throw new GitDeliveryException("git-index-snapshot-unavailable", "git-index-snapshot", "Git index state could not be verified.");
+  }
   private const int MaximumStatusPaths = 500;
   private readonly IProcessExecutionService _processExecution;
   private readonly ISettingsStore _settingsStore;
@@ -2635,7 +2653,8 @@ public sealed class GitRepositoryService : IGitRepositoryService
     IReadOnlyList<string> arguments,
     string stage,
     CancellationToken cancellationToken,
-    bool allowFailure = false
+    bool allowFailure = false,
+    bool captureOutputDigest = false
   )
   {
     var result = await _processExecution.ExecuteAsync(
@@ -2648,7 +2667,8 @@ public sealed class GitRepositoryService : IGitRepositoryService
             "push",
             StringComparison.Ordinal
           ) ? 30 : 10
-        )
+        ),
+        CaptureStandardOutputDigest: captureOutputDigest
       ),
       cancellationToken
     );

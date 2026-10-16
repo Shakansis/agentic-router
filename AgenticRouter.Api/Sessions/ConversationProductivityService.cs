@@ -99,6 +99,7 @@ public sealed class ConversationProductivityService
     )
   );
 
+  private readonly ILogger<ConversationProductivityService> _logger;
   private readonly IPersistentSessionStore _store;
   private readonly IWorkspaceProfileService _profiles;
   private readonly ISettingsStore _settings;
@@ -116,9 +117,11 @@ public sealed class ConversationProductivityService
     ISettingsStore settings,
     IOllamaClient providers,
     ITokenEstimator tokens,
-    IModelOrganizationService modelOrganization
+    IModelOrganizationService modelOrganization,
+    ILogger<ConversationProductivityService> logger
   )
   {
+    _logger = logger;
     _store = store;
     _profiles = profiles;
     _settings = settings;
@@ -172,12 +175,12 @@ public sealed class ConversationProductivityService
     ))
     {
       cancellationToken.ThrowIfCancellationRequested();
-      var sessions = await _store.ReadAllAsync(
+      var sessions = await _store.ReadAllMetadataAsync(
         workspace.Id,
         cancellationToken
       );
 
-      foreach (var session in sessions.OrderByDescending(
+      foreach (var metadata in sessions.OrderByDescending(
         item => item.UpdatedAt
       ).ThenBy(
         item => item.Id,
@@ -185,6 +188,14 @@ public sealed class ConversationProductivityService
       ))
       {
         cancellationToken.ThrowIfCancellationRequested();
+        ConversationSessionRecord? session;
+        try { session = await _store.ReadAsync(workspace.Id, metadata.Id, cancellationToken); }
+        catch (WorkspaceProfileException exception) when (exception.Code == "session-file-invalid")
+        {
+          _logger.LogWarning(exception, "Skipping invalid persisted session {SessionId} during content search.", metadata.Id);
+          continue;
+        }
+        if (session is null) continue;
         scanned++;
 
         if (!MatchesFilters(
@@ -1332,7 +1343,7 @@ public sealed class ConversationProductivityService
     CancellationToken cancellationToken
   )
   {
-    var sessions = await _store.ReadAllAsync(
+    var sessions = await _store.ReadAllMetadataAsync(
       active.Id,
       cancellationToken
     );

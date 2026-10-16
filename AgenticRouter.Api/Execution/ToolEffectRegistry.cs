@@ -26,6 +26,7 @@ public static class ToolEffectRegistry
     {
       ["list_files"] = ToolEffects.Inspected,
       ["read_file"] = ToolEffects.Inspected,
+      ["read_files"] = ToolEffects.Inspected,
       ["get_file_info"] = ToolEffects.Inspected,
       ["search_text"] = ToolEffects.Inspected,
       [DiagnosticTraceCapability.ToolName] = ToolEffects.Inspected,

@@ -45,12 +45,26 @@ effective value. Unknown support permits configuration and clearly warns that
 the runtime may reject or ignore it. Option-specific provider errors retain their
 cause and surface runtime-performance-rejected without rewriting saved settings.
 
-Native activity reports explicit values sent and Auto omitted. It does not claim
-that accepted options became effective runner settings. Compatibility endpoints
-used by external harnesses do not have a reviewed mapping for these options;
-configured values produce an explicit runtime.performance-unavailable activity
-warning on that route. No Modelfile mutation or compatibility-request rewriting
-is introduced to compensate.
+Native activity reports explicit values sent and Auto omitted. When draft tokens
+or batch size are configured, the existing Host inference transport translates
+Anthropic Messages, OpenAI Chat Completions and Responses to native Ollama chat.
+The Host supplies its resolved context, output budget, keep_alive and exact
+provider/model/digest performance options; protocol adapters retain the harness
+request's sampling and reasoning controls, tools, inline images, call identities
+and streaming order. Off sends zero; Auto remains omitted. No MTP value is hardcoded,
+no model alias/Modelfile is created, and no saved setting is changed.
+
+Responses namespaces are mapped by their declared exact names. Client tool search
+and the existing Codex custom apply_patch bridge retain their native protocol.
+Unknown protocol shapes fail explicitly; they are not silently discarded.
+Payloads remain transient. Native provider load, prompt evaluation and generation
+measurements remain available through translation. Accepted options alone still do
+not prove activation; the real validation checks server/runner PIDs, command-line
+options and provider timings independently.
+
+Native Execute and external harness startup use the same effective context
+resolution, including the model ceiling and Execute output reserve. Merely changing
+the harness does not request a different context or KV server configuration.
 
 ## Measurement identity
 
@@ -185,3 +199,5 @@ OllamaClient, OllamaRuntimeProfileService, RuntimeStatusService,
 SupervisionRouteResolver and ChatStreamService; the Settings HTML/JS and shared
 header CSS; inference help; RuntimePerformance, OllamaStartupRecovery and
 ExecutionState browser tests plus FakeOllamaCli environment evidence.
+
+An explicit turn Thinking=None takes precedence over compatibility-harness defaults. For a reasoning-capable Ollama model, the Host routes that inference through the native translator even when draft and batch options are Auto, and sends `think:false` on every generation, including tool continuations. This does not hide reasoning received from a provider; it controls generation. Installed-Claude browser/API coverage verifies the outgoing control with draft tokens 0 and 3.

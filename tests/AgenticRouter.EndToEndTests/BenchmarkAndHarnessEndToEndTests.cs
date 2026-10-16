@@ -5840,8 +5840,16 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task QwenCodeHarnessUsesIsolatedAuthenticatedServerAndExactWorkspaceModel()
+  [DataRow(true)]
+  [DataRow(false)]
+  public async Task QwenCodeHarnessUsesIsolatedAuthenticatedServerAndExactWorkspaceModel(bool supportsReasoning)
   {
+    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
+    Directory.CreateDirectory(runtime);
+    var unavailable = Path.Combine(runtime, "fake-qwen-no-reasoning.txt");
+    if (supportsReasoning) File.Delete(unavailable);
+    else await File.WriteAllTextAsync(unavailable, "No native reasoning option advertised.");
+    File.Delete(Path.Combine(runtime, "fake-qwen-effort.json"));
     var inferenceSettings = (await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/settings"))!;
     foreach (var profile in inferenceSettings["inferenceProfiles"]!.AsObject())
     {
@@ -5873,8 +5881,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       );
     await Expect(assistant.Locator(".activity"))
       .ToHaveAttributeAsync("data-terminal", "true");
-    await Expect(assistant.Locator("[data-event-type=\"harness.qwen-code-effort.applied\"]"))
-      .ToContainTextAsync("medium effort");
+    await Expect(assistant.Locator(supportsReasoning
+      ? "[data-event-type=\"harness.qwen-code-effort.applied\"]"
+      : "[data-event-type=\"harness.qwen-code-effort.prompt-guided\"]"))
+      .ToContainTextAsync(supportsReasoning ? "medium effort" : "does not advertise medium");
     var capabilityProjection = assistant.Locator(
       "[data-event-type=\"execution-capability-profile-projected\"]"
     );
@@ -5889,7 +5899,6 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Expect(capabilityProjection).ToContainTextAsync("run_process");
     await Expect(capabilityProjection).ToContainTextAsync("missing adapter []");
 
-    var runtime = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
     using var session = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-session.json"))
     );
@@ -6027,17 +6036,20 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       settings.RootElement.GetProperty("memory")
         .GetProperty("enableManagedAutoMemory").GetBoolean()
     );
-    using (var effort = JsonDocument.Parse(
-      await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-effort.json"))
-    ))
-    {
-      Assert.AreEqual("reasoning_effort", effort.RootElement.GetProperty("configId").GetString());
-      Assert.AreEqual("medium", effort.RootElement.GetProperty("value").GetString());
-      Assert.AreEqual(
-        assignedClientId,
-        effort.RootElement.GetProperty("clientId").GetString()
-      );
-    }
+    if (supportsReasoning)
+      using (var effort = JsonDocument.Parse(
+        await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-effort.json"))
+      ))
+      {
+        Assert.AreEqual("reasoning_effort", effort.RootElement.GetProperty("configId").GetString());
+        Assert.AreEqual("medium", effort.RootElement.GetProperty("value").GetString());
+        Assert.AreEqual(
+          assignedClientId,
+          effort.RootElement.GetProperty("clientId").GetString()
+        );
+      }
+    else Assert.IsFalse(File.Exists(Path.Combine(runtime, "fake-qwen-effort.json")));
+    File.Delete(unavailable);
 
     using var firstPrompt = JsonDocument.Parse(
       await File.ReadAllTextAsync(Path.Combine(runtime, "fake-qwen-prompt.json"))
@@ -6125,8 +6137,14 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
     await SetExecuteModeAsync("auto");
     await Page.Locator("#harness-selector").SelectOptionAsync("qwen-code");
-    await SendMessageAsync("activity details qwen code");
+    var response = await Page.RunAndWaitForResponseAsync(
+      () => SendMessageAsync("activity details qwen code"),
+      response => response.Url.Contains("/api/chat/stream", StringComparison.Ordinal));
+    var events = ParseSseEvents(await response.TextAsync());
+    Assert.HasCount(4, events.Where(item => item["localAction"]?["tool"]?.GetValue<string>() is "tool_call" or "ToolCall"),
+      "Invocation wrappers must remain in diagnostic events even though their work rows are hidden.");
     var assistant = Page.Locator(".message.assistant").Last;
+    await Expect(assistant.Locator(".work-action", new() { HasText = "ToolCall" })).ToHaveCountAsync(0);
     await Expect(assistant.Locator(".assistant-work .work-action", new() { HasText = "ToolSearch" })).ToHaveCountAsync(0);
     var discovery = assistant.Locator(".activity .work-action", new() { HasText = "ToolSearch" });
     await Expect(discovery).ToHaveCountAsync(1);
@@ -6147,6 +6165,17 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     var literal = assistant.Locator(".assistant-work .work-action", new() { HasText = "Read literal.json" });
     await literal.Locator("summary").ClickAsync();
     await Expect(literal.Locator(".work-action-preview")).ToContainTextAsync("{\"message\":\"literal\\nJSON\"}");
+    var timeline = await Page.EvaluateAsync<string>("JSON.stringify(state.history.findLast(item => item.role === 'assistant').timeline)");
+    StringAssert.Contains(timeline, "invocation-details");
+    await Page.EvaluateAsync("""
+      async () => {
+        const timeline = state.history.findLast(item => item.role === 'assistant').timeline;
+        await replayConversationTimeline(timeline, appendAssistantMessage({ modelSelectionOrigin: 'agent' }));
+      }
+      """);
+    var replay = Page.Locator(".message.assistant").Last;
+    await Expect(replay.Locator(".work-action", new() { HasText = "ToolCall" })).ToHaveCountAsync(0);
+    await Expect(replay.Locator(".assistant-work .work-action")).ToHaveCountAsync(3);
   }
 
   [TestMethod]
@@ -8022,8 +8051,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       await SendMessageAsync("codex footer token totals");
       var footer = Page.Locator(".execution-session-footer").Last;
       await Expect(footer.Locator("[data-metric=tokens]")).ToContainTextAsync("200");
-      await Expect(footer.Locator("[data-metric=throughput], [data-metric=ttft]")).ToHaveCountAsync(0);
-      await Expect(footer.Locator("[data-metric=throughput-unavailable]")).ToContainTextAsync("tok/s unavailable");
+      await Expect(footer.Locator("[data-metric=ttft]")).ToHaveCountAsync(0);
+      await Expect(footer.Locator("[data-metric=throughput]")).ToContainTextAsync("unavailable");
       var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");
       using var response = await _environment.HttpClient.GetAsync($"api/execution-sessions/{executionId}/review");
       response.EnsureSuccessStatusCode();
@@ -8036,13 +8065,55 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
   }
 
   [TestMethod]
+  [DataRow("native")]
+  [DataRow("codex")]
+  [DataRow("claude-code")]
+  [DataRow("opencode")]
+  [DataRow("qwen-code")]
+  [DoNotParallelize]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task EveryHarnessKeepsTokenBadgesVisibleIncludingUnavailableMetricsAndReplay(string harness)
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+    await SendMessageAsync("execute create file");
+    var footer = Page.Locator(".execution-session-footer").Last;
+    await Expect(footer).ToBeVisibleAsync();
+    foreach (var metric in new[] { "tokens", "throughput" })
+    {
+      var badge = footer.Locator($"[data-metric={metric}]");
+      await Expect(badge).ToBeVisibleAsync();
+      await Expect(badge).ToHaveAttributeAsync("data-metric-state", new Regex("^(available|unavailable|error)$"));
+      await Expect(badge).ToHaveAttributeAsync("title", new Regex(".+"));
+    }
+    await Page.EvaluateAsync("""
+      async () => {
+        const timeline = state.history.findLast(item => item.role === 'assistant').timeline;
+        await replayConversationTimeline(timeline, appendAssistantMessage({ modelSelectionOrigin: 'agent' }));
+      }
+      """);
+    footer = Page.Locator(".execution-session-footer").Last;
+    await Expect(footer.Locator("[data-metric=tokens]")).ToBeVisibleAsync();
+    await Expect(footer.Locator("[data-metric=throughput]")).ToBeVisibleAsync();
+  }
+
+  [TestMethod]
   [DataRow("responses")]
   [DataRow("completions")]
+  [DataRow("completions null delta")]
   [DataRow("messages")]
   [DataRow("responses stream only")]
   [DataRow("responses stream only buffered")]
   [DataRow("responses missing usage")]
   [DataRow("responses nonstream first")]
+  [DataRow("native generate")]
+  [DataRow("native generate malformed metadata")]
+  [DataRow("native generate large input")]
+  [DataRow("responses rejected last")]
+  [DataRow("responses all rejected")]
+  [DataRow("responses server failure last")]
   [DoNotParallelize]
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task HarnessHttpMetricsAggregateCallsWithoutNativeUsageDuplication(string fixture)
@@ -8058,11 +8129,34 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     response.EnsureSuccessStatusCode();
     var summary = JsonNode.Parse(await response.Content.ReadAsStringAsync())!["summary"]!;
     var metrics = summary["inferenceMetrics"]!;
+    if (fixture.Contains("large input", StringComparison.Ordinal))
+    {
+      var calls = _environment.FakeOllama.CompatibilityRequests.Where(request => request.Fixture.Contains(fixture, StringComparison.Ordinal)).ToArray();
+      Assert.HasCount(2, calls);
+      Assert.IsTrue(calls.All(call => call.Limit is > 0 and < 16_384),
+        "The Host must cap generation to actual input headroom without changing the context window.");
+    }
+    if (fixture.Contains("server failure last", StringComparison.Ordinal)
+      || fixture.Contains("all rejected", StringComparison.Ordinal))
+    {
+      var diagnostic = fixture.Contains("all rejected", StringComparison.Ordinal)
+        ? "Inference returned HTTP 400." : "Inference returned HTTP 500.";
+      Assert.IsNull(metrics["outputTokens"]);
+      Assert.IsNull(metrics["tokensPerSecond"]);
+      Assert.AreEqual(diagnostic, metrics["telemetryError"]!.GetValue<string>());
+      await Expect(footer.Locator("[data-metric=tokens], [data-metric=throughput]")).ToHaveCountAsync(2);
+      foreach (var name in new[] { "tokens", "throughput" })
+      {
+        await Expect(footer.Locator($"[data-metric={name}]")).ToHaveAttributeAsync("data-metric-state", "error");
+        await Expect(footer.Locator($"[data-metric={name}]")).ToHaveAttributeAsync("title", diagnostic);
+      }
+      return;
+    }
     if (fixture.Contains("missing usage", StringComparison.Ordinal))
     {
       Assert.IsNull(metrics["outputTokens"], "Native 999-token notifications must not fill missing HTTP inference usage.");
       Assert.IsNull(metrics["tokensPerSecond"]);
-      await Expect(footer.Locator("[data-metric=tokens], [data-metric=throughput]")).ToHaveCountAsync(0);
+      await Expect(footer.Locator("[data-metric=tokens], [data-metric=throughput][data-metric-state=unavailable]")).ToHaveCountAsync(2);
       return;
     }
     Assert.AreEqual(100L, metrics["outputTokens"]!.GetValue<long>());
@@ -8071,10 +8165,10 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     {
       Assert.IsNull(metrics["generationMilliseconds"], "One buffered batch supplies no generation interval.");
       Assert.IsNull(metrics["tokensPerSecond"]);
-      await Expect(footer.Locator("[data-metric=throughput]")).ToHaveCountAsync(0);
-      await Expect(footer.Locator("[data-metric=throughput-unavailable]")).ToBeVisibleAsync();
-      await Expect(footer.Locator("[data-metric=throughput-unavailable]"))
-        .ToHaveAttributeAsync("title", "Generation time is unavailable for at least one inference. Total turn duration includes loading, prefill and tools and cannot replace generation time.");
+      await Expect(footer.Locator("[data-metric=throughput]")).ToHaveAttributeAsync("data-metric-state", "unavailable");
+      await Expect(footer.Locator("[data-metric=throughput]")).ToBeVisibleAsync();
+      await Expect(footer.Locator("[data-metric=throughput]"))
+        .ToHaveAttributeAsync("title", "Generation time unavailable.");
       return;
     }
     var generation = metrics["generationMilliseconds"]!.GetValue<double>();

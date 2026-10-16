@@ -960,6 +960,9 @@ public sealed class DurableSupervisionRunCoordinator
     }
     finally
     {
+      using var historyScope = _scopeFactory.CreateScope();
+      await historyScope.ServiceProvider.GetRequiredService<ConversationHistoryFiles>()
+        .SettleConversationAsync(state.Checkpoint.WorkspaceId, state.Checkpoint.ConversationSessionId);
       state.CompleteExecution();
     }
   }

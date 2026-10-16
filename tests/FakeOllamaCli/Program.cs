@@ -103,6 +103,21 @@ while (true)
   {
     break;
   }
+  _ = HandleSafeClientAsync(client);
+}
+
+async Task HandleSafeClientAsync(TcpClient client)
+{
+  try { await HandleClientAsync(client); }
+  catch (Exception exception)
+  {
+    await File.AppendAllTextAsync(Path.ChangeExtension(Environment.ProcessPath!, ".errors"), exception + "\n");
+    client.Dispose();
+  }
+}
+
+async Task HandleClientAsync(TcpClient client)
+{
   await using var stream = client.GetStream();
   using var reader = new StreamReader(
     stream,
@@ -113,8 +128,10 @@ while (true)
   );
   var requestLine = await reader.ReadLineAsync() ?? string.Empty;
   var contentLength = 0;
+  var chunked = false;
   while (await reader.ReadLineAsync() is { Length: > 0 } header)
   {
+    if (header.Equals("Transfer-Encoding: chunked", StringComparison.OrdinalIgnoreCase)) chunked = true;
     if (header.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
     {
       contentLength = int.Parse(header[15..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
@@ -126,7 +143,22 @@ while (true)
   if (File.Exists(forwardPath) && requestPath is not "/api/version" and not "/test/environment")
   {
     var body = new char[contentLength];
-    if (contentLength > 0) await reader.ReadBlockAsync(body.AsMemory());
+    if (chunked)
+    {
+      var chunks = new StringBuilder();
+      while (await reader.ReadLineAsync() is { } chunkHeader)
+      {
+        var size = int.Parse(chunkHeader.Split(';')[0], System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture);
+        if (size == 0) { await reader.ReadLineAsync(); break; }
+        var chunk = new char[size];
+        await reader.ReadBlockAsync(chunk.AsMemory());
+        chunks.Append(chunk);
+        await reader.ReadLineAsync();
+      }
+      body = chunks.ToString().ToCharArray();
+      contentLength = body.Length;
+    }
+    else if (contentLength > 0) await reader.ReadBlockAsync(body.AsMemory());
     var progressFixture = requestPath == "/api/chat"
       && new string(body).Contains("inference progress fixture", StringComparison.Ordinal);
     if (progressFixture)
@@ -162,7 +194,7 @@ while (true)
     ));
     await stream.WriteAsync(forwardedBytes);
     client.Dispose();
-    continue;
+    return;
   }
   var payload = requestPath switch
   {

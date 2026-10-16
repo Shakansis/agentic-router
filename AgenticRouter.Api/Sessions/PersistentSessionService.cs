@@ -9,6 +9,8 @@ namespace AgenticRouter.Api.Sessions;
 
 public interface IPersistentSessionService
 {
+  Task<ConversationSessionRecord> RewindAsync(string sessionId, string turnId, int index,
+    SessionSummaryRecord? priorSummary, CancellationToken cancellationToken);
   Task SaveCompletionReportAsync(string workspaceId, string sessionId, string checkId,
     ExecutionCompletionReport report, CancellationToken cancellationToken);
 
@@ -125,6 +127,7 @@ public interface IPersistentSessionService
 public sealed class PersistentSessionService : IPersistentSessionService
 {
   private readonly LiveChatRuns _chatRuns;
+  private readonly HistoryContentStore _historyContent;
   private readonly IPersistentSessionStore _store;
   private readonly IWorkspaceProfileService _profiles;
   private readonly ISettingsStore _settings;
@@ -138,6 +141,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
   public PersistentSessionService(
     IPersistentSessionStore store,
+    HistoryContentStore historyContent,
     LiveChatRuns chatRuns,
     IWorkspaceProfileService profiles,
     ISettingsStore settings,
@@ -147,6 +151,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
   )
   {
     _store = store;
+    _historyContent = historyContent;
     _chatRuns = chatRuns;
     _profiles = profiles;
     _settings = settings;
@@ -495,6 +500,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
     CancellationToken cancellationToken
   )
   {
+    if (sessionId is not null && _chatRuns.IsRewinding(sessionId))
+      throw new WorkspaceProfileException("session-rewind-in-progress", "session-edit", "Conversation rollback is still running. Retry after it settles.", true);
     var active = await RequireActiveAsync(
       cancellationToken
     );
@@ -640,13 +647,11 @@ public sealed class PersistentSessionService : IPersistentSessionService
         Messages = session.Messages.Append(
           new ChatMessage(
             "user",
-            PersistedUserMessage(
-              message,
-              images
-            ),
+            message,
             updatedAt,
             Hidden: hidden,
-            TurnId: turnId
+            TurnId: turnId,
+            InteractionMode: interactionMode
           )
         ).ToArray()
       };
@@ -661,6 +666,36 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       _gate.Release();
     }
+  }
+
+  public async Task<ConversationSessionRecord> RewindAsync(string sessionId, string turnId, int index,
+    SessionSummaryRecord? priorSummary, CancellationToken cancellationToken)
+  {
+    var active = await RequireActiveAsync(cancellationToken);
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      if (_chatRuns.FindConversation(sessionId) is not null)
+        throw new WorkspaceProfileException("session-edit-conflict", "session-edit", "The conversation is still running.", true);
+      var stored = await _store.ReadAsync(active.Id, sessionId, cancellationToken)
+        ?? throw new WorkspaceProfileException("session-not-found", "session-edit", "The conversation is unavailable.", false);
+      if (index < 0 || index >= stored.Messages.Count || stored.Messages[index].TurnId != turnId)
+        throw new WorkspaceProfileException("session-edit-conflict", "session-edit", "The conversation changed before rollback.", true);
+      await _supervisionRuns.DiscardConversationAsync(active.Id, sessionId, cancellationToken);
+      var session = RewindForEditedMessage(stored, index, stored.Messages[index].Content) with
+      {
+        State = "idle",
+        UpdatedAt = DateTimeOffset.UtcNow,
+        SessionSummary = priorSummary,
+        ContextMessages = null,
+        TranscriptId = null,
+        LastContextUsage = null
+      };
+      var limits = (await _settings.GetAsync(cancellationToken)).SessionHistory;
+      return await _store.WriteAsync(session, limits.SessionCompactionThresholdBytes,
+        limits.SessionCompactionTargetBytes, cancellationToken);
+    }
+    finally { _gate.Release(); }
   }
 
   private static ConversationSessionRecord RewindForEditedMessage(
@@ -1227,7 +1262,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     finally { _gate.Release(); }
   }
 
-  private static IReadOnlyList<ChatStreamEvent>? CoalesceTimeline(
+  internal static IReadOnlyList<ChatStreamEvent>? CoalesceTimeline(
     IReadOnlyList<ChatStreamEvent>? timeline
   )
   {
@@ -1235,12 +1270,33 @@ public sealed class PersistentSessionService : IPersistentSessionService
     {
       return timeline;
     }
-    var result = new List<ChatStreamEvent>(timeline.Count);
+    var result = new List<ChatStreamEvent>(Math.Min(timeline.Count, 256));
     var replaceableIndexes = new Dictionary<string, int>(StringComparer.Ordinal);
     var lastContextBucket = -1;
     var warningCrossed = false;
+    ChatStreamEvent? pending = null;
+    var text = new System.Text.StringBuilder();
+    DateTimeOffset firstTimestamp = default;
+    void FlushText()
+    {
+      if (pending is null) return;
+      result.Add(pending with { Timestamp = firstTimestamp, ReasoningDelta = text.ToString() });
+      pending = null;
+      text.Clear();
+    }
     foreach (var item in timeline)
     {
+      if (item.Type == "reasoning.delta")
+      {
+        if (pending is not null && (pending.Type != item.Type || pending.RequestId != item.RequestId
+          || pending.ContentBlockId != item.ContentBlockId || pending.SelectedModel != item.SelectedModel))
+          FlushText();
+        if (pending is null) firstTimestamp = item.Timestamp;
+        pending = item;
+        text.Append(item.ReasoningDelta);
+        continue;
+      }
+      FlushText();
       if (item.Type == "context.usage" && item.ContextUsage is { } usage)
       {
         var limit = usage.EffectiveLimitTokens > 0
@@ -1285,6 +1341,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
 
       result.Add(item);
     }
+    FlushText();
     return result.ToArray();
   }
 
@@ -1526,7 +1583,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     var active = await RequireActiveAsync(
       cancellationToken
     );
-    var sessions = await _store.ReadAllAsync(
+    var sessions = await _store.ReadAllMetadataAsync(
       active.Id,
       cancellationToken
     );
@@ -1555,7 +1612,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     var active = await RequireActiveAsync(
       cancellationToken
     );
-    var sessions = await _store.ReadAllAsync(
+    var sessions = await _store.ReadAllMetadataAsync(
       active.Id,
       cancellationToken
     );
@@ -1742,7 +1799,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
     CancellationToken cancellationToken
   )
   {
-    var existing = await _store.ReadAllAsync(
+    var existing = await _store.ReadAllMetadataAsync(
       active.Id,
       cancellationToken
     );
@@ -1910,7 +1967,9 @@ public sealed class PersistentSessionService : IPersistentSessionService
           }
           ).ToArray(),
           Timeline = stored?.Timeline,
-          TurnId = stored?.TurnId ?? message.TurnId
+          TurnId = stored?.TurnId ?? message.TurnId,
+          InteractionMode = stored?.InteractionMode ?? message.InteractionMode,
+          Attachments = stored?.Attachments
         };
       }
     ).ToArray();
@@ -2003,7 +2062,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
       };
   }
 
-  private static WorkspaceHistoryUsage CreateUsage(
+  private WorkspaceHistoryUsage CreateUsage(
     WorkspaceProfileData workspace,
     IReadOnlyList<ConversationSessionMetadata> sessions
   )
@@ -2014,7 +2073,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
       sessions.Count,
       sessions.Sum(
         session => session.StorageBytes
-      ),
+      ) + _historyContent.SavedBytes(workspace.Id),
       sessions.Count == 0
         ? null
         : sessions.Min(

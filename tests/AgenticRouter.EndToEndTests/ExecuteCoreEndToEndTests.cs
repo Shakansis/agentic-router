@@ -6147,6 +6147,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       {
         "list_files",
         "read_file",
+        "read_files",
         "get_file_info",
         "search_text"
       },

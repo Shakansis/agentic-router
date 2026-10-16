@@ -149,7 +149,7 @@ public sealed class HarnessWorkspaceObserver
         undoAvailable,
         undoAvailable ? null : "The original file exceeded the bounded harness rollback budget or was unavailable.",
         undoAvailable ? originalBytes : 0,
-        OriginalBinaryBase64: before?.Text is null && before?.Bytes is not null
+        OriginalBinaryBase64: before?.Bytes is not null
           ? Convert.ToBase64String(before.Bytes)
           : null
       ));

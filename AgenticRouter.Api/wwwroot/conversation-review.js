@@ -1930,12 +1930,22 @@ async function decideRecovery(
 }
 
 function finishActivity(assistant, summary, keepOpen) {
+  assistant.terminalSummary = summary;
   cancelAnimationFrame(assistant.clockFrame);
   assistant.progress.hidden = true;
   assistant.runningIndicator.hidden = true;
   renderTerminalActivitySummary(assistant.summary, summary);
   assistant.details.dataset.terminal = "true";
   assistant.details.open = keepOpen;
+  if (assistant.sessionHeader.hidden) {
+    const status = document.createElement("strong");
+    status.textContent = summary.startsWith("Failed") ? "failed"
+      : summary.startsWith("Canceled") ? "cancelled" : "completed";
+    const model = document.createElement("span");
+    model.textContent = assistant.selectedModel || "Model unavailable";
+    assistant.sessionHeader.replaceChildren(status, model, document.createElement("span"));
+    assistant.sessionHeader.hidden = false;
+  }
   const status = assistant.sessionHeader.querySelector("strong");
   if (status && !["completed", "failed", "blocked", "cancelled"].includes(status.textContent.toLowerCase())) {
     // A transport failure/cancellation may arrive without a final session snapshot.
@@ -1973,24 +1983,63 @@ function renderTerminalActivitySummary(element, summary) {
   );
 }
 
-function startMessageEdit(element, message, historyIndex) {
-  if (state.requestController || state.readOnlyConversation) {
+async function startMessageEdit(element, message, historyIndex, attachments = [], interactionMode = "chat") {
+  if (state.requestController || state.readOnlyConversation || state.historyOperationActive) {
     return;
   }
 
-  state.editingTurn = {
-    element,
-    historyIndex
-  };
-  elements.composer.classList.add("editing");
-  elements.messageInput.value = message;
-  resizeComposer();
-  setStreamingState(false);
-  elements.messageInput.focus();
-  elements.messageInput.setSelectionRange(
-    message.length,
-    message.length
-  );
+  const original = state.history[historyIndex];
+  if (!original?.turnId) {
+    showToast("This historical turn has no recoverable prompt identity.", "error");
+    return;
+  }
+  const button = element.querySelector(".edit-message");
+  button.disabled = true;
+  state.historyOperationActive = true;
+  elements.sendButton.disabled = true;
+  elements.messageInput.disabled = true;
+  try {
+    const result = await runHistoryFileOperation("/api/history-files/rewind/{operationId}", {
+      sessionId: state.conversationSessionId, turnId: original.turnId,
+      messageIndex: historyIndex, browserSessionId: state.browserSessionId
+    });
+    removeConversationFrom(element);
+    state.history = result.session?.messages ?? state.history.slice(0, historyIndex);
+    state.persistedMessageCount = result.session ? state.history.length : 0;
+    state.persistedContext = null;
+    state.contextUsage = null;
+    state.contextUsageRestored = false;
+    state.latestExecutionSessionId = null;
+    state.savedExecutionReviews = result.session?.executionReviews ?? [];
+    state.latestSavedExecutionReview = state.savedExecutionReviews.at(-1) ?? null;
+    state.pendingDiagnosticInvestigation = null;
+    state.activeAgentModel = null;
+    state.activeAgentRole = null;
+    clearActiveUserInput();
+    state.activeSupervisionRunId = null;
+    state.conversationState = "idle";
+    state.restoredPromptDraft = true;
+    state.browserSessionId = result.browserSessionId;
+    persistBrowserSessionId(state.browserSessionId);
+    clearAttachments();
+    state.attachments = result.images.map(image => ({ ...image,
+      previewUrl: `data:${image.mimeType};base64,${image.base64Data}` }));
+    renderAttachmentPreviews();
+    elements.messageInput.value = result.message;
+    setInteractionMode(result.mode);
+    renderContextUsage();
+    resizeComposer();
+    await refreshSessions();
+    await refreshGit();
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  } finally {
+    state.historyOperationActive = false;
+    setStreamingState(false);
+    elements.messageInput.focus();
+    scheduleMessageQueueDispatch();
+  }
 }
 
 function cancelMessageEdit() {
@@ -2008,8 +2057,10 @@ function removeConversationFrom(element) {
 
   while (current) {
     const next = current.nextElementSibling;
-    resizeObserver.unobserve(current);
-    current.remove();
+    if (!current.classList.contains("host-file-operation")) {
+      resizeObserver.unobserve(current);
+      current.remove();
+    }
     current = next;
   }
 }

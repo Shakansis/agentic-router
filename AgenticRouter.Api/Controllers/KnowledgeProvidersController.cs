@@ -2,6 +2,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Knowledge;
 using AgenticRouter.Api.Providers.Cloud;
 using AgenticRouter.Api.Runtime;
+using AgenticRouter.Api.WorkspaceProfiles;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgenticRouter.Api.Controllers;
@@ -14,18 +15,24 @@ public sealed class KnowledgeProvidersController : ControllerBase
   private readonly ISettingsStore _settingsStore;
   private readonly IProtectedSecretStore _secretStore;
   private readonly ISystemMemoryMetricsProvider _systemMemory;
+  private readonly IWorkspaceProfileService _workspaceProfiles;
+  private readonly ILogger<KnowledgeProvidersController> _logger;
 
   public KnowledgeProvidersController(
     IKnowledgeProviderRegistry providers,
     ISettingsStore settingsStore,
     IProtectedSecretStore secretStore,
-    ISystemMemoryMetricsProvider systemMemory
+    ISystemMemoryMetricsProvider systemMemory,
+    IWorkspaceProfileService workspaceProfiles,
+    ILogger<KnowledgeProvidersController> logger
   )
   {
     _providers = providers;
     _settingsStore = settingsStore;
     _secretStore = secretStore;
     _systemMemory = systemMemory;
+    _workspaceProfiles = workspaceProfiles;
+    _logger = logger;
   }
 
   [HttpGet]
@@ -56,7 +63,7 @@ public sealed class KnowledgeProvidersController : ControllerBase
     }
 
     return Ok(
-      await BuildViewAsync(cancellationToken)
+      await BuildViewAsync(cancellationToken, probeExplicitly: true)
     );
   }
 
@@ -142,7 +149,7 @@ public sealed class KnowledgeProvidersController : ControllerBase
         CancellationToken.None
       );
       return Ok(
-        await BuildViewAsync(cancellationToken)
+        await BuildViewAsync(cancellationToken, probeExplicitly: true)
       );
     }
     catch (SecretStorageException exception)
@@ -167,14 +174,25 @@ public sealed class KnowledgeProvidersController : ControllerBase
   }
 
   private async Task<KnowledgeProvidersView> BuildViewAsync(
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    bool probeExplicitly = false
   )
   {
     var settings = await _settingsStore.GetAsync(cancellationToken);
+    var workspace = await _workspaceProfiles.GetActiveDataAsync(cancellationToken);
     var views = new List<KnowledgeProviderView>();
     foreach (var provider in _providers.Providers)
     {
-      var availability = await provider.GetAvailabilityAsync(cancellationToken);
+      var statusChecked = probeExplicitly || workspace?.Knowledge is { Enabled: true } selection
+        && selection.ProviderId == provider.Definition.Id;
+      var availability = statusChecked
+        ? await provider.GetAvailabilityAsync(cancellationToken)
+        : new KnowledgeProviderAvailability(
+          provider.Definition.Id == KnowledgeProviderIds.AnythingLlm
+            && !string.IsNullOrWhiteSpace(settings.KnowledgeProviders.AnythingLlm.BaseUrl)
+            && !string.IsNullOrWhiteSpace(settings.KnowledgeProviders.AnythingLlm.SecretReference),
+          false,
+          "Knowledge is disabled for this project. Refresh to check the connection explicitly.");
       IReadOnlyList<KnowledgeLibrary> libraries = [];
       if (availability.Available)
       {
@@ -192,6 +210,11 @@ public sealed class KnowledgeProvidersController : ControllerBase
         }
       }
 
+      if (workspace?.Knowledge is { Enabled: true } activeKnowledge
+        && activeKnowledge.ProviderId == provider.Definition.Id
+        && availability.Configured && !availability.Available && availability.Diagnostic is not null)
+        _logger.LogWarning("knowledge-unavailable: {Diagnostic}", availability.Diagnostic);
+
       views.Add(
         new KnowledgeProviderView(
           provider.Definition,
@@ -203,7 +226,8 @@ public sealed class KnowledgeProvidersController : ControllerBase
             && !string.IsNullOrWhiteSpace(
               settings.KnowledgeProviders.AnythingLlm.SecretReference
             ),
-          libraries
+          libraries,
+          statusChecked
         )
       );
     }
@@ -267,7 +291,8 @@ public sealed record KnowledgeProviderView(
   KnowledgeProviderAvailability Availability,
   string? BaseUrl,
   bool AuthenticationConfigured,
-  IReadOnlyList<KnowledgeLibrary> Libraries
+  IReadOnlyList<KnowledgeLibrary> Libraries,
+  bool StatusChecked = true
 );
 
 public sealed record KnowledgeInstallationGuidance(

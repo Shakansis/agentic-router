@@ -2138,10 +2138,7 @@ public sealed class DurableSupervisionEndToEndTests
       new() { Name = "Execute", Exact = true }
     ).ClickAsync();
     await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
-    await Page.Locator("#message-input").FillAsync(
-      "/supervisor supervision restart boundary"
-    );
-    await Page.Locator("#send-button").ClickAsync();
+    await StartMessageAsync("/supervisor supervision restart boundary");
 
     JsonObject? activeRun = null;
     var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
@@ -2262,10 +2259,7 @@ public sealed class DurableSupervisionEndToEndTests
     await Page.GetByRole(AriaRole.Button, new() { Name = "Execute", Exact = true })
       .ClickAsync();
     await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
-    await Page.Locator("#message-input").FillAsync(
-      "/supervisor supervision restart boundary"
-    );
-    await Page.Locator("#send-button").ClickAsync();
+    await StartMessageAsync("/supervisor supervision restart boundary");
 
     JsonObject? active = null;
     var deadline = DateTimeOffset.UtcNow.AddSeconds(30);

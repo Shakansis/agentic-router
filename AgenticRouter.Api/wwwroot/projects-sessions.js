@@ -269,8 +269,7 @@ async function changeWorkspaceHistory(event) {
   if (
     enabled
     && !await showAppConfirm(
-      "Enable local history for this workspace? The content will not be encrypted "
-        + "by Agentic Router v0.9.12.",
+      historyPrivacyNotice,
       { title: "Enable local history?", confirmLabel: "Enable" }
     )
   ) {
@@ -389,20 +388,29 @@ function renderKnowledgeSettings() {
   const provider = selectedKnowledgeProvider();
   const available = Boolean(provider?.availability?.available);
   const configured = Boolean(provider?.availability?.configured);
-  elements.knowledgeProviderStatus.textContent = state.knowledgeProviderLoadError
-    ? "Knowledge provider status unavailable"
-    : available
-      ? `${provider.definition.displayName} available`
-      : configured
-        ? `${provider?.definition?.displayName ?? "AnythingLLM"} unavailable`
-        : "AnythingLLM not configured";
+  const statusUnchecked = !selection.enabled || provider?.statusChecked === false;
+  elements.knowledgeProviderStatus.textContent = !selection.enabled
+    ? "Knowledge disabled for project"
+    : state.knowledgeProviderLoadError
+      ? "Knowledge provider status unavailable"
+      : statusUnchecked
+        ? "Knowledge provider status not checked"
+        : available
+          ? `${provider.definition.displayName} available`
+          : configured
+            ? `${provider?.definition?.displayName ?? "AnythingLLM"} unavailable`
+            : "AnythingLLM not configured";
   elements.knowledgeProviderDiagnostic.textContent =
-    state.knowledgeProviderLoadError
+    !selection.enabled
+      ? "Knowledge is disabled for this project. Enable it to use the selected libraries."
+      : state.knowledgeProviderLoadError
       ?? provider?.availability?.diagnostic
       ?? (available ? `${provider.libraries.length} libraries available.` : "");
-  elements.knowledgeProviderStatus.className = available
-    ? "verification-ok"
-    : "verification-warning";
+  elements.knowledgeProviderStatus.className = statusUnchecked
+    ? "inline-status"
+    : available
+      ? "verification-ok"
+      : "verification-warning";
   elements.knowledgeEnabled.checked = Boolean(selection.enabled);
   elements.knowledgeEnabled.disabled = !active;
   elements.knowledgeBaseUrl.value = provider?.baseUrl
@@ -419,7 +427,7 @@ function renderKnowledgeSettings() {
   const libraries = [...(provider?.libraries ?? [])];
   for (const id of selectedIds) {
     if (!libraries.some(library => library.id === id)) {
-      libraries.push({ id, name: `${id} · currently unavailable` });
+      libraries.push({ id, name: `${id} · ${statusUnchecked ? "saved selection" : "currently unavailable"}` });
     }
   }
 
@@ -523,6 +531,14 @@ async function saveProjectKnowledge() {
     state.workspaceProfiles.profiles = state.workspaceProfiles.profiles.map(
       profile => profile.id === updated.id ? updated : profile
     );
+    if (updated.knowledge.enabled) {
+      try {
+        state.knowledgeProviders = await fetchJson("/api/knowledge-providers");
+        state.knowledgeProviderLoadError = null;
+      } catch (error) {
+        state.knowledgeProviderLoadError = error.message;
+      }
+    }
     renderKnowledgeSettings();
     elements.knowledgeSaveStatus.textContent = updated.knowledge.enabled
       ? "Project knowledge enabled. Retrieval will run before inference."
@@ -1729,6 +1745,9 @@ async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) 
         state.history = session.messages.map(
           message => ({
             role: message.role,
+            turnId: message.turnId,
+            interactionMode: message.interactionMode,
+            attachments: message.attachments,
             content: message.content,
             createdAt: message.createdAt,
             diagnostic: message.diagnostic,
@@ -1837,6 +1856,9 @@ async function openSessionReadOnly(id, workspaceId) {
     state.history = session.messages.map(
       message => ({
         role: message.role,
+        turnId: message.turnId,
+        interactionMode: message.interactionMode,
+        attachments: message.attachments,
         content: message.content,
         createdAt: message.createdAt,
         diagnostic: message.diagnostic,
@@ -2009,8 +2031,9 @@ async function renderRestoredConversation(session, options = {}) {
         appendUserMessage(
           message.content,
           index,
-          [],
-          message.createdAt
+          message.attachments ?? [],
+          message.createdAt,
+          message.interactionMode ?? session.lastInteractionMode
         );
         if ((message.timeline?.length ?? 0) > 0) {
           const assistant = appendAssistantMessage({
@@ -2124,7 +2147,7 @@ async function renderRestoredConversation(session, options = {}) {
     notice.className = "workspace-note";
     notice.textContent = session.messages.some(isPersistedContinuityMessage)
       ? "Older turns were compacted into continuity context. Their original presentation is no longer available in this saved history."
-      : session.transcriptId
+      : session.transcriptId || session.contextProjectionTargetBytes > 0
         ? "Model context was compacted. The original conversation history is preserved."
       : "Older messages remain visible but will be omitted from the model's next context.";
     elements.messages.append(notice);
@@ -2975,12 +2998,14 @@ function renderExternalAppWarnings() {
     add("ollama-local", "Ollama", state.setup.ollama.diagnostic, "general");
   }
   for (const provider of state.knowledgeProviders?.providers ?? []) {
-    if (provider.availability.configured && !provider.availability.available) {
+    const knowledge = activeWorkspaceProfile()?.knowledge;
+    if (knowledge?.enabled && knowledge.providerId === provider.definition.id
+      && provider.statusChecked !== false && provider.availability.configured && !provider.availability.available) {
       add(provider.definition.id, provider.definition.displayName,
         provider.availability.diagnostic, "knowledge");
     }
   }
-  if (state.knowledgeProviderLoadError) {
+  if (activeWorkspaceProfile()?.knowledge?.enabled && state.knowledgeProviderLoadError) {
     add("knowledge-status", "Knowledge provider",
       state.knowledgeProviderLoadError, "knowledge");
   }

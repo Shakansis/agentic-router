@@ -48,6 +48,29 @@ boundaries, including all current harnesses, repeated cutoff, native recovery,
 unresolved actions, cancellation, route continuity and blocked terminal display.
 Real model compliance remains separate acceptance requiring authorization.
 
+## Codex Responses transport compatibility
+
+The native `apply_patch` wire adapter accepts both Responses SSE and JSON.
+Non-streaming requests remain JSON, including the exact native patch-call
+translation. If a streaming request receives a valid terminal JSON response,
+the adapter emits the corresponding item and terminal events for Codex instead
+of aborting the connection. Provider error objects become failure events, never
+successful completions. JSON telemetry uses actual provider usage without
+inventing streamed token timing. SSE frames are validated even when a compatibility
+server sends an incorrect or missing Content-Type; the proxy forwards them with
+the expected SSE header. Transport logging retains the original exception and
+bounded response media type without logging the provider body.
+
+The header rejection was observed in traces `0HNP6U8IRC8IS:00000057` and
+`0HNP6URLTV88R:0000039B`; their original response bodies and media types were not
+captured, so the exact provider response remains unconfirmed.
+Browser/API coverage includes the installed Codex executable against a local
+deterministic provider, four Host reads followed by JSON completion, SSE retry,
+JSON provider failure, SSE with NDJSON/plain-text/missing headers, and rejected
+workspace escape. A separate fake-Codex
+boundary verifies non-streaming JSON patch translation. Real Ollama acceptance
+remains separate; no additional model is loaded by these tests.
+
 ## Implementation surfaces
 
 - Shared policy and terminal truth: `ExecutionProgressPolicy`,
@@ -88,12 +111,15 @@ Real model compliance remains separate acceptance requiring authorization.
 
 ## Execute output budget and checkpoint regression
 
-All Execute generations reserve 50% of the selected general context for output,
+All Execute generations have a ceiling of 50% of the selected general context for output,
 capped by the model, provider and role context ceilings. At 131,072 context tokens,
 the output limit is 65,536. This Host rule takes precedence over the role/model
 output limits and the older file-creation override during Execute; Chat and
-non-execution calls retain their configured limits. Input-fit/compaction uses the
-same reservation. The context ceiling itself is not increased.
+non-execution calls retain their configured limits. Input-fit/compaction and Host
+reads use the configured response reserve, not that generation ceiling. Ollama
+Native and external Host transport reduce the applied generation limit to fit
+the remaining window after estimated input. The context ceiling itself is not
+increased, and runtime residency options (MTP, KV, batch, keep_alive) are retained.
 
 Native Ollama resolution consumes the common Host policy. External inference
 transport applies that same budget to Chat Completions (`max_tokens` or an existing

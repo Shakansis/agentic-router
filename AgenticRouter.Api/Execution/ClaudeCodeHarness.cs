@@ -361,9 +361,11 @@ public sealed class ClaudeCodeHarnessAdapter : IAgentHarness, IAgentHarnessTrans
       active.Write(Event(active, "turn.started", message: $"Claude Code session {session.NativeSessionId} started."));
       if (request.RequestedEffort is not null) active.Write(Event(
         active,
-        request.RequestedEffort == ModelEffortLevels.None ? "effort.unavailable" : "effort.applied",
+        request.RequestedEffort == ModelEffortLevels.None && !request.ModelSupportsReasoning ? "effort.unavailable" : "effort.applied",
         message: request.RequestedEffort == ModelEffortLevels.None
-          ? "Claude Code has no reviewed None effort control; thinking was not disabled."
+          ? request.ModelSupportsReasoning
+            ? "Host Ollama translation applies None through think:false, overriding Claude Code defaults."
+            : "The selected model exposes no native thinking control; None remains prompt-guided."
           : $"Applied {request.RequestedEffort} effort through the Claude Code CLI."
       ));
       await WriteAsync(

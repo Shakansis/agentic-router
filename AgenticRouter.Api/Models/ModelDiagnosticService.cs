@@ -139,6 +139,7 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
       );
     }
 
+    ApplicationSettings? testSettings = null;
     try
     {
       async Task ReportAsync(string stage, long characters = 0)
@@ -148,6 +149,7 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
       }
       await ReportAsync("preparing");
       var settings = request.Settings ?? await _settingsStore.GetAsync(cancellationToken);
+      testSettings = settings;
       using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
       timeout.CancelAfter(TimeSpan.FromSeconds(settings.Runtime.GenerationTimeoutSeconds));
       cancellationToken = timeout.Token;
@@ -208,6 +210,7 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
           null,
           UsageModelRoles.ModelTest,
           "model-throughput-test",
+          ModelRevision: installed.First(item => string.Equals(item.Name, model, StringComparison.OrdinalIgnoreCase)).Digest,
           InferenceObserver: value => metrics = ExecutionInferenceMetrics.Combine(metrics, value),
           RuntimeSettingsOverride: settings
         ),
@@ -247,12 +250,20 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
     }
     catch (OllamaRuntimeProfileException exception)
     {
+      var settingsField = ContextSettingsField(testSettings, exception.Error);
+      var correction = settingsField switch
+      {
+        "context.providerContextTokens" => "Increase Context sent to Ollama in Runtime settings",
+        "ollamaRuntime.modelOverrides" => "Increase the Model test maximum context in this model's override in Ollama context settings",
+        "ollamaRuntime.roleDefaults.modelTest.maximumContextTokens" => "Increase the Model test maximum context in Ollama context settings",
+        _ => "Review the effective model and profile context limits"
+      };
       var message = exception.Error.Code == "request-context-does-not-fit"
         ? $"The 8K output test needs {exception.Error.RequiredContextTokens} context tokens, "
           + $"but the selected maximum is {exception.Error.MaximumContextTokens}. "
-          + "Increase the Model test maximum context (and any model override) in Ollama context settings, then test again without saving."
+          + $"{correction}, then test again without saving."
         : exception.Message;
-      return Failure(model, stopwatch, traceId, message);
+      return Failure(model, stopwatch, traceId, message, settingsField);
     }
     catch (OllamaProviderException exception)
     {
@@ -271,9 +282,27 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
         traceId,
         requestCancellation.IsCancellationRequested
           ? "The model test was cancelled."
-          : "The model test exceeded the selected generation timeout. Increase it in Runtime settings for longer tests."
+          : "The model test exceeded the selected generation timeout. Increase it in Runtime settings for longer tests.",
+        requestCancellation.IsCancellationRequested ? null : "runtime.generationTimeoutSeconds"
       );
     }
+  }
+
+  private static string? ContextSettingsField(ApplicationSettings? settings, OllamaRuntimeProfileError error)
+  {
+    if (settings is null || error.Code != "request-context-does-not-fit"
+      || error.RequiredContextTokens is not int required) return null;
+    if (settings.Context.ProviderContextTokens < required
+      && error.MaximumContextTokens == settings.Context.ProviderContextTokens)
+      return "context.providerContextTokens";
+    var profile = settings.OllamaRuntime.ModelOverrides.FirstOrDefault(item =>
+      item.Provider == ModelProviderIds.OllamaLocal && item.Model == error.Model && item.Digest == error.Digest);
+    if (profile?.Overrides.TryGetValue(error.Role, out var exact) == true)
+      return exact.MaximumContextTokens < required && exact.MaximumContextTokens == error.MaximumContextTokens
+        ? "ollamaRuntime.modelOverrides" : null;
+    return settings.OllamaRuntime.RoleDefaults.TryGetValue(error.Role, out var role)
+      && role.MaximumContextTokens < required && role.MaximumContextTokens == error.MaximumContextTokens
+        ? $"ollamaRuntime.roleDefaults.{error.Role}.maximumContextTokens" : null;
   }
 
   private static ModelDiagnostic ToDiagnostic(
@@ -338,7 +367,8 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
     string model,
     Stopwatch stopwatch,
     string traceId,
-    string error
+    string error,
+    string? settingsField = null
   )
   {
     return new ModelTestResult(
@@ -348,7 +378,8 @@ public sealed class ModelDiagnosticService : IModelDiagnosticService
       stopwatch.ElapsedMilliseconds,
       "Failed",
       traceId,
-      error
+      error,
+      SettingsField: settingsField
     );
   }
 

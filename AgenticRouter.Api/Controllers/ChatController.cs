@@ -38,6 +38,8 @@ public sealed class ChatController : ControllerBase
   private readonly IExecutionLatencyTracker _latency;
   private readonly IUserInputCoordinator _userInput;
   private readonly LiveChatRuns _chatRuns;
+  private readonly ConversationHistoryFiles _historyFiles;
+  private bool _snapshotSettlementDeferred;
   private LiveChatRun? _ownedRun;
   private SsePresentationWriter? _eventWriter;
   private string? _executionSessionId;
@@ -51,6 +53,7 @@ public sealed class ChatController : ControllerBase
   public ChatController(
     IChatStreamService chatStreamService,
     LiveChatRuns chatRuns,
+    ConversationHistoryFiles historyFiles,
     IExecutionSessionStore executionSessions,
     IPersistentSessionService persistentSessions,
     IImageAttachmentValidator imageValidator,
@@ -66,6 +69,7 @@ public sealed class ChatController : ControllerBase
   {
     _chatStreamService = chatStreamService;
     _chatRuns = chatRuns;
+    _historyFiles = historyFiles;
     _executionSessions = executionSessions;
     _persistentSessions = persistentSessions;
     _imageValidator = imageValidator;
@@ -268,13 +272,24 @@ public sealed class ChatController : ControllerBase
       cancellationToken
     );
 
+    var precedingHostTimings = new List<HostFileTiming>();
     try
     {
       try
       {
+        var historyClock = Stopwatch.StartNew();
+        if (request.HistoryWindowId is not null)
+          await PublishHostProgressAsync(requestId, new HostFileProgress(requestId, "Validating prompt data", "running",
+            null, 0, null, 0, []), cancellationToken);
         _ = _imageValidator.Validate(
           request.Images
         );
+        precedingHostTimings.Add(new("Validating prompt data", historyClock.ElapsedMilliseconds,
+          (request.Images ?? []).Sum(image => image.DeclaredBytes)));
+        historyClock.Restart();
+        if (request.HistoryWindowId is not null)
+          await PublishHostProgressAsync(requestId, new HostFileProgress(requestId, "Preparing conversation context", "running",
+            null, 0, null, 0, precedingHostTimings.ToArray()), cancellationToken);
         _conversationSessionId = request.ConversationSessionId;
         var persisted = await _persistentSessions.BeginTurnAsync(
           request.ConversationSessionId,
@@ -292,6 +307,9 @@ public sealed class ChatController : ControllerBase
         );
         _conversationSessionId = persisted?.Id
           ?? _conversationSessionId;
+        precedingHostTimings.Add(new(persisted is null ? "Preparing conversation context"
+          : persisted.ContextMessages is not null ? "Compacting historical chat" : "Saving historical chat",
+          historyClock.ElapsedMilliseconds, persisted?.LastHistoryWriteBytes ?? 0));
         if (!request.HideUserMessage && persisted?.ContextMessages is { } contextMessages)
         {
           request = request with { History = contextMessages.SkipLast(1).ToArray() };
@@ -326,7 +344,7 @@ public sealed class ChatController : ControllerBase
           ),
           cancellationToken
         );
-        if (request.ReplaceFromMessageIndex is not null)
+        if (request.ReplaceFromMessageIndex is not null || exception.Code == "session-rewind-in-progress")
         {
           throw new ChatStageException(
             exception.Stage,
@@ -345,6 +363,18 @@ public sealed class ChatController : ControllerBase
         }
       }
 
+      request = request with { ConversationSessionId = _conversationSessionId };
+      try
+      {
+        await _historyFiles.PrepareAsync(request, requestId,
+          progress => PublishHostProgressAsync(requestId, progress, cancellationToken), cancellationToken, precedingHostTimings);
+      }
+      catch (Exception exception) when (exception is WorkspaceProfileException or IOException or UnauthorizedAccessException)
+      {
+        throw new ChatStageException("history-files", "The Host could not prepare prompt data and snapshot coverage.",
+          exception is WorkspaceProfileException ? exception.Message : "Local snapshot content could not be stored or verified.",
+          request.Model, null, 409, true, exception);
+      }
       var answer = new System.Text.StringBuilder();
       var contentBlocks = new List<ContentBlockAccumulator>();
       var normalizedRequest = request with
@@ -373,6 +403,8 @@ public sealed class ChatController : ControllerBase
         {
           await foreach (var streamEvent in stream)
           {
+            if (streamEvent.Type is "response.completed" or "error" or "request.cancelled")
+              await SettleHistoryAfterFailureAsync(request, requestId, publishProgress: true);
             CaptureContentBlock(
               contentBlocks,
               streamEvent
@@ -520,12 +552,14 @@ public sealed class ChatController : ControllerBase
       {
         if (_ownedRun?.StopRequested == true)
           await _supervisionRuns.CancelAsync(_durableSupervisionRunId, CancellationToken.None);
+        else _snapshotSettlementDeferred = true;
         _logger.LogInformation(
           "Browser detached from durable supervision run {RunId}; Host execution continues.",
           _durableSupervisionRunId
         );
         return;
       }
+      await SettleHistoryAfterFailureAsync(request, requestId);
       _logger.LogInformation(
         "Chat request {RequestId} was cancelled.",
         requestId
@@ -550,7 +584,11 @@ public sealed class ChatController : ControllerBase
             null,
             null,
             CurrentExecutionSummary()
-          ),
+          ) with
+          {
+            ChatSummary = _chatStreamService.CurrentChatSummary is { } cancelledSummary
+              ? cancelledSummary with { State = "cancelled" } : null
+          },
           CancellationToken.None
         );
       }
@@ -735,6 +773,7 @@ public sealed class ChatController : ControllerBase
     }
     finally
     {
+      if (!_snapshotSettlementDeferred) await SettleHistoryAfterFailureAsync(request, requestId);
       await PersistPresentationTimelineAsync(
         requestId
       );
@@ -744,6 +783,30 @@ public sealed class ChatController : ControllerBase
         _eventWriter = null;
       }
       _latency.Complete();
+    }
+  }
+
+  private async Task PublishHostProgressAsync(string requestId, HostFileProgress progress, CancellationToken token)
+  {
+    await WriteEventAsync(new ChatStreamEvent(requestId, "host.files.progress", DateTimeOffset.UtcNow,
+      $"Host · {progress.Action}", null, null, null, progress.ElapsedMilliseconds, null, null,
+      ConversationSessionId: _conversationSessionId, HostFileProgress: progress), token);
+  }
+
+  private async Task SettleHistoryAfterFailureAsync(ChatRequest request, string requestId, bool publishProgress = false)
+  {
+    try
+    {
+      await _historyFiles.SettleAsync(request, requestId,
+        progress => publishProgress ? PublishHostProgressAsync(requestId, progress, CancellationToken.None) : Task.CompletedTask,
+        CancellationToken.None);
+    }
+    catch (Exception exception)
+    {
+      _logger.LogWarning(exception, "Host snapshot settlement failed for {RequestId}; rollback coverage is unavailable.", requestId);
+      if (publishProgress)
+        await PublishHostProgressAsync(requestId, new HostFileProgress(Guid.NewGuid().ToString("N"),
+          "Snapshot result unavailable; this turn cannot safely roll back files", "failed", null, 0, null, 0, []), CancellationToken.None);
     }
   }
 
@@ -1631,6 +1694,8 @@ public sealed class ChatController : ControllerBase
 
     try
     {
+      var checkpointStarted = Stopwatch.GetTimestamp();
+      _latency.Mark("history-checkpoint-start");
       await _persistentSessions.MarkTerminalAsync(
         _conversationSessionId,
         _turnId,
@@ -1638,6 +1703,7 @@ public sealed class ChatController : ControllerBase
         review,
         _ownedRun?.Token ?? HttpContext.RequestAborted
       );
+      _latency.Mark("history-checkpoint-end", (long)Stopwatch.GetElapsedTime(checkpointStarted).TotalMilliseconds);
     }
     catch (WorkspaceProfileException exception)
     {
@@ -1758,7 +1824,11 @@ public sealed class ChatController : ControllerBase
       ,
       null,
       CurrentExecutionSummary()
-    );
+    ) with
+    {
+      ChatSummary = _chatStreamService.CurrentChatSummary is { } failedSummary
+        ? failedSummary with { State = "failed" } : null
+    };
 
     var writtenEvent = await WriteEventAsync(
       streamEvent,

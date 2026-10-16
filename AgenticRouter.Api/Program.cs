@@ -199,6 +199,8 @@ builder.Services.AddSingleton<IKnowledgeProviderRegistry, KnowledgeProviderRegis
 builder.Services.AddScoped<IKnowledgeContextService, KnowledgeContextService>();
 builder.Services.AddSingleton<IPersistentSessionStore, PersistentSessionStore>();
 builder.Services.AddSingleton<IPersistentSessionService, PersistentSessionService>();
+builder.Services.AddSingleton<HistoryContentStore>();
+builder.Services.AddSingleton<ConversationHistoryFiles>();
 builder.Services.AddSingleton<ISupervisionCheckpointStore, SupervisionCheckpointStore>();
 builder.Services.AddSingleton<IMarkdownRenderer, SafeMarkdownRenderer>();
 builder.Services.AddScoped<IIntentionRouter, IntentionRouter>();
@@ -217,6 +219,7 @@ builder.Services.AddSingleton<
   ISpecialistToolingProtocol,
   SpecialistToolingProtocol
 >();
+builder.Services.AddSingleton<HostFileReadPolicy>();
 builder.Services.AddScoped<ILocalActionService, LocalActionService>();
 builder.Services.AddSingleton<IWebDownloadService, WebDownloadService>();
 builder.Services.AddScoped<IApprovalPolicyService, ApprovalPolicyService>();
@@ -471,7 +474,15 @@ builder.Services.AddScoped<IExecutionSpecialistTurnService>(
 var app = builder.Build();
 
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+  OnPrepareResponse = context =>
+  {
+    var extension = Path.GetExtension(context.File.Name);
+    if (extension is ".html" or ".js" or ".css")
+      context.Context.Response.Headers.CacheControl = "no-cache";
+  }
+});
 app.UseMiddleware<TraceContextMiddleware>();
 app.UseMiddleware<SafeModeMiddleware>();
 app.UseMiddleware<BenchmarkExecutionScopeMiddleware>();

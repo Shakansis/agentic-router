@@ -326,7 +326,7 @@ public sealed class RuntimePerformanceEndToEndTests : ChatEndToEndTestBase<Runti
     Assert.IsTrue(toolEvents.Any(item => item["type"]!.GetValue<string>() == "runtime.performance-configured"));
     await ConfigureAsync(4, 256);
     var externalEvents = await ExecuteCodexStreamAsync("Report runtime configuration without modifying files.", "runtime-performance-compatibility");
-    Assert.IsTrue(externalEvents.Any(item => item["type"]!.GetValue<string>() == "runtime.performance-unavailable"));
+    Assert.IsTrue(externalEvents.Any(item => item["type"]!.GetValue<string>() == "runtime.performance-configured"));
 
     using var client = new HttpClient { BaseAddress = _environment.BaseUri, Timeout = TimeSpan.FromSeconds(30) };
     async Task<BenchmarkSuiteRunResult> RunAsync()

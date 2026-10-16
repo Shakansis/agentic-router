@@ -205,7 +205,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Page.Locator("#knowledge-api-key").FillAsync("anything-secret-ui");
     await Page.Locator("#save-knowledge-connection").ClickAsync();
     await Expect(Page.Locator("#knowledge-provider-status")).ToContainTextAsync(
-      "available"
+      "Knowledge disabled for project"
     );
     var library = Page.Locator(
       "#knowledge-library-list input[value=\"project-handbook\"]"
@@ -3776,6 +3776,13 @@ baselineTotal!.Value
       )
     ).ToBeVisibleAsync();
 
+    var footer = Page.Locator(".execution-session-footer").Last;
+    await Expect(footer.Locator("[data-metric=tokens]")).ToBeVisibleAsync();
+    await Expect(footer.Locator("[data-metric=throughput]")).ToBeVisibleAsync();
+    await Expect(footer.Locator("[data-metric=tokens]")).ToHaveAttributeAsync("data-metric-state", "error");
+    await Expect(footer.Locator("[data-metric=throughput]")).ToHaveAttributeAsync("data-metric-state", "error");
+    await Expect(footer.Locator("[data-metric=tokens]")).ToHaveAttributeAsync("title", new Regex("Inference.*final usage"));
+
     using var response = await _environment.HttpClient.GetAsync(
       "api/usage/summary?window=rolling-hour"
     );
@@ -3795,6 +3802,39 @@ baselineTotal!.Value
         "accuracy"
       ).GetString()
     );
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task NativeFailedInferenceKeepsBadgesWithAMissingFinalUsageReason()
+  {
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using var enabled = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{workspaceId}/history", new { enabled = true });
+    enabled.EnsureSuccessStatusCode();
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await StartMessageAsync("generic HTTP failure");
+    await Expect(Page.Locator(".assistant-answer.error")).ToBeVisibleAsync();
+    var footer = Page.Locator(".execution-session-footer").Last;
+    foreach (var name in new[] { "tokens", "throughput" })
+    {
+      await Expect(footer.Locator($"[data-metric={name}]")).ToBeVisibleAsync();
+      await Expect(footer.Locator($"[data-metric={name}]")).ToHaveAttributeAsync("data-metric-state", "error");
+      await Expect(footer.Locator($"[data-metric={name}]")).ToHaveAttributeAsync("title", new Regex("Inference.*final usage"));
+    }
+    await Expect(Page.Locator(".message.assistant .activity").Last).ToHaveAttributeAsync("data-terminal", "true");
+    var conversationId = await Page.EvaluateAsync<string>("() => state.conversationSessionId");
+    var requests = _environment.FakeOllama.AllRequests.Count;
+    await Page.ReloadAsync();
+    await Page.Locator("#recent-sessions").EvaluateAsync("element => element.open = true");
+    await Page.Locator($".session-entry[data-session-id='{conversationId}'] .session-entry-content").ClickAsync();
+    foreach (var name in new[] { "tokens", "throughput" })
+    {
+      await Expect(Page.Locator(".execution-session-footer").Last.Locator($"[data-metric={name}]")).ToHaveAttributeAsync("data-metric-state", "error");
+      await Expect(Page.Locator(".execution-session-footer").Last.Locator($"[data-metric={name}]")).ToHaveAttributeAsync("title", new Regex("Inference.*final usage"));
+    }
+    Assert.HasCount(requests, _environment.FakeOllama.AllRequests, "History replay must not dispatch another inference.");
   }
 
   [TestMethod]

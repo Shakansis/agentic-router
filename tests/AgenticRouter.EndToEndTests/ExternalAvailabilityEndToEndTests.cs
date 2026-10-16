@@ -15,6 +15,7 @@ public sealed class ExternalAvailabilityEndToEndTests
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task AvailabilityWatcherAddsAndRemovesKnowledgeWarningWithoutReloading()
   {
+    await EnableKnowledgeAsync();
     using var unavailable = ReserveUnavailableEndpoint();
     var unavailableAddress =
       $"http://127.0.0.1:{((IPEndPoint)unavailable.LocalEndPoint!).Port}";
@@ -61,6 +62,7 @@ public sealed class ExternalAvailabilityEndToEndTests
   [Timeout(60_000, CooperativeCancellation = true)]
   public async Task MissingKnowledgeServiceDoesNotBlockStartupAndWarningClearsAfterReconnection()
   {
+    await EnableKnowledgeAsync();
     using var unavailable = ReserveUnavailableEndpoint();
     var address = $"http://127.0.0.1:{((IPEndPoint)unavailable.LocalEndPoint!).Port}";
     using var configured = await _environment.HttpClient.PutAsJsonAsync(
@@ -224,5 +226,81 @@ public sealed class ExternalAvailabilityEndToEndTests
     var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
     socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
     return socket;
+  }
+
+  private static async Task EnableKnowledgeAsync()
+  {
+    var id = await ActiveWorkspaceIdAsync();
+    using var response = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{id}/knowledge",
+      new { enabled = true, providerId = "anythingllm", libraryIds = new[] { "project-handbook" } });
+    response.EnsureSuccessStatusCode();
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DisabledProjectDoesNotWarnForUnavailableAnythingLlm()
+  {
+    var id = await ActiveWorkspaceIdAsync();
+    using var selection = await _environment.HttpClient.PutAsJsonAsync(
+      $"api/workspaces/{id}/knowledge",
+      new { enabled = false, providerId = "anythingllm", libraryIds = new[] { "project-handbook" } });
+    selection.EnsureSuccessStatusCode();
+    using var unavailable = ReserveUnavailableEndpoint();
+    using var configured = await _environment.HttpClient.PutAsJsonAsync(
+      "api/knowledge-providers/anythingllm/connection",
+      new { baseUrl = $"http://127.0.0.1:{((IPEndPoint)unavailable.LocalEndPoint!).Port}", apiKey = "test-knowledge-key" });
+    configured.EnsureSuccessStatusCode();
+    Assert.IsFalse(JsonNode.Parse(await configured.Content.ReadAsStringAsync())!["providers"]![0]!["availability"]!["available"]!.GetValue<bool>());
+    await Page.GotoAsync("/");
+    await Expect(Page.Locator("#app-loader")).ToBeHiddenAsync();
+    await Expect(Page.Locator("[data-external-app='anythingllm']")).ToHaveCountAsync(0);
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await Page.Locator("#knowledge-section").EvaluateAsync("element => element.open = true");
+    await Expect(Page.Locator("#knowledge-provider-status")).ToHaveTextAsync("Knowledge disabled for project");
+    await Expect(Page.Locator("#knowledge-provider-diagnostic")).Not.ToContainTextAsync("could not be reached");
+    Assert.DoesNotContain("knowledge-unavailable", _environment.ApiOutput);
+    Assert.DoesNotContain("knowledge-timeout", _environment.ApiOutput);
+    await Page.Locator("#knowledge-enabled").CheckAsync();
+    await Expect(Page.Locator("#knowledge-provider-status")).ToHaveTextAsync("AnythingLLM unavailable");
+    await Expect(Page.Locator("[data-external-app='anythingllm']")).ToHaveCountAsync(1);
+    await Page.Locator("#knowledge-enabled").UncheckAsync();
+    await Expect(Page.Locator("#knowledge-provider-status")).ToHaveTextAsync("Knowledge disabled for project");
+    await Expect(Page.Locator("[data-external-app='anythingllm']")).ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DisabledProjectSkipsAutomaticAnythingLlmProbesDuringStartupFocusAndExecute()
+  {
+    using var configured = await _environment.HttpClient.PutAsJsonAsync(
+      "api/knowledge-providers/anythingllm/connection",
+      new { baseUrl = $"{_environment.FakeCloud.BaseUrl}/anythingllm/", apiKey = "test-knowledge-key" });
+    configured.EnsureSuccessStatusCode();
+    var before = _environment.FakeCloud.Requests.Count(request => request.Path.StartsWith("/anythingllm/", StringComparison.Ordinal));
+    Assert.IsGreaterThan(0, before);
+    await Page.GotoAsync("/");
+    await Expect(Page.Locator("#app-loader")).ToBeHiddenAsync();
+    await Expect(Page.Locator("[data-external-app='anythingllm']")).ToHaveCountAsync(0);
+    await Page.Locator(".project-accordion.active .project-menu-button").ClickAsync();
+    await Page.Locator("#project-menu-edit").ClickAsync();
+    await Page.Locator("#knowledge-section").EvaluateAsync("element => element.open = true");
+    await Expect(Page.Locator("#knowledge-enabled")).Not.ToBeCheckedAsync();
+    await Expect(Page.Locator("#knowledge-provider-status")).ToHaveTextAsync("Knowledge disabled for project");
+    await Page.Locator("#cancel-workspace").ClickAsync();
+    var events = await ExecuteCodexStreamAsync("harness HTTP metrics", "browser-disabled-knowledge-execute");
+    Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
+    Assert.IsEmpty(events.Where(item => item["type"]!.GetValue<string>() == "error"));
+    await Page.RunAndWaitForResponseAsync(
+      () => Page.EvaluateAsync("window.dispatchEvent(new Event('focus'))"),
+      response => response.Url.EndsWith("/api/knowledge-providers", StringComparison.Ordinal));
+    Assert.AreEqual(before, _environment.FakeCloud.Requests.Count(request => request.Path.StartsWith("/anythingllm/", StringComparison.Ordinal)));
+    using var refreshed = await _environment.HttpClient.PostAsync("api/knowledge-providers/anythingllm/refresh", null);
+    refreshed.EnsureSuccessStatusCode();
+    var refreshedView = JsonNode.Parse(await refreshed.Content.ReadAsStringAsync())!;
+    Assert.IsTrue(refreshedView["providers"]![0]!["statusChecked"]!.GetValue<bool>());
+    Assert.IsTrue(refreshedView["providers"]![0]!["availability"]!["available"]!.GetValue<bool>());
+    Assert.IsGreaterThan(before, _environment.FakeCloud.Requests.Count(request => request.Path.StartsWith("/anythingllm/", StringComparison.Ordinal)));
   }
 }

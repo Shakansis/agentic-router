@@ -269,7 +269,9 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
           : $"Qwen Code session {session.SessionId} started."
       );
 
-      if (request.ModelSupportsReasoning && request.RequestedEffort is not null)
+      var nativeEffort = request.ModelSupportsReasoning && request.RequestedEffort is not null
+        && session.ReasoningEfforts.Contains(request.RequestedEffort, StringComparer.Ordinal);
+      if (nativeEffort)
       {
         await SendAsync(
           HttpMethod.Post,
@@ -284,13 +286,13 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         );
       }
       if (request.RequestedEffort is not null) yield return Event(
-        request.ModelSupportsReasoning
+        nativeEffort
           ? "effort.applied"
           : "effort.prompt-guided",
         active,
-        message: request.ModelSupportsReasoning
+        message: nativeEffort
           ? $"Applied {request.RequestedEffort} effort through the Qwen Code reasoning_effort session option."
-          : $"The selected model does not advertise reasoning support; {request.RequestedEffort} effort is prompt-guided for this Qwen Code turn."
+          : $"The Qwen Code session does not advertise {request.RequestedEffort} reasoning effort; effort is prompt-guided for this turn."
       );
 
       var prompt = await SubmitPromptAsync(
@@ -1300,6 +1302,18 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
         cancellationToken
       );
       var currentModel = RequiredString(context.GetProperty("state").GetProperty("models"), "currentModelId");
+      if (context.GetProperty("state").TryGetProperty("configOptions", out var configOptions)
+        && configOptions.ValueKind == JsonValueKind.Array)
+      {
+        session.ReasoningEfforts = configOptions.EnumerateArray()
+          .Where(option => String(option, "id") == "reasoning_effort")
+          .SelectMany(option => option.TryGetProperty("options", out var choices) && choices.ValueKind == JsonValueKind.Array
+            ? choices.EnumerateArray().SelectMany(choice => choice.TryGetProperty("value", out var value)
+              ? new[] { value.GetString()! }
+              : choice.TryGetProperty("options", out var nested) && nested.ValueKind == JsonValueKind.Array
+                ? nested.EnumerateArray().Select(item => RequiredString(item, "value")) : []) : [])
+          .ToArray();
+      }
       var availableModels = context.GetProperty("state").GetProperty("models").GetProperty("availableModels");
       if (
         availableModels.ValueKind != JsonValueKind.Array
@@ -2454,6 +2468,8 @@ public sealed class QwenCodeHarnessAdapter : IAgentHarness, IAgentHarnessTranspo
     public long LastUsedSequence { get; set; } = lastUsedSequence;
 
     public long? SynchronizedThroughVersion { get; set; }
+
+    public IReadOnlyList<string> ReasoningEfforts { get; set; } = [];
   }
 
   private sealed record PendingPermission(

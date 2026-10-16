@@ -1616,6 +1616,14 @@ public sealed class ExecutionSession
     }
   }
 
+  public void ClearFileReadContextFailures()
+  {
+    lock (_gate)
+      foreach (var key in _deterministicFailures.Where(pair => pair.Value.FailureCode == "FILE_READ_CONTEXT_EXHAUSTED")
+        .Select(pair => pair.Key).ToArray())
+        _deterministicFailures.Remove(key);
+  }
+
   public void RequireProcessRefresh()
   {
     lock (_gate)

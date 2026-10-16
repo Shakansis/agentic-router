@@ -103,7 +103,7 @@ public static class OllamaRuntimeProfileResolver
     );
     if (execution) target = Math.Min(settings.Context.DefaultContextTokens, maximum);
     var outputTokens = execution
-      ? Execution.ExecutionProgressPolicy.OutputTokenLimit(target)
+      ? Execution.ExecutionProgressPolicy.OutputTokenLimit(target, requiredInputTokens)
       : outputTokenLimitOverride ?? Math.Min(requestedOutputTokens, profile.OutputTokenLimit);
     var required = checked(
       (int)Math.Min(
@@ -152,6 +152,12 @@ public static class OllamaRuntimeProfileResolver
         + $"One loaded Ollama runner may use the largest active role context ({sharedTarget} tokens); "
         + "separate models provide more stable residency."
       : null;
+
+    if (execution)
+    {
+      outputTokens = Execution.ExecutionProgressPolicy.OutputTokenLimit(effective, requiredInputTokens);
+      required = checked((int)Math.Min(int.MaxValue, requiredInputTokens + outputTokens));
+    }
 
     return new OllamaContextResolution(
       ModelProviderIds.OllamaLocal,

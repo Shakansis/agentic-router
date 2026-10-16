@@ -34,12 +34,19 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var approve = Page.Locator(".action-approval").GetByRole(AriaRole.Button,
       new() { Name = "Approve", Exact = true });
     await Expect(approve).ToBeVisibleAsync();
+    var liveHeader = Page.Locator(".execution-session-header.is-live").Last;
+    await Expect(liveHeader.Locator("[data-metric=tokens]")).ToBeVisibleAsync();
+    await Expect(liveHeader.Locator("[data-metric=throughput]")).ToBeVisibleAsync();
     await Page.WaitForTimeoutAsync(1800);
     await approve.ClickAsync();
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true");
     var footer = Page.Locator(".execution-session-footer").Last;
     await Expect(footer).ToBeVisibleAsync();
+    await Expect(footer.Locator(".execution-footer-heading summary")).ToContainTextAsync("Host summary");
+    await Expect(footer.Locator(".execution-footer-panel .execution-footer-state")).ToHaveTextAsync("completed");
+    await Expect(footer.Locator(".execution-footer-bottom .review-changes")).ToBeVisibleAsync();
+    await Expect(footer.Locator(".execution-footer-bottom .copy-message")).ToBeEnabledAsync();
     var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");
     using var response = await _environment.HttpClient.GetAsync($"api/execution-sessions/{executionId}/review");
     response.EnsureSuccessStatusCode();
@@ -49,7 +56,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     {
       Assert.IsNull(metrics["outputTokens"]);
       Assert.IsNull(metrics["tokensPerSecond"]);
-      await Expect(footer.Locator("[data-metric=tokens], [data-metric=throughput]")).ToHaveCountAsync(0);
+      await Expect(footer.Locator("[data-metric=tokens], [data-metric=throughput]")).ToHaveCountAsync(2);
+      await Expect(footer.Locator("[data-metric=tokens]")).ToHaveAttributeAsync("data-metric-state", "unavailable");
+      await Expect(footer.Locator("[data-metric=throughput]")).ToHaveAttributeAsync("title", "Provider token count unavailable.");
     }
     else
     {
@@ -72,7 +81,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       Assert.IsTrue(await footer.EvaluateAsync<bool>("""
         footer => {
           const bounds = footer.getBoundingClientRect();
-          return [...footer.querySelectorAll('.execution-footer-metric, .execution-footer-activity > span')]
+          return [...footer.querySelectorAll('.execution-footer-metric, .execution-footer-activity > span, button, summary')]
             .every(item => item.getBoundingClientRect().right <= bounds.right + 1)
             && !footer.querySelector('.divider')
             && ![...footer.children].some(item => /^[|·]$/.test(item.textContent.trim()));
@@ -106,7 +115,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator($".session-entry[data-session-id='{conversationId}'] .session-entry-content").ClickAsync();
     footer = Page.Locator(".execution-session-footer").Last;
     await Expect(footer.Locator("[data-metric=ttft]")).ToBeVisibleAsync();
-    await Expect(footer.Locator("[data-metric=tokens]")).ToHaveCountAsync(missingUsage ? 0 : 1);
+    await Expect(footer.Locator("[data-metric=tokens]")).ToHaveCountAsync(1);
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
     await Page.Locator(".review-changes").Last.ClickAsync();
     using var restored = await _environment.HttpClient.GetAsync($"api/execution-sessions/{executionId}/review");
@@ -6664,8 +6673,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       originalWork, new() { UseInnerText = true }
     );
     await Expect(Page.Locator(".message.assistant .activity").First).Not.ToHaveAttributeAsync("open", string.Empty);
-    Assert.IsLessThan(10_485_760L, new FileInfo(path).Length);
-    Assert.HasCount(1, Directory.GetFiles(directory, $"{sessionId}.*.history.gz"));
+    Assert.IsFalse(File.Exists(path), "The original transcript has one permanent compressed representation.");
+    Assert.IsLessThan(10_485_760L, new FileInfo(path + ".gz").Length);
+    Assert.HasCount(0, Directory.GetFiles(directory, $"{sessionId}.*.history.gz"));
+    Assert.IsTrue(File.Exists(path + ".gz"));
 
     await Page.GetByRole(AriaRole.Button, new() { Name = "Chat", Exact = true }).ClickAsync();
     await SendMessageAsync("Continue with the preserved transcript.");
@@ -6693,7 +6704,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var expectedDuplicateMessages = exported["messages"]!.AsArray()
       .Count(message => !string.IsNullOrWhiteSpace(message!["content"]!.GetValue<string>()));
     Assert.AreEqual(expectedDuplicateMessages, duplicateSession["messages"]!.AsArray().Count);
-    Assert.HasCount(1, Directory.GetFiles(directory, $"{duplicateId}.*.history.gz"));
+    Assert.IsTrue(File.Exists(Path.Combine(directory, duplicateId + ".json.gz")));
     using var deleteDuplicate = await _environment.HttpClient.DeleteAsync($"api/sessions/{duplicateId}?confirmed=true");
     deleteDuplicate.EnsureSuccessStatusCode();
     Assert.HasCount(0, Directory.GetFiles(directory, $"{duplicateId}.*.history.gz"));
@@ -6705,8 +6716,12 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(Page.Locator(".see-more-history")).ToHaveCountAsync(0);
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(12);
     await Page.Locator(".message.user").First.GetByRole(
-      AriaRole.Button, new() { Name = "Edit message", Exact = true }
+      AriaRole.Button, new() { Name = "Rollback", Exact = true }
     ).ClickAsync();
+    await Expect(Page.Locator("#message-input")).ToHaveValueAsync("execute create file");
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(0);
+    await Page.GetByRole(AriaRole.Button, new() { Name = "Chat", Exact = true }).ClickAsync();
     await StartMessageAsync("Edited original request after loading earlier history.");
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
     await Expect(Page.Locator(".message.assistant .activity")).ToHaveAttributeAsync(
@@ -7109,17 +7124,28 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         lifecyclePath
       })
     {
+      Assert.IsFalse(File.Exists(compactedPath), "Only the lossless compressed representation should remain.");
       Assert.IsLessThanOrEqualTo(
         targetBytes,
         new FileInfo(
-          compactedPath
+          compactedPath + ".gz"
         ).Length,
         compactedPath
       );
-      var compactedJson = await File.ReadAllTextAsync(
-        compactedPath
-      );
-      var continuity = JsonNode.Parse(compactedJson)!["messages"]![0]!["content"]!.GetValue<string>();
+      using var restoredFile = File.OpenRead(compactedPath + ".gz");
+      using var restoredStream = new GZipStream(restoredFile, CompressionMode.Decompress);
+      using var reader = new StreamReader(restoredStream);
+      var canonicalJson = await reader.ReadToEndAsync();
+      var canonical = JsonNode.Parse(canonicalJson)!;
+      Assert.IsGreaterThan(thresholdBytes / 2, canonical["messages"]!.AsArray()
+        .Max(item => item!["content"]!.GetValue<string>().Length));
+      Assert.IsTrue(canonicalJson.Contains("action.completed", StringComparison.Ordinal));
+      using var projected = await _environment.HttpClient.GetAsync(
+        $"api/sessions/{Path.GetFileNameWithoutExtension(compactedPath)}?workspaceId={workspaceId}");
+      projected.EnsureSuccessStatusCode();
+      var projectedSession = JsonNode.Parse(await projected.Content.ReadAsStringAsync())!;
+      var compactedJson = projectedSession["contextMessages"]!.ToJsonString();
+      var continuity = projectedSession["contextMessages"]![0]!["content"]!.GetValue<string>();
       Assert.HasCount(1, Regex.Matches(continuity, marker));
       if (compactedPath == abovePath)
       {
@@ -7246,12 +7272,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     Assert.IsLessThanOrEqualTo(
       targetBytes,
       new FileInfo(
-        liveWritePath
+        liveWritePath + ".gz"
       ).Length
     );
-    var liveWriteJson = await File.ReadAllTextAsync(
-      liveWritePath
-    );
+    Assert.IsFalse(File.Exists(liveWritePath));
+    using var liveWriteResponse = await _environment.HttpClient.GetAsync(
+      $"api/sessions/compaction-live-write-v0913?workspaceId={workspaceId}");
+    liveWriteResponse.EnsureSuccessStatusCode();
+    var liveWriteJson = await liveWriteResponse.Content.ReadAsStringAsync();
+    Assert.IsGreaterThan(thresholdBytes, JsonNode.Parse(liveWriteJson)!["messages"]![1]!["content"]!.GetValue<string>().Length);
     StringAssert.Contains(
       liveWriteJson,
       marker
@@ -9954,7 +9983,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync(
       "Model: alpha:latest"
     );
-    await Expect(assistant.Locator(".activity > summary")).ToContainTextAsync("Trace:");
+    await Expect(assistant.Locator(".execution-footer-metadata")).ToContainTextAsync("Trace:");
     var traceCopy = assistant.Locator(".activity-trace-copy");
     await Expect(traceCopy).ToBeVisibleAsync();
     await Expect(traceCopy).ToHaveAccessibleNameAsync("Copy trace ID");
@@ -10375,10 +10404,18 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       StringAssert.Contains(Result("emptySearch").ToJsonString(), "results");
 
       var largeRead = Result("largeRead");
-      Assert.AreEqual("recoverable", largeRead["outcome"]!.GetValue<string>());
-      Assert.AreEqual("FILE_READ_RANGE_REQUIRED", largeRead["code"]!.GetValue<string>());
-      Assert.AreEqual("read_file", largeRead["nextActions"]![0]!["tool"]!.GetValue<string>());
-      Assert.IsTrue(marker.RootElement.GetProperty("rangedRead").GetProperty("Succeeded").GetBoolean());
+      Assert.AreEqual("succeeded", largeRead["outcome"]!.GetValue<string>());
+      var largeRange = JsonNode.Parse(largeRead["facts"]!.AsArray()
+        .Single(fact => fact!["name"]!.GetValue<string>() == "message")!["value"]!.GetValue<string>())!;
+      Assert.IsTrue(largeRange["truncated"]!.GetValue<bool>());
+      Assert.IsGreaterThan(0L, largeRange["nextOffsetBytes"]!.GetValue<long>());
+      var batch = JsonNode.Parse(Result("batchRead")["facts"]!.AsArray()
+        .Single(fact => fact!["name"]!.GetValue<string>() == "message")!["value"]!.GetValue<string>())!;
+      Assert.AreEqual("alpha beta", batch["files"]![0]!["content"]!.GetValue<string>());
+      Assert.AreEqual("rename me", batch["files"]![1]!["content"]!.GetValue<string>());
+      var ranged = Result("rangedRead");
+      Assert.AreEqual("FILE_READ_CONTEXT_EXHAUSTED", ranged["code"]!.GetValue<string>());
+      Assert.IsFalse(marker.RootElement.GetProperty("rangedRead").GetProperty("Succeeded").GetBoolean());
 
       var deleteAgain = Result("deleteAgain");
       Assert.AreEqual("no_op", deleteAgain["outcome"]!.GetValue<string>());

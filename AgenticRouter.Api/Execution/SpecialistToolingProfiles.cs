@@ -267,7 +267,7 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
     CanonicalToolResult result
   )
   {
-    var safeOutput = result.Output.Length <= ToolOutputLimit
+    var safeOutput = result.Tool is "read_file" or "read_files" || result.Output.Length <= ToolOutputLimit
       ? result.Output
       : $"{result.Output[..ToolOutputLimit]}\n[tool result truncated]";
     var content = profile.Id == SpecialistToolingProfileIds.QwenCodeOllama
@@ -309,7 +309,7 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
       && definition.Name == "read_file"
     )
     {
-      return "Read one existing bounded text file. If the Host reports that a required output path "
+      return HostFileReadPolicy.Guidance + " Read one existing text file. If the Host reports that a required output path "
         + "does not exist, do not repeat this read; use create_file for that output instead.";
     }
 

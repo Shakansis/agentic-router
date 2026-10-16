@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace AgenticRouter.Api.Execution;
@@ -15,7 +17,8 @@ public sealed record ProcessExecutionRequest(
   string Executable,
   IReadOnlyList<string> Arguments,
   string WorkingDirectory,
-  TimeSpan Timeout
+  TimeSpan Timeout,
+  bool CaptureStandardOutputDigest = false
 );
 
 public sealed record ProcessExecutionResult(
@@ -26,7 +29,8 @@ public sealed record ProcessExecutionResult(
   bool Cancelled,
   long DurationMilliseconds,
   bool StandardOutputTruncated,
-  bool StandardErrorTruncated
+  bool StandardErrorTruncated,
+  string? StandardOutputDigest = null
 );
 
 public sealed class ProcessExecutionService : IProcessExecutionService
@@ -89,7 +93,8 @@ public sealed class ProcessExecutionService : IProcessExecutionService
 
     var standardOutput = ReadBoundedAsync(
       process.StandardOutput,
-      linked.Token
+      linked.Token,
+      request.CaptureStandardOutputDigest
     );
     var standardError = ReadBoundedAsync(
       process.StandardError,
@@ -136,17 +141,20 @@ public sealed class ProcessExecutionService : IProcessExecutionService
       false,
       stopwatch.ElapsedMilliseconds,
       output.Truncated,
-      error.Truncated
+      error.Truncated,
+      output.Digest
     );
   }
 
   private static async Task<BoundedOutput> ReadBoundedAsync(
     StreamReader reader,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    bool captureDigest = false
   )
   {
     var buffer = new char[4_096];
     var result = new StringBuilder();
+    using var digest = captureDigest ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
 
     var truncated = false;
 
@@ -165,6 +173,9 @@ public sealed class ProcessExecutionService : IProcessExecutionService
         break;
       }
 
+      // Hash all decoded code units while retaining the existing bounded text.
+      // This remains stable across chunk boundaries, including surrogate pairs.
+      digest?.AppendData(MemoryMarshal.AsBytes(buffer.AsSpan(0, read)));
       var accepted = Math.Min(
         read,
         OutputLimit - result.Length
@@ -194,7 +205,8 @@ public sealed class ProcessExecutionService : IProcessExecutionService
 
     return new BoundedOutput(
       result.ToString(),
-      truncated
+      truncated,
+      digest is null ? null : Convert.ToHexStringLower(digest.GetHashAndReset())
     );
   }
 
@@ -235,6 +247,7 @@ public sealed class ProcessExecutionService : IProcessExecutionService
 
   private sealed record BoundedOutput(
     string Text,
-    bool Truncated
+    bool Truncated,
+    string? Digest = null
   );
 }

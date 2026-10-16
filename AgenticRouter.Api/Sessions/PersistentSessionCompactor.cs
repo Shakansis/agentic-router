@@ -8,8 +8,8 @@ namespace AgenticRouter.Api.Sessions;
 
 internal sealed record SessionCompactionResult(
   ConversationSessionRecord Session,
-  int BeforeBytes,
-  int AfterBytes,
+  long BeforeBytes,
+  long AfterBytes,
   bool Compacted
 );
 
@@ -49,15 +49,14 @@ internal static class PersistentSessionCompactor
     return null;
   }
 
-  public static SessionCompactionResult Compact(
+  public static async Task<SessionCompactionResult> CompactAsync(
     ConversationSessionRecord session,
     int targetBytes,
-    Func<ConversationSessionRecord, int> measureBytes
+    Func<ConversationSessionRecord, CancellationToken, Task<long>> measureBytes,
+    CancellationToken cancellationToken
   )
   {
-    var beforeBytes = measureBytes(
-      session
-    );
+    var beforeBytes = await measureBytes(session, cancellationToken);
     if (beforeBytes <= targetBytes)
     {
       return new SessionCompactionResult(
@@ -127,7 +126,7 @@ internal static class PersistentSessionCompactor
     }
 
     var candidate = Candidate();
-    while (measureBytes(candidate) > targetBytes)
+    while (await measureBytes(candidate, cancellationToken) > targetBytes)
     {
       if (TryRemoveOldestTurn(
         messages,
@@ -219,9 +218,7 @@ internal static class PersistentSessionCompactor
       break;
     }
 
-    var afterBytes = measureBytes(
-      candidate
-    );
+    var afterBytes = await measureBytes(candidate, cancellationToken);
     return new SessionCompactionResult(
       candidate,
       beforeBytes,

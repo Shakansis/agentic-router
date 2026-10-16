@@ -2,8 +2,18 @@
 
 The completion footer keeps the session status, routing identity, action/file
 counts, planning/tool failure counters and end-to-end duration. Inference metrics
-are optional badges in the same footer. The live execution header is unchanged.
+include always-visible output-token and throughput badges in the same footer.
+The live header uses the same metric renderer, showing unavailable values until
+the Host supplies measurements. Every harness uses this presentation rule.
 Groups and badges wrap without independent separator elements.
+
+The terminal footer uses three rows on the chat canvas, without an outer card:
+the existing collapsible Host summary and recorded turn duration/copyable trace;
+an inset runtime panel with status, routing identity and metric badges; then
+activity counts and the existing Review changes, Copy and optional Completion
+check controls. Rows wrap on narrow screens. Chat uses the same arrangement,
+omitting the Host summary when unavailable. Technical details remain accessible
+above the footer; metric/evidence semantics are unchanged.
 
 `ExecutionSessionSummary.InferenceMetrics` persists with the existing execution
 snapshot and conversation events. Provider observations are recorded by the Host
@@ -36,9 +46,11 @@ idempotent, and aggregation covers supervisor and worker turns.
   It belongs to the first inference, even when
   that inference has no observable first-token timing.
 - Missing token usage makes the total unavailable. Missing generation timing
-  makes throughput unavailable. When tokens are known but throughput is not,
-  show a `tok/s unavailable` badge with an explanation instead of silently
-  omitting it. Other unavailable badges are omitted. A non-streaming
+  makes throughput unavailable. Output-token and throughput badges always remain
+  visible, including historical
+  turns without observations. Missing data shows `unavailable`; invalid numeric
+  data shows `error`. Short tooltips identify missing token counts, missing
+  generation time or invalid values. Unavailable TTFT remains omitted. A non-streaming
   response does not provide TTFT or a stream generation interval.
 
 External harness startup is not an inference dispatch. For Ollama, a transparent
@@ -58,14 +70,40 @@ notifications replace that snapshot. A missing baseline leaves the count
 unavailable. Claude Code supplies total turn output usage. OpenCode counts completed
 assistant message usage, replacing repeated message snapshots and adding its
 separate reasoning count. These native-protocol fallbacks do not supply
-per-inference generation durations or dispatch timing, so timing badges remain
-absent in that case. Qwen context-window occupancy is not output usage. Native
+per-inference generation durations or dispatch timing, so throughput shows
+unavailable and TTFT remains absent in that case. Qwen context-window occupancy
+is not output usage. Native
 protocol counts are never added again to already observed HTTP inference counts.
 
-Existing histories without these observations remain readable and omit the
-badges. No inference is dispatched to fill missing historical metrics.
+Existing histories without these observations remain readable and show unavailable
+output-token and throughput badges. No inference is dispatched to fill missing
+historical metrics.
 
 ## Chat presentation
+
+Follow-up trace `0HNP7LF1O5VFE:00000063` retained exact `tool_call`/`ToolCall`
+envelopes; the running server already served the matching exclusion. Its script
+URLs still reused the release version and lacked explicit cache revalidation.
+The loaded user's browser was unavailable for direct inspection. The user
+subsequently reloaded the tab and confirmed that the ToolCall rows disappeared,
+confirming stale loaded client code in this case.
+HTML, JavaScript and CSS now use `Cache-Control: no-cache` with existing ETags,
+and the HTML asset URLs include a presentation revision to invalidate previously
+cached release URLs. This does not reload an already-open page or interrupt a
+turn. Reloading the page once loads the corrected renderer; restarting only the
+server does not replace JavaScript already executing in a browser tab.
+Isolated cache/presentation validation passed 9/9 cases, covering HTTP 200/304
+revalidation, browser asset revision, hidden ToolCall envelopes, concrete actions,
+replay, and common badges across five harnesses. Release build had zero warnings
+and errors; scoped formatting and diff checks passed. Evidence:
+`.artifacts/presentation-cache-20261011/results/cache-and-presentation.trx`.
+
+Generic harness invocation envelopes named `tool_call` or `ToolCall` do not render
+work-action rows or replace the current activity during normal dispatch. Concrete
+actions (Read, Search, Edit, Run and others) retain their normal presentation.
+Protocol events remain in diagnostics and the persisted timeline; historical
+replay applies the same display rule. Existing tool discovery remains confined to
+technical details. Failed invocation diagnostics remain available.
 
 Chat and Execute share `inference.progress` events. An owned Ollama runtime's
 existing output supplies loading and prompt-processing stages and measured prompt
@@ -94,6 +132,43 @@ progress commentary, never in the final answer. Thinking remains separate.
 
 ## Validation
 
+The 2026-10-11 Qwen follow-up inspected the running Host read-only. Execution
+`5298cdf2826d41689b1dec47c0a3a953`, trace `0HNP7JKBNSDLO:000001CD`, retained TTFT
+but aggregate output tokens and generation time were null. The served JavaScript
+already contained terminal unavailable badges; the actual loaded browser DOM was
+not accessible, so the reported disappearance in that tab was not reproduced.
+No real inference was launched and the active Host was not restarted.
+
+The shared renderer now supplies both live and terminal metric badges. Terminal
+errors without a session summary receive a fallback status panel with unavailable
+metrics. Historical replay uses the same renderer. The common HTTP observer also
+accepts null optional message/delta/tool-call fields without treating otherwise
+valid usage as malformed; malformed JSON remains unavailable. This parser gap is
+covered by a deterministic compatibility fixture; it is not established as the
+cause of the real Qwen turn. Qwen occupancy-only notifications still cannot supply
+output counts or generation duration. Missing observations remain unavailable,
+never estimated from context occupancy or total execution duration.
+
+Final isolated validation: 18/18 browser/API cases passed across Native, Codex,
+Claude Code, OpenCode and Qwen Code, including replay, unavailable metrics, live
+badges during approval, buffered responses, and missing usage. The previous
+binary passed seven HTTP cases and failed the new null-field regression; the
+updated observer passed all eight. Release build had zero warnings/errors;
+scoped formatting, JavaScript syntax and diff checks passed. Evidence is under
+`.artifacts/harness-metrics-20261011/`. The user Host PID 128976 remained running;
+only isolated test Hosts were restarted, and those processes were disposed.
+An additional early-provider-failure browser/API regression passed, verifying
+visible unavailable badges without a normal completion summary: 19 targeted
+passing cases in total.
+
+The footer layout was verified by 10 deterministic browser/API E2E cases
+(`TestResults/footer-layout.trx`): Chat completion and history, Execute metrics
+with present/missing usage and history, trace copying, and on-demand completion
+checks through all five harness fixtures. Captures at 1280, 760 and 390 px verify
+wrapping; desktop/mobile captures were visually inspected. Release build passed
+with zero warnings/errors; formatting verification, JavaScript syntax checks and
+diff checks passed. No real inference was used.
+
 `HarnessHttpMetricsAggregateCallsWithoutNativeUsageDuplication` exercises the
 browser, API, harness and provider boundary for all three external inference
 protocols, multiple calls, metadata, missing usage, buffered output and native
@@ -112,3 +187,37 @@ Provider semantics: [Ollama chat API](https://docs.ollama.com/api/chat),
 [Codex token usage](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs),
 [OpenCode usage normalization](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/session.ts),
 [Gemini token usage](https://ai.google.dev/gemini-api/docs/tokens).
+
+## Final usage and rejected inference (2026-10-11)
+
+Native Ollama final `eval_count` and `eval_duration` are authoritative. Tok/s is
+their ratio; it is not an estimate from text length or total turn duration.
+Stream first-to-last timing is used only when provider duration is absent and
+separate streamed deltas supply a measurable interval. Output counts are never
+invented from stream chunks, context occupancy or native harness notifications
+when HTTP inference observation is authoritative.
+
+The common observer distinguishes `/api/generate` text `response` from the
+Responses API's object `response`. Valid final native usage supersedes malformed
+optional earlier telemetry; metadata/start frames do not mark inference complete.
+Turn disposal closes admission and prevents late requests attaching to a closed
+observation. Bounded final logs record inference identity, endpoint, HTTP status,
+count, generation duration, source and diagnostic, without provider payloads.
+
+Known admission rejections (400/401/403/404/405/413/415/422/429), with no generated
+delta or reported token usage, do not erase the aggregate of successful calls.
+Server failures and interrupted generation without final usage remain an unknown
+part of the aggregate, rather than an exact partial total. Optional
+`TelemetryError` carries a short reason. The shared browser renderer keeps both
+badges visible and shows `error` with that tooltip for unavailable measurements;
+known measurements remain numeric. Native failed/cancelled inference records the
+same explicit missing-final-usage diagnostic. Ordinary absence without a known
+failure remains `unavailable`. Existing persisted contracts remain compatible.
+The request-scoped Chat service retains its latest operational summary so that
+error/cancellation events include metrics recorded while an inference unwinds.
+Previously an exception could exit the stream after measurement but before the
+updated summary reached the browser. Terminal events and their persisted replay
+now carry that summary through the existing event contract.
+
+Trace evidence, reproducible regressions and validation boundaries are recorded
+in [the investigation report](validation/2026-10-11-inference-and-read-context.md).

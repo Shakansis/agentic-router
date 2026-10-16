@@ -62,16 +62,58 @@ public sealed class PerformanceControlsEndToEndTests : ChatEndToEndTestBase<Perf
   }
 
   [TestMethod]
+  [DataRow("role")]
+  [DataRow("override")]
+  [DataRow("provider")]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task ModelTestExplainsInsufficientSelectedContextWithoutChangingIt()
+  public async Task ModelTestExplainsInsufficientSelectedContextWithoutChangingIt(string scope)
   {
+    if (scope == "provider")
+    {
+      var baseline = _environment.BaselineSettings;
+      using var configured = await _environment.PutSettingsAsync(baseline with
+      {
+        Context = baseline.Context with { DefaultContextTokens = 8192, ProviderContextTokens = 8192 },
+        Execution = baseline.Execution with { MaxToolOutputTokens = 4096 },
+        OllamaRuntime = baseline.OllamaRuntime with
+        {
+          RoleDefaults = baseline.OllamaRuntime.RoleDefaults.ToDictionary(pair => pair.Key, pair => pair.Value with
+          {
+            MinimumContextTokens = Math.Min(8192, pair.Value.MinimumContextTokens),
+            TargetContextTokens = Math.Min(8192, pair.Value.TargetContextTokens),
+            MaximumContextTokens = 8192,
+            OutputTokenLimit = Math.Min(4096, pair.Value.OutputTokenLimit)
+          })
+        }
+      });
+      configured.EnsureSuccessStatusCode();
+    }
     await Page.GotoAsync("/");
     await OpenSettingsAsync();
     var before = await _environment.HttpClient.GetStringAsync("api/settings");
     await Page.Locator("[data-settings-target=ollama-context]").ClickAsync();
-    await Page.Locator("#runtime-role-modelTest-targetContextTokens").FillAsync("4096");
-    await Page.Locator("#runtime-role-modelTest-maximumContextTokens").FillAsync("8192");
+    await Page.Locator("#runtime-role-modelTest-targetContextTokens").FillAsync(scope == "override" ? "16384" : "4096");
+    await Page.Locator("#runtime-role-modelTest-maximumContextTokens").FillAsync(scope == "override" ? "16384" : "8192");
     await Page.Locator("#runtime-role-modelTest-outputTokenLimit").FillAsync("512");
+    var field = "runtime-role-modelTest-maximumContextTokens";
+    if (scope == "override")
+    {
+      await Page.Locator("#runtime-override-model").EvaluateAsync("element => element.closest('details').open = true");
+      await Page.Locator("#runtime-override-model").SelectOptionAsync("qwen3.8:27b-gpu0");
+      await Page.Locator("#runtime-override-role").SelectOptionAsync("modelTest");
+      await Page.Locator("#runtime-override-target").FillAsync("4096");
+      await Page.Locator("#runtime-override-maximum").FillAsync("8192");
+      await Page.Locator("#runtime-override-output").FillAsync("512");
+      await Page.Locator("#save-runtime-override").ClickAsync();
+      field = "runtime-override-maximum";
+    }
+    if (scope == "provider")
+    {
+      await Page.Locator("[data-settings-target=harnesses]").ClickAsync();
+      await Page.Locator("#default-context-tokens").FillAsync("8192");
+      await Page.Locator("#provider-context-tokens").FillAsync("8192");
+      field = "provider-context-tokens";
+    }
     await Page.Locator("[data-settings-target=general]").ClickAsync();
     await Page.Locator("#model-test-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
     _environment.FakeOllama.Reset();
@@ -79,6 +121,48 @@ public sealed class PerformanceControlsEndToEndTests : ChatEndToEndTestBase<Perf
     await Expect(Page.Locator("#model-test-result")).ToContainTextAsync("selected maximum is 8192");
     await Expect(Page.Locator("#model-test-result")).ToContainTextAsync("test again without saving");
     Assert.IsEmpty(_environment.FakeOllama.Requests);
+    Assert.AreEqual(before, await _environment.HttpClient.GetStringAsync("api/settings"));
+    await Page.Locator("[data-model-test-settings]").ClickAsync();
+    await Expect(Page.Locator($"#{field}")).ToBeFocusedAsync();
+    await Expect(Page.Locator($"#{field}")).ToHaveValueAsync("8192");
+    await Expect(Page.Locator("#runtime-role-modelTest-outputTokenLimit")).ToHaveValueAsync("512");
+    Assert.AreEqual(before, await _environment.HttpClient.GetStringAsync("api/settings"));
+    await Page.Locator($"#{field}").FillAsync("16384");
+    if (scope == "override") await Page.Locator("#save-runtime-override").ClickAsync();
+    await Page.Locator("[data-settings-target=general]").ClickAsync();
+    await Page.Locator("#test-model").ClickAsync();
+    if (scope == "provider")
+    {
+      // Both ceilings initially match: after raising the provider, the role is the remaining limit.
+      await Expect(Page.Locator("#model-test-result")).ToContainTextAsync("selected maximum is 8192");
+      await Page.Locator("[data-model-test-settings]").ClickAsync();
+      await Expect(Page.Locator("#runtime-role-modelTest-maximumContextTokens")).ToBeFocusedAsync();
+      await Page.Locator("#runtime-role-modelTest-maximumContextTokens").FillAsync("16384");
+      await Page.Locator("[data-settings-target=general]").ClickAsync();
+      await Page.Locator("#test-model").ClickAsync();
+    }
+    await Expect(Page.Locator("#model-test-result")).ToContainTextAsync("Completed");
+    Assert.IsNotEmpty(_environment.FakeOllama.Requests);
+    Assert.AreEqual(before, await _environment.HttpClient.GetStringAsync("api/settings"));
+    await Expect(Page.Locator("[data-model-test-settings]")).ToHaveCountAsync(0);
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task ModelTestTimeoutNavigatesToTheSelectedDraftWithoutSaving()
+  {
+    await Page.GotoAsync("/");
+    await OpenSettingsAsync();
+    var before = await _environment.HttpClient.GetStringAsync("api/settings");
+    await Page.Locator("[data-settings-target=harnesses]").ClickAsync();
+    await Page.Locator("#generation-timeout-seconds").FillAsync("1");
+    await Page.Locator("[data-settings-target=general]").ClickAsync();
+    _environment.FakeOllama.DelayNextModelTestResponse(TimeSpan.FromSeconds(16));
+    await Page.Locator("#test-model").ClickAsync();
+    await Expect(Page.Locator("#model-test-result")).ToContainTextAsync("exceeded the selected generation timeout");
+    await Page.Locator("[data-model-test-settings]").ClickAsync();
+    await Expect(Page.Locator("#generation-timeout-seconds")).ToBeFocusedAsync();
+    await Expect(Page.Locator("#generation-timeout-seconds")).ToHaveValueAsync("1");
     Assert.AreEqual(before, await _environment.HttpClient.GetStringAsync("api/settings"));
   }
 
@@ -97,6 +181,7 @@ public sealed class PerformanceControlsEndToEndTests : ChatEndToEndTestBase<Perf
     await Expect(Page.Locator(".model-test-stages [aria-current=step]")).ToHaveTextAsync("Loading model / processing input");
     await Page.GetByRole(AriaRole.Button, new() { Name = "Cancel test", Exact = true }).ClickAsync();
     await Expect(Page.Locator("#model-test-result")).ToHaveTextAsync("Model test cancelled.");
+    await Expect(Page.Locator("[data-model-test-settings]")).ToHaveCountAsync(0);
     await Expect(Page.Locator("#test-model")).ToBeEnabledAsync();
     Assert.AreEqual(before, await _environment.HttpClient.GetStringAsync("api/settings"));
   }

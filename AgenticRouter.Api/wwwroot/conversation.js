@@ -135,10 +135,12 @@ function updateInteractionControls() {
     : "";
   elements.messageInput.disabled =
     state.conversationTransitioning
+    || state.historyOperationActive
     || onboardingBlocked
     || state.readOnlyConversation;
   elements.sendButton.disabled =
     state.conversationTransitioning
+    || state.historyOperationActive
     || onboardingBlocked
     || state.readOnlyConversation;
   const executeStrategyAvailable = state.interactionMode === "execute";
@@ -386,6 +388,8 @@ async function saveCurrentConversation() {
               content: message.content,
               createdAt: message.createdAt,
               diagnostic: message.diagnostic,
+              turnId: message.turnId,
+              interactionMode: message.interactionMode,
               hidden: message.hidden,
               contentBlocks: message.contentBlocks
             })
@@ -400,6 +404,10 @@ async function saveCurrentConversation() {
       }
     );
     setPersistenceStatus(result.status);
+    await fetchJson("/api/history-files/promote", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ windowId: historyWindowId, sessionId: state.conversationSessionId })
+    });
     await refreshSessions();
     return true;
   } catch (error) {
@@ -460,6 +468,7 @@ function clearConversationUi() {
   state.history = [];
   state.persistedContext = null;
   state.persistedMessageCount = 0;
+  state.restoredPromptDraft = false;
   state.editingTurn = null;
   state.harness = "native";
   state.interactionMode = "chat";
@@ -1240,6 +1249,7 @@ function queueCurrentMessage() {
   if (!message) {
     return;
   }
+
   state.messageQueue.push({
     id: `queued-${createSessionId()}`,
     message
@@ -1435,6 +1445,7 @@ function scheduleMessageQueueDispatch() {
   if (
     state.requestController
     || state.conversationTransitioning
+    || state.historyOperationActive
     || state.queueEditingId
     || state.editingTurn
     || state.queuedDispatchMessage
@@ -1533,6 +1544,7 @@ async function steerBufferedMessage(id) {
   renderMessageQueue();
   updateStreamingComposerActions();
   updateComposerStatus();
+  state.restoredPromptDraft = false;
   const sentAt = new Date();
   const steeredMessage = appendSteeredMessage(
     message,
@@ -1736,6 +1748,7 @@ function finishAssistantSegmentForSteering(assistant) {
 
 async function handleComposerSubmit(event) {
   event.preventDefault();
+  if (state.historyOperationActive) return;
 
   if (state.readOnlyConversation) {
     return;
@@ -1779,6 +1792,15 @@ async function handleComposerSubmit(event) {
 
   if (!message) {
     return;
+  }
+
+  if (requestInteractionMode === "execute") {
+    try {
+      if (!await ensureExecuteSnapshotDecision()) return;
+    } catch (error) {
+      elements.composerStatus.textContent = error.message;
+      return;
+    }
   }
 
   const autoModelHarness = requestInteractionMode === "execute"
@@ -1877,7 +1899,8 @@ async function handleComposerSubmit(event) {
       role: "user",
       content: message,
       createdAt: sentAt.toISOString(),
-      hidden: hiddenUserMessage
+      hidden: hiddenUserMessage,
+      interactionMode: requestInteractionMode
     }
   ];
   state.conversationState = "running";
@@ -1891,7 +1914,8 @@ async function handleComposerSubmit(event) {
       message,
       historyIndex,
       requestAttachments,
-      sentAt
+      sentAt,
+      requestInteractionMode
     );
   }
   const conversationVersion = state.conversationVersion;
@@ -1908,6 +1932,7 @@ async function handleComposerSubmit(event) {
     : null;
   const chatRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
   assistant.chatRunId = chatRunId;
+  assistant.userHistoryIndex = historyIndex;
   rememberLiveChatRun(chatRunId, state.conversationSessionId, supervisionRunId);
   assistant.supervisionRunId = supervisionRunId;
   assistant.requestedExecutionStrategy = requestInteractionMode === "execute"
@@ -1958,7 +1983,9 @@ async function handleComposerSubmit(event) {
           replaceFromMessageIndex,
           hideUserMessage: hiddenUserMessage,
           supervisionRunId,
-          chatRunId
+          chatRunId,
+          historyWindowId,
+          historyMessageIndex: historyIndex
         }),
         signal: controller.signal
       }
@@ -2176,7 +2203,8 @@ function appendUserMessage(
   message,
   historyIndex,
   attachments = [],
-  sentAt = null
+  sentAt = null,
+  interactionMode = state.history[historyIndex]?.interactionMode ?? state.interactionMode
 ) {
   const element = document.createElement("article");
   element.className = "message user";
@@ -2186,27 +2214,30 @@ function appendUserMessage(
   content.textContent = message;
 
   if (attachments.length > 0) {
-    const gallery = createMessageImageGallery(attachments);
+    const gallery = createMessageImageGallery(attachments, historyIndex);
     const attachmentNote = document.createElement("small");
     attachmentNote.className = "message-attachment-note";
     attachmentNote.textContent =
       `${attachments.length} attached image${attachments.length === 1 ? "" : "s"}`
-      + " · bytes not persisted";
+      + (attachments.some(item => item.digest) ? " · saved with history" : "");
     content.append(gallery, attachmentNote);
   }
   const actions = document.createElement("div");
   actions.className = "message-actions";
   const editButton = createMessageActionButton(
-    "Edit",
-    "Edit message"
+    interactionMode === "execute" ? "↶" : "✎",
+    interactionMode === "execute" ? "Rollback" : "Edit message"
   );
+  editButton.title = interactionMode === "execute" ? "Rollback" : "Edit message";
   editButton.classList.add("edit-message");
   editButton.addEventListener(
     "click",
     () => startMessageEdit(
       element,
       message,
-      historyIndex
+      historyIndex,
+      attachments,
+      interactionMode
     )
   );
   actions.append(editButton);
@@ -2215,7 +2246,7 @@ function appendUserMessage(
   resizeObserver.observe(element);
 }
 
-function createMessageImageGallery(attachments) {
+function createMessageImageGallery(attachments, historyIndex) {
   const gallery = document.createElement("div");
   gallery.className = "message-image-gallery";
   const acceptedTypes = new Set([
@@ -2225,13 +2256,39 @@ function createMessageImageGallery(attachments) {
     "image/gif"
   ]);
 
-  for (const attachment of attachments) {
+  for (const [attachmentIndex, attachment] of attachments.entries()) {
     if (
       !acceptedTypes.has(attachment.mimeType)
-      || !attachment.base64Data
     ) {
       continue;
     }
+
+    if (!attachment.base64Data && attachment.digest) {
+      const saved = document.createElement("button");
+      saved.type = "button";
+      saved.className = "history-file-link";
+      saved.textContent = attachment.fileName;
+      saved.addEventListener("click", async () => {
+        try {
+          const turnId = state.history[historyIndex]?.turnId;
+          const response = await fetch("/api/history-files/download", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fileId: `${state.conversationSessionId}|${turnId}|attachment|${attachmentIndex}` })
+          });
+          if (!response.ok) throw new Error("The saved image could not be recovered.");
+          const url = URL.createObjectURL(await response.blob());
+          elements.imageReviewContent.src = url;
+          elements.imageReviewContent.alt = attachment.fileName;
+          elements.imageReviewTitle.textContent = attachment.fileName;
+          elements.imageReviewMetadata.textContent = `${attachment.mimeType} · ${formatBytes(attachment.bytes)} · consultation copy`;
+          elements.imageReviewDialog.addEventListener("close", () => URL.revokeObjectURL(url), { once: true });
+          elements.imageReviewDialog.showModal();
+        } catch (error) { showToast(error.message, "error"); }
+      });
+      gallery.append(saved);
+      continue;
+    }
+    if (!attachment.base64Data) continue;
 
     const fileName = attachment.fileName || "image attachment";
     const preview = document.createElement("button");
@@ -2484,6 +2541,7 @@ function appendAssistantMessage(options = {}, existingAssistant = null) {
     sourcesList,
     copyButton,
     reviewButton,
+    actions,
     executionSession: options.executionSession ?? null,
     runningIndicator,
     completionSummary,
@@ -3022,7 +3080,12 @@ function ensureWorkNarrative(assistant, text, replace = false) {
 function isVisibleWorkAction(action) {
   const tool = action?.tool?.trim().toLowerCase();
   return Boolean(tool)
+    && !isToolInvocationWrapper(action)
     && !tool.startsWith("mcp__agentic_router__");
+}
+
+function isToolInvocationWrapper(action) {
+  return ["tool_call", "toolcall"].includes(canonicalActionTool(action?.tool));
 }
 
 function canonicalActionTool(tool) {
@@ -3247,6 +3310,17 @@ function completedActionActivity(kind) {
 }
 
 function renderCurrentActivity(assistant, streamEvent) {
+  if (isToolInvocationWrapper(streamEvent.localAction)
+    && !["failed", "rejected", "cancelled"].includes(streamEvent.localAction.state)) return;
+  if (streamEvent.hostFileProgress) {
+    renderHostFilesProgress(assistant.runningIndicator, streamEvent.hostFileProgress);
+    return;
+  }
+  if (assistant.runningIndicator.classList.contains("host-files-active")) {
+    assistant.runningIndicator.classList.remove("host-files-active");
+    assistant.runningIndicator.querySelector(".assistant-inference-percent").hidden = true;
+    assistant.runningIndicator.title = "";
+  }
   const progress = streamEvent.inferenceProgress;
   const indicator = assistant.runningIndicator;
   if (progress) {

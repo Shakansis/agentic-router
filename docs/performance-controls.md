@@ -22,6 +22,28 @@ New Model test profiles use a 16,384-token target/maximum context and an
 context reports the required and allowed sizes with instructions to adjust the draft.
 POST /api/models/test remains available for clients requiring one JSON result.
 
+Configuration failures in Test model include a Host-selected optional
+`settingsField`. The result shows **Review settings →** for recognized context
+and timeout settings. It navigates within the existing Settings modal, scrolls
+to the relevant field and focuses it, preserving the pending draft. It does not
+save, increase a limit or start another inference. The target is selected from
+typed runtime facts, not from parsing the human-readable error message.
+
+For an 8K output test, 8,192 context tokens leave no room for the prompt. Review
+Settings → Ollama context → Context by role → Model test → Max.; 16,384 is the
+default test target/maximum. Exact-model overrides use Override by model and
+digest → Model test → Maximum, followed by Apply override to update the draft.
+If Context sent to Ollama is the limiting ceiling, the action navigates there
+instead; after changing it, a remaining role/override limit may need adjustment.
+Repeat Test model without Save to validate the draft. Footer Save remains the
+sole persistence action. Cancellation does not show a configuration shortcut.
+
+The test now passes the digest obtained during installed-model discovery into
+runtime resolution. Previously a context-only override could be ignored when
+the call had no model revision and no performance override triggered a second
+discovery. Context-only and performance overrides now both use the exact
+installed identity. No extra inference or metadata call was introduced.
+
 The SSE stream reports preparation, loading/prefill, generation and collection.
 Loading/prefill starts before runtime resolution and ends with the first content
 or thinking delta. Ollama's HTTP API does not expose separate live load/prefill
@@ -55,6 +77,42 @@ None emits effort.unavailable and is not sent as an invalid --effort value.
 Harness names omit the Experimental suffix; capability/availability checks remain.
 
 See [completion checks](execution-completion-report.md) for the optional report.
+
+## Configuration navigation validation — 2026-10-11
+
+Release solution build passed with zero warnings/errors using isolated binaries
+at `.artifacts/settings-error-navigation-20261011/bin/` and the previously restored
+isolated intermediate directory. The ordinary running API output was not replaced.
+Scoped whitespace verification, JavaScript syntax and diff checks passed.
+
+22 deterministic browser/API E2Es passed in
+`.artifacts/settings-error-navigation-20261011/results/final-model-settings/final-model-settings.trx`:
+model-test behavior plus runtime-performance regressions. Coverage includes
+role/override/provider context destinations, focused fields, retained draft edits,
+successful retesting without persistence, context-only override identity,
+timeout navigation and cancellation without a configuration action. The provider
+case also checks successive limiting ceilings: provider first, then role.
+Tests use fake providers and owned temporary processes, without real inference or
+restarting the user Host.
+
+Commands:
+
+```powershell
+dotnet build AgenticRouter.slnx -c Release --no-restore `
+  --artifacts-path .artifacts/inference-finalization-20261011/build `
+  -p:OutputPath="$PWD/.artifacts/settings-error-navigation-20261011/bin/" `
+  -p:AppendTargetFrameworkToOutputPath=false -p:UseSharedCompilation=false `
+  -m:1 --disable-build-servers
+.artifacts/settings-error-navigation-20261011/run-tests.ps1 `
+  -Name final-model-settings `
+  -Filter 'FullyQualifiedName~ModelTest|FullyQualifiedName~RuntimePerformanceEndToEndTests'
+dotnet format whitespace AgenticRouter.slnx --no-restore --verify-no-changes `
+  --include AgenticRouter.Api/Models/ModelDiagnosticService.cs `
+  AgenticRouter.Api/Contracts/ApplicationContracts.cs `
+  tests/AgenticRouter.EndToEndTests/PerformanceControlsEndToEndTests.cs
+node --check AgenticRouter.Api/wwwroot/settings-runtime.js
+git diff --check
+```
 
 ## Validation — 2026-10-04
 

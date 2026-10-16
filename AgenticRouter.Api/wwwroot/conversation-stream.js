@@ -84,6 +84,10 @@ async function consumeEventStream(stream, assistant, options = {}) {
     );
     if (!historical) captureConversationContentBlock(contentBlocks, streamEvent);
     const updateVisibleState = !historical && !state.readOnlyConversation;
+    if (!historical && Number.isInteger(assistant.userHistoryIndex)) {
+      const prompt = state.history[assistant.userHistoryIndex];
+      if (prompt?.role === "user") prompt.turnId = streamEvent.requestId;
+    }
     if (updateVisibleState) {
       state.conversationSessionId =
         streamEvent.conversationSessionId ?? state.conversationSessionId;
@@ -833,6 +837,20 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
     return;
   }
 
+  const host = streamEvent.hostFileProgress;
+  const hostKey = host ? `${host.operationId}:${host.action}` : null;
+  if (host) {
+    assistant.hostFileRows ??= new Map();
+    const existing = assistant.hostFileRows.get(hostKey);
+    if (existing) {
+      existing.querySelector(".activity-time").textContent = formatElapsed(host.elapsedMilliseconds);
+      existing.querySelector(".activity-message").textContent = `${streamEvent.message}`
+        + (Number.isFinite(host.percent) ? ` · ${Math.floor(host.percent)}%` : "")
+        + (host.state === "completed" ? ` · ${host.timings.map(item => `${item.action}: ${formatElapsed(item.elapsedMilliseconds)}`).join(" · ")}` : "");
+      return;
+    }
+  }
+
   const group = ensureActivityGroup(
     assistant,
     streamEvent,
@@ -851,6 +869,7 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
   icon.textContent = activityIconFor(
     streamEvent.type
   );
+  if (host) icon.replaceChildren(createHostFilesIcon());
   icon.setAttribute(
     "aria-hidden",
     "true"
@@ -862,9 +881,14 @@ function addActivity(assistant, streamEvent, isWarningOrError) {
     ? `${streamEvent.message}\nRun ID: ${streamEvent.chatRunId || streamEvent.requestId}`
       + `\nSeed: ${inference.seedStatus === "requested" ? `${inference.seed} (requested)` : "unavailable"}`
     : streamEvent.message;
+  if (host) {
+    message.textContent += (Number.isFinite(host.percent) ? ` · ${Math.floor(host.percent)}%` : "")
+      + (host.state === "completed" ? ` · ${host.timings.map(item => `${item.action}: ${formatElapsed(item.elapsedMilliseconds)}`).join(" · ")}` : "");
+  }
   if (inference) message.style.whiteSpace = "pre-line";
   row.append(time, icon, message);
   group.body.append(row);
+  if (host) assistant.hostFileRows.set(hostKey, row);
   group.count++;
   assistant.technicalEventCount++;
   group.countLabel.textContent =
@@ -1200,6 +1224,10 @@ function updateChatSummary(assistant, summary) {
 
 function updateExecutionStatusPlacement(assistant) {
   const terminal = assistant.details.dataset.terminal === "true";
+  assistant.sessionHeader.querySelector(".execution-footer-metrics")?.remove();
+  if (!terminal && !assistant.sessionHeader.hidden) {
+    assistant.sessionHeader.append(renderInferenceMetrics(assistant));
+  }
   assistant.sessionHeader.classList.toggle("is-live", !terminal && !assistant.sessionHeader.hidden);
   assistant.sessionFooter.hidden = !terminal || assistant.sessionHeader.hidden;
   if (!assistant.sessionFooter.hidden) {
@@ -1207,8 +1235,68 @@ function updateExecutionStatusPlacement(assistant) {
   }
 }
 
+function renderInferenceMetrics(assistant) {
+  const metrics = assistant.supervisionProgress
+    ? assistant.supervisionProgress.inferenceMetrics
+    : assistant.executionSession?.inferenceMetrics ?? assistant.chatSummary?.inferenceMetrics;
+  const badges = document.createElement("div");
+  badges.className = "execution-footer-metrics";
+  const addMetric = (key, value, label, icon, title, unavailableReason) => {
+    const available = Number.isFinite(value) && value >= 0;
+    if (!available && !unavailableReason) return;
+    const invalid = !available && (value != null || metrics?.telemetryError);
+    const badge = document.createElement("span");
+    badge.className = "execution-footer-metric";
+    badge.dataset.metric = key;
+    badge.dataset.metricState = available ? "available" : invalid ? "error" : "unavailable";
+    badge.title = available ? title : invalid ? metrics?.telemetryError
+      ?? `Invalid ${label === "tokens" ? "token count" : "generation timing"}.` : unavailableReason;
+    const glyph = document.createElement("span");
+    glyph.className = "execution-footer-metric-icon";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = icon;
+    const number = document.createElement("strong");
+    number.textContent = !available ? (invalid ? "error" : "unavailable") : key === "tokens"
+      ? new Intl.NumberFormat().format(value)
+      : key === "ttft" ? `${(value / 1000).toFixed(2)}s` : value.toFixed(2);
+    const unit = document.createElement("span");
+    unit.textContent = label;
+    badge.append(glyph, number, unit);
+    badges.append(badge);
+  };
+  addMetric("throughput", metrics?.tokensPerSecond, "tok/s", "↯",
+    ["stream", "mixed"].includes(metrics?.generationTimingSource)
+      ? "Output tokens divided by provider generation durations where reported, otherwise measured first-to-last token intervals. Excludes prefill, tools and waiting."
+      : "Output tokens divided by measured model generation time across the turn. Excludes tools and waiting.",
+    metrics?.outputTokens == null ? "Provider token count unavailable."
+      : metrics.outputTokens === 0 ? "No output tokens reported." : "Generation time unavailable.");
+  addMetric("tokens", metrics?.outputTokens, "tokens", "◫",
+    "Total output tokens reported by the models across this turn, including reasoning where reported.",
+    "Provider token count unavailable.");
+  addMetric("ttft", metrics?.timeToFirstTokenMilliseconds, "TTFT", "◷",
+    metrics?.firstTokenTimingSource === "after-model-load"
+      ? "Time to the first output token after subtracting provider-reported model loading. Includes prompt processing and reasoning's first token."
+      : "From inference dispatch to the first output token. Model loading duration is unavailable; it has not been subtracted.");
+
+  return badges;
+}
+
 function renderExecutionFooter(assistant) {
   const footer = assistant.sessionFooter;
+  const heading = document.createElement("div");
+  heading.className = "execution-footer-heading";
+  heading.append(assistant.completionSummary);
+  const metadata = document.createElement("div");
+  metadata.className = "execution-footer-metadata";
+  if (assistant.terminalSummary) {
+    // Keep the recorded turn duration distinct from the execution duration below.
+    const parts = assistant.terminalSummary.split(" · ");
+    renderTerminalActivitySummary(metadata, parts.filter(
+      part => part.startsWith("Trace: ") || /^\d/.test(part)
+    ).join(" · "));
+    assistant.summary.textContent = assistant.terminalSummary.split(" · Trace: ")[0];
+  }
+  heading.append(metadata);
   const [stateLabel, route, counts] = assistant.sessionHeader.childNodes;
   const identity = document.createElement("div");
   identity.className = "execution-footer-identity";
@@ -1227,48 +1315,7 @@ function renderExecutionFooter(assistant) {
   }
   identity.append(runtime);
 
-  const metrics = assistant.supervisionProgress
-    ? assistant.supervisionProgress.inferenceMetrics
-    : assistant.executionSession?.inferenceMetrics ?? assistant.chatSummary?.inferenceMetrics;
-  const badges = document.createElement("div");
-  badges.className = "execution-footer-metrics";
-  const addMetric = (key, value, label, icon, title) => {
-    if (!Number.isFinite(value) || value < 0) return;
-    const badge = document.createElement("span");
-    badge.className = "execution-footer-metric";
-    badge.dataset.metric = key;
-    badge.title = title;
-    const glyph = document.createElement("span");
-    glyph.className = "execution-footer-metric-icon";
-    glyph.setAttribute("aria-hidden", "true");
-    glyph.textContent = icon;
-    const number = document.createElement("strong");
-    number.textContent = key === "tokens"
-      ? new Intl.NumberFormat().format(value)
-      : key === "ttft" ? `${(value / 1000).toFixed(2)}s` : value.toFixed(2);
-    const unit = document.createElement("span");
-    unit.textContent = label;
-    badge.append(glyph, number, unit);
-    badges.append(badge);
-  };
-  addMetric("throughput", metrics?.tokensPerSecond, "tok/s", "↯",
-    ["stream", "mixed"].includes(metrics?.generationTimingSource)
-      ? "Output tokens divided by provider generation durations where reported, otherwise measured first-to-last token intervals. Excludes prefill, tools and waiting."
-      : "Output tokens divided by measured model generation time across the turn. Excludes tools and waiting.");
-  addMetric("tokens", metrics?.outputTokens, "tokens", "◫",
-    "Total output tokens reported by the models across this turn, including reasoning where reported.");
-  addMetric("ttft", metrics?.timeToFirstTokenMilliseconds, "TTFT", "◷",
-    metrics?.firstTokenTimingSource === "after-model-load"
-      ? "Time to the first output token after subtracting provider-reported model loading. Includes prompt processing and reasoning's first token."
-      : "From inference dispatch to the first output token. Model loading duration is unavailable; it has not been subtracted.");
-  if (metrics?.outputTokens > 0 && !Number.isFinite(metrics.tokensPerSecond)) {
-    const unavailable = document.createElement("span");
-    unavailable.className = "execution-footer-metric";
-    unavailable.dataset.metric = "throughput-unavailable";
-    unavailable.textContent = "↯ tok/s unavailable";
-    unavailable.title = "Generation time is unavailable for at least one inference. Total turn duration includes loading, prefill and tools and cannot replace generation time.";
-    badges.prepend(unavailable);
-  }
+  const badges = renderInferenceMetrics(assistant);
 
   const activity = document.createElement("div");
   activity.className = "execution-footer-activity";
@@ -1277,10 +1324,16 @@ function renderExecutionFooter(assistant) {
     item.textContent = text;
     activity.append(item);
   }
-  // No freestanding dividers: every item can wrap without leaving a separator behind.
-  footer.replaceChildren(identity);
-  if (badges.childElementCount) footer.append(badges);
-  footer.append(activity);
+  const runtimePanel = document.createElement("div");
+  runtimePanel.className = "execution-footer-panel";
+  runtimePanel.append(identity);
+  if (badges.childElementCount) runtimePanel.append(badges);
+  const bottom = document.createElement("div");
+  bottom.className = "execution-footer-bottom";
+  bottom.append(activity, assistant.actions);
+  // Move existing controls rather than duplicating their state or handlers.
+  footer.replaceChildren(heading, runtimePanel, bottom);
+  assistant.actions.querySelector(".completion-check")?.remove();
   if (assistant.completionCheckId || assistant.completionReportResult) {
     const check = document.createElement("button");
     check.type = "button";
@@ -1289,7 +1342,7 @@ function renderExecutionFooter(assistant) {
     check.title = "Optional model review of recorded evidence. Does not execute or repair the task.";
     check.disabled = Boolean(assistant.completionChecking);
     check.addEventListener("click", () => void requestCompletionCheck(assistant));
-    footer.append(check);
+    assistant.actions.append(check);
   }
 }
 

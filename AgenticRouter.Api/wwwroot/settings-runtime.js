@@ -5028,6 +5028,30 @@ async function validateRuntimePerformanceDrafts(failureLabel = "Save failed") {
   return true;
 }
 
+const modelTestSettingsFields = {
+  "ollamaRuntime.roleDefaults.modelTest.maximumContextTokens": "runtime-role-modelTest-maximumContextTokens",
+  "ollamaRuntime.modelOverrides": "runtime-override-maximum",
+  "context.providerContextTokens": "provider-context-tokens",
+  "runtime.generationTimeoutSeconds": "generation-timeout-seconds"
+};
+
+function navigateToModelTestSettings(result) {
+  const field = document.getElementById(modelTestSettingsFields[result.settingsField]);
+  if (!field) return;
+  // Navigate inside the existing modal; reopening would discard its pending draft.
+  navigateToSettingsError(result.settingsField);
+  if (result.settingsField === "ollamaRuntime.modelOverrides") {
+    if (elements.runtimeOverrideModel.value !== result.model || elements.runtimeOverrideRole.value !== "modelTest") {
+      elements.runtimeOverrideModel.value = result.model;
+      elements.runtimeOverrideRole.value = "modelTest";
+      loadRuntimeOverrideEditor();
+    }
+    field.closest("details").open = true;
+  }
+  field.scrollIntoView({ block: "center" });
+  field.focus({ preventScroll: true });
+}
+
 function renderModelTestResult(result) {
   const panel = elements.modelTestResult;
   panel.replaceChildren();
@@ -5038,6 +5062,15 @@ function renderModelTestResult(result) {
     const error = document.createElement("p");
     error.textContent = `${result.error} · Trace ID: ${result.traceId}`;
     panel.append(error);
+    if (Object.hasOwn(modelTestSettingsFields, result.settingsField)) {
+      const settings = document.createElement("button");
+      settings.type = "button";
+      settings.className = "secondary-button";
+      settings.dataset.modelTestSettings = result.settingsField;
+      settings.textContent = "Review settings →";
+      settings.addEventListener("click", () => navigateToModelTestSettings(result));
+      panel.append(settings);
+    }
     return;
   }
   const metrics = document.createElement("dl");

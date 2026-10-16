@@ -299,7 +299,6 @@ public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
       !cancellationToken.IsCancellationRequested
     )
     {
-      _logger.LogWarning("knowledge-timeout: AnythingLLM did not respond in time. Check that it is running and review the project Knowledge settings.");
       _logger.LogDebug(exception, "AnythingLLM transport timeout cause.");
       throw Error(
         "knowledge-timeout",
@@ -311,7 +310,6 @@ public sealed class AnythingLlmKnowledgeProvider : IKnowledgeProvider
     }
     catch (HttpRequestException exception)
     {
-      _logger.LogWarning("knowledge-unavailable: AnythingLLM could not be reached. Start AnythingLLM or check its address in the project Knowledge settings.");
       _logger.LogDebug(exception, "AnythingLLM transport failure cause.");
       throw Error(
         "knowledge-unavailable",

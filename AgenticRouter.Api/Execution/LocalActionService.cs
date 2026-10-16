@@ -21,7 +21,8 @@ public interface ILocalActionService
   Task<LocalActionResult> ExecuteAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    long? availableFileReadTokens = null
   );
 }
 
@@ -115,7 +116,6 @@ public sealed record PendingRenameChange(
 
 public sealed class LocalActionService : ILocalActionService
 {
-  private const int FileReadLimit = 128 * 1_024;
   private const int FileWriteLimit = 1024 * 1_024;
   private const int BatchWriteLimit = 5 * 1024 * 1_024;
   private const long BatchDownloadLimit = 1024L * 1024 * 1024;
@@ -130,6 +130,8 @@ public sealed class LocalActionService : ILocalActionService
   private readonly IWebDownloadService _webDownload;
   private readonly IExecutionLatencyTracker _latency;
   private readonly ProjectAwarenessCache? _projectAwarenessCache;
+  private readonly HostFileReadPolicy _fileReads;
+  private readonly AgenticRouter.Api.Sessions.ConversationHistoryFiles? _historyFiles;
 
   public LocalActionService(
     ITrustedWorkspaceService workspace,
@@ -142,7 +144,9 @@ public sealed class LocalActionService : ILocalActionService
     IIncidentJournal incidents,
     IWebDownloadService webDownload,
     IExecutionLatencyTracker? latency = null,
-    ProjectAwarenessCache? projectAwarenessCache = null
+    ProjectAwarenessCache? projectAwarenessCache = null,
+    HostFileReadPolicy? fileReads = null,
+    AgenticRouter.Api.Sessions.ConversationHistoryFiles? historyFiles = null
   )
   {
     _workspace = workspace;
@@ -156,6 +160,8 @@ public sealed class LocalActionService : ILocalActionService
     _webDownload = webDownload;
     _latency = latency ?? NullExecutionLatencyTracker.Instance;
     _projectAwarenessCache = projectAwarenessCache;
+    _fileReads = fileReads ?? new HostFileReadPolicy(new AgenticRouter.Api.Usage.ConservativeTokenEstimator());
+    _historyFiles = historyFiles;
   }
 
   public async Task<ValidatedLocalAction> ValidateAsync(
@@ -297,6 +303,16 @@ public sealed class LocalActionService : ILocalActionService
       );
     }
 
+    if (proposal.Tool == "read_files")
+    {
+      var batch = await ResolveReadFilesAsync(proposal.Arguments, executionSession, cancellationToken);
+      return AttachPlanBinding(new ValidatedLocalAction(Guid.NewGuid().ToString("N"), proposal.Tool,
+        proposal.Arguments.Clone(), null, null, $"read_files: {batch.Requests.Count} files",
+        batch.RequiresExplicitApproval ? string.Join("\n", batch.Requests.Select(file => file.RelativePath)) : null,
+        true, batch.RequiresExplicitApproval),
+        proposal, executionSession);
+    }
+
     if (proposal.Tool == "create_files")
     {
       return AttachPlanBinding(
@@ -367,7 +383,8 @@ public sealed class LocalActionService : ILocalActionService
   public async Task<LocalActionResult> ExecuteAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    long? availableFileReadTokens = null
   )
   {
     _latency.MarkOnce("first-tool-start");
@@ -385,6 +402,16 @@ public sealed class LocalActionService : ILocalActionService
         cancellationToken
       );
       await ValidatePendingRenameStateAsync(action, cancellationToken);
+      if (_historyFiles is not null && executionSession is not null && !action.ReadOnly)
+      {
+        var targets = (action.PendingFileChanges ?? []).Select(file => file.RelativePath).ToList();
+        if (action.TargetPath is not null && action.Tool is "create_file" or "write_file" or "replace_text" or "apply_patch" or "download_file" or "rename_path")
+          targets.Add(action.TargetPath);
+        if (action.PendingRename is { } rename) targets.Add(rename.DestinationRelativePath);
+        if (action.Tool == "download_files" && action.Arguments.TryGetProperty("files", out var downloads))
+          targets.AddRange(downloads.EnumerateArray().Select(file => file.GetProperty("path").GetString()!));
+        await _historyFiles.CaptureBeforeMutationAsync(executionSession.RequestId, targets, cancellationToken);
+      }
       if (action.Tool == "run_process")
       {
         await RevalidateProcessActionAsync(action, cancellationToken);
@@ -399,10 +426,12 @@ public sealed class LocalActionService : ILocalActionService
           action,
           cancellationToken
         ),
+        "read_files" => await ReadFilesAsync(action, executionSession, cancellationToken, availableFileReadTokens),
         "read_file" => await ReadFileAsync(
           action,
           executionSession,
-          cancellationToken
+          cancellationToken,
+          availableFileReadTokens
         ),
         "get_file_info" => await GetFileInfoAsync(
           action,
@@ -996,7 +1025,8 @@ public sealed class LocalActionService : ILocalActionService
   private async Task<ValidatedLocalAction> ValidateFileActionAsync(
     LocalActionProposal proposal,
     ExecutionSession? executionSession,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    bool inferPlanTarget = true
   )
   {
     var corrections = new List<LocalActionCorrection>();
@@ -1005,7 +1035,7 @@ public sealed class LocalActionService : ILocalActionService
       "path"
     );
     if (
-      IsPlanTargetBoundFileTool(proposal.Tool)
+      inferPlanTarget && IsPlanTargetBoundFileTool(proposal.Tool)
       && TryInferHostPlanTarget(
         proposal.Tool,
         executionSession,
@@ -2267,117 +2297,74 @@ public sealed class LocalActionService : ILocalActionService
     );
   }
 
+  private async Task<(IReadOnlyList<HostFileReadRequest> Requests, bool RequiresExplicitApproval)> ResolveReadFilesAsync(JsonElement arguments,
+    ExecutionSession? executionSession, CancellationToken cancellationToken)
+  {
+    if (!arguments.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array
+      || files.GetArrayLength() is < 1 or > HostFileReadPolicy.MaximumBatchFiles)
+      throw new LocalActionException("action-validation", $"read_files requires 1 to {HostFileReadPolicy.MaximumBatchFiles} files.");
+    var requests = new List<HostFileReadRequest>();
+    var requiresExplicitApproval = false;
+    foreach (var file in files.EnumerateArray())
+    {
+      if (file.ValueKind != JsonValueKind.Object)
+        throw new LocalActionException("action-validation", "Each read_files entry requires a path.");
+      var validated = await ValidateFileActionAsync(new LocalActionProposal("read_file", file, null),
+        executionSession, cancellationToken, inferPlanTarget: false);
+      var target = RequiredTarget(validated);
+      requiresExplicitApproval |= validated.RequiresExplicitApproval;
+      if (!File.Exists(target)) throw new LocalActionException("action-execution", "A requested file does not exist.");
+      requests.Add(new HostFileReadRequest(target, await GetRelativePathAsync(target, cancellationToken),
+        GetOptionalLong(file, "offsetBytes", 0), file.TryGetProperty("lengthBytes", out _)
+          ? GetOptionalInteger(file, "lengthBytes", HostFileReadPolicy.MaximumReadBytes) : null));
+    }
+    return (requests, requiresExplicitApproval);
+  }
+
+  private async Task<LocalActionResult> ReadFilesAsync(ValidatedLocalAction action,
+    ExecutionSession? executionSession, CancellationToken cancellationToken, long? availableFileReadTokens)
+  {
+    // Revalidate every path at execution, including reparse-point changes after admission.
+    var (requests, _) = await ResolveReadFilesAsync(action.Arguments, executionSession, cancellationToken);
+    var read = await _fileReads.ReadFilesAsync(requests, availableFileReadTokens, cancellationToken);
+    if (read.Code is not null)
+      return new LocalActionResult(read.Output, "action.output", Succeeded: false, Code: read.Code,
+        RetryUnchanged: false, EffectState: HostActionEffectStates.None, Outcome: HostActionOutcomes.Recoverable,
+        Changed: false, PostconditionSatisfied: false);
+    if (executionSession is not null)
+    {
+      using var response = JsonDocument.Parse(read.Output);
+      var returned = response.RootElement.GetProperty("files").EnumerateArray().ToArray();
+      for (var index = 0; index < requests.Count; index++)
+      {
+        if (returned[index].GetProperty("content").GetString() is { Length: > 0 }
+          || !returned[index].GetProperty("truncated").GetBoolean())
+          await RecordObservationAsync(requests[index].Path, null, executionSession, cancellationToken);
+      }
+    }
+    return new LocalActionResult(read.Output, "action.output");
+  }
+
   private async Task<LocalActionResult> ReadFileAsync(
     ValidatedLocalAction action,
     ExecutionSession? executionSession,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    long? availableFileReadTokens
   )
   {
-    var target = RequiredTarget(
-      action
-    );
-    var file = new FileInfo(
-      target
-    );
-
-    if (!file.Exists)
-    {
-      throw new LocalActionException(
-        "action-execution",
-        "The file does not exist."
-      );
-    }
-
-    var requestedOffset = GetOptionalLong(action.Arguments, "offsetBytes", 0);
-    var hasRequestedLength = action.Arguments.TryGetProperty("lengthBytes", out _);
-    var requestedLength = GetOptionalInteger(action.Arguments, "lengthBytes", FileReadLimit);
-    if (requestedOffset < 0 || requestedLength is < 1 or > FileReadLimit)
-    {
-      throw new LocalActionException(
-        "action-validation",
-        "read_file range must use offsetBytes >= 0 and lengthBytes between 1 and 131072."
-      );
-    }
-
-    if (file.Length > FileReadLimit && !hasRequestedLength)
-    {
-      var preparedLength = (int)Math.Min(FileReadLimit, file.Length);
-      return new LocalActionResult(
-        JsonSerializer.Serialize(new
-        {
-          sizeBytes = file.Length,
-          maxRangeBytes = FileReadLimit,
-          validRange = new { minimumOffsetBytes = 0, maximumOffsetBytes = Math.Max(0, file.Length - 1) }
-        }),
-        "action.output",
-        Succeeded: false,
-        Code: "FILE_READ_RANGE_REQUIRED",
-        RetryUnchanged: false,
-        EffectState: HostActionEffectStates.None,
-        Outcome: HostActionOutcomes.Recoverable,
-        Changed: false,
-        PostconditionSatisfied: false,
-        NextActions:
-        [
-          new HostActionNextAction(
-            "read_file",
-            JsonSerializer.SerializeToElement(new
-            {
-              path = await GetRelativePathAsync(target, cancellationToken),
-              offsetBytes = 0,
-              lengthBytes = preparedLength
-            }),
-            "Read the first valid bounded range."
-          )
-        ]
-      );
-    }
-
-    if (requestedOffset >= file.Length && file.Length > 0)
-    {
-      throw new LocalActionException(
-        "action-validation",
-        $"read_file offsetBytes must be lower than the file size ({file.Length})."
-      );
-    }
-
-    var rangeRead = hasRequestedLength || requestedOffset > 0;
-    string content;
-    if (rangeRead)
-    {
-      await using var stream = new FileStream(
-        target,
-        FileMode.Open,
-        FileAccess.Read,
-        FileShare.ReadWrite,
-        65_536,
-        FileOptions.Asynchronous | FileOptions.SequentialScan
-      );
-      stream.Seek(requestedOffset, SeekOrigin.Begin);
-      var buffer = new byte[Math.Min(requestedLength, (int)Math.Min(int.MaxValue, file.Length - requestedOffset))];
-      var read = await stream.ReadAsync(buffer.AsMemory(), cancellationToken);
-      content = JsonSerializer.Serialize(new
-      {
-        offsetBytes = requestedOffset,
-        lengthBytes = read,
-        sizeBytes = file.Length,
-        content = Encoding.UTF8.GetString(buffer, 0, read)
-      });
-    }
-    else
-    {
-      content = await File.ReadAllTextAsync(target, cancellationToken);
-    }
-    await RecordObservationAsync(
-      target,
-      rangeRead ? null : content,
-      executionSession,
-      cancellationToken
-    );
-    return new LocalActionResult(
-      content,
-      "action.output"
-    );
+    var target = RequiredTarget(action);
+    if (!File.Exists(target))
+      throw new LocalActionException("action-execution", "The file does not exist.");
+    var offset = GetOptionalLong(action.Arguments, "offsetBytes", 0);
+    int? length = action.Arguments.TryGetProperty("lengthBytes", out _)
+      ? GetOptionalInteger(action.Arguments, "lengthBytes", HostFileReadPolicy.MaximumReadBytes) : null;
+    var read = await _fileReads.ReadAsync(target, offset, length, availableFileReadTokens, cancellationToken);
+    if (read.Code is not null)
+      return new LocalActionResult(read.Output, "action.output", Succeeded: false,
+        Code: read.Code, RetryUnchanged: false, EffectState: HostActionEffectStates.None,
+        Outcome: HostActionOutcomes.Recoverable, Changed: false, PostconditionSatisfied: false);
+    await RecordObservationAsync(target, read.CompleteContent, executionSession, cancellationToken);
+    return new LocalActionResult(read.Output, "action.output");
   }
 
   private async Task<LocalActionResult> GetFileInfoAsync(

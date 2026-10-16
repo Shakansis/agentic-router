@@ -523,6 +523,8 @@ function updateComposerStatus() {
     elements.composerStatus.textContent = "Switching conversation safely";
   } else if (state.editingTurn) {
     elements.composerStatus.textContent = "Editing message · Esc to cancel";
+  } else if (state.restoredPromptDraft) {
+    elements.composerStatus.textContent = "Editing message · original turn restored";
   } else if (state.interactionMode === "execute") {
     if (state.harness === "auto-model-harness") {
       elements.composerStatus.textContent =

@@ -61,6 +61,8 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   public string RepositoryRoot { get; }
 
+  public int ApiProcessId => _apiProcess.Id;
+
   public string DataDirectory { get; }
 
   public string WorkspaceDirectory { get; }

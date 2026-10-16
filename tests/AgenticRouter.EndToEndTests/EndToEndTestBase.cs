@@ -994,6 +994,16 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
     string message
   )
   {
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+    // These existing Execute fixtures explicitly choose context-only rollback when
+    // no Git repository exists. The dedicated history suite exercises the dialog.
+    if (await Page.EvaluateAsync<string>("state.interactionMode") == "execute")
+    {
+      var window = await Page.EvaluateAsync<string>("historyWindowId");
+      using var consent = await _environment.HttpClient.PostAsJsonAsync("api/history-files/git-decision",
+        new { windowId = window, choice = "context-only" });
+      consent.EnsureSuccessStatusCode();
+    }
     await Expect(
       Page.Locator("#send-button-label")
     ).ToHaveTextAsync("Send");

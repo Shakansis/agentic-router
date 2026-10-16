@@ -742,14 +742,37 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       ),
       Tool(
         "read_file",
-        "Read a bounded text file or an explicit byte range inside the trusted workspace.",
+        HostFileReadPolicy.Guidance + " Read a text file or an explicit byte range inside the trusted workspace.",
         new
         {
           path = StringProperty(),
           offsetBytes = new { type = "integer", minimum = 0 },
-          lengthBytes = new { type = "integer", minimum = 1, maximum = 131072 }
+          lengthBytes = new { type = "integer", minimum = 1, maximum = HostFileReadPolicy.MaximumReadBytes }
         },
         ["path"]
+      ),
+      Tool(
+        "read_files",
+        HostFileReadPolicy.Guidance + " Supply files in priority order; contents are identified by path.",
+        new
+        {
+          files = new
+          {
+            type = "array", minItems = 1, maxItems = HostFileReadPolicy.MaximumBatchFiles,
+            items = new
+            {
+              type = "object",
+              properties = new
+              {
+                path = StringProperty(),
+                offsetBytes = new { type = "integer", minimum = 0 },
+                lengthBytes = new { type = "integer", minimum = 1, maximum = HostFileReadPolicy.MaximumReadBytes }
+              },
+              required = new[] { "path" }
+            }
+          }
+        },
+        ["files"]
       ),
       Tool(
         "get_file_info",

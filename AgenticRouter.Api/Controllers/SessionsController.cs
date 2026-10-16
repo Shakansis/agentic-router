@@ -15,18 +15,21 @@ public sealed class SessionsController : ControllerBase
   private readonly IPersistentSessionService _sessions;
   private readonly IConversationProductivityService _productivity;
   private readonly IMarkdownRenderer _markdown;
+  private readonly ConversationHistoryFiles _historyFiles;
 
   public SessionsController(
     IPersistentSessionService sessions,
     LiveChatRuns chatRuns,
     IConversationProductivityService productivity,
-    IMarkdownRenderer markdown
+    IMarkdownRenderer markdown,
+    ConversationHistoryFiles historyFiles
   )
   {
     _sessions = sessions;
     _chatRuns = chatRuns;
     _productivity = productivity;
     _markdown = markdown;
+    _historyFiles = historyFiles;
   }
 
   [HttpGet]
@@ -210,10 +213,11 @@ public sealed class SessionsController : ControllerBase
   )
   {
     return await ExecuteAsync(
-      () => _productivity.DuplicateAsync(
-        id,
-        cancellationToken
-      )
+      async () =>
+      {
+        var result = await _productivity.DuplicateAsync(id, cancellationToken);
+        return result with { Session = await _historyFiles.DuplicateAttachmentsAsync(id, result.Session, cancellationToken) };
+      }
     );
   }
 
@@ -331,6 +335,7 @@ public sealed class SessionsController : ControllerBase
         id,
         cancellationToken
       );
+      await _historyFiles.CollectAsync((await _historyFiles.ActiveAsync(cancellationToken)).Id, cancellationToken);
       return NoContent();
     }
     catch (WorkspaceProfileException exception)
@@ -460,6 +465,7 @@ public sealed class SessionsController : ControllerBase
     try
     {
       await operation();
+      await _historyFiles.CollectAsync((await _historyFiles.ActiveAsync(HttpContext.RequestAborted)).Id, HttpContext.RequestAborted);
       return NoContent();
     }
     catch (WorkspaceProfileException exception)

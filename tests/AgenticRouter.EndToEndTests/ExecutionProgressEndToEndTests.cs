@@ -150,8 +150,7 @@ public sealed class ExecutionProgressEndToEndTests : ChatEndToEndTestBase<Execut
     await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
     await SetExecuteModeAsync("auto");
     await Page.Locator("#harness-selector").SelectOptionAsync("opencode");
-    await Page.Locator("#message-input").FillAsync("Create a game: global output fixture no cutoff");
-    await Page.Locator("#send-button").ClickAsync();
+    await StartMessageAsync("Create a game: global output fixture no cutoff");
     await Expect(Page.Locator(".message.assistant .activity").Last).ToHaveAttributeAsync("data-terminal", "true");
     await Expect(Page.Locator(".message.assistant .activity > summary").Last).ToContainTextAsync("Blocked");
     var executionId = await Page.EvaluateAsync<string>("() => state.latestExecutionSessionId");

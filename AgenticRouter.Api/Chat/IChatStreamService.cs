@@ -6,6 +6,8 @@ namespace AgenticRouter.Api.Chat;
 
 public interface IChatStreamService
 {
+  ChatTurnSummary? CurrentChatSummary { get; }
+
   IAsyncEnumerable<ChatStreamEvent> StreamAsync(
     ChatRequest request,
     string requestId,

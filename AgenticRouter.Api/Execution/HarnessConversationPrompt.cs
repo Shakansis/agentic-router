@@ -31,6 +31,7 @@ internal static class HarnessConversationPromptBuilder
     builder.Append(
       "- " + ExecutionProgressPolicy.ImmediateToolGuidance + "\n"
     );
+    builder.Append("- ").Append(HostFileReadPolicy.Guidance).Append('\n');
     builder.Append("- ").Append(ExecutionProgressPolicy.EarlyWriteGuidance).Append('\n');
     builder.Append(
       "- " + ExecutionProgressPolicy.ActionIntroductionGuidance + "\n"

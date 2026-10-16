@@ -289,7 +289,8 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
       var path = context.Request.Url?.AbsolutePath;
 
       if (context.Request.HttpMethod == "POST"
-        && path is "/v1/responses" or "/v1/chat/completions" or "/v1/messages")
+        && (path is "/v1/responses" or "/v1/chat/completions" or "/v1/messages"
+          || path == "/api/generate" && context.Request.QueryString["metrics_fixture"] == "1"))
       {
         using var document = await JsonDocument.ParseAsync(context.Request.InputStream,
           cancellationToken: cancellationToken);
@@ -302,8 +303,20 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
         var limitNames = new[] { "max_tokens", "max_completion_tokens", "max_output_tokens" };
         var limits = limitNames.Where(name => document.RootElement.TryGetProperty(name, out _)).ToArray();
         CompatibilityRequests.Enqueue((fixture, path, limits.Length == 1
-          ? document.RootElement.GetProperty(limits[0]).GetInt32() : null, limits.Length, context.Request.ContentType));
+          ? document.RootElement.GetProperty(limits[0]).GetInt32()
+          : path == "/api/generate" ? document.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32()
+          : null, limits.Length, context.Request.ContentType));
         var call = document.RootElement.GetProperty("call").GetInt32();
+        if (fixture.Contains("all rejected", StringComparison.Ordinal)
+          || call == 2 && (fixture.Contains("rejected last", StringComparison.Ordinal)
+            || fixture.Contains("server failure last", StringComparison.Ordinal)))
+        {
+          await WriteJsonAsync(context.Response, fixture.Contains("rejected last", StringComparison.Ordinal)
+            || fixture.Contains("all rejected", StringComparison.Ordinal)
+            ? HttpStatusCode.BadRequest : HttpStatusCode.InternalServerError,
+            new { error = "Deterministic provider failure." }, cancellationToken);
+          return;
+        }
         var output = call == 0 ? 40 : 60;
         var usage = path == "/v1/chat/completions"
           ? new JsonObject { ["completion_tokens"] = output }
@@ -326,18 +339,32 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
           }
         }
         if (!fixture.Contains("missing usage", StringComparison.Ordinal)) final["usage"] = usage;
+        if (fixture.Contains("null delta", StringComparison.Ordinal))
+        {
+          final["choices"] = new JsonArray(new JsonObject { ["delta"] = null, ["finish_reason"] = "stop" });
+          final["message"] = null;
+        }
         if (!fixture.Contains("stream only", StringComparison.Ordinal))
           final["timings"] = new JsonObject { ["predicted_ms"] = call == 0 ? 1000 : 3000 };
+        if (path == "/api/generate")
+        {
+          final.Remove("usage");
+          final.Remove("timings");
+          final["response"] = "";
+          final["done"] = true;
+          final["eval_count"] = output;
+          final["eval_duration"] = call == 0 ? 1_000_000_000L : 3_000_000_000L;
+        }
         if (fixture.Contains("nonstream first", StringComparison.Ordinal) && call == 0)
         {
           await WriteJsonAsync(context.Response, HttpStatusCode.OK, final, cancellationToken);
           return;
         }
-        context.Response.ContentType = "text/event-stream";
+        context.Response.ContentType = path == "/api/generate" ? "application/x-ndjson" : "text/event-stream";
         context.Response.SendChunked = true;
         async Task FrameAsync(object value)
         {
-          var bytes = Encoding.UTF8.GetBytes("data: " + JsonSerializer.Serialize(value) + "\n\n");
+          var bytes = Encoding.UTF8.GetBytes((path == "/api/generate" ? "" : "data: ") + JsonSerializer.Serialize(value) + "\n\n");
           await context.Response.OutputStream.WriteAsync(bytes, cancellationToken);
           await context.Response.OutputStream.FlushAsync(cancellationToken);
         }
@@ -345,6 +372,7 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
         await Task.Delay(call == 0 ? 240 : 70, cancellationToken);
         object Delta(string value) => path switch
         {
+          "/api/generate" => new { response = value, done = false },
           "/v1/responses" => new { type = "response.reasoning_summary_text.delta", delta = value },
           "/v1/messages" => new { type = "content_block_delta", delta = new { thinking = value } },
           _ => new { choices = new[] { new { delta = new { reasoning = value } } } }
@@ -361,6 +389,11 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
           return;
         }
         await FrameAsync(Delta("first"));
+        if (path == "/api/generate" && fixture.Contains("malformed metadata", StringComparison.Ordinal))
+        {
+          await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{bad-metadata}\n\n"), cancellationToken);
+          await context.Response.OutputStream.FlushAsync(cancellationToken);
+        }
         await Task.Delay(150, cancellationToken);
         await FrameAsync(Delta("last"));
         await FrameAsync(path == "/v1/responses"
@@ -860,6 +893,12 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     {
       await WriteJsonAsync(context.Response, HttpStatusCode.BadRequest,
         new { error = "num_batch is unsupported by this runtime fixture" }, cancellationToken);
+      return;
+    }
+
+    if (InstalledNativeCompatibilityProbe && messages.Length > 0)
+    {
+      await HandleNativeCompatibilityProbeAsync(context, root, messages, availableTools, cancellationToken);
       return;
     }
 
@@ -2447,6 +2486,21 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
       entry => IsExecuteObjective(entry.message)
     ).Last();
     var current = currentEntry.message.Content;
+    if (stream && hasTools && current.Contains("native large read fixture", StringComparison.Ordinal))
+    {
+      var result = messages.LastOrDefault(message => message.Role == "tool" && (message.ToolName == "read_file"
+        || message.Content.Contains("Tool: read_file", StringComparison.Ordinal)));
+      var discover = result is null && !availableTools.Contains("read_file", StringComparer.Ordinal);
+      var name = discover ? LocalActionPlanner.RequestToolsetTool : "read_file";
+      var readArguments = discover
+        ? JsonSerializer.SerializeToElement(new { tools = new[] { "read_file" }, reason = "Inspect the requested file." })
+        : JsonSerializer.SerializeToElement(new { path = "native-large.txt" });
+      await WriteStreamingToolResponseAsync(response, model,
+        result is null ? "I will inspect the requested file." : result.Content.Contains("NATIVE_FILE_END", StringComparison.Ordinal)
+          ? "NATIVE_FULL_READ_OK" : "NATIVE_FULL_READ_MISSING", null,
+        result is null ? new[] { new { function = new { name, arguments = readArguments } } } : null, 0, cancellationToken);
+      return;
+    }
     if (stream && hasTools && current.Contains("footer inference metrics", StringComparison.OrdinalIgnoreCase))
     {
       var created = messages.Skip(currentEntry.index + 1).Any(message => message.ToolName == "create_file"
@@ -7180,6 +7234,25 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     CancellationToken cancellationToken
   )
   {
+    var adaptiveRead = messages.LastOrDefault(message => message.Role == "user"
+      && message.Content.Contains("READ_ARGUMENTS:", StringComparison.Ordinal));
+    if (adaptiveRead is not null)
+    {
+      var reads = messages.Count(message => message.Role == "tool");
+      var twoReads = adaptiveRead.Content.Contains("two reads", StringComparison.Ordinal);
+      var completed = reads >= (twoReads ? 2 : 1);
+      var arguments = JsonSerializer.Deserialize<JsonElement>(adaptiveRead.Content.Split("READ_ARGUMENTS:", 2)[1]);
+      if (twoReads && reads == 1)
+        arguments = JsonSerializer.SerializeToElement(new { path = "read-b.txt", offsetBytes = 0, lengthBytes = 512 });
+      var tool = adaptiveRead.Content.Contains("adaptive file read batch", StringComparison.Ordinal)
+        ? "read_files" : adaptiveRead.Content.Contains("adaptive file read list", StringComparison.Ordinal)
+          ? "list_files" : "read_file";
+      await WriteStreamingToolResponseAsync(response, model,
+        completed ? "Adaptive file evidence collected." : string.Empty, null,
+        completed ? null : new[] { new { function = new { name = tool, arguments } } },
+        0, cancellationToken);
+      return;
+    }
     if (messages.Any(message => message.Role == "user"
       && message.Content.Contains("chat progress fixture", StringComparison.Ordinal)))
       await Task.Delay(600, cancellationToken);

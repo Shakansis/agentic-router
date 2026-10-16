@@ -8,6 +8,29 @@ namespace AgenticRouter.EndToEndTests;
 public sealed class ChatPresentationEndToEndTests : ChatEndToEndTestBase<ChatPresentationEndToEndTests>
 {
   [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task InterfaceAssetsRevalidateAndLoadTheCurrentPresentationRevision()
+  {
+    foreach (var path in new[] { "/", "/conversation.js", "/conversation-stream.js", "/styles.css" })
+    {
+      using var response = await _environment.HttpClient.GetAsync(path);
+      response.EnsureSuccessStatusCode();
+      Assert.IsNotNull(response.Headers.CacheControl, path);
+      Assert.IsTrue(response.Headers.CacheControl.NoCache, path);
+      Assert.IsNotNull(response.Headers.ETag, path);
+      using var conditional = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, path);
+      conditional.Headers.IfNoneMatch.Add(response.Headers.ETag);
+      using var unchanged = await _environment.HttpClient.SendAsync(conditional);
+      Assert.AreEqual(System.Net.HttpStatusCode.NotModified, unchanged.StatusCode, path);
+      Assert.IsNotNull(unchanged.Headers.CacheControl, path);
+      Assert.IsTrue(unchanged.Headers.CacheControl.NoCache, path);
+    }
+    await Page.GotoAsync("/");
+    Assert.IsTrue(await Page.EvaluateAsync<bool>("Array.from(document.scripts).filter(script => script.src).every(script => new URL(script.src).searchParams.get('rev') === '20261011.1')"));
+    Assert.IsTrue(await Page.EvaluateAsync<bool>("isToolInvocationWrapper({tool: 'tool_call'}) && !isVisibleWorkAction({tool: 'tool_call'})"));
+  }
+
+  [TestMethod]
   [Timeout(90_000, CooperativeCancellation = true)]
   public async Task ChatShowsLiveIdentityReadsCommentaryAndPersistedCompletionMetrics()
   {
@@ -77,7 +100,11 @@ public sealed class ChatPresentationEndToEndTests : ChatEndToEndTestBase<ChatPre
       """, saved["messages"]!.AsArray().Last(item => item!["role"]!.GetValue<string>() == "assistant")!["timeline"]!.ToJsonString());
     await Expect(Page.Locator(".chat-session-footer").Last).ToBeVisibleAsync();
     await Expect(Page.Locator(".chat-session-footer").Last).ToContainTextAsync("Model: alpha:latest");
-    await Expect(Page.Locator(".chat-session-footer").Last.Locator(".execution-footer-metric")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".chat-session-footer").Last.Locator(".execution-footer-metric")).ToHaveCountAsync(2);
+    await Expect(Page.Locator(".chat-session-footer").Last.Locator("[data-metric=tokens]"))
+      .ToHaveAttributeAsync("data-metric-state", "unavailable");
+    await Expect(Page.Locator(".chat-session-footer").Last.Locator("[data-metric=throughput]"))
+      .ToHaveAttributeAsync("title", "Provider token count unavailable.");
     Assert.HasCount(requests, _environment.FakeOllama.AllRequests);
   }
 

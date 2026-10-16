@@ -10,6 +10,20 @@ public sealed class LiveChatRuns(IHostApplicationLifetime lifetime)
 {
   private readonly ConcurrentDictionary<string, LiveChatRun> _runs = new(StringComparer.Ordinal);
   private readonly object _admission = new();
+  private readonly HashSet<string> _rewinding = new(StringComparer.Ordinal);
+  public bool IsRewinding(string id) { lock (_admission) return _rewinding.Contains(id); }
+  public IDisposable? ReserveRewind(string id)
+  {
+    lock (_admission)
+    {
+      if (FindConversation(id) is not null || !_rewinding.Add(id)) return null;
+      return new RewindAdmission(this, id);
+    }
+  }
+  private sealed class RewindAdmission(LiveChatRuns owner, string id) : IDisposable
+  {
+    public void Dispose() { lock (owner._admission) owner._rewinding.Remove(id); }
+  }
 
   public LiveChatRun? Find(string id) => _runs.GetValueOrDefault(id);
   public IReadOnlyList<LiveChatRunView> Active => _runs.Values.Where(run => !run.Completed).Select(run => run.View).ToArray();
@@ -21,6 +35,7 @@ public sealed class LiveChatRuns(IHostApplicationLifetime lifetime)
     lock (_admission)
     {
       if (!Guid.TryParse(request.ChatRunId, out _)) return null;
+      if (request.ConversationSessionId is { } editing && _rewinding.Contains(editing)) return null;
       if (request.ConversationSessionId is { } conversation && FindConversation(conversation) is not null) return null;
       foreach (var old in _runs.Values.Where(run => run.Completed)
         .OrderByDescending(run => run.CreatedAt).Skip(15))

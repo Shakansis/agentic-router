@@ -85,7 +85,11 @@ public sealed record ChatMessage(
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   IReadOnlyList<ChatStreamEvent>? Timeline = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  string? TurnId = null
+  string? TurnId = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  string? InteractionMode = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  IReadOnlyList<AgenticRouter.Api.Sessions.HistoryAttachment>? Attachments = null
 );
 
 public sealed record ChatMessageContentBlock(
@@ -143,7 +147,9 @@ public sealed record ChatRequest(
   string? SupervisionRunId = null,
   bool PreserveExactUserMessage = false,
   string? ChatRunId = null,
-  string? Thinking = null
+  string? Thinking = null,
+  string? HistoryWindowId = null,
+  int? HistoryMessageIndex = null
 );
 
 public sealed record HarnessSteerInput(
@@ -321,7 +327,10 @@ public sealed record ConversationSessionRecord(
   IReadOnlyList<ChatMessage>? ContextMessages = null,
   int PresentationOffset = 0,
   ContextUsageView? LastContextUsage = null,
-  AgenticRouter.Api.Chat.LiveChatRunView? ActiveChatRun = null
+  AgenticRouter.Api.Chat.LiveChatRunView? ActiveChatRun = null,
+  int ContextProjectionTargetBytes = 0,
+  [property: JsonIgnore]
+  long LastHistoryWriteBytes = 0
 );
 
 public sealed record RenameConversationSessionRequest(
@@ -792,7 +801,9 @@ public sealed record ExecutionInferenceMetrics(
   string? GenerationTimingSource = null,
   double? DispatchToFirstTokenMilliseconds = null,
   double? ModelLoadMilliseconds = null,
-  string? FirstTokenTimingSource = null
+  string? FirstTokenTimingSource = null,
+  double? PrefillMilliseconds = null,
+  string? TelemetryError = null
 )
 {
   public double? TokensPerSecond => OutputTokens is > 0 && GenerationMilliseconds is > 0
@@ -818,7 +829,9 @@ public sealed record ExecutionInferenceMetrics(
         ? previous.GenerationTimingSource : "mixed",
       first.DispatchToFirstTokenMilliseconds,
       first.ModelLoadMilliseconds,
-      first.FirstTokenTimingSource
+      first.FirstTokenTimingSource,
+      previous.PrefillMilliseconds + next.PrefillMilliseconds,
+      previous.TelemetryError ?? next.TelemetryError
     );
   }
 }
@@ -966,7 +979,8 @@ public sealed record ModelTestResult(
   long? InputTokens = null,
   double? LoadMilliseconds = null,
   double? PrefillMilliseconds = null,
-  int OutputTokenBudget = 8192
+  int OutputTokenBudget = 8192,
+  string? SettingsField = null
 );
 
 public sealed record ModelConformanceBenchmarkResult(
@@ -1058,7 +1072,9 @@ public sealed record ChatStreamEvent(
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   string? CompletionCheckId = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  InferenceProgressView? InferenceProgress = null
+  InferenceProgressView? InferenceProgress = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  AgenticRouter.Api.Sessions.HostFileProgress? HostFileProgress = null
 );
 
 public sealed record InferenceProgressView(

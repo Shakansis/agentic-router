@@ -1513,6 +1513,29 @@ p {
   animation: brain-pulse 1.35s ease-in-out infinite;
 }
 
+.assistant-running-host {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 45%, transparent));
+}
+.assistant-running-indicator:not(.host-files-active) .assistant-running-host,
+.host-files-active .assistant-running-brain { display: none; }
+.host-files-active { color: color-mix(in srgb, var(--accent) 65%, white); }
+.activity-icon .assistant-running-host { width: 14px; height: 14px; }
+.history-files-list { list-style: none; padding: 0; }
+.history-files-list li { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.history-files-list small { overflow-wrap: anywhere; }
+.history-file-link { text-align: left; border: 0; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; overflow-wrap: anywhere; }
+
+#snapshot-git-dialog { width: min(720px, calc(100vw - 32px)); height: auto; }
+#snapshot-git-dialog form { height: auto; }
+#history-file-operation-status .assistant-running-host { width: 14px; height: 14px; vertical-align: middle; margin-right: 6px; }
+
 .assistant-response.error {
   color: #ffdadd;
 }
@@ -1889,18 +1912,61 @@ p {
 }
 
 .execution-session-footer {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 16px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.execution-footer-heading,
+.execution-footer-panel,
+.execution-footer-bottom {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
-  margin: 6px 0 8px 18px;
-  padding: 8px 11px;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 10px 16px;
+}
+
+.execution-footer-heading { align-items: baseline; }
+.execution-footer-heading .execution-completion-summary {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin: 0;
+}
+.execution-footer-metadata {
+  margin-left: auto;
+  color: var(--subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.execution-footer-heading:has(.execution-completion-summary[hidden]) .execution-footer-metadata {
+  margin-left: 0;
+}
+.execution-footer-panel {
+  padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 11px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, #151a22), color-mix(in srgb, var(--panel) 88%, #11161e));
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 2%);
-  color: var(--muted);
-  font-size: 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 72%, var(--bg));
+}
+.execution-footer-bottom .assistant-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin: 0 0 0 auto;
+  opacity: 1;
+}
+.execution-footer-bottom .completion-check {
+  margin-left: 6px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.execution-footer-bottom .completion-check::after {
+  margin-left: 8px;
+  content: "→";
 }
 
 .execution-footer-identity,
@@ -1926,6 +1992,7 @@ p {
   background: var(--muted);
 }
 .execution-footer-metrics { gap: 6px; }
+.execution-session-header > .execution-footer-metrics { grid-column: 1 / -1; }
 .execution-footer-metric {
   display: inline-flex;
   align-items: center;
@@ -1933,7 +2000,7 @@ p {
   min-height: 27px;
   padding: 4px 8px;
   border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: 8px;
+  border-radius: 999px;
   background: color-mix(in srgb, var(--panel) 88%, #171e28);
   font-size: 11px;
   white-space: nowrap;

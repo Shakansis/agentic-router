@@ -797,6 +797,10 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
         new { path = "item.txt", query = "missing" }
       );
       var largeContent = new string('x', 140_000);
+      var batchRead = await InvokeHostToolAsync("read_files", new
+      {
+        files = new[] { new { path = "item.txt" }, new { path = "rename-destination.txt" } }
+      });
       var largeCreate = await InvokeHostToolAsync(
         "create_files",
         new { files = new[] { new { path = "large.txt", content = largeContent } } }
@@ -835,6 +839,7 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
             emptySearch,
             largeCreate,
             largeRead,
+            batchRead,
             rangedRead,
             delete,
             deleteAgain

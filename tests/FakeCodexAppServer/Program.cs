@@ -745,12 +745,44 @@ async Task RunTurnAsync(
       await Task.Delay(1_500, cancellationToken);
     }
 
+    if (currentRequest.Contains("codex nonstream JSON fixture", StringComparison.Ordinal))
+    {
+      using var http = new HttpClient();
+      using var response = await http.PostAsJsonAsync(
+        Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL") + "/responses",
+        new
+        {
+          model,
+          stream = false,
+          tools = new[] { new { type = "custom", name = "apply_patch", description = "Native patch" } },
+          input = Array.Empty<object>()
+        }, cancellationToken);
+      response.EnsureSuccessStatusCode();
+      if (response.Content.Headers.ContentType?.MediaType != "application/json")
+        throw new InvalidOperationException("Non-streaming Responses must remain JSON.");
+      using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+      var call = document.RootElement.GetProperty("output")[0];
+      if (call.GetProperty("type").GetString() != "custom_tool_call"
+        || call.GetProperty("name").GetString() != "apply_patch"
+        || !call.GetProperty("input").GetString()!.Contains("*** Begin Patch", StringComparison.Ordinal)
+        || call.TryGetProperty("arguments", out _))
+        throw new InvalidOperationException("Non-streaming JSON did not preserve native patch translation.");
+      await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = "json-answer", delta = "JSON_NONSTREAM_OK" } });
+      await SendAsync(new { method = "turn/completed", @params = new { threadId, turn = new { id = turnId, status = "completed" } } });
+      turns.TryRemove(turnId, out _);
+      return;
+    }
+
     if (currentRequest.Contains("harness HTTP metrics", StringComparison.OrdinalIgnoreCase))
     {
       using var http = new HttpClient();
       var protocol = currentRequest.Contains("messages", StringComparison.Ordinal) ? "messages"
+        : currentRequest.Contains("native generate", StringComparison.Ordinal) ? "../api/generate?metrics_fixture=1"
         : currentRequest.Contains("completions", StringComparison.Ordinal) ? "chat/completions" : "responses";
-      for (var call = 0; call < 2; call++)
+      var rejected = currentRequest.Contains("rejected last", StringComparison.Ordinal)
+        || currentRequest.Contains("server failure last", StringComparison.Ordinal);
+      var allRejected = currentRequest.Contains("all rejected", StringComparison.Ordinal);
+      for (var call = 0; call < (rejected ? 3 : 2); call++)
       {
         using var request = new HttpRequestMessage(HttpMethod.Post,
           Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL") + "/" + protocol)
@@ -759,11 +791,12 @@ async Task RunTurnAsync(
           {
             model = "alpha:latest",
             fixture = currentRequest,
+            prompt = currentRequest.Contains("large input", StringComparison.Ordinal) ? new string('a', 60_000) : "probe",
             call
           }), System.Text.Encoding.UTF8, "application/json")
         };
         using var response = await http.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        if (!allRejected && (!rejected || call < 2)) response.EnsureSuccessStatusCode();
         await response.Content.ReadAsStringAsync(cancellationToken);
         if (call == 0) await Task.Delay(600, cancellationToken);
       }

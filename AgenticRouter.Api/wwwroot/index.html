@@ -6,12 +6,12 @@
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
   <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=0.15.0_alpha">
-  <link rel="stylesheet" href="/panels.css?v=0.15.0_alpha">
-  <link rel="stylesheet" href="/benchmark.css?v=0.15.0_alpha">
-  <link rel="stylesheet" href="/model-runtime.css?v=0.15.0_alpha">
-  <link rel="stylesheet" href="/bootstrap.css?v=0.15.0_alpha">
-  <link rel="stylesheet" href="/user-input.css?v=0.15.0_alpha">
+  <link rel="stylesheet" href="/styles.css?v=0.15.0_alpha&amp;rev=20261011.1">
+  <link rel="stylesheet" href="/panels.css?v=0.15.0_alpha&amp;rev=20261011.1">
+  <link rel="stylesheet" href="/benchmark.css?v=0.15.0_alpha&amp;rev=20261011.1">
+  <link rel="stylesheet" href="/model-runtime.css?v=0.15.0_alpha&amp;rev=20261011.1">
+  <link rel="stylesheet" href="/bootstrap.css?v=0.15.0_alpha&amp;rev=20261011.1">
+  <link rel="stylesheet" href="/user-input.css?v=0.15.0_alpha&amp;rev=20261011.1">
 </head>
 <body class="bootstrapping">
   <div
@@ -1943,6 +1943,7 @@
                 <label><input id="backup-reviews" type="checkbox"> Bounded review changes</label>
               </div>
               <input id="backup-restore-file" type="file" accept=".zip,application/zip" hidden>
+              <p class="runtime-note">This ZIP includes conversation text and selected metadata. Uploaded files and rollback snapshots are kept in Local history and are not included in this backup.</p>
               <div class="settings-action-row">
                 <button id="create-local-backup" class="secondary-button" type="button">Create backup .zip</button>
                 <button id="open-local-backup" class="secondary-button" type="button">Inspect backup</button>
@@ -2033,6 +2034,8 @@
                 </label>
               </div>
               <div class="validation-profile-actions">
+                <button id="view-history-files" class="secondary-button" type="button">View files</button>
+                <button id="compact-history-files" class="secondary-button" type="button">Compact history</button>
                 <button id="delete-archived-sessions" class="secondary-button danger-button" type="button">
                   Delete archived
                 </button>
@@ -2040,6 +2043,8 @@
                   Delete all history
                 </button>
               </div>
+              <p class="runtime-note history-content-notice">Local history includes complete uploaded files and images and Execute rollback snapshots, including Git-ignored files. Data stays on this computer and is not encrypted by AR. Disabling history stops new saves; it does not delete existing data. Without history, prompt data is temporary and is lost on closing or reloading this window.</p>
+              <output id="history-file-operation-status" class="runtime-note" role="status"></output>
             </div>
           </details>
         </section>
@@ -2577,17 +2582,32 @@
 
   <div id="toast-region" class="toast-region" aria-live="assertive" aria-relevant="additions"></div>
 
-  <script defer src="/shared.js?v=0.15.0_alpha"></script>
-  <script defer src="/i18n.js?v=0.15.0_alpha"></script>
-  <script defer src="/app.js?v=0.15.0_alpha"></script>
-  <script defer src="/loading.js?v=0.15.0_alpha"></script>
-  <script defer src="/benchmark.js?v=0.15.0_alpha"></script>
-  <script defer src="/git.js?v=0.15.0_alpha"></script>
-  <script defer src="/projects-sessions.js?v=0.15.0_alpha"></script>
-  <script defer src="/settings-runtime.js?v=0.15.0_alpha"></script>
-  <script defer src="/conversation.js?v=0.15.0_alpha"></script>
-  <script defer src="/conversation-stream.js?v=0.15.0_alpha"></script>
-  <script defer src="/conversation-review.js?v=0.15.0_alpha"></script>
-  <script defer src="/conversation-render.js?v=0.15.0_alpha"></script>
+  <dialog id="snapshot-git-dialog" class="settings-dialog">
+    <header class="dialog-header"><h2>Execute rollback coverage</h2></header>
+    <div class="dialog-body"><p>This project has no usable Git repository. Initialize Git and create an initial local commit, or continue with rollback of conversation context only. Without Git, changes to project files will not be rolled back. The choice applies to this project in this window and resets on closing or reloading.</p></div>
+    <footer class="dialog-footer">
+      <button class="secondary-button" type="button" data-snapshot-choice="cancel">Cancel</button>
+      <button class="secondary-button" type="button" data-snapshot-choice="context-only">Continue without file rollback</button>
+      <button class="primary-button" type="button" data-snapshot-choice="initialize">Initialize Git and commit</button>
+    </footer>
+  </dialog>
+  <dialog id="history-files-dialog" class="settings-dialog">
+    <header class="dialog-header"><div><h2>Saved history files</h2><p>Opening or downloading provides a copy. Saved history cannot be edited.</p></div><button id="close-history-files" class="icon-button" type="button" aria-label="Close">×</button></header>
+    <div class="dialog-body"><ul id="history-files-list" class="history-files-list"></ul></div>
+  </dialog>
+
+  <script defer src="/shared.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/i18n.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/app.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/loading.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/benchmark.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/git.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/projects-sessions.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/settings-runtime.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/conversation.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/conversation-stream.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/conversation-review.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/conversation-render.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/history-files.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
 </body>
 </html>
