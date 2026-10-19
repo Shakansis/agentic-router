@@ -156,6 +156,11 @@ identity guard; application files remain byte-for-byte unchanged.
 
 ## Validation boundary
 
+Follow-up: the user subsequently authorized all 13 real cases. That run exposed
+an Ollama Responses ordering defect affecting Codex steering. Its reproduction,
+AR compatibility correction and rerun results are recorded in
+[0.16.1 acceptance](release-0.16.1-alpha.md). The 0.16.0 assets remain unchanged.
+
 The four real-model classes contain 13 opt-in cases, including one replay case
 that depends on their recorded histories. They were discovered but not executed
 in this release run: fresh local inference authorization and an isolated real-test

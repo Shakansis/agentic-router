@@ -1,3 +1,27 @@
+# Agentic Router v0.16.1 alpha
+
+Fix Codex steering with local Ollama after interrupted reasoning. The Responses
+compatibility transport binds pending assistant reasoning before the newer user
+instruction, preserving conversation order, tool correlation and trailing
+prefill. Host policy and steering receipt semantics remain unchanged.
+
+All **13/13 real-model/history-dependent cases passed** against the executable
+extracted from the final Windows ZIP, including all five harnesses, persisted
+metrics, steering, 12 Native benchmark samples and Storytelling Apply/Undo/export.
+The complete installed-CLI suite also passed **32/32** against isolated simulated
+providers. The full deterministic browser/API suite passed **885/885**. All final
+gates completed with zero failures or skips; Release builds have zero warnings.
+
+Known issue: Qwen Code 0.25.0 may leave timing/token metrics unavailable when a
+native request is cancelled before reporting usage. See
+[Known issues](https://github.com/Shakansis/agentic-router-releases#known-issues)
+for the observed occurrence and its limits.
+
+Windows x64 and Linux x64 packages are rebuilt from the same frozen source;
+previous release assets remain unchanged. See the
+[acceptance record](https://github.com/Shakansis/agentic-router/blob/main/docs/validation/release-0.16.1-alpha.md)
+for the complete real, deterministic, installed-CLI and package results.
+
 # Agentic Router v0.16.0 alpha
 
 This alpha adds fixed specialists, a Storytelling Editor, project-file references,

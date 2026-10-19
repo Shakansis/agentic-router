@@ -4,14 +4,14 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: `v0.16.0_alpha` adds the Storytelling Editor, project-file references, model library controls and Native multi-tool execution. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
+**Current Status**: `v0.16.1_alpha` fixes Codex steering with Ollama after interrupted reasoning. It includes the Storytelling Editor, project-file references, model library controls and Native multi-tool execution from 0.16. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.16.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-win-x64.zip.sha256) |
-| `v0.16.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.16.1_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-win-x64.zip.sha256) |
+| `v0.16.1_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -20,13 +20,26 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.16.0_alpha` is a pre-release intended for evaluation. The package is
+`0.16.1_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
 conversations by default and can be disabled or reopened from Local resources.
 
-### What's new in 0.16.0_alpha
+### Known issues
+
+- **Qwen Code 0.25.0: incomplete inference metrics.** When a native request is
+  cancelled before reporting usage, timing/token metrics may remain unavailable
+  even if the answer finishes. Observed once; not reproduced in two subsequent
+  checks. Frequency in normal use is unknown.
+
+### What's new in 0.16.1_alpha
+
+- Preserve interrupted reasoning before a newer steering instruction on Ollama's
+  Responses endpoint. The model can then follow the current instruction instead
+  of continuing a stale assistant prefill. See the [real acceptance record](docs/validation/release-0.16.1-alpha.md).
+
+Included from 0.16:
 
 - Keep a specialist fixed for the conversation, or let Automatic route each turn.
 - Use the Storytelling Editor with RPG storytelling: review or rewrite a selection,
@@ -703,6 +716,12 @@ establish real inference quality or GPU capacity. Real-model runs require explic
 authorization. When a local AR instance is running, use isolated build outputs
 and `AGENTIC_ROUTER_E2E_*_PATH` overrides for the API and fixture executables.
 Keep the user's running instance and data directory separate from validation.
+
+The 0.16.1 Windows portable binary passed all **13/13** opt-in real-model/history
+cases with the installed `qwen3.8:27b-q4_K_M` and all five harnesses, including
+Native multi-tool execution and Storytelling Apply/Undo. The
+[acceptance record](docs/validation/release-0.16.1-alpha.md) records the exact
+versions, results and validation limits.
 
 ### Benchmark Lab production scenarios and repeated runs
 
