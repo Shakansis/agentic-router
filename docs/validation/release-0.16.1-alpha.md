@@ -159,3 +159,13 @@ and native CLI process tree were stopped. Their API/runtime ports have no
 remaining listener. External Ollama PID 24372 retains its original executable
 and creation time, with zero resident models as before. The two pre-existing
 Codex processes remain present. Evidence: `cleanup-real.json`.
+
+After the complete deterministic suite, the captured test-process tree and all
+release-artifact processes were absent, as were the known test API/runtime
+listeners. No test/build server remained. Evidence: `cleanup-all.json`.
+
+## Publication status
+
+The 0.16.1 packages and documentation are prepared and validated locally.
+Publication has not been performed; authorization for the source push and public
+release upload is pending. Existing 0.16.0 assets remain unchanged.
