@@ -482,6 +482,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
         LocalActionPlanner.RequestToolsetTool,
         "list_files",
         "read_file",
+        "read_files",
         "get_file_info",
         "search_text"
       },
@@ -740,6 +741,7 @@ public abstract class ChatEndToEndTestBase<TBatch> : PageTest
       "get_execution_plan",
       "list_files",
       "read_file",
+      "read_files",
       "get_file_info",
       "search_text",
       "web_search",

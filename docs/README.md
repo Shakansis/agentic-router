@@ -18,6 +18,13 @@ Use these sources for the current checkout, in this order:
    security, backup, and distribution documents.
 
 Current focused implementation records include
+[`rpg-specialist-editor.md`](rpg-specialist-editor.md) for fixed specialists and
+the in-tab Storytelling Editor draft/review workflow,
+[`composer-file-references.md`](composer-file-references.md) for project-file search
+and inline path badges in the composer,
+[`native-multi-tool-execution.md`](native-multi-tool-execution.md) for Native batches
+and optional parallel reads, [`model-library.md`](model-library.md) for installed
+model controls,
 [`PLAN-v59-durable-supervised-execute.md`](PLAN-v59-durable-supervised-execute.md)
 for the local durable Supervisor/Autonomous contract and
 [`PLAN-v62-phase-effort-profile.md`](PLAN-v62-phase-effort-profile.md) for the

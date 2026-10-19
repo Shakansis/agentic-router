@@ -8,6 +8,7 @@ using AgenticRouter.Api.Markdown;
 using AgenticRouter.Api.Observability;
 using AgenticRouter.Api.Providers;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Routing;
 using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Sessions;
 using AgenticRouter.Api.Supervision;
@@ -201,6 +202,14 @@ public sealed class ChatController : ControllerBase
     _trace.Link("requestId", requestId);
     _latency.Start(requestId);
 
+    try { IntentionRouter.ValidateSpecialist(request.Specialist); }
+    catch (ChatStageException exception)
+    {
+      await WriteErrorAsync(requestId, exception, cancellationToken);
+      _latency.Complete();
+      return;
+    }
+
     if (request.Thinking is not null && !ModelEffortLevels.IsValid(request.Thinking))
     {
       await WriteErrorAsync(requestId, new ChatStageException("request-validation",
@@ -303,7 +312,8 @@ public sealed class ChatController : ControllerBase
           request.Images,
           request.HideUserMessage,
           request.ReplaceFromMessageIndex,
-          cancellationToken
+          cancellationToken,
+          request.Specialist
         );
         _conversationSessionId = persisted?.Id
           ?? _conversationSessionId;
@@ -993,7 +1003,8 @@ public sealed class ChatController : ControllerBase
           Images: request.Images,
           Takeover: takeover,
           ExecutionStrategy: supervision.RequestedStrategy,
-          Thinking: request.Thinking
+          Thinking: request.Thinking,
+          Specialist: request.Specialist
         ),
         cancellationToken
       );
@@ -1682,7 +1693,7 @@ public sealed class ChatController : ControllerBase
       checkpoint,
       _lastExecutionCheckpoint,
       StringComparison.Ordinal
-    ))
+    ) && !streamEvent.Type.StartsWith("tools.", StringComparison.Ordinal))
     {
       return;
     }

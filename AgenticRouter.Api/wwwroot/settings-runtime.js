@@ -1142,14 +1142,14 @@ function renderRuntimeProfilesEditor() {
       caption.append(document.createTextNode(label + " "), runtimeHelpButton(label, {
         minimumContextTokens: "Minimum context window in tokens for this role.",
         targetContextTokens: "Preferred context window. The existing escalation ladder may increase it when needed.",
-        maximumContextTokens: "Role context ceiling, constrained by the provider and model limits.",
+        maximumContextTokens: "Maximum allowed escalation for this role. The model's declared capacity caps the effective window; global context values do not override this profile.",
         outputTokenLimit: "Maximum generated tokens reserved for this role.",
         keepAlive: "Residency duration in seconds. -1 requests indefinite residency; 0 unloads after the request."
       }[field]));
       const input = document.createElement("input");
       input.type = "number";
-      input.min = field === "keepAlive" ? "-1" : "128";
-      input.max = field === "keepAlive" ? "86400" : "131072";
+      input.min = field === "keepAlive" ? "-1" : field === "outputTokenLimit" ? "128" : "1024";
+      input.max = field === "keepAlive" ? "86400" : field === "outputTokenLimit" ? "1048575" : "2147483647";
       input.value = profile[field];
       input.id = `runtime-role-${role}-${field}`;
       fieldLabel.htmlFor = input.id;
@@ -1711,6 +1711,8 @@ function renderSettings() {
   elements.defaultContextTokens.value = state.settings.context.defaultContextTokens;
   elements.providerContextTokens.value = state.settings.context.providerContextTokens;
   elements.reservedResponseTokens.value = state.settings.context.reservedResponseTokens;
+  elements.parallelToolExecution.value = state.settings.execution.parallelToolExecution ?? "off";
+  elements.maxConcurrentToolCalls.value = state.settings.execution.maxConcurrentToolCalls ?? 4;
   elements.maxDirectPlanSteps.value = state.settings.execution.maxDirectPlanSteps ?? 5;
   elements.fileCreationOutputTokenLimit.value =
     state.settings.execution.fileCreationOutputTokenLimit ?? "";
@@ -2162,9 +2164,15 @@ function renderModelOrganization() {
       badges.append(badge);
     }
 
-    heading.append(title, exact, badges);
+    const lastUsed = document.createElement("small");
+    lastUsed.className = "model-last-used";
+    lastUsed.textContent = model.lastUsedAt
+      ? `Last used in AR · ${new Date(model.lastUsedAt).toLocaleString()}`
+      : model.usageState === "unavailable" ? "Last used in AR · unavailable" : "Last used in AR · no recorded use";
+    if (model.lastUsedAt) lastUsed.dataset.lastUsedAt = model.lastUsedAt;
+    heading.append(title, exact, badges, lastUsed);
     const fields = document.createElement("div");
-    fields.className = "model-preference-fields";
+    fields.className = "model-preference-fields settings-grid";
     const alias = document.createElement("input");
     alias.type = "text";
     alias.maxLength = 80;
@@ -2177,6 +2185,17 @@ function renderModelOrganization() {
     note.placeholder = "Optional note";
     note.value = model.note ?? "";
     note.dataset.modelNote = "";
+    const labeledField = (label, input, help) => {
+      const field = document.createElement("label");
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      const hint = document.createElement("small");
+      hint.textContent = help;
+      field.append(caption, input, hint);
+      return field;
+    };
+    fields.append(labeledField("Local alias", alias, "Display name in AR. Keeps the original model ID."),
+      labeledField("Note", note, "What you use this model for."));
     if (
       model.providerId === "ollama-local"
       && selectableAffinityDevices().length >= 2
@@ -2184,7 +2203,7 @@ function renderModelOrganization() {
       const affinityField = document.createElement("label");
       affinityField.className = "model-gpu-affinity-field";
       const affinityLabel = document.createElement("span");
-      affinityLabel.textContent = "GPU Affinity";
+      affinityLabel.textContent = "GPU affinity";
       const affinity = document.createElement("select");
       affinity.dataset.modelGpuAffinity = model.qualifiedId;
       replaceOptions(
@@ -2198,13 +2217,12 @@ function renderModelOrganization() {
         setModelGpuAffinity(model.qualifiedId, affinity.value, affinity);
       });
       const affinityHelp = document.createElement("small");
-      affinityHelp.textContent = "Overrides all role GPUs. Auto uses General Default GPU.";
+      affinityHelp.textContent = "Overrides role GPUs. Auto uses General Default GPU. Apply with Save settings.";
       affinityField.append(affinityLabel, affinity, affinityHelp);
       fields.append(affinityField);
     }
-    fields.append(alias, note);
     const actions = document.createElement("div");
-    actions.className = "settings-action-row";
+    actions.className = "settings-action-row model-library-actions";
 
     for (const action of [
       {
@@ -2232,10 +2250,21 @@ function renderModelOrganization() {
       button.textContent = window.AgenticRouterI18n.t(action.key);
       actions.append(button);
     }
+    if (model.providerId === "ollama-local" && model.available) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary-button model-remove-button";
+      remove.textContent = "Remove from Ollama";
+      remove.dataset.modelOrganizationAction = "remove";
+      remove.dataset.providerId = model.providerId;
+      remove.dataset.modelId = model.modelId;
+      actions.append(remove);
+    }
 
     card.append(heading, fields, actions);
     elements.modelOrganizationList.append(card);
   }
+  elements.modelLibraryCount.textContent = `${models.length} of ${state.modelOrganization?.models?.length ?? 0} models`;
 
   if (models.length === 0) {
     const empty = document.createElement("p");
@@ -2290,6 +2319,11 @@ async function handleModelOrganizationAction(event) {
     return;
   }
 
+  if (button.dataset.modelOrganizationAction === "remove") {
+    await removeLibraryModel(current, button);
+    return;
+  }
+
   const card = button.closest(".model-organization-card");
   button.disabled = true;
 
@@ -2316,9 +2350,115 @@ async function handleModelOrganizationAction(event) {
       }
     );
     renderComposerModels();
-    renderSettings();
+    renderModelOrganization();
+    elements.modelLibraryStatus.textContent = "Model preferences saved.";
+    elements.modelLibraryStatus.dataset.state = "success";
   } catch (error) {
-    elements.modelProfileStatus.textContent = error.message;
+    showModelLibraryError(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function showModelLibraryError(error) {
+  elements.modelLibraryStatus.textContent = error.message;
+  elements.modelLibraryStatus.dataset.state = "error";
+}
+
+async function refreshModelLibrary() {
+  elements.modelLibraryRefresh.disabled = true;
+  try {
+    const [organization, models] = await Promise.all([
+      fetchJson("/api/model-organization"), fetchJson("/api/models")
+    ]);
+    state.modelOrganization = organization;
+    state.models = models.models;
+    renderModelOrganization();
+    renderComposerModels();
+  } finally {
+    elements.modelLibraryRefresh.disabled = false;
+  }
+}
+
+async function installLibraryModel() {
+  if (elements.modelInstallButton.disabled) return;
+  const model = elements.modelInstallName.value.trim();
+  if (!model) {
+    showModelLibraryError(new Error("Enter a model name from the Ollama library."));
+    elements.modelInstallName.focus();
+    return;
+  }
+  elements.modelInstallButton.disabled = true;
+  elements.modelInstallName.disabled = true;
+  elements.modelLibraryStatus.dataset.state = "working";
+  elements.modelLibraryStatus.textContent = `Starting download · ${model}`;
+  const progress = elements.modelInstallProgress;
+  progress.hidden = false;
+  progress.removeAttribute("value");
+  try {
+    const result = await fetchJson("/api/setup/models/install", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model })
+    });
+    elements.modelLibraryStatus.textContent = result.message;
+    if (result.state === "available") {
+      await refreshModelLibrary();
+      finishLibraryInstall();
+    } else {
+      pollLibraryInstall(result.resourceId);
+    }
+  } catch (error) {
+    showModelLibraryError(error);
+    finishLibraryInstall();
+  }
+}
+
+function finishLibraryInstall() {
+  elements.modelInstallProgress.hidden = true;
+  elements.modelInstallButton.disabled = false;
+  elements.modelInstallName.disabled = false;
+}
+
+async function pollLibraryInstall(model) {
+  try {
+    const { job } = await fetchJson(`/api/setup/models/job?model=${encodeURIComponent(model)}`);
+    if (!job) throw new Error("Download status is unavailable. Refresh models to check the installation.");
+    elements.modelLibraryStatus.textContent = `${model} · ${job.message}`;
+    if (job.totalBytes > 0 && job.completedBytes != null) {
+      elements.modelInstallProgress.max = job.totalBytes;
+      elements.modelInstallProgress.value = job.completedBytes;
+      if (job.state === "downloading") elements.modelLibraryStatus.textContent += ` · ${formatBytes(job.completedBytes)} / ${formatBytes(job.totalBytes)}`;
+    } else elements.modelInstallProgress.removeAttribute("value");
+    if (job.state === "downloading") {
+      setTimeout(() => pollLibraryInstall(model), 1500);
+      return;
+    }
+    if (job.state !== "completed") throw new Error(job.message);
+    elements.modelLibraryStatus.dataset.state = "success";
+    await refreshModelLibrary();
+    finishLibraryInstall();
+  } catch (error) {
+    showModelLibraryError(error);
+    finishLibraryInstall();
+  }
+}
+
+async function removeLibraryModel(model, button) {
+  if (!await showAppConfirm(
+    `Remove ${model.modelId} from the configured Ollama server?\n\nAR will run ollama rm for this exact model. Saved routes, aliases and history stay unchanged; routes using it will need another installed model. Active AR requests finish before removal.`,
+    { title: "Remove model", confirmLabel: "Remove from Ollama", danger: true }
+  )) return;
+  button.disabled = true;
+  elements.modelLibraryStatus.dataset.state = "working";
+  elements.modelLibraryStatus.textContent = `Removing ${model.modelId} · waiting for any active AR request to finish…`;
+  try {
+    const result = await fetchJson("/api/setup/models/remove", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: model.modelId })
+    });
+    elements.modelLibraryStatus.textContent = result.message;
+    elements.modelLibraryStatus.dataset.state = "success";
+    await refreshModelLibrary();
+  } catch (error) {
+    showModelLibraryError(error);
   } finally {
     button.disabled = false;
   }
@@ -3636,6 +3776,8 @@ function collectSelectedSettings() {
     ollamaRuntime: collectOllamaRuntimeSettings(),
     execution: {
       ...state.settings.execution,
+      parallelToolExecution: elements.parallelToolExecution.value,
+      maxConcurrentToolCalls: Number(elements.maxConcurrentToolCalls.value),
       maxDirectPlanSteps: Number(elements.maxDirectPlanSteps.value),
       fileCreationOutputTokenLimit: elements.fileCreationOutputTokenLimit.value === ""
         ? null
@@ -3806,6 +3948,8 @@ function markSettingsValidationErrors(errors) {
         "context.providerContextTokens": elements.providerContextTokens,
         "context.reservedResponseTokens": elements.reservedResponseTokens,
         "context.maxConversationMessages": elements.maxConversationMessages,
+        "execution.parallelToolExecution": elements.parallelToolExecution,
+        "execution.maxConcurrentToolCalls": elements.maxConcurrentToolCalls,
         "execution.maxDirectPlanSteps": elements.maxDirectPlanSteps,
         "execution.fileCreationOutputTokenLimit": elements.fileCreationOutputTokenLimit,
         "execution.phaseEffort.plan": elements.phaseEffortPlan,

@@ -52,6 +52,8 @@ const state = {
   pendingDeliveryAction: null,
   activeAgentModel: null,
   activeAgentRole: null,
+  specialist: null,
+  activeSpecialist: null,
   activeHarness: null,
   usageOverview: null,
   pricingCatalog: null,
@@ -178,7 +180,9 @@ async function initialize() {
   if (defaultBenchmarkPrompt) {
     elements.benchmarkCustomPrompt.value = defaultBenchmarkPrompt;
   }
+  initializeComposerFiles();
   bindEvents();
+  initializeStoryEditor();
   initializeSidebarResize();
   initializeScrollFollowing();
   initializeComposerShellMetrics();
@@ -383,6 +387,8 @@ function bindElements() {
     "default-context-tokens",
     "provider-context-tokens",
     "reserved-response-tokens",
+    "parallel-tool-execution",
+    "max-concurrent-tool-calls",
     "max-direct-plan-steps",
     "file-creation-output-token-limit",
     "phase-effort-plan",
@@ -451,6 +457,12 @@ function bindElements() {
     "model-filter-favorites",
     "model-filter-hidden",
     "model-organization-list",
+    "model-install-name",
+    "model-install-button",
+    "model-install-progress",
+    "model-library-refresh",
+    "model-library-status",
+    "model-library-count",
     "model-profile-selector",
     "model-profile-name",
     "model-profile-primary",
@@ -781,6 +793,8 @@ function bindEvents() {
   elements.messageInput.addEventListener("input", updateStreamingComposerActions);
   elements.messageInput.addEventListener("input", renderPendingContextUsage);
   elements.compactContext.addEventListener("click", requestManualContextCompaction);
+  elements.contextUsage.addEventListener("toggle", fitContextUsagePopover);
+  window.addEventListener("resize", fitContextUsagePopover);
   elements.contextUsageAdvanced.addEventListener(
     "toggle",
     updateContextUsageAdvancedLabel
@@ -984,6 +998,11 @@ function bindEvents() {
     "click",
     handleModelOrganizationAction
   );
+  elements.modelInstallButton.addEventListener("click", installLibraryModel);
+  elements.modelInstallName.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); installLibraryModel(); }
+  });
+  elements.modelLibraryRefresh.addEventListener("click", () => refreshModelLibrary().catch(showModelLibraryError));
   elements.saveModelProfile.addEventListener("click", saveModelProfile);
   elements.applyModelProfile.addEventListener("click", applyModelProfile);
   elements.deleteModelProfile.addEventListener("click", deleteModelProfile);
@@ -1531,6 +1550,7 @@ async function loadApplicationState() {
   state.knowledgeProviders = knowledgeProviders;
   state.validationProfiles = validationProfiles;
   state.workspaceProfiles = workspaceProfiles;
+  updateStoryFileState();
   state.usageOverview = usageOverview;
   state.pricingCatalog = pricingCatalog;
   state.cloudProviders = cloudProviders;

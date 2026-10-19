@@ -160,7 +160,7 @@ public sealed class HistoryFilesEndToEndTests : ChatEndToEndTestBase<HistoryFile
     await SendMessageAsync("Second message");
     var calls = _environment.FakeOllama.Requests.Count;
     await Page.GetByRole(AriaRole.Button, new() { Name = "Edit message", Exact = true }).First.ClickAsync();
-    await Expect(Page.Locator("#message-input")).ToHaveValueAsync("First message");
+    await Expect(Page.Locator("#message-input")).ToHaveJSPropertyAsync("value", "First message");
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(0);
     Assert.HasCount(calls, _environment.FakeOllama.Requests);
     using var sessions = await _environment.HttpClient.GetAsync("api/sessions");
@@ -285,7 +285,7 @@ public sealed class HistoryFilesEndToEndTests : ChatEndToEndTestBase<HistoryFile
     Assert.IsTrue(File.Exists(path));
     var calls = _environment.FakeOllama.Requests.Count;
     await Page.GetByRole(AriaRole.Button, new() { Name = "Rollback", Exact = true }).ClickAsync();
-    await Expect(Page.Locator("#message-input")).ToHaveValueAsync(prompt);
+    await Expect(Page.Locator("#message-input")).ToHaveJSPropertyAsync("value", prompt);
     await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(0);
     await Expect(Page.Locator(".host-file-operation")).ToContainTextAsync("Rollback complete");

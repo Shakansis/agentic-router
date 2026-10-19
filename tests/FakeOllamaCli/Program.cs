@@ -15,6 +15,21 @@ if (string.Equals(
   return;
 }
 
+if (args.Length == 2 && args[0] == "rm")
+{
+  using var client = new HttpClient();
+  var removalHost = Environment.GetEnvironmentVariable("OLLAMA_HOST")
+    ?? throw new InvalidOperationException("OLLAMA_HOST is required for rm.");
+  using var request = new HttpRequestMessage(HttpMethod.Delete, new Uri(new Uri(removalHost), "/api/delete"))
+  {
+    Content = new StringContent(JsonSerializer.Serialize(new { model = args[1] }), Encoding.UTF8, "application/json")
+  };
+  using var result = await client.SendAsync(request);
+  Environment.ExitCode = result.IsSuccessStatusCode ? 0 : 1;
+  Console.WriteLine(result.IsSuccessStatusCode ? $"deleted '{args[1]}'" : "removal failed");
+  return;
+}
+
 if (!args.SequenceEqual(["serve"], StringComparer.Ordinal))
 {
   Console.Error.WriteLine($"Unexpected fake Ollama arguments: {string.Join(' ', args)}");
@@ -140,6 +155,8 @@ async Task HandleClientAsync(TcpClient client)
   var requestPath = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries)
     .ElementAtOrDefault(1);
   var forwardPath = Path.ChangeExtension(Environment.ProcessPath!, ".forward-url");
+  var backendForwardPath = Path.ChangeExtension(Environment.ProcessPath!, $".forward-{library}.url");
+  if (File.Exists(backendForwardPath)) forwardPath = backendForwardPath;
   if (File.Exists(forwardPath) && requestPath is not "/api/version" and not "/test/environment")
   {
     var body = new char[contentLength];

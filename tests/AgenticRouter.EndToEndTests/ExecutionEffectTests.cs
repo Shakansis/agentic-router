@@ -53,22 +53,25 @@ public sealed class ExecutionEffectTests
         "APPLICATION_OWNED_PROJECT_CONTEXT\nstatic project context"
       ),
       new("user", "Create the requested artifacts"),
-      new("assistant", new string('a', 12_000)),
-      new("tool", $"Status: completed\nOutput:\n{obsoleteOutput}", ToolName: "read_file")
+      new("assistant", new string('a', 12_000), ToolCalls: [new("read_file", JsonSerializer.SerializeToElement(new { path = "old.txt" }), "old")]),
+      new("tool", $"Status: completed\nOutput:\n{obsoleteOutput}", ToolName: "read_file", ToolCallId: "old")
     };
     for (var index = 1; index <= 3; index++)
     {
-      messages.Add(new OllamaToolMessage("assistant", $"recent proposal {index}"));
+      messages.Add(new OllamaToolMessage("assistant", $"recent proposal {index}",
+        ToolCalls: [new("read_file", JsonSerializer.SerializeToElement(new { path = $"recent-{index}.txt" }), $"recent-{index}")]));
       messages.Add(
         new OllamaToolMessage(
           "tool",
           $"Status: completed\nOutput:\nrecent result {index}",
-          ToolName: "read_file"
+          ToolName: "read_file",
+          ToolCallId: $"recent-{index}"
         )
       );
     }
-    messages.Add(new OllamaToolMessage("assistant", "latest assistant proposal"));
-    messages.Add(new OllamaToolMessage("tool", latestOutput, ToolName: "read_file"));
+    messages.Add(new OllamaToolMessage("assistant", "latest assistant proposal",
+      ToolCalls: [new("read_file", JsonSerializer.SerializeToElement(new { path = "latest.txt" }), "latest")]));
+    messages.Add(new OllamaToolMessage("tool", latestOutput, ToolName: "read_file", ToolCallId: "latest"));
 
     var fit = planner.FitToBudget(
       messages,
@@ -442,10 +445,16 @@ public sealed class ExecutionEffectTests
   {
     var resolver = new ToolNameResolver();
     var unambiguous = Assert.ThrowsExactly<LocalActionException>(
+      () => resolver.Resolve("file-search", resolver.ExecutableTools)
+    );
+    Assert.AreEqual("search_text", unambiguous.ProposedCanonicalTool);
+    StringAssert.Contains(unambiguous.Message, "Use canonical tool 'search_text'");
+
+    var reads = Assert.ThrowsExactly<LocalActionException>(
       () => resolver.Resolve("file-read", resolver.ExecutableTools)
     );
-    Assert.AreEqual("read_file", unambiguous.ProposedCanonicalTool);
-    StringAssert.Contains(unambiguous.Message, "Use canonical tool 'read_file'");
+    Assert.IsNull(reads.ProposedCanonicalTool);
+    StringAssert.Contains(reads.Message, "capability family 'file-read'");
 
     var ambiguous = Assert.ThrowsExactly<LocalActionException>(
       () => resolver.Resolve("file-mutation", resolver.ExecutableTools)

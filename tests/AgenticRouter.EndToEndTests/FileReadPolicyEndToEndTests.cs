@@ -40,7 +40,7 @@ public sealed class FileReadPolicyEndToEndTests : ChatEndToEndTestBase<FileReadP
     await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
     var before = _environment.FakeOllama.AllRequests.Count;
     await SendMessageAsync("chat workspace read request adaptive file read single two reads\nREAD_ARGUMENTS:{\"path\":\"chat-readable.txt\"}");
-    var requests = _environment.FakeOllama.AllRequests.Skip(before).ToArray();
+    var requests = _environment.FakeOllama.AllRequests.Skip(before).Where(request => request.Messages.Count > 0).ToArray();
     Assert.HasCount(3, requests);
     var last = requests.Last().Messages;
     Assert.IsTrue(last.Any(message => message.Role == "tool" && message.Content.Contains("HOST_READ_CONTEXT_COMPACTED_V1", StringComparison.Ordinal)));
@@ -319,7 +319,7 @@ public sealed class FileReadPolicyEndToEndTests : ChatEndToEndTestBase<FileReadP
     await Page.Locator("#model-selector").SelectOptionAsync(model);
     var before = _environment.FakeOllama.AllRequests.Count;
     await SendMessageAsync($"chat workspace read request adaptive file read {(tool == "read_files" ? "batch" : tool == "list_files" ? "list" : "single")}\nREAD_ARGUMENTS:{JsonSerializer.Serialize(arguments)}");
-    var requests = _environment.FakeOllama.AllRequests.Skip(before).ToArray();
+    var requests = _environment.FakeOllama.AllRequests.Skip(before).Where(request => request.Messages.Count > 0).ToArray();
     Assert.HasCount(2, requests, "One tool call and one final synthesis must suffice.");
     var message = requests.Last().Messages.Last(item => item.Role == "tool").Content;
     const string marker = "Output:\n";

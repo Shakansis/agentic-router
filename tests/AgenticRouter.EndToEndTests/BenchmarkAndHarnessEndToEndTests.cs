@@ -6074,18 +6074,18 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task QwenCodeUsesTheHostResolved128kContextWindow()
+  [DataRow(131072)]
+  [DataRow(524288)]
+  public async Task QwenCodeUsesSelectedRoleContextWithoutGlobalAdjustment(int modelMaximum)
   {
+    _environment.FakeOllama.SetDeclaredContext("qwen3.8:27b-gpu0", modelMaximum);
+    await _environment.RestartApplicationAsync();
+    var effective = Math.Min(262144, modelMaximum);
     var runtime = _environment.BaselineSettings.OllamaRuntime;
-    var largeContextProfile = new TestOllamaRoleRuntimeSettings(8_192, 131_072, 131_072, 300, 4_096);
+    var largeContextProfile = new TestOllamaRoleRuntimeSettings(8_192, 262_144, 262_144, 300, 4_096);
     using var saved = await _environment.PutSettingsAsync(
       _environment.BaselineSettings with
       {
-        Context = _environment.BaselineSettings.Context with
-        {
-          DefaultContextTokens = 131_072,
-          ProviderContextTokens = 131_072
-        },
         OllamaRuntime = runtime with
         {
           ModelOverrides =
@@ -6112,7 +6112,8 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
     Assert.HasCount(1, events.Where(IsTerminalStreamEvent));
     Assert.IsTrue(
       events.Where(item => item["type"]!.GetValue<string>() == "context.usage")
-        .Any(item => item["contextUsage"]?["effectiveLimitTokens"]?.GetValue<int>() == 131_072)
+        .Any(item => item["contextUsage"]?["effectiveLimitTokens"]?.GetValue<int>() == effective
+          && item["contextUsage"]?["requestedContextTokens"]?.GetValue<int>() == 262144)
     );
 
     var runtimePath = Path.Combine(_environment.DataDirectory, "qwen-code-runtime");
@@ -6123,7 +6124,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       model.RootElement.GetProperty("settings").GetString()!
     );
     Assert.AreEqual(
-      131_072,
+      effective,
       settings.RootElement.GetProperty("modelProviders").GetProperty("openai")[0]
         .GetProperty("generationConfig").GetProperty("contextWindowSize").GetInt32()
     );
@@ -6527,7 +6528,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       AriaRole.Button,
       new() { Name = "Previous question", Exact = true }
     ).ClickAsync();
-    await Expect(composer).ToHaveValueAsync("Custom source answer");
+    await Expect(composer).ToHaveJSPropertyAsync("value", "Custom source answer");
     await composer.FillAsync("Edited source answer");
     await composer.PressAsync("Enter");
     await Expect(panel).ToContainTextAsync("2 / 2");
@@ -6663,7 +6664,7 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       new() { Name = "Previous question", Exact = true }
     ).ClickAsync();
     await Expect(panel).ToContainTextAsync("1 / 2");
-    await Expect(composer).ToHaveValueAsync("Persisted first answer");
+    await Expect(composer).ToHaveJSPropertyAsync("value", "Persisted first answer");
     await Expect(composer).ToBeEditableAsync(new() { Editable = false });
 
     await panel.GetByRole(
@@ -8335,8 +8336,12 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
       .ToContainTextAsync("155 / 32.8k · live exact");
     await Expect(Page.Locator(".execution-session-footer [data-metric=tokens]").Last)
       .ToContainTextAsync("20");
-    await Expect(Page.Locator(".execution-session-footer [data-metric=throughput], .execution-session-footer [data-metric=ttft]"))
+    await Expect(Page.Locator(".execution-session-footer [data-metric=ttft]"))
       .ToHaveCountAsync(0);
+    await Expect(Page.Locator(".execution-session-footer [data-metric=throughput]"))
+      .ToHaveAttributeAsync("data-metric-state", "unavailable");
+    await Expect(Page.Locator(".execution-session-footer [data-metric=throughput]"))
+      .ToContainTextAsync("unavailable");
     await Expect(Page.Locator("#context-usage-estimate-warning"))
       .ToBeHiddenAsync();
   }

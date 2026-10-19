@@ -108,6 +108,8 @@ public sealed class InstalledHarnessUpgradeEndToEndTests : PageTest
     if (Environment.GetEnvironmentVariable("AGENTIC_ROUTER_INSTALLED_HARNESS_E2E") != "1")
       Assert.Inconclusive("Opt in with real executable overrides; provider remains deterministic and local.");
     await using var environment = await TestEnvironment.StartAsync();
+    await File.WriteAllTextAsync(Path.Combine(environment.WorkspaceDirectory, "fixture-baseline.txt"),
+      "Baseline for the isolated harness integration workspace.\n");
     environment.FakeOllama.InstalledHarnessProbe = true;
     environment.FakeOllama.InstalledNativeCompatibilityProbe = draft is not null || disableThinking;
     if (disableThinking) await File.WriteAllTextAsync(Path.Combine(environment.WorkspaceDirectory, "initial.txt"), "NATIVE_COMPATIBILITY_READ_OK");

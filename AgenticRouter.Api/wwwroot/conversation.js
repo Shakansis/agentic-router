@@ -109,7 +109,7 @@ function handleSendStrategyKeyDown(event) {
 }
 
 function updateInteractionControls() {
-  const isStreaming = Boolean(state.requestController);
+  const isStreaming = Boolean(state.requestController || storyEditor.controller);
   const disabled = isStreaming
     || state.conversationTransitioning
     || state.readOnlyConversation;
@@ -139,7 +139,8 @@ function updateInteractionControls() {
     || onboardingBlocked
     || state.readOnlyConversation;
   elements.sendButton.disabled =
-    state.conversationTransitioning
+    Boolean(storyEditor.controller)
+    || state.conversationTransitioning
     || state.historyOperationActive
     || onboardingBlocked
     || state.readOnlyConversation;
@@ -154,6 +155,8 @@ function updateInteractionControls() {
     setSendStrategyMenu(false);
   }
   renderSendStrategy();
+  renderSpecialistControl();
+  if (storyEditor.elements["story-document"]) updateStorySelection();
   updateImageAttachmentControls();
   elements.composer.classList.toggle(
     "execute-mode",
@@ -252,7 +255,7 @@ function renderHarnesses() {
 function updateHarnessControls() {
   const disabled = Boolean(
     state.requestController
-  ) || state.conversationTransitioning || state.readOnlyConversation;
+  ) || Boolean(storyEditor.controller) || state.conversationTransitioning || state.readOnlyConversation;
   const automaticRoute = state.interactionMode === "execute"
     && state.harness === "auto-model-harness";
   elements.modelSelector.disabled = disabled || automaticRoute;
@@ -399,7 +402,8 @@ async function saveCurrentConversation() {
           state: state.conversationState,
           approvalPolicy: state.approvalPolicy,
           harness: state.harness,
-          executionStrategy: state.executionStrategy
+          executionStrategy: state.executionStrategy,
+          specialist: state.specialist
         })
       }
     );
@@ -475,6 +479,9 @@ function clearConversationUi() {
   state.approvalPolicy = "auto";
   state.activeAgentModel = null;
   state.activeAgentRole = null;
+  state.specialist = null;
+  state.activeSpecialist = null;
+  closeStoryEditor();
   state.modelCapability = null;
   state.contextUsage = null;
   state.messageQueue = [];
@@ -1210,6 +1217,7 @@ function createEmptyState() {
 }
 
 function handleComposerKeyDown(event) {
+  if (handleComposerMentionKey(event)) return;
   if (event.key === "Escape" && state.editingTurn && !state.requestController) {
     event.preventDefault();
     cancelMessageEdit();
@@ -1748,6 +1756,7 @@ function finishAssistantSegmentForSteering(assistant) {
 
 async function handleComposerSubmit(event) {
   event.preventDefault();
+  if (storyEditor.controller) return;
   if (state.historyOperationActive) return;
 
   if (state.readOnlyConversation) {
@@ -1968,6 +1977,7 @@ async function handleComposerSubmit(event) {
           history: modelHistory,
           interactionMode: requestInteractionMode,
           thinking: elements.thinkingSelector.value || null,
+          specialist: state.specialist,
           harness: state.harness,
           approvalPolicy: state.approvalPolicy,
           browserSessionId: state.browserSessionId,

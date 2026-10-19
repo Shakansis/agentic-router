@@ -345,7 +345,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2),
         $"{model}: planners={JsonSerializer.Serialize(plannerRequests.Select(request => new { request.Model, request.AvailableTools, request.PredictTokens }))}; all={JsonSerializer.Serialize(_environment.FakeOllama.Requests.Select(request => new { request.Model, request.AvailableTools, request.PredictTokens, Markers = request.Messages.Select(message => message.Content[..Math.Min(message.Content.Length, 80)]).ToArray() }))}");
       Assert.IsTrue(_environment.FakeOllama.Requests.Where(request =>
-        !plannerRequests.Contains(request))
+        request.Messages.Count > 0 && !plannerRequests.Contains(request))
         .All(request => request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2), model);
       Assert.AreEqual("first", await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "token-budget-a.txt")));
       Assert.AreEqual("second", await File.ReadAllTextAsync(Path.Combine(_environment.WorkspaceDirectory, "token-budget-b.txt")));
@@ -354,7 +354,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       await Page.GetByRole(AriaRole.Button, new() { Name = "Chat", Exact = true }).ClickAsync();
       await SendMessageAsync("ordinary chat output budget");
       Assert.IsNotEmpty(_environment.FakeOllama.Requests);
-      Assert.IsTrue(_environment.FakeOllama.Requests.All(request =>
+      Assert.IsTrue(_environment.FakeOllama.Requests.Where(request => request.Messages.Count > 0).All(request =>
         request.PredictTokens == _environment.BaselineSettings.OllamaRuntime.RoleDefaults["primary"].OutputTokenLimit),
         $"Chat must keep its configured output limit: {model}, requests={JsonSerializer.Serialize(_environment.FakeOllama.Requests.Select(request => new { request.Model, request.PredictTokens }))}");
     }
@@ -2290,7 +2290,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "Completed"
     );
 
-    var requests = _environment.FakeOllama.Requests;
+    var requests = _environment.FakeOllama.Requests.Where(request => request.Messages.Count > 0).ToArray();
     Assert.HasCount(
       1,
       requests
@@ -2593,10 +2593,14 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "Write documentation explicitly"
     );
 
-    var requests = _environment.FakeOllama.Requests;
+    // Residency cleanup sends an empty, non-streaming unload request. It is not inference.
+    var requests = _environment.FakeOllama.Requests
+      .Where(request => !(request.KeepAlive == 0 && !request.Stream && request.Messages.Count == 0))
+      .ToArray();
     Assert.HasCount(
       1,
-      requests
+      requests,
+      JsonSerializer.Serialize(requests.Select(request => new { request.Model, request.KeepAlive, request.Stream, Roles = request.Messages.Select(message => message.Role) }))
     );
     Assert.AreEqual(
       "beta:code",
@@ -3213,13 +3217,13 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.IsNotEmpty(
       chatToolRequests
     );
-    Assert.IsTrue(
-      chatToolRequests.All(
-        request => request.AvailableTools.All(
-          tool => tool is "list_files" or "read_file" or "get_file_info" or "search_text"
-        )
-      )
-    );
+    foreach (var request in chatToolRequests)
+    {
+      CollectionAssert.AreEquivalent(
+        new[] { "list_files", "read_file", "read_files", "get_file_info", "search_text" },
+        request.AvailableTools.ToArray()
+      );
+    }
   }
 
   [TestMethod]
@@ -3466,7 +3470,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "Second message"
     );
 
-    var requests = _environment.FakeOllama.Requests;
+    var requests = _environment.FakeOllama.Requests.Where(request => request.Messages.Count > 0).ToArray();
     Assert.HasCount(
       2,
       requests
@@ -3641,19 +3645,15 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
     await Expect(
       input
-    ).ToHaveValueAsync(
+    ).ToHaveJSPropertyAsync("value",
       "First message"
     );
     await Expect(
       input
     ).ToBeFocusedAsync();
-    await Expect(
-      Page.Locator(
-        "#composer-status"
-      )
-    ).ToContainTextAsync(
-      "Editing message"
-    );
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(afterFailure ? 1 : 0);
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(afterFailure ? 1 : 0);
+    await Expect(Page.Locator("#cancel-message-edit")).ToBeHiddenAsync();
     await input.FillAsync(
       "First message edited"
     );
@@ -3793,7 +3793,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task EditingMessageKeepsSubmitControlsAlignedAndCanBeCancelledVisibly()
+  public async Task RewindingMessageRestoresDraftAndKeepsSubmitControlsUsable()
   {
     await Page.SetViewportSizeAsync(
       1024,
@@ -3821,43 +3821,21 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     );
     await Expect(
       cancelEdit
-    ).ToBeVisibleAsync();
-    var alignmentDifference = await Page.EvaluateAsync<double>(
+    ).ToBeHiddenAsync();
+    await Expect(Page.Locator("#message-input"))
+      .ToHaveJSPropertyAsync("value", "Message to edit");
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(0);
+    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(0);
+    Assert.IsTrue(await Page.EvaluateAsync<bool>(
       """
       () => {
-        const controls = document.querySelector(".composer-submit-actions");
-        const approval = document.querySelector("#approval-policy");
-        return Math.abs(
-          controls.getBoundingClientRect().bottom
-            - approval.getBoundingClientRect().bottom
-        );
+        const composer = document.querySelector("#composer").getBoundingClientRect();
+        const controls = document.querySelector(".composer-submit-actions").getBoundingClientRect();
+        return controls.left >= composer.left && controls.right <= composer.right + 1
+          && controls.bottom <= composer.bottom + 1;
       }
       """
-    );
-    Assert.IsLessThanOrEqualTo(
-      1,
-      alignmentDifference
-    );
-    await cancelEdit.ClickAsync();
-    await Expect(
-      cancelEdit
-    ).ToBeHiddenAsync();
-    await Expect(
-      Page.Locator(
-        "#message-input"
-      )
-    ).ToHaveValueAsync(
-      string.Empty
-    );
-    await Expect(
-      Page.Locator(
-        ".message.user"
-      )
-    ).ToHaveCountAsync(
-      1
-    );
-
-    await editButton.ClickAsync();
+    ));
     await Page.Locator(
       "#message-input"
     ).PressAsync(
@@ -3873,11 +3851,19 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).ToHaveTextAsync(
       "Send"
     );
+    await Expect(Page.Locator("#message-input"))
+      .ToHaveJSPropertyAsync("value", "Message to edit");
+    await Page.Locator("#send-button").ClickAsync();
+    await Expect(Page.Locator(".message.assistant .activity").Last)
+      .ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
+    await Expect(Page.Locator(".message.user .message-content"))
+      .ToHaveTextAsync("Message to edit");
   }
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task RejectedEditKeepsTheOriginalConversationAndDraft()
+  public async Task RejectedRewindKeepsTheOriginalConversationAndDraft()
   {
     var workspaceId = await ActiveWorkspaceIdAsync();
     using var enabled = await _environment.HttpClient.PutAsJsonAsync($"api/workspaces/{workspaceId}/history", new { enabled = true });
@@ -3899,20 +3885,20 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     });
     replaced.EnsureSuccessStatusCode();
     var requests = _environment.FakeOllama.Requests.Count;
-    await Page.Locator(".message.user").First.GetByRole(AriaRole.Button, new() { Name = "Edit message", Exact = true }).ClickAsync();
     await Page.Locator("#message-input").FillAsync("Edited draft must survive the conflict");
-    var responseTask = Page.WaitForResponseAsync(response => response.Url.EndsWith("/api/chat/stream", StringComparison.Ordinal));
-    await Page.Locator("#message-input").PressAsync("Enter");
+    var responseTask = Page.WaitForResponseAsync(response => response.Url.Contains("/api/history-files/rewind/", StringComparison.Ordinal));
+    await Page.Locator(".message.user").First.GetByRole(AriaRole.Button, new() { Name = "Edit message", Exact = true }).ClickAsync();
     var response = await responseTask;
+    Assert.AreEqual(400, response.Status);
     StringAssert.Contains(await response.TextAsync(), "session-edit-conflict");
-    await Expect(Page.Locator("#message-input")).ToHaveValueAsync("Edited draft must survive the conflict");
-    await Expect(Page.Locator("#cancel-message-edit")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#message-input")).ToHaveJSPropertyAsync("value", "Edited draft must survive the conflict");
+    await Expect(Page.Locator("#cancel-message-edit")).ToBeHiddenAsync();
+    await Expect(Page.Locator("#send-button")).ToBeEnabledAsync();
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(1);
     await Expect(Page.Locator(".message.user")).ToContainTextAsync("Original message before external replacement");
     Assert.HasCount(requests, _environment.FakeOllama.Requests);
     var stored = JsonNode.Parse(await _environment.HttpClient.GetStringAsync($"api/sessions/{id}?workspaceId={workspaceId}"))!;
     Assert.AreEqual("Externally replaced history", stored["messages"]![0]!["content"]!.GetValue<string>());
-    await Page.Locator("#cancel-message-edit").ClickAsync();
   }
 
   [TestMethod]
@@ -4331,13 +4317,15 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     ).SelectOptionAsync(
       "docs:latest"
     );
+    await SendMessageAsync("Warm the selected documentation model");
+    _environment.FakeOllama.Reset();
     await SendMessageAsync(
       "generic HTTP failure"
     );
     await Expect(
       Page.Locator(
         ".activity > summary"
-      )
+      ).Last
     ).ToContainTextAsync(
       "Failed"
     );
@@ -7046,6 +7034,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         LocalActionPlanner.RequestToolsetTool,
         "list_files",
         "read_file",
+        "read_files",
         "get_file_info",
         "search_text",
         "create_file"
@@ -8310,16 +8299,17 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task MultipleNativeToolCallsRetainAndExecuteOnlyTheFirst()
+  public async Task MultipleNativeToolCallsExecuteEveryCallInOrder()
   {
     await Page.GotoAsync(
       "/"
     );
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3-coder:30b");
     await SetExecuteModeAsync(
       "auto"
     );
     await SendMessageAsync(
-      "execute multiple native tool calls create file"
+      "NATIVE_MULTITOOL_V1 mutate"
     );
 
     Assert.AreEqual(
@@ -8331,11 +8321,11 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         )
       )
     );
-    Assert.IsFalse(
+    Assert.IsTrue(
       Directory.Exists(
         Path.Combine(
           _environment.WorkspaceDirectory,
-          "ignored-extra-call"
+          "additional-call"
         )
       )
     );
@@ -8344,7 +8334,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
         "[data-event-type=\"action.planning-retry\"]"
       )
     ).ToHaveCountAsync(
-      1
+      0
     );
     Assert.IsTrue(
       _environment.FakeOllama.Requests
@@ -8352,7 +8342,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
           request => request.Messages
         )
         .All(
-          message => message.ToolCalls.Count <= 1
+          message => message.ToolCalls.Count <= 3
         )
     );
   }
@@ -8436,8 +8426,8 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
     Assert.IsNotEmpty(specialistRequests);
     Assert.IsTrue(
       specialistRequests.All(
-        request => request.ContextTokens == 16_384
-          && request.PredictTokens == 8_192
+        request => request.ContextTokens == 24_576
+          && request.PredictTokens == 12_288
       ),
       string.Join(
         ", ",

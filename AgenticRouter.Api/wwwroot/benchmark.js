@@ -291,7 +291,7 @@ function renderBenchmarkControls() {
     ?? catalog?.defaultContextTokens
     ?? 32768;
   elements.benchmarkContextTokens.min = String(catalog?.minimumContextTokens ?? 4096);
-  elements.benchmarkContextTokens.max = String(catalog?.maximumContextTokens ?? 131072);
+  elements.benchmarkContextTokens.max = String(catalog?.maximumContextTokens ?? 1048576);
   elements.benchmarkContextTokens.value = String(selectedContext);
   elements.benchmarkContextPresets.replaceChildren(...(catalog?.contextPresets ?? []).map(value => {
     const option = document.createElement("option");

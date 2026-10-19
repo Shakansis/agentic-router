@@ -316,6 +316,15 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         ["contentBlockId"] = "large-thinking",
         ["reasoningDelta"] = $"Observation {index}. "
       });
+      if (index % 20 == 19)
+        timeline.Add(new JsonObject
+        {
+          ["requestId"] = "large-history",
+          ["type"] = "target.model-resolved",
+          ["timestamp"] = DateTimeOffset.UtcNow,
+          ["selectedModel"] = "alpha:latest",
+          ["message"] = "Target model: alpha:latest."
+        });
     }
     foreach (var item in originalTimeline) timeline.Add(item);
     messages.Add(new JsonObject { ["role"] = "user", ["content"] = "Latest question" });
@@ -338,8 +347,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         const sample = () => {
           const thinking = document.querySelector('[data-content-block-id="large-thinking"]');
           const count = Number(thinking?.dataset.deltaCount ?? 0);
-          if (count > 0 && count < 30000) window.historyReplayFrames++;
-          if (count < 30000) requestAnimationFrame(sample);
+          if (count > 0 && count < 1500) window.historyReplayFrames++;
+          if (count < 1500) requestAnimationFrame(sample);
         };
         requestAnimationFrame(sample);
       }
@@ -347,7 +356,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(".see-more-history").ClickAsync();
     await Expect(Page.Locator(".see-more-history")).ToHaveCountAsync(0, new() { Timeout = 30_000 });
     var thinking = Page.Locator("[data-content-block-id=\"large-thinking\"]");
-    await Expect(thinking).ToHaveAttributeAsync("data-delta-count", "30000");
+    await Expect(thinking).ToHaveAttributeAsync("data-delta-count", "1500");
     var text = await thinking.Locator(".assistant-reasoning-body").TextContentAsync();
     Assert.AreEqual(string.Concat(Enumerable.Range(0, 30_000).Select(index => $"Observation {index}. ")), text);
     Assert.IsLessThan(100, await thinking.Locator(".assistant-reasoning-body")
@@ -361,7 +370,13 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     using var exported = await _environment.HttpClient.GetAsync($"api/sessions/{sessionId}/export");
     exported.EnsureSuccessStatusCode();
     var original = JsonNode.Parse(await exported.Content.ReadAsStringAsync())!;
-    Assert.AreEqual(timeline.Count, original["messages"]![1]!["timeline"]!.AsArray().Count);
+    var exportedTimeline = original["messages"]![1]!["timeline"]!.AsArray();
+    Assert.AreEqual(text, string.Concat(exportedTimeline
+      .Where(item => item!["contentBlockId"]?.GetValue<string>() == "large-thinking")
+      .Select(item => item!["reasoningDelta"]?.GetValue<string>())));
+    Assert.HasCount(1500, exportedTimeline.Where(item =>
+      item!["requestId"]?.GetValue<string>() == "large-history"
+      && item["type"]!.GetValue<string>() == "target.model-resolved"));
   }
 
   [TestMethod]
@@ -408,6 +423,9 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
             document.querySelector('#messages').scrollWidth - document.querySelector('#messages').clientWidth];
         }
         """);
+      var runningScreenshot = Path.Combine(TestContext.TestResultsDirectory!, $"execution-sticky-{width}-{outcome}.png");
+      await Page.ScreenshotAsync(new() { Path = runningScreenshot });
+      TestContext.AddResultFile(runningScreenshot);
       Assert.IsLessThanOrEqualTo(2d, metrics[0], "The running status must stay at the chat viewport top.");
       Assert.IsLessThanOrEqualTo(1d, metrics[1]);
       Assert.IsLessThanOrEqualTo(1d, metrics[2]);
@@ -439,7 +457,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       await Expect(footer.Locator(".execution-footer-state")).ToHaveTextAsync(outcome);
       Assert.AreEqual("static", await header.EvaluateAsync<string>("element => getComputedStyle(element).position"));
       Assert.AreEqual("static", await footer.EvaluateAsync<string>("element => getComputedStyle(element).position"));
-      Assert.IsTrue(await footer.EvaluateAsync<bool>("element => element.previousElementSibling.classList.contains('activity') && element.nextElementSibling.classList.contains('message-actions')"));
+      Assert.IsTrue(await footer.EvaluateAsync<bool>("element => element.previousElementSibling.classList.contains('activity') && element.querySelectorAll('.message-actions').length === 1"));
     }
     finally { await File.WriteAllTextAsync(release, "cancelled"); }
   }
@@ -2895,6 +2913,23 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     var browserSessionId = await Page.EvaluateAsync<string>(
       "() => state.browserSessionId"
     );
+    using (var invalid = await _environment.HttpClient.PostAsJsonAsync("api/chat/stream", new
+    {
+      message = "execute create file",
+      model = "missing-replacement-model:latest",
+      interactionMode = "execute",
+      approvalPolicy = "auto",
+      browserSessionId
+    }))
+    {
+      invalid.EnsureSuccessStatusCode();
+      Assert.HasCount(1, ParseSseEvents(await invalid.Content.ReadAsStringAsync())
+        .Where(item => item["type"]!.GetValue<string>() == "error"));
+      await Expect(Page.Locator(".action-approval")).ToBeVisibleAsync();
+      await Expect(Page.Locator(".action-approval").GetByRole(AriaRole.Button,
+        new() { Name = "Approve", Exact = true })).ToBeEnabledAsync();
+      Assert.IsFalse(File.Exists(Path.Combine(_environment.WorkspaceDirectory, "hello.txt")));
+    }
     using var response = await _environment.HttpClient.PostAsJsonAsync(
       "api/chat/stream",
       new
@@ -3837,6 +3872,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         LocalActionPlanner.RequestToolsetTool,
         "list_files",
         "read_file",
+        "read_files",
         "get_file_info",
         "search_text"
       },
@@ -3861,6 +3897,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
             LocalActionPlanner.RequestToolsetTool,
             "list_files",
             "read_file",
+            "read_files",
             "get_file_info",
             "search_text",
             "create_file"
@@ -3875,6 +3912,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
             LocalActionPlanner.RequestToolsetTool,
             "list_files",
             "read_file",
+            "read_files",
             "get_file_info",
             "search_text",
             "create_file"
@@ -3891,6 +3929,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
             or "search_text"
             or "create_file"
             or "read_file"
+            or "read_files"
         )
       )
     );
@@ -4012,11 +4051,16 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         StringComparison.Ordinal
       ))).ToArray();
     Assert.IsTrue(planningRequests.Any(request =>
-      request.AvailableTools.Contains("create_file", StringComparer.Ordinal)
-      && request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2));
-    Assert.IsTrue(planningRequests.Where(request =>
-      !request.AvailableTools.Contains("create_file", StringComparer.Ordinal))
-      .All(request => request.PredictTokens == _environment.BaselineSettings.Context.DefaultContextTokens / 2));
+      request.AvailableTools.Contains("create_file", StringComparer.Ordinal)));
+    Assert.IsTrue(planningRequests.Any(request =>
+      !request.AvailableTools.Contains("create_file", StringComparer.Ordinal)));
+    Assert.IsTrue(planningRequests.All(request =>
+      request.ContextTokens == specialist.TargetContextTokens
+      && request.PredictTokens is > 0
+      && request.PredictTokens <= specialist.TargetContextTokens / 2));
+    Assert.IsLessThan(planningRequests[0].PredictTokens!.Value,
+      planningRequests[^1].PredictTokens!.Value,
+      "Accumulated evidence must reduce the remaining output headroom.");
   }
 
   [TestMethod]
@@ -4081,6 +4125,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         LocalActionPlanner.RequestToolsetTool,
         "list_files",
         "read_file",
+        "read_files",
         "get_file_info",
         "search_text"
       },
@@ -4132,6 +4177,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
         LocalActionPlanner.RequestToolsetTool,
         "list_files",
         "read_file",
+        "read_files",
         "get_file_info",
         "search_text"
       },
@@ -6718,7 +6764,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(".message.user").First.GetByRole(
       AriaRole.Button, new() { Name = "Rollback", Exact = true }
     ).ClickAsync();
-    await Expect(Page.Locator("#message-input")).ToHaveValueAsync("execute create file");
+    await Expect(Page.Locator("#message-input")).ToHaveJSPropertyAsync("value", "execute create file");
     await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
     await Expect(Page.Locator(".message.user")).ToHaveCountAsync(0);
     await Page.GetByRole(AriaRole.Button, new() { Name = "Chat", Exact = true }).ClickAsync();
@@ -9924,7 +9970,7 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
       new Regex("(^|\\s)trace-diagnostic-investigate(\\s|$)")
     );
     await Expect(buttons).ToBeEnabledAsync();
-    await Expect(Page.Locator(".message.assistant .activity > summary").Last).ToContainTextAsync("Trace:");
+    await Expect(Page.Locator(".message.assistant .execution-footer-metadata").Last).ToContainTextAsync("Trace:");
     var visibleUserMessages = Page.Locator(".message.user");
     await Expect(visibleUserMessages).ToHaveCountAsync(1);
 
@@ -10214,8 +10260,10 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     );
     response.EnsureSuccessStatusCode();
     var stream = await response.Content.ReadAsStringAsync();
-    StringAssert.Contains(stream, "context-item-too-large");
-    StringAssert.Contains(stream, "request-context-exhausted");
+    var failure = ParseSseEvents(stream).Single(item => item["type"]!.GetValue<string>() == "error")["error"]!;
+    Assert.AreEqual("request-context-does-not-fit", failure["code"]!.GetValue<string>());
+    Assert.AreEqual(413, failure["httpStatus"]!.GetValue<int>());
+    Assert.IsGreaterThan(8_192L, failure["contextFit"]!["requiredContextTokens"]!.GetValue<long>());
     Assert.IsFalse(_environment.FakeOllama.Requests.Any(
       request => request.HasTools
         && request.Messages.Any(message => message.Content.Contains("SPECIALIST_TOOL_LOOP_V2", StringComparison.Ordinal))

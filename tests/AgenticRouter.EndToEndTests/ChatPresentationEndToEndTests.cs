@@ -26,7 +26,7 @@ public sealed class ChatPresentationEndToEndTests : ChatEndToEndTestBase<ChatPre
       Assert.IsTrue(unchanged.Headers.CacheControl.NoCache, path);
     }
     await Page.GotoAsync("/");
-    Assert.IsTrue(await Page.EvaluateAsync<bool>("Array.from(document.scripts).filter(script => script.src).every(script => new URL(script.src).searchParams.get('rev') === '20261011.1')"));
+    Assert.IsTrue(await Page.EvaluateAsync<bool>("Array.from(document.scripts).filter(script => script.src).every(script => new URL(script.src).searchParams.get('rev') === '20261019.1')"));
     Assert.IsTrue(await Page.EvaluateAsync<bool>("isToolInvocationWrapper({tool: 'tool_call'}) && !isVisibleWorkAction({tool: 'tool_call'})"));
   }
 

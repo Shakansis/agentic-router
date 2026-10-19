@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$VersionLabel = '0.15.0_alpha',
+  [string]$VersionLabel = '0.16.0_alpha',
   [ValidateSet('win-x64', 'linux-x64')]
   [string]$RuntimeIdentifier = 'win-x64',
   [string]$OutputDirectory,
@@ -103,7 +103,7 @@ function New-PosixTarGzip {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.15.0_alpha.'
+  throw 'VersionLabel must use the form 0.16.0_alpha.'
 }
 
 $packageVersion = $VersionLabel.Replace('_', '-')
@@ -182,6 +182,8 @@ try {
     '--self-contained',
     'true',
     '--no-restore',
+    '--disable-build-servers',
+    '-p:UseSharedCompilation=false',
     "-p:OutputPath=$buildArtifactsDirectory\bin\",
     '-o',
     $stagingDirectory,

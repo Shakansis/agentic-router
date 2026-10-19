@@ -6,12 +6,14 @@
   <meta name="color-scheme" content="dark">
   <title>Agentic Router</title>
   <link rel="icon" type="image/png" href="/img/brand/agentic-router-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=0.15.0_alpha&amp;rev=20261011.1">
-  <link rel="stylesheet" href="/panels.css?v=0.15.0_alpha&amp;rev=20261011.1">
-  <link rel="stylesheet" href="/benchmark.css?v=0.15.0_alpha&amp;rev=20261011.1">
-  <link rel="stylesheet" href="/model-runtime.css?v=0.15.0_alpha&amp;rev=20261011.1">
-  <link rel="stylesheet" href="/bootstrap.css?v=0.15.0_alpha&amp;rev=20261011.1">
-  <link rel="stylesheet" href="/user-input.css?v=0.15.0_alpha&amp;rev=20261011.1">
+  <link rel="stylesheet" href="/styles.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/panels.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/benchmark.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/model-runtime.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/bootstrap.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/user-input.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/story-editor.css?v=0.16.0_alpha&amp;rev=20261019.1">
+  <link rel="stylesheet" href="/composer-files.css?v=0.16.0_alpha&amp;rev=20261019.1">
 </head>
 <body class="bootstrapping">
   <div
@@ -145,7 +147,7 @@
       <ul id="external-app-warnings-list" class="project-conversation-list" tabindex="0" aria-label="Availability warnings"></ul>
     </details>
 
-    <span class="app-version sidebar-expanded-only">v0.15.0_alpha</span>
+    <span class="app-version sidebar-expanded-only">v0.16.0_alpha</span>
   </aside>
 
   <div
@@ -192,7 +194,22 @@
   <main id="conversation-view" class="workspace">
     <header class="chat-header">
       <div class="title-group">
-        <span class="eyebrow">Local session</span>
+        <div class="session-heading">
+          <span class="eyebrow">Local session</span>
+          <div class="specialist-control">
+            <label class="visually-hidden" for="specialist-selector">Specialist</label>
+            <select id="specialist-selector" aria-describedby="active-specialist">
+              <option value="">Automatic</option>
+              <option value="general-chat">General chat · Fixed</option>
+              <option value="documentation">Documentation · Fixed</option>
+              <option value="software-development">Software development · Fixed</option>
+              <option value="software-architecture">Software architecture · Fixed</option>
+              <option value="rpg-storytelling">RPG storytelling · Fixed</option>
+              <option value="review-and-testing">Review and testing · Fixed</option>
+            </select>
+            <span id="active-specialist" class="visually-hidden" role="status">Automatic · Waiting for a message</span>
+          </div>
+        </div>
         <h1>Conversation</h1>
         <span id="conversation-persistence" class="persistence-status" role="status">
           Unsaved
@@ -221,6 +238,7 @@
       </details>
 
       <div class="header-actions">
+        <button id="open-story-editor" class="secondary-button" type="button" aria-controls="story-editor" aria-expanded="false" title="Open Storytelling Editor" hidden>Storytelling Editor</button>
         <button id="new-conversation" class="secondary-button" type="button" aria-label="New conversation" title="New conversation">
           <span class="button-icon" aria-hidden="true">＋</span>
           <span>New conversation</span>
@@ -235,6 +253,115 @@
         </button>
       </div>
     </header>
+
+    <aside id="story-editor" class="story-editor-panel" aria-label="Storytelling Editor" hidden>
+      <header class="story-editor-heading">
+        <div><span class="eyebrow">Writing workspace</span><h2 id="story-editor-title">Storytelling Editor</h2><p>Workspace files · Save explicitly or export a copy</p></div>
+        <div class="story-heading-actions">
+          <button id="story-fullscreen-toggle" class="secondary-button" type="button" aria-haspopup="dialog" aria-controls="story-fullscreen" aria-expanded="false">Full screen</button>
+          <button id="close-story-editor" class="icon-button" type="button" aria-label="Close Storytelling Editor">×</button>
+        </div>
+      </header>
+      <div class="story-file-toolbar">
+        <button id="story-open-file" class="secondary-button" type="button">Workspace files</button>
+        <label class="visually-hidden" for="story-file-name">Export file name</label>
+        <input id="story-file-name" type="text" value="story.md" maxlength="120" aria-label="Export file name" title="Name of the exported copy. Save to workspace keeps the original path.">
+        <button id="story-export" class="secondary-button" type="button">Export .md</button>
+      </div>
+      <div class="story-workspace-source"><span id="story-file-source" class="runtime-note" role="status">Unsaved draft · Open a workspace file to save changes</span><button id="story-save-file" class="secondary-button" type="button" disabled>Save to workspace</button></div>
+      <p id="story-file-save-status" class="story-file-save-status" role="status" aria-live="polite"></p>
+      <div id="story-import-confirmation" class="story-editor-notice" hidden>
+        <p>Opening this file will replace the current draft. Export it first if you want to keep it.</p>
+        <button id="story-confirm-import" class="secondary-button" type="button">Replace draft</button>
+        <button id="story-cancel-import" class="secondary-button" type="button">Keep draft</button>
+      </div>
+      <label class="visually-hidden" for="story-document">Story draft</label>
+      <div class="story-document-toolbar">
+        <div class="story-view-toggle" role="group" aria-label="Document display">
+          <button id="story-mode-raw" type="button" class="secondary-button" aria-pressed="true" aria-controls="story-document">Raw</button>
+          <button id="story-mode-view" type="button" class="secondary-button" aria-pressed="false" aria-controls="story-preview">View</button>
+        </div>
+        <span id="story-token-estimate" class="runtime-note" title="Approximate tokens in the whole draft, using the Host heuristic of three characters per token. This is not GPU memory or the model's current context." role="status">~0 tokens · Whole draft</span>
+      </div>
+      <textarea id="story-document" class="story-document" maxlength="200000" spellcheck="true" placeholder="Write, paste, or open a story. Select a passage to revise or find synonyms."></textarea>
+      <div id="story-preview" class="story-preview benchmark-markdown" role="region" aria-label="Formatted Markdown" tabindex="0" hidden></div>
+      <div id="story-highlights" class="story-editor-toolbar" hidden><span id="story-highlight-status" class="runtime-note" role="status"></span><button id="story-clear-highlights" class="secondary-button" type="button">Clear highlights</button></div>
+      <div class="story-draft-status">
+        <p id="story-selection-status" class="runtime-note" role="status">0 words · Select a passage</p>
+        <button id="story-undo" class="secondary-button" type="button" disabled>Undo last application</button>
+      </div>
+      <div class="story-editor-actions">
+        <label for="story-instruction">Revision instruction (optional)</label>
+        <textarea id="story-instruction" rows="2" maxlength="2000" placeholder="For example: reduce repetition while preserving the character’s voice."></textarea>
+        <div class="story-editor-toolbar">
+          <button id="story-revise" class="secondary-button" type="button">Revise selection</button>
+          <button id="story-rewrite" class="secondary-button" type="button">Rewrite selection</button>
+          <button id="story-synonyms" class="secondary-button" type="button">Find synonyms</button>
+          <button id="story-agreement" class="secondary-button" type="button">Check agreement</button>
+          <button id="story-repetitions" class="secondary-button" type="button">Find repetitions</button>
+          <button id="story-review-proposal" class="secondary-button" type="button" hidden>Review proposal</button>
+          <button id="story-cancel" class="secondary-button" type="button" hidden>Cancel proposal</button>
+        </div>
+        <div id="story-loading" class="story-loading" role="status" aria-live="polite" hidden>
+          <span class="conversation-history-spinner" aria-hidden="true"></span>
+          <span><strong id="story-loading-label">Analyzing selected passage…</strong><small>Waiting for the model. You can cancel this request.</small></span>
+        </div>
+        <p class="runtime-note">Storytelling specialist · Chat model selection · Selected passage and nearby context · Local Ollama: at least 30 min keep-alive per analysis</p>
+      </div>
+      <p id="story-status" class="runtime-note" role="status" aria-live="polite"></p>
+      <section id="story-repetition-panel" class="story-repetition-panel" aria-label="Repeated words" hidden>
+        <label><input id="story-ignore-common" type="checkbox" checked> Ignore common words (Portuguese / English)</label>
+        <label class="story-proximity-control">Maximum distance (words) <input id="story-repetition-distance" type="number" min="1" max="500" step="1" value="50"></label>
+        <p class="runtime-note">Only nearby repetitions · Case insensitive · Click to choose an occurrence; right-click for highlight and ignore options.</p>
+        <div id="story-repetition-results" class="story-repetition-results"></div>
+        <details id="story-ignored" hidden><summary>Ignored words</summary><p class="runtime-note">Ignored in this draft. Click a word to include it again.</p><div id="story-ignored-words" class="story-editor-toolbar"></div></details>
+      </section>
+      <div id="story-word-menu" class="story-word-menu" role="menu" aria-label="Repeated word actions" hidden>
+        <button id="story-highlight-word" role="menuitem" type="button">Highlight all</button>
+        <button id="story-ignore-word" role="menuitem" type="button">Ignore from repetition</button>
+      </div>
+      <div id="story-view-menu" class="story-word-menu" role="menu" aria-label="Story text actions" hidden>
+        <button id="story-select-section" role="menuitem" type="button">Select section</button>
+        <button id="story-view-synonym" role="menuitem" type="button">Find synonym</button>
+      </div>
+    </aside>
+
+    <dialog id="story-fullscreen" class="story-fullscreen" aria-labelledby="story-editor-title"></dialog>
+    <dialog id="story-files-dialog" class="story-files-dialog" aria-labelledby="story-files-title">
+      <header class="story-comparison-header"><div><h2 id="story-files-title">Open workspace file</h2><p id="story-files-project" class="runtime-note"></p></div><button id="story-files-close" class="icon-button" type="button" aria-label="Close workspace files">×</button></header>
+      <div class="story-files-body">
+        <div class="story-editor-toolbar"><button id="story-files-up" class="secondary-button" type="button">Up</button><span id="story-files-directory" class="runtime-note"></span><button id="story-files-refresh" class="secondary-button" type="button">Refresh</button></div>
+        <input id="story-files-filter" type="search" placeholder="Filter this folder…" aria-label="Filter workspace files">
+        <p class="runtime-note">Editable UTF-8 .md / .txt files · Active project only</p>
+        <p id="story-files-status" class="runtime-note" role="status"></p>
+        <div id="story-files-list" class="story-files-list" aria-label="Workspace files"></div>
+      </div>
+    </dialog>
+
+    <dialog id="story-comparison" class="story-comparison" aria-labelledby="story-comparison-title">
+      <header class="story-comparison-header">
+        <div><h2 id="story-comparison-title">Review selected passage</h2><p id="story-proposal-model" class="runtime-note"></p></div>
+        <button id="story-close-comparison" class="icon-button" type="button" aria-label="Return to draft" title="Return to draft without discarding">×</button>
+      </header>
+      <div class="story-comparison-body">
+        <p id="story-comparison-status" class="runtime-note" role="status"></p>
+        <div class="story-diff-legend"><span><del>Removed</del> from original</span><span><ins>Added</ins> to proposal</span><span>Matching colors pair changes · Hover or focus to highlight · Scrolls together</span><span id="story-diff-note" role="status"></span></div>
+        <div id="story-alternatives" class="story-alternatives"></div>
+        <p id="story-synonym-context-note" class="runtime-note" hidden>Sentence shown for context. Apply replaces only the selected text.</p>
+        <div class="story-comparison-columns">
+          <div><div class="story-comparison-column-heading"><h3 id="story-original-label">Original selection</h3></div><pre id="story-original" tabindex="0" aria-label="Original text with removals"></pre></div>
+          <div>
+            <div class="story-comparison-column-heading"><label id="story-replacement-label" for="story-replacement">Proposed replacement</label><button id="story-edit-proposal" class="secondary-button" type="button" aria-pressed="false" aria-controls="story-replacement story-replacement-diff">Edit proposal</button></div>
+            <pre id="story-replacement-diff" tabindex="0" aria-label="Proposed replacement with additions"></pre>
+            <textarea id="story-replacement" rows="5" maxlength="32000" hidden></textarea>
+          </div>
+        </div>
+      </div>
+        <footer class="story-comparison-footer">
+          <button id="story-discard" class="secondary-button" type="button">Discard proposal</button>
+          <button id="story-apply" class="primary-button" type="button">Apply to selection</button>
+        </footer>
+    </dialog>
 
     <section id="messages" class="messages" aria-live="polite">
       <div id="empty-state" class="empty-state">
@@ -398,12 +525,15 @@
           </header>
           <div id="message-buffer-list" class="message-buffer-list"></div>
         </section>
-        <textarea
-          id="message-input"
-          rows="1"
-          aria-label="Message"
-          placeholder="Send a message…"
-        ></textarea>
+        <div class="composer-editor-wrap">
+          <div id="composer-file-picker" class="composer-file-picker" hidden>
+            <div id="composer-file-status" role="status"></div>
+            <div id="composer-file-list" role="listbox" aria-label="Project files"></div>
+          </div>
+          <div id="message-input" class="composer-input" contenteditable="true" role="textbox"
+            aria-label="Message" aria-multiline="true" aria-autocomplete="list" aria-controls="composer-file-list"
+            aria-expanded="false" data-placeholder="Send a message… Type @ to reference a project file."></div>
+        </div>
         <div class="composer-actions">
           <div class="capability-controls">
             <button
@@ -663,7 +793,7 @@
                     i
                   </button>
                 </span>
-                <input id="benchmark-context-tokens" type="number" min="4096" max="131072" step="1024" value="32768" list="benchmark-context-presets" required>
+                <input id="benchmark-context-tokens" type="number" min="4096" max="2147483647" step="1" value="32768" list="benchmark-context-presets" required>
                 <datalist id="benchmark-context-presets"></datalist>
               </label>
               <label>
@@ -1195,6 +1325,18 @@
                 <small id="default-gpu-help">Used when model GPU Affinity is Auto. An explicit model affinity takes precedence, including Supervisor and Worker.</small>
               </label>
               <label>
+                <span>Parallel Tool Execution</span>
+                <select id="parallel-tool-execution" name="parallelToolExecution" aria-describedby="parallel-tool-execution-help">
+                  <option value="off">Off</option><option value="auto">Auto</option><option value="on">On</option>
+                </select>
+                <small id="parallel-tool-execution-help">Native only. All modes accept multiple calls. Auto overlaps eligible reads; On also encourages independent groups. Mutations remain sequential.</small>
+              </label>
+              <label>
+                <span>Max Concurrent Tool Calls</span>
+                <input id="max-concurrent-tool-calls" name="maxConcurrentToolCalls" type="number" min="1" max="16" step="1" required>
+                <small>Native only. Maximum simultaneous eligible reads.</small>
+              </label>
+              <label>
                 <span>Direct execution plan limit</span>
                 <input
                   id="max-direct-plan-steps"
@@ -1408,12 +1550,23 @@
             </div>
             <div id="intentions-grid" class="intentions-grid"></div>
             <details class="model-organization-panel" data-ignore-settings-dirty>
-              <summary>Model organization and filters</summary>
+              <summary>Model library · install, organize and remove</summary>
               <div class="model-organization-body">
-                <div class="model-filter-grid">
+                <div class="model-library-install">
+                  <div class="model-library-heading"><div><h4>Add an Ollama model</h4><p>Browse the library, copy a model name and install it here.</p></div><a class="secondary-button" href="https://ollama.com/search" target="_blank" rel="noopener noreferrer">Browse Ollama ↗</a></div>
+                  <div class="model-install-row settings-grid">
+                    <label><span>Model name</span><input id="model-install-name" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="e.g. muse-glimmer:30b-q4_K_M-dflash"></label>
+                    <button id="model-install-button" class="primary-button" type="button">Install model</button>
+                  </div>
+                  <p class="runtime-note">Downloads to the configured Ollama server. Check the model size on Ollama before installing.</p>
+                  <progress id="model-install-progress" aria-label="Model download progress" hidden></progress>
+                </div>
+                <div class="model-library-heading"><div><h4>Your models</h4><p id="model-library-count"></p></div><button id="model-library-refresh" class="secondary-button" type="button">Refresh models</button></div>
+                <p id="model-library-status" class="runtime-note" role="status" aria-live="polite"></p>
+                <div class="model-filter-grid settings-grid">
                   <label>
-                    <span>Search exact alias or ID</span>
-                    <input id="model-filter-search" type="search" autocomplete="off">
+                    <span>Search models</span>
+                    <input id="model-filter-search" type="search" autocomplete="off" placeholder="Name or local alias">
                   </label>
                   <label>
                     <span>Source</span>
@@ -1424,11 +1577,11 @@
                     </select>
                   </label>
                   <label>
-                    <span>Minimum context</span>
+                    <span>Minimum context · tokens</span>
                     <input id="model-filter-context" type="number" min="0" step="1024" value="0">
                   </label>
                 </div>
-                <div class="model-filter-toggles">
+                <div class="model-filter-toggles" role="group" aria-label="Model filters">
                   <label><input id="model-filter-tools" type="checkbox"> Tools</label>
                   <label><input id="model-filter-web" type="checkbox"> Web</label>
                   <label><input id="model-filter-vision" type="checkbox"> Vision</label>
@@ -1438,6 +1591,7 @@
                   <label><input id="model-filter-favorites" type="checkbox"> Favorites only</label>
                   <label><input id="model-filter-hidden" type="checkbox"> Show hidden</label>
                 </div>
+                <p class="runtime-note model-library-help">Last used = last successful inference recorded by AR in retained history. Usage outside AR is not tracked. Hide only removes a model from pickers; Remove uninstalls it from Ollama.</p>
                 <div id="model-organization-list" class="model-organization-list"></div>
               </div>
             </details>
@@ -1576,8 +1730,8 @@
                 <button
                   class="information-button"
                   type="button"
-                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.15.0."
-                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.15.0."
+                  aria-label="Information: history is local, optional, and not encrypted by Agentic Router v0.16.0."
+                  data-tooltip="History is local, optional, and not encrypted by Agentic Router v0.16.0."
                 >i</button>
               </div>
             </div>
@@ -1640,12 +1794,13 @@
             </div>
             <div class="settings-grid context-settings-grid">
             <label>
-              <span>Estimated default context</span>
-              <input id="default-context-tokens" type="number" min="1024" max="131072" required>
+              <span>Fallback conversation context</span>
+              <input id="default-context-tokens" type="number" min="1024" max="2147483647" required>
             </label>
             <label>
-              <span>Context sent to Ollama</span>
-              <input id="provider-context-tokens" type="number" min="1024" max="131072" required>
+              <span>Fallback / benchmark context ceiling</span>
+              <input id="provider-context-tokens" type="number" min="1024" max="2147483647" required>
+              <small>Used for fallback context budgeting and explicit benchmark limits. Local model requests use their selected role or exact-model profile, independently of these global values.</small>
             </label>
             <label>
               <span>Response reserve</span>
@@ -1776,6 +1931,7 @@
               <p class="runtime-note">
                 Specialist, primary, fallback, benchmark, model-test, web-search-synthesis, and vision roles use independent context profiles. Legacy router and resident role IDs remain readable but are not active request routes.
               </p>
+              <p class="runtime-note">Choose the context here, with minimum ≤ target ≤ maximum. Local models use this role's target (or its exact-model override), capped only by the model's declared capacity. No global context adjustment is required. Chat shows requested and effective values when the model cannot support the full request.</p>
               <div id="runtime-role-profiles" class="runtime-role-profiles"></div>
 
               <details class="runtime-profile-subsection">
@@ -1791,19 +1947,19 @@
                   </label>
                   <label for="runtime-override-minimum">
                     <span class="runtime-field-caption">Minimum <button type="button" class="information-button" aria-label="Help: Minimum" data-tooltip="Smallest allowed context window in tokens for this role.">?</button></span>
-                    <input id="runtime-override-minimum" type="number" min="1024" max="131072">
+                    <input id="runtime-override-minimum" type="number" min="1024" max="2147483647">
                   </label>
                   <label for="runtime-override-target">
                     <span class="runtime-field-caption">Target <button type="button" class="information-button" aria-label="Help: Target" data-tooltip="Preferred context window in tokens. The existing escalation ladder may increase it when needed.">?</button></span>
-                    <input id="runtime-override-target" type="number" min="1024" max="131072">
+                    <input id="runtime-override-target" type="number" min="1024" max="2147483647">
                   </label>
                   <label for="runtime-override-maximum">
-                    <span class="runtime-field-caption">Maximum <button type="button" class="information-button" aria-label="Help: Maximum" data-tooltip="Maximum context window for this role, constrained by provider and model limits.">?</button></span>
-                    <input id="runtime-override-maximum" type="number" min="1024" max="131072">
+                    <span class="runtime-field-caption">Maximum <button type="button" class="information-button" aria-label="Help: Maximum" data-tooltip="Maximum allowed escalation for this role. The model's declared capacity caps the effective window; global context values do not override this profile.">?</button></span>
+                    <input id="runtime-override-maximum" type="number" min="1024" max="2147483647">
                   </label>
                   <label for="runtime-override-output">
                     <span class="runtime-field-caption">Output limit <button type="button" class="information-button" aria-label="Help: Output limit" data-tooltip="Maximum generated tokens reserved for this role.">?</button></span>
-                    <input id="runtime-override-output" type="number" min="128" max="32768">
+                    <input id="runtime-override-output" type="number" min="128" max="1048575">
                   </label>
                   <label for="runtime-override-keep-alive">
                     <span class="runtime-field-caption">Keep-alive (seconds; -1 keeps the selected role loaded) <button type="button" class="information-button" aria-label="Help: Keep-alive (seconds; -1 keeps the selected role loaded)" data-tooltip="Residency duration in seconds. -1 requests indefinite residency; 0 unloads after the request.">?</button></span>
@@ -2019,8 +2175,8 @@
             <button
               class="information-button"
               type="button"
-              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.15.0."
-              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.15.0. Disabling it stops new writes but does not delete existing records."
+              aria-label="Information: local history may contain conversation content, paths, diffs, and bounded command output and is not encrypted by Agentic Router v0.16.0."
+              data-tooltip="Content stays on this computer and may include prompts, responses, paths, diffs, and bounded command output. History is not encrypted by Agentic Router v0.16.0. Disabling it stops new writes but does not delete existing records."
             >i</button>
           </div>
           <details id="local-history-section" class="workspace-accordion" open>
@@ -2596,18 +2752,23 @@
     <div class="dialog-body"><ul id="history-files-list" class="history-files-list"></ul></div>
   </dialog>
 
-  <script defer src="/shared.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/i18n.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/app.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/loading.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/benchmark.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/git.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/projects-sessions.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/settings-runtime.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/conversation.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/conversation-stream.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/conversation-review.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/conversation-render.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
-  <script defer src="/history-files.js?v=0.15.0_alpha&amp;rev=20261011.1"></script>
+  <script defer src="/shared.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/i18n.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/app.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/loading.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/benchmark.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/git.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/projects-sessions.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/settings-runtime.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/conversation.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/conversation-stream.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/conversation-review.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/conversation-render.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/history-files.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/story-editor.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/story-preview.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/story-view-menu.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/story-files.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
+  <script defer src="/composer-files.js?v=0.16.0_alpha&amp;rev=20261019.1"></script>
 </body>
 </html>

@@ -348,7 +348,7 @@ public sealed class OllamaClient : IOllamaClient
           policy.Resolution.Performance?.DraftTokens,
           policy.Resolution.Performance?.BatchSize
         ),
-        null,
+        usageContext.MinimumKeepAliveSeconds is null ? null : policy.KeepAlive,
         tools.Count == 0
           ? null
           : tools.Select(
@@ -419,8 +419,9 @@ public sealed class OllamaClient : IOllamaClient
           result.Message?.Thinking,
           result.Message?.ToolCalls?.Select(
             call => new OllamaToolCall(
-              call.Function.Name,
-              call.Function.Arguments.Clone(),
+              call.Function?.Name ?? string.Empty,
+              call.Function is { Arguments.ValueKind: not JsonValueKind.Undefined } function
+                ? function.Arguments.Clone() : JsonSerializer.SerializeToElement<object?>(null),
               call.Id
             )
           ).ToArray() ?? [],
@@ -595,8 +596,9 @@ public sealed class OllamaClient : IOllamaClient
         toolCalls.AddRange(
           chunk.Message.ToolCalls.Select(
             call => new OllamaToolCall(
-              call.Function.Name,
-              call.Function.Arguments.Clone(),
+              call.Function?.Name ?? string.Empty,
+              call.Function is { Arguments.ValueKind: not JsonValueKind.Undefined } function
+                ? function.Arguments.Clone() : JsonSerializer.SerializeToElement<object?>(null),
               call.Id
             )
           )
@@ -686,7 +688,7 @@ public sealed class OllamaClient : IOllamaClient
           policy.Resolution.Performance?.DraftTokens,
           policy.Resolution.Performance?.BatchSize
         ),
-        null,
+        usageContext.MinimumKeepAliveSeconds is null ? null : policy.KeepAlive,
         images: options.Images,
         requestedEffort: ResolveThinking(options.EffectiveGenerationProfile,
           options.RequestedEffort, policy.SupportsThinking, model,
@@ -1154,6 +1156,19 @@ public sealed class OllamaClient : IOllamaClient
         )
       )
       .ToArray();
+  }
+
+  public async Task UnloadModelAtEndpointAsync(Uri endpoint, string model, CancellationToken cancellationToken)
+  {
+    // The endpoint is an observed residency, not a new GPU-affinity selection.
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    using var response = await SendChatAsync(
+      endpoint,
+      CreateRequest(model, Array.Empty<ChatMessage>(), false, null, null, 0),
+      "model-unload",
+      cancellationToken,
+      requestTimeout: TimeSpan.FromSeconds(settings.Runtime.GenerationTimeoutSeconds)
+    );
   }
 
   public async Task SetModelResidencyAsync(
@@ -1832,6 +1847,9 @@ public sealed class OllamaClient : IOllamaClient
       };
     }
 
+    if (usageContext.MinimumKeepAliveSeconds is > 0 && resolution.KeepAlive >= 0)
+      resolution = resolution with { KeepAlive = Math.Max(resolution.KeepAlive, usageContext.MinimumKeepAliveSeconds.Value) };
+
     return new GenerationPolicy(
       resolution,
       resolution.OutputTokenLimit,
@@ -1840,7 +1858,7 @@ public sealed class OllamaClient : IOllamaClient
       metadata.SupportsThinking,
       metadata.ThinkingValues,
       metadata.ThinkingDefault,
-      usageContext.RuntimeSettingsOverride is null ? null : resolution.KeepAlive
+      usageContext.RuntimeSettingsOverride is null && usageContext.MinimumKeepAliveSeconds is null ? null : resolution.KeepAlive
     );
   }
 
@@ -2451,7 +2469,7 @@ public sealed class OllamaClient : IOllamaClient
 
   private sealed record OllamaApiToolCall(
     string? Type,
-    OllamaApiFunctionCall Function,
+    OllamaApiFunctionCall? Function,
     string? Id = null
   );
 

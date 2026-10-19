@@ -1251,67 +1251,23 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
 
     foreach (var call in calls.EnumerateArray())
     {
-      if (
-        !call.TryGetProperty(
-          "function",
-          out var function
-        )
-      )
-      {
-        continue;
-      }
-
-      var name = ReadString(
-        function,
-        "name"
-      );
-      var arguments = ReadString(
-        function,
-        "arguments"
-      );
-
-      if (
-        string.IsNullOrWhiteSpace(
-          name
-        )
-        || string.IsNullOrWhiteSpace(
-          arguments
-        )
-      )
-      {
-        continue;
-      }
-
+      var hasFunction = call.ValueKind == JsonValueKind.Object && call.TryGetProperty("function", out _);
+      var function = hasFunction ? call.GetProperty("function") : default;
+      var name = function.ValueKind == JsonValueKind.Object ? ReadString(function, "name") : null;
+      var arguments = function.ValueKind == JsonValueKind.Object ? ReadString(function, "arguments") : null;
+      JsonElement parsed;
       try
       {
-        using var document = JsonDocument.Parse(
-          arguments
-        );
-        result.Add(
-          new OllamaToolCall(
-            name,
-            document.RootElement.Clone(),
-            ReadString(
-              call,
-              "id"
-            )
-          )
-        );
+        using var document = JsonDocument.Parse(arguments ?? "null");
+        parsed = document.RootElement.Clone();
       }
-      catch (JsonException exception)
+      catch (JsonException)
       {
-        throw new CloudProviderException(
-          "tool-protocol-invalid",
-          "tool-call-parse",
-          ProviderId,
-          null,
-          "The provider returned malformed tool arguments.",
-          null,
-          false,
-          null,
-          exception
-        );
+        // Preserve the invalid call for individual Host rejection alongside valid siblings.
+        parsed = JsonSerializer.SerializeToElement(arguments);
       }
+      result.Add(new OllamaToolCall(name ?? string.Empty, parsed,
+        call.ValueKind == JsonValueKind.Object ? ReadString(call, "id") : null));
     }
 
     return result;

@@ -69,7 +69,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
   private const string PlannerPrompt =
     PlannerMarker + "\n"
     + "You are the selected specialist and retain ownership of this task. When another local "
-    + "action is necessary, return exactly one safe tool call, observe the authoritative result, and decide the "
+    + "action is necessary, return one or more tool calls, observe their authoritative results, and decide the "
     + "next action yourself. The Host executes tools and enforces deterministic boundaries; "
     + "it does not reinterpret your intent through another model. "
     + "Treat minor spelling and grammar mistakes as recoverable input. When a phrase is "
@@ -78,7 +78,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     + "and continue without inventing unrelated behavior. "
     + "Re-evaluate the remaining work after every authoritative tool result and never repeat a "
     + "completed action. "
-    + "Use exactly one native tool call when a local action is required. "
+    + "Group independent actions in one native response. Preserve dependent action order; never guess arguments that require an earlier result. Prefer existing batch tools such as read_files and create_files where appropriate. "
     + ExecutionProgressPolicy.ActionIntroductionGuidance
     + ExecutionProgressPolicy.ImmediateToolGuidance
     + ExecutionProgressPolicy.EarlyWriteGuidance
@@ -181,36 +181,16 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
     AddLast(compact, messages, item => item.Content?.StartsWith(ExpertExecutionGuidanceService.GuidanceMarker, StringComparison.Ordinal) == true);
     compact.Add(new OllamaToolMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
 
-    var retainedToolIndexes = messages.Select(
-      (item, index) => (item, index)
-    ).Where(
-      pair => pair.item.Role == "tool"
-    ).TakeLast(
-      RetainedToolPairs
-    ).Select(
-      pair => pair.index
-    ).ToArray();
-    var previousToolIndex = -1;
-    foreach (var toolIndex in retainedToolIndexes)
+    var retainedAssistantIndexes = messages.Select((item, index) => (item, index))
+      .Where(pair => pair.item.Role == "assistant" && pair.item.ToolCalls?.Count > 0)
+      .TakeLast(RetainedToolPairs).Select(pair => pair.index).ToArray();
+    foreach (var assistantIndex in retainedAssistantIndexes)
     {
-      var assistant = messages.Skip(
-        previousToolIndex + 1
-      ).Take(
-        toolIndex - previousToolIndex - 1
-      ).LastOrDefault(
-        item => item.Role == "assistant"
-      );
-      if (assistant is not null)
-      {
-        compact.Add(
-          assistant with
-          {
-            Thinking = null
-          }
-        );
-      }
-      compact.Add(messages[toolIndex]);
-      previousToolIndex = toolIndex;
+      var assistant = messages[assistantIndex];
+      compact.Add(assistant with { Thinking = null });
+      var ids = assistant.ToolCalls!.Select(call => call.Id).ToHashSet(StringComparer.Ordinal);
+      compact.AddRange(messages.Skip(assistantIndex + 1).TakeWhile(item => item.Role != "assistant")
+        .Where(item => item.Role == "tool" && ids.Contains(item.ToolCallId)));
     }
 
     var latestControl = messages.LastOrDefault(item => IsControlMessage(item.Content));
@@ -290,13 +270,31 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
     try
     {
-      return ParseResponse(
-        completionAllowed,
-        response,
-        canonicalTurn,
-        assistantMessage,
-        availableTools
-      );
+      if (canonicalTurn.ToolCalls.Count == 0)
+        return ParseResponse(completionAllowed, response, canonicalTurn, assistantMessage, availableTools);
+
+      var batchId = Guid.NewGuid().ToString("N");
+      if (canonicalTurn.ToolCalls.GroupBy(call => call.CallId, StringComparer.Ordinal).Any(group => group.Count() > 1))
+        throw new LocalActionException("tool-call-duplicate-id", "The model reused a tool call identifier. No calls from this ambiguous batch were executed; use distinct identifiers.");
+      var calls = new List<LocalActionPlanningResult>();
+      foreach (var call in canonicalTurn.ToolCalls)
+      {
+        LocalActionPlanningResult planned;
+        try
+        {
+          planned = ParseResponse(completionAllowed, response, canonicalTurn with { ToolCalls = [call] }, assistantMessage, availableTools);
+        }
+        catch (LocalActionException failure)
+        {
+          if (canonicalTurn.ToolCalls.Count == 1) throw;
+          planned = new LocalActionPlanningResult(
+            new LocalActionProposal(call.Name, call.Arguments, null), assistantMessage, false,
+            CallId: call.CallId, ActionIntroduction: canonicalTurn.ActionIntroduction, CallFailure: failure);
+        }
+        calls.Add(planned with { BatchId = batchId, BatchPosition = calls.Count });
+      }
+      var batch = new ToolExecutionBatch(batchId, calls);
+      return calls[0] with { Batch = batch, ContextResolution = response.ContextResolution, Usage = response.Usage };
     }
     catch (JsonException exception)
     {
@@ -562,7 +560,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
   private static string MessageFingerprint(OllamaToolMessage message)
   {
-    return $"{message.Role}:{message.ToolName}:{message.Content}:{message.ToolCalls?.Count ?? 0}";
+    return $"{message.Role}:{message.ToolCallId}:{message.ToolName}:{message.Content}:{string.Join(",", message.ToolCalls?.Select(call => call.Id) ?? [])}";
   }
 
   private sealed record PlanningRequest(
@@ -669,7 +667,6 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
         ),
         assistantMessage,
         false,
-        canonicalTurn.IgnoredToolCallCount,
         response.ContextResolution,
         call.CallId,
         response.Usage,
@@ -1289,9 +1286,12 @@ public sealed record LocalActionPlanningResult(
   LocalActionProposal? Proposal,
   OllamaToolMessage AssistantMessage,
   bool ExplicitNoAction,
-  int IgnoredToolCallCount = 0,
   OllamaContextResolution? ContextResolution = null,
   string? CallId = null,
   ProviderTokenUsage? Usage = null,
-  string? ActionIntroduction = null
+  string? ActionIntroduction = null,
+  ToolExecutionBatch? Batch = null,
+  string? BatchId = null,
+  int BatchPosition = 0,
+  LocalActionException? CallFailure = null
 );

@@ -8,6 +8,29 @@ open help; Escape, scroll, dialog close and resize dismiss it.
 
 ## Configuration
 
+Context configuration accepts 1,024 through 2,147,483,647 tokens (the integer contract limit) for the global
+default/provider ceiling, role minimum/target/maximum and exact-model overrides.
+The escalation ladder accepts the same range, retaining its ordered/distinct
+validation. Existing saved/default context sizes and ladder values are not raised
+automatically. Role windows and exact overrides may be saved above the configured
+provider ceiling and model-declared capacity; saving a preference does not
+allocate the requested window. Local Ollama requests use the active role target
+or exact-model override, capped by the declared model limit. Global default/provider
+context settings do not cap local role profiles, history budgeting or workspace-read
+budgeting. Other roles sharing the same model do not increase the active role target.
+The same resolution applies to local Chat, Storytelling and Execute harnesses.
+No 256k ceiling is imposed: 10,000,000 and 1,000,000,000 are valid profile values
+within the existing integer contract. Request-specific bounded operations may still
+explicitly supply a generation context cap; the Benchmark Lab retains its explicit
+measurement limits. Runtime resolution retains the requested target separately. A capped
+maximum between escalation ladder entries remains usable when the request fits.
+Chat context usage exposes requested, effective and model-maximum values, including
+a visible warning identifying the model maximum when the requested target was reduced. Effective values describe
+the Host-selected window sent to the provider, not an independent VRAM measurement.
+Output reservations must
+remain below the role maximum. Benchmark context uses the configured provider
+ceiling and accepts individual token values, including 250,000 and 1,000,000.
+
 Draft tokens, input batch size and managed Ollama KV cache precision are configured. The typed performance object is
 attached to the existing exact provider/model/digest identity, alongside role
 overrides, and applies across roles. Sampling profiles, GPU placement, memory

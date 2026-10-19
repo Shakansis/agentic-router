@@ -170,8 +170,7 @@ public sealed class SettingsValidator : ISettingsValidator
     );
     ValidateOllamaRuntime(
       errors,
-      settings.OllamaRuntime,
-      settings.Context.ProviderContextTokens
+      settings.OllamaRuntime
     );
 
     ValidateGpuSelection(
@@ -656,21 +655,21 @@ public sealed class SettingsValidator : ISettingsValidator
     ContextSettings context
   )
   {
-    if (context.DefaultContextTokens is < 1_024 or > 131_072)
+    if (context.DefaultContextTokens is < 1_024 or > ContextSettings.MaximumSupportedTokens)
     {
       AddError(
         errors,
         "context.defaultContextTokens",
-        "Default context tokens must be between 1024 and 131072."
+        $"Default context tokens must be between 1024 and {ContextSettings.MaximumSupportedTokens}."
       );
     }
 
-    if (context.ProviderContextTokens is < 1_024 or > 131_072)
+    if (context.ProviderContextTokens is < 1_024 or > ContextSettings.MaximumSupportedTokens)
     {
       AddError(
         errors,
         "context.providerContextTokens",
-        "Provider context tokens must be between 1024 and 131072."
+        $"Provider context tokens must be between 1024 and {ContextSettings.MaximumSupportedTokens}."
       );
     }
 
@@ -744,6 +743,9 @@ public sealed class SettingsValidator : ISettingsValidator
     ExecutionSettings execution
   )
   {
+    if (execution.ParallelToolExecution is not ("off" or "auto" or "on"))
+      AddError(errors, "execution.parallelToolExecution", "Choose off, auto, or on.");
+    ValidateRange(errors, "execution.maxConcurrentToolCalls", execution.MaxConcurrentToolCalls, 1, 16);
     ValidateRange(
       errors,
       "execution.maxDirectPlanSteps",
@@ -1582,8 +1584,7 @@ public sealed class SettingsValidator : ISettingsValidator
 
   private static void ValidateOllamaRuntime(
     IDictionary<string, List<string>> errors,
-    OllamaRuntimeSettings runtime,
-    int providerContextCeiling
+    OllamaRuntimeSettings runtime
   )
   {
     if (runtime.ManagedKvCacheType is not ("auto" or "f16" or "q8_0" or "q4_0"))
@@ -1618,8 +1619,7 @@ public sealed class SettingsValidator : ISettingsValidator
       ValidateOllamaRoleProfile(
         errors,
         $"ollamaRuntime.roleDefaults.{role}",
-        profile,
-        providerContextCeiling
+        profile
       );
     }
 
@@ -1639,7 +1639,7 @@ public sealed class SettingsValidator : ISettingsValidator
       runtime.ContextEscalationLadder.Count == 0
       || runtime.ContextEscalationLadder.Count > 16
       || runtime.ContextEscalationLadder.Any(
-        value => value is < 1_024 or > 131_072
+        value => value is < 1_024 or > ContextSettings.MaximumSupportedTokens
       )
       || runtime.ContextEscalationLadder.Distinct().Count()
         != runtime.ContextEscalationLadder.Count
@@ -1651,7 +1651,7 @@ public sealed class SettingsValidator : ISettingsValidator
       AddError(
         errors,
         "ollamaRuntime.contextEscalationLadder",
-        "The context escalation ladder must contain distinct ascending values between 1024 and 131072."
+        $"The context escalation ladder must contain distinct ascending values between 1024 and {ContextSettings.MaximumSupportedTokens}."
       );
     }
 
@@ -1767,8 +1767,7 @@ public sealed class SettingsValidator : ISettingsValidator
         ValidateOllamaRoleProfile(
           errors,
           $"{prefix}.overrides.{pair.Key}",
-          pair.Value,
-          providerContextCeiling
+          pair.Value
         );
       }
     }
@@ -1824,21 +1823,20 @@ public sealed class SettingsValidator : ISettingsValidator
   private static void ValidateOllamaRoleProfile(
     IDictionary<string, List<string>> errors,
     string prefix,
-    OllamaRoleRuntimeSettings profile,
-    int providerContextCeiling
+    OllamaRoleRuntimeSettings profile
   )
   {
     if (
       profile.MinimumContextTokens < 1_024
       || profile.MinimumContextTokens > profile.TargetContextTokens
       || profile.TargetContextTokens > profile.MaximumContextTokens
-      || profile.MaximumContextTokens > providerContextCeiling
     )
     {
       AddError(
         errors,
         prefix,
-        "Context minimum, target, and maximum must be ordered and remain within the provider context ceiling."
+        "Context minimum must be at least 1024 tokens, with minimum <= target <= maximum. "
+          + $"Received minimum {profile.MinimumContextTokens}, target {profile.TargetContextTokens}, maximum {profile.MaximumContextTokens}."
       );
     }
 

@@ -49,38 +49,15 @@ public static class OllamaRuntimeProfileResolver
       )
     ).ToArray();
     var shared = configuredRoles.Length > 1;
-    var configuredProfiles = configuredRoles.Select(
-      configuredRole => GetConfiguredProfile(
-        settings,
-        model,
-        digest,
-        configuredRole
-      )
-    ).ToArray();
-    var sharedTarget = shared
-      ? configuredProfiles.Max(
-        candidate => candidate.TargetContextTokens
-      )
-      : profile.TargetContextTokens;
-    var sharedMaximum = shared
-      ? configuredProfiles.Max(
-        candidate => candidate.MaximumContextTokens
-      )
-      : profile.MaximumContextTokens;
-    var target = Math.Max(
-      profile.TargetContextTokens,
-      sharedTarget
-    );
-    var providerCeiling = generationMaximumContextTokens is > 0
-      ? Math.Min(
-        settings.Context.ProviderContextTokens,
-        generationMaximumContextTokens.Value
-      )
-      : settings.Context.ProviderContextTokens;
+    var target = profile.TargetContextTokens;
+    var local = ProviderModelReference.Parse(model).ProviderId == ModelProviderIds.OllamaLocal;
+    if (!local && execution) target = settings.Context.DefaultContextTokens;
+    var requestedContext = target;
     var maximum = Math.Min(
-      sharedMaximum,
-      providerCeiling
+      profile.MaximumContextTokens,
+      generationMaximumContextTokens is > 0 ? generationMaximumContextTokens.Value : int.MaxValue
     );
+    if (!local) maximum = Math.Min(maximum, settings.Context.ProviderContextTokens);
     var cappedByModel = declaredModelMaximum is > 0
       && maximum > declaredModelMaximum.Value;
 
@@ -101,7 +78,6 @@ public static class OllamaRuntimeProfileResolver
       minimum,
       maximum
     );
-    if (execution) target = Math.Min(settings.Context.DefaultContextTokens, maximum);
     var outputTokens = execution
       ? Execution.ExecutionProgressPolicy.OutputTokenLimit(target, requiredInputTokens)
       : outputTokenLimitOverride ?? Math.Min(requestedOutputTokens, profile.OutputTokenLimit);
@@ -121,6 +97,8 @@ public static class OllamaRuntimeProfileResolver
           && value >= target
           && value <= maximum
       );
+      // A declared model cap can fall between ladder entries. It remains usable.
+      if (candidate == 0 && required <= maximum) candidate = maximum;
 
       if (candidate == 0)
       {
@@ -149,8 +127,7 @@ public static class OllamaRuntimeProfileResolver
 
     var sharedWarning = shared
       ? $"The exact model is configured for {string.Join(", ", configuredRoles)}. "
-        + $"One loaded Ollama runner may use the largest active role context ({sharedTarget} tokens); "
-        + "separate models provide more stable residency."
+        + $"This request uses the {role} profile; another role may request a different context window."
       : null;
 
     if (execution)
@@ -177,7 +154,9 @@ public static class OllamaRuntimeProfileResolver
       cappedByModel,
       shared,
       sharedWarning,
-      escalated
+      requestedContext > effective && effective == declaredModelMaximum
+        ? $"Requested {requestedContext} tokens; effective {effective} tokens (model maximum)."
+        : escalated
         ? $"The request required {required} tokens, so context escalated from {target} to {effective}."
         : generationMaximumContextTokens is > 0
           && maximum <= generationMaximumContextTokens.Value
@@ -185,7 +164,8 @@ public static class OllamaRuntimeProfileResolver
         : overridden
           ? "The exact model and digest override was applied."
           : "The role default was inherited.",
-      ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, model, digest)
+      ModelRuntimePerformance.Resolve(settings, ModelProviderIds.OllamaLocal, model, digest),
+      requestedContext
     );
   }
 

@@ -1,0 +1,855 @@
+{
+  "model": "qwen3.8:27b-q4_K_M",
+  "digest": "25b843619e944cd0ae6069f94ff4e5e26a16e109ccbc0a66a0f05979ed70098e",
+  "backend": "vulkan:all",
+  "nativeContext": 131072,
+  "mtpDraft": 3,
+  "kvCache": "f16",
+  "runnerBatchSize": 512,
+  "intention": "review-and-testing",
+  "temperature": 0.25,
+  "configuredThinking": "medium",
+  "nativeThinkingControlReportedAvailable": false,
+  "sourceSettingsSha256": "B37D9DB68BAC8D1DC181156ADA3242B65D58660D42E8394CD0BF98EDD85F8782",
+  "fixtureFiles": 46,
+  "codeFiles": 32,
+  "order": [
+    "A1",
+    "B1",
+    "C1",
+    "B2",
+    "C2",
+    "A2",
+    "C3",
+    "A3",
+    "B3"
+  ],
+  "invalidCollectionAttempts": 1,
+  "collectorRestartBeforeRepetition": 3,
+  "medianSummary": [
+    {
+      "scenario": "A",
+      "count": 3,
+      "wallMilliseconds": 44788,
+      "inferenceCount": 13,
+      "inputTokens": 66830,
+      "outputTokens": 2672,
+      "totalTokens": 69502,
+      "executedTools": 12,
+      "peakConcurrency": 1.0,
+      "providerInferenceMilliseconds": 43771.406,
+      "prefillMilliseconds": 6966.686,
+      "decodeMilliseconds": 35768.985,
+      "toolRuntimeSumMilliseconds": 26.0,
+      "firstTtftMilliseconds": 1463.2228,
+      "readFileCount": 9,
+      "searchCount": 3,
+      "wallMinimum": 34476.0,
+      "wallMaximum": 53370.0
+    },
+    {
+      "scenario": "B",
+      "count": 3,
+      "wallMilliseconds": 39077,
+      "inferenceCount": 6,
+      "inputTokens": 34377,
+      "outputTokens": 2447,
+      "totalTokens": 37283,
+      "executedTools": 17,
+      "peakConcurrency": 1.0,
+      "providerInferenceMilliseconds": 38164.896,
+      "prefillMilliseconds": 5568.923,
+      "decodeMilliseconds": 31365.239,
+      "toolRuntimeSumMilliseconds": 35.0,
+      "firstTtftMilliseconds": 1621.7663,
+      "readFileCount": 13,
+      "searchCount": 3,
+      "wallMinimum": 31402.0,
+      "wallMaximum": 52424.0
+    },
+    {
+      "scenario": "C",
+      "count": 3,
+      "wallMilliseconds": 34429,
+      "inferenceCount": 6,
+      "inputTokens": 34704,
+      "outputTokens": 1950,
+      "totalTokens": 36913,
+      "executedTools": 17,
+      "peakConcurrency": 1.0,
+      "providerInferenceMilliseconds": 33312.488,
+      "prefillMilliseconds": 6155.137,
+      "decodeMilliseconds": 26121.074,
+      "toolRuntimeSumMilliseconds": 65.0,
+      "firstTtftMilliseconds": 1272.6557,
+      "readFileCount": 12,
+      "searchCount": 3,
+      "wallMinimum": 31911.0,
+      "wallMaximum": 41136.0
+    }
+  ],
+  "samples": [
+    {
+      "scenario": "A",
+      "repetition": 1,
+      "wallMilliseconds": 34476,
+      "inferenceCount": 10,
+      "inputTokens": 48315,
+      "outputTokens": 1824,
+      "totalTokens": 50139,
+      "executedTools": 9,
+      "batchSizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 29.0,
+      "providerInferenceMilliseconds": 33142.267,
+      "prefillMilliseconds": 6331.616,
+      "decodeMilliseconds": 26488.939,
+      "warmLoadSumMilliseconds": 54.432,
+      "firstTtftMilliseconds": 1401.2968,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 8,
+      "searchCount": 1,
+      "listCount": 0,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "read_file: docs\\architecture.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "search_text: logs",
+        "read_file: config\\features.json"
+      ],
+      "schedulingReasons": [
+        "parallel-off"
+      ],
+      "answer": "INC-241 Investigation Report\n\nFlow traced: OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; DailyExportJob shares the same factory (per docs/architecture.md).\n\nEvidence (inspected):\n\nREADME.md, docs/incidents/INC-241.md, docs/architecture.md, docs/time-contract.md — contract: tenant day must become [startUtc, endUtc) via tenant-zone conversion; for loja-sul 2026-10-13 = [2026-10-13T03:00Z, 2026-10-14T03:00Z).\nsrc/Time/BusinessDateRangeFactory.cs — root cause: builds localStart/localEnd as local midnights, then DateTime.SpecifyKind(..., Utc) — it relabels local time as UTC instead of converting. tenantZone is accepted but never used.\nsrc/Time/TenantTimeZoneResolver.cs — correctly resolves America/Sao_Paulo for loja-sul.\nsrc/Storage/OrderQueryBuilder.cs — half-open >= startUtc AND < endUtc filter; correct if given correct bounds.\nconfig/features.json — v2DateRanges.loja-sul: true, so the buggy v2 path is active.\nlogs/api.log:2102, logs/worker.log:2102 — both show startUtc=2026-10-13T00:00Z endUtc=2026-10-14T00:00Z rows=17 (API expectedRows=20), confirming the wrong interval in both API and export.\nlogs/audit.log:2102–2104 — ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z (23:10/23:30/23:50 São Paulo), i.e. inside the correct interval but after the buggy endUtc=00:00Z — hence omitted.\n\nHypothesis (supported): Release 2.18's \"normalize timestamp kind\" change replaced zone conversion with SpecifyKind(Utc), shifting the window 3h early and dropping late-evening orders.\n\nNext verification: Add a unit test asserting Create(2026-10-13, America/Sao_Paulo) yields [03:00Z, next 03:00Z), then fix the factory to convert via TimeZoneInfo and re-run the trace.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nEmit at most ONE tool call per response. Wait for each result before issuing the next call."
+    },
+    {
+      "scenario": "B",
+      "repetition": 1,
+      "wallMilliseconds": 52424,
+      "inferenceCount": 6,
+      "inputTokens": 34377,
+      "outputTokens": 3167,
+      "totalTokens": 37544,
+      "executedTools": 17,
+      "batchSizes": [
+        3,
+        3,
+        4,
+        4,
+        3
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 35.0,
+      "providerInferenceMilliseconds": 51299.341,
+      "prefillMilliseconds": 8949.679,
+      "decodeMilliseconds": 42143.74,
+      "warmLoadSumMilliseconds": 33.282,
+      "firstTtftMilliseconds": 3701.4846000000002,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 13,
+      "searchCount": 3,
+      "listCount": 1,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "list_files: .",
+        "read_file: docs\\architecture.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\release-2.18.md",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\UtcRange.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: config\\tenants.json",
+        "read_file: src\\Orders\\OrderHistoryService.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "read_file: config\\features.json",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log",
+        "read_file: src\\Export\\DailyExportJob.cs"
+      ],
+      "schedulingReasons": [
+        "parallel-off"
+      ],
+      "answer": "I have enough evidence across source, config, docs, and all three logs to conclude.\n\nINC-241 Investigation\n\nFlow (documented): OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; DailyExportJob shares the same factory.\n\nEvidence (verified):\n\ndocs/time-contract.md: loja-sul 2026-10-13 must be [2026-10-13T03:00Z, 2026-10-14T03:00Z); \"Never relabel a local DateTime as UTC.\"\nsrc/Time/BusinessDateRangeFactory.cs: builds localStart/localEnd from date then wraps them with DateTime.SpecifyKind(..., DateTimeKind.Utc), ignoring the tenantZone parameter. It never converts local→UTC.\nconfig/tenants.json + features.json: loja-sul = America/Sao_Paulo (UTC−3), v2DateRanges enabled.\nlogs/api.log:2102 and logs/worker.log:2102: both emit startUtc=2026-10-13T00:00:00Z endUtc=2026-10-14T00:00:00Z rows=17 — a UTC-midnight range, 3h too early.\nlogs/audit.log:2102-2104: ORD-4831/4832/4833 committed at 02:10Z/02:30Z/02:50Z (23:10/23:30/23:50 local) — all ≥ 2026-10-14T00:00Z, so excluded by the buggy range; the correct 03:00Z end would include them.\n\nConclusion (evidence, not hypothesis): The v2 range factory relabels local midnight as UTC, truncating the last 3 hours of the business day for non-UTC tenants. Both API and export are affected because they share the factory.\n\nNext verification: Unit-test BusinessDateRangeFactory.Create(2026-10-13, America/Sao_Paulo) and assert it returns [03:00Z, 2026-10-14T03:00Z).\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nGroup independent inspections in the SAME response, up to four tool calls. Wait for earlier results when needed to determine the next arguments."
+    },
+    {
+      "scenario": "C",
+      "repetition": 1,
+      "wallMilliseconds": 31911,
+      "inferenceCount": 6,
+      "inputTokens": 34704,
+      "outputTokens": 1718,
+      "totalTokens": 36422,
+      "executedTools": 16,
+      "batchSizes": [
+        3,
+        4,
+        4,
+        4,
+        1
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 43.0,
+      "providerInferenceMilliseconds": 30602.98,
+      "prefillMilliseconds": 6094.264,
+      "decodeMilliseconds": 23433.373,
+      "warmLoadSumMilliseconds": 44.359,
+      "firstTtftMilliseconds": 1827.6638,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 12,
+      "searchCount": 3,
+      "listCount": 1,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "list_files: .",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\architecture.md",
+        "read_file: config\\tenants.json",
+        "read_file: config\\features.json",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\UtcRange.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "read_file: src\\Orders\\OrderHistoryService.cs",
+        "read_file: src\\Export\\DailyExportJob.cs",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log"
+      ],
+      "schedulingReasons": [
+        "eligible-read"
+      ],
+      "answer": "INC-241 Investigation\n\nFlow traced: OrderHistoryController → OrderHistoryService.Find → BusinessDateRangeFactory.Create → OrderQueryBuilder → OrderRepository. DailyExportJob shares the same factory.\n\nEvidence (inspected):\n\ndocs/time-contract.md: for loja-sul, 2026-10-13 must be [2026-10-13T03:00:00Z, 2026-10-14T03:00:00Z).\nconfig/tenants.json / features.json: loja-sul = America/Sao_Paulo, v2DateRanges=true, cache bypass on.\nsrc/Time/BusinessDateRangeFactory.cs: builds localStart/localEnd as local midnights, then wraps them with DateTime.SpecifyKind(..., Utc) — it never converts through tenantZone. The zone parameter is unused.\nlogs/api.log:2102 (trace inc241-history): startUtc=2026-10-13T00:00:00Z endUtc=2026-10-14T00:00:00Z rows=17 expectedRows=20.\nlogs/worker.log:2102 (inc241-export): identical wrong interval, rows=17.\nlogs/audit.log:2102-2104: ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z.\n\nConclusion (evidence): The factory relabels local midnights as UTC, producing a UTC-midnight window that ends at 2026-10-14T00:00:00Z. The three late-evening orders (local 23:10–23:50 = 02:10–02:50Z) fall after that boundary, so both API and export drop them. Storage rows remain (audit confirms). This matches the contract's \"never relabel a local DateTime as UTC\" rule.\n\nHypothesis (unverified): no other filter contributes; the single factory is the sole cause.\n\nNext verification: add a unit test asserting Create(2026-10-13, Sao_Paulo) yields [03:00Z, 03:00Z+1d) and that the three orders are included.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nGroup independent inspections in the SAME response, up to four tool calls. Wait for earlier results when needed to determine the next arguments."
+    },
+    {
+      "scenario": "B",
+      "repetition": 2,
+      "wallMilliseconds": 39077,
+      "inferenceCount": 6,
+      "inputTokens": 34836,
+      "outputTokens": 2447,
+      "totalTokens": 37283,
+      "executedTools": 18,
+      "batchSizes": [
+        3,
+        4,
+        4,
+        4,
+        3
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 43.0,
+      "providerInferenceMilliseconds": 38164.896,
+      "prefillMilliseconds": 5568.923,
+      "decodeMilliseconds": 31365.239,
+      "warmLoadSumMilliseconds": 36.902,
+      "firstTtftMilliseconds": 1303.9043000000001,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 13,
+      "searchCount": 4,
+      "listCount": 1,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "list_files: .",
+        "read_file: docs\\architecture.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\release-2.18.md",
+        "read_file: config\\tenants.json",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\UtcRange.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "read_file: config\\features.json",
+        "read_file: src\\Orders\\OrderHistoryService.cs",
+        "read_file: src\\Export\\DailyExportJob.cs",
+        "search_text: logs\\audit.log",
+        "search_text: logs\\audit.log"
+      ],
+      "schedulingReasons": [
+        "parallel-off"
+      ],
+      "answer": "INC-241 Investigation Report\n\nFlow inspected: OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; export path DailyExportJob reuses the same factory.\n\nEvidence (observed):\n\nsrc/Time/BusinessDateRangeFactory.cs — builds localStart/localEnd from the DateOnly midnights, then calls DateTime.SpecifyKind(localStart, DateTimeKind.Utc). The tenantZone parameter is accepted but never used; local midnights are relabelled as UTC.\ndocs/time-contract.md — explicitly forbids \"relabel[ling] a local DateTime as UTC without converting it\"; correct interval for loja-sul 2026-10-13 is [2026-10-13T03:00Z, 2026-10-14T03:00Z).\nlogs/api.log:2102 and logs/worker.log:2102 — both traces show startUtc=2026-10-13T00:00:00Z endUtc=2026-10-14T00:00:00Z rows=17 expectedRows=20, cache=bypass.\nlogs/audit.log:2102/2104 — ORD-4831 createdAtUtc=2026-10-14T02:10Z, ORD-4833 =2026-10-14T02:50Z, committed=true (23:10/23:50 local).\nconfig/features.json — v2DateRanges.loja-sul=true, historyCacheBypass=true; config/tenants.json — America/Sao_Paulo.\n\nConclusion (evidence): The v2 range factory truncates the interval by 3 hours (BRT offset), dropping the 23:00–24:00 local window. Both API and export share the defect; cache and storage are exonerated.\n\nNext verification: Patch BusinessDateRangeFactory.Create to convert each local midnight via tenantZone (e.g., new DateTimeOffset(localStart, tenantZone.GetUtcOffset(localStart))), then re-run the 2026-10-13 loja-sul query and confirm rows=20 including ORD-4831/4832/4833.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nGroup independent inspections in the SAME response, up to four tool calls. Wait for earlier results when needed to determine the next arguments."
+    },
+    {
+      "scenario": "C",
+      "repetition": 2,
+      "wallMilliseconds": 34429,
+      "inferenceCount": 6,
+      "inputTokens": 36474,
+      "outputTokens": 1950,
+      "totalTokens": 38424,
+      "executedTools": 17,
+      "batchSizes": [
+        3,
+        4,
+        4,
+        3,
+        3
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 74.0,
+      "providerInferenceMilliseconds": 33312.488,
+      "prefillMilliseconds": 6155.137,
+      "decodeMilliseconds": 26121.074,
+      "warmLoadSumMilliseconds": 36.824,
+      "firstTtftMilliseconds": 1149.8888,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 12,
+      "searchCount": 4,
+      "listCount": 1,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "list_files: .",
+        "read_file: docs\\architecture.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\release-2.18.md",
+        "search_text: logs",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: config\\tenants.json",
+        "read_file: config\\features.json",
+        "read_file: src\\Api\\OrderHistoryController.cs",
+        "read_file: src\\Orders\\OrderHistoryService.cs",
+        "read_file: logs\\api.log",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log"
+      ],
+      "schedulingReasons": [
+        "eligible-read"
+      ],
+      "answer": "INC-241 Investigation Report\n\nFlow followed: README → docs/incidents/INC-241.md → docs/architecture.md (request/export chain) → docs/time-contract.md (expected interval) → docs/release-2.18.md → source (OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → TenantTimeZoneResolver) → config (tenants.json, features.json) → logs (api.log, worker.log, audit.log).\n\nEvidence (observed):\n\napi.log:2102 and worker.log:2102: requestedDate=2026-10-13 produced startUtc=2026-10-13T00:00:00Z endUtc=2026-10-14T00:00:00Z, rows=17 (API expectedRows=20), cache=bypass.\naudit.log:2102-2104: ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z — i.e. 23:10/23:30/23:50 America/Sao_Paulo, outside the 00:00Z–00:00Z window.\ntime-contract.md: correct interval is [2026-10-13T03:00:00Z, 2026-10-14T03:00:00Z).\nBusinessDateRangeFactory.cs: builds local midnights then DateTime.SpecifyKind(..., Utc) — it ignores tenantZone and relabels local time as UTC.\nfeatures.json/tenants.json: v2DateRanges on for loja-sul; zone = America/Sao_Paulo.\n\nRoot cause (evidence-backed): the v2 range factory never converts the tenant-local midnight boundaries to UTC; it stamps them as UTC, truncating the last ~3 hours of each business day. Both API and export share this factory, explaining identical omission.\n\nHypothesis (unverified): no other filter drops rows; the 3 missing rows map exactly to the 03:00Z gap.\n\nNext verification: unit-test BusinessDateRangeFactory.Create(2026-10-13, America/Sao_Paulo) asserting [03:00Z, +1d 03:00Z), and confirm OrderQueryBuilder applies the range unmodified.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nGroup independent inspections in the SAME response, up to four tool calls. Wait for earlier results when needed to determine the next arguments."
+    },
+    {
+      "scenario": "A",
+      "repetition": 2,
+      "wallMilliseconds": 53370,
+      "inferenceCount": 14,
+      "inputTokens": 73325,
+      "outputTokens": 3227,
+      "totalTokens": 76552,
+      "executedTools": 13,
+      "batchSizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 26.0,
+      "providerInferenceMilliseconds": 52281.184,
+      "prefillMilliseconds": 7425.193,
+      "decodeMilliseconds": 43442.911,
+      "warmLoadSumMilliseconds": 81.711,
+      "firstTtftMilliseconds": 1950.4185,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 10,
+      "searchCount": 3,
+      "listCount": 0,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "read_file: docs\\architecture.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\UtcRange.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: config\\tenants.json",
+        "read_file: config\\features.json",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log"
+      ],
+      "schedulingReasons": [
+        "parallel-off"
+      ],
+      "answer": "INC-241 Investigation Report\n\nFlow traced: OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; DailyExportJob shares the same factory.\n\nEvidence (inspected):\n\ndocs/time-contract.md: loja-sul 2026-10-13 must be [2026-10-13T03:00Z, 2026-10-14T03:00Z).\nconfig/tenants.json + TenantTimeZoneResolver.cs: zone correctly resolves to America/Sao_Paulo.\nconfig/features.json: v2DateRanges.loja-sul=true, historyCacheBypass=true (rules out cache).\nsrc/Time/BusinessDateRangeFactory.cs: builds localStart/localEnd from local midnight, then DateTime.SpecifyKind(..., Utc) — it never converts through tenantZone.\nsrc/Time/UtcRange.cs + OrderQueryBuilder.cs: half-open [startUtc, endUtc) applied to created_at_utc.\nlogs/api.log:2102 & worker.log:2102: both emit startUtc=...T00:00:00Z endUtc=...T00:00:00Z, rows=17 expectedRows=20.\nlogs/audit.log:2102-2104: ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z (local 23:10/23:30/23:50).\n\nRoot cause (evidence, not hypothesis): the v2 factory relabels local-midnight DateTime as UTC, ignoring the tenant zone. The resulting [10-13T00:00Z, 10-14T00:00Z) excludes the 02:10–02:50Z rows, so both API and export drop them.\n\nNext verification: add a unit test asserting Create(2026-10-13, America/Sao_Paulo) yields [03:00Z, 03:00Z+1d), then fix the factory to convert both boundaries via tenantZone.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nEmit at most ONE tool call per response. Wait for each result before issuing the next call."
+    },
+    {
+      "scenario": "C",
+      "repetition": 3,
+      "wallMilliseconds": 41136,
+      "inferenceCount": 6,
+      "inputTokens": 34436,
+      "outputTokens": 2477,
+      "totalTokens": 36913,
+      "executedTools": 18,
+      "batchSizes": [
+        3,
+        3,
+        4,
+        4,
+        4
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 65.0,
+      "providerInferenceMilliseconds": 39948.895,
+      "prefillMilliseconds": 6576.744,
+      "decodeMilliseconds": 33162.27,
+      "warmLoadSumMilliseconds": 36.972,
+      "firstTtftMilliseconds": 1272.6557,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 14,
+      "searchCount": 3,
+      "listCount": 1,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "list_files: .",
+        "read_file: docs\\architecture.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\release-2.18.md",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "read_file: config\\tenants.json",
+        "read_file: config\\features.json",
+        "read_file: src\\Orders\\OrderHistoryService.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: src\\Export\\DailyExportJob.cs",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log",
+        "read_file: src\\Time\\UtcRange.cs",
+        "read_file: src\\Orders\\OrderFilter.cs"
+      ],
+      "schedulingReasons": [
+        "eligible-read"
+      ],
+      "answer": "INC-241 Investigation Report\n\nFlow traced: OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; DailyExportJob shares the same factory. Tenant zone resolved via TenantTimeZoneResolver.\n\nEvidence (inspected):\n\ndocs/time-contract.md: loja-sul 2026-10-13 must be [2026-10-13T03:00Z, 2026-10-14T03:00Z); \"never relabel a local DateTime as UTC.\"\nsrc/Time/BusinessDateRangeFactory.cs: builds local midnights then calls DateTime.SpecifyKind(localStart, DateTimeKind.Utc) — the tenantZone parameter is never used.\nlogs/api.log:2102 & logs/worker.log:2102: startUtc=2026-10-13T00:00Z endUtc=2026-10-14T00:00Z rows=17 expectedRows=20 — a UTC-midnight range, not the zone-converted one.\nlogs/audit.log:2102-2104: ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z (23:10/23:30/23:50 local) — present in storage, outside the buggy range.\nconfig/features.json: v2DateRanges.loja-sul=true, historyCacheBypass=true (cache ruled out).\n\nRoot cause (evidence-backed): the factory mislabels local wall-clock midnight as UTC, producing [13T00Z,14T00Z) instead of [13T03Z,14T03Z), dropping the 3 late-evening orders in both API and export.\n\nNext verification: fix Create to convert both midnights through tenantZone (e.g., TimeZoneInfo.ConvertTimeToUtc), then confirm the range becomes [03:00Z,03:00Z) and rows=20.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nGroup independent inspections in the SAME response, up to four tool calls. Wait for earlier results when needed to determine the next arguments."
+    },
+    {
+      "scenario": "A",
+      "repetition": 3,
+      "wallMilliseconds": 44788,
+      "inferenceCount": 13,
+      "inputTokens": 66830,
+      "outputTokens": 2672,
+      "totalTokens": 69502,
+      "executedTools": 12,
+      "batchSizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 19.0,
+      "providerInferenceMilliseconds": 43771.406,
+      "prefillMilliseconds": 6966.686,
+      "decodeMilliseconds": 35768.985,
+      "warmLoadSumMilliseconds": 81.028,
+      "firstTtftMilliseconds": 1463.2228,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 9,
+      "searchCount": 3,
+      "listCount": 0,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\architecture.md",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: config\\tenants.json",
+        "read_file: config\\features.json",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log"
+      ],
+      "schedulingReasons": [
+        "parallel-off"
+      ],
+      "answer": "I have sufficient evidence across source, config, docs, and all three logs. Here is the report.\n\nINC-241 Investigation\n\nFlow (documented): OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; DailyExportJob shares the same factory.\n\nEvidence (observed):\n\ndocs/time-contract.md: 2026-10-13 for loja-sul must be [2026-10-13T03:00:00Z, 2026-10-14T03:00:00Z).\nconfig/tenants.json: loja-sul = America/Sao_Paulo; config/features.json: v2DateRanges.loja-sul=true, historyCacheBypass=true.\nsrc/Time/BusinessDateRangeFactory.cs: builds local midnights then calls DateTime.SpecifyKind(localStart, DateTimeKind.Utc) — it tags local wall-clock as UTC instead of converting via tenantZone. The tenantZone parameter is unused.\nsrc/Storage/OrderQueryBuilder.cs: passes Range.StartUtc/EndUtc straight into the SQL half-open filter.\nlogs/api.log:2102 and logs/worker.log:2102: both show startUtc=2026-10-13T00:00:00Z endUtc=2026-10-14T00:00:00Z rows=17 expectedRows=20.\nlogs/audit.log:2102-2104: ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z — rows exist but fall after the wrong endUtc.\n\nHypothesis (root cause): the v2 \"normalize kind\" change in BusinessDateRangeFactory relabels local midnights as UTC, shifting the window 3h early and dropping late-evening orders. This is consistent, not a cache issue (bypass confirmed).\n\nNext verification: unit-test BusinessDateRangeFactory.Create(2026-10-13, Sao_Paulo) asserting [03:00Z, 03:00Z+1d), then confirm the fix converts via TimeZoneInfo rather than SpecifyKind.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nEmit at most ONE tool call per response. Wait for each result before issuing the next call."
+    },
+    {
+      "scenario": "B",
+      "repetition": 3,
+      "wallMilliseconds": 31402,
+      "inferenceCount": 5,
+      "inputTokens": 27793,
+      "outputTokens": 1898,
+      "totalTokens": 29691,
+      "executedTools": 15,
+      "batchSizes": [
+        3,
+        4,
+        4,
+        4
+      ],
+      "peakConcurrency": 1.0,
+      "rejectedCalls": 0,
+      "toolRuntimeSumMilliseconds": 33.0,
+      "providerInferenceMilliseconds": 30565.367,
+      "prefillMilliseconds": 5513.231,
+      "decodeMilliseconds": 24238.22,
+      "warmLoadSumMilliseconds": 28.49,
+      "firstTtftMilliseconds": 1621.7663,
+      "flowGatePassed": true,
+      "diagnosisScored": false,
+      "errorCount": 0,
+      "readFileCount": 11,
+      "searchCount": 3,
+      "listCount": 1,
+      "inspectionSequence": [
+        "read_file: README.md",
+        "read_file: docs\\incidents\\INC-241.md",
+        "list_files: .",
+        "read_file: docs\\time-contract.md",
+        "read_file: docs\\architecture.md",
+        "read_file: src\\Time\\BusinessDateRangeFactory.cs",
+        "read_file: src\\Time\\TenantTimeZoneResolver.cs",
+        "read_file: src\\Storage\\OrderQueryBuilder.cs",
+        "read_file: src\\Orders\\OrderHistoryService.cs",
+        "search_text: logs\\api.log",
+        "search_text: logs\\worker.log",
+        "search_text: logs\\audit.log",
+        "read_file: config\\tenants.json",
+        "read_file: config\\features.json",
+        "read_file: src\\Time\\UtcRange.cs"
+      ],
+      "schedulingReasons": [
+        "parallel-off"
+      ],
+      "answer": "INC-241 Investigation Report\n\nFlow traced: OrderHistoryController → OrderHistoryService → BusinessDateRangeFactory → OrderQueryBuilder → OrderRepository; DailyExportJob shares the same factory.\n\nEvidence (inspected):\n\ndocs/time-contract.md: for loja-sul, 2026-10-13 must be [2026-10-13T03:00Z, 2026-10-14T03:00Z); \"Never relabel a local DateTime as UTC.\"\nsrc/Time/BusinessDateRangeFactory.cs: ignores tenantZone; builds local midnights then DateTime.SpecifyKind(..., Utc) — a \"v2 optimization.\"\nlogs/api.log:2102 (trace inc241-history): startUtc=2026-10-13T00:00Z endUtc=2026-10-14T00:00Z rows=17 expectedRows=20 cache=bypass.\nlogs/worker.log:2102 (inc241-export): identical wrong range, rows=17.\nlogs/audit.log:2102-2104: ORD-4831/4832/4833 committed at 2026-10-14T02:10/02:30/02:50Z — outside the emitted range, hence omitted.\nconfig/tenants.json (zone America/Sao_Paulo), config/features.json (v2DateRanges on, cache bypass), src/Time/TenantTimeZoneResolver.cs, src/Storage/OrderQueryBuilder.cs, src/Time/UtcRange.cs.\n\nConclusion (evidence): The v2 range factory relabels local midnights as UTC, truncating the interval by 3h. Both API and export share the bug; storage rows are intact.\n\nHypothesis: The \"v2 optimization\" comment marks the regression introduced in 2.18.\n\nNext verification: Add a unit test asserting Create(2026-10-13, Sao_Paulo) yields [03:00Z, 03:00Z+1d), then confirm the factory converts via TimeZoneInfo instead of SpecifyKind.\n\nAuthoritative execution status: Validation was requested, but no validation profile is configured.\n\nNo files were changed.\n\nValidation: not-run.",
+      "prompt": "Software development investigation: analyze incident INC-241 in this isolated OrderDesk repository. Daily history and exports omit late-evening orders after release 2.18; stored rows still exist.\r\nStart with README.md and docs/incidents/INC-241.md. Follow the documented request/export flow and compare source, tenant/feature configuration, time contracts and operational logs. Search for the incident trace IDs and relevant range-construction/filtering symbols. Inspect at least eight relevant files across source, documentation, configuration and logs before concluding. Log files are long: use search_text to find the relevant region and bounded read_file ranges rather than dumping whole logs.\r\nExplain the investigation flow, cite inspected paths and observations, distinguish evidence from hypotheses, and suggest one focused next verification. Keep the final report under 220 words. Do not change files, execute commands, run tests, use web search or ask the user for input. This is an inspection-only task.\r\nUse list_files, search_text, read_file and get_file_info as needed. Do not use read_files: all three benchmark variants compare individual native tool calls. Their schemas are already offered; do not request them again. Include a short progress introduction in the same response as the first call. Continue after introductions until the investigation is complete.\nGroup independent inspections in the SAME response, up to four tool calls. Wait for earlier results when needed to determine the next arguments."
+    }
+  ],
+  "fixtureManifest": [
+    {
+      "path": "OrderDesk.csproj",
+      "bytes": 182,
+      "sha256": "130BEFBA0CFF4F414B147BF251BCA57CDC8C95D059D63F15F94FF00A15A3560D"
+    },
+    {
+      "path": "README.md",
+      "bytes": 570,
+      "sha256": "8725F590CBA8CD009A6CB1D01E7C09CF8947CD6DE78FD2F2239A285FE09F6109"
+    },
+    {
+      "path": "config\\appsettings.json",
+      "bytes": 103,
+      "sha256": "BE9DC00B0319750048A4C759D54EF00147C9A53C0821C3BC64C34F39B7356B32"
+    },
+    {
+      "path": "config\\features.json",
+      "bytes": 76,
+      "sha256": "0759EA6354A3FBF4F6EBF9ECB1ACE79596FD806B722FB90B5E4BD6BF02963DB0"
+    },
+    {
+      "path": "config\\tenants.json",
+      "bytes": 105,
+      "sha256": "DF27D121F01A21645B40DB71F583091A2BF7F3862E548A7F23734BF21D6FDB9E"
+    },
+    {
+      "path": "docs\\architecture.md",
+      "bytes": 723,
+      "sha256": "33F7A69DEC5FD23CB76C526BD43F07E035EAAC312346CB4D01D59FE7933E1C99"
+    },
+    {
+      "path": "docs\\release-2.18.md",
+      "bytes": 180,
+      "sha256": "706F67A37A4BC989B518D08005FFE01FFA7A638976ED9AE0F641A0DDC8CDC2FB"
+    },
+    {
+      "path": "docs\\runbook.md",
+      "bytes": 262,
+      "sha256": "6675B999AFF5A208945C42DDAF7A06A28C4FDA699BAF2B2AA4E6184A4FE0BE8A"
+    },
+    {
+      "path": "docs\\storage.md",
+      "bytes": 174,
+      "sha256": "FB3DCE19EF0D259AE17CFA728F155C3BE9713A8C3AC847871520C7F4343AB0EC"
+    },
+    {
+      "path": "docs\\time-contract.md",
+      "bytes": 488,
+      "sha256": "0A3D5C40735A590ECF8F02D022708D08D9C3CEBFFC4B50999C6161F894403D4B"
+    },
+    {
+      "path": "docs\\incidents\\INC-241.md",
+      "bytes": 751,
+      "sha256": "FF955E84C8306D76AA113B459ABCE4E4F0FE9AF986E1251C26250CC998DABD20"
+    },
+    {
+      "path": "logs\\api.log",
+      "bytes": 684108,
+      "sha256": "DF137B0422D6E7629707ACF60995AD47F3B5AD289F2EBAB1F3AD8CC81A38A001"
+    },
+    {
+      "path": "logs\\audit.log",
+      "bytes": 694321,
+      "sha256": "403954D3F078F681CE5B4AF725AD90F5F63F838809151EABCD902A83A92221BA"
+    },
+    {
+      "path": "logs\\worker.log",
+      "bytes": 699057,
+      "sha256": "2403962E465396CF08232380CCDAFC58F84CB9BA29E42D48EB08312865B4376C"
+    },
+    {
+      "path": "src\\Api\\HistoryRequest.cs",
+      "bytes": 123,
+      "sha256": "6E71A6EA5FDD664474AF1978021878EBF183103995B1CF9ECD3F570C8091FEB5"
+    },
+    {
+      "path": "src\\Api\\HistoryResponse.cs",
+      "bytes": 115,
+      "sha256": "EAA84714B2FDC5A7607DCFB05716016D23EB17298D32052CE4111C4999EDD955"
+    },
+    {
+      "path": "src\\Api\\OrderHistoryController.cs",
+      "bytes": 213,
+      "sha256": "6CF2C50EE3F66417E866E7400524F43A3E0EBAE3A16200F68308EAB880D2E34B"
+    },
+    {
+      "path": "src\\Api\\Pagination.cs",
+      "bytes": 137,
+      "sha256": "F7AF34F371C4239FE01AFAA8708F34A6ACCEB579D580FCEDBA249C42E2AE1DFC"
+    },
+    {
+      "path": "src\\Api\\RequestValidator.cs",
+      "bytes": 198,
+      "sha256": "6009FDF7A3D750432C928CD75BC4714922B5409355FD19BD3AD08AC3578659B9"
+    },
+    {
+      "path": "src\\Cache\\CacheOptions.cs",
+      "bytes": 99,
+      "sha256": "FE98A827ABBA5CBE866D2CA24EA749DBA24D85182478DA48C30CD9AF4FD54648"
+    },
+    {
+      "path": "src\\Cache\\HistoryCacheKey.cs",
+      "bytes": 176,
+      "sha256": "794826679BA761884CCA9E4DC57CE4D2083495388378B6177E26E98C4A9B9710"
+    },
+    {
+      "path": "src\\Cache\\OrderHistoryCache.cs",
+      "bytes": 347,
+      "sha256": "7BAB673417B95DA839F3FE324733F6E8948949D75F5FEC8AF1B524D6FB9A716E"
+    },
+    {
+      "path": "src\\Export\\CsvWriter.cs",
+      "bytes": 207,
+      "sha256": "3BB8F59E7A871F65689ADFB7EEA9DD686EE07E802ADD1C073093B3DD156BB818"
+    },
+    {
+      "path": "src\\Export\\DailyExportJob.cs",
+      "bytes": 289,
+      "sha256": "FFAEBF7B8DD4FBDAC8BFB6446EF2C809656861BA63DA05C1F43E1F0BCAB258FE"
+    },
+    {
+      "path": "src\\Export\\ExportCheckpoint.cs",
+      "bytes": 128,
+      "sha256": "394A8358F673E8FBF65283B6AE1C80774FDEB1F859910F12A3E7E96367F6F87D"
+    },
+    {
+      "path": "src\\Export\\ExportRequest.cs",
+      "bytes": 119,
+      "sha256": "07C88EDA6FA6F2FF10E31C8631ADC73060F94C6499ABD06549E4CB779A12CD13"
+    },
+    {
+      "path": "src\\Export\\ExportRetryPolicy.cs",
+      "bytes": 152,
+      "sha256": "A2D4ABF0BE7F5BC3E091447A5C588A3F186AF50B7E2C52D9CC7BBCA77B0A7589"
+    },
+    {
+      "path": "src\\Orders\\Order.cs",
+      "bytes": 135,
+      "sha256": "62107B2275B1B6D3762AEEDE7657EA1B012E11FD9BC4B2F95792D26D30EF85F4"
+    },
+    {
+      "path": "src\\Orders\\OrderFilter.cs",
+      "bytes": 110,
+      "sha256": "E14EE0BBDD87DB0D351188C42BC35F6876D49F259A68A2FD82902CE727EC1469"
+    },
+    {
+      "path": "src\\Orders\\OrderHistoryService.cs",
+      "bytes": 390,
+      "sha256": "7995BFEFA311AED60C05A2A05FC00456BE5393E4C09B646593FD410AE270AB36"
+    },
+    {
+      "path": "src\\Orders\\OrderId.cs",
+      "bytes": 153,
+      "sha256": "8298D21C9B207004890FEF450CD3C2AD8786BC45997870F2D9704682C511C77C"
+    },
+    {
+      "path": "src\\Orders\\OrderStatus.cs",
+      "bytes": 210,
+      "sha256": "5B5B00BE1A601BCFFCA222A8CC2E181D46A9E440D9A48EB2386EDCC5231CD2CD"
+    },
+    {
+      "path": "src\\Orders\\OrderTotals.cs",
+      "bytes": 181,
+      "sha256": "7173F29FA49FA6ED5D58871290402ECC16C370F0660BAB489CF4A3F597E1EE4C"
+    },
+    {
+      "path": "src\\Storage\\AuditRecord.cs",
+      "bytes": 150,
+      "sha256": "E0EB8081ECD795246177647CBA3AFE2F303F9C20F68236A94DE4ED8AA784CB55"
+    },
+    {
+      "path": "src\\Storage\\OrderQueryBuilder.cs",
+      "bytes": 347,
+      "sha256": "64D4C407ED354B18EE4B71A0E76A4CF80A275AD6E6D9D7FDB0BAD399FFEDA021"
+    },
+    {
+      "path": "src\\Storage\\OrderRepository.cs",
+      "bytes": 372,
+      "sha256": "84D02BC436DDAF17694CC9858111CC07751BE6C280300F49C743F7EF31DD1AC8"
+    },
+    {
+      "path": "src\\Storage\\OrderRowMapper.cs",
+      "bytes": 222,
+      "sha256": "332A6CEFCD457E7607B9D18DAA4819E0C6F96AAE210CBEEFDA639CA06B191C2E"
+    },
+    {
+      "path": "src\\Storage\\StorageOptions.cs",
+      "bytes": 121,
+      "sha256": "37E22B91519EFDAE88EA314FB88106E1337BC588523E16110DAA131D233C5B61"
+    },
+    {
+      "path": "src\\Telemetry\\HistoryMetrics.cs",
+      "bytes": 138,
+      "sha256": "D2DF6133B25CCB57770097D708E24552414854AAF11266984CA1F05E1124CDD2"
+    },
+    {
+      "path": "src\\Telemetry\\RangeLog.cs",
+      "bytes": 158,
+      "sha256": "BCC11E58260790F8730111D30E048B6EAE102BB4AF3F4BFC90CC8BC9273398E9"
+    },
+    {
+      "path": "src\\Telemetry\\TraceContext.cs",
+      "bytes": 151,
+      "sha256": "FE1644A525743A344D62B59DDE25C980178FC0A722B389F9E5765B2F60A09A46"
+    },
+    {
+      "path": "src\\Time\\BusinessDateRangeFactory.cs",
+      "bytes": 496,
+      "sha256": "6BFE8B5191A0188345AF52A49C30CE6D47DE535C5F9ACDBA3439A15406E5454F"
+    },
+    {
+      "path": "src\\Time\\BusinessDayFormatter.cs",
+      "bytes": 193,
+      "sha256": "BE0AB86F178DA0D888DF3112135B8F659D4DA69D348F8619C5E74109BB75DCF5"
+    },
+    {
+      "path": "src\\Time\\Clock.cs",
+      "bytes": 181,
+      "sha256": "83943EFDC4275AF03644E862BE9FF9ECF7066E55F3E97E7CAA1C4BBA23BFA1E4"
+    },
+    {
+      "path": "src\\Time\\TenantTimeZoneResolver.cs",
+      "bytes": 211,
+      "sha256": "4A5C84C2543CEF0A7B357DD3BE2274D344200E9DF8EA0664C6CB0011B5413690"
+    },
+    {
+      "path": "src\\Time\\UtcRange.cs",
+      "bytes": 199,
+      "sha256": "AD3A244C71E698F76074CB7C8CA4C3F354DE740373C32D3D215D34ABBD67C13F"
+    }
+  ],
+  "cleanup": {
+    "benchmarkPort": 63484,
+    "remainingBenchmarkOrManagedListeners": 0,
+    "remainingKnownOwnedProcesses": [],
+    "originalProcesses": [
+      {
+        "id": 34188,
+        "name": "ollama app.exe",
+        "sameProcess": true
+      },
+      {
+        "id": 19340,
+        "name": "ollama.exe",
+        "sameProcess": true
+      },
+      {
+        "id": 65184,
+        "name": "ollama.exe",
+        "sameProcess": true
+      }
+    ],
+    "originalServiceModels": [
+      {
+        "port": 11434,
+        "models": []
+      },
+      {
+        "port": 11436,
+        "models": []
+      }
+    ],
+    "fixtureFilesChanged": 0,
+    "productionSourcesChanged": 0,
+    "devSettingsUnchanged": true
+  }
+}

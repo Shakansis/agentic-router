@@ -7,8 +7,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgenticRouter.Api.Contracts;
-using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Providers.Ollama;
+using AgenticRouter.Api.Runtime;
 using AgenticRouter.Api.Usage;
 
 namespace AgenticRouter.Api.Execution;

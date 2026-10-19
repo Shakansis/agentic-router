@@ -44,7 +44,8 @@ public interface IPersistentSessionService
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
     int? replaceFromMessageIndex,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? specialist = null
   );
 
   Task<ConversationSessionRecord?> CompleteTurnAsync(
@@ -434,7 +435,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
           PreferredModelProfileId = active.PreferredModelProfileId,
           LastApprovalPolicy = request.ApprovalPolicy,
           SelectedHarness = request.Harness,
-          LastExecutionStrategy = request.ExecutionStrategy
+          LastExecutionStrategy = request.ExecutionStrategy,
+          Specialist = request.Specialist
         };
       }
 
@@ -460,6 +462,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
           LastApprovalPolicy = request.ApprovalPolicy,
           SelectedHarness = request.Harness,
           LastExecutionStrategy = request.ExecutionStrategy,
+          Specialist = request.Specialist,
           Messages = SanitizeMessages(
             snapshotMessages,
             existing.Messages
@@ -497,7 +500,8 @@ public sealed class PersistentSessionService : IPersistentSessionService
     IReadOnlyList<ChatImageAttachment>? images,
     bool hidden,
     int? replaceFromMessageIndex,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    string? specialist = null
   )
   {
     if (sessionId is not null && _chatRuns.IsRewinding(sessionId))
@@ -644,6 +648,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
         LastApprovalPolicy = approvalPolicy,
         SelectedHarness = harness,
         LastExecutionStrategy = executionStrategy,
+        Specialist = specialist,
         Messages = session.Messages.Append(
           new ChatMessage(
             "user",
@@ -1918,6 +1923,7 @@ public sealed class PersistentSessionService : IPersistentSessionService
           message => message.Role != "user"
         )
       )
+      || (request.Specialist is not null && !SettingsDefaults.IntentionNames.Contains(request.Specialist, StringComparer.Ordinal))
       || request.InteractionMode is not "chat" and not "execute"
       || request.ApprovalPolicy is not "ask" and not "auto"
       || request.ExecutionStrategy is not "auto"

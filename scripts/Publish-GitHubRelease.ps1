@@ -42,7 +42,7 @@ function Invoke-GitHubCli {
 }
 
 if ($VersionLabel -notmatch '^\d+\.\d+\.\d+_[0-9A-Za-z][0-9A-Za-z.-]*$') {
-  throw 'VersionLabel must use the form 0.15.0_alpha.'
+  throw 'VersionLabel must use the form 0.16.0_alpha.'
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'Repository must use the OWNER/NAME form.'
@@ -163,7 +163,9 @@ foreach ($screenshotName in @(
   '09-review-files.png',
   '10-generated-website.png',
   '11-view-folder.png',
-  '12-benchmark-lab.png'
+  '12-benchmark-lab.png',
+  '13-storytelling-editor.png',
+  '14-project-file-references.png'
 )) {
   $publicFiles["screenshots\$screenshotName"] = Join-Path (
     $repositoryRoot

@@ -62,7 +62,9 @@ public sealed class OllamaStartupRecoveryEndToEndTests
     await Expect(indicator.Locator(".assistant-current-activity")).ToContainTextAsync("Loading model");
     await Expect(Page.Locator(".assistant-progress").Last).ToContainTextAsync("Loading model");
     await Expect(indicator.Locator(".assistant-inference-percent")).ToBeHiddenAsync();
-    Assert.AreEqual("rgb(255, 255, 255)", await indicator.Locator("svg").EvaluateAsync<string>("e => getComputedStyle(e).stroke"));
+    await Expect(indicator.Locator(".assistant-running-brain")).ToBeVisibleAsync();
+    await Expect(indicator.Locator(".assistant-running-host")).ToBeHiddenAsync();
+    Assert.AreEqual("rgb(255, 255, 255)", await indicator.Locator(".assistant-running-brain").EvaluateAsync<string>("e => getComputedStyle(e).stroke"));
     await Expect(indicator.Locator(".assistant-inference-percent")).ToHaveTextAsync("25%");
     await Expect(indicator.Locator(".assistant-current-activity")).ToContainTextAsync("Processing prompt");
     await Expect(Page.Locator(".assistant-progress").Last).ToContainTextAsync("Processing prompt");
@@ -144,6 +146,186 @@ public sealed class OllamaStartupRecoveryEndToEndTests
       }
       return values.ToArray();
     }
+  }
+
+  [TestMethod]
+  [DataRow("native")]
+  [DataRow("codex")]
+  [DataRow("claude-code")]
+  [DataRow("qwen-code")]
+  [DataRow("opencode")]
+  [Timeout(120_000, CooperativeCancellation = true)]
+  public async Task DirectSwitchUnloadsPreviousBackendAcrossHarnesses(string harness)
+  {
+    await ConfigureAsync([0]);
+    await using var previous = FakeOllamaServer.Start();
+    await using var next = FakeOllamaServer.Start();
+    Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(_executable)!, "lib", "ollama", "vulkan"));
+    Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(_executable)!, "lib", "ollama", "rocm_v6"));
+    await File.WriteAllTextAsync(Path.ChangeExtension(_executable, ".forward-vulkan.url"), previous.BaseUrl);
+    await File.WriteAllTextAsync(Path.ChangeExtension(_executable, ".forward-rocm_v6.url"), next.BaseUrl);
+    _environment.FakeOllama.SetLoadedModelContext("unused:latest", 8192);
+
+    var settings = await GetSettingsJsonAsync();
+    settings["defaultGpu"] = "vulkan:all";
+    using (var saved = await PutSettingsJsonAsync(settings)) saved.EnsureSuccessStatusCode();
+    await Page.ReloadAsync();
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    Assert.Contains("alpha:latest", previous.LoadedModels);
+    var ownedPids = StartedPids();
+
+    var ordering = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    previous.RequestObserved = request =>
+    {
+      if (request.KeepAlive == 0) ordering.Enqueue("unload");
+    };
+    next.RequestObserved = request =>
+    {
+      if (request.KeepAlive != 0)
+        ordering.Enqueue(previous.LoadedModels.Count == 0 ? "load-after-unload" : "overlap");
+    };
+    settings["defaultGpu"] = "rocm:0";
+    using (var saved = await PutSettingsJsonAsync(settings)) saved.EnsureSuccessStatusCode();
+    await Page.ReloadAsync();
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(harness);
+    await Page.Locator("#model-selector").SelectOptionAsync("beta:code");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
+    await Expect(Page.Locator("[data-event-type='runtime.model-unloaded']").Last)
+      .ToContainTextAsync("alpha:latest");
+    Assert.IsEmpty(previous.LoadedModels);
+    Assert.AreEqual("unload", ordering.First());
+    Assert.DoesNotContain("overlap", ordering);
+    if (harness == "native") Assert.Contains("load-after-unload", ordering);
+    Assert.Contains("unused:latest", _environment.FakeOllama.LoadedModels,
+      "Direct must preserve unrelated models in the user's external Ollama service.");
+    Assert.IsTrue(ownedPids.All(ProcessIsAlive), "Only models are unloaded; the managed servers remain reusable.");
+  }
+
+  [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
+  [Timeout(90_000, CooperativeCancellation = true)]
+  public async Task DirectSwitchRequiresVerifiedUnloadAndRecovers(bool acknowledgeWithoutUnloading)
+  {
+    await ConfigureAsync([0]);
+    await SetExecuteModeAsync("auto");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    Assert.Contains("alpha:latest", _environment.FakeOllama.LoadedModels);
+    _environment.FakeOllama.RejectModelUnload = !acknowledgeWithoutUnloading;
+    _environment.FakeOllama.IgnoreModelUnload = acknowledgeWithoutUnloading;
+    await Page.Locator("#model-selector").SelectOptionAsync("beta:code");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    await Expect(Page.Locator(".assistant-answer.error").Last).ToBeVisibleAsync(new() { Timeout = 20_000 });
+    Assert.IsFalse(_environment.FakeOllama.Requests.Any(request => request.Model == "beta:code"),
+      "An unload error or an unverified unload must prevent target inference.");
+    _environment.FakeOllama.RejectModelUnload = false;
+    _environment.FakeOllama.IgnoreModelUnload = false;
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    Assert.Contains("beta:code", _environment.FakeOllama.LoadedModels);
+    Assert.DoesNotContain("alpha:latest", _environment.FakeOllama.LoadedModels);
+  }
+
+  [TestMethod]
+  [DataRow(false)]
+  [DataRow(true)]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DirectSwitchWaitsForActiveTurnAndReleasesCancelledWaiter(bool cancelWaitingTurn)
+  {
+    await ConfigureAsync([0]);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    _environment.FakeOllama.BeforeChatResponse = request =>
+    {
+      if (request.Model == "alpha:latest" && request.Messages.Any(message => message.Content.Contains("RESIDENCY_ACTIVE_TURN", StringComparison.Ordinal)))
+      {
+        _environment.FakeOllama.SetLoadedModelContext("alpha:latest", 8192);
+        started.TrySetResult();
+        return release.Task;
+      }
+      return Task.CompletedTask;
+    };
+    try
+    {
+      await StartMessageAsync("RESIDENCY_ACTIVE_TURN");
+      await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+      using var client = new HttpClient { BaseAddress = _environment.BaseUri, Timeout = TimeSpan.FromSeconds(30) };
+      using var request = new HttpRequestMessage(HttpMethod.Post, "api/chat/stream")
+      {
+        Content = JsonContent.Create(new
+        {
+          model = "beta:code",
+          message = "Report runtime configuration without modifying files.",
+          interactionMode = "chat",
+          executionStrategy = "direct",
+          harness = "native",
+          browserSessionId = Guid.NewGuid().ToString("N"),
+          chatRunId = Guid.NewGuid().ToString("N"),
+          history = Array.Empty<object>()
+        })
+      };
+      using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+      response.EnsureSuccessStatusCode();
+      using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
+      using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+      JsonNode? waiting = null;
+      while (await reader.ReadLineAsync(deadline.Token) is { } line)
+      {
+        if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
+        var frame = JsonNode.Parse(line[6..])!;
+        if (frame["type"]?.GetValue<string>() != "runtime.model-switch-waiting") continue;
+        waiting = frame;
+        break;
+      }
+      Assert.IsNotNull(waiting);
+      Assert.IsFalse(_environment.FakeOllama.Requests.Any(item => item.KeepAlive == 0 || item.Model == "beta:code"),
+        "Waiting for the active turn must not evict its model or start the next model.");
+      if (cancelWaitingTurn)
+      {
+        using var cancelled = await client.PostAsync($"api/chat/runs/{waiting["chatRunId"]!.GetValue<string>()}/cancel", null);
+        cancelled.EnsureSuccessStatusCode();
+        StringAssert.Contains(await reader.ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(10)), "request.cancelled");
+      }
+      release.TrySetResult();
+      await Expect(Page.Locator(".message.assistant .activity").Last).ToHaveAttributeAsync("data-terminal", "true");
+      if (cancelWaitingTurn)
+      {
+        await Page.Locator("#model-selector").SelectOptionAsync("beta:code");
+        await SendMessageAsync("Report runtime configuration without modifying files.");
+      }
+      else
+        StringAssert.Contains(await reader.ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(10)), "response.completed");
+      Assert.Contains("beta:code", _environment.FakeOllama.LoadedModels);
+      Assert.DoesNotContain("alpha:latest", _environment.FakeOllama.LoadedModels);
+      await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
+    }
+    finally
+    {
+      release.TrySetResult();
+      _environment.FakeOllama.BeforeChatResponse = null;
+    }
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task DirectExternalSwitchPreservesUnrelatedModelsAndKeepsSelectedWarm()
+  {
+    _environment.FakeOllama.SetLoadedModelContext("unused:latest", 8192);
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("alpha:latest");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    var beforeWarm = _environment.FakeOllama.Requests.Count(item => item.KeepAlive == 0);
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    Assert.AreEqual(beforeWarm, _environment.FakeOllama.Requests.Count(item => item.KeepAlive == 0));
+    await Page.Locator("#model-selector").SelectOptionAsync("beta:code");
+    await SendMessageAsync("Report runtime configuration without modifying files.");
+    Assert.DoesNotContain("alpha:latest", _environment.FakeOllama.LoadedModels);
+    Assert.Contains("beta:code", _environment.FakeOllama.LoadedModels);
+    Assert.Contains("unused:latest", _environment.FakeOllama.LoadedModels);
+    await Expect(Page.Locator(".assistant-answer.error")).ToHaveCountAsync(0);
   }
 
   [TestCleanup]

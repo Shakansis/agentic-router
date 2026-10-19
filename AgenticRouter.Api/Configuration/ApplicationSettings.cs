@@ -532,6 +532,8 @@ public sealed record OllamaGpuTarget(
 
 public sealed record ContextSettings
 {
+  public const int MaximumSupportedTokens = int.MaxValue;
+
   public int DefaultContextTokens { get; init; } = 32_768;
 
   public int ProviderContextTokens { get; init; } = 40_960;
@@ -799,6 +801,10 @@ public static class OllamaRuntimeDefaults
 
 public sealed record ExecutionSettings
 {
+  public string ParallelToolExecution { get; init; } = "off";
+
+  public int MaxConcurrentToolCalls { get; init; } = 4;
+
   public int MaxDirectPlanSteps { get; init; } = 5;
 
   public int? FileCreationOutputTokenLimit { get; init; }

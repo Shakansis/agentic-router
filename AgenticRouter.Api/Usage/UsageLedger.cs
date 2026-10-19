@@ -8,6 +8,8 @@ namespace AgenticRouter.Api.Usage;
 
 public interface IUsageLedger
 {
+  Task<IReadOnlyDictionary<string, DateTimeOffset>> LastModelUsesAsync(CancellationToken cancellationToken);
+
   Task AppendAsync(
     UsageEvent usageEvent,
     int maximumEventBytes,
@@ -44,6 +46,25 @@ public interface IUsageLedger
 
 public sealed class JsonlUsageLedger : IUsageLedger
 {
+  public async Task<IReadOnlyDictionary<string, DateTimeOffset>> LastModelUsesAsync(CancellationToken cancellationToken)
+  {
+    var result = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+    if (!Directory.Exists(_usageDirectory)) return result;
+    var now = DateTimeOffset.UtcNow;
+    foreach (var path in Directory.EnumerateFiles(_usageDirectory, "*.jsonl", SearchOption.TopDirectoryOnly))
+    {
+      await foreach (var entry in ReadEventsAsync(path, cancellationToken))
+      {
+        if (entry.Status != UsageStatuses.Success || entry.TotalTokens <= 0
+          || !UsageEventValidator.Validate(entry, _pricing.Get().Version, now).Accepted) continue;
+        var key = entry.ProviderId + "/" + entry.ModelId;
+        if (!result.TryGetValue(key, out var previous) || entry.TimestampUtc > previous)
+          result[key] = entry.TimestampUtc;
+      }
+    }
+    return result;
+  }
+
   private static readonly JsonSerializerOptions JsonOptions = new(
     JsonSerializerDefaults.Web
   );

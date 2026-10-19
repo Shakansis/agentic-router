@@ -15,10 +15,19 @@ public sealed class SafeMarkdownRenderer : IMarkdownRenderer
     .Build();
 
   private readonly HtmlSanitizer _sanitizer;
+  private readonly HtmlSanitizer _documentSanitizer;
 
   public SafeMarkdownRenderer()
   {
-    _sanitizer = new HtmlSanitizer();
+    _sanitizer = CreateSanitizer();
+    _documentSanitizer = CreateSanitizer();
+    foreach (var attribute in new[] { "id", "data-story-start", "data-story-end" })
+      _documentSanitizer.AllowedAttributes.Add(attribute);
+  }
+
+  private static HtmlSanitizer CreateSanitizer()
+  {
+    var _sanitizer = new HtmlSanitizer();
     _sanitizer.AllowedTags.Clear();
 
     foreach (var tag in new[]
@@ -77,7 +86,10 @@ public sealed class SafeMarkdownRenderer : IMarkdownRenderer
     _sanitizer.AllowedSchemes.Add(
       "mailto"
     );
+    return _sanitizer;
   }
+
+  public string RenderDocument(string markdown) => _documentSanitizer.Sanitize(StoryMarkdownDocument.Render(markdown));
 
   public string Render(
     string markdown

@@ -314,6 +314,10 @@ function renderContextUsage() {
     + `${liveContext ? `${window.AgenticRouterI18n.t("context.live")} ` : ""}`
     + `${usage.accuracy === "exact" ? "exact" : "estimated"}`;
   const estimatedLiveUsage = liveContext && usage.accuracy !== "exact";
+  const requestedContext = usage.requestedContextTokens;
+  const reducedContext = requestedContext > effectiveLimit;
+  const modelCapped = reducedContext && effectiveLimit === usage.modelMaximumContextTokens;
+  const contextCapReason = modelCapped ? "model maximum" : "request runtime profile";
   const estimateWarning = t(
     "context.live_estimate_warning",
     { harness: activeContextHarnessLabel() }
@@ -330,8 +334,11 @@ function renderContextUsage() {
   elements.contextUsage.dataset.warning =
     usage.warningThreshold ? String(usage.warningThreshold) : "";
   elements.contextUsageWarning.hidden =
-    !usage.warningThreshold && !usage.trimmed;
+    !usage.warningThreshold && !usage.trimmed && !reducedContext;
   elements.contextUsageWarning.textContent = [
+    reducedContext
+      ? `Requested ${formatInteger(requestedContext)} tokens; effective ${formatInteger(effectiveLimit)} tokens (${contextCapReason}).`
+      : null,
     usage.warningThreshold
       ? `Warning: context is above ${usage.warningThreshold}% of usable capacity.`
       : null,
@@ -386,7 +393,9 @@ function renderContextUsage() {
       "Output reserve",
       formatInteger(usage.reservedResponseTokens)
     ),
-    contextDetail("Effective limit", formatInteger(effectiveLimit))
+    ...(requestedContext > 0 ? [contextDetail("Requested context", formatInteger(requestedContext))] : []),
+    contextDetail("Effective limit", formatInteger(effectiveLimit)),
+    ...(usage.modelMaximumContextTokens > 0 ? [contextDetail("Model maximum", formatInteger(usage.modelMaximumContextTokens))] : [])
   );
 
   const advancedDetails = [
@@ -421,11 +430,18 @@ function renderContextUsage() {
   elements.contextUsageAdvanced.dataset.detailCount =
     String(advancedDetails.length);
   updateContextUsageAdvancedLabel();
+  fitContextUsagePopover();
   elements.compactContext.hidden = !usage.compactionEligible;
   elements.compactContext.disabled = Boolean(state.requestController);
   elements.compactContext.textContent = state.compactContextNextRequest
     ? "Compaction prepared"
     : "Compact context";
+}
+
+function fitContextUsagePopover() {
+  if (!elements.contextUsage.open) return;
+  const available = Math.max(0, elements.contextUsage.getBoundingClientRect().top - 24);
+  elements.contextUsage.querySelector(".context-usage-popover").style.maxHeight = `${Math.min(620, available)}px`;
 }
 
 function activeContextHarnessLabel() {
@@ -492,13 +508,15 @@ function formatCompactTokens(value) {
     return formatInteger(numeric);
   }
 
-  return `${(numeric / 1000).toLocaleString(
+  const [divisor, suffix] = numeric >= 1_000_000_000 ? [1_000_000_000, "B"]
+    : numeric >= 1_000_000 ? [1_000_000, "M"] : [1000, "k"];
+  return `${(numeric / divisor).toLocaleString(
     window.AgenticRouterI18n.locale,
     {
       minimumFractionDigits: 1,
       maximumFractionDigits: 1
     }
-  )}k`;
+  )}${suffix}`;
 }
 
 function updateComposerStatus() {
@@ -567,7 +585,9 @@ function updateActiveAgentLabel() {
   elements.activeAgentLabel.textContent =
     selectedModel && selectedModel !== "auto"
       ? selectedModel
-      : "Auto (Keywords)";
+      : state.specialist
+        ? `Auto · ${specialistLabels[state.specialist] ?? state.specialist}`
+        : "Auto (Keywords)";
   elements.activeAgentLabel.title = elements.activeAgentLabel.textContent;
   renderCloudUsage();
 }

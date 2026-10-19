@@ -341,6 +341,8 @@ internal static class TestOllamaRuntimeDefaults
 
 internal sealed record TestExecutionSettings
 {
+  public string ParallelToolExecution { get; init; } = "off";
+  public int MaxConcurrentToolCalls { get; init; } = 4;
   public int MaxDirectPlanSteps { get; init; } = 5;
 
   public int? FileCreationOutputTokenLimit { get; init; }

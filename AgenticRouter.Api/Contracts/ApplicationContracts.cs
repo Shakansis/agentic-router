@@ -149,8 +149,13 @@ public sealed record ChatRequest(
   string? ChatRunId = null,
   string? Thinking = null,
   string? HistoryWindowId = null,
-  int? HistoryMessageIndex = null
-);
+  int? HistoryMessageIndex = null,
+  string? Specialist = null
+)
+{
+  [JsonIgnore]
+  public int? MinimumKeepAliveSeconds { get; init; }
+}
 
 public sealed record HarnessSteerInput(
   string SessionId,
@@ -330,7 +335,8 @@ public sealed record ConversationSessionRecord(
   AgenticRouter.Api.Chat.LiveChatRunView? ActiveChatRun = null,
   int ContextProjectionTargetBytes = 0,
   [property: JsonIgnore]
-  long LastHistoryWriteBytes = 0
+  long LastHistoryWriteBytes = 0,
+  string? Specialist = null
 );
 
 public sealed record RenameConversationSessionRequest(
@@ -354,7 +360,8 @@ public sealed record SaveConversationSessionRequest(
   string ApprovalPolicy = "auto",
   string Harness = "native",
   string ExecutionStrategy = "auto",
-  int PreservedMessageCount = 0
+  int PreservedMessageCount = 0,
+  string? Specialist = null
 );
 
 public sealed record ConversationPersistenceView(
@@ -478,7 +485,9 @@ public sealed record ContextUsageView(
   long? TotalDurationNanoseconds = null,
   long? LoadDurationNanoseconds = null,
   long? PromptEvalDurationNanoseconds = null,
-  long? EvalDurationNanoseconds = null
+  long? EvalDurationNanoseconds = null,
+  int? RequestedContextTokens = null,
+  int? ModelMaximumContextTokens = null
 );
 
 public sealed record TrustedWorkspaceRequest(
@@ -907,7 +916,8 @@ public sealed record ExecutionSessionReview(
   GitDeliveryStateView? Delivery = null,
   IReadOnlyList<ToolNameResolutionEvidence>? ToolNameResolutions = null,
   IReadOnlyList<ExecutionActionRecord>? Actions = null,
-  bool Historical = false
+  bool Historical = false,
+  IReadOnlyList<NativeToolBatchSnapshot>? NativeToolBatches = null
 );
 
 public sealed record UndoExecutionRequest(
@@ -1074,7 +1084,14 @@ public sealed record ChatStreamEvent(
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   InferenceProgressView? InferenceProgress = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  AgenticRouter.Api.Sessions.HostFileProgress? HostFileProgress = null
+  AgenticRouter.Api.Sessions.HostFileProgress? HostFileProgress = null,
+  NativeToolExecutionTelemetry? ToolExecution = null
+);
+
+public sealed record NativeToolExecutionTelemetry(
+  string? BatchId, string? CallId, int Position, string Status,
+  int Active, int Peak, int Limit, long? DurationMilliseconds = null,
+  string? Reason = null
 );
 
 public sealed record InferenceProgressView(

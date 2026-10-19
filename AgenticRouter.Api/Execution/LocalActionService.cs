@@ -57,7 +57,10 @@ public sealed record ValidatedLocalAction(
   PendingRenameChange? PendingRename = null,
   bool ProcessPermissionGranted = false,
   IReadOnlyList<DownloadConflict>? DownloadConflicts = null,
-  IReadOnlyDictionary<string, string>? DownloadDecisions = null
+  IReadOnlyDictionary<string, string>? DownloadDecisions = null,
+  string? ToolBatchId = null,
+  string? ToolCallId = null,
+  int? ToolBatchPosition = null
 );
 
 public sealed record DownloadConflict(

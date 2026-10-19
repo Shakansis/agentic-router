@@ -1,3 +1,56 @@
+# Agentic Router v0.16.0 alpha
+
+This alpha adds fixed specialists, a Storytelling Editor, project-file references,
+model library controls and Native multi-tool execution. Windows x64 and Linux x64
+portable packages include the .NET runtime. Ollama, models and optional harness
+CLIs remain separate installations. Previous releases remain unchanged.
+
+## Writing and conversation workflows
+
+- Fix a configured specialist for a conversation independently of the model and
+  harness, or retain Automatic routing. The Host validates and restores that choice.
+- Selecting RPG storytelling explicitly exposes the Storytelling Editor. Review or
+  rewrite a selected passage, compare the proposal before Apply, discard it or undo
+  an applied change. Drafts remain separate from conversation history.
+- Open, compare and explicitly save Markdown inside the trusted workspace, with
+  conflict detection and preservation of unsaved drafts. Preview and selection
+  tools support longer documents and fullscreen work.
+- Type `@` to search project files and insert relative-path badges at the caret.
+  Keyboard selection, clipboard text, queued prompts and restored drafts preserve
+  those paths. This does not automatically attach file contents.
+- Chat Edit immediately rewinds the selected turn and restores its original prompt
+  and attachments. Execute Rollback additionally restores captured file effects;
+  conflicting external changes remain explicit.
+
+## Native execution and local runtime
+
+- Native accepts every structured tool call emitted in a response and correlates
+  individual results in emission order. Malformed siblings receive individual
+  failures; duplicate call IDs are rejected before effects.
+- Sequential execution remains the default. Optional parallel execution admits
+  only eligible independent reads, with bounded concurrency, individual Host
+  validation, cancellation, effect evidence and sequential mutation barriers.
+- Direct turns coordinate model switching and verify unloads before loading the
+  selected model. External models that AR has not selected remain untouched.
+- Local context follows the active role or exact-model override and the model's
+  declared capacity. Unrelated roles and global fallback settings do not silently
+  reduce or enlarge that request. Requested and effective values remain visible.
+- The model library adds explicit Ollama install/remove controls, verified removal,
+  aliases, notes, favorites and last successful use recorded by AR. Automated
+  validation uses fake models and does not install or remove the user's models.
+
+- Correct mobile live status layout: counters retain their own full-width row
+  after inference badges are inserted, keeping the model identity readable and
+  the running header fixed at the conversation viewport top.
+- Fix a Direct Execute replacement waiting on the old session's model lease while
+  that session awaited approval. Valid replacements now cancel the prior session
+  before model admission; invalid requests preserve the pending approval.
+
+## Validation
+
+Release validation is in progress. Final counts, package checks and remaining
+real-provider limitations will be recorded here after the release gates finish.
+
 # Agentic Router v0.15.0 alpha
 
 This alpha improves harness steering, per-model runtime tuning and execution

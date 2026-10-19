@@ -1894,7 +1894,7 @@ p {
   display: none;
 }
 
-.execution-session-header span:last-child {
+.execution-session-header > .execution-session-counts {
   color: var(--subtle);
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -1905,7 +1905,7 @@ p {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .execution-session-header span:last-child {
+  .execution-session-header > .execution-session-counts {
     grid-column: 1 / -1;
     text-align: left;
   }

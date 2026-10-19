@@ -637,6 +637,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
     );
   }
 
+  public Task UnloadModelAtEndpointAsync(Uri endpoint, string model, CancellationToken cancellationToken)
+    => _ollama.UnloadModelAtEndpointAsync(endpoint, model, cancellationToken);
+
   public Task SetModelResidencyAsync(
     Uri baseUri,
     string model,

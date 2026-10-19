@@ -289,6 +289,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
       "max_coordinator_handoffs_per_turn",
       settings.Execution.MaxCoordinatorHandoffsPerTurn
     );
+    Scalar(yaml, 1, "parallel_tool_execution", settings.Execution.ParallelToolExecution);
+    Scalar(yaml, 1, "max_concurrent_tool_calls", settings.Execution.MaxConcurrentToolCalls);
     Scalar(
       yaml,
       1,
@@ -1855,7 +1857,7 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     };
     ValidateKeys(
       section,
-      numericKeys.Concat(["file_creation_output_token_limit"]).Concat(effortKeys).ToArray(),
+      numericKeys.Concat(["file_creation_output_token_limit", "parallel_tool_execution", "max_concurrent_tool_calls"]).Concat(effortKeys).ToArray(),
       "execution",
       errors
     );
@@ -1879,6 +1881,8 @@ public sealed class PortableYamlSettingsService : IPortableYamlSettingsService
     {
       Execution = current with
       {
+        ParallelToolExecution = ReadString(section, "parallel_tool_execution", current.ParallelToolExecution, "execution.parallel_tool_execution", errors),
+        MaxConcurrentToolCalls = ReadInt(section, "max_concurrent_tool_calls", current.MaxConcurrentToolCalls, "execution.max_concurrent_tool_calls", errors),
         DirectCoordinatorPlanningFailuresBeforeHandoff = values[0],
         ResidentCoordinatorPlanningFailuresBeforeFailure = values[1],
         MaxCoordinatorHandoffsPerTurn = values[2],

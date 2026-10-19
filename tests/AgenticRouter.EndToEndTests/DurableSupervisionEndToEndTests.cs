@@ -870,6 +870,8 @@ public sealed class DurableSupervisionEndToEndTests
       await Page.Locator("#send-button").ClickAsync();
 
       var assistant = Page.Locator(".message.assistant").Last;
+      await Page.Locator("#snapshot-git-dialog").GetByRole(AriaRole.Button,
+        new() { Name = "Continue without file rollback", Exact = true }).ClickAsync();
       await Expect(
         assistant.Locator(".supervision-progress-panel")
       ).ToHaveCountAsync(0);
@@ -1066,6 +1068,8 @@ public sealed class DurableSupervisionEndToEndTests
       $"Use {harness} autonomous supervision and expose generic worker activity."
     );
     await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator("#snapshot-git-dialog").GetByRole(AriaRole.Button,
+      new() { Name = "Continue without file rollback", Exact = true }).ClickAsync();
 
     var assistant = Page.Locator(".message.assistant").Last;
     var plan = assistant.Locator(".execution-plan");
@@ -2304,6 +2308,8 @@ public sealed class DurableSupervisionEndToEndTests
       "/supervisor supervision restart boundary"
     );
     await Page.Locator("#send-button").ClickAsync();
+    await Page.Locator("#snapshot-git-dialog").GetByRole(AriaRole.Button,
+      new() { Name = "Continue without file rollback", Exact = true }).ClickAsync();
     await Expect(
       Page.Locator("[data-event-type=\"action.awaiting-approval\"]")
     ).ToBeVisibleAsync(new() { Timeout = 30_000 });
@@ -2385,8 +2391,7 @@ public sealed class DurableSupervisionEndToEndTests
       "#send-strategy-menu [data-send-strategy=\"autonomous\"]"
     ).ClickAsync();
     const string prompt = "supervision restart boundary";
-    await Page.Locator("#message-input").FillAsync(prompt);
-    await Page.Locator("#send-button").ClickAsync();
+    await StartMessageAsync(prompt);
 
     JsonObject? firstRun = null;
     var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
@@ -2437,10 +2442,11 @@ public sealed class DurableSupervisionEndToEndTests
 
     await Page.Locator(".message.user").First.GetByRole(
       AriaRole.Button,
-      new() { Name = "Edit message", Exact = true }
+      new() { Name = "Rollback", Exact = true }
     ).ClickAsync();
-    await Expect(Page.Locator("#message-input")).ToHaveValueAsync(prompt);
-    await Page.Locator("#message-input").PressAsync("Enter");
+    await Expect(Page.Locator("#message-input")).ToHaveJSPropertyAsync("value", prompt);
+    await Expect(Page.Locator("#message-input")).ToBeEnabledAsync();
+    await StartMessageAsync(prompt);
 
     JsonObject? replacement = null;
     deadline = DateTimeOffset.UtcNow.AddSeconds(30);

@@ -748,6 +748,15 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
     }
     if (text.Contains("vertical two host bridge opencode", StringComparison.Ordinal))
     {
+      // Context recovery starts a replacement session with the original objective.
+      // Preserve the completed probe instead of replaying its mutations and reads.
+      if (text.Contains("HOST_CONTEXT_RECOVERY_V1", StringComparison.Ordinal)
+        && runtime is not null
+        && File.Exists(Path.Combine(runtime, "fake-opencode-host-vertical-two.json")))
+      {
+        await CompleteAsync(sessionId);
+        return;
+      }
       async Task CheckpointAsync(string value)
       {
         if (runtime is not null)
@@ -805,12 +814,6 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
         "create_files",
         new { files = new[] { new { path = "large.txt", content = largeContent } } }
       );
-      var largeRead = await InvokeHostToolAsync("read_file", new { path = "large.txt" });
-      var rangedRead = await InvokeHostToolAsync(
-        "read_file",
-        new { path = "large.txt", offsetBytes = 0, lengthBytes = 1024 }
-      );
-      await CheckpointAsync("large-read");
       var delete = await InvokeHostToolAsync(
         "delete_paths",
         new { paths = new[] { "item.txt" }, recursive = false }
@@ -820,6 +823,12 @@ app.MapPost("/session/{sessionId}/prompt_async", async (string sessionId, HttpCo
         new { paths = new[] { "item.txt" }, recursive = false }
       );
       await CheckpointAsync("delete");
+      var largeRead = await InvokeHostToolAsync("read_file", new { path = "large.txt" });
+      var rangedRead = await InvokeHostToolAsync(
+        "read_file",
+        new { path = "large.txt", offsetBytes = 0, lengthBytes = 1024 }
+      );
+      await CheckpointAsync("large-read");
       if (runtime is not null)
       {
         await File.WriteAllTextAsync(

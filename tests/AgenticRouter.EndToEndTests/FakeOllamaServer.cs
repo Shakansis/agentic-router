@@ -75,6 +75,8 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
   private readonly ConcurrentQueue<RecordedChatRequest> _allRequests = new();
   private readonly ConcurrentQueue<string> _capabilityQueries = new();
   private readonly ConcurrentQueue<string> _errors = new();
+  private readonly ConcurrentDictionary<string, int> _declaredContexts = new();
+  public void SetDeclaredContext(string model, int tokens) => _declaredContexts[model] = tokens;
   public ConcurrentQueue<(string Fixture, string Protocol, int? Limit, int LimitFields, string? ContentType)> CompatibilityRequests { get; } = new();
   private readonly ConcurrentDictionary<string, RunningModel> _loaded = new(
     StringComparer.Ordinal
@@ -144,9 +146,17 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
 
   public bool BooleanThinkingForQwen { get; set; }
   public bool BooleanThinkingForGptOss { get; set; }
+  public bool RejectModelUnload { get; set; }
+  public bool IgnoreModelUnload { get; set; }
+  public Action<RecordedChatRequest>? RequestObserved { get; set; }
+  public Func<RecordedChatRequest, Task>? BeforeChatResponse { get; set; }
 
   public void Reset()
   {
+    RejectModelUnload = false;
+    IgnoreModelUnload = false;
+    RequestObserved = null;
+    BeforeChatResponse = null;
     _requests.Clear();
     CompatibilityRequests.Clear();
     _runtimeDraftModels.Clear();
@@ -156,6 +166,7 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     _errors.Clear();
     _generationAttempts.Clear();
     _pulledModels.Clear();
+    _declaredContexts.Clear();
     _protocolVersion = "0.13.5-test";
     _adaptiveConformanceModel = null;
     _evictOnNextLoadedModel = null;
@@ -485,6 +496,20 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
         return;
       }
 
+      if (context.Request.HttpMethod == HttpMethod.Delete.Method && path == "/api/delete")
+      {
+        using var document = await JsonDocument.ParseAsync(context.Request.InputStream, cancellationToken: cancellationToken);
+        var model = document.RootElement.GetProperty("model").GetString()!;
+        if (model.StartsWith("remove-failure", StringComparison.Ordinal))
+          await WriteJsonAsync(context.Response, HttpStatusCode.InternalServerError, new { error = "fixture removal failure" }, cancellationToken);
+        else
+        {
+          if (!model.StartsWith("remove-unverified", StringComparison.Ordinal)) _pulledModels.TryRemove(model, out _);
+          await WriteJsonAsync(context.Response, HttpStatusCode.OK, new { }, cancellationToken);
+        }
+        return;
+      }
+
       if (
         context.Request.HttpMethod == HttpMethod.Post.Method
         && path == "/api/show"
@@ -547,6 +572,11 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     );
     var model = document.RootElement.GetProperty("model").GetString()
       ?? throw new InvalidOperationException("A model is required.");
+    if (model.StartsWith("missing-library-model", StringComparison.Ordinal))
+    {
+      await WriteJsonAsync(context.Response, HttpStatusCode.NotFound, new { error = "model does not exist" }, cancellationToken);
+      return;
+    }
     const long total = 1_000_000L;
     context.Response.StatusCode = (int)HttpStatusCode.OK;
     context.Response.ContentType = "application/x-ndjson";
@@ -561,6 +591,8 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
       new { status = "downloading", total, completed = total / 2 },
       cancellationToken
     );
+    if (model.StartsWith("slow-library", StringComparison.Ordinal))
+      await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
     _pulledModels[model] = new ModelDefinition(model, total);
     await WritePullUpdateAsync(
       context.Response,
@@ -644,7 +676,7 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
         model_info = new Dictionary<string, object>
         {
           ["qwen3.nextn_predict_layers"] = _runtimeDraftModels.GetValueOrDefault(model) ? 1 : 0,
-          ["general.context_length"] = string.Equals(
+          ["general.context_length"] = _declaredContexts.TryGetValue(model, out var declaredContext) ? declaredContext : string.Equals(
             model,
             "qwen3.8:27b-gpu0",
             StringComparison.Ordinal
@@ -888,6 +920,16 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     _allRequests.Enqueue(
       recorded
     );
+    RequestObserved?.Invoke(recorded);
+    if (BeforeChatResponse is { } beforeResponse)
+      await beforeResponse(recorded).WaitAsync(cancellationToken);
+
+    if (messages.Any(message => message.Role == "user"
+      && message.Content.StartsWith("AGENTIC_ROUTER_STORY_EDITOR_V1\n", StringComparison.Ordinal)))
+    {
+      await RespondToStoryEditorAsync(context.Response, model, messages, cancellationToken);
+      return;
+    }
 
     if (RejectRuntimePerformance && (recorded.DraftTokens is not null || recorded.BatchSize is not null))
     {
@@ -920,11 +962,14 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
 
     if (messages.Length == 0 && keepAlive is not null)
     {
-      UpdateResidency(
-        model,
-        keepAlive.Value,
-        contextTokens
-      );
+      if (keepAlive == 0 && RejectModelUnload)
+      {
+        await WriteJsonAsync(context.Response, HttpStatusCode.ServiceUnavailable,
+          new { error = "Simulated unload failure" }, cancellationToken);
+        return;
+      }
+      if (keepAlive != 0 || !IgnoreModelUnload)
+        UpdateResidency(model, keepAlive.Value, contextTokens);
       await WriteJsonAsync(
         context.Response,
         HttpStatusCode.OK,
@@ -1915,12 +1960,12 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
       );
     object NextDeleteProposal()
     {
-      if (completedStructuredReads == 0)
+      if (completedStructuredReads == 0 && !current.Contains("delete files direct", StringComparison.OrdinalIgnoreCase))
       {
         return CreateLocalActionPlan(current);
       }
 
-      if (completedStructuredReads == 1)
+      if (completedStructuredReads == 1 && !current.Contains("delete files direct", StringComparison.OrdinalIgnoreCase))
       {
         return new
         {
@@ -2486,6 +2531,46 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
       entry => IsExecuteObjective(entry.message)
     ).Last();
     var current = currentEntry.message.Content;
+    if (current.Contains("NATIVE_MULTITOOL_V1", StringComparison.Ordinal))
+    {
+      var prior = messages.Skip(currentEntry.index + 1).Where(message => message.Role == "tool").ToArray();
+      object Call(string id, string name, object arguments) => new { id, function = new { name, arguments } };
+      object[]? calls;
+      if (!prior.Any(message => message.ToolName == LocalActionPlanner.RequestToolsetTool))
+        calls = [Call("grant", LocalActionPlanner.RequestToolsetTool,
+          new { tools = new[] { "read_file", "get_file_info", "list_files", "create_file", "create_directory" }, reason = "Inspect the independent inputs and requested effects." })];
+      else if (prior.Any(message => message.ToolName != LocalActionPlanner.RequestToolsetTool))
+        calls = null;
+      else if (current.Contains("duplicate", StringComparison.Ordinal)
+        && !messages.Any(message => message.Content.Contains("tool-call-duplicate-id", StringComparison.Ordinal)
+          || message.Content.Contains("reused a tool call identifier", StringComparison.Ordinal)))
+        calls = [Call("duplicate", "create_file", new { path = "duplicate-unsafe.txt", content = "must never execute" }),
+          Call("duplicate", "create_directory", new { path = "duplicate-unsafe-directory" })];
+      else if (current.Contains("mutate", StringComparison.Ordinal))
+        calls = [Call("create", "create_file", new { path = "hello.txt", content = "hello from agent" }),
+          Call("directory", "create_directory", new { path = "additional-call" }),
+          Call("verify", "read_file", new { path = "hello.txt" })];
+      else
+      {
+        var items = new List<object> { Call("read-a", "read_file", new { path = "multi-a.txt" }) };
+        if (current.Contains("invalid", StringComparison.Ordinal))
+          items.Add(Call("invalid", "unregistered_tool", new { }));
+        if (current.Contains("escape", StringComparison.Ordinal))
+          items.Add(Call("escape", "create_file", new { path = "../native-multitool-escape.txt", content = "must not escape" }));
+        if (current.Contains("malformed", StringComparison.Ordinal))
+          items.Add(Call("malformed", "read_file", "not-an-object"));
+        if (current.Contains("mixed", StringComparison.Ordinal))
+          items.Add(Call("write", "create_file", new { path = "multi-created.txt", content = "created between read groups" }));
+        items.Add(Call("read-b", "read_file", new { path = "multi-b.txt" }));
+        items.Add(Call("info", "get_file_info", new { path = current.Contains("mixed", StringComparison.Ordinal) ? "multi-created.txt" : "multi-a.txt" }));
+        calls = items.ToArray();
+      }
+      await WriteStreamingToolResponseAsync(response, model,
+        calls is null ? "NATIVE_MULTITOOL_OK" : "I will inspect the independent inputs and perform the requested actions.",
+        null, calls, 0, cancellationToken);
+      return;
+    }
+
     if (stream && hasTools && current.Contains("native large read fixture", StringComparison.Ordinal))
     {
       var result = messages.LastOrDefault(message => message.Role == "tool" && (message.ToolName == "read_file"
@@ -4276,36 +4361,6 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
         }
       }
       : null;
-
-    if (
-      toolCalls is not null
-      && hasPlan
-      && !hasResult
-      && current.Contains(
-        "multiple native tool calls",
-        StringComparison.OrdinalIgnoreCase
-      )
-    )
-    {
-      toolCalls =
-      [
-        toolCalls[0],
-        new
-        {
-          function = new
-          {
-            name = "create_directory",
-            arguments = JsonSerializer.SerializeToElement(
-              new
-              {
-                path = "ignored-extra-call"
-              },
-              CompactJsonOptions
-            )
-          }
-        }
-      ];
-    }
 
     var thinking = toolCalls is null
       ? null

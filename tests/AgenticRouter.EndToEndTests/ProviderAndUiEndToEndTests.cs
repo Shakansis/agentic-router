@@ -240,7 +240,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       "aria-pressed",
       "true"
     );
-    await Expect(Page.Locator("#message-input")).ToHaveValueAsync(
+    await Expect(Page.Locator("#message-input")).ToHaveTextAsync(
       new Regex("Install or start AnythingLLM")
     );
   }
@@ -2789,7 +2789,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         ["Current conversation", "System & instructions"]
       );
     await Expect(Page.Locator("#context-usage-limit-details dt"))
-      .ToHaveTextAsync(["Output reserve", "Effective limit"]);
+      .ToHaveTextAsync(["Output reserve", "Requested context", "Effective limit", "Model maximum"]);
 
     var advanced = Page.Locator("#context-usage-advanced");
     await Expect(advanced).ToBeVisibleAsync();
@@ -2848,13 +2848,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
     await Expect(editor).ToHaveValueAsync("queued edited prompt");
 
-    await Page.Locator(".message.user").First.GetByRole(
-      AriaRole.Button, new() { Name = "Edit message", Exact = true }).ClickAsync();
     await Page.Locator(".message-buffer-action[data-action=\"save\"]").ClickAsync();
-    await Expect(Page.Locator(".message-buffer-item"))
-      .ToContainTextAsync("queued edited prompt");
-    await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(1);
-    await Page.Locator("#cancel-message-edit").ClickAsync();
     await Expect(Page.Locator(".message.assistant")).ToHaveCountAsync(2);
     await Expect(Page.Locator(".message.assistant .activity").Last)
       .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 10_000 });
@@ -2926,7 +2920,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
-  public async Task CloudImageConfirmationIsSessionScopedAndHistoryStoresMetadataOnly()
+  public async Task CloudImageConfirmationIsSessionScopedAndSessionJsonStoresMetadataOnly()
   {
     await ConnectFakeCloudAsync(
       "google-ai-studio",
@@ -3042,10 +3036,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
       persisted,
       "cloud-confirmation.png"
     );
-    StringAssert.Contains(
-      persisted,
-      "missing-attachment"
-    );
+    Assert.DoesNotContain("missing-attachment", persisted);
     Assert.DoesNotContain(
       png,
       persisted
@@ -4440,7 +4431,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.15.0_alpha"
+      "v0.16.0_alpha"
     );
     await Expect(
       Page.Locator(

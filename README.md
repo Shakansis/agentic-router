@@ -4,14 +4,14 @@
 
 A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: `v0.15.0_alpha` improves harness steering, per-model runtime controls, execution evidence and UI performance. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
+**Current Status**: `v0.16.0_alpha` adds the Storytelling Editor, project-file references, model library controls and Native multi-tool execution. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.15.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-win-x64.zip.sha256) |
-| `v0.15.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.15.0_alpha/AgenticRouter-0.15.0_alpha-linux-x64.tar.gz.sha256) |
+| `v0.16.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-win-x64.zip.sha256) |
+| `v0.16.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.0_alpha/AgenticRouter-0.16.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -20,23 +20,27 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.15.0_alpha` is a pre-release intended for evaluation. The package is
+`0.16.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
 conversations by default and can be disabled or reopened from Local resources.
 
-### What's new in 0.15.0_alpha
+### What's new in 0.16.0_alpha
 
-- Steer supported running harnesses with explicit delivery evidence. Codex opts
-  into instant interruption; Qwen distinguishes queued input from same-turn delivery.
-- Tune draft tokens, batch size and KV cache per exact local model. KV overrides
-  inherit the global default and share settings across roles; compatible AR-owned
-  Ollama servers are reused without replacing another cache configuration.
-- Inspect inference progress, throughput and TTFT with their measurement source.
-  Completion and recovery remain based on Host-observed effects.
-- Updated harness protocol integration, native Codex patch validation, cleaner
-  activity reports and corrected resource-panel layering.
+- Keep a specialist fixed for the conversation, or let Automatic route each turn.
+- Use the Storytelling Editor with RPG storytelling: review or rewrite a selection,
+  compare changes before Apply, undo edits, and open/save Markdown in the trusted project.
+- Type `@` in the composer to find project files and insert relative-path badges.
+  File contents are not attached automatically.
+- Accept every Native tool call in a response. Execution remains sequential by
+  default; optional parallel reads retain individual Host validation and evidence.
+- Manage installed Ollama models from the library, including explicit installation,
+  verified removal, aliases, notes, favorites and last recorded use in AR.
+- Use the active role's requested context, capped by the local model's declared
+  capacity, and coordinate Direct model residency without stopping external models.
+- Rewind Chat immediately to the original prompt; Execute rollback also restores
+  captured file effects while preserving conflicting external changes.
 
 See [release notes](RELEASE_NOTES.md) for scope and validation evidence.
 
@@ -63,7 +67,7 @@ The Host, not the model, owns security boundaries, approval decisions, recovery 
 
 ## 🏗️ Architecture Overview
 
-The system follows a **Mixture of Experts (MoE)** approach and is **completely GPU-agnostic**:
+The Host routes to configured specialists and resolves the selected provider, model and harness independently of GPU count:
 
 ### Hardware Flexibility
 
@@ -126,7 +130,7 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 
 **Core Concepts:**
 - **Trusted Workspace**: A user-approved directory where all file operations are confined
-- **Specialist Ownership**: The selected specialist reasons, calls one tool, observes the Host result, and continues without a resident translation model
+- **Specialist Ownership**: The selected specialist reasons, calls tools, observes each Host result, and continues without a resident translation model
 - **Optional Progress**: A semantic plan is not required before ordinary workspace actions
 - **Effect-Based Completion**: Actions count as completed only after the Host observes the required effect
 - **Completion Report**: After a finished Execute attempt, one tool-free review by the selected model lists what was done, missing, or not verified in a collapsed report. It never starts corrections or changes Host status. See [report behavior and limits](docs/execution-completion-report.md).
@@ -136,8 +140,37 @@ Execute mode gives the selected specialist a direct, iterative tool loop inside 
 - **Codex Context Authority**: The Host-resolved effective context window is passed unchanged to the isolated Codex model catalog and thread; automatic compaction starts at 98% of that same total active-context limit
 - **Bounded Codex Continuation**: One visible continuation on the same model, provider, thread, workspace, and approval policy is allowed after an idle/disconnected stream or an unexpected App Server exit; the recovery prompt includes the exact cause and Host-confirmed plan/effect state
 - **Browser Message Buffer**: During an active response the ordinary Send button queues follow-up prompts locally in the current browser; a detached composer control cancels the response, queued items can be edited or removed inline, and the next ready item submits automatically after completion; drafts being edited never auto-submit and the queue is not persisted
-- **Same-turn Steering**: Queued items can steer the exact active Codex or Qwen Code turn; Claude Code and OpenCode remain queue-only and the disabled queued-item action explains that distinction
+- **Project File References**: Type `@` in the composer to search the active workspace and insert a filename badge. The model receives the relative path at that position in the message; file contents are not attached automatically. See [file reference behavior](docs/composer-file-references.md).
+- **Native Tool Batches**: Every emitted call receives its own validation and result. Execution is sequential by default; optional bounded parallel reads use the existing Host authority. See [multi-tool execution](docs/native-multi-tool-execution.md).
+- **Same-turn Steering**: Queued items can steer the exact active Codex, OpenCode or Qwen Code turn; Native and Claude Code remain queue-only and the disabled queued-item action explains that distinction
 - **Context Accounting**: Live context usage remains fixed directly above the composer as backgroundless text, outside the prompt panel, while retaining its detailed usage popover
+
+### Specialists, writing and model library
+
+Choose Automatic routing or fix a specialist in the conversation header. With
+RPG storytelling fixed, open the Storytelling Editor to work on a separate
+Markdown draft. Review or rewrite a selection, inspect the comparison and apply
+explicitly. Workspace open/save, conflict checks, preview and Markdown export
+keep the draft under user control. Unsaved drafts live in the current tab.
+See [the editor contract](docs/rpg-specialist-editor.md).
+
+![Storytelling Editor comparison before Apply](distribution/screenshots/13-storytelling-editor.png)
+
+Project file references stay inline with the prompt and send relative paths.
+
+![Project file reference in the composer](distribution/screenshots/14-project-file-references.png)
+
+These captures use deterministic test content; they illustrate the interface.
+
+Settings > Models and routing includes the installed model library: explicit
+installation/removal, aliases, notes, favorites, visibility and last recorded
+successful use in AR. Removal is verified against Ollama's installed registry.
+See [model library behavior](docs/model-library.md).
+
+For local inference, the active role or exact-model context preference is capped
+by the model's declared capacity. The context display distinguishes requested
+and effective values; these estimates do not prove that available hardware can
+allocate that window. See [runtime settings](docs/model-runtime-performance.md).
 
 ### Execute strategy on the Send button
 
@@ -219,7 +252,7 @@ reasoning, and unknown values are rejected atomically when settings are saved.
 
 **Available Tools:**
 - `list_files` - List directory contents
-- `read_file` - Read file contents
+- `read_file` / `read_files` - Read one file or a bounded group of files
 - `get_file_info` - Get file metadata
 - `search_text` - Search for text within files
 - `create_file` - Create new files
@@ -229,7 +262,7 @@ reasoning, and unknown values are rejected atomically when settings are saved.
 - `apply_patch` - Apply multiple text replacements
 - `create_directory` - Create directories
 - `run_process` - Execute allowed processes with policy validation
-- `delete_files` - Delete explicit bounded files with hash checks and undo evidence
+- `delete_paths` - Delete explicit bounded paths with hash checks and undo evidence
 - `run_validation_profile` - Run configured validation profiles
 - `web_search` - Search current external sources when the effective route and configured Host integration support it
 - `download_file` / `download_files` - Save one or up to 50 public HTTPS files to trusted workspace paths (1 GiB per request) in interactive Execute. A transfer requires explicit approval, including Auto and Autonomous. Existing files receive a keep-or-replace choice; Autonomous keeps them and reports the replacement URL. Benchmark runs do not offer downloads because they cannot request an interactive decision.
@@ -581,6 +614,8 @@ The application provides a clean, dark-themed interface with real-time status mo
 **Main Interface Features:**
 - **Sidebar Status**: Shows Ollama connection status, available local models, detected graphics devices, trusted workspace, authoritative Git state, token usage, and clickable cloud usage
 - **Chat Workspace**: Main conversation area with streaming responses
+- **Specialist selector**: Keep Automatic keyword routing or fix a specialist for the conversation, independently of the model picker
+- **Storytelling Editor**: Available when RPG storytelling is fixed. Open text/Markdown drafts, review selected passages, compare contextual synonyms, inspect repeated words, explicitly apply replacements, and export `.md`; unsaved drafts stay in the current tab, with explicit workspace saving and Markdown export. See [the editor contract](docs/rpg-specialist-editor.md)
 - **Model Selector**: Choose "Auto" for intent-based routing or select a specific model
 - **Execute Send Strategy**: In Execute, use the split Send control to select Auto, Direct, Supervisor, or Autonomous per request
 - **Projects and conversations**: Groups bounded conversation history by project, provides direct new-chat and project-edit actions, and keeps the active workspace explicit
@@ -592,7 +627,7 @@ The application provides a clean, dark-themed interface with real-time status mo
 
 ### Configuration Dialog
 
-Click the "Configurações" button to access the configuration interface:
+Open **Settings** to access the configuration interface:
 
 ![Settings Dialog](screenshots/settings-dialog.png)
 
@@ -610,7 +645,7 @@ Click the "Configurações" button to access the configuration interface:
 2. In Execute, click the small strategy segment on the right side of Send and choose `A`, `D`, `S`, or `∞`; Chat does not show this control
 3. Press **Enter** or the main Send segment to send (Shift+Enter for line break)
 4. While a response is active, Send or Enter adds the draft to the browser-only queue; use the separate upper-right control to cancel the active response
-5. Edit, delete, or—on Codex and Qwen Code—steer a queued item with its inline icon actions
+5. Edit, delete, or—on Codex, OpenCode and Qwen Code—steer a queued item with its inline icon actions
 6. The router resolves the requested model, harness, and execution strategy
 7. Response streams in real-time with routing and Host activity visible in collapsible details
 
@@ -646,7 +681,7 @@ never silently degrades to another GPU or CPU.
 
 ### Configuration UI
 
-Click the **⚙️ Configurar Agentes e Intenções** button to:
+Open **Settings > Intents** to:
 - Set model overrides per intent
 - Configure device preferences (Default, Placa 1, Placa 2)
 - Customize system prompts for each intent
@@ -659,8 +694,16 @@ Press **Escape** to close the configuration dialog.
 ### Run End-to-End Tests
 
 ```bash
-dotnet test tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj
+dotnet test tests/AgenticRouter.EndToEndTests/AgenticRouter.EndToEndTests.csproj -c Release --settings playwright.runsettings --filter "FullyQualifiedName!~AgenticRouter.EndToEndTests.Real&FullyQualifiedName!~InstalledHarnessUpgradeEndToEndTests"
 ```
+
+The complete deterministic suite runs a real browser and Host API with providers
+simulated at their external boundary. Installed-CLI integration and real-model
+acceptance are separate opt-in groups; passing deterministic tests does not
+establish real inference quality or GPU capacity. Real-model runs require explicit
+authorization. When a local AR instance is running, use isolated build outputs
+and `AGENTIC_ROUTER_E2E_*_PATH` overrides for the API and fixture executables.
+Keep the user's running instance and data directory separate from validation.
 
 ### Benchmark Lab production scenarios and repeated runs
 
@@ -808,9 +851,9 @@ The `IOllamaClient` interface demonstrates a clean HTTP-based provider pattern:
 
 ### Tool Protocol Conformance
 
-Direct tool coordination is enabled only after the exact installed model passes the host's behavioral conformance benchmark. Declared Ollama `tools` capability is evidence of availability, not proof of compatibility. Tool-protocol failures (malformed XML, truncated JSON, missing native tool calls) are treated as typed recoverable protocol failures, not generic provider failures.
+Tool-protocol benchmarks record compatibility for the exact installed model and harness. Declared Ollama `tools` capability is evidence of availability, not proof that the model will emit correct calls. Tool-protocol failures (malformed XML, truncated JSON, missing native tool calls) are treated as typed recoverable protocol failures, not generic provider failures.
 
-## �� Development Guidelines
+## Development Guidelines
 
 ### Code Quality
 
@@ -841,7 +884,7 @@ After editing:
 1. Run formatting if configured
 2. Run `dotnet build` in Release configuration
 3. Run relevant Playwright E2E tests
-4. Verify no test exceeds 60 seconds
+4. Respect scenario deadlines and investigate timeouts without weakening assertions
 5. Report changed files, commands, results
 
 ## Maintainer diagnostics and recovery
@@ -857,7 +900,7 @@ or cloud provider:
 .\tools\diagnostics\Run-AgenticRouterDiagnostics.ps1
 ```
 
-Every terminal Chat/Execute activity summary keeps its trace ID visible. A
+Every terminal Chat/Execute footer keeps its trace ID visible. A
 failed turn with a persisted sanitized incident offers one **Investigate error**
 action: it submits a hidden Chat request for that exact trace and returns the
 analysis without visually filling the composer. Successful turns show the trace

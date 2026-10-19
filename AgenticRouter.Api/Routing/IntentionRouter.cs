@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
+using AgenticRouter.Api.Chat;
+using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 
 namespace AgenticRouter.Api.Routing;
@@ -54,6 +56,15 @@ public sealed class IntentionRouter : IIntentionRouter
     ChatRequest request
   )
   {
+    ValidateSpecialist(request.Specialist);
+    if (request.Specialist is { } specialist)
+    {
+      return new IntentionRoutingResult(
+        new RouterDecision(specialist, 1, "Specialist fixed by the user for this conversation."),
+        "user-selected-specialist"
+      );
+    }
+
     var text = Normalize(
       RoutingText(request)
     );
@@ -80,6 +91,15 @@ public sealed class IntentionRouter : IIntentionRouter
       ),
       "general-chat-fallback"
     );
+  }
+
+  public static void ValidateSpecialist(string? specialist)
+  {
+    if (specialist is not null && !SettingsDefaults.IntentionNames.Contains(specialist, StringComparer.Ordinal))
+    {
+      throw new ChatStageException("request-validation", "Choose a known specialist or Automatic.",
+        "Invalid specialist identifier.", null, null, 400, true);
+    }
   }
 
   private static KeywordRule Rule(

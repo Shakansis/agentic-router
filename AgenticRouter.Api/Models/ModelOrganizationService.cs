@@ -54,7 +54,9 @@ public sealed record OrganizedModelView(
   string? Digest,
   ProviderModelCapabilities? Capabilities,
   bool ConformanceApproved,
-  string? ConformanceIdentity
+  string? ConformanceIdentity,
+  DateTimeOffset? LastUsedAt = null,
+  string UsageState = "not-recorded"
 );
 
 public sealed record ModelOrganizationView(
@@ -175,6 +177,7 @@ public sealed class ModelOrganizationService : IModelOrganizationService
   private readonly IToolProtocolConformanceService _conformance;
   private readonly IWorkspaceProfileStore _workspaces;
   private readonly IWorkspaceProfileService _workspaceService;
+  private readonly IUsageLedger _usage;
   private readonly SemaphoreSlim _gate = new(
     1,
     1
@@ -187,7 +190,8 @@ public sealed class ModelOrganizationService : IModelOrganizationService
     IOllamaClient models,
     IToolProtocolConformanceService conformance,
     IWorkspaceProfileStore workspaces,
-    IWorkspaceProfileService workspaceService
+    IWorkspaceProfileService workspaceService,
+    IUsageLedger usage
   )
   {
     _path = Path.Combine(
@@ -200,6 +204,7 @@ public sealed class ModelOrganizationService : IModelOrganizationService
     _conformance = conformance;
     _workspaces = workspaces;
     _workspaceService = workspaceService;
+    _usage = usage;
   }
 
   public async Task<ModelOrganizationView> GetAsync(
@@ -237,6 +242,13 @@ public sealed class ModelOrganizationService : IModelOrganizationService
       );
     }
 
+    IReadOnlyDictionary<string, DateTimeOffset> lastUses = new Dictionary<string, DateTimeOffset>();
+    var usageAvailable = true;
+    try { lastUses = await _usage.LastModelUsesAsync(cancellationToken); }
+    catch (Exception exception) when (exception is UsageStorageException or IOException or UnauthorizedAccessException)
+    {
+      usageAvailable = false;
+    }
     var preferences = document.Preferences.ToDictionary(
       preference => IdentityKey(
         preference.ProviderId,
@@ -322,7 +334,11 @@ public sealed class ModelOrganizationService : IModelOrganizationService
           null
         )
       )
-    ).OrderBy(
+    ).Select(model => model with
+    {
+      LastUsedAt = lastUses.TryGetValue(model.ProviderId + "/" + model.ModelId, out var used) ? used : null,
+      UsageState = usageAvailable ? "retained-history" : "unavailable"
+    }).OrderBy(
       model => model.ProviderId,
       StringComparer.Ordinal
     ).ThenByDescending(

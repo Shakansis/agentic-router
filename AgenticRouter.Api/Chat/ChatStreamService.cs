@@ -62,6 +62,7 @@ public sealed class ChatStreamService
   private readonly IOllamaClient _ollamaClient;
   private readonly IMarkdownRenderer _markdownRenderer;
   private readonly IModelRequestTracker _requestTracker;
+  private readonly DirectModelResidency _directModelResidency;
   private readonly IIntentionRouter _intentionRouter;
   private readonly IModelResolver _modelResolver;
   private readonly IConversationContextBuilder _contextBuilder;
@@ -110,6 +111,7 @@ public sealed class ChatStreamService
   private string? _usageGpu;
   private string? _usageModelRoleOverride;
   private int? _usageRuntimeContextTokens;
+  private int? _minimumKeepAliveSeconds;
   private IReadOnlyDictionary<string, string?> _usageModelRevisions =
     new Dictionary<string, string?>(
       StringComparer.OrdinalIgnoreCase
@@ -122,6 +124,7 @@ public sealed class ChatStreamService
     IOllamaClient ollamaClient,
     IMarkdownRenderer markdownRenderer,
     IModelRequestTracker requestTracker,
+    DirectModelResidency directModelResidency,
     IIntentionRouter intentionRouter,
     IModelResolver modelResolver,
     IConversationContextBuilder contextBuilder,
@@ -167,6 +170,7 @@ public sealed class ChatStreamService
     _ollamaClient = ollamaClient;
     _markdownRenderer = markdownRenderer;
     _requestTracker = requestTracker;
+    _directModelResidency = directModelResidency;
     _intentionRouter = intentionRouter;
     _modelResolver = modelResolver;
     _contextBuilder = contextBuilder;
@@ -321,10 +325,13 @@ public sealed class ChatStreamService
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
-    using var requestLease = _requestTracker.BeginRequest();
+    var stopwatch = Stopwatch.StartNew();
+    var exclusiveLocalTurn = invocation.Role == ExecutionContextRole.Direct
+      && (string.IsNullOrWhiteSpace(request.Model) || request.Model == "auto"
+        || ProviderModelReference.Parse(request.Model).IsLocal);
+    IDisposable? requestLease = null;
     _contextRecoveryBudget = invocation.ContextRecoveryBudget;
     _trace.Link("turnId", requestId);
-    var stopwatch = Stopwatch.StartNew();
     var preflightTimer = Stopwatch.StartNew();
     var runPreflight = invocation.Role == ExecutionContextRole.Direct
       ? null
@@ -355,6 +362,7 @@ public sealed class ChatStreamService
         ? null
         : UsageModelRoles.Benchmark;
       _usageRuntimeContextTokens = benchmarkContext?.ContextTokens;
+      _minimumKeepAliveSeconds = request.MinimumKeepAliveSeconds;
       var isAuto = string.IsNullOrWhiteSpace(
         request.Model
       ) || string.Equals(
@@ -398,6 +406,9 @@ public sealed class ChatStreamService
         ? request with { Message = inferenceObjective }
         : request);
       var intention = routedIntention.Decision.Intention;
+      yield return Event(requestId,
+        request.Specialist is null ? "specialist.auto-selected" : "specialist.fixed-selected",
+        routedIntention.Decision.Reason, stopwatch, null, intention);
       var selectedModel = request.Model.Trim();
       var selectedModelRole = UsageModelRoles.Primary;
       var images = _imageValidator.Validate(
@@ -496,14 +507,16 @@ public sealed class ChatStreamService
       {
         yield return Event(
           requestId,
-          "router.auto-enabled",
-          "Auto routing enabled.",
+          request.Specialist is null ? "router.auto-enabled" : "router.specialist-fixed",
+          request.Specialist is null ? "Auto routing enabled." : "Using the user-selected specialist with automatic model selection.",
           stopwatch
         );
         yield return Event(
           requestId,
           "router.classification-started",
-          $"Classifying request intention with {IntentionRouter.RouterVersion}.",
+          request.Specialist is null
+            ? $"Classifying request intention with {IntentionRouter.RouterVersion}."
+            : "Resolving the user-selected specialist.",
           stopwatch
         );
         var routing = routedIntention ?? _intentionRouter.Route(request);
@@ -860,9 +873,28 @@ public sealed class ChatStreamService
         );
       }
 
+      var contextSettings = settings;
+      OllamaContextResolution? selectedRuntime = null;
+      if (ProviderModelReference.Parse(selectedModel).ProviderId == ModelProviderIds.OllamaLocal)
+      {
+        selectedRuntime = OllamaRuntimeProfileResolver.Resolve(settings, selectedModel,
+          models.FirstOrDefault(model => model.Name == selectedModel)?.Digest,
+          _usageModelRoleOverride ?? selectedModelRole, capabilities.ContextTokens, 0,
+          settings.Context.ReservedResponseTokens,
+          generationProfile.MaximumContextTokens, generationProfile.MaximumOutputTokens,
+          execution: request.InteractionMode == "execute");
+        contextSettings = settings with
+        {
+          Context = settings.Context with
+          {
+            DefaultContextTokens = selectedRuntime.MaximumContextTokens,
+            ReservedResponseTokens = selectedRuntime.OutputTokenLimit
+          }
+        };
+      }
       var context = _contextBuilder.Build(
         request,
-        settings,
+        contextSettings,
         intention,
         knowledge.Context,
         capabilities.ContextTokens
@@ -880,6 +912,7 @@ public sealed class ChatStreamService
           settings,
           null
         );
+        contextUsage = WithRuntimeContextUsage(contextUsage, selectedRuntime);
         yield return new ChatStreamEvent(
           requestId,
           "context.usage",
@@ -909,6 +942,39 @@ public sealed class ChatStreamService
             ? intention
             : null
         );
+      }
+
+      // A replacement must cancel the same browser's old Execute before waiting
+      // on its exclusive lease. Resolve the request and validate the workspace first.
+      if (invocation.Role == ExecutionContextRole.Direct && request.InteractionMode == "execute"
+        && request.BrowserSessionId is { } browserSessionId
+        && _executionSessions.GetActive(browserSessionId) is { IsActive: true } previous
+        && (await _workspace.GetStatusAsync(cancellationToken)).Valid)
+      {
+        previous.Complete("cancelled", "A newer Execute request replaced this browser session.");
+      }
+      if (exclusiveLocalTurn && _requestTracker.HasActiveRequests)
+        yield return Event(requestId, "runtime.model-switch-waiting",
+          "Waiting for active model work to finish before the Direct turn.", stopwatch);
+      requestLease = await _requestTracker.BeginRequestAsync(exclusiveLocalTurn, cancellationToken);
+      if (ProviderModelReference.Parse(selectedModel).IsLocal)
+      {
+        var target = _managedOllamaServers.Plan(baseUri, _usageGpu, settings.DefaultGpu,
+          ModelRuntimePerformance.ResolveKvCacheType(settings, selectedModel,
+            _usageModelRevisions.GetValueOrDefault(selectedModel)));
+        if (exclusiveLocalTurn)
+        {
+          await foreach (var update in _directModelResidency.PrepareAsync(
+            _ollamaClient, target, ProviderModelReference.Parse(selectedModel).ModelId, cancellationToken))
+          {
+            yield return Event(requestId, update.Stage,
+              update.Stage == "runtime.model-unloading"
+                ? $"Unloading {update.Model} before loading {selectedModel} in Direct mode."
+                : $"Verified that {update.Model} is no longer resident.",
+              stopwatch, selectedModel, intention);
+          }
+        }
+        else _directModelResidency.ObserveSelection(target, ProviderModelReference.Parse(selectedModel).ModelId);
       }
 
       IReadOnlyList<ChatMessage> messages = context.Messages;
@@ -1580,6 +1646,7 @@ public sealed class ChatStreamService
         settings,
         progress.Usage
       );
+      contextUsage = WithRuntimeContextUsage(contextUsage, progress.ContextResolution);
       yield return new ChatStreamEvent(
         requestId,
         "response.completed",
@@ -1607,20 +1674,24 @@ public sealed class ChatStreamService
     }
     finally
     {
-      if (
-        _executionSession?.IsActive == true
-        && !(
-          _applicationLifetime.ApplicationStopping.IsCancellationRequested
-          && _executionSession.State == "awaiting-user-input"
-        )
-      )
+      try
       {
-        _executionSession.Complete(
-          cancellationToken.IsCancellationRequested
-            ? "cancelled"
-            : "failed"
-        );
+        if (
+          _executionSession?.IsActive == true
+          && !(
+            _applicationLifetime.ApplicationStopping.IsCancellationRequested
+            && _executionSession.State == "awaiting-user-input"
+          )
+        )
+        {
+          _executionSession.Complete(
+            cancellationToken.IsCancellationRequested
+              ? "cancelled"
+              : "failed"
+          );
+        }
       }
+      finally { requestLease?.Dispose(); }
     }
   }
 
@@ -4585,8 +4656,26 @@ public sealed class ChatStreamService
     var noProgressAttempts = 0;
     var observedSuccessfulActions = new HashSet<string>(StringComparer.Ordinal);
 
+    await using var toolScheduler = new NativeToolScheduler(cancellationToken, _executionSession);
+    if (!structuredCoordination)
+      progress.ToolMessages.Add(new OllamaToolMessage("system",
+        $"NATIVE_TOOL_EXECUTION_V1: parallel mode={settings.ParallelToolExecution}, limit={settings.MaxConcurrentToolCalls}. "
+        + (settings.ParallelToolExecution == "on"
+          ? "Actively group independent read operations in one response. " : "Multiple calls per response are accepted. ")
+        + "Writes and control operations are sequential barriers. Use existing batch tools where appropriate."));
     while (true)
     {
+      var stagedExecution = toolScheduler.MustDrain(progress.PendingToolCalls.FirstOrDefault(), settings)
+        ? toolScheduler.Take() : null;
+      ValidatedLocalAction action = null!;
+      var requiresApproval = false;
+      var approvalRevised = false;
+      JsonElement? lastRepeatArguments = null;
+      string? lastProposedTool = null;
+      string? lastToolEvidenceId = null;
+      ExecutionAttempt execution;
+      // Resume an admitted read without repeating planning, validation or approval.
+      if (stagedExecution is not null) goto ConsolidateNativeExecution;
       if (noProgressAttempts >= settings.MaxToolCallsPerTurn)
       {
         var checkpoint = CreateRecoveryCheckpoint(
@@ -4637,9 +4726,6 @@ public sealed class ChatStreamService
       var planHandled = false;
       var toolsetHandled = false;
       var proposalCycles = 0;
-      JsonElement? lastRepeatArguments = null;
-      string? lastProposedTool = null;
-      string? lastToolEvidenceId = null;
       var planningFingerprints = new Dictionary<string, int>(
         StringComparer.Ordinal
       );
@@ -4649,372 +4735,220 @@ public sealed class ChatStreamService
         && proposalCycles < settings.MaxToolCallsPerTurn
       )
       {
+        if (toolScheduler.MustDrain(progress.PendingToolCalls.FirstOrDefault(), settings))
+        {
+          toolsetHandled = true;
+          break;
+        }
         proposalCycles++;
         var attempt = planningFailures + 1;
         var completionAllowed = CanCompletePlanning(
           progress,
           executionRole == ExecutionContextRole.Supervisor
         );
-        CoordinatorContextFit? preflightFit = null;
-        StructuredContextFit? structuredPreflightFit = null;
-        SpecialistContextMeasurement specialistMeasurement;
-        var compactedForRequest = false;
-        var omittedContextBlocks = 0;
-        long beforeCompactionTokens;
-        long afterCompactionTokens;
-        var fileCreationOutputLimit = (structuredCoordination
-          ? progress.ToolScope.Allows("create_file")
-            || progress.ToolScope.Allows("create_files")
-          : progress.GrantedTools.Contains("create_file")
-            || progress.GrantedTools.Contains("create_files"))
-            ? applicationSettings.Execution.FileCreationOutputTokenLimit
-            : null;
-        var budget = GetCoordinatorInputBudget(
-          applicationSettings,
-          model,
-          providerMaximumTokens,
-          fileCreationOutputLimit
-        );
-        if (structuredCoordination)
-        {
-          var originalCount = progress.Messages.Count;
-          var originalMeasurement = _expertGuidance.MeasureRequest(
-            progress.Messages
-          );
-          beforeCompactionTokens = originalMeasurement.InputTokens;
-          var shouldCompact = ShouldCompactContext(
-            originalMeasurement,
-            budget,
-            progress
-          );
-          var previewFit = originalMeasurement.CompactionEligible
-            && progress.LastUnproductiveCompactionTokens != originalMeasurement.InputTokens
-            ? _expertGuidance.FitToBudget(
-              progress.Messages,
-              _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
-              budget.MaximumInputTokens,
-              true
-            )
-            : null;
-          structuredPreflightFit = shouldCompact
-            ? previewFit ?? _expertGuidance.FitToBudget(
-              progress.Messages,
-              _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
-              budget.MaximumInputTokens,
-              true
-            )
-            : _expertGuidance.FitToBudget(
-            progress.Messages,
-            _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
-            budget.MaximumInputTokens
-          );
-          var mandatoryReduction = originalMeasurement.InputTokens > budget.MaximumInputTokens;
-          if (
-            shouldCompact
-            && structuredPreflightFit.Compacted
-            && !structuredPreflightFit.TooLarge
-            && (structuredPreflightFit.Outcome == "compacted" || mandatoryReduction)
-          )
-          {
-            ReplaceChatMessages(progress.Messages, structuredPreflightFit.Messages);
-            ReplaceMessages(progress.ToolMessages, progress.Messages.Select(ToToolMessage).ToArray());
-            compactedForRequest = true;
-            progress.ManualCompactionPending = false;
-            yield return Event(
-              requestId,
-              "request-context-compacted",
-              $"Structured coordinator context compacted deterministically from {structuredPreflightFit.BeforeTokens} to {structuredPreflightFit.AfterTokens} estimated input tokens.",
-              stopwatch,
-              model,
-              intention
-            ) with
-            {
-              IncidentContextFit = ContextFitView(structuredPreflightFit.AfterTokens, budget)
-            };
-          }
-          else if (shouldCompact && structuredPreflightFit.Compacted)
-          {
-            progress.LastUnproductiveCompactionTokens = originalMeasurement.InputTokens;
-          }
-          specialistMeasurement = _expertGuidance.MeasureRequest(
-            progress.Messages
-          ) with
-          {
-            CompactionEligible = originalMeasurement.CompactionEligible
-          };
-          afterCompactionTokens = previewFit?.AfterTokens
-            ?? structuredPreflightFit.AfterTokens;
-          omittedContextBlocks = Math.Max(
-            0,
-            originalCount - (previewFit?.Messages.Count ?? progress.Messages.Count)
-          );
-          progress.ManualCompactionPending = false;
-        }
-        else
-        {
-          var planRequired = _executionSession?.Plan is null;
-          var originalCount = progress.ToolMessages.Count;
-          var originalMeasurement = _actionPlanner.MeasureRequest(
-            progress.ToolMessages,
-            progress.ToolingProfile,
-            progress.GrantedTools,
-            planRequired,
-            attempt
-          );
-          beforeCompactionTokens = originalMeasurement.InputTokens;
-          var shouldCompact = ShouldCompactContext(
-            originalMeasurement,
-            budget,
-            progress
-          );
-          var previewFit = originalMeasurement.CompactionEligible
-            && progress.LastUnproductiveCompactionTokens != originalMeasurement.InputTokens
-            ? _actionPlanner.FitToBudget(
-              progress.ToolMessages,
-              progress.ToolingProfile,
-              progress.GrantedTools,
-              _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
-              budget.MaximumInputTokens,
-              planRequired,
-              attempt,
-              completionAllowed,
-              true
-            )
-            : null;
-          preflightFit = shouldCompact
-            ? previewFit ?? _actionPlanner.FitToBudget(
-              progress.ToolMessages,
-              progress.ToolingProfile,
-              progress.GrantedTools,
-              _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
-              budget.MaximumInputTokens,
-              planRequired,
-              attempt,
-              completionAllowed,
-              true
-            )
-            : _actionPlanner.FitToBudget(
-            progress.ToolMessages,
-            progress.ToolingProfile,
-            progress.GrantedTools,
-            _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
-            budget.MaximumInputTokens,
-            planRequired,
-            attempt,
-            completionAllowed
-          );
-          var mandatoryReduction = originalMeasurement.InputTokens > budget.MaximumInputTokens;
-          if (
-            shouldCompact
-            && preflightFit.Compacted
-            && !preflightFit.TooLarge
-            && (preflightFit.Outcome == "compacted" || mandatoryReduction)
-          )
-          {
-            ReplaceMessages(progress.ToolMessages, preflightFit.Messages);
-            compactedForRequest = true;
-            progress.ManualCompactionPending = false;
-            yield return Event(
-              requestId,
-              "request-context-compacted",
-              $"Coordinator context compacted deterministically from {preflightFit.BeforeTokens} to {preflightFit.AfterTokens} estimated input tokens.",
-              stopwatch,
-              model,
-              intention
-            ) with
-            {
-              IncidentContextFit = ContextFitView(preflightFit, budget)
-            };
-          }
-          else if (shouldCompact && preflightFit.Compacted)
-          {
-            progress.LastUnproductiveCompactionTokens = originalMeasurement.InputTokens;
-          }
-          specialistMeasurement = _actionPlanner.MeasureRequest(
-            progress.ToolMessages,
-            progress.ToolingProfile,
-            progress.GrantedTools,
-            planRequired,
-            attempt
-          ) with
-          {
-            CompactionEligible = originalMeasurement.CompactionEligible
-          };
-          afterCompactionTokens = previewFit?.AfterTokens
-            ?? preflightFit.AfterTokens;
-          omittedContextBlocks = Math.Max(
-            0,
-            originalCount - (previewFit?.Messages.Count ?? progress.ToolMessages.Count)
-          );
-          progress.ManualCompactionPending = false;
-        }
-
-        progress.ContextInferenceSequence++;
-        var contextSnapshot = CreateSpecialistContextUsage(
-          specialistMeasurement,
-          budget,
-          applicationSettings,
-          providerMaximumTokens,
-          progress.VisibleMessages,
-          progress.OmittedMessages,
-          progress.ContextInferenceSequence,
-          compactedForRequest,
-          beforeCompactionTokens,
-          afterCompactionTokens,
-          omittedContextBlocks
-        );
-        progress.LatestContextUsage = contextSnapshot;
-        yield return new ChatStreamEvent(
-          requestId,
-          "context.usage",
-          DateTimeOffset.UtcNow,
-          $"Specialist inference {progress.ContextInferenceSequence}: estimated input {contextSnapshot.InputTokens} tokens; required context {contextSnapshot.RequiredContextTokens} of {contextSnapshot.EffectiveLimitTokens}.",
-          null,
-          model,
-          intention,
-          stopwatch.ElapsedMilliseconds,
-          null,
-          null,
-          ContextUsage: contextSnapshot
-        );
-
         PlanningAttempt planning;
-        if (preflightFit?.TooLarge == true || structuredPreflightFit?.TooLarge == true)
+        if (progress.PendingToolCalls.TryDequeue(out var pendingCall))
         {
-          var beforeTokens = preflightFit?.BeforeTokens ?? structuredPreflightFit!.BeforeTokens;
-          var coordinationUsageRole = CoordinationUsageRole(
-            applicationSettings,
-            model
-          );
-          planning = new PlanningAttempt(
-            null,
-            ContextItemTooLarge(model, beforeTokens, budget, coordinationUsageRole)
-          );
+          planning = new PlanningAttempt(pendingCall, null);
         }
         else
         {
-          var reasoning = Channel.CreateUnbounded<string>(
-            new UnboundedChannelOptions
-            {
-              SingleReader = true,
-              SingleWriter = true
-            }
+          CoordinatorContextFit? preflightFit = null;
+          StructuredContextFit? structuredPreflightFit = null;
+          SpecialistContextMeasurement specialistMeasurement;
+          var compactedForRequest = false;
+          var omittedContextBlocks = 0;
+          long beforeCompactionTokens;
+          long afterCompactionTokens;
+          var fileCreationOutputLimit = (structuredCoordination
+            ? progress.ToolScope.Allows("create_file")
+              || progress.ToolScope.Allows("create_files")
+            : progress.GrantedTools.Contains("create_file")
+              || progress.GrantedTools.Contains("create_files"))
+              ? applicationSettings.Execution.FileCreationOutputTokenLimit
+              : null;
+          var budget = GetCoordinatorInputBudget(
+            applicationSettings,
+            model,
+            providerMaximumTokens,
+            fileCreationOutputLimit
           );
-
-          async Task<PlanningAttempt> RunPlanningAsync()
+          if (structuredCoordination)
           {
-            try
-            {
-              return await TryPlanAsync(
-                () => structuredCoordination
-                  ? PlanStructuredActionAsync(
-                    baseUri,
-                    model,
-                    progress,
-                    CoordinationUsageRole(applicationSettings, model),
-                    cancellationToken,
-                    fileCreationOutputLimit
-                  )
-                  : _actionPlanner.PlanAsync(
-                    baseUri,
-                    model,
-                    progress.ToolingProfile,
-                    progress.ToolMessages,
-                    progress.GrantedTools,
-                    _executionSession?.Plan is null,
-                    attempt,
-                    completionAllowed,
-                    UsageContext(
-                      model,
-                      CoordinationUsageRole(applicationSettings, model),
-                      "local-action-planning"
-                    ),
-                    cancellationToken,
-                    (
-                      delta,
-                      token
-                    ) => reasoning.Writer.WriteAsync(
-                      delta,
-                      token
-                    ),
-                    requestedEffort: progress.ProviderOptions.RequestedEffort,
-                    maximumOutputTokens: fileCreationOutputLimit,
-                    generationProfile: progress.ProviderOptions.EffectiveGenerationProfile
-                  )
-              );
-            }
-            finally
-            {
-              reasoning.Writer.TryComplete();
-            }
-          }
-
-          var planningTask = RunPlanningAsync();
-          long liveOutputCharacters = 0;
-          long lastLiveOutputTokens = 0;
-          var lastLiveContextUpdate = TimeSpan.MinValue;
-          while (await reasoning.Reader.WaitToReadAsync(cancellationToken))
-          {
-            var presentation = new StringBuilder();
-            while (reasoning.Reader.TryRead(out var delta))
-            {
-              presentation.Append(delta);
-            }
-            if (presentation.Length == 0)
-            {
-              continue;
-            }
-            liveOutputCharacters += presentation.Length;
-            var liveOutputTokens = Math.Max(
-              1,
-              (liveOutputCharacters + 2) / 3
+            var originalCount = progress.Messages.Count;
+            var originalMeasurement = _expertGuidance.MeasureRequest(
+              progress.Messages
             );
+            beforeCompactionTokens = originalMeasurement.InputTokens;
+            var shouldCompact = ShouldCompactContext(
+              originalMeasurement,
+              budget,
+              progress
+            );
+            var previewFit = originalMeasurement.CompactionEligible
+              && progress.LastUnproductiveCompactionTokens != originalMeasurement.InputTokens
+              ? _expertGuidance.FitToBudget(
+                progress.Messages,
+                _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
+                budget.MaximumInputTokens,
+                true
+              )
+              : null;
+            structuredPreflightFit = shouldCompact
+              ? previewFit ?? _expertGuidance.FitToBudget(
+                progress.Messages,
+                _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
+                budget.MaximumInputTokens,
+                true
+              )
+              : _expertGuidance.FitToBudget(
+              progress.Messages,
+              _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
+              budget.MaximumInputTokens
+            );
+            var mandatoryReduction = originalMeasurement.InputTokens > budget.MaximumInputTokens;
             if (
-              lastLiveOutputTokens == 0
-              || liveOutputTokens - lastLiveOutputTokens >= 64
-              || stopwatch.Elapsed - lastLiveContextUpdate >= TimeSpan.FromMilliseconds(500)
+              shouldCompact
+              && structuredPreflightFit.Compacted
+              && !structuredPreflightFit.TooLarge
+              && (structuredPreflightFit.Outcome == "compacted" || mandatoryReduction)
             )
             {
-              var liveContext = WithEstimatedLiveContextUsage(
-                contextSnapshot,
-                liveOutputTokens
-              );
-              progress.LatestContextUsage = liveContext;
-              lastLiveOutputTokens = liveOutputTokens;
-              lastLiveContextUpdate = stopwatch.Elapsed;
-              yield return new ChatStreamEvent(
+              ReplaceChatMessages(progress.Messages, structuredPreflightFit.Messages);
+              ReplaceMessages(progress.ToolMessages, progress.Messages.Select(ToToolMessage).ToArray());
+              compactedForRequest = true;
+              progress.ManualCompactionPending = false;
+              yield return Event(
                 requestId,
-                "context.usage",
-                DateTimeOffset.UtcNow,
-                $"Specialist inference {progress.ContextInferenceSequence}: live estimated active context {liveContext.ActiveContextTokens} of {liveContext.EffectiveLimitTokens} tokens.",
-                null,
+                "request-context-compacted",
+                $"Structured coordinator context compacted deterministically from {structuredPreflightFit.BeforeTokens} to {structuredPreflightFit.AfterTokens} estimated input tokens.",
+                stopwatch,
                 model,
-                intention,
-                stopwatch.ElapsedMilliseconds,
-                null,
-                null,
-                ContextUsage: liveContext
-              );
+                intention
+              ) with
+              {
+                IncidentContextFit = ContextFitView(structuredPreflightFit.AfterTokens, budget)
+              };
             }
-            yield return Event(
-              requestId,
-              "reasoning.delta",
-              null,
-              stopwatch,
-              model,
-              intention
+            else if (shouldCompact && structuredPreflightFit.Compacted)
+            {
+              progress.LastUnproductiveCompactionTokens = originalMeasurement.InputTokens;
+            }
+            specialistMeasurement = _expertGuidance.MeasureRequest(
+              progress.Messages
             ) with
             {
-              ReasoningDelta = presentation.ToString()
+              CompactionEligible = originalMeasurement.CompactionEligible
             };
+            afterCompactionTokens = previewFit?.AfterTokens
+              ?? structuredPreflightFit.AfterTokens;
+            omittedContextBlocks = Math.Max(
+              0,
+              originalCount - (previewFit?.Messages.Count ?? progress.Messages.Count)
+            );
+            progress.ManualCompactionPending = false;
+          }
+          else
+          {
+            var planRequired = _executionSession?.Plan is null;
+            var originalCount = progress.ToolMessages.Count;
+            var originalMeasurement = _actionPlanner.MeasureRequest(
+              progress.ToolMessages,
+              progress.ToolingProfile,
+              progress.GrantedTools,
+              planRequired,
+              attempt
+            );
+            beforeCompactionTokens = originalMeasurement.InputTokens;
+            var shouldCompact = ShouldCompactContext(
+              originalMeasurement,
+              budget,
+              progress
+            );
+            var previewFit = originalMeasurement.CompactionEligible
+              && progress.LastUnproductiveCompactionTokens != originalMeasurement.InputTokens
+              ? _actionPlanner.FitToBudget(
+                progress.ToolMessages,
+                progress.ToolingProfile,
+                progress.GrantedTools,
+                _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
+                budget.MaximumInputTokens,
+                planRequired,
+                attempt,
+                completionAllowed,
+                true
+              )
+              : null;
+            preflightFit = shouldCompact
+              ? previewFit ?? _actionPlanner.FitToBudget(
+                progress.ToolMessages,
+                progress.ToolingProfile,
+                progress.GrantedTools,
+                _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
+                budget.MaximumInputTokens,
+                planRequired,
+                attempt,
+                completionAllowed,
+                true
+              )
+              : _actionPlanner.FitToBudget(
+              progress.ToolMessages,
+              progress.ToolingProfile,
+              progress.GrantedTools,
+              _executionSession?.CreateCoordinatorStateSummary() ?? "execution-session=unavailable",
+              budget.MaximumInputTokens,
+              planRequired,
+              attempt,
+              completionAllowed
+            );
+            var mandatoryReduction = originalMeasurement.InputTokens > budget.MaximumInputTokens;
+            if (
+              shouldCompact
+              && preflightFit.Compacted
+              && !preflightFit.TooLarge
+              && (preflightFit.Outcome == "compacted" || mandatoryReduction)
+            )
+            {
+              ReplaceMessages(progress.ToolMessages, preflightFit.Messages);
+              compactedForRequest = true;
+              progress.ManualCompactionPending = false;
+              yield return Event(
+                requestId,
+                "request-context-compacted",
+                $"Coordinator context compacted deterministically from {preflightFit.BeforeTokens} to {preflightFit.AfterTokens} estimated input tokens.",
+                stopwatch,
+                model,
+                intention
+              ) with
+              {
+                IncidentContextFit = ContextFitView(preflightFit, budget)
+              };
+            }
+            else if (shouldCompact && preflightFit.Compacted)
+            {
+              progress.LastUnproductiveCompactionTokens = originalMeasurement.InputTokens;
+            }
+            specialistMeasurement = _actionPlanner.MeasureRequest(
+              progress.ToolMessages,
+              progress.ToolingProfile,
+              progress.GrantedTools,
+              planRequired,
+              attempt
+            ) with
+            {
+              CompactionEligible = originalMeasurement.CompactionEligible
+            };
+            afterCompactionTokens = previewFit?.AfterTokens
+              ?? preflightFit.AfterTokens;
+            omittedContextBlocks = Math.Max(
+              0,
+              originalCount - (previewFit?.Messages.Count ?? progress.ToolMessages.Count)
+            );
+            progress.ManualCompactionPending = false;
           }
 
-          planning = await planningTask;
-        }
-
-        if (planning.Result?.Usage is not null)
-        {
-          var exactSnapshot = CreateSpecialistContextUsage(
+          progress.ContextInferenceSequence++;
+          var contextSnapshot = CreateSpecialistContextUsage(
             specialistMeasurement,
             budget,
             applicationSettings,
@@ -5025,23 +4959,188 @@ public sealed class ChatStreamService
             compactedForRequest,
             beforeCompactionTokens,
             afterCompactionTokens,
-            omittedContextBlocks,
-            planning.Result.Usage
+            omittedContextBlocks
           );
-          progress.LatestContextUsage = exactSnapshot;
+          progress.LatestContextUsage = contextSnapshot;
           yield return new ChatStreamEvent(
             requestId,
             "context.usage",
             DateTimeOffset.UtcNow,
-            $"Specialist inference {progress.ContextInferenceSequence}: provider-reported input {exactSnapshot.InputTokens} tokens; required context {exactSnapshot.RequiredContextTokens} of {exactSnapshot.EffectiveLimitTokens}.",
+            $"Specialist inference {progress.ContextInferenceSequence}: estimated input {contextSnapshot.InputTokens} tokens; required context {contextSnapshot.RequiredContextTokens} of {contextSnapshot.EffectiveLimitTokens}.",
             null,
             model,
             intention,
             stopwatch.ElapsedMilliseconds,
             null,
             null,
-            ContextUsage: exactSnapshot
+            ContextUsage: contextSnapshot
           );
+
+          if (preflightFit?.TooLarge == true || structuredPreflightFit?.TooLarge == true)
+          {
+            var beforeTokens = preflightFit?.BeforeTokens ?? structuredPreflightFit!.BeforeTokens;
+            var coordinationUsageRole = CoordinationUsageRole(
+              applicationSettings,
+              model
+            );
+            planning = new PlanningAttempt(
+              null,
+              ContextItemTooLarge(model, beforeTokens, budget, coordinationUsageRole)
+            );
+          }
+          else
+          {
+            var reasoning = Channel.CreateUnbounded<string>(
+              new UnboundedChannelOptions
+              {
+                SingleReader = true,
+                SingleWriter = true
+              }
+            );
+
+            async Task<PlanningAttempt> RunPlanningAsync()
+            {
+              try
+              {
+                return await TryPlanAsync(
+                  () => structuredCoordination
+                    ? PlanStructuredActionAsync(
+                      baseUri,
+                      model,
+                      progress,
+                      CoordinationUsageRole(applicationSettings, model),
+                      cancellationToken,
+                      fileCreationOutputLimit
+                    )
+                    : _actionPlanner.PlanAsync(
+                      baseUri,
+                      model,
+                      progress.ToolingProfile,
+                      progress.ToolMessages,
+                      progress.GrantedTools,
+                      _executionSession?.Plan is null,
+                      attempt,
+                      completionAllowed,
+                      UsageContext(
+                        model,
+                        CoordinationUsageRole(applicationSettings, model),
+                        "local-action-planning"
+                      ),
+                      cancellationToken,
+                      (
+                        delta,
+                        token
+                      ) => reasoning.Writer.WriteAsync(
+                        delta,
+                        token
+                      ),
+                      requestedEffort: progress.ProviderOptions.RequestedEffort,
+                      maximumOutputTokens: fileCreationOutputLimit,
+                      generationProfile: progress.ProviderOptions.EffectiveGenerationProfile
+                    )
+                );
+              }
+              finally
+              {
+                reasoning.Writer.TryComplete();
+              }
+            }
+
+            var planningTask = RunPlanningAsync();
+            long liveOutputCharacters = 0;
+            long lastLiveOutputTokens = 0;
+            var lastLiveContextUpdate = TimeSpan.MinValue;
+            while (await reasoning.Reader.WaitToReadAsync(cancellationToken))
+            {
+              var presentation = new StringBuilder();
+              while (reasoning.Reader.TryRead(out var delta))
+              {
+                presentation.Append(delta);
+              }
+              if (presentation.Length == 0)
+              {
+                continue;
+              }
+              liveOutputCharacters += presentation.Length;
+              var liveOutputTokens = Math.Max(
+                1,
+                (liveOutputCharacters + 2) / 3
+              );
+              if (
+                lastLiveOutputTokens == 0
+                || liveOutputTokens - lastLiveOutputTokens >= 64
+                || stopwatch.Elapsed - lastLiveContextUpdate >= TimeSpan.FromMilliseconds(500)
+              )
+              {
+                var liveContext = WithEstimatedLiveContextUsage(
+                  contextSnapshot,
+                  liveOutputTokens
+                );
+                progress.LatestContextUsage = liveContext;
+                lastLiveOutputTokens = liveOutputTokens;
+                lastLiveContextUpdate = stopwatch.Elapsed;
+                yield return new ChatStreamEvent(
+                  requestId,
+                  "context.usage",
+                  DateTimeOffset.UtcNow,
+                  $"Specialist inference {progress.ContextInferenceSequence}: live estimated active context {liveContext.ActiveContextTokens} of {liveContext.EffectiveLimitTokens} tokens.",
+                  null,
+                  model,
+                  intention,
+                  stopwatch.ElapsedMilliseconds,
+                  null,
+                  null,
+                  ContextUsage: liveContext
+                );
+              }
+              yield return Event(
+                requestId,
+                "reasoning.delta",
+                null,
+                stopwatch,
+                model,
+                intention
+              ) with
+              {
+                ReasoningDelta = presentation.ToString()
+              };
+            }
+
+            planning = await planningTask;
+          }
+
+          if (planning.Result?.Usage is not null)
+          {
+            var exactSnapshot = CreateSpecialistContextUsage(
+              specialistMeasurement,
+              budget,
+              applicationSettings,
+              providerMaximumTokens,
+              progress.VisibleMessages,
+              progress.OmittedMessages,
+              progress.ContextInferenceSequence,
+              compactedForRequest,
+              beforeCompactionTokens,
+              afterCompactionTokens,
+              omittedContextBlocks,
+              planning.Result.Usage
+            );
+            progress.LatestContextUsage = exactSnapshot;
+            yield return new ChatStreamEvent(
+              requestId,
+              "context.usage",
+              DateTimeOffset.UtcNow,
+              $"Specialist inference {progress.ContextInferenceSequence}: provider-reported input {exactSnapshot.InputTokens} tokens; required context {exactSnapshot.RequiredContextTokens} of {exactSnapshot.EffectiveLimitTokens}.",
+              null,
+              model,
+              intention,
+              stopwatch.ElapsedMilliseconds,
+              null,
+              null,
+              ContextUsage: exactSnapshot
+            );
+          }
+
         }
 
         if (planning.Failure is not null)
@@ -5483,6 +5582,9 @@ public sealed class ChatStreamService
 
         var planningResult = planning.Result!;
         var proposal = planningResult.Proposal;
+        progress.ActiveBatchId = planningResult.BatchId;
+        progress.ActiveBatchPosition = planningResult.BatchPosition;
+        progress.ActiveToolDurationMilliseconds = null;
 
         if (
           !progress.RuntimeContextReported
@@ -5510,17 +5612,18 @@ public sealed class ChatStreamService
           progress.RuntimeContextReported = true;
         }
 
-        if (planningResult.IgnoredToolCallCount > 0)
+        if (planningResult.Batch is { } nativeBatch)
         {
-          yield return Event(
-            requestId,
-            "action.planning-normalized",
-            $"The coordinator returned {planningResult.IgnoredToolCallCount + 1} native tool calls; "
-              + "only the first call was retained for validation and the remaining calls were ignored.",
-            stopwatch,
-            model,
-            intention
-          );
+          toolScheduler.ResetPeak();
+          _executionSession?.RecordNativeToolBatch(nativeBatch, progress.ContextInferenceSequence);
+          _logger.LogInformation("Native tool batch {BatchId}: inference {InferenceSequence}, received {Received}, parsed {Valid}, rejected {Rejected}.",
+            nativeBatch.Id, progress.ContextInferenceSequence, nativeBatch.Calls.Count,
+            nativeBatch.Calls.Count(call => call.CallFailure is null), nativeBatch.Calls.Count(call => call.CallFailure is not null));
+          foreach (var nextCall in nativeBatch.Calls.Skip(1)) progress.PendingToolCalls.Enqueue(nextCall);
+          yield return Event(requestId, "tools.batch-created",
+            $"Native inference produced {nativeBatch.Calls.Count} tool call(s); each will be validated individually.",
+            stopwatch, model, intention) with
+          { ExecutionSession = _executionSession?.CreateSummary() };
         }
 
         if (proposal is null)
@@ -5633,6 +5736,13 @@ public sealed class ChatStreamService
             _executionSession?.RecordPlanningFailure();
             exhaustedFailure = introductionFailure;
             progress.ToolMessages.Add(planningResult.AssistantMessage);
+            foreach (var sibling in progress.PendingToolCalls)
+            {
+              progress.ActiveToolCallId = sibling.CallId;
+              progress.ToolMessages.Add(NativeToolResultMessage(progress, sibling.Proposal!.Tool, "rejected",
+                introductionCorrection, false, code: "action-introduction-required"));
+            }
+            progress.PendingToolCalls.Clear();
             progress.ActiveToolCallId = planningResult.CallId;
             progress.ToolMessages.Add(
               NativeToolResultMessage(
@@ -5677,10 +5787,21 @@ public sealed class ChatStreamService
         lastProposedTool = proposal.Tool;
         lastToolEvidenceId = planningResult.CallId;
 
-        progress.ToolMessages.Add(
-          planningResult.AssistantMessage
-        );
+        if (planningResult.BatchPosition == 0)
+          progress.ToolMessages.Add(planningResult.AssistantMessage);
         progress.ActiveToolCallId = planningResult.CallId;
+        if (planningResult.CallFailure is { } callFailure)
+        {
+          progress.ToolMessages.Add(NativeToolResultMessage(progress, proposal.Tool, "rejected",
+            callFailure.Message, false, code: callFailure.Stage, retryUnchanged: false));
+          _executionSession?.RecordToolFailure();
+          planningFailures++;
+          exhaustedFailure = callFailure;
+          yield return Event(requestId, "tools.call-rejected", callFailure.Message, stopwatch, model, intention)
+            with
+          { ExecutionSession = _executionSession?.CreateSummary() };
+          continue;
+        }
 
         if (proposal.Tool == LocalActionPlanner.RequestToolsetTool)
         {
@@ -5822,7 +5943,7 @@ public sealed class ChatStreamService
           continue;
         }
 
-        if (CanCompleteAfterRedundantReadOnlyProposal(proposal, progress))
+        if (progress.PendingToolCalls.Count == 0 && toolScheduler.Count == 0 && CanCompleteAfterRedundantReadOnlyProposal(proposal, progress))
         {
           const string warning =
             "The specialist proposed another read-only action after the Host verified the requested mutation, reviewed every latest changed file, and found no unresolved completion issue. "
@@ -5832,6 +5953,8 @@ public sealed class ChatStreamService
             "skipped-redundant-after-completion"
           );
           _executionSession?.AddWarning(warning);
+          _executionSession?.RecordNativeToolCall(progress.ActiveBatchId, progress.ActiveToolCallId,
+            "skipped", code: "redundant-after-completion");
           yield return Event(
             requestId,
             "action.redundant-read-skipped",
@@ -6802,8 +6925,14 @@ public sealed class ChatStreamService
         continue;
       }
 
-      var action = validatedAction;
-      var approvalRevised = false;
+      action = validatedAction with
+      {
+        ToolBatchId = progress.ActiveBatchId,
+        ToolCallId = progress.ActiveToolCallId,
+        ToolBatchPosition = progress.ActiveBatchPosition
+      };
+      _executionSession?.RecordNativeToolCall(progress.ActiveBatchId, progress.ActiveToolCallId,
+        "prepared", action.ActionId);
 
       foreach (var correction in action.Corrections ?? [])
       {
@@ -6896,7 +7025,7 @@ public sealed class ChatStreamService
         "proposed",
         false
       );
-      var requiresApproval = _approvalPolicy.RequiresApproval(
+      requiresApproval = _approvalPolicy.RequiresApproval(
         action,
         request.ApprovalPolicy
       );
@@ -7120,15 +7249,85 @@ public sealed class ChatStreamService
         );
       }
 
-      var execution = await TryExecuteAsync(
-        () => _actionService.ExecuteAsync(
-          action,
-          _executionSession,
-          cancellationToken,
-          action.Tool is "read_file" or "read_files"
-            ? ExecutionFileReadBudget(progress, applicationSettings, model, providerMaximumTokens, structuredCoordination) : null
-        )
-      );
+      var schedulingReason = structuredCoordination ? "structured-coordination"
+        : settings.ParallelToolExecution == "off" ? "parallel-off"
+        : requiresApproval ? "approval-required"
+        : !NativeToolScheduler.IsEligibleTool(action.Tool) || !action.ReadOnly ? "sequential-barrier" : "eligible-read";
+      _executionSession?.RecordNativeToolCall(progress.ActiveBatchId, progress.ActiveToolCallId,
+        "running", action.ActionId, schedulingReason: schedulingReason);
+      if (!structuredCoordination && settings.ParallelToolExecution != "off"
+        && NativeToolScheduler.IsEligibleTool(action.Tool) && action.ReadOnly && !requiresApproval)
+      {
+        if (toolScheduler.Count == 0)
+        {
+          var groupSize = 1 + progress.PendingToolCalls
+            .TakeWhile(call => NativeToolScheduler.IsEligible(call, settings)).Count();
+          toolScheduler.FileReadBudgetPerCall = Math.Max(1, ExecutionFileReadBudget(
+            progress, applicationSettings, model, providerMaximumTokens, structuredCoordination) / groupSize);
+        }
+        var readBudget = toolScheduler.FileReadBudgetPerCall;
+        var admittedAction = action;
+        toolScheduler.Start(action, progress.ActiveToolCallId, progress.ActiveBatchId, progress.ActiveBatchPosition,
+          lastRepeatArguments, token => _actionService.ExecuteAsync(admittedAction, _executionSession, token,
+            admittedAction.Tool == "read_file" ? readBudget : null));
+        yield return Event(requestId, "tools.parallel-running",
+          $"Native read group: {toolScheduler.Count} admitted, peak active {toolScheduler.PeakConcurrency} (limit {settings.MaxConcurrentToolCalls}).",
+          stopwatch, model, intention) with
+        {
+          ToolExecution = new NativeToolExecutionTelemetry(
+            progress.ActiveBatchId, progress.ActiveToolCallId, progress.ActiveBatchPosition, "running",
+            toolScheduler.ActiveCount, toolScheduler.PeakConcurrency, settings.MaxConcurrentToolCalls)
+        };
+        if (!toolScheduler.MustDrain(progress.PendingToolCalls.FirstOrDefault(), settings)) continue;
+        stagedExecution = toolScheduler.Take();
+      }
+    ConsolidateNativeExecution:
+      if (stagedExecution is not null)
+      {
+        action = stagedExecution.Action;
+        progress.ActiveToolCallId = stagedExecution.CallId;
+        progress.ActiveBatchId = stagedExecution.BatchId;
+        progress.ActiveBatchPosition = stagedExecution.Position;
+        lastRepeatArguments = stagedExecution.RepeatArguments;
+        lastProposedTool = action.Tool;
+        lastToolEvidenceId = stagedExecution.CallId;
+        var capacityWait = toolScheduler.Count + 1 >= settings.MaxConcurrentToolCalls
+          && progress.PendingToolCalls.Count > 0;
+        var waitStarted = Stopwatch.GetTimestamp();
+        var finished = await stagedExecution.Completion;
+        if (capacityWait)
+          _executionSession?.RecordNativeToolResourceWait(stagedExecution.BatchId,
+            (long)Stopwatch.GetElapsedTime(waitStarted).TotalMilliseconds);
+        execution = new ExecutionAttempt(finished.Result, finished.Failure, finished.DurationMilliseconds);
+        yield return Event(requestId, "tools.call-finished",
+          $"{action.Tool}: {finished.DurationMilliseconds} ms; peak active {toolScheduler.PeakConcurrency}.",
+          stopwatch, model, intention) with
+        {
+          ToolExecution = new NativeToolExecutionTelemetry(
+            progress.ActiveBatchId, progress.ActiveToolCallId, progress.ActiveBatchPosition, "finished",
+            toolScheduler.ActiveCount, toolScheduler.PeakConcurrency, settings.MaxConcurrentToolCalls,
+            finished.DurationMilliseconds)
+        };
+      }
+      else
+      {
+        execution = await TryExecuteAsync(
+          () => _actionService.ExecuteAsync(
+            action,
+            _executionSession,
+            cancellationToken,
+            action.Tool is "read_file" or "read_files"
+              ? ExecutionFileReadBudget(progress, applicationSettings, model, providerMaximumTokens, structuredCoordination) : null
+          )
+        );
+      }
+      _logger.LogInformation("Native tool call {CallId} batch {BatchId}: tool {Tool}, duration_ms {Duration}, scheduling {Scheduling}.",
+        progress.ActiveToolCallId, progress.ActiveBatchId, action.Tool, execution.DurationMilliseconds,
+        stagedExecution is null ? "sequential" : "eligible-read");
+      progress.ActiveToolDurationMilliseconds = execution.DurationMilliseconds;
+      _executionSession?.RecordNativeToolCall(progress.ActiveBatchId, progress.ActiveToolCallId, "running",
+        action.ActionId, durationMilliseconds: execution.DurationMilliseconds,
+        peakConcurrency: stagedExecution is null ? 1 : toolScheduler.PeakConcurrency);
       _executionSession?.RecordHostOrchestration(
         Math.Max(0, execution.DurationMilliseconds - (execution.Result?.Process?.DurationMilliseconds ?? 0))
       );
@@ -7259,6 +7458,9 @@ public sealed class ChatStreamService
             cancellationToken
           );
         }
+        yield return Event(requestId, "tools.call-recorded", $"{action.Tool}: completed.", stopwatch, model, intention)
+          with
+        { ExecutionSession = _executionSession?.CreateSummary() };
         _executionSession?.RecordToolSuccess();
         progress.RecoveryAttemptCount = 0;
         if (_executionSession?.Plan is not null)
@@ -7421,6 +7623,9 @@ public sealed class ChatStreamService
             cancellationToken
           );
         }
+        yield return Event(requestId, "tools.call-recorded", $"{action.Tool}: failed.", stopwatch, model, intention)
+          with
+        { ExecutionSession = _executionSession?.CreateSummary() };
         _executionSession?.RecordToolFailure();
         _executionSession?.AddWarning(
           $"{action.Tool} failed: {failureOutput}"
@@ -7631,10 +7836,11 @@ public sealed class ChatStreamService
     var heartbeatDelay = Task.Delay(heartbeatInterval, activityLifetime.Token);
     var safetyDelay = Task.Delay(ExtremeInactivityCeiling, activityLifetime.Token);
 
+    await using var enumerator = source.GetAsyncEnumerator(requestLifetime.Token);
+    Task<bool>? moveNext = null;
     try
     {
-      await using var enumerator = source.GetAsyncEnumerator(requestLifetime.Token);
-      var moveNext = enumerator.MoveNextAsync().AsTask();
+      moveNext = enumerator.MoveNextAsync().AsTask();
       while (true)
       {
         var candidates = new List<Task> { moveNext, heartbeatDelay, safetyDelay, progressReady };
@@ -7816,6 +8022,17 @@ public sealed class ChatStreamService
     }
     finally
     {
+      // A progress wait can observe cancellation before the provider MoveNext.
+      // Settle that operation before disposing its async iterator.
+      if (moveNext is not null)
+      {
+        if (!moveNext.IsCompleted) requestLifetime.Cancel();
+        try { await moveNext; }
+        catch (Exception exception)
+        {
+          _logger.LogDebug(exception, "Pending stream read settled during request cleanup.");
+        }
+      }
       activityLifetime.Cancel();
       activityLifetime.Dispose();
       _inferenceProgressObserver = null;
@@ -8237,8 +8454,8 @@ public sealed class ChatStreamService
       readRuntime?.MaximumContextTokens ?? int.MaxValue,
       options.EffectiveGenerationProfile.MaximumContextTokens ?? int.MaxValue,
       capabilities.ContextTokens ?? int.MaxValue,
-      readSettings.Context.DefaultContextTokens,
-      readSettings.Context.ProviderContextTokens
+      readRuntime is null ? readSettings.Context.DefaultContextTokens : int.MaxValue,
+      readRuntime is null ? readSettings.Context.ProviderContextTokens : int.MaxValue
     }.Min();
     var readOutputReserve = Math.Max(readSettings.Context.ReservedResponseTokens,
       readRuntime?.OutputTokenLimit ?? options.EffectiveGenerationProfile.MaximumOutputTokens ?? 0);
@@ -8451,6 +8668,12 @@ public sealed class ChatStreamService
       if (progress.Failure is not null)
       {
         yield break;
+      }
+      if (response.ContextResolution is not null)
+      {
+        progress.ContextResolution = response.ContextResolution;
+        if (progress.ContextUsage is not null)
+          progress.ContextUsage = WithRuntimeContextUsage(progress.ContextUsage, response.ContextResolution);
       }
       if (
         !progress.RuntimeContextReported
@@ -9028,6 +9251,12 @@ public sealed class ChatStreamService
         );
       }
 
+      if (update.ContextResolution is not null)
+      {
+        progress.ContextResolution = update.ContextResolution;
+        if (progress.ContextUsage is not null)
+          progress.ContextUsage = WithRuntimeContextUsage(progress.ContextUsage, update.ContextResolution);
+      }
       if (
         !progress.RuntimeContextReported
         && update.ContextResolution is not null
@@ -9546,7 +9775,7 @@ public sealed class ChatStreamService
     OllamaContextResolution resolution
   )
   {
-    var usage = CreateContextUsage(context, capabilities, settings, null);
+    var usage = WithRuntimeContextUsage(CreateContextUsage(context, capabilities, settings, null), resolution);
     var effectiveLimit = runtimeContextTokens ?? resolution.EffectiveContextTokens;
     return usage with
     {
@@ -9555,6 +9784,21 @@ public sealed class ChatStreamService
       RequiredContextTokens = resolution.RequiredContextTokens,
       EffectiveLimitTokens = effectiveLimit,
       InferenceSequence = 1
+    };
+  }
+
+  private static ContextUsageView WithRuntimeContextUsage(ContextUsageView usage, OllamaContextResolution? resolution)
+  {
+    if (resolution is null) return usage;
+    var percentage = (usage.ActiveContextTokens > 0 ? usage.ActiveContextTokens : usage.InputTokens + resolution.OutputTokenLimit)
+      * 100d / Math.Max(1, resolution.EffectiveContextTokens);
+    return usage with
+    {
+      RequestedContextTokens = resolution.RequestedContextTokens ?? resolution.TargetContextTokens,
+      ModelMaximumContextTokens = resolution.DeclaredModelMaximum,
+      EffectiveLimitTokens = resolution.EffectiveContextTokens,
+      ReservedResponseTokens = resolution.OutputTokenLimit,
+      WarningThreshold = percentage >= 95 ? 95 : percentage >= 85 ? 85 : percentage >= 70 ? 70 : 0
     };
   }
 
@@ -9710,7 +9954,9 @@ public sealed class ChatStreamService
       providerUsage?.TotalDurationNanoseconds,
       providerUsage?.LoadDurationNanoseconds,
       providerUsage?.PromptEvalDurationNanoseconds,
-      providerUsage?.EvalDurationNanoseconds
+      providerUsage?.EvalDurationNanoseconds,
+      RequestedContextTokens: budget.RequestedContextTokens,
+      ModelMaximumContextTokens: providerMaximumTokens
     );
   }
 
@@ -11248,6 +11494,15 @@ public sealed class ChatStreamService
       postconditionSatisfied,
       nextActions
     );
+    _executionSession?.RecordNativeToolCall(progress.ActiveBatchId, progress.ActiveToolCallId,
+      status, action?.ActionId, code, progress.ActiveToolDurationMilliseconds);
+    // Recovery may refine a rejection. Keep exactly one result per emitted call.
+    var assistantIndex = progress.ToolMessages.FindLastIndex(message => message.Role == "assistant"
+      && message.ToolCalls?.Any(call => call.Id == progress.ActiveToolCallId) == true);
+    if (assistantIndex >= 0)
+      for (var index = progress.ToolMessages.Count - 1; index > assistantIndex; index--)
+        if (progress.ToolMessages[index].Role == "tool" && progress.ToolMessages[index].ToolCallId == progress.ActiveToolCallId)
+          progress.ToolMessages.RemoveAt(index);
     return _toolingProtocol.CreateToolResultMessage(
       progress.ToolingProfile,
       new CanonicalToolResult(
@@ -11379,8 +11634,8 @@ public sealed class ChatStreamService
     var effectiveLimit = _usageRuntimeContextTokens ?? new[]
     {
       resolution.MaximumContextTokens,
-      settings.Context.DefaultContextTokens,
-      settings.Context.ProviderContextTokens,
+      ProviderModelReference.Parse(model).ProviderId == ModelProviderIds.OllamaLocal ? int.MaxValue : settings.Context.DefaultContextTokens,
+      ProviderModelReference.Parse(model).ProviderId == ModelProviderIds.OllamaLocal ? int.MaxValue : settings.Context.ProviderContextTokens,
       providerMaximumTokens ?? int.MaxValue
     }.Min();
     return new CoordinatorInputBudget(
@@ -11392,7 +11647,8 @@ public sealed class ChatStreamService
         : Math.Min(
           resolution.EffectiveContextTokens,
           effectiveLimit
-        )
+        ),
+      resolution.RequestedContextTokens
     );
   }
 
@@ -12419,7 +12675,8 @@ public sealed class ChatStreamService
       IncidentSequence: _trace.NextSequence(),
       Gpu: _usageGpu,
       InferenceObserver: requestPurpose == "target-response" ? _chatInferenceObserver : null,
-      ProgressObserver: _inferenceProgressObserver
+      ProgressObserver: _inferenceProgressObserver,
+      MinimumKeepAliveSeconds: requestPurpose == "target-response" ? _minimumKeepAliveSeconds : null
     );
   }
 
@@ -12837,7 +13094,9 @@ public sealed class ChatStreamService
       ContextUsage = contextUsage;
     }
 
-    public ContextUsageView? ContextUsage { get; }
+    public ContextUsageView? ContextUsage { get; set; }
+
+    public OllamaContextResolution? ContextResolution { get; set; }
 
     public StringBuilder Answer { get; } = new();
 
@@ -13005,6 +13264,11 @@ public sealed class ChatStreamService
 
     public string? ActiveToolCallId { get; set; }
 
+    public Queue<LocalActionPlanningResult> PendingToolCalls { get; } = new();
+    public string? ActiveBatchId { get; set; }
+    public int ActiveBatchPosition { get; set; }
+    public long? ActiveToolDurationMilliseconds { get; set; }
+
     public ExpertExecutionGuidance? Guidance { get; set; }
 
     public ExecutionTurnToolScope ToolScope { get; private set; }
@@ -13086,7 +13350,8 @@ public sealed class ChatStreamService
     int MaximumInputTokens,
     int MaximumContextTokens,
     int ReservedOutputTokens,
-    int EffectiveContextTokens
+    int EffectiveContextTokens,
+    int? RequestedContextTokens
   );
 
   private sealed record ValidationAttempt(

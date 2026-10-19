@@ -957,6 +957,7 @@ public sealed class ExecutionSession
   private readonly object _gate = new();
   private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
   private readonly List<ExecutionActionRecord> _actions = [];
+  private readonly List<NativeToolBatchSnapshot> _nativeToolBatches = [];
   private readonly List<ExecutionFileChange> _files = [];
   private readonly List<ExecutionProcessReview> _processes = [];
   private readonly List<string> _warnings = [];
@@ -2816,6 +2817,75 @@ public sealed class ExecutionSession
     );
   }
 
+  public void InterruptNativeToolCalls()
+  {
+    lock (_gate)
+    {
+      for (var index = 0; index < _nativeToolBatches.Count; index++)
+      {
+        var batch = _nativeToolBatches[index];
+        if (batch.Calls.Any(call => call.Status is "received" or "prepared" or "running"))
+          _nativeToolBatches[index] = batch with
+          {
+            CompletedAt = DateTimeOffset.UtcNow,
+            Calls = batch.Calls.Select(call => call.Status is "received" or "prepared" or "running"
+              ? call with { Status = "interrupted" } : call).ToArray()
+          };
+      }
+    }
+  }
+
+  public void RecordNativeToolResourceWait(string? batchId, long milliseconds)
+  {
+    lock (_gate)
+    {
+      var index = _nativeToolBatches.FindIndex(batch => batch.Id == batchId);
+      if (index >= 0)
+        _nativeToolBatches[index] = _nativeToolBatches[index] with
+        { ResourceWaitMilliseconds = _nativeToolBatches[index].ResourceWaitMilliseconds + milliseconds };
+    }
+  }
+
+  public void RecordNativeToolBatch(ToolExecutionBatch batch, int inferenceSequence)
+  {
+    lock (_gate)
+    {
+      _nativeToolBatches.Add(new NativeToolBatchSnapshot(batch.Id, inferenceSequence, DateTimeOffset.UtcNow,
+        batch.Calls.Select(call => new NativeToolCallSnapshot(call.CallId!, call.Proposal!.Tool, call.BatchPosition,
+          Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(call.Proposal.Arguments.GetRawText()))), "received")).ToArray()));
+      if (_nativeToolBatches.Count > 16) _nativeToolBatches.RemoveAt(0);
+    }
+  }
+
+  public void RecordNativeToolCall(string? batchId, string? callId, string status,
+    string? actionId = null, string? code = null, long? durationMilliseconds = null,
+    string? schedulingReason = null, int peakConcurrency = 0)
+  {
+    lock (_gate)
+    {
+      var index = _nativeToolBatches.FindIndex(batch => batch.Id == batchId);
+      if (index < 0) return;
+      var batch = _nativeToolBatches[index];
+      var calls = batch.Calls.Select(call => call.CallId != callId ? call : call with
+      {
+        Status = status,
+        ActionId = actionId ?? call.ActionId,
+        Code = code ?? call.Code,
+        DurationMilliseconds = durationMilliseconds ?? call.DurationMilliseconds,
+        SchedulingReason = schedulingReason ?? call.SchedulingReason,
+        AdmissionWaitMilliseconds = status == "running" && call.AdmissionWaitMilliseconds is null
+          ? (long)(DateTimeOffset.UtcNow - batch.ReceivedAt).TotalMilliseconds : call.AdmissionWaitMilliseconds
+      }).ToArray();
+      _nativeToolBatches[index] = batch with
+      {
+        Calls = calls,
+        PeakConcurrency = Math.Max(batch.PeakConcurrency, peakConcurrency),
+        CompletedAt = calls.All(call => call.Status is not ("received" or "prepared" or "running"))
+          ? DateTimeOffset.UtcNow : null
+      };
+    }
+  }
+
   public ExecutionSessionReview CreateReview()
   {
     lock (_gate)
@@ -2842,7 +2912,8 @@ public sealed class ExecutionSession
           {
             Result = null
           }
-        ).ToArray()
+        ).ToArray(),
+        NativeToolBatches: _nativeToolBatches.ToArray()
       );
     }
   }
@@ -2870,6 +2941,11 @@ public sealed class ExecutionSession
   {
     lock (_gate)
     {
+      _nativeToolBatches.AddRange((snapshot.Review.NativeToolBatches ?? []).Select(batch => batch with
+      {
+        Calls = batch.Calls.Select(call => call.Status is "received" or "prepared" or "running"
+          ? call with { Status = "interrupted" } : call).ToArray()
+      }));
       _files.AddRange(
         snapshot.Files
       );

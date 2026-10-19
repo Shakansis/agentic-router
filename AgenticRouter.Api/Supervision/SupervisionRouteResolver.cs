@@ -73,6 +73,11 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
   )
   {
     var objective = request.Objective.Trim();
+    if (request.Specialist is not null && !SettingsDefaults.IntentionNames.Contains(request.Specialist, StringComparer.Ordinal))
+    {
+      throw new SupervisionException("supervision-specialist-invalid", "supervision-prepare",
+        "Choose a known specialist or Automatic.", true);
+    }
     if (objective.Length is < 1 or > 16_384)
     {
       throw new SupervisionException(
@@ -207,7 +212,7 @@ public sealed class SupervisionRouteResolver : ISupervisionRouteResolver
     if (useAutoModel)
     {
       var routing = _intentionRouter.Route(
-        new ChatRequest(objective, "auto", [], InteractionMode: "execute")
+        new ChatRequest(objective, "auto", [], InteractionMode: "execute", Specialist: request.Specialist)
       );
       var resolution = _modelResolver.Resolve(
         settings,

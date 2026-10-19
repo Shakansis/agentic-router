@@ -22,7 +22,8 @@ public sealed record OllamaContextResolution(
   bool SharedModel,
   string? SharedModelWarning,
   string Reason,
-  ModelRuntimePerformanceSettings? Performance = null
+  ModelRuntimePerformanceSettings? Performance = null,
+  int? RequestedContextTokens = null
 );
 
 public sealed record OllamaRuntimeProfileError(

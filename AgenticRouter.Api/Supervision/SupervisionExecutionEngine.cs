@@ -1361,7 +1361,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         checkpoint.ConversationSessionId,
         Images: images,
         ExecutionStrategy: SupervisionExecutionStrategies.Direct,
-        Thinking: supervisor ? null : checkpoint.Route.WorkerThinking
+        Thinking: supervisor ? null : checkpoint.Route.WorkerThinking,
+        Specialist: checkpoint.Route.Specialist
       );
       string? roleResult = null;
       ExecutionPreflightMeasurement? preflight = null;
@@ -1563,6 +1564,11 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         finally
         {
           statusLifetime.Cancel();
+          // Status cancellation can win the race with the turn's pending read.
+          // Finish that read before disposing the shared Host stream.
+          if (!moveNext.IsCompleted) turnLifetime.Cancel();
+          try { await moveNext; }
+          catch (OperationCanceledException) when (turnLifetime.IsCancellationRequested) { }
         }
       }
       catch (OperationCanceledException) when (

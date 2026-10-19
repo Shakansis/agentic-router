@@ -99,6 +99,8 @@ public interface IOllamaClient
     CancellationToken cancellationToken
   );
 
+  Task UnloadModelAtEndpointAsync(Uri endpoint, string model, CancellationToken cancellationToken);
+
   Task SetModelResidencyAsync(
     Uri baseUri,
     string model,

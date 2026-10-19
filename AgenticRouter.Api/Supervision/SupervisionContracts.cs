@@ -122,7 +122,8 @@ public sealed record PrepareSupervisionRunRequest(
   IReadOnlyList<ChatImageAttachment>? Images = null,
   SupervisionTakeoverSnapshot? Takeover = null,
   string ExecutionStrategy = SupervisionExecutionStrategies.Supervised,
-  string? Thinking = null
+  string? Thinking = null,
+  string? Specialist = null
 );
 
 public sealed record ResumeSupervisionRunRequest(
@@ -310,7 +311,8 @@ public sealed record SupervisionRouteSnapshot(
   string? WorkerInheritedGpuSelection = null,
   string? SupervisorInheritedGpuSelection = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-  string? WorkerThinking = null
+  string? WorkerThinking = null,
+  string? Specialist = null
 )
 {
   [JsonIgnore]
@@ -359,7 +361,10 @@ public sealed record SupervisionActionCheckpoint(
   DateTimeOffset PreparedAt,
   DateTimeOffset UpdatedAt,
   string? ResultSha256 = null,
-  string? Reconciliation = null
+  string? Reconciliation = null,
+  string? ToolBatchId = null,
+  string? ToolCallId = null,
+  int? ToolBatchPosition = null
 );
 
 public sealed record SupervisionTrackedFileSnapshot(

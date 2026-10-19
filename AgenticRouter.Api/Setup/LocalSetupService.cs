@@ -21,11 +21,16 @@ public interface ILocalSetupService
 
   Task<SetupActionResult> StartModelPullAsync(
     string model,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    bool recommendedOnly = true
   );
+
+  SetupJobState? GetModelJob(string model);
+
+  Task<SetupActionResult> RemoveModelAsync(string model, CancellationToken cancellationToken);
 }
 
-public sealed class LocalSetupService : ILocalSetupService
+public sealed partial class LocalSetupService : ILocalSetupService
 {
   private const long Gibibyte = 1024L * 1024L * 1024L;
 
@@ -87,6 +92,8 @@ public sealed class LocalSetupService : ILocalSetupService
     IOllamaInstallationProfileStore installationProfiles,
     IOllamaBackendEvidenceService backendEvidence,
     IHostApplicationLifetime applicationLifetime,
+    IConfiguration configuration,
+    IModelRequestTracker requests,
     ILogger<LocalSetupService> logger
   )
   {
@@ -99,6 +106,8 @@ public sealed class LocalSetupService : ILocalSetupService
     _installationProfiles = installationProfiles;
     _backendEvidence = backendEvidence;
     _applicationLifetime = applicationLifetime;
+    _configuration = configuration;
+    _requests = requests;
     _logger = logger;
   }
 
@@ -337,17 +346,18 @@ public sealed class LocalSetupService : ILocalSetupService
 
   public async Task<SetupActionResult> StartModelPullAsync(
     string model,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    bool recommendedOnly = true
   )
   {
     ThrowIfMutationUnavailable();
+    model = ValidateModelName(model);
     var status = await GetStatusAsync(cancellationToken);
     var recommendation = status.RecommendedModels.FirstOrDefault(
       candidate => string.Equals(candidate.Model, model, StringComparison.OrdinalIgnoreCase)
-    ) ?? throw new SetupException(
-      "model-not-recommended",
-      "The selected model is not in the current GPU-compatible recommendation set."
     );
+    if (recommendedOnly && recommendation is null)
+      throw new SetupException("model-not-recommended", "The selected model is not in the current GPU-compatible recommendation set.");
     if (!status.Ollama.Available)
     {
       throw new SetupException(
@@ -355,26 +365,33 @@ public sealed class LocalSetupService : ILocalSetupService
         "Start Ollama before downloading a model."
       );
     }
-    if (recommendation.Installed)
-    {
-      return new SetupActionResult(model, false, "available", $"{model} is already installed.");
-    }
-
     var key = ModelJobKey(model);
+    if (GetJob(key)?.State == "removing")
+      throw new SetupException("model-operation-active", "This model is being removed. Wait for removal to finish before installing it.");
     if (GetJob(key)?.State == "downloading")
     {
       var current = GetJob(key)!;
       return new SetupActionResult(model, false, current.State, current.Message);
     }
 
+    var settings = await _settingsStore.GetAsync(cancellationToken);
+    var installed = await _ollama.GetModelsAsync(new Uri(settings.OllamaUrl), cancellationToken);
+    if (installed.Any(item => item.Name == model))
+      return new SetupActionResult(model, false, "available", $"{model} is already installed.");
+
     var initial = new SetupJobState(
       "downloading",
       $"Downloading {model}.",
       DateTimeOffset.UtcNow,
       0,
-      recommendation.DownloadBytes
+      recommendation?.DownloadBytes
     );
-    _jobs[key] = initial;
+    if (!_jobs.TryAdd(key, initial))
+    {
+      var previous = _jobs[key];
+      if (previous.State is "downloading" or "removing" || !_jobs.TryUpdate(key, initial, previous))
+        throw new SetupException("model-operation-active", "A model operation is already in progress. Refresh its status before retrying.");
+    }
     _ = RunModelPullAsync(model, key);
     return new SetupActionResult(model, true, initial.State, initial.Message);
   }
@@ -401,6 +418,9 @@ public sealed class LocalSetupService : ILocalSetupService
           progress.TotalBytes
         );
       }
+      var installed = await _ollama.GetModelsAsync(baseUri, _applicationLifetime.ApplicationStopping);
+      if (!installed.Any(item => item.Name == model))
+        throw new InvalidOperationException("Ollama finished the download but the model is not listed as installed. Refresh the library before retrying.");
       _jobs[key] = new SetupJobState(
         "completed",
         $"{model} is installed.",
@@ -573,7 +593,7 @@ public sealed class LocalSetupService : ILocalSetupService
     {
       throw new SetupException(
         "safe-mode-read-only",
-        "Installation and model downloads are disabled in safe mode."
+        "Installation, model downloads and model removal are disabled in safe mode."
       );
     }
   }

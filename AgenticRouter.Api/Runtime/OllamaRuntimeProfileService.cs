@@ -487,11 +487,6 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
       }
       var maximum = Math.Min(
         roleProfile.MaximumContextTokens,
-        settings.Context.ProviderContextTokens
-      );
-
-      maximum = Math.Min(
-        maximum,
         metadata.DeclaredContextTokens.Value
       );
 
@@ -845,18 +840,6 @@ public sealed class OllamaRuntimeProfileService : IOllamaRuntimeProfileService
         continue;
       }
 
-      foreach (var pair in modelOverride.Overrides)
-      {
-        if (pair.Value.MaximumContextTokens > metadata.DeclaredContextTokens)
-        {
-          errors[
-            $"ollamaRuntime.modelOverrides.{index}.overrides.{pair.Key}.maximumContextTokens"
-          ] =
-          [
-            $"The configured maximum exceeds the model-declared limit of {metadata.DeclaredContextTokens} tokens."
-          ];
-        }
-      }
     }
 
     return errors;

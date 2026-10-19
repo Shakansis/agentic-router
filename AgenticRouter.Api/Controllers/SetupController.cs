@@ -115,10 +115,32 @@ public sealed class SetupController : ControllerBase
     }
   }
 
+  [HttpPost("models/install")]
+  public async Task<IActionResult> InstallLibraryModel([FromBody] PullSetupModelRequest request, CancellationToken cancellationToken)
+  {
+    try { return Ok(await _setup.StartModelPullAsync(request.Model ?? "", cancellationToken, recommendedOnly: false)); }
+    catch (SetupException exception) { return SetupProblem(exception); }
+  }
+
+  [HttpGet("models/job")]
+  public IActionResult ModelJob([FromQuery] string model)
+  {
+    try { return Ok(new { model, job = _setup.GetModelJob(model) }); }
+    catch (SetupException exception) { return SetupProblem(exception); }
+  }
+
+  [HttpPost("models/remove")]
+  public async Task<IActionResult> RemoveLibraryModel([FromBody] PullSetupModelRequest request, CancellationToken cancellationToken)
+  {
+    try { return Ok(await _setup.RemoveModelAsync(request.Model ?? "", cancellationToken)); }
+    catch (SetupException exception) { return SetupProblem(exception); }
+  }
+
   private ObjectResult SetupProblem(SetupException exception)
   {
     var status = exception.Code switch
     {
+      "invalid-model-name" => StatusCodes.Status400BadRequest,
       "installer-not-found" => StatusCodes.Status404NotFound,
       "installer-start-failed" => StatusCodes.Status503ServiceUnavailable,
       _ => StatusCodes.Status409Conflict

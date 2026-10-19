@@ -33,7 +33,6 @@ public sealed record CanonicalToolCompletion(
 public sealed record CanonicalSpecialistTurn(
   IReadOnlyList<CanonicalToolCall> ToolCalls,
   CanonicalToolCompletion? Completion,
-  int IgnoredToolCallCount,
   string? Thinking = null,
   string? ActionIntroduction = null
 );
@@ -52,7 +51,7 @@ public sealed record SpecialistToolingProfile(
   string Version,
   string Transport,
   string PromptInstructions,
-  bool AllowsParallelCalls,
+  bool AcceptsMultipleCalls,
   bool CorrectionMayComplete,
   string ResolutionSource
 )
@@ -146,7 +145,7 @@ public sealed class SpecialistToolingProfileResolver : ISpecialistToolingProfile
         "1",
         "ollama-native-tools",
         QwenCodePrompt,
-        false,
+        true,
         true,
         identity.ToolProtocolConfirmed
           ? "exact-provider-model-and-confirmed-protocol"
@@ -161,7 +160,7 @@ public sealed class SpecialistToolingProfileResolver : ISpecialistToolingProfile
         "1",
         "provider-native-tools",
         GenericNativePrompt,
-        false,
+        true,
         true,
         "provider-capability"
       );
@@ -219,10 +218,7 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
     OllamaToolResponse response
   )
   {
-    var retainedCalls = profile.AllowsParallelCalls
-      ? response.ToolCalls
-      : response.ToolCalls.Take(1).ToArray();
-    var calls = retainedCalls.Select(
+    var calls = response.ToolCalls.Select(
       call => new CanonicalToolCall(
         string.IsNullOrWhiteSpace(call.Id) ? Guid.NewGuid().ToString("N") : call.Id,
         call.Name,
@@ -238,7 +234,6 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
     return new CanonicalSpecialistTurn(
       calls,
       completion,
-      response.ToolCalls.Count - calls.Length,
       response.Thinking,
       actionIntroduction
     );

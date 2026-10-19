@@ -17,6 +17,7 @@ async function refreshWorkspaceState() {
     ]);
   state.workspaceProfiles = workspaceProfiles;
   state.workspace = workspace;
+  updateStoryFileState();
   state.projectProfile = projectProfile;
   state.knowledgeProviders = knowledgeProviders;
   state.validationProfiles = validationProfiles;
@@ -1741,6 +1742,7 @@ async function openConversation(id, workspaceId = activeWorkspaceProfile()?.id) 
         state.browserSessionId = session.activeChatRun?.browserSessionId ?? nextBrowserSessionId;
         persistBrowserSessionId(state.browserSessionId);
         state.conversationSessionId = session.id;
+        restoreSpecialistControl(session);
         renderSupervisionRecovery();
         state.history = session.messages.map(
           message => ({
@@ -1853,6 +1855,7 @@ async function openSessionReadOnly(id, workspaceId) {
     clearConversationUi();
     state.readOnlyConversation = true;
     state.conversationSessionId = session.id;
+    restoreSpecialistControl(session);
     state.history = session.messages.map(
       message => ({
         role: message.role,

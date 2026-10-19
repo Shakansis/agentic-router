@@ -318,7 +318,7 @@ public sealed class DurableSupervisionRunCoordinator
       SupervisionRequestPolicy.Hash(
         request.Objective.Trim()
       ),
-      resolution.Route with { WorkerThinking = request.Thinking },
+      resolution.Route with { WorkerThinking = request.Thinking, Specialist = request.Specialist },
       approvalPolicy,
       resumePolicy,
       DurableSupervisionRunStates.Prepared,
@@ -1333,7 +1333,10 @@ public sealed class DurableSupervisionRunCoordinator
       existing?.PreparedAt ?? now,
       now,
       string.IsNullOrEmpty(result) ? null : Hash(result),
-      existing?.Reconciliation
+      existing?.Reconciliation,
+      action.ToolBatchId,
+      action.ToolCallId,
+      action.ToolBatchPosition
     );
     var actions = (checkpoint.Recovery?.Actions ?? [])
       .Where(candidate => !string.Equals(candidate.ActionId, action.ActionId, StringComparison.Ordinal))

@@ -63,6 +63,9 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 builder.Services.AddControllers();
+builder.Services.AddScoped<StoryEditorService>();
+builder.Services.AddScoped<StoryWorkspaceFiles>();
+builder.Services.AddScoped<WorkspaceFileSearch>();
 builder.Services.AddHttpClient<OllamaClient>(
   client => client.Timeout = Timeout.InfiniteTimeSpan
 ).RemoveAllLoggers();
@@ -433,7 +436,8 @@ builder.Services.AddSingleton<IModelOrganizationService>(
     services.GetRequiredService<IOllamaClient>(),
     services.GetRequiredService<IToolProtocolConformanceService>(),
     services.GetRequiredService<IWorkspaceProfileStore>(),
-    services.GetRequiredService<IWorkspaceProfileService>()
+    services.GetRequiredService<IWorkspaceProfileService>(),
+    services.GetRequiredService<IUsageLedger>()
   )
 );
 builder.Services.AddSingleton<
@@ -458,6 +462,7 @@ builder.Services.AddSingleton<IOllamaRuntimeProfileService>(
   )
 );
 builder.Services.AddSingleton<IModelRequestTracker, ModelRequestTracker>();
+builder.Services.AddSingleton<DirectModelResidency>();
 builder.Services.AddScoped<IRuntimeStatusService, RuntimeStatusService>();
 builder.Services.AddSingleton<LiveChatRuns>();
 builder.Services.AddScoped<ExecutionCompletionReportService>();

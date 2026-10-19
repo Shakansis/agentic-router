@@ -84,6 +84,10 @@ async function consumeEventStream(stream, assistant, options = {}) {
     );
     if (!historical) captureConversationContentBlock(contentBlocks, streamEvent);
     const updateVisibleState = !historical && !state.readOnlyConversation;
+    if (updateVisibleState && streamEvent.type.startsWith("specialist.") && streamEvent.intention) {
+      state.activeSpecialist = streamEvent.intention;
+      renderSpecialistControl();
+    }
     if (!historical && Number.isInteger(assistant.userHistoryIndex)) {
       const prompt = state.history[assistant.userHistoryIndex];
       if (prompt?.role === "user") prompt.turnId = streamEvent.requestId;
@@ -93,6 +97,25 @@ async function consumeEventStream(stream, assistant, options = {}) {
         streamEvent.conversationSessionId ?? state.conversationSessionId;
     }
 
+    if (!historical && streamEvent.toolExecution) {
+      const active = streamEvent.toolExecution.active;
+      if (active > 1) {
+        if (!assistant.parallelToolStatus) {
+          assistant.parallelToolStatus = document.createElement("small");
+          assistant.parallelToolStatus.className = "native-parallel-status";
+          assistant.parallelToolStatus.setAttribute("role", "status");
+          assistant.answer.insertAdjacentElement("afterend", assistant.parallelToolStatus);
+        }
+        assistant.parallelToolStatus.textContent = `${active} tools running concurrently`;
+      } else {
+        assistant.parallelToolStatus?.remove();
+        assistant.parallelToolStatus = null;
+      }
+    }
+    if (["response.completed", "error", "request.cancelled"].includes(streamEvent.type)) {
+      assistant.parallelToolStatus?.remove();
+      assistant.parallelToolStatus = null;
+    }
     const selectedHarness = /^harness\.(.+)-selected$/.exec(streamEvent.type);
     if (streamEvent.type === "ollama.startup-delayed") {
       if (!assistant.ollamaStartupAlert) {
@@ -1183,6 +1206,7 @@ function updateExecutionSession(assistant, session, updateVisibleState = true) {
       : null
   ].filter(Boolean).join("\n");
   const counts = document.createElement("span");
+  counts.className = "execution-session-counts";
   counts.textContent =
     `${session.actionCount} actions · ${session.changedFileCount} files · `
     + `planning ${session.planningFailureCount} · `
@@ -1212,6 +1236,7 @@ function updateChatSummary(assistant, summary) {
   const model = document.createElement("span");
   model.textContent = `Model: ${summary.model || assistant.selectedModel || "resolving"} · Chat`;
   const counts = document.createElement("span");
+  counts.className = "execution-session-counts";
   counts.textContent = [
     Number.isInteger(summary.readCount) ? `${summary.readCount} ${summary.readCount === 1 ? "read" : "reads"}` : null,
     Number.isInteger(summary.searchCount) ? `${summary.searchCount} ${summary.searchCount === 1 ? "search" : "searches"}` : null,

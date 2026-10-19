@@ -143,7 +143,9 @@ public sealed record ProviderCallContext(
   [property: System.Text.Json.Serialization.JsonIgnore]
   Configuration.ApplicationSettings? RuntimeSettingsOverride = null,
   [property: System.Text.Json.Serialization.JsonIgnore]
-  Action<InferenceProgressView>? ProgressObserver = null
+  Action<InferenceProgressView>? ProgressObserver = null,
+  [property: System.Text.Json.Serialization.JsonIgnore]
+  int? MinimumKeepAliveSeconds = null
 );
 
 public sealed record ProviderTokenUsage(

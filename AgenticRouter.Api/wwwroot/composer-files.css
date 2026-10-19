@@ -1,0 +1,17 @@
+.composer-editor-wrap { position: relative; min-width: 0; }
+.composer-input { display: block; width: 100%; min-height: 64px; max-height: 180px; padding: 12px 5px 10px; overflow-y: auto; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.composer-input[data-empty="true"]::before { content: attr(data-placeholder); color: var(--subtle); pointer-events: none; position: absolute; }
+.composer-input[aria-disabled="true"] { opacity: .6; cursor: default; }
+.composer-file-badge { display: inline-flex; align-items: center; vertical-align: baseline; gap: 5px; max-width: 100%; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--border-strong); background: rgba(104, 133, 255, .16); color: var(--text); font-size: 12px; line-height: 1.7; white-space: nowrap; }
+.composer-file-badge > span { overflow: hidden; text-overflow: ellipsis; }
+.composer-file-remove { padding: 0 2px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; }
+.composer-file-remove:hover { color: var(--text); }
+.composer-file-picker { position: absolute; bottom: calc(100% + 8px); left: 0; right: 0; z-index: 30; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel-raised); box-shadow: var(--shadow); }
+.composer-file-picker[hidden] { display: none; }
+#composer-file-status { padding: 10px 12px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+#composer-file-list { overflow-y: auto; max-height: min(280px, 40vh); }
+#composer-file-list [role="option"] { padding: 9px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+#composer-file-list [role="option"][aria-selected="true"], #composer-file-list [role="option"]:hover { background: rgba(104, 133, 255, .16); }
+#composer-file-list strong { font-size: 13px; font-weight: 600; }
+#composer-file-list small { font-size: 11px; color: var(--muted); }
+@media (max-width: 760px) { .composer-input { font-size: 16px; } }
