@@ -78,6 +78,7 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
   private readonly ConcurrentDictionary<string, int> _declaredContexts = new();
   public void SetDeclaredContext(string model, int tokens) => _declaredContexts[model] = tokens;
   public ConcurrentQueue<(string Fixture, string Protocol, int? Limit, int LimitFields, string? ContentType)> CompatibilityRequests { get; } = new();
+  public ConcurrentQueue<JsonObject> ResponsesReasoningRequests { get; } = new();
   private readonly ConcurrentDictionary<string, RunningModel> _loaded = new(
     StringComparer.Ordinal
   );
@@ -159,6 +160,7 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     BeforeChatResponse = null;
     _requests.Clear();
     CompatibilityRequests.Clear();
+    ResponsesReasoningRequests.Clear();
     _runtimeDraftModels.Clear();
     _runtimeNonGenerativeModels.Clear();
     RejectRuntimePerformance = false;
@@ -311,6 +313,13 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
           return;
         }
         var fixture = document.RootElement.GetProperty("fixture").GetString()!;
+        if (fixture == "codex interrupted reasoning fixture")
+        {
+          ResponsesReasoningRequests.Enqueue(JsonNode.Parse(document.RootElement.GetRawText())!.AsObject());
+          await WriteJsonAsync(context.Response, HttpStatusCode.OK,
+            new { status = "completed", output = Array.Empty<object>(), usage = new { output_tokens = 1 } }, cancellationToken);
+          return;
+        }
         var limitNames = new[] { "max_tokens", "max_completion_tokens", "max_output_tokens" };
         var limits = limitNames.Where(name => document.RootElement.TryGetProperty(name, out _)).ToArray();
         CompatibilityRequests.Enqueue((fixture, path, limits.Length == 1

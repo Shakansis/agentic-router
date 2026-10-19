@@ -745,6 +745,39 @@ async Task RunTurnAsync(
       await Task.Delay(1_500, cancellationToken);
     }
 
+    if (currentRequest.Contains("codex interrupted reasoning fixture", StringComparison.Ordinal))
+    {
+      using var http = new HttpClient();
+      using var response = await http.PostAsJsonAsync(
+        Environment.GetEnvironmentVariable("CODEX_OSS_BASE_URL") + "/responses",
+        new
+        {
+          model,
+          fixture = "codex interrupted reasoning fixture",
+          stream = false,
+          input = new object[]
+          {
+            new { type = "message", role = "user", content = "Original request" },
+            new { type = "reasoning", encrypted_content = "Interrupted reasoning", summary = Array.Empty<object>() },
+            new { type = "message", role = "user", content = "Latest steering instruction" },
+            new { type = "reasoning", encrypted_content = "Completed reasoning", summary = Array.Empty<object>() },
+            new { type = "message", role = "assistant", content = "Completed answer" },
+            new { type = "reasoning", encrypted_content = "Tool reasoning", summary = Array.Empty<object>() },
+            new { type = "function_call", call_id = "read-1", name = "read_file", arguments = "{\"path\":\"README.md\"}" },
+            new { type = "function_call_output", call_id = "read-1", output = "Fixture text" },
+            new { type = "reasoning", encrypted_content = "Another interruption", summary = Array.Empty<object>() },
+            new { type = "message", role = "user", content = "Final instruction" },
+            new { type = "reasoning", encrypted_content = "Trailing prefill", summary = Array.Empty<object>() }
+          }
+        }, cancellationToken);
+      response.EnsureSuccessStatusCode();
+      await response.Content.ReadAsStringAsync(cancellationToken);
+      await SendAsync(new { method = "item/agentMessage/delta", @params = new { threadId, turnId, itemId = "order-answer", delta = "REASONING_ORDER_OK" } });
+      await SendAsync(new { method = "turn/completed", @params = new { threadId, turn = new { id = turnId, status = "completed" } } });
+      turns.TryRemove(turnId, out _);
+      return;
+    }
+
     if (currentRequest.Contains("codex nonstream JSON fixture", StringComparison.Ordinal))
     {
       using var http = new HttpClient();

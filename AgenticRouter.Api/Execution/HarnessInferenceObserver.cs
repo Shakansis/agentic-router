@@ -132,6 +132,8 @@ public sealed class HarnessInferenceObserver(
             body = nativeWire.Request(turn.Runtime, turn.DisableThinking);
             request.RequestUri = new Uri(turn.Upstream.GetLeftPart(UriPartial.Authority) + "/api/chat");
           }
+          if (nativeWire is null && inferencePath == "/v1/responses")
+            OllamaHarnessWireAdapter.PreserveResponsesReasoningOrder(body);
           if (turn.Runtime is not null && turn.OutputTokenLimit is int ceiling)
           {
             var inputTokens = fileReads.MeasureRequest(body);

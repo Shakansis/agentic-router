@@ -3199,12 +3199,8 @@ public sealed class ExecutionStateEndToEndTests : ChatEndToEndTestBase<Execution
     await Page.Locator(
       "#close-change-review"
     ).ClickAsync();
-    if (await Page.Locator("#cancel-request").IsVisibleAsync())
-    {
-      await Page.Locator(
-        "#cancel-request"
-      ).ClickAsync();
-    }
+    await Expect(technicalDetails).ToHaveAttributeAsync("data-terminal", "true");
+    await Expect(Page.Locator("#cancel-request")).ToBeHiddenAsync();
   }
 
   [TestMethod]

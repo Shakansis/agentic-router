@@ -14,6 +14,32 @@ internal sealed class OllamaHarnessWireAdapter(string protocol, JsonObject origi
 
   public bool Streaming => original["stream"]?.GetValue<bool>() != false;
 
+  public static void PreserveResponsesReasoningOrder(JsonObject body)
+  {
+    if (body["input"] is not JsonArray input) return;
+    var pending = false;
+    for (var index = 0; index < input.Count; index++)
+    {
+      if (input[index] is not JsonObject item) continue;
+      var type = item["type"]?.GetValue<string>();
+      var role = item["role"]?.GetValue<string>();
+      if (pending && (role is not null && role != "assistant"
+        || type is "agent_message" or "function_call_output" or "tool_search_output"))
+      {
+        // Ollama holds reasoning until the next assistant item, even across a
+        // newer user message. Attach interrupted reasoning before that message
+        // so it cannot become a stale assistant prefill after a native steer.
+        input.Insert(index++, new JsonObject
+        { ["type"] = "message", ["role"] = "assistant", ["content"] = new JsonArray() });
+        pending = false;
+      }
+      if (type == "reasoning")
+        pending = !string.IsNullOrEmpty(item["encrypted_content"]?.GetValue<string>());
+      else if (role == "assistant" || type is "function_call" or "tool_search_call")
+        pending = false;
+    }
+  }
+
   public JsonObject Request(OllamaContextResolution runtime, bool disableThinking = false)
   {
     var messages = new JsonArray();

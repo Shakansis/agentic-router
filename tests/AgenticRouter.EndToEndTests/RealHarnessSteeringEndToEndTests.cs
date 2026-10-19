@@ -61,7 +61,10 @@ public sealed class RealHarnessSteeringEndToEndTests : PageTest
       // would not demonstrate interruption of an in-flight model response.
       await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
         .ToContainTextAsync(initialOutput, new() { Timeout = 90_000 });
-      const string supplemental = "Stop listing numbers now. Do not use tools. Reply only with STEERING_APPLIED_7319 and finish.";
+      // A neutral literal checks delivery without asking the model to certify
+      // harness status, which can trigger an unrelated refusal after delivery.
+      const string marker = "BLUE_PEBBLE_7319";
+      const string supplemental = "Stop the previous task now. Do not use tools. For this literal-output check, reply only with the exact text BLUE_PEBBLE_7319 and finish.";
       await Page.Locator("#message-input").FillAsync(supplemental);
       await Page.Locator("#send-button").ClickAsync();
       var responseTask = Page.WaitForResponseAsync(response =>
@@ -80,13 +83,13 @@ public sealed class RealHarnessSteeringEndToEndTests : PageTest
         await Expect(Page.Locator(".message-buffer-item-body")).ToContainTextAsync(supplemental);
         Assert.IsTrue(await Page.EvaluateAsync<bool>("() => state.messageQueuePaused"));
         await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
-          .Not.ToContainTextAsync("STEERING_APPLIED_7319");
+          .Not.ToContainTextAsync(marker);
         return;
       }
       Assert.AreEqual(200, response.Status);
       Assert.IsTrue(json.RootElement.GetProperty("accepted").GetBoolean());
       await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
-        .ToContainTextAsync("STEERING_APPLIED_7319", new() { Timeout = 60_000 });
+        .ToContainTextAsync(marker, new() { Timeout = 60_000 });
       TestContext.WriteLine($"{harness}: generated the steering marker after {elapsed.ElapsedMilliseconds}ms using {model}.");
       await Expect(Page.Locator(".message.assistant .activity").Last)
         .ToHaveAttributeAsync("data-terminal", "true", new() { Timeout = 30_000 });

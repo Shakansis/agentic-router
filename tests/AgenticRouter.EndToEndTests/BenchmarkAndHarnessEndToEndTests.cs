@@ -7553,6 +7553,37 @@ public sealed class BenchmarkAndHarnessEndToEndTests : ChatEndToEndTestBase<Benc
 
   [TestMethod]
   [Timeout(60_000, CooperativeCancellation = true)]
+  public async Task CodexInterruptedReasoningStaysBeforeSteeringAtTheOllamaBoundary()
+  {
+    await Page.GotoAsync("/");
+    await Page.Locator("#model-selector").SelectOptionAsync("qwen3.8:27b-gpu0");
+    await SetExecuteModeAsync("auto");
+    await Page.Locator("#harness-selector").SelectOptionAsync(HarnessIds.Codex);
+    await SendMessageAsync("codex interrupted reasoning fixture");
+    await Expect(Page.Locator(".message.assistant .assistant-answer").Last)
+      .ToContainTextAsync("REASONING_ORDER_OK");
+
+    var request = _environment.FakeOllama.ResponsesReasoningRequests.Single();
+    var input = request["input"]!.AsArray();
+    CollectionAssert.AreEqual(new[]
+    {
+      "user", "reasoning", "assistant", "user", "reasoning", "assistant",
+      "reasoning", "function_call", "function_call_output", "reasoning", "assistant", "user", "reasoning"
+    }, input.Select(item => item!["role"]?.GetValue<string>() ?? item["type"]!.GetValue<string>()).ToArray());
+    Assert.AreEqual("Interrupted reasoning", input[1]!["encrypted_content"]!.GetValue<string>());
+    Assert.HasCount(0, input[2]!["content"]!.AsArray());
+    Assert.AreEqual("Latest steering instruction", input[3]!["content"]!.GetValue<string>());
+    Assert.AreEqual("Completed answer", input[5]!["content"]!.GetValue<string>());
+    Assert.AreEqual("read-1", input[7]!["call_id"]!.GetValue<string>());
+    Assert.AreEqual("read-1", input[8]!["call_id"]!.GetValue<string>());
+    Assert.AreEqual("Another interruption", input[9]!["encrypted_content"]!.GetValue<string>());
+    Assert.HasCount(0, input[10]!["content"]!.AsArray());
+    Assert.AreEqual("Final instruction", input[11]!["content"]!.GetValue<string>());
+    Assert.AreEqual("Trailing prefill", input[12]!["encrypted_content"]!.GetValue<string>());
+  }
+
+  [TestMethod]
+  [Timeout(60_000, CooperativeCancellation = true)]
   public async Task CodexSteerTargetsTheExactActiveTurnAndRemainsVisibleInTheConversation()
   {
     await Page.GotoAsync("/");
