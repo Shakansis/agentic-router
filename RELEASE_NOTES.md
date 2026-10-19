@@ -48,8 +48,20 @@ CLIs remain separate installations. Previous releases remain unchanged.
 
 ## Validation
 
-Release validation is in progress. Final counts, package checks and remaining
-real-provider limitations will be recorded here after the release gates finish.
+- Complete deterministic suite: **884/884 passed**, zero failures/skips.
+- Installed Codex, Claude Code, OpenCode and Qwen Code integration: **32/32 passed**
+  against isolated simulated providers. No CLI upgrade was performed.
+- Extracted Windows ZIP: **8/8 browser/API checks passed**. Both portable packages
+  passed content inspection, SHA-256 checks, startup and HTTP page/API smoke;
+  Linux startup ran under Ubuntu WSL. All 36 static assets match source.
+- Release builds have zero warnings/errors. Formatting, JavaScript/PowerShell
+  syntax and intended-diff checks passed. Existing AR/Ollama processes were preserved.
+- The 13 real-model/history-dependent opt-in cases were not executed in this
+  release run. This does not establish fresh real inference quality, GPU capacity
+  or physical Linux desktop/GPU acceptance.
+
+See the [release validation record](https://github.com/Shakansis/agentic-router/blob/main/docs/validation/release-0.16.0-alpha.md)
+for commands, package hashes, fixes and validation boundaries.
 
 # Agentic Router v0.15.0 alpha
 

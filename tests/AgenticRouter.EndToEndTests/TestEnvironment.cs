@@ -638,10 +638,10 @@ internal sealed class TestEnvironment : IAsyncDisposable
   {
     var startInfo = _apiProcess.StartInfo;
 
-    if (!string.Equals(
-      _apiProcess.ProcessName,
-      "AgenticRouter.Api",
-      StringComparison.OrdinalIgnoreCase
+    if (!_apiProcess.HasExited && !string.Equals(
+      _apiProcess.MainModule?.FileName,
+      Path.GetFullPath(startInfo.FileName),
+      OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal
     ))
     {
       throw new InvalidOperationException(

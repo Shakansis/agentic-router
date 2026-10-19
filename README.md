@@ -110,13 +110,12 @@ will be filled completely before another visible device is used.
 The application follows a flexible pipeline that adapts to available hardware:
 
 1. **User Request**: User sends a prompt (e.g., "Create a dialogue for the tavern keeper based on campaign history")
-2. **Intent Classification**: Ordered local keyword rules identify the user's intent without an inference call
-3. **Intent Detection**: The deterministic router selects an intent (e.g., "rpg-storytelling") and its configured expert
-4. **Model Resolution**: System resolves the target model based on configuration precedence
-5. **Device Resolution**: System selects the appropriate device (auto, specific GPU, or CPU-only)
-6. **Provider Connection**: Application connects to Ollama Local or an enabled cloud provider through the provider registry
-7. **Inference**: Provider processes the request and streams the response
-8. **Response Streaming**: Response streams in real-time to the UI with routing activity visible
+2. **Specialist Selection**: Honor the fixed specialist, or use ordered local keyword rules to select an intent (e.g., "rpg-storytelling") without an inference call
+3. **Model Resolution**: System resolves the target model based on configuration precedence
+4. **Device Resolution**: System selects the appropriate device (auto, specific GPU, or CPU-only)
+5. **Provider Connection**: Application connects to Ollama Local or an enabled cloud provider through the provider registry
+6. **Inference**: Provider processes the request and streams the response
+7. **Response Streaming**: Response streams in real-time to the UI with routing activity visible
 
 **Key Point**: On the standard local Windows endpoint, explicit GPU selection is
 Host-enforced through an isolated managed Ollama process. Custom/remote Ollama
@@ -681,9 +680,9 @@ never silently degrades to another GPU or CPU.
 
 ### Configuration UI
 
-Open **Settings > Intents** to:
+Open **Settings > Models and routing** to:
 - Set model overrides per intent
-- Configure device preferences (Default, Placa 1, Placa 2)
+- Configure device preferences from the adapters available on this machine
 - Customize system prompts for each intent
 - Manage preferred model lists
 
