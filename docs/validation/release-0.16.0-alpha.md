@@ -166,3 +166,21 @@ Linux startup was verified in WSL, not a separate Linux desktop/GPU environment.
 Package smoke checks exercise startup, HTTP and static assets; full browser/API
 coverage uses the isolated Windows Release build. No coverage percentage is
 claimed from these test counts.
+
+## Publication and cleanup
+
+Published [v0.16.0_alpha](https://github.com/Shakansis/agentic-router-releases/releases/tag/v0.16.0_alpha)
+as a prerelease with exactly four assets. GitHub-reported digests and byte sizes
+match the two local archives and both checksum files; all four public download
+URLs returned HTTP 200. The prior `v0.15.0_alpha` asset metadata is unchanged.
+Public README/screenshots were published by the existing explicit file allowlist.
+
+Application changes and validation evidence were pushed to source `main` in
+`9ba9241` and `760442a`; this publication record is a subsequent documentation-only
+update. No portable binary was replaced after verification.
+
+No task-owned API, fake provider, testhost, browser automation or build-server
+process remained after the completed runs. Process-instance identity and
+parent/child evidence were checked. The pre-existing AR/Ollama instances and
+the user's Visual Studio build server were preserved. Raw process and publication
+checks remain in the ignored artifact directory.
