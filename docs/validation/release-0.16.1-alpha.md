@@ -166,6 +166,14 @@ listeners. No test/build server remained. Evidence: `cleanup-all.json`.
 
 ## Publication status
 
-The 0.16.1 packages and documentation are prepared and validated locally.
-Publication has not been performed; authorization for the source push and public
-release upload is pending. Existing 0.16.0 assets remain unchanged.
+Published with explicit user authorization as
+[`v0.16.1_alpha`](https://github.com/Shakansis/agentic-router-releases/releases/tag/v0.16.1_alpha).
+The source fix, tests and reviewed documentation were pushed to source `main`
+through `42aba92fc1a1a0abcc707de08c8fcd467e8c2ee7`; the packaged application
+remains frozen at `8fd53a8ce733148ac52f3f4d557fb5cabeadc5bf`.
+
+All four published assets match the local manifest by name, byte count and
+GitHub SHA-256 digest, and their download URLs return HTTP 200. The public README
+and release notes match the reviewed local files. The existing `0.16.0_alpha`
+asset names, sizes, digests and URLs remain unchanged. Evidence:
+`publication-verification.json`.
