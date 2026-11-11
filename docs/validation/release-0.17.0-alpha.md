@@ -107,3 +107,16 @@ Earlier real OpenAI acceptance remains historical evidence.
 Unsaved editor drafts remain window-local; checkpoints do not reconstruct them
 after restart. Existing services, settings, model installations and user data
 are preserved; this release does not activate a replacement running instance.
+
+## Publication receipt
+
+Published [v0.17.0_alpha](https://github.com/Shakansis/agentic-router-releases/releases/tag/v0.17.0_alpha)
+as a non-draft prerelease. All four assets are uploaded; GitHub's reported sizes
+and SHA-256 digests match the local archives and checksum files. Public guide
+commit: `1dbf5b4` in `Shakansis/agentic-router-releases`.
+
+Source `main` was pushed and its remote SHA verified as `540fd2e` before this
+receipt. The annotated source tag `v0.17.0_alpha` resolves to packaged source
+`e90a21b`. The working tree was clean after release/validation commits, before
+starting the separate Agent Browser increment. Local publication metadata and
+digest comparisons are retained under the evidence directory.
