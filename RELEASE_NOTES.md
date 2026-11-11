@@ -22,6 +22,14 @@ Windows x64 and Linux x64 packages share this source. Agent Browser and the new
 conversation dropdown are the next increment and are not enabled in this release.
 Shared-composer proposal, explicit Apply and Undo passed browser/API acceptance
 with the installed local Qwen model. Paid-provider acceptance was not rerun.
+All **32/32** installed-harness cases passed with simulated providers, and the
+final Windows ZIP passed **22/22** tool-workspace, presentation and registry checks.
+Both portable packages passed content/checksum inspection and page/API startup
+smokes; Linux startup ran under Ubuntu/WSL. Release builds have zero warnings.
+The broad deterministic run passed 928/930. Its two failures exposed an outdated
+registry expectation and a mobile sticky-header regression; both were corrected
+and passed in the final-package run. All 930 deterministic scenarios therefore
+have passing evidence across those runs, with no unresolved failures or skips.
 Unsaved editor drafts remain window-local and are not reconstructed on restart.
 See the [release validation record](https://github.com/Shakansis/agentic-router/blob/main/docs/validation/release-0.17.0-alpha.md)
 for executed checks and limitations.

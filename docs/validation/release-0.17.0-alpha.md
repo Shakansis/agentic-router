@@ -28,11 +28,57 @@ Local-model shared-composer acceptance passed **1/1** with the installed
 remained unchanged until Apply, and Undo restored the source. The screenshot
 was inspected. No cloud provider was used.
 
-The complete deterministic suite and final portable-package checks are in
-progress. Publication must wait for their results. The first deterministic
-run was stopped after detecting an obsolete
+The final Windows ZIP passed **22/22** browser/API tests: all 15 tool-workspace
+scenarios, the Chat presentation class, the closed canonical tool registry and
+all three live execution-header scenarios.
+Both portable archives passed content inspection and checksum verification.
+The extracted Windows executable and the Linux executable under Ubuntu/WSL
+served the page and settings API successfully. All Windows static assets match
+the source; Linux executable/launcher permissions are 755. No running user
+instance was replaced.
+
+Installed-harness browser/API checks passed **32/32**, with zero failures/skips,
+in 7.31 minutes, against the extracted Windows executable and simulated
+providers. Versions: Codex `0.167.0-alpha.4.1`, Claude Code `2.1.295`, OpenCode
+`1.18.35`, Qwen Code `0.25.0`. No CLI was upgraded or reinstalled.
+
+The complete deterministic run exercised **930 scenarios** in 30.21 minutes:
+**928 passed, two failed, zero skipped**. Both failures below were corrected
+and their exact cases passed in the **22/22** final-package run. The TRX result
+names were matched to verify that no failed case remains unresolved. Thus all
+930 deterministic scenarios have passing evidence across the broad run and
+the final targeted run; this is not a claim that the earlier broad invocation
+was entirely green. Including the 32 installed-harness and one real local-model
+case, the distinct passing matrix is **963 scenarios**. Package reruns overlap
+that matrix and are not counted twice.
+
+The first deterministic run was
+stopped after detecting an obsolete
 asset-revision assertion; the interface and assertion now consistently require
 `20261111.1`. Cache revalidation assertions remain intact.
+The broad rerun exposed a second outdated expectation: the closed registry test
+omitted the new canonical `set_response_target`. Its expected set was updated;
+exact names, aliases and collision checks remain required. It passed against
+the final package with the corrected test assembly. This changes no production
+behavior.
+The mobile execution-header scenario also reproduced a real layout regression:
+the assistant message's trailing margin constrained its sticky header in the
+smaller shared-composer viewport. Removing that margin only while the header
+is live restored its position. All three original desktop/mobile/terminal-state
+cases passed without changing assertions or tolerances; screenshots were
+inspected. Both packages were rebuilt after this correction.
+
+## Frozen packages
+
+Both final packages identify source commit
+`e90a21bf08f89e160bd8d04e514bb7c219c323cd`, following feature commit `5c0c024`
+and registry-test correction `9788315`.
+Validation-record commits after this point do not change the packaged code.
+
+| Runtime | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Windows x64 ZIP | 123032786 | `2cb4a8e5b2523bd14bfaf933ada1b08f83f7decf82b73a0eed9ab968b784f262` |
+| Linux x64 tar.gz | 141889320 | `a6f74941974cccec62629d1d9fdae4213d767b34664b85f60deae224013bb6d1` |
 
 ## Reproduction and evidence
 
@@ -57,7 +103,7 @@ git diff --check
 
 The user explicitly authorized local-model validation during this release and
 asked to avoid paid models. No paid-provider inference is part of this run.
-Earlier real OpenAI and installed-CLI records remain historical evidence.
+Earlier real OpenAI acceptance remains historical evidence.
 Unsaved editor drafts remain window-local; checkpoints do not reconstruct them
 after restart. Existing services, settings, model installations and user data
 are preserved; this release does not activate a replacement running instance.

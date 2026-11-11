@@ -33,9 +33,10 @@ Agentic Router runs local AI conversations and supervised workspace changes thro
   distinguish throughput estimates from measured generation.
 
 Shared-composer revision, explicit Apply and Undo also passed browser/API
-acceptance with an installed local Qwen model. Paid-provider and installed-CLI
-acceptance from previous versions remains historical evidence. Agent Browser
-is planned for the following increment.
+acceptance with an installed local Qwen model. All 32 installed-harness checks
+passed against simulated providers. Paid-provider acceptance from previous
+versions remains historical evidence. Agent Browser is planned for the following
+increment.
 
 Included from 0.16:
 
