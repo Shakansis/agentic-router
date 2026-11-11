@@ -19,6 +19,8 @@ public sealed record ModelPresentationPreference(
   DateTimeOffset UpdatedAt
 );
 
+public sealed record OrphanedModelSettingsResult(ApplicationSettings Settings, IReadOnlyList<string> RemovedModels);
+
 public sealed record ModelConfigurationProfile
 {
   public string Id { get; init; } = string.Empty;
@@ -121,6 +123,8 @@ public sealed record ModelProfilePreview(
 
 public interface IModelOrganizationService
 {
+  Task<OrphanedModelSettingsResult> PruneOrphanedLocalSettingsAsync(ApplicationSettings settings, CancellationToken cancellationToken);
+  Task ForgetLocalModelAsync(string model, CancellationToken cancellationToken);
   Task<ModelOrganizationView> GetAsync(
     CancellationToken cancellationToken
   );
@@ -174,6 +178,7 @@ public sealed class ModelOrganizationService : IModelOrganizationService
   private readonly ISettingsStore _settings;
   private readonly ISettingsValidator _settingsValidator;
   private readonly IOllamaClient _models;
+  private readonly OllamaClient _localModels;
   private readonly IToolProtocolConformanceService _conformance;
   private readonly IWorkspaceProfileStore _workspaces;
   private readonly IWorkspaceProfileService _workspaceService;
@@ -191,7 +196,8 @@ public sealed class ModelOrganizationService : IModelOrganizationService
     IToolProtocolConformanceService conformance,
     IWorkspaceProfileStore workspaces,
     IWorkspaceProfileService workspaceService,
-    IUsageLedger usage
+    IUsageLedger usage,
+    OllamaClient localModels
   )
   {
     _path = Path.Combine(
@@ -205,6 +211,99 @@ public sealed class ModelOrganizationService : IModelOrganizationService
     _workspaces = workspaces;
     _workspaceService = workspaceService;
     _usage = usage;
+    _localModels = localModels;
+  }
+
+  public async Task<OrphanedModelSettingsResult> PruneOrphanedLocalSettingsAsync(
+    ApplicationSettings settings, CancellationToken cancellationToken)
+  {
+    var current = await _settings.GetAsync(cancellationToken);
+    if (!new Uri(current.OllamaUrl).Equals(new Uri(settings.OllamaUrl))) return new(settings, []);
+    var candidates = settings.OllamaRuntime.ModelOverrides.Where(item => item.Provider == ModelProviderIds.OllamaLocal)
+      .Select(item => item.Model).Concat(settings.ModelGpuAffinities.Keys.Select(ProviderModelReference.Parse)
+        .Where(item => item.IsLocal).Select(item => item.ModelId)).Distinct(StringComparer.Ordinal).ToArray();
+    if (candidates.Length == 0) return new(settings, []);
+    IReadOnlyList<InstalledModel> installed;
+    try
+    {
+      // Use authoritative local discovery. The combined registry can return cloud
+      // models after an Ollama failure; that must never erase local configuration.
+      installed = await _localModels.GetInstalledModelIdentitiesAsync(new Uri(settings.OllamaUrl), cancellationToken);
+    }
+    catch (OllamaProviderException) { return new(settings, []); }
+    var names = installed.Select(item => item.Name).ToHashSet(StringComparer.Ordinal);
+    var removed = candidates.Where(model => !names.Contains(model)).ToArray();
+    foreach (var model in removed) settings = WithoutLocalModelSettings(settings, model);
+    // A tag can also be replaced with another digest. Remove only the obsolete
+    // revision's runtime settings, retaining this installed tag's other preferences.
+    settings = settings with
+    {
+      OllamaRuntime = settings.OllamaRuntime with
+      {
+        ModelOverrides = settings.OllamaRuntime.ModelOverrides.Where(item =>
+        {
+          if (item.Provider != ModelProviderIds.OllamaLocal) return true;
+          var model = installed.FirstOrDefault(candidate => candidate.Name == item.Model);
+          var previouslySaved = current.OllamaRuntime.ModelOverrides.Any(saved =>
+            saved.Provider == item.Provider && saved.Model == item.Model && saved.Digest == item.Digest);
+          return !previouslySaved || model is not null &&
+            (string.IsNullOrWhiteSpace(model.Digest) || model.Digest == item.Digest);
+        }).ToArray()
+      }
+    };
+    return new(settings, removed);
+  }
+
+  private static ApplicationSettings WithoutLocalModelSettings(ApplicationSettings settings, string model) => settings with
+  {
+    OllamaRuntime = settings.OllamaRuntime with
+    {
+      ModelOverrides = settings.OllamaRuntime.ModelOverrides
+        .Where(item => item.Provider != ModelProviderIds.OllamaLocal || item.Model != model).ToArray()
+    },
+    ModelGpuAffinities = settings.ModelGpuAffinities.Where(pair =>
+    {
+      var reference = ProviderModelReference.Parse(pair.Key);
+      return !reference.IsLocal || reference.ModelId != model;
+    }).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal)
+  };
+
+  public async Task ForgetLocalModelAsync(string model, CancellationToken cancellationToken)
+  {
+    var settings = await _settings.GetAsync(cancellationToken);
+    var cleaned = WithoutLocalModelSettings(settings, model);
+    var result = await _settings.SaveAsync(cleaned, cancellationToken);
+    if (!result.IsValid)
+      throw new ModelOrganizationException("model-settings-cleanup-failed", "model-remove", "The model is absent, but its settings could not be removed. Review the settings validation errors.");
+    await _gate.WaitAsync(cancellationToken);
+    try
+    {
+      var document = await ReadUnlockedAsync(cancellationToken);
+      bool ReferencesRemovedModel(string value)
+      {
+        var reference = ProviderModelReference.Parse(value);
+        return reference.IsLocal && reference.ModelId == model;
+      }
+      var removedProfiles = document.Profiles.Where(profile => new[]
+      {
+        profile.PrimaryModel, profile.FallbackModel, profile.RouterModel, profile.CoordinatorModel, profile.ComparisonModel ?? ""
+      }.Any(ReferencesRemovedModel)).Select(profile => profile.Id).ToHashSet(StringComparer.Ordinal);
+      if (removedProfiles.Count > 0)
+      {
+        var workspaces = await _workspaces.ReadAsync(cancellationToken);
+        await _workspaces.WriteAsync(workspaces with
+        {
+          Profiles = workspaces.Profiles.Select(workspace => removedProfiles.Contains(workspace.PreferredModelProfileId ?? "")
+            ? workspace with { PreferredModelProfileId = null } : workspace).ToArray()
+        }, cancellationToken);
+      }
+      await WriteUnlockedAsync(document with
+      {
+        Preferences = document.Preferences.Where(item => item.ProviderId != ModelProviderIds.OllamaLocal || item.ModelId != model).ToArray(),
+        Profiles = document.Profiles.Where(profile => !removedProfiles.Contains(profile.Id)).ToArray()
+      }, cancellationToken);
+    }
+    finally { _gate.Release(); }
   }
 
   public async Task<ModelOrganizationView> GetAsync(

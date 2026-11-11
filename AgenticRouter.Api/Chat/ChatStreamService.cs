@@ -26,7 +26,7 @@ using AgenticRouter.Api.WorkspaceProfiles;
 
 namespace AgenticRouter.Api.Chat;
 
-public sealed class ChatStreamService
+public sealed partial class ChatStreamService
   : IChatStreamService,
     IExecutionSpecialistTurnService
 {
@@ -51,7 +51,8 @@ public sealed class ChatStreamService
       "read_files",
       "get_file_info",
       "search_text",
-      "get_execution_plan"
+      "get_execution_plan",
+      ToolWindowTurn.ToolName
     ],
     StringComparer.OrdinalIgnoreCase
   );
@@ -103,6 +104,7 @@ public sealed class ChatStreamService
   private Action<ExecutionInferenceMetrics>? _chatInferenceObserver;
   public ChatTurnSummary? CurrentChatSummary { get; private set; }
   private Action<InferenceProgressView>? _inferenceProgressObserver;
+  private Func<bool, CancellationToken, Task<bool>>? _requestProviderRetry;
   private ExecutionSession? _executionSession;
   private ExecutionContextRecoveryBudget? _contextRecoveryBudget;
   private string? _usageWorkspaceId;
@@ -282,7 +284,7 @@ public sealed class ChatStreamService
     );
   }
 
-  private async IAsyncEnumerable<ChatStreamEvent> StreamCoreAsync(
+  private async IAsyncEnumerable<ChatStreamEvent> StreamUnroutedCoreAsync(
     ChatRequest request,
     string requestId,
     ExecutionSpecialistTurnInvocation invocation,
@@ -896,7 +898,7 @@ public sealed class ChatStreamService
         request,
         contextSettings,
         intention,
-        knowledge.Context,
+        string.Join("\n\n", new[] { knowledge.Context, _toolWindow?.Instructions }.Where(value => !string.IsNullOrWhiteSpace(value))),
         capabilities.ContextTokens
       );
       ContextUsageView? contextUsage = null;
@@ -1147,6 +1149,7 @@ public sealed class ChatStreamService
                 ? [WebSearchCapability.ToolName]
                 : []
             )
+            .Concat(_toolWindow is null || invocation.Role == ExecutionContextRole.Supervisor ? [] : new[] { ToolWindowTurn.ToolName })
             .ToArray()
         };
         var hostCapabilities = HostCapabilityProfile.Create(
@@ -1417,8 +1420,8 @@ public sealed class ChatStreamService
 
       var progress = new GenerationProgress(contextUsage);
 
-      var useHostReadOnlyTools = images.Count == 0
-        && !capabilities.ProviderNativeWebSearch;
+      var useHostReadOnlyTools = (_toolWindow is not null || images.Count == 0)
+        && (!capabilities.ProviderNativeWebSearch || capabilities.NativeWebSearchWithHostTools);
       await foreach (var streamEvent in !string.IsNullOrWhiteSpace(
         request.DiagnosticTraceId
       )
@@ -1545,7 +1548,7 @@ public sealed class ChatStreamService
               GenerationProfile: chatOptions.GenerationProfile
             );
             var fallbackUsesHostReadOnlyTools = images.Count == 0
-              && !fallbackCapabilities.ProviderNativeWebSearch;
+              && (!fallbackCapabilities.ProviderNativeWebSearch || fallbackCapabilities.NativeWebSearchWithHostTools);
 
             await foreach (var streamEvent in !string.IsNullOrWhiteSpace(
               request.DiagnosticTraceId
@@ -2254,9 +2257,8 @@ public sealed class ChatStreamService
           image.Bytes
         )
       ).ToArray(),
-      ManagedContext: string.IsNullOrWhiteSpace(managedContext)
-        ? null
-        : [managedContext],
+      ManagedContext: new[] { managedContext, _toolWindow?.Instructions }
+        .Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray(),
       RequestedEffort: requestedEffort,
       ModelSupportsReasoning: modelSupportsReasoning,
       SessionGroupId: invocation.SupervisionRunId
@@ -3612,6 +3614,17 @@ public sealed class ChatStreamService
         harnessEvent.Message ?? "Dynamic tool request omitted its call id, tool, or arguments.",
         false
       );
+    }
+
+    if (harnessEvent.Tool == ToolWindowTurn.ToolName)
+    {
+      var target = SelectToolWindowTarget(arguments, requestId, model, intention);
+      await harness.ResolveToolCallAsync(harnessEvent.ToolCallId, target.Succeeded,
+        CreateHostActionResult(harnessEvent.Tool, target.Succeeded ? "completed" : "rejected", target.Result,
+          code: target.Succeeded ? "TOOL_WINDOW_TARGET_SELECTED" : "TOOL_WINDOW_TARGET_REJECTED",
+          effectVerified: false, evidenceId: harnessEvent.ToolCallId).Serialize(), cancellationToken);
+      yield return target.Event;
+      yield break;
     }
 
     if (string.Equals(
@@ -6200,6 +6213,22 @@ public sealed class ChatStreamService
           continue;
         }
 
+        if (proposal.Tool == ToolWindowTurn.ToolName)
+        {
+          var target = SelectToolWindowTarget(proposal.Arguments, requestId, model, intention);
+          progress.ToolMessages.Add(NativeToolResultMessage(progress, proposal.Tool,
+            target.Succeeded ? "completed" : "rejected", target.Result));
+          var targetResult = CreateHostActionResult(proposal.Tool, target.Succeeded ? "completed" : "rejected",
+            target.Result, code: target.Succeeded ? "TOOL_WINDOW_TARGET_SELECTED" : "TOOL_WINDOW_TARGET_REJECTED",
+            effectVerified: false, retryUnchanged: false);
+          progress.Messages.Add(new ChatMessage("user", HostActionResultAdapter.LegacyCompatibleMessage(
+            proposal.Tool, target.Succeeded ? "completed" : "rejected", targetResult)));
+          if (target.Succeeded) { _executionSession?.RecordToolSuccess(); planningFailures = 0; }
+          else _executionSession?.RecordToolFailure();
+          yield return target.Event;
+          continue;
+        }
+
         if (string.Equals(
           proposal.Tool,
           WebSearchCapability.ToolName,
@@ -7804,6 +7833,8 @@ public sealed class ChatStreamService
     });
     _inferenceProgressObserver = value => progress.Writer.TryWrite(value);
     var progressReady = progress.Reader.WaitToReadAsync(requestLifetime.Token).AsTask();
+    var recoveryEvents = Channel.CreateUnbounded<ChatStreamEvent>(new UnboundedChannelOptions { SingleReader = true });
+    var recoveryReady = recoveryEvents.Reader.WaitToReadAsync(requestLifetime.Token).AsTask();
     var stopwatch = Stopwatch.StartNew();
     var criticalAfter = TimeSpan.FromTicks(
       checked(warningAfter.Ticks * 2)
@@ -7826,6 +7857,8 @@ public sealed class ChatStreamService
     var selectedHarness = string.IsNullOrWhiteSpace(request.Harness)
       ? HarnessIds.Native
       : request.Harness;
+    if (executionRole == ExecutionContextRole.Direct && !string.IsNullOrWhiteSpace(request.BrowserSessionId))
+      _requestProviderRetry = RequestProviderRetryAsync;
     string? activeTool = null;
     long lastObservedOutputTokens = 0;
     CancellationTokenSource activityLifetime = CancellationTokenSource.CreateLinkedTokenSource(
@@ -7843,7 +7876,7 @@ public sealed class ChatStreamService
       moveNext = enumerator.MoveNextAsync().AsTask();
       while (true)
       {
-        var candidates = new List<Task> { moveNext, heartbeatDelay, safetyDelay, progressReady };
+        var candidates = new List<Task> { recoveryReady, moveNext, heartbeatDelay, safetyDelay, progressReady };
         if (pendingSteering is not null) candidates.Insert(0, pendingSteering);
         if (!warningSent)
         {
@@ -7854,6 +7887,13 @@ public sealed class ChatStreamService
           candidates.Add(criticalDelay);
         }
         var completed = await Task.WhenAny(candidates);
+        if (completed == recoveryReady)
+        {
+          if (await recoveryReady && recoveryEvents.Reader.TryRead(out var recoveryEvent))
+            yield return recoveryEvent;
+          recoveryReady = recoveryEvents.Reader.WaitToReadAsync(requestLifetime.Token).AsTask();
+          continue;
+        }
         if (completed == progressReady)
         {
           if (await progressReady && progress.Reader.TryRead(out var currentProgress))
@@ -8036,9 +8076,37 @@ public sealed class ChatStreamService
       activityLifetime.Cancel();
       activityLifetime.Dispose();
       _inferenceProgressObserver = null;
+      _requestProviderRetry = null;
       progress.Writer.TryComplete();
+      recoveryEvents.Writer.TryComplete();
       steeringLifetime.Cancel();
       if (pendingSteering is not null) await pendingSteering;
+    }
+
+    async Task<bool> RequestProviderRetryAsync(bool sameResponse, CancellationToken token)
+    {
+      var checkpointId = Guid.NewGuid().ToString("N");
+      var sessionId = _executionSession?.Id ?? requestId;
+      var retry = sameResponse
+        ? new RecoveryOptionView("retry", "Retry response retrieval", "Check the same OpenAI response again.")
+        : new RecoveryOptionView("retry", "Start a new response", "Submit a new OpenAI generation. It may incur a separate charge.");
+      RecoveryOptionView[] options = [retry, new("stop", "Stop", "End this request and keep any existing changes.")];
+      var decision = _recoveryDecisions.WaitAsync(checkpointId, request.BrowserSessionId!, sessionId,
+        new HashSet<string>(StringComparer.Ordinal) { "retry", "stop" }, token);
+      var reason = sameResponse
+        ? "The OpenAI response could not be retrieved within the automatic recovery budget."
+        : "No retrievable OpenAI response is available. The outcome of the previous submission may be unknown.";
+      await recoveryEvents.Writer.WriteAsync(
+        Event(requestId, "action.recovery-decision-required", "Choose how to continue the OpenAI request.",
+          stopwatch, selectedModel) with
+        {
+          RecoveryDecision = new RecoveryDecisionEvent(checkpointId, sessionId, reason, options)
+        }, token);
+      var accepted = await decision == "retry";
+      await recoveryEvents.Writer.WriteAsync(
+        Event(requestId, accepted ? "action.recovery-resumed" : "action.recovery-stopped",
+          accepted ? retry.Description : "The OpenAI request was stopped.", stopwatch, selectedModel), token);
+      return accepted;
     }
 
     void TryStartInactivityRecovery()
@@ -8378,7 +8446,7 @@ public sealed class ChatStreamService
     );
 
     var workspaceReadsAvailable = workspace.Valid && workspace.Path is not null;
-    if (!workspaceReadsAvailable && !applicationWebSearchAvailable)
+    if (!workspaceReadsAvailable && !applicationWebSearchAvailable && _toolWindow is null)
     {
       yield return Event(
         requestId,
@@ -8414,6 +8482,7 @@ public sealed class ChatStreamService
           ? [WebSearchCapability.ToolName]
           : []
       )
+      .Concat(_toolWindow is null ? [] : new[] { ToolWindowTurn.ToolName })
       .ToArray();
     var selectedReference = ProviderModelReference.Parse(
       model
@@ -8503,6 +8572,12 @@ public sealed class ChatStreamService
       )
     ).ToList();
 
+    if (_toolWindow is not null && options.Images.Count > 0)
+    {
+      var userIndex = toolMessages.FindLastIndex(message => message.Role == "user");
+      if (userIndex >= 0) toolMessages[userIndex] = toolMessages[userIndex] with { Images = options.Images };
+    }
+
     yield return Event(
       requestId,
       "chat.read-only-tools-enabled",
@@ -8565,7 +8640,8 @@ public sealed class ChatStreamService
                 token
               ),
               false,
-              generationProfile: options.EffectiveGenerationProfile
+              generationProfile: options.EffectiveGenerationProfile,
+              options: options
             ),
             null
           );
@@ -8652,6 +8728,12 @@ public sealed class ChatStreamService
 
       var response = generation.Response!;
       progress.Usage = response.Usage;
+      if (response.Citations is { Count: > 0 })
+        progress.Citations = MergeCitations(progress.Citations, response.Citations);
+      if (response.Activity is { HostedWebSearchCallCount: > 0 } hostedWeb)
+        yield return Event(requestId, "web.search-completed",
+          $"Provider-hosted web search observed: {hostedWeb.HostedWebSearchCallCount} tool call(s), {hostedWeb.SearchQueryCount} disclosed query(s), {hostedWeb.CitationCount} citation(s).",
+          stopwatch, model, intention);
       if (!string.IsNullOrWhiteSpace(
         response.RetryActivity
       ))
@@ -8850,6 +8932,16 @@ public sealed class ChatStreamService
           turn
         )
       );
+
+      if (call.Name == ToolWindowTurn.ToolName && _toolWindow is not null)
+      {
+        var target = SelectToolWindowTarget(call.Arguments, requestId, model, intention);
+        toolMessages.Add(_toolingProtocol.CreateToolResultMessage(toolingProfile,
+          new CanonicalToolResult(call.CallId, call.Name, target.Succeeded ? "completed" : "rejected",
+            target.Result, target.Succeeded, false)));
+        yield return target.Event;
+        continue;
+      }
 
       if (string.Equals(
         call.Name,
@@ -9280,6 +9372,10 @@ public sealed class ChatStreamService
       {
         progress.Citations = update.Citations;
       }
+      if (update.Activity is { HostedWebSearchCallCount: > 0 } hostedWeb)
+        yield return Event(requestId, "web.search-completed",
+          $"Provider-hosted web search observed: {hostedWeb.HostedWebSearchCallCount} tool call(s), {hostedWeb.SearchQueryCount} disclosed query(s), {hostedWeb.CitationCount} citation(s).",
+          stopwatch, model, intention);
 
       if (update.Usage is not null)
       {
@@ -10051,7 +10147,8 @@ public sealed class ChatStreamService
       cancellationToken,
       usage => providerUsage = usage,
       progress.ProviderOptions,
-      maximumOutputTokens
+      maximumOutputTokens,
+      toolScope: progress.ToolScope
     );
     progress.Guidance = guidance;
     var assistantMessage = new OllamaToolMessage(
@@ -10065,7 +10162,7 @@ public sealed class ChatStreamService
     {
       return new LocalActionPlanningResult(
         null,
-        assistantMessage,
+        _toolWindow is null ? assistantMessage : assistantMessage with { Content = guidance.Objective },
         true,
         Usage: providerUsage
       );
@@ -12677,7 +12774,8 @@ public sealed class ChatStreamService
       InferenceObserver: requestPurpose == "target-response" ? _chatInferenceObserver : null,
       ProgressObserver: _inferenceProgressObserver,
       MinimumKeepAliveSeconds: requestPurpose == "target-response" ? _minimumKeepAliveSeconds : null
-    );
+    )
+    { RequestProviderRetry = _requestProviderRetry };
   }
 
   private ChatStreamEvent InferenceProfileEvent(

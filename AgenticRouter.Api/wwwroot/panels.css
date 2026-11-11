@@ -1775,6 +1775,30 @@ textarea[readonly] {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 55%, transparent);
 }
 
+.settings-field-error {
+  display: block;
+  color: #ffc8cc;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.settings-invalid-overrides {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.settings-invalid-overrides label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-invalid-overrides input {
+  width: 100%;
+  min-width: 0;
+}
+
 .intention-card {
   display: flex;
   flex-direction: column;
@@ -1982,7 +2006,31 @@ textarea[readonly] {
   background: var(--danger-soft);
   font-size: 11px;
   line-height: 1.5;
-  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.settings-errors ul {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.settings-errors button {
+  padding: 3px 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.settings-errors button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
 }
 
 @media (max-width: 760px) {

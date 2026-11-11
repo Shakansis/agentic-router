@@ -3419,7 +3419,7 @@ public sealed class ExecuteCoreEndToEndTests : ChatEndToEndTestBase<ExecuteCoreE
       "#cloud-providers-list > .cloud-provider-card[data-provider=\"ollama-local\"] .ollama-web-search-settings"
     )).ToHaveCountAsync(1);
     await Expect(Page.Locator("#cloud-providers-list > .cloud-provider-card"))
-      .ToHaveCountAsync(4);
+      .ToHaveCountAsync(5);
 
     await Page.Locator("[data-settings-target=\"inference\"]").ClickAsync();
     await Page.Locator("#inference-profile-selector").SelectOptionAsync("supervisor");

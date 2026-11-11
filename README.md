@@ -2,16 +2,16 @@
 
 <img src="AgenticRouter.Api/wwwroot/img/brand/agentic-router-full.png" alt="Agentic Router" width="480">
 
-A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured Groq, Google AI Studio, and Cerebras models.
+A **GPU-agnostic** local-first chat application that routes each user message to the most appropriate LLM through intent classification and model selection. Works with **1 to N GPUs**, CPU-only Ollama, or explicitly configured OpenAI, Groq, Google AI Studio, and Cerebras models.
 
-**Current Status**: `v0.16.1_alpha` fixes Codex steering with Ollama after interrupted reasoning. It includes the Storytelling Editor, project-file references, model library controls and Native multi-tool execution from 0.16. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
+**Current Status**: `v0.17.0_alpha` adds shared-composer tool tabs, the compact Storytelling Editor, OpenAI Responses/web search and local-model configuration cleanup. Windows and Linux x64 portable packages share one Host core. This remains evaluation software.
 
 ## Download
 
 | Current version | Platform | Package | Checksum |
 | --- | --- | --- | --- |
-| `v0.16.1_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-win-x64.zip.sha256) |
-| `v0.16.1_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.16.1_alpha/AgenticRouter-0.16.1_alpha-linux-x64.tar.gz.sha256) |
+| `v0.17.0_alpha` | Windows x64 | [Download ZIP](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.17.0_alpha/AgenticRouter-0.17.0_alpha-win-x64.zip) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.17.0_alpha/AgenticRouter-0.17.0_alpha-win-x64.zip.sha256) |
+| `v0.17.0_alpha` | Linux x64 | [Download tar.gz](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.17.0_alpha/AgenticRouter-0.17.0_alpha-linux-x64.tar.gz) | [SHA-256](https://github.com/Shakansis/agentic-router-releases/releases/download/v0.17.0_alpha/AgenticRouter-0.17.0_alpha-linux-x64.tar.gz.sha256) |
 
 [View all versions and release notes](https://github.com/Shakansis/agentic-router-releases/releases).
 
@@ -20,7 +20,7 @@ ZIP and run `AgenticRouter.exe`. On Linux x64, extract the tar.gz and run
 `./run-agentic-router.sh` (use `chmod +x AgenticRouter run-agentic-router.sh`
 when required by the filesystem).
 
-`0.16.1_alpha` is a pre-release intended for evaluation. The package is
+`0.17.0_alpha` is a pre-release intended for evaluation. The package is
 self-contained and does not require a separate .NET installation. Ollama,
 models, and optional harnesses can be installed from the onboarding experience
 or Settings > Local resources. The initial setup screen appears before new
@@ -33,11 +33,18 @@ conversations by default and can be disabled or reopened from Local resources.
   even if the answer finishes. Observed once; not reproduced in two subsequent
   checks. Frequency in normal use is unknown.
 
-### What's new in 0.16.1_alpha
+### What's new in 0.17.0_alpha
 
-- Preserve interrupted reasoning before a newer steering instruction on Ollama's
-  Responses endpoint. The model can then follow the current instruction instead
-  of continuing a stale assistant prefill. See the [real acceptance record](docs/validation/release-0.16.1-alpha.md).
+- Work in Chat and the Storytelling Editor with one shared composer, an initially
+  closed tool pane, adjustable divider and compact editor controls. The Host records
+  output-target decisions and keeps proposals reviewable before Apply.
+  See [tool workspace](docs/tool-workspace.md).
+- Configure OpenAI Responses, hosted web search and reasoning controls through
+  the existing protected provider settings. Recovery reports provider progress and
+  preserves tool continuity. See [OpenAI provider](docs/openai-provider.md).
+- Clean up removed local models' saved configuration and expose throughput
+  estimates separately from measured generation.
+- Preserve the Codex/Ollama interrupted-reasoning correction from 0.16.1.
 
 Included from 0.16:
 
@@ -87,7 +94,7 @@ The Host routes to configured specialists and resolves the selected provider, mo
 - **Single GPU**: Works seamlessly with one graphics card
 - **Multi-GPU**: Supports multiple GPUs for distributed workloads
 - **No GPU**: Runs on CPU-only systems
-- **Remote Providers**: Connects to Ollama, Groq, Google AI Studio, or Cerebras through provider-specific HTTP contracts
+- **Remote Providers**: Connects to Ollama, OpenAI, Groq, Google AI Studio, or Cerebras through provider-specific HTTP contracts
 
 ### Multiple-GPU scope
 
@@ -304,7 +311,7 @@ Execute mode includes a safe Git workflow for committing changes:
 ### Backend
 - **.NET 10** - Latest .NET platform
 - **ASP.NET Core Web API** - Minimal hosting model with controllers
-- **Provider registry** - Ollama Local, Groq, Google AI Studio, and Cerebras
+- **Provider registry** - Ollama Local, OpenAI, Groq, Google AI Studio, and Cerebras
 - **Protected secrets** - Windows DPAPI or Linux Secret Service with opaque references in ordinary settings
 - **Server-Sent Events (SSE)** - Streaming mechanism for real-time updates
 - **CancellationToken** - Proper async cancellation throughout the pipeline
@@ -318,7 +325,7 @@ Execute mode includes a safe Git workflow for committing changes:
 ### Testing
 - **Playwright for .NET with MSTest** - Browser-driven end-to-end tests
 - **Fake Ollama Server** - Deterministic test double for provider boundary
-- **Fake Cloud Provider Server** - Deterministic Groq, Gemini, and Cerebras contracts without quota use
+- **Fake Cloud Provider Server** - Deterministic OpenAI Responses, Groq, Gemini, and Cerebras contracts without quota use
 
 ### Dependencies
 - `HtmlSanitizer` (9.1.973) - Safe HTML rendering
@@ -348,7 +355,7 @@ Execute mode includes a safe Git workflow for committing changes:
       GitDelivery/             # Git workflow integration
     Providers/
       Ollama/                  # Ollama HTTP communication
-      Cloud/                   # Groq, Gemini, Cerebras, registry, and protected keys
+      Cloud/                   # OpenAI, Groq, Gemini, Cerebras, registry, and protected keys
       CapabilityServices.cs    # Capability detection and metadata
       ProviderDispatchClient.cs
       ProviderHealth.cs
@@ -554,7 +561,13 @@ usage preferences but never exports the ledger.
 
 ### Cloud usage and mandatory local fallback
 
-When an intent primary resolves to Groq, Google AI Studio, or Cerebras, its
+Configure OpenAI in **Settings > Providers > OpenAI**, using a protected API key.
+The card supports organization/project IDs, service tier, output token limit,
+and verbosity; reasoning controls remain in **Inference profiles**. Generation
+uses the Responses API. See [OpenAI provider](docs/openai-provider.md) for
+capability evidence, supported options, and validation limits.
+
+When an intent primary resolves to OpenAI, Groq, Google AI Studio, or Cerebras, its
 fallback must resolve to one exact installed Ollama Local model. Settings reject
 a missing, cloud, unavailable, or ambiguous fallback before saving. At runtime,
 an eligible timeout, provider outage, rate limit, quota failure, or supported

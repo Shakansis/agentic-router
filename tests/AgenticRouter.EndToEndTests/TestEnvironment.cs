@@ -89,7 +89,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
 
   public string ApiOutput => _apiOutput.ToString();
 
-  public static async Task<TestEnvironment> StartAsync()
+  public static async Task<TestEnvironment> StartAsync(Uri? openAiBaseUri = null)
   {
     var repositoryRoot = FindRepositoryRoot();
     var temporaryRoot = Path.Combine(
@@ -194,6 +194,8 @@ internal sealed class TestEnvironment : IAsyncDisposable
       + Environment.GetEnvironmentVariable("PATH");
     processStartInfo.Environment["AgenticRouter__Providers__GroqBaseUrl"] =
       $"{fakeCloud.BaseUrl}/groq/openai/v1/";
+    processStartInfo.Environment["AgenticRouter__Providers__OpenAiBaseUrl"] =
+      openAiBaseUri?.AbsoluteUri ?? $"{fakeCloud.BaseUrl}/openai/v1/";
     processStartInfo.Environment[
       "AgenticRouter__Providers__GoogleAiStudioBaseUrl"
     ] = $"{fakeCloud.BaseUrl}/gemini/v1beta/";
@@ -959,7 +961,7 @@ internal sealed class TestEnvironment : IAsyncDisposable
     );
   }
 
-  private static string FindRepositoryRoot()
+  internal static string FindRepositoryRoot()
   {
     var configuredRoot = Environment.GetEnvironmentVariable(
       "AGENTIC_ROUTER_REPOSITORY_ROOT"

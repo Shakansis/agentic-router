@@ -3,6 +3,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Devices;
 using AgenticRouter.Api.Execution;
+using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Providers.Ollama;
 using AgenticRouter.Api.Recovery;
 using AgenticRouter.Api.Runtime;
@@ -69,6 +70,7 @@ public sealed partial class LocalSetupService : ILocalSetupService
   ];
 
   private readonly ISettingsStore _settingsStore;
+  private readonly IModelOrganizationService _modelOrganization;
   private readonly OllamaClient _ollama;
   private readonly IGpuDiscoveryService _gpuDiscovery;
   private readonly IHarnessRegistry _harnesses;
@@ -94,10 +96,12 @@ public sealed partial class LocalSetupService : ILocalSetupService
     IHostApplicationLifetime applicationLifetime,
     IConfiguration configuration,
     IModelRequestTracker requests,
+    IModelOrganizationService modelOrganization,
     ILogger<LocalSetupService> logger
   )
   {
     _settingsStore = settingsStore;
+    _modelOrganization = modelOrganization;
     _ollama = ollama;
     _gpuDiscovery = gpuDiscovery;
     _harnesses = harnesses;

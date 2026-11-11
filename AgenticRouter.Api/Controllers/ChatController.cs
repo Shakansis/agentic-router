@@ -202,10 +202,22 @@ public sealed class ChatController : ControllerBase
     _trace.Link("requestId", requestId);
     _latency.Start(requestId);
 
-    try { IntentionRouter.ValidateSpecialist(request.Specialist); }
+    try
+    {
+      IntentionRouter.ValidateSpecialist(request.Specialist);
+      ToolWindowTurn.Validate(request.ToolWindow);
+    }
     catch (ChatStageException exception)
     {
       await WriteErrorAsync(requestId, exception, cancellationToken);
+      _latency.Complete();
+      return;
+    }
+
+    catch (LocalActionException exception)
+    {
+      await WriteErrorAsync(requestId, new ChatStageException(exception.Stage,
+        exception.Message, exception.Message, null, null, 400, true), cancellationToken);
       _latency.Complete();
       return;
     }
@@ -391,8 +403,25 @@ public sealed class ChatController : ControllerBase
       {
         ConversationSessionId = _conversationSessionId,
         Message = supervision.Objective,
-        ExecutionStrategy = supervision.RequestedStrategy
+        ExecutionStrategy = supervision.DirectForCloudModel
+          ? supervision.Strategy
+          : supervision.RequestedStrategy
       };
+      if (supervision.DirectForCloudModel)
+      {
+        await WriteEventAsync(new ChatStreamEvent(
+          requestId,
+          "supervision.cloud-model-direct",
+          DateTimeOffset.UtcNow,
+          "Using Direct Execute with the selected cloud model because durable supervision requires a local Ollama model.",
+          null,
+          request.Model,
+          null,
+          null,
+          null,
+          null
+        ), cancellationToken);
+      }
       SupervisionTakeoverSnapshot? takeover = null;
       while (true)
       {
@@ -1004,7 +1033,8 @@ public sealed class ChatController : ControllerBase
           Takeover: takeover,
           ExecutionStrategy: supervision.RequestedStrategy,
           Thinking: request.Thinking,
-          Specialist: request.Specialist
+          Specialist: request.Specialist,
+          ToolWindow: request.ToolWindow
         ),
         cancellationToken
       );
@@ -1210,7 +1240,8 @@ public sealed class ChatController : ControllerBase
       requestId,
       startedView,
       0,
-      cancellationToken
+      cancellationToken,
+      request.ToolWindow
     ))
     {
       yield return streamEvent;
@@ -1348,11 +1379,13 @@ public sealed class ChatController : ControllerBase
     DurableSupervisionRunView startedView,
     long afterSequence,
     [System.Runtime.CompilerServices.EnumeratorCancellation]
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    ToolWindowContext? toolWindow = null
   )
   {
     var stopwatch = Stopwatch.StartNew();
     ContextUsageView? latestContextUsage = null;
+    var responseTarget = toolWindow?.ToolId;
     await foreach (var progressEvent in _supervisionRuns.SubscribeAsync(
       runId,
       afterSequence,
@@ -1364,6 +1397,7 @@ public sealed class ChatController : ControllerBase
         ? liveView
         : startedView;
       latestContextUsage = progressEvent.ContextUsage ?? latestContextUsage;
+      responseTarget = progressEvent.ToolWindow?.Target ?? responseTarget;
       var isReasoning = progressEvent.Type == SupervisionEventTypeIds.TurnReasoning;
       yield return new ChatStreamEvent(
         requestId,
@@ -1394,7 +1428,8 @@ public sealed class ChatController : ControllerBase
             progressView,
             progressEvent
           ),
-        ContextUsage: progressEvent.ContextUsage
+        ContextUsage: progressEvent.ContextUsage,
+        ToolWindow: progressEvent.ToolWindow
       );
 
       if (!progressEvent.Terminal)
@@ -1428,6 +1463,14 @@ public sealed class ChatController : ControllerBase
             500,
             false
           );
+        }
+        if (responseTarget == "story-editor" && toolWindow is not null)
+        {
+          yield return new ChatStreamEvent(requestId, "tool-window.response", DateTimeOffset.UtcNow,
+            "Supervised response delivered to Storytelling Editor.", null, view.Route.Model, null,
+            stopwatch.ElapsedMilliseconds, null, null, ToolWindow: new ToolWindowOutput(responseTarget,
+              "Active auxiliary tool destination.", toolWindow.Revision, RenderedHtml: _markdown.Render(finalAnswer)));
+          finalAnswer = "Response delivered to Storytelling Editor. Proposed changes require review and Apply.";
         }
         yield return new ChatStreamEvent(
           requestId,
@@ -2103,7 +2146,7 @@ public sealed class ChatController : ControllerBase
 
     if (_ownedRun is not null) streamEvent = _ownedRun.Publish(streamEvent);
     _presentationTimeline.Add(
-      streamEvent
+      streamEvent with { ToolWindow = null }
     );
     if (_ownedRun is not null) return streamEvent;
 

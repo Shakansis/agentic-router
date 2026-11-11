@@ -316,7 +316,8 @@ public sealed class GeminiCloudProvider : ICloudProviderAdapter
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
     ProviderGenerationProfile? generationProfile,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    ProviderChatOptions? options = null
   )
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;

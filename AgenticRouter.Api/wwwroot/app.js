@@ -183,6 +183,7 @@ async function initialize() {
   initializeComposerFiles();
   bindEvents();
   initializeStoryEditor();
+  initializeToolWorkspace();
   initializeSidebarResize();
   initializeScrollFollowing();
   initializeComposerShellMetrics();

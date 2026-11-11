@@ -8,7 +8,9 @@ namespace AgenticRouter.Api.Providers.Cloud;
 public sealed record CloudCallResult<T>(
   T Value,
   ProviderTokenUsage? Usage,
-  ProviderRateLimitSnapshot? RateLimit
+  ProviderRateLimitSnapshot? RateLimit,
+  IReadOnlyList<ProviderCitation>? Citations = null,
+  ProviderActivityMetadata? Activity = null
 );
 
 public sealed record CloudProviderConnectionView(
@@ -69,7 +71,8 @@ public interface ICloudProviderAdapter
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
     ProviderGenerationProfile? generationProfile,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    ProviderChatOptions? options = null
   );
 
   IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(

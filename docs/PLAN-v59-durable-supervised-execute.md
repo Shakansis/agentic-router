@@ -90,6 +90,11 @@ Durable Supervised Execute supports local agents only.
 - Supervisor, worker, retry, restart recovery, and final verification all use the same
   fixed local route.
 
+When a regular Execute turn explicitly selects a cloud model, the Host uses
+Direct for the Auto and Supervisor send strategies and records that decision in
+the turn activity. This happens before any supervised run is created.
+Autonomous still requires its local supervised route and approval authority.
+
 This is a product boundary, not a cost estimate or preference.
 
 ## Necessary now, useful later, and unnecessary

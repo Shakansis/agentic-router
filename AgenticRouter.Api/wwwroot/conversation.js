@@ -1260,7 +1260,8 @@ function queueCurrentMessage() {
 
   state.messageQueue.push({
     id: `queued-${createSessionId()}`,
-    message
+    message,
+    toolWindow: captureToolWindowContext()
   });
   state.messageQueuePaused = false;
   elements.messageInput.value = "";
@@ -1333,7 +1334,10 @@ function renderMessageQueue() {
       const steer = createMessageBufferButton(t("steer.action"), "steer");
       const steeringSupported = activeHarnessSupportsSteering();
       const activeHarnessId = state.activeHarness ?? state.harness;
-      const steerExplanation = !state.requestController
+      const toolSnapshotPending = !toolWindowContextMatches(item.toolWindow, state.activeAssistant?.toolWindow);
+      const steerExplanation = toolSnapshotPending
+        ? "Changed tool snapshots run as the next turn; Use now cannot replace the active tool context."
+        : !state.requestController
         ? t("steer.no_active")
         : !steeringSupported
           ? t(
@@ -1342,6 +1346,7 @@ function renderMessageQueue() {
           )
           : t("steer.available");
       steer.disabled = !state.requestController
+        || toolSnapshotPending
         || !steeringSupported
         || state.steeringMessage;
       steer.title = steerExplanation;
@@ -1536,6 +1541,7 @@ async function steerBufferedMessage(id) {
     || !state.requestController
     || !activeHarnessSupportsSteering()
     || !item.message
+    || !toolWindowContextMatches(item.toolWindow, state.activeAssistant?.toolWindow)
     || item.message.length > 16_384
     || state.steeringMessage
   ) {
@@ -1793,6 +1799,7 @@ async function handleComposerSubmit(event) {
   }
   state.queuedDispatchMessage = null;
   const message = queuedMessage?.message ?? elements.messageInput.value.trim();
+  const toolWindow = queuedMessage ? queuedMessage.toolWindow ?? null : captureToolWindowContext();
   const hiddenUserMessage = queuedMessage?.hidden === true;
   const requestInteractionMode = queuedMessage?.interactionMode
     ?? state.interactionMode;
@@ -1941,6 +1948,7 @@ async function handleComposerSubmit(event) {
     : null;
   const chatRunId = globalThis.crypto?.randomUUID?.() ?? createSessionId();
   assistant.chatRunId = chatRunId;
+  assistant.toolWindow = toolWindow;
   assistant.userHistoryIndex = historyIndex;
   rememberLiveChatRun(chatRunId, state.conversationSessionId, supervisionRunId);
   assistant.supervisionRunId = supervisionRunId;
@@ -1995,7 +2003,8 @@ async function handleComposerSubmit(event) {
           supervisionRunId,
           chatRunId,
           historyWindowId,
-          historyMessageIndex: historyIndex
+          historyMessageIndex: historyIndex,
+          toolWindow: hiddenUserMessage ? null : toolWindow
         }),
         signal: controller.signal
       }
@@ -2631,7 +2640,10 @@ function startElapsedClock(assistant) {
         const preparation = {
           "loading-model": "Loading model",
           "processing-prompt": "Processing prompt",
-          waiting: "Waiting for model"
+          waiting: "Waiting for model",
+          "provider-queued": "Queued at OpenAI",
+          "provider-in-progress": "OpenAI request in progress",
+          "provider-retrying": "Retrying OpenAI request"
         }[assistant.inferenceProgress?.stage];
         assistant.progress.textContent =
           `${preparation ?? (assistant.activeReasoning ? "Thinking" : "Thinking…")} · `
@@ -3349,6 +3361,9 @@ function renderCurrentActivity(assistant, streamEvent) {
       "loading-model": "Loading model",
       "processing-prompt": "Processing prompt",
       waiting: "Waiting for model",
+      "provider-queued": "Queued at OpenAI",
+      "provider-in-progress": "OpenAI request in progress",
+      "provider-retrying": progress.unavailableReason ?? "Retrying OpenAI request",
       generating: "Thinking"
     }[progress.stage] ?? "Thinking", false);
     return;

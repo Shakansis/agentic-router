@@ -4,6 +4,17 @@ namespace AgenticRouter.Api.Usage;
 
 public static class ProviderUsageMapper
 {
+  public static ProviderTokenUsage? FromOpenAiResponses(JsonElement response)
+  {
+    if (!response.TryGetProperty("usage", out var usage)
+      || usage.ValueKind != JsonValueKind.Object
+      || !TryGetInt64(usage, "input_tokens", out var input)
+      || !TryGetInt64(usage, "output_tokens", out var output)) return null;
+    return new ProviderTokenUsage(input, output,
+      ReadNestedInt64(usage, "input_tokens_details", "cached_tokens"),
+      ReadNestedInt64(usage, "output_tokens_details", "reasoning_tokens"));
+  }
+
   public static ProviderTokenUsage? FromOpenAiCompatible(
     JsonElement response
   )

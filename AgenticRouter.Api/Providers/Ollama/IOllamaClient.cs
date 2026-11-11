@@ -62,7 +62,8 @@ public interface IOllamaClient
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
     string? requestedEffort = null,
-    ProviderGenerationProfile? generationProfile = null
+    ProviderGenerationProfile? generationProfile = null,
+    ProviderChatOptions? options = null
   );
 
   Task<OllamaModelCapabilities> GetModelCapabilitiesAsync(
@@ -167,7 +168,8 @@ public sealed record OllamaToolDefinition(
 public sealed record OllamaToolCall(
   string Name,
   System.Text.Json.JsonElement Arguments,
-  string? Id = null
+  string? Id = null,
+  [property: System.Text.Json.Serialization.JsonIgnore] ProviderToolContinuation? Continuation = null
 );
 
 public sealed record OllamaToolMessage(
@@ -186,7 +188,9 @@ public sealed record OllamaToolResponse(
   IReadOnlyList<OllamaToolCall> ToolCalls,
   OllamaContextResolution? ContextResolution = null,
   ProviderTokenUsage? Usage = null,
-  string? RetryActivity = null
+  string? RetryActivity = null,
+  IReadOnlyList<ProviderCitation>? Citations = null,
+  ProviderActivityMetadata? Activity = null
 );
 
 public sealed record OllamaRunningModel(

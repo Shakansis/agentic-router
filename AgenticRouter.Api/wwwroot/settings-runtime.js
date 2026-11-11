@@ -1218,6 +1218,9 @@ function loadRuntimeOverrideEditor() {
       && candidate.digest === model?.digest
   )?.overrides?.[role];
   const profile = saved ?? runtime?.roleDefaults?.[role];
+  document.getElementById("runtime-override-source").textContent = saved
+    ? `Model-specific context override · ${model.name} · ${shortDigest(model.digest)} · ${runtimeRoleLabels[role] ?? role}.`
+    : `Using ${runtimeRoleLabels[role] ?? role} role defaults; no model-specific context override.`;
 
   if (!profile) {
     return;
@@ -1853,6 +1856,7 @@ function renderSelectedInferenceProfile() {
     ? "Used only for Supervisor turns, including when Auto chooses supervision. Workers use their task inference profile."
     : "Used for this task intent in Chat, direct Execute, and Worker turns with either automatic or manually selected models.";
   renderInferenceSupport(name, profile);
+  markSettingsValidationErrors(settingsValidationErrors);
 }
 
 function renderInferenceSupport(name, profile) {
@@ -2055,6 +2059,7 @@ async function revokeProcessPermission(workspaceId, permissionId, button) {
 function modelOptions() {
   const groups = {
     "ollama-local": "Local models",
+    openai: "OpenAI",
     groq: "Groq",
     "google-ai-studio": "Google AI Studio",
     cerebras: "Cerebras"
@@ -2444,7 +2449,7 @@ async function pollLibraryInstall(model) {
 
 async function removeLibraryModel(model, button) {
   if (!await showAppConfirm(
-    `Remove ${model.modelId} from the configured Ollama server?\n\nAR will run ollama rm for this exact model. Saved routes, aliases and history stay unchanged; routes using it will need another installed model. Active AR requests finish before removal.`,
+    `Remove ${model.modelId} from the configured Ollama server?\n\nAR will run ollama rm for this exact model and delete its runtime overrides, GPU affinity, model preferences and saved profiles that include it. Routes using it will need another installed model. Active AR requests finish before removal.`,
     { title: "Remove model", confirmLabel: "Remove from Ollama", danger: true }
   )) return;
   button.disabled = true;
@@ -2456,6 +2461,22 @@ async function removeLibraryModel(model, button) {
     });
     elements.modelLibraryStatus.textContent = result.message;
     elements.modelLibraryStatus.dataset.state = "success";
+    state.settings.ollamaRuntime.modelOverrides = state.settings.ollamaRuntime.modelOverrides
+      .filter(item => item.provider !== "ollama-local" || item.model !== model.modelId);
+    for (const name of Object.keys(state.settings.modelGpuAffinities ?? {})) {
+      const reference = parseModelReference(name);
+      if (reference.provider === "ollama-local" && reference.model === model.modelId)
+        delete state.settings.modelGpuAffinities[name];
+    }
+    state.runtimePerformanceDrafts = Object.fromEntries(Object.entries(state.runtimePerformanceDrafts ?? {})
+      .filter(([, draft]) => draft.provider !== "ollama-local" || draft.model !== model.modelId));
+    for (const [selector, reload] of [[elements.runtimeOverrideModel, loadRuntimeOverrideEditor],
+      [elements.runtimePerformanceModel, loadRuntimePerformanceEditor]]) {
+      const wasSelected = selector.value === model.modelId;
+      Array.from(selector.options).filter(option => option.value === model.modelId).forEach(option => option.remove());
+      if (wasSelected) reload();
+    }
+    resetSettingsValidation();
     await refreshModelLibrary();
   } catch (error) {
     showModelLibraryError(error);
@@ -2949,11 +2970,60 @@ function renderCloudProviders() {
     const fields = document.createElement("div");
     fields.className = "cloud-provider-fields";
     fields.append(keyField, billingField);
+    if (provider.provider === "openai") {
+      renderOpenAiOptions(fields);
+    }
     body.append(metadata, fields, actions, diagnostic);
     card.append(summary, body);
     elements.cloudProvidersList.append(card);
   }
 
+}
+
+function renderOpenAiOptions(container) {
+  const options = state.settings.cloudProviders.openAiOptions ?? {};
+  for (const [name, label, type] of [
+    ["organizationId", "Organization ID (optional)", "text"],
+    ["projectId", "Project ID (optional)", "text"],
+    ["maximumOutputTokens", "Maximum output tokens (includes reasoning)", "number"]
+  ]) {
+    const field = document.createElement("label");
+    const title = document.createElement("span");
+    title.textContent = label;
+    const input = document.createElement("input");
+    input.type = type;
+    input.dataset.openaiOption = name;
+    input.value = options[name] ?? "";
+    if (type === "number") {
+      input.min = "1";
+      input.step = "1";
+      input.placeholder = "Provider default";
+    } else {
+      input.maxLength = 256;
+      input.autocomplete = "off";
+    }
+    field.append(title, input);
+    container.append(field);
+  }
+  for (const [name, label, values] of [
+    ["serviceTier", "Service tier", ["auto", "default", "flex", "priority"]],
+    ["verbosity", "Response verbosity (supported models)", ["auto", "low", "medium", "high"]]
+  ]) {
+    const field = document.createElement("label");
+    const title = document.createElement("span");
+    title.textContent = label;
+    const select = document.createElement("select");
+    select.dataset.openaiOption = name;
+    replaceOptions(select, values.map(value => ({ value, label: value })), options[name] ?? "auto");
+    field.append(title, select);
+    container.append(field);
+  }
+  const note = document.createElement("p");
+  note.className = "runtime-note";
+  note.textContent = "OpenAI API key. Save settings to apply the options above. "
+    + "Models and access depend on your API project. Reasoning effort and sampling are configured in Inference profiles; "
+    + "only supported controls are applied. Service tiers can affect API cost and latency.";
+  container.append(note);
 }
 
 function createProviderHealthCard(provider) {
@@ -3089,6 +3159,7 @@ function cloudActionButton(provider, action, label, extraClass = "") {
 function collectCloudProviderSettings() {
   const cloud = structuredClone(state.settings.cloudProviders);
   const keys = {
+    openai: "openAi",
     groq: "groq",
     "google-ai-studio": "googleAiStudio",
     cerebras: "cerebras"
@@ -3104,6 +3175,13 @@ function collectCloudProviderSettings() {
     }
   }
 
+  cloud.openAiOptions ??= {};
+  for (const input of elements.cloudProvidersList.querySelectorAll("[data-openai-option]")) {
+    const name = input.dataset.openaiOption;
+    cloud.openAiOptions[name] = name === "maximumOutputTokens"
+      ? (input.value.trim() ? Number(input.value) : null)
+      : input.value.trim() || null;
+  }
   return cloud;
 }
 
@@ -3683,7 +3761,7 @@ function createModelTestProgress(model, cancel) {
 
 async function openSettings(section = "general") {
   elements.runtimeDetails.open = false;
-  elements.settingsErrors.hidden = true;
+  resetSettingsValidation();
   elements.saveStatus.textContent = "";
   if (!elements.testModel.disabled) elements.modelTestResult.textContent = "";
   state.inferenceProfileDrafts = null;
@@ -3829,8 +3907,7 @@ function collectSelectedSettings() {
 
 async function saveSettings(event) {
   event.preventDefault();
-  elements.settingsErrors.hidden = true;
-  clearSettingsValidationMarkers();
+  resetSettingsValidation();
   if (!await validateRuntimePerformanceDrafts()) return;
   elements.saveStatus.textContent = "Saving…";
   updateSettingsDirtyState();
@@ -3856,14 +3933,7 @@ async function saveSettings(event) {
     scheduleRuntimeRefresh();
   } catch (error) {
     const errors = error.payload?.errors;
-    const message = errors
-      ? Object.entries(errors)
-        .flatMap(([field, messages]) => messages.map(message => `${field}: ${message}`))
-        .join("\n")
-      : error.message;
-    elements.settingsErrors.textContent = message;
-    elements.settingsErrors.hidden = false;
-    markSettingsValidationErrors(errors ?? {});
+    showSettingsValidationErrors(errors ?? {}, error.message, nextSettings);
     elements.saveStatus.textContent = "Save failed";
     updateSettingsDirtyState();
     navigateToSettingsError(
@@ -3878,6 +3948,13 @@ function handleSettingsInput(event) {
   event.target.classList.remove("field-invalid");
   event.target.removeAttribute("aria-invalid");
   event.target.closest(".intention-card")?.classList.remove("field-invalid-card");
+  for (const field of Object.keys(settingsValidationErrors)) {
+    if (settingsValidationControl(field) === event.target) delete settingsValidationErrors[field];
+  }
+  if (elements.settingsErrors.querySelector("[data-settings-error-field]")) {
+    renderSettingsValidationSummary();
+    markSettingsValidationErrors(settingsValidationErrors);
+  }
   if (
     event.target.closest("[data-ignore-settings-dirty]")
     ||
@@ -3892,80 +3969,235 @@ function handleSettingsInput(event) {
   renderModelChainPreview();
 }
 
+let settingsValidationErrors = {};
+let settingsValidationOverrides = [];
+
+function resetSettingsValidation() {
+  settingsValidationErrors = {};
+  settingsValidationOverrides = [];
+  elements.settingsErrors.replaceChildren();
+  elements.settingsErrors.hidden = true;
+  elements.settingsForm.querySelector(".settings-invalid-overrides")?.remove();
+  clearSettingsValidationMarkers();
+}
+
 function clearSettingsValidationMarkers() {
-  elements.settingsForm.querySelectorAll(".field-invalid").forEach(
+  elements.settingsForm.querySelectorAll('.field-invalid, [aria-describedby*="settings-field-error-"]').forEach(
     field => {
       field.classList.remove("field-invalid");
       field.removeAttribute("aria-invalid");
+      const describedBy = (field.getAttribute("aria-describedby") ?? "").split(/\s+/)
+        .filter(id => id && !id.startsWith("settings-field-error-"));
+      if (describedBy.length) field.setAttribute("aria-describedby", describedBy.join(" "));
+      else field.removeAttribute("aria-describedby");
     }
   );
   elements.settingsForm.querySelectorAll(".field-invalid-card").forEach(
     card => card.classList.remove("field-invalid-card")
   );
+  elements.settingsForm.querySelectorAll(".settings-field-error").forEach(message => message.remove());
+}
+
+function settingsValidationControl(field, activate = false) {
+  const inference = field.match(/^inferenceProfiles\.([^.]*)\.?([^.]*)/);
+  const intention = field.match(/^intentions[.:]([^.:]+)/i)?.[1];
+  if (inference) {
+    if (activate) {
+      elements.inferenceProfileSelector.value = inference[1];
+      renderSelectedInferenceProfile();
+    }
+    if (elements.inferenceProfileSelector.value !== inference[1]) return null;
+    return elements[inferenceFields[inference[2]]] ?? elements.inferenceProfileSelector;
+  } else if (intention) {
+    const card = elements.intentionsGrid.querySelector(
+      `[data-intention="${CSS.escape(intention)}"]`
+    );
+    return field.toLowerCase().endsWith("gpu")
+      ? card?.querySelector(".intention-gpu")
+      : field.toLowerCase().includes("fallback")
+        ? card?.querySelector(".intention-fallback-model")
+        : card?.querySelector(".intention-model");
+  } else if (field === "routerGpu") {
+    return elements.routerGpu;
+  } else if (field.startsWith("router")) {
+    return elements.routerModel;
+  } else if (field === "actionGpu") {
+    return elements.actionGpu;
+  } else if (field.startsWith("action")) {
+    return elements.actionModel;
+  } else if (field === "coordinatorGpu") {
+    return elements.coordinatorGpu;
+  } else if (field.startsWith("coordinator")) {
+    return elements.coordinatorModel;
+  } else if (field.startsWith("defaultModel")) {
+    return elements.defaultModel;
+  } else if (field.startsWith("supervisorModel")) {
+    return elements.supervisorModel;
+  } else {
+    const role = field.match(/^ollamaRuntime\.roleDefaults\.([^.]+)(?:\.([^.]+))?$/);
+    if (role) return document.getElementById(`runtime-role-${role[1]}-${role[2] ?? "targetContextTokens"}`);
+    if (field === "ollamaRuntime.modelOverrides") return elements.runtimeOverrideModel;
+    const override = field.match(/^ollamaRuntime\.modelOverrides\.(\d+)(?:\.(.*))?$/);
+    if (override) {
+      const saved = settingsValidationOverrides[Number(override[1])];
+      const missing = document.getElementById(`settings-override-identity-${override[1]}`);
+      if (missing) return missing;
+      if (!saved) return elements.runtimeOverrideModel;
+      const performance = override[2]?.match(/^performance\.([^.]+)$/)?.[1];
+      if (performance) {
+        if (activate) {
+          elements.runtimePerformanceModel.value = saved.model;
+          loadRuntimePerformanceEditor();
+        }
+        if (elements.runtimePerformanceModel.value !== saved.model) return null;
+        return { draftTokens: elements.runtimeDraftValue, batchSize: elements.runtimeBatchValue,
+          kvCacheType: elements.runtimeKvCache }[performance] ?? elements.runtimePerformanceModel;
+      }
+      const overrideRole = override[2]?.match(/^overrides\.([^.]+)(?:\.(.*))?$/);
+      const selectedRole = overrideRole?.[1] ?? Object.keys(saved.overrides ?? {})[0] ?? "specialist";
+      if (activate) {
+        elements.runtimeOverrideModel.value = saved.model;
+        elements.runtimeOverrideRole.value = selectedRole;
+        loadRuntimeOverrideEditor();
+      }
+      if (elements.runtimeOverrideModel.value !== saved.model
+        || overrideRole && elements.runtimeOverrideRole.value !== selectedRole) return null;
+      return ({ minimumContextTokens: elements.runtimeOverrideMinimum,
+        targetContextTokens: elements.runtimeOverrideTarget, maximumContextTokens: elements.runtimeOverrideMaximum,
+        outputTokenLimit: elements.runtimeOverrideOutput, keepAlive: elements.runtimeOverrideKeepAlive })[overrideRole ? overrideRole[2] ?? "targetContextTokens" : ""]
+        ?? elements.runtimeOverrideModel;
+    }
+    const openAi = field.match(/^cloudProviders\.openAiOptions\.([^.]+)$/);
+    if (openAi) return elements.cloudProvidersList.querySelector(`[data-openai-option="${CSS.escape(openAi[1])}"]`);
+    const cloud = field.match(/^cloudProviders\.(openAi|groq|googleAiStudio|cerebras)(?:\.(.*))?$/);
+    if (cloud) {
+      const provider = { openAi: "openai", groq: "groq", googleAiStudio: "google-ai-studio", cerebras: "cerebras" }[cloud[1]];
+      return elements.cloudProvidersList.querySelector(`[data-cloud-${cloud[2] === "expectedBillingMode" ? "billing" : "key"}="${provider}"]`);
+    }
+    const fieldControls = {
+      "context.defaultContextTokens": elements.defaultContextTokens,
+      "context.providerContextTokens": elements.providerContextTokens,
+      "context.reservedResponseTokens": elements.reservedResponseTokens,
+      "context.maxConversationMessages": elements.maxConversationMessages,
+      "execution.parallelToolExecution": elements.parallelToolExecution,
+      "execution.maxConcurrentToolCalls": elements.maxConcurrentToolCalls,
+      "execution.maxDirectPlanSteps": elements.maxDirectPlanSteps,
+      "execution.fileCreationOutputTokenLimit": elements.fileCreationOutputTokenLimit,
+      "execution.phaseEffort.plan": elements.phaseEffortPlan,
+      "execution.phaseEffort.verify": elements.phaseEffortVerify,
+      "execution.phaseEffort.complete": elements.phaseEffortComplete,
+      "execution.phaseEffort.recovery": elements.phaseEffortRecovery,
+      "execution.maxToolOutputTokens": elements.maxToolOutputTokens,
+      "runtime.generationTimeoutSeconds": elements.generationTimeoutSeconds,
+      "ollamaRuntime.managedKvCacheType": elements.runtimeManagedKvCache,
+      "ollamaRuntime.memory.targetMaximumGpuUsagePercent": elements.runtimeMemoryGpuPercent,
+      "ollamaRuntime.memory.minimumFreeVramBytes": elements.runtimeMemoryFreeVram,
+      "ollamaRuntime.memory.minimumFreeSystemRamBytes": elements.runtimeMemoryFreeRam,
+      "ollamaRuntime.memory.allowCpuOffload": elements.runtimeMemoryCpuOffload,
+      "ollamaRuntime.memory.preferFullGpuForActivePrimary": elements.runtimeMemoryPreferFullGpu,
+      "usage.retentionDays": elements.usageRetentionDays,
+      "usage.selectedWindow": elements.usageSelectedWindow,
+      "usage.alertThresholds": elements.usageAlertThresholds,
+      "usage.providerShortWindowMinutes": elements.usageProviderShortMinutes,
+      "usage.providerLongWindowMinutes": elements.usageProviderLongMinutes,
+      "usage.customRollingWindowMinutes": elements.usageCustomMinutes,
+      defaultGpu: elements.defaultGpu,
+      ollamaUrl: elements.ollamaUrl
+    };
+    return fieldControls[field] ?? elements.settingsForm.querySelector(`[name="${CSS.escape(field)}"]`);
+  }
+}
+
+function showSettingsValidationErrors(errors, fallback, submitted) {
+  settingsValidationErrors = structuredClone(errors);
+  settingsValidationOverrides = submitted?.ollamaRuntime?.modelOverrides ?? [];
+  elements.settingsForm.querySelector(".settings-invalid-overrides")?.remove();
+  // An absent model/revision has no installed-model option. Show its exact saved
+  // identity so navigation never selects a different revision or an unrelated field.
+  const missing = new Map();
+  for (const field of Object.keys(errors)) {
+    const index = field.match(/^ollamaRuntime\.modelOverrides\.(\d+)/)?.[1];
+    const saved = settingsValidationOverrides[Number(index)];
+    if (index == null || !saved || state.models.some(model => model.name === saved.model
+      && model.provider === saved.provider && model.digest === saved.digest)) continue;
+    missing.set(index, saved);
+  }
+  if (missing.size) {
+    const panel = document.createElement("div");
+    panel.className = "settings-invalid-overrides";
+    for (const [index, saved] of missing) {
+      const label = document.createElement("label");
+      const caption = document.createElement("span");
+      caption.textContent = "Model configuration · " + saved.model;
+      const input = document.createElement("input");
+      input.id = `settings-override-identity-${index}`;
+      input.type = "text";
+      input.readOnly = true;
+      input.value = `${saved.provider} · ${saved.model} · ${saved.digest}`;
+      const note = document.createElement("small");
+      note.textContent = "Saved provider, model and digest. Review the validation message below.";
+      label.append(caption, input, note);
+      panel.append(label);
+    }
+    elements.runtimeOverrideModel.closest("details").append(panel);
+  }
+  renderSettingsValidationSummary(fallback);
+  markSettingsValidationErrors(errors);
+}
+
+function settingsValidationLabel(field) {
+  const override = field.match(/^ollamaRuntime\.modelOverrides\.(\d+)/)?.[1];
+  const saved = settingsValidationOverrides[Number(override)];
+  if (override != null && saved) return `${saved.model} · ${shortDigest(saved.digest)}`;
+  const inference = field.match(/^inferenceProfiles\.([^.]+)\.([^.]+)$/);
+  const control = inference ? elements[inferenceFields[inference[2]]] : settingsValidationControl(field);
+  const label = control?.labels?.[0]?.cloneNode(true);
+  label?.querySelectorAll("button, input, select, textarea, small").forEach(child => child.remove());
+  const text = label?.textContent.replace(/\s+/g, " ").trim();
+  const profile = field.match(/^inferenceProfiles\.([^.]+)/)?.[1];
+  return (profile ? profile + " · " : "") + (text || field);
+}
+
+function renderSettingsValidationSummary(fallback) {
+  const entries = Object.entries(settingsValidationErrors);
+  elements.settingsErrors.replaceChildren();
+  elements.settingsErrors.hidden = entries.length === 0 && !fallback;
+  if (!entries.length) {
+    elements.settingsErrors.textContent = fallback ?? "";
+    return;
+  }
+  const title = document.createElement("strong");
+  title.textContent = `Review ${entries.length} setting${entries.length === 1 ? "" : "s"}`;
+  const list = document.createElement("ul");
+  for (const [field, messages] of entries) {
+    const item = document.createElement("li");
+    const link = document.createElement("button");
+    link.type = "button";
+    link.dataset.settingsErrorField = field;
+    link.title = field;
+    link.textContent = `${settingsValidationLabel(field)}: ${messages.join(" ")}`;
+    link.addEventListener("click", () => navigateToSettingsError(field));
+    item.append(link);
+    list.append(item);
+  }
+  elements.settingsErrors.append(title, list);
 }
 
 function markSettingsValidationErrors(errors) {
-  for (const field of Object.keys(errors)) {
-    let control = null;
-    const inference = field.match(/^inferenceProfiles\.([^.]*)\.?([^.]*)/);
-    const intention = field.match(/^intentions[.:]([^.:]+)/i)?.[1];
-    if (inference) {
-      elements.inferenceProfileSelector.value = inference[1];
-      renderSelectedInferenceProfile();
-      control = elements[inferenceFields[inference[2]]] ?? elements.inferenceProfileSelector;
-      if (["seed", "topP", "topK", "minP", "repeatPenalty", "repeatLastN"].includes(inference[2])) {
-        elements.settingsForm.querySelector(".inference-advanced").open = true;
-      }
-    } else if (intention) {
-      const card = elements.intentionsGrid.querySelector(
-        `[data-intention="${CSS.escape(intention)}"]`
-      );
-      control = field.toLowerCase().endsWith("gpu")
-        ? card?.querySelector(".intention-gpu")
-        : field.toLowerCase().includes("fallback")
-          ? card?.querySelector(".intention-fallback-model")
-          : card?.querySelector(".intention-model");
-      card?.classList.add("field-invalid-card");
-    } else if (field === "routerGpu") {
-      control = elements.routerGpu;
-    } else if (field.startsWith("router")) {
-      control = elements.routerModel;
-    } else if (field === "actionGpu") {
-      control = elements.actionGpu;
-    } else if (field.startsWith("action")) {
-      control = elements.actionModel;
-    } else if (field === "coordinatorGpu") {
-      control = elements.coordinatorGpu;
-    } else if (field.startsWith("coordinator")) {
-      control = elements.coordinatorModel;
-    } else if (field.startsWith("defaultModel")) {
-      control = elements.defaultModel;
-    } else if (field.startsWith("supervisorModel")) {
-      control = elements.supervisorModel;
-    } else {
-      const fieldControls = {
-        "context.defaultContextTokens": elements.defaultContextTokens,
-        "context.providerContextTokens": elements.providerContextTokens,
-        "context.reservedResponseTokens": elements.reservedResponseTokens,
-        "context.maxConversationMessages": elements.maxConversationMessages,
-        "execution.parallelToolExecution": elements.parallelToolExecution,
-        "execution.maxConcurrentToolCalls": elements.maxConcurrentToolCalls,
-        "execution.maxDirectPlanSteps": elements.maxDirectPlanSteps,
-        "execution.fileCreationOutputTokenLimit": elements.fileCreationOutputTokenLimit,
-        "execution.phaseEffort.plan": elements.phaseEffortPlan,
-        "execution.phaseEffort.verify": elements.phaseEffortVerify,
-        "execution.phaseEffort.complete": elements.phaseEffortComplete,
-        "execution.phaseEffort.recovery": elements.phaseEffortRecovery,
-        "execution.maxToolOutputTokens": elements.maxToolOutputTokens,
-        "runtime.generationTimeoutSeconds": elements.generationTimeoutSeconds,
-        defaultGpu: elements.defaultGpu,
-        ollamaUrl: elements.ollamaUrl
-      };
-      control = fieldControls[field] ?? null;
-    }
+  clearSettingsValidationMarkers();
+  let index = 0;
+  for (const [field, messages] of Object.entries(errors)) {
+    const control = settingsValidationControl(field);
     if (control) {
       control.classList.add("field-invalid");
       control.setAttribute("aria-invalid", "true");
+      control.closest(".intention-card")?.classList.add("field-invalid-card");
+      const message = document.createElement("small");
+      message.className = "settings-field-error";
+      message.id = `settings-field-error-${index++}`;
+      message.textContent = messages.join(" ");
+      (control.closest("label") ?? control.parentElement).append(message);
+      control.setAttribute("aria-describedby", [control.getAttribute("aria-describedby"), message.id].filter(Boolean).join(" "));
     }
   }
 }
@@ -4352,11 +4584,7 @@ function setSettingsSection(section, moveFocus) {
 }
 
 function navigateToSettingsError(field) {
-  const inference = field?.match(/^inferenceProfiles\.([^.]*)/);
-  if (inference) {
-    elements.inferenceProfileSelector.value = inference[1];
-    renderSelectedInferenceProfile();
-  }
+  const control = field ? settingsValidationControl(field, true) : null;
   const section = !field
     ? "general"
     : field === "execution.maxDirectPlanSteps" || field.startsWith("execution.phaseEffort")
@@ -4384,11 +4612,12 @@ function navigateToSettingsError(field) {
                     : field.startsWith("session")
                       ? "workspaces"
                       : "general";
-  setSettingsSection(
-    section,
-    true
-  );
-  elements.settingsForm.querySelector(".field-invalid")?.focus();
+  setSettingsSection(control?.closest("[data-settings-section]")?.dataset.settingsSection ?? section, false);
+  for (let details = control?.closest("details"); details; details = details.parentElement.closest("details")) details.open = true;
+  markSettingsValidationErrors(settingsValidationErrors);
+  const target = control ?? elements.settingsErrors;
+  target.scrollIntoView({ behavior: "instant", block: "center" });
+  target.focus({ preventScroll: true });
 }
 
 function handleSettingsCancel(event) {
@@ -4767,6 +4996,7 @@ function providerFromModel(model) {
 function providerLabel(provider) {
   return {
     "ollama-local": "Ollama Local",
+    openai: "OpenAI",
     groq: "Groq",
     "google-ai-studio": "Google AI Studio",
     cerebras: "Cerebras"
@@ -5158,8 +5388,11 @@ async function validateRuntimePerformanceDrafts(failureLabel = "Save failed") {
       await loadRuntimePerformanceEditor();
       setSettingsSection("ollama-context", true);
       const message = label + " must be a positive integer up to 2147483647.";
-      elements.settingsErrors.textContent = draft.model + ": " + message;
-      elements.settingsErrors.hidden = false;
+      const submitted = collectSelectedSettings();
+      const index = submitted.ollamaRuntime.modelOverrides.findIndex(item => item.provider === draft.provider
+        && item.model === draft.model && item.digest === draft.digest);
+      const property = field === elements.runtimeDraftValue ? "draftTokens" : "batchSize";
+      showSettingsValidationErrors({ [`ollamaRuntime.modelOverrides.${index}.performance.${property}`]: [message] }, message, submitted);
       elements.saveStatus.textContent = failureLabel;
       updateSettingsDirtyState();
       field.classList.add("field-invalid");

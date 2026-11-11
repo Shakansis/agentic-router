@@ -146,7 +146,10 @@ public sealed record ProviderCallContext(
   Action<InferenceProgressView>? ProgressObserver = null,
   [property: System.Text.Json.Serialization.JsonIgnore]
   int? MinimumKeepAliveSeconds = null
-);
+)
+{
+  internal Func<bool, CancellationToken, Task<bool>>? RequestProviderRetry { get; init; }
+}
 
 public sealed record ProviderTokenUsage(
   long InputTokens,
@@ -287,6 +290,8 @@ public sealed record UsageEvent
   public long ImageBytes { get; init; }
 
   public int SearchQueryCount { get; init; }
+
+  public int HostedWebSearchCallCount { get; init; }
 
   public int GroundedRequestCount { get; init; }
 

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using AgenticRouter.Api.Configuration;
+using AgenticRouter.Api.Contracts;
 
 namespace AgenticRouter.Api.Providers;
 
@@ -27,12 +28,14 @@ public static class ModelEffortLevels
 public static class ModelProviderIds
 {
   public const string OllamaLocal = "ollama-local";
+  public const string OpenAi = "openai";
   public const string Groq = "groq";
   public const string GoogleAiStudio = "google-ai-studio";
   public const string Cerebras = "cerebras";
 
   public static readonly IReadOnlySet<string> Cloud = new HashSet<string>(
     [
+      OpenAi,
       Groq,
       GoogleAiStudio,
       Cerebras
@@ -47,6 +50,7 @@ public static class ModelProviderIds
     return providerId switch
     {
       OllamaLocal => "Ollama Local",
+      OpenAi => "OpenAI",
       Groq => "Groq",
       GoogleAiStudio => "Google AI Studio",
       Cerebras => "Cerebras",
@@ -119,7 +123,8 @@ public sealed record ProviderModelCapabilities(
   bool ToolProtocolConfirmed = false,
   IReadOnlyList<string>? AdapterGenerationParameters = null,
   IReadOnlyList<string>? ThinkingModes = null,
-  IReadOnlyList<ProviderRuntimeOptionCapability>? RuntimeOptions = null
+  IReadOnlyList<ProviderRuntimeOptionCapability>? RuntimeOptions = null,
+  bool NativeWebSearchWithHostTools = false
 );
 
 public sealed record ProviderRuntimeOptionCapability(
@@ -140,6 +145,13 @@ public sealed record ProviderImagePayload(
   int? Height
 );
 
+// Opaque protocol continuation, carried only in memory and never as authority or visible reasoning.
+public sealed record ProviderToolContinuation(
+  string Provider,
+  string Model,
+  IReadOnlyList<System.Text.Json.JsonElement> Items
+);
+
 public sealed record ProviderChatOptions(
   bool WebSearchEnabled,
   IReadOnlyList<ProviderImagePayload> Images,
@@ -154,6 +166,9 @@ public sealed record ProviderChatOptions(
 
   public ProviderGenerationProfile EffectiveGenerationProfile =>
     GenerationProfile ?? ProviderGenerationProfiles.Deterministic;
+
+  internal Action<InferenceProgressView>? ProviderProgress { get; init; }
+  internal Func<bool, CancellationToken, Task<bool>>? RequestProviderRetry { get; init; }
 }
 
 public sealed record ProviderGenerationProfile(
@@ -239,7 +254,8 @@ public sealed record ProviderActivityMetadata(
   int GroundedRequestCount = 0,
   int CitationCount = 0,
   decimal? ProviderSearchCost = null,
-  string Accuracy = "unavailable"
+  string Accuracy = "unavailable",
+  int HostedWebSearchCallCount = 0
 );
 
 public sealed record ProviderModelPricing(

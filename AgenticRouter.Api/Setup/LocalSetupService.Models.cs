@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using AgenticRouter.Api.Models;
 using AgenticRouter.Api.Runtime;
 
 namespace AgenticRouter.Api.Setup;
@@ -40,9 +41,13 @@ public sealed partial class LocalSetupService
       using var lease = await _requests.BeginRequestAsync(true, cancellationToken);
       var settings = await _settingsStore.GetAsync(cancellationToken);
       var endpoint = new Uri(settings.OllamaUrl);
-      var installed = await _ollama.GetModelsAsync(endpoint, cancellationToken);
+      var installed = await _ollama.GetInstalledModelIdentitiesAsync(endpoint, cancellationToken);
       if (!installed.Any(item => item.Name == model))
-        throw new SetupException("model-not-installed", "This exact model is no longer installed. Refresh the model library.");
+      {
+        await _modelOrganization.ForgetLocalModelAsync(model, cancellationToken);
+        _jobs[key] = initial with { State = "removed", Message = $"{model} settings were removed.", UpdatedAt = DateTimeOffset.UtcNow };
+        return new SetupActionResult(model, true, "removed", $"{model} is no longer installed. Its saved model configuration was removed.");
+      }
       var start = new ProcessStartInfo
       {
         FileName = ResolveModelCli(),
@@ -72,16 +77,19 @@ public sealed partial class LocalSetupService
         await process.WaitForExitAsync(CancellationToken.None);
         throw new SetupException("model-remove-interrupted", "Removal was interrupted. Refresh the library to check whether the model was removed.");
       }
-      installed = await _ollama.GetModelsAsync(endpoint, cancellationToken);
+      installed = await _ollama.GetInstalledModelIdentitiesAsync(endpoint, cancellationToken);
       if (installed.Any(item => item.Name == model))
         throw new SetupException("model-remove-unverified", "Ollama exited successfully but the model is still installed. Refresh before retrying.");
+      await _modelOrganization.ForgetLocalModelAsync(model, cancellationToken);
       _jobs[key] = initial with { State = "removed", Message = $"{model} was removed.", UpdatedAt = DateTimeOffset.UtcNow };
-      return new SetupActionResult(model, true, "removed", $"{model} was removed. Routing and saved preferences were preserved.");
+      return new SetupActionResult(model, true, "removed", $"{model} was removed with its runtime overrides, GPU affinity, model preferences and referencing saved profiles.");
     }
     catch (Exception exception)
     {
       _jobs[key] = initial with { State = "failed", Message = "Model removal did not complete.", UpdatedAt = DateTimeOffset.UtcNow };
       _logger.LogWarning(exception, "Model removal failed for {Model}.", model);
+      if (exception is ModelOrganizationException configurationFailure)
+        throw new SetupException(configurationFailure.Code, configurationFailure.Message, configurationFailure);
       if (exception is Win32Exception or IOException)
         throw new SetupException("model-remove-start-failed", "The Ollama CLI could not run. Check the Ollama installation and try again.", exception);
       throw;

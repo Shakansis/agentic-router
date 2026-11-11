@@ -69,6 +69,8 @@ builder.Services.AddScoped<WorkspaceFileSearch>();
 builder.Services.AddHttpClient<OllamaClient>(
   client => client.Timeout = Timeout.InfiniteTimeSpan
 ).RemoveAllLoggers();
+builder.Services.AddHttpClient(OpenAiCloudProvider.GenerationHttpClientName,
+  client => client.Timeout = OpenAiCloudProvider.GenerationTimeout).RemoveAllLoggers();
 builder.Services.AddHttpClient(AnythingLlmKnowledgeProvider.HttpClientName)
   .RemoveAllLoggers();
 builder.Services.AddSingleton<ISettingsValidator, SettingsValidator>();
@@ -138,6 +140,7 @@ builder.Services.AddSingleton<ISettingsStore>(
     safeModeState
   )
 );
+builder.Services.AddSingleton<ICloudProviderAdapter, OpenAiCloudProvider>();
 builder.Services.AddSingleton<ICloudProviderAdapter, GroqCloudProvider>();
 builder.Services.AddSingleton<ICloudProviderAdapter>(
   services => new GeminiCloudProvider(
@@ -437,7 +440,8 @@ builder.Services.AddSingleton<IModelOrganizationService>(
     services.GetRequiredService<IToolProtocolConformanceService>(),
     services.GetRequiredService<IWorkspaceProfileStore>(),
     services.GetRequiredService<IWorkspaceProfileService>(),
-    services.GetRequiredService<IUsageLedger>()
+    services.GetRequiredService<IUsageLedger>(),
+    services.GetRequiredService<OllamaClient>()
   )
 );
 builder.Services.AddSingleton<

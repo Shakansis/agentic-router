@@ -3033,7 +3033,9 @@ function renderExternalAppWarnings() {
       && ["degraded", "unavailable"].includes(provider.connectionState)
       && !warnings.some(warning => warning.id === provider.providerId)) {
       add(provider.providerId, provider.displayName,
-        provider.currentDiagnostic, "providers");
+        provider.currentDiagnostic || (provider.providerId === "openai" && provider.stale
+          ? "Status is stale; no recent connectivity check. This does not confirm a disconnection."
+          : provider.currentDiagnostic), "providers");
     }
   }
   if (state.webSearch?.hasKey && state.webSearch.state !== "available") {

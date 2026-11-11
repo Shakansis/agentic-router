@@ -2011,6 +2011,10 @@ p {
   text-transform: none;
 }
 .execution-footer-metric-icon { color: var(--subtle); }
+.execution-footer-metric[data-metric-state="estimated"],
+.execution-footer-metric[data-metric-state="estimated"] .execution-footer-metric-icon {
+  color: var(--warning);
+}
 .execution-footer-activity {
   gap: 5px 10px;
   color: var(--subtle);

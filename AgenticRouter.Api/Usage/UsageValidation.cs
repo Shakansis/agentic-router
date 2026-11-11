@@ -129,6 +129,7 @@ public static class UsageEventValidator
       || usageEvent.ImageCount < 0
       || usageEvent.ImageBytes < 0
       || usageEvent.SearchQueryCount < 0
+      || usageEvent.HostedWebSearchCallCount < 0
       || usageEvent.GroundedRequestCount < 0
       || usageEvent.CitationCount < 0
     )

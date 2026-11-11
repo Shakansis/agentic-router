@@ -20,7 +20,8 @@ internal sealed record SupervisionExecutionInput(
   IReadOnlyList<ChatMessage> History,
   IReadOnlyList<ChatImageAttachment> Images,
   IExecutionActionJournal? ActionJournal = null,
-  ISupervisionTurnProgressSink? ProgressSink = null
+  ISupervisionTurnProgressSink? ProgressSink = null,
+  ToolWindowContext? ToolWindow = null
 );
 
 internal sealed record SupervisionTurnProgress(
@@ -34,7 +35,8 @@ internal sealed record SupervisionTurnProgress(
   LocalActionEvent? LocalAction = null,
   string? RetryReason = null,
   long? DurationMilliseconds = null,
-  bool Transient = false
+  bool Transient = false,
+  ToolWindowOutput? ToolWindow = null
 );
 
 internal interface ISupervisionTurnProgressSink
@@ -112,6 +114,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
   private readonly CompletionCheckStore _completionReports;
   private TimeSpan _turnStatusInterval = TimeSpan.FromSeconds(30);
   private string _recoveryEffort = ModelEffortLevels.Medium;
+  private ToolWindowContext? _liveToolWindow;
 
   public SupervisionExecutionEngine(
     IExecutionSpecialistTurnService turns,
@@ -137,6 +140,7 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    _liveToolWindow = input.ToolWindow;
     await foreach (var update in ExecuteCoreAsync(input, cancellationToken))
     {
       if (update.Terminal && update.State == DurableSupervisionRunStates.Completed
@@ -1362,7 +1366,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
         Images: images,
         ExecutionStrategy: SupervisionExecutionStrategies.Direct,
         Thinking: supervisor ? null : checkpoint.Route.WorkerThinking,
-        Specialist: checkpoint.Route.Specialist
+        Specialist: checkpoint.Route.Specialist,
+        ToolWindow: _liveToolWindow
       );
       string? roleResult = null;
       ExecutionPreflightMeasurement? preflight = null;
@@ -1463,7 +1468,8 @@ internal sealed class SupervisionExecutionEngine : ISupervisionExecutionEngine
                   context.Id,
                   context.WorkItemId,
                   LocalAction: streamEvent.LocalAction,
-                  Transient: true
+                  Transient: true,
+                  ToolWindow: streamEvent.ToolWindow
                 ),
                 cancellationToken
               );

@@ -150,7 +150,8 @@ public sealed record ChatRequest(
   string? Thinking = null,
   string? HistoryWindowId = null,
   int? HistoryMessageIndex = null,
-  string? Specialist = null
+  string? Specialist = null,
+  AgenticRouter.Api.Chat.ToolWindowContext? ToolWindow = null
 )
 {
   [JsonIgnore]
@@ -835,7 +836,9 @@ public sealed record ExecutionInferenceMetrics(
       first.FirstInferenceDispatchedAt,
       first.TimeToFirstTokenMilliseconds,
       previous.GenerationTimingSource == next.GenerationTimingSource
-        ? previous.GenerationTimingSource : "mixed",
+        ? previous.GenerationTimingSource
+        : previous.GenerationTimingSource is "request-estimate" or "mixed-estimate"
+          || next.GenerationTimingSource is "request-estimate" or "mixed-estimate" ? "mixed-estimate" : "mixed",
       first.DispatchToFirstTokenMilliseconds,
       first.ModelLoadMilliseconds,
       first.FirstTokenTimingSource,
@@ -1085,7 +1088,9 @@ public sealed record ChatStreamEvent(
   InferenceProgressView? InferenceProgress = null,
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   AgenticRouter.Api.Sessions.HostFileProgress? HostFileProgress = null,
-  NativeToolExecutionTelemetry? ToolExecution = null
+  NativeToolExecutionTelemetry? ToolExecution = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  AgenticRouter.Api.Chat.ToolWindowOutput? ToolWindow = null
 );
 
 public sealed record NativeToolExecutionTelemetry(

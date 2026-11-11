@@ -36,7 +36,8 @@ public interface IExpertExecutionGuidanceService
     CancellationToken cancellationToken,
     Action<ProviderTokenUsage?>? usageObserver = null,
     ProviderChatOptions? options = null,
-    int? maximumOutputTokens = null
+    int? maximumOutputTokens = null,
+    ExecutionTurnToolScope? toolScope = null
   );
 }
 
@@ -122,6 +123,7 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
 
     var compact = new List<ChatMessage>();
     AddLast(compact, messages, item => item.Role == "system" && item.Content.StartsWith("APPLICATION_OWNED_PROJECT_CONTEXT", StringComparison.Ordinal));
+    AddLast(compact, messages, item => item.Role == "system" && AgenticRouter.Api.Chat.ToolWindowTurn.IsContextMessage(item.Content));
     AddLast(compact, messages, item => item.Role == "user" && !IsControlMessage(item.Content) && !item.Content.StartsWith(GuidanceMarker, StringComparison.Ordinal));
     AddLast(compact, messages, item => item.Content.StartsWith(GuidanceMarker, StringComparison.Ordinal));
     compact.Add(new ChatMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
@@ -251,10 +253,11 @@ public sealed class ExpertExecutionGuidanceService : IExpertExecutionGuidanceSer
     CancellationToken cancellationToken,
     Action<ProviderTokenUsage?>? usageObserver = null,
     ProviderChatOptions? options = null,
-    int? maximumOutputTokens = null
+    int? maximumOutputTokens = null,
+    ExecutionTurnToolScope? toolScope = null
   )
   {
-    var scope = ExecutionTurnToolPolicy.Resolve(
+    var scope = toolScope ?? ExecutionTurnToolPolicy.Resolve(
       messages.Select(message => (message.Role, (string?)message.Content))
     );
     var guidanceMessages = new[]

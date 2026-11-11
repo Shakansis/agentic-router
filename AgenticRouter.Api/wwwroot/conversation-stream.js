@@ -71,7 +71,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
     if (historical && options.conversationVersion !== state.conversationVersion) break;
     assistant.selectedModel = streamEvent.selectedModel
       ?? assistant.selectedModel;
-    if (!historical) timeline.push(streamEvent);
+    if (!historical) timeline.push({ ...streamEvent, toolWindow: undefined });
+    receiveToolWindowEvent(streamEvent, historical);
     const observedOutputTokens = assistant.lastObservedOutputTokens ?? 0;
     if (isMeaningfulRequestActivity(streamEvent, observedOutputTokens)) {
       assistant.lastHostActivityAt = Date.parse(streamEvent.timestamp)
@@ -514,7 +515,8 @@ async function consumeEventStream(stream, assistant, options = {}) {
             || streamEvent.type.includes("warning")
         );
       }
-    } else if (streamEvent.type === "chat.model-progress") {
+    } else if (streamEvent.type === "chat.model-progress"
+      || ["tool-window.target-selected", "tool-window.proposal", "tool-window.target-rejected"].includes(streamEvent.type)) {
       closeAssistantContent(assistant);
       assistant.workActivity.hidden = false;
       const message = document.createElement("p");
@@ -1266,6 +1268,7 @@ function renderInferenceMetrics(assistant) {
     : assistant.executionSession?.inferenceMetrics ?? assistant.chatSummary?.inferenceMetrics;
   const badges = document.createElement("div");
   badges.className = "execution-footer-metrics";
+  const estimatedThroughput = ["stream", "mixed", "request-estimate", "mixed-estimate"].includes(metrics?.generationTimingSource);
   const addMetric = (key, value, label, icon, title, unavailableReason) => {
     const available = Number.isFinite(value) && value >= 0;
     if (!available && !unavailableReason) return;
@@ -1273,7 +1276,7 @@ function renderInferenceMetrics(assistant) {
     const badge = document.createElement("span");
     badge.className = "execution-footer-metric";
     badge.dataset.metric = key;
-    badge.dataset.metricState = available ? "available" : invalid ? "error" : "unavailable";
+    badge.dataset.metricState = available ? key === "throughput" && estimatedThroughput ? "estimated" : "available" : invalid ? "error" : "unavailable";
     badge.title = available ? title : invalid ? metrics?.telemetryError
       ?? `Invalid ${label === "tokens" ? "token count" : "generation timing"}.` : unavailableReason;
     const glyph = document.createElement("span");
@@ -1283,14 +1286,20 @@ function renderInferenceMetrics(assistant) {
     const number = document.createElement("strong");
     number.textContent = !available ? (invalid ? "error" : "unavailable") : key === "tokens"
       ? new Intl.NumberFormat().format(value)
-      : key === "ttft" ? `${(value / 1000).toFixed(2)}s` : value.toFixed(2);
+      : key === "ttft" ? `${(value / 1000).toFixed(2)}s` : `${key === "throughput" && estimatedThroughput ? "≈" : ""}${value.toFixed(2)}`;
     const unit = document.createElement("span");
     unit.textContent = label;
+    if (available && key === "throughput" && estimatedThroughput)
+      badge.setAttribute("aria-label", `Estimated ${value.toFixed(2)} tokens per second. ${title}`);
     badge.append(glyph, number, unit);
     badges.append(badge);
   };
   addMetric("throughput", metrics?.tokensPerSecond, "tok/s", "↯",
-    ["stream", "mixed"].includes(metrics?.generationTimingSource)
+    metrics?.generationTimingSource === "request-estimate"
+      ? "Estimated average: provider-reported output tokens divided by the request time measured by AR. Includes network, prompt processing, reasoning and hosted tools; excludes Host tool execution. Not the model's decode speed."
+    : metrics?.generationTimingSource === "mixed-estimate"
+      ? "Estimated aggregate: combines measured request durations with other generation timings. Request durations include network, prompt processing, reasoning and hosted tools; Host tool execution is excluded."
+    : ["stream", "mixed"].includes(metrics?.generationTimingSource)
       ? "Output tokens divided by provider generation durations where reported, otherwise measured first-to-last token intervals. Excludes prefill, tools and waiting."
       : "Output tokens divided by measured model generation time across the turn. Excludes tools and waiting.",
     metrics?.outputTokens == null ? "Provider token count unavailable."

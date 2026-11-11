@@ -540,7 +540,7 @@ public sealed class StoryEditorEndToEndTests : ChatEndToEndTestBase<StoryEditorE
     await Expect(Page.Locator("#story-comparison")).ToBeHiddenAsync();
     await Expect(Page.Locator("#story-fullscreen")).ToBeVisibleAsync();
     await Page.Locator("#story-fullscreen-toggle").ClickAsync();
-    await Expect(Page.Locator("#conversation-view > #story-editor")).ToBeVisibleAsync();
+    await Expect(Page.Locator("#tool-content > #story-editor")).ToBeVisibleAsync();
     await Expect(Page.Locator("#story-review-proposal")).ToBeVisibleAsync();
     await Page.Locator("#story-fullscreen-toggle").ClickAsync();
     await Page.Locator("#story-review-proposal").ClickAsync();
@@ -1298,9 +1298,14 @@ public sealed class StoryEditorEndToEndTests : ChatEndToEndTestBase<StoryEditorE
         const header = document.querySelector('.chat-header').getBoundingClientRect();
         const runtime = document.querySelector('#runtime-summary').getBoundingClientRect();
         const editor = document.querySelector('#story-editor').getBoundingClientRect();
+        const pane = document.querySelector('#tool-pane').getBoundingClientRect();
+        const tabs = document.querySelector('#tool-pane > .workspace-pane-heading').getBoundingClientRect();
+        const chat = document.querySelector('#chat-pane').getBoundingClientRect();
         return Math.abs(runtime.x + runtime.width / 2 - header.x - header.width / 2) <= 2
-          && Math.abs(editor.top - header.bottom) <= 1
-          && Math.abs(editor.left - header.left) <= 1 && Math.abs(editor.right - header.right) <= 1;
+          && Math.abs(pane.top - header.bottom) <= 1
+          && Math.abs(editor.top - tabs.bottom) <= 1
+          && Math.abs(pane.right - header.right) <= 1
+          && (header.width <= 760 ? Math.abs(pane.left - header.left) <= 1 : Math.abs(pane.left - chat.right - 8) <= 1);
       }
       """);
     await SaveScreenshotAsync("specialist-header-wide-sidebar.png");
@@ -1328,18 +1333,20 @@ public sealed class StoryEditorEndToEndTests : ChatEndToEndTestBase<StoryEditorE
         () => {
           const rect = id => document.getElementById(id).getBoundingClientRect();
           const open = rect('story-open-file'), name = rect('story-file-name'), save = rect('story-export');
-          return Math.abs(open.height - save.height) < 1 && Math.abs(open.bottom - save.bottom) < 1
-            && (innerWidth <= 600 ? name.bottom <= open.top : Math.abs(name.bottom - open.bottom) < 1);
+          const controls = rect('story-controls');
+          return Math.abs(open.height - save.height) < 1 && open.bottom <= name.top && name.bottom <= save.top
+            && [open, name, save].every(item => item.left >= controls.left && item.right <= controls.right);
         }
         """), $"File toolbar alignment at {width}px");
       await Page.WaitForFunctionAsync("document.querySelector('#story-editor').getBoundingClientRect().top >= document.querySelector('.chat-header').getBoundingClientRect().bottom - 1");
-      if (width <= 1100)
+      if (await Page.Locator("#conversation-view").EvaluateAsync<bool>("el => el.clientWidth <= 760"))
       {
         Assert.IsTrue(await Page.EvaluateAsync<bool>("""
           () => {
             const header = document.querySelector('.chat-header').getBoundingClientRect();
             const editor = document.querySelector('#story-editor').getBoundingClientRect();
-            return Math.abs(editor.top - header.bottom) <= 1
+            const tabs = document.querySelector('#tool-pane > .workspace-pane-heading').getBoundingClientRect();
+            return Math.abs(tabs.top - header.bottom) <= 1 && Math.abs(editor.top - tabs.bottom) <= 1
               && Math.abs(editor.left - header.left) <= 1 && Math.abs(editor.right - header.right) <= 1;
           }
           """), $"Full-width editor placement at {width}px");

@@ -1,5 +1,8 @@
 # Fixed specialists and the RPG editor
 
+The editor now uses the [shared composer and auxiliary tool tabs](tool-workspace.md).
+That contract supersedes the original split/overlay layout described below.
+
 The conversation header exposes a compact specialist selector beside Local session,
 independently of model and harness selection. Its Automatic option shows the last
 Host-resolved specialist after a turn; fixed options explicitly say Fixed.

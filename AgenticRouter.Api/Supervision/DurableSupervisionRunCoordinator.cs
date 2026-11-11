@@ -363,7 +363,8 @@ public sealed class DurableSupervisionRunCoordinator
       MaximumEventsPerRun,
       initialRuntime,
       inputContext.History,
-      request.Images?.ToArray() ?? []
+      request.Images?.ToArray() ?? [],
+      request.ToolWindow
     );
     if (!_runs.TryAdd(
       runId,
@@ -887,7 +888,8 @@ public sealed class DurableSupervisionRunCoordinator
         state.History,
         state.Images,
         new DurableExecutionActionJournal(this, state),
-        new DurableSupervisionTurnProgressSink(this, state)
+        new DurableSupervisionTurnProgressSink(this, state),
+        state.ToolWindow
       );
       await foreach (var update in engine.ExecuteAsync(
         input,
@@ -969,6 +971,11 @@ public sealed class DurableSupervisionRunCoordinator
 
   private static void ValidateLiveInput(PrepareSupervisionRunRequest request)
   {
+    try { AgenticRouter.Api.Chat.ToolWindowTurn.Validate(request.ToolWindow); }
+    catch (LocalActionException exception)
+    {
+      throw new SupervisionException(exception.Stage, "supervision-prepare", exception.Message, false, 400, exception);
+    }
     if (request.Thinking is not null && !ModelEffortLevels.IsValid(request.Thinking))
       throw new SupervisionException("supervision-thinking-invalid", "supervision-prepare",
         "Thinking must be none, low, medium, or high.", false);
@@ -1532,7 +1539,8 @@ public sealed class DurableSupervisionRunCoordinator
       int maximumEvents,
       SupervisionRuntimeView runtime,
       IReadOnlyList<ChatMessage> history,
-      IReadOnlyList<ChatImageAttachment> images
+      IReadOnlyList<ChatImageAttachment> images,
+      AgenticRouter.Api.Chat.ToolWindowContext? toolWindow = null
     )
     {
       _checkpoint = checkpoint;
@@ -1541,6 +1549,7 @@ public sealed class DurableSupervisionRunCoordinator
       _eventSequence = checkpoint.Events.LastOrDefault()?.Sequence ?? 0;
       History = history;
       Images = images;
+      ToolWindow = toolWindow;
     }
 
     public SemaphoreSlim TransitionGate { get; } = new(
@@ -1551,6 +1560,7 @@ public sealed class DurableSupervisionRunCoordinator
     public IReadOnlyList<ChatMessage> History { get; private set; }
 
     public IReadOnlyList<ChatImageAttachment> Images { get; private set; }
+    public AgenticRouter.Api.Chat.ToolWindowContext? ToolWindow { get; }
 
     public CancellationToken ExecutionToken => _cancellation.Token;
     public Task? Execution { get { lock (_gate) return _execution; } }
@@ -1676,7 +1686,8 @@ public sealed class DurableSupervisionRunCoordinator
             progress.ContextUsage,
             progress.LocalAction,
             RetryReason: progress.RetryReason,
-            DurationMilliseconds: progress.DurationMilliseconds
+            DurationMilliseconds: progress.DurationMilliseconds,
+            ToolWindow: progress.ToolWindow
           )
         ).TakeLast(_maximumEvents).ToArray();
         signal = _changed;

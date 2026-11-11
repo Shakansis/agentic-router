@@ -1392,6 +1392,19 @@ public sealed class SettingsValidator : ISettingsValidator
     CloudProvidersSettings providers
   )
   {
+    ValidateCloudProvider(errors, "cloudProviders.openAi", providers.OpenAi);
+    var openAi = providers.OpenAiOptions;
+    foreach (var (name, value) in new[] { ("organizationId", openAi.OrganizationId), ("projectId", openAi.ProjectId) })
+    {
+      if (value is not null && (value.Length > 256 || value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_')))
+        AddError(errors, $"cloudProviders.openAiOptions.{name}", "Use at most 256 letters, digits, hyphens, or underscores.");
+    }
+    if (openAi.ServiceTier is not ("auto" or "default" or "flex" or "priority"))
+      AddError(errors, "cloudProviders.openAiOptions.serviceTier", "Service tier must be auto, default, flex, or priority.");
+    if (openAi.Verbosity is not ("auto" or "low" or "medium" or "high"))
+      AddError(errors, "cloudProviders.openAiOptions.verbosity", "Verbosity must be auto, low, medium, or high.");
+    if (openAi.MaximumOutputTokens is <= 0)
+      AddError(errors, "cloudProviders.openAiOptions.maximumOutputTokens", "Maximum output tokens must be greater than zero, or empty for the provider default.");
     ValidateCloudProvider(
       errors,
       "cloudProviders.groq",

@@ -27,6 +27,7 @@
 .runtime-profile-fields {
   display: grid;
   grid-template-columns: repeat(5, minmax(5.8rem, 1fr));
+  align-items: start;
   gap: 0.55rem;
 }
 

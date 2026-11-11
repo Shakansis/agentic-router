@@ -2,6 +2,7 @@ using AgenticRouter.Api.Configuration;
 using AgenticRouter.Api.Contracts;
 using AgenticRouter.Api.Execution;
 using AgenticRouter.Api.Observability;
+using AgenticRouter.Api.Providers;
 
 namespace AgenticRouter.Api.Usage;
 
@@ -307,16 +308,20 @@ public sealed class UsageRecorder : IUsageRecorder
     {
       var usage = request.ProviderUsage;
       var outputTokens = usage?.GeneratedOutputTokens ?? usage?.OutputTokens;
+      var providerGeneration = usage?.EvalDurationNanoseconds is >= 0
+        ? usage.EvalDurationNanoseconds.Value / 1_000_000d : (double?)null;
+      var estimate = request.ProviderId == ModelProviderIds.OpenAi
+        && request.Status == UsageStatuses.Success && outputTokens is > 0
+        && providerGeneration is null && request.Inference.CompletedRequestMilliseconds is > 0
+          ? request.Inference.CompletedRequestMilliseconds : null;
       var loadMilliseconds = usage?.LoadDurationNanoseconds is >= 0
         ? usage.LoadDurationNanoseconds / 1_000_000d : null;
       var metrics = new ExecutionInferenceMetrics(
         outputTokens is >= 0 ? outputTokens : null,
-        usage?.EvalDurationNanoseconds is >= 0
-          ? usage.EvalDurationNanoseconds.Value / 1_000_000d
-          : null,
+        providerGeneration ?? estimate,
         request.Inference.DispatchedAt,
         InferenceObservation.AfterModelLoad(request.Inference.TimeToFirstTokenMilliseconds, loadMilliseconds),
-        "provider",
+        estimate is not null ? "request-estimate" : "provider",
         request.Inference.TimeToFirstTokenMilliseconds,
         loadMilliseconds,
         loadMilliseconds is not null ? "after-model-load" : "dispatch",
@@ -433,6 +438,7 @@ public sealed class UsageRecorder : IUsageRecorder
         ImageCount = request.Activity?.ImageCount ?? 0,
         ImageBytes = request.Activity?.ImageBytes ?? 0,
         SearchQueryCount = request.Activity?.SearchQueryCount ?? 0,
+        HostedWebSearchCallCount = request.Activity?.HostedWebSearchCallCount ?? 0,
         GroundedRequestCount = request.Activity?.GroundedRequestCount ?? 0,
         CitationCount = request.Activity?.CitationCount ?? 0,
         ProviderSearchCost = request.Activity?.ProviderSearchCost,

@@ -123,7 +123,8 @@ public sealed record PrepareSupervisionRunRequest(
   SupervisionTakeoverSnapshot? Takeover = null,
   string ExecutionStrategy = SupervisionExecutionStrategies.Supervised,
   string? Thinking = null,
-  string? Specialist = null
+  string? Specialist = null,
+  AgenticRouter.Api.Chat.ToolWindowContext? ToolWindow = null
 );
 
 public sealed record ResumeSupervisionRunRequest(
@@ -159,7 +160,9 @@ public sealed record SupervisionRunEvent(
   LocalActionEvent? LocalAction = null,
   string? RejectionReason = null,
   string? RetryReason = null,
-  long? DurationMilliseconds = null
+  long? DurationMilliseconds = null,
+  [property: JsonIgnore]
+  AgenticRouter.Api.Chat.ToolWindowOutput? ToolWindow = null
 );
 
 public static class SupervisionWorkItemStates
@@ -505,13 +508,15 @@ public sealed record SupervisionRequestResolution(
   int? EstimatedStepCount = null
 )
 {
+  public bool DirectForCloudModel => ActivationReason == "cloud-model-direct";
+
   public bool Supervised => string.Equals(
     Strategy,
     SupervisionExecutionStrategies.Supervised,
     StringComparison.Ordinal
   );
 
-  public bool Automatic => string.Equals(
+  public bool Automatic => !DirectForCloudModel && string.Equals(
     RequestedStrategy,
     SupervisionExecutionStrategies.Auto,
     StringComparison.Ordinal
@@ -660,6 +665,18 @@ public static class SupervisionRequestPolicy
         "Enter an objective after /supervisor.",
         true
       );
+    }
+
+    if (request.InteractionMode == "execute"
+      && requestedStrategy is SupervisionExecutionStrategies.Auto or SupervisionExecutionStrategies.Supervised
+      && request.Model is { } model)
+    {
+      var reference = ProviderModelReference.Parse(model.Trim());
+      if (reference.ModelId.Length > 0 && ModelProviderIds.Cloud.Contains(reference.ProviderId))
+      {
+        strategy = SupervisionExecutionStrategies.Direct;
+        activationReason = "cloud-model-direct";
+      }
     }
 
     return new SupervisionRequestResolution(

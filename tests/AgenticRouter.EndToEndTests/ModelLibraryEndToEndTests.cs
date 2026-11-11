@@ -37,12 +37,50 @@ public sealed class ModelLibraryEndToEndTests : ChatEndToEndTestBase<ModelLibrar
 
   [TestMethod]
   [Timeout(120_000, CooperativeCancellation = true)]
-  public async Task InstallOrganizeCancelAndRemoveThroughCliPreservesSettingsAndHistory()
+  public async Task InstallOrganizeCancelAndRemoveThroughCliDeletesModelSettings()
   {
     await ConfigureCliAsync();
     var before = await _environment.HttpClient.GetStringAsync("api/settings");
     await OpenLibraryAsync();
     await InstallAsync("library-fixture");
+    var models = await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/models");
+    var identity = models!["models"]!.AsArray().Single(item => item!["name"]!.GetValue<string>() == "library-fixture:latest")!;
+    var configured = await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/settings");
+    configured!["ollamaRuntime"]!["modelOverrides"]!.AsArray().Add(new JsonObject
+    {
+      ["provider"] = "ollama-local",
+      ["model"] = "library-fixture:latest",
+      ["digest"] = identity["digest"]!.DeepClone(),
+      ["overrides"] = new JsonObject(),
+      ["performance"] = new JsonObject { ["batchSize"] = 256 }
+    });
+    configured["modelGpuAffinities"]!["library-fixture:latest"] = "auto";
+    using (var saved = await _environment.HttpClient.PutAsJsonAsync("api/settings", configured)) saved.EnsureSuccessStatusCode();
+    using var profileResponse = await _environment.HttpClient.PostAsJsonAsync("api/model-organization/profiles", new
+    {
+      name = "Library model profile",
+      primaryModel = "library-fixture:latest",
+      fallbackModel = "none",
+      routerModel = "alpha:latest",
+      coordinatorModel = "alpha:latest",
+      webPreference = "off"
+    });
+    Assert.AreEqual(HttpStatusCode.OK, profileResponse.StatusCode, await profileResponse.Content.ReadAsStringAsync());
+    var profile = JsonNode.Parse(await profileResponse.Content.ReadAsStringAsync())!;
+    var profileId = profile["profileId"]!.GetValue<string>();
+    using var comparisonProfile = await _environment.HttpClient.PostAsJsonAsync("api/model-organization/profiles", new
+    {
+      name = "Library comparison profile",
+      primaryModel = "alpha:latest",
+      fallbackModel = "none",
+      routerModel = "alpha:latest",
+      coordinatorModel = "alpha:latest",
+      comparisonModel = "library-fixture:latest",
+      webPreference = "off"
+    });
+    comparisonProfile.EnsureSuccessStatusCode();
+    var workspaceId = await ActiveWorkspaceIdAsync();
+    using (var preferred = await _environment.HttpClient.PutAsJsonAsync($"api/model-organization/workspaces/{workspaceId}/preferred-profile", new { profileId })) preferred.EnsureSuccessStatusCode();
     var card = Page.Locator("[data-model-identity='library-fixture:latest']");
     await Expect(card).ToBeVisibleAsync();
     await card.GetByLabel("Local alias", new() { Exact = false }).FillAsync("Story model");
@@ -56,14 +94,16 @@ public sealed class ModelLibraryEndToEndTests : ChatEndToEndTestBase<ModelLibrar
     await card.Locator("[data-model-organization-action='remove']").ClickAsync();
     await ConfirmAppModalAsync();
     await Expect(Page.Locator("#model-library-status")).ToContainTextAsync("was removed", new() { Timeout = 30_000 });
-    await Expect(card).ToContainTextAsync("unavailable");
-    await Expect(card.Locator("[data-model-note]")).ToHaveValueAsync("Used for prose");
-    await Expect(card.Locator("[data-model-organization-action='remove']")).ToHaveCountAsync(0);
-    var models = await _environment.HttpClient.GetStringAsync("api/models");
-    Assert.DoesNotContain("library-fixture:latest", models);
+    await Expect(card).ToHaveCountAsync(0);
+    Assert.DoesNotContain("library-fixture:latest", await _environment.HttpClient.GetStringAsync("api/models"));
     Assert.AreEqual(before, await _environment.HttpClient.GetStringAsync("api/settings"));
+    var organization = await _environment.HttpClient.GetStringAsync("api/model-organization");
+    Assert.DoesNotContain("Library model profile", organization);
+    Assert.DoesNotContain("Library comparison profile", organization);
+    var workspaces = JsonNode.Parse(await _environment.HttpClient.GetStringAsync("api/workspaces"))!;
+    Assert.IsNull(workspaces["profiles"]!.AsArray().Single(item => item!["id"]!.GetValue<string>() == workspaceId)!["preferredModelProfileId"]);
     await InstallAsync("library-fixture");
-    await Expect(card.Locator("strong")).ToHaveTextAsync("Story model");
+    await Expect(card.Locator("strong")).ToHaveTextAsync("library-fixture:latest");
     await Expect(card.Locator("[data-model-organization-action='remove']")).ToBeVisibleAsync();
   }
 
@@ -81,11 +121,17 @@ public sealed class ModelLibraryEndToEndTests : ChatEndToEndTestBase<ModelLibrar
     {
       await InstallAsync(name);
       var card = Page.Locator($"[data-model-identity='{name}']");
+      await card.GetByLabel("Local alias", new() { Exact = false }).FillAsync("Keep after failed removal");
+      await card.Locator("[data-model-organization-action='save']").ClickAsync();
       await card.Locator("[data-model-organization-action='remove']").ClickAsync();
       await ConfirmAppModalAsync();
       await Expect(Page.Locator("#model-library-status")).ToHaveAttributeAsync("data-state", "error");
       await Expect(card.Locator("[data-model-organization-action='remove']")).ToBeEnabledAsync();
       Assert.Contains(name, await _environment.HttpClient.GetStringAsync("api/models"));
+      await Expect(card.Locator("strong")).ToHaveTextAsync("Keep after failed removal");
+      var organization = await _environment.HttpClient.GetFromJsonAsync<JsonObject>("api/model-organization");
+      Assert.AreEqual("Keep after failed removal", organization!["models"]!.AsArray()
+        .Single(item => item!["modelId"]!.GetValue<string>() == name)!["alias"]!.GetValue<string>());
     }
     await Expect(Page.Locator("#model-library-status")).ToContainTextAsync("still installed");
     using var invalid = await _environment.HttpClient.PostAsJsonAsync("api/setup/models/remove", new { model = "alpha:latest; whoami" });

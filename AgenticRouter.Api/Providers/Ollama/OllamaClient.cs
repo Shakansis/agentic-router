@@ -51,9 +51,17 @@ public sealed class OllamaClient : IOllamaClient
     _logger = logger;
   }
 
-  public async Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
+  public Task<IReadOnlyList<InstalledModel>> GetModelsAsync(
     Uri baseUri,
     CancellationToken cancellationToken
+  ) => ReadInstalledModelsAsync(baseUri, false, cancellationToken);
+
+  internal Task<IReadOnlyList<InstalledModel>> GetInstalledModelIdentitiesAsync(
+    Uri baseUri, CancellationToken cancellationToken
+  ) => ReadInstalledModelsAsync(baseUri, true, cancellationToken);
+
+  private async Task<IReadOnlyList<InstalledModel>> ReadInstalledModelsAsync(
+    Uri baseUri, bool includeNonSelectable, CancellationToken cancellationToken
   )
   {
     using var request = new HttpRequestMessage(
@@ -82,10 +90,10 @@ public sealed class OllamaClient : IOllamaClient
       .Where(
         model => !string.IsNullOrWhiteSpace(
           model.Name
-        ) && !model.Name.StartsWith(
+        ) && (includeNonSelectable || !model.Name.StartsWith(
           "functiongemma",
           StringComparison.OrdinalIgnoreCase
-        )
+        ))
       )
       .Select(
         model => new InstalledModel(
@@ -298,7 +306,8 @@ public sealed class OllamaClient : IOllamaClient
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
     string? requestedEffort = null,
-    ProviderGenerationProfile? generationProfile = null
+    ProviderGenerationProfile? generationProfile = null,
+    ProviderChatOptions? options = null
   )
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;

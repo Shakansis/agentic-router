@@ -1,0 +1,73 @@
+#tool-workspace { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; }
+#tool-workspace.has-tool { grid-template-columns: minmax(280px, var(--chat-split, 44%)) 8px minmax(0, 1fr); }
+#chat-pane, #tool-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.workspace-pane-heading { display: flex; flex: 0 0 36px; align-items: stretch; gap: 6px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.workspace-pane-heading [role=tab] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 7px 9px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.workspace-pane-heading [aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
+.workspace-pane-heading small { margin-left: 6px; font-size: 10px; color: var(--subtle); }
+.workspace-pane-heading [role=tab]:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+#chat-content { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+#chat-content > .messages { padding: 22px max(16px, calc((100% - var(--chat-content-width)) / 2)); }
+#chat-content > .conversation-history-loader { inset: 0; }
+#chat-content > .jump-latest { bottom: 12px; right: 18px; max-width: calc(100% - 36px); }
+#tool-divider { background: var(--bg); border-inline: 1px solid var(--border); cursor: col-resize; touch-action: none; }
+#tool-divider:hover, #tool-divider:focus-visible, #tool-divider.dragging { background: var(--accent-soft); outline: none; }
+#tool-divider[hidden], #tool-pane[hidden] { display: none; }
+#tool-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#conversation-view.story-editor-open { display: flex; }
+#conversation-view.story-editor-open > .composer-shell { visibility: visible; pointer-events: auto; }
+.composer-target { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 11px; color: var(--muted); }
+#composer-target-label { color: var(--text); }
+#composer-target-hint { text-align: right; font-size: 10px; }
+.story-editor-panel { position: static; flex: 1; padding: 0; gap: 0; border: 0; overflow: hidden; }
+.story-editor-heading { padding: 10px 12px; gap: 8px; flex-shrink: 0; }
+.story-editor-heading h2 { font-size: 14px; }
+.story-editor-heading .eyebrow, .story-editor-heading p { display: none; }
+.story-heading-actions { gap: 5px; }
+.story-heading-actions .secondary-button { padding: 5px 8px; }
+.story-editor-body { flex: 1; display: grid; grid-template-columns: 174px minmax(0, 1fr); min-height: 0; }
+.story-editor-body.controls-collapsed { grid-template-columns: minmax(0, 1fr); }
+.story-controls { min-width: 0; min-height: 0; overflow-y: auto; padding: 12px; border-right: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; gap: 14px; }
+.story-controls[hidden] { display: none; }
+.story-controls .story-file-toolbar { display: flex; flex-direction: column; align-items: stretch; }
+.story-controls .story-file-toolbar input { width: 100%; }
+.story-controls .story-workspace-source { display: grid; }
+.story-controls .story-editor-toolbar { flex-direction: column; align-items: stretch; }
+.story-controls .story-editor-toolbar button { text-align: left; font-size: 11px; }
+.story-controls .story-editor-actions { display: flex; flex-direction: column; gap: 8px; }
+.story-controls .story-editor-actions > .runtime-note { display: none; }
+.story-controls .story-loading { flex-wrap: wrap; }
+.story-controls .story-repetition-panel { padding: 0; border: 0; }
+.story-reading-area { display: flex; flex-direction: column; min-height: 0; min-width: 0; gap: 8px; padding: 12px; overflow: auto; }
+.story-reading-area .story-document, .story-reading-area .story-preview { flex: 1 0 240px; width: 100%; min-height: 240px; margin: 0; padding: 14px; font-size: 14px; line-height: 1.8; }
+.story-reading-area .story-draft-status { flex-shrink: 0; font-size: 11px; }
+.story-reading-area .story-draft-status button { font-size: 11px; padding: 5px 8px; }
+.story-document-toolbar { flex-wrap: wrap; }
+.story-tool-output { flex: 0 0 auto; max-height: 45%; overflow-y: auto; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.story-tool-output[hidden] { display: none; }
+.story-tool-output-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 12px; }
+.story-tool-output-body { font-size: 13px; overflow-wrap: anywhere; }
+.story-editor-panel > #story-status { flex-shrink: 0; padding: 6px 12px; font-size: 11px; }
+.story-editor-panel > #story-status:empty { display: none; }
+.tool-workspace-activity { padding: 8px 12px; color: var(--muted); border-left: 2px solid var(--accent); font-size: 12px; }
+.story-fullscreen[open] { display: flex; flex-direction: column; }
+.story-fullscreen > .story-editor-panel { padding: 0; height: auto; flex: 1; }
+.story-fullscreen > .composer-shell { flex-shrink: 0; }
+@container (max-width: 760px) {
+  #tool-workspace.has-tool { grid-template-columns: minmax(0, 1fr); position: relative; }
+  #tool-workspace.has-tool #tool-divider { display: none; }
+  #tool-workspace.has-tool .workspace-pane-heading { padding-left: 108px; }
+  #tool-workspace.has-tool #chat-pane > .workspace-pane-heading { position: absolute; top: 0; left: 0; z-index: 2; padding: 0 12px; border: 0; background: transparent; height: 36px; }
+  #tool-workspace.has-tool[data-active=story-editor] #chat-pane { position: absolute; inset: 0; pointer-events: none; }
+  #tool-workspace.has-tool[data-active=story-editor] #chat-content { visibility: hidden; }
+  #tool-workspace.has-tool[data-active=story-editor] #chat-tab { pointer-events: auto; }
+  #tool-workspace.has-tool[data-active=chat] #tool-pane { position: absolute; inset: 0; pointer-events: none; }
+  #tool-workspace.has-tool[data-active=chat] #tool-content { visibility: hidden; }
+  #tool-workspace.has-tool[data-active=chat] #story-tool-tab { pointer-events: auto; }
+  .story-editor-body { grid-template-columns: 144px minmax(0, 1fr); }
+  .story-controls { padding: 8px; }
+  .story-reading-area { padding: 8px; }
+  #composer-target-hint { display: none; }
+  .story-editor-heading { flex-wrap: nowrap; }
+  .story-heading-actions { width: auto; flex-wrap: wrap; }
+}

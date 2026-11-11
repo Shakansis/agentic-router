@@ -78,6 +78,7 @@ function initializeStoryEditor() {
     storyEditor.elements["story-editor"].hidden = false;
     document.getElementById("conversation-view").classList.add("story-editor-open");
     document.getElementById("open-story-editor").setAttribute("aria-expanded", "true");
+    selectToolWorkspaceTab("story-editor");
     storyEditor.elements[storyEditor.mode === "raw" ? "story-document" : "story-preview"].focus();
   });
   document.getElementById("close-story-editor").addEventListener("click", () => {
@@ -176,6 +177,7 @@ function closeStoryEditor() {
   document.getElementById("story-editor").hidden = true;
   document.getElementById("conversation-view").classList.remove("story-editor-open");
   document.getElementById("open-story-editor").setAttribute("aria-expanded", "false");
+  renderToolWorkspace();
 }
 
 function setStoryFullscreen(expanded) {
@@ -195,11 +197,13 @@ function setStoryFullscreen(expanded) {
   if (expanded) {
     panel.before(dialog);
     dialog.append(panel);
+    dialog.append(elements.composerShell);
     document.getElementById("conversation-view").classList.remove("story-editor-open");
     dialog.showModal();
   } else {
     dialog.close();
     dialog.before(panel);
+    document.getElementById("conversation-view").append(elements.composerShell);
     document.getElementById("conversation-view").classList.add("story-editor-open");
   }
   const toggle = document.getElementById("story-fullscreen-toggle");
@@ -474,6 +478,7 @@ async function requestStoryProposal(operation) {
   updateInteractionControls();
   updateHarnessControls();
   storyStatus("Generating a proposal with the RPG specialist… You can keep editing; changes will invalidate this proposal.");
+  reportToolActivity(`${operation}: generating a proposal for the selected passage.`);
   document.getElementById("story-loading").scrollIntoView({ block: "nearest" });
   try {
     const result = await fetchJson("/api/story-editor/proposals", {
@@ -519,12 +524,14 @@ async function requestStoryProposal(operation) {
       alternatives.append(item);
     }
     storyEditor.elements["story-comparison"].showModal();
+    reportToolActivity("Proposal generated. Waiting for review and Apply.");
     storyStatus(snapshot.revision === storyEditor.revision
       ? "Compare the original and replacement. The draft has not changed."
       : "Draft changed during generation. Generate a new proposal before applying.");
   } catch (error) {
     if (storyEditor.controller === controller) {
       storyStatus(error.name === "AbortError" ? "Proposal cancelled. Draft preserved." : `${error.message} Draft preserved.`);
+      reportToolActivity(error.name === "AbortError" ? "Proposal cancelled; draft preserved." : "Proposal failed; draft preserved.");
     }
   } finally {
     if (storyEditor.controller === controller) {
@@ -565,6 +572,7 @@ function applyStoryProposal() {
   storyEditor.elements["story-comparison"].close();
   updateStoryProposalControls();
   storyStatus("Replacement applied only to the selected passage. Undo is available.");
+  reportToolActivity("Replacement applied to the selected passage. Workspace saving remains explicit.");
   storyEditor.elements[storyEditor.mode === "raw" ? "story-document" : "story-preview"].focus();
 }
 
@@ -574,6 +582,7 @@ function undoStoryApplication() {
   storyEditor.elements["story-document"].value = undo.document;
   storyDraftChanged();
   storyStatus("Last application undone.");
+  reportToolActivity("Last application undone.");
 }
 
 const storyCommonWords = new Set(("a o as os um uma uns umas de da do das dos e é em no na nos nas "

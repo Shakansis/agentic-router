@@ -181,6 +181,8 @@ public sealed class SettingsController : ControllerBase
       );
     }
 
+    var cleanup = await _models.PruneOrphanedLocalSettingsAsync(settings, cancellationToken);
+    settings = cleanup.Settings;
     var fallbackErrors = await _cloudFallbackPolicy.ValidateAsync(
       settings,
       cancellationToken
@@ -233,6 +235,10 @@ public sealed class SettingsController : ControllerBase
       settings,
       cancellationToken
     );
+    if (!result.IsValid || result.Settings is null)
+      return BadRequest(new ValidationErrorsResponse(validationMessage, result.Errors));
+    foreach (var model in cleanup.RemovedModels)
+      await _models.ForgetLocalModelAsync(model, cancellationToken);
     await _workspaceProfiles.UpdateDefaultModelAsync(
       settings.DefaultModel,
       cancellationToken

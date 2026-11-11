@@ -235,7 +235,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
     Func<string, CancellationToken, ValueTask>? onContentDelta = null,
     bool toolOutput = true,
     string? requestedEffort = null,
-    ProviderGenerationProfile? generationProfile = null
+    ProviderGenerationProfile? generationProfile = null,
+    ProviderChatOptions? options = null
   )
   {
     var reference = ProviderModelReference.Parse(
@@ -297,8 +298,14 @@ public sealed class ProviderDispatchClient : IOllamaClient
           tools,
           stage,
           generationProfile,
-          cancellationToken
+          cancellationToken,
+          (options ?? ProviderChatOptions.Empty) with
+          {
+            ProviderProgress = usageContext.ProgressObserver,
+            RequestProviderRetry = usageContext.RequestProviderRetry
+          }
         );
+        if (reference.ProviderId == ModelProviderIds.OpenAi) inference.CompleteRequest();
         await RecordAsync(
           usageContext,
           reference,
@@ -310,6 +317,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
             result.Value
           ),
           result.RateLimit,
+          activity: result.Activity,
           inference: inference
         );
         _health.ObserveSuccess(
@@ -325,7 +333,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
         var response = result.Value with
         {
           Usage = result.Usage,
-          RetryActivity = retryActivity
+          RetryActivity = retryActivity,
+          Citations = result.Citations,
+          Activity = result.Activity
         };
         if (
           onContentDelta is not null
@@ -891,6 +901,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
           continue;
         }
 
+        if (update.Done && reference.ProviderId == ModelProviderIds.OpenAi) inference.CompleteRequest();
+
         timeToFirstChunk ??= attemptStopwatch.Elapsed;
         if (!string.IsNullOrEmpty(update.Delta) || !string.IsNullOrEmpty(update.ThinkingDelta))
           inference.ObserveToken();
@@ -1040,7 +1052,9 @@ public sealed class ProviderDispatchClient : IOllamaClient
     options = options with
     {
       GenerationProfile = await ApplyExecutionOutputBudgetAsync(
-      reference, usageContext, options.EffectiveGenerationProfile, cancellationToken)
+        reference, usageContext, options.EffectiveGenerationProfile, cancellationToken),
+      ProviderProgress = usageContext.ProgressObserver,
+      RequestProviderRetry = usageContext.RequestProviderRetry
     };
     var operationStopwatch = Stopwatch.StartNew();
     var estimatedInput = _tokenEstimator.EstimateMessages(
@@ -1070,6 +1084,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
           options,
           cancellationToken
         );
+        if (reference.ProviderId == ModelProviderIds.OpenAi) inference.CompleteRequest();
         await RecordAsync(
           usageContext,
           reference,
@@ -1081,6 +1096,7 @@ public sealed class ProviderDispatchClient : IOllamaClient
             result.Value
           ),
           result.RateLimit,
+          activity: result.Activity,
           inference: inference
         );
         _health.ObserveSuccess(
@@ -1210,7 +1226,8 @@ public sealed class ProviderDispatchClient : IOllamaClient
       GroundedRequestCount: activity?.GroundedRequestCount ?? 0,
       CitationCount: activity?.CitationCount ?? 0,
       ProviderSearchCost: activity?.ProviderSearchCost,
-      Accuracy: activity?.Accuracy ?? UsageAccuracy.Exact
+      Accuracy: activity?.Accuracy ?? UsageAccuracy.Exact,
+      HostedWebSearchCallCount: activity?.HostedWebSearchCallCount ?? 0
     );
   }
 

@@ -94,6 +94,8 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
   private string? _evictOnNextLoadedModel;
   private string? _evictOnNextRemovedModel;
   private bool _hideInstalledModels;
+  public bool ModelDiscoveryUnavailable { get; set; }
+  private readonly ConcurrentDictionary<string, bool> _hiddenModels = new(StringComparer.Ordinal);
   private int _nextModelTestDelayMilliseconds;
   private int _tagQueryCount;
   private string? _realLifeProblemFailureMode;
@@ -174,6 +176,8 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     _evictOnNextLoadedModel = null;
     _evictOnNextRemovedModel = null;
     _hideInstalledModels = false;
+    ModelDiscoveryUnavailable = false;
+    _hiddenModels.Clear();
     _realLifeProblemFailureMode = null;
     Interlocked.Exchange(
       ref _nextModelTestDelayMilliseconds,
@@ -227,6 +231,8 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
   {
     _hideInstalledModels = true;
   }
+
+  public void HideInstalledModel(string model) => _hiddenModels[model] = true;
 
   public void RemoveLoadedModel(
     string model
@@ -445,6 +451,11 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
       )
       {
         Interlocked.Increment(ref _tagQueryCount);
+        if (ModelDiscoveryUnavailable)
+        {
+          await WriteJsonAsync(context.Response, HttpStatusCode.ServiceUnavailable, new { error = "Model discovery unavailable" }, cancellationToken);
+          return;
+        }
         await WriteJsonAsync(
           context.Response,
           HttpStatusCode.OK,
@@ -454,7 +465,7 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
               _hideInstalledModels
                 ? Enumerable.Empty<ModelDefinition>()
                 : Models
-            ).Concat(_pulledModels.Values).Select(
+            ).Concat(_pulledModels.Values).Where(model => !_hiddenModels.ContainsKey(model.Name)).Select(
               model => new
               {
                 name = model.Name,
@@ -932,6 +943,13 @@ internal sealed partial class FakeOllamaServer : IAsyncDisposable
     RequestObserved?.Invoke(recorded);
     if (BeforeChatResponse is { } beforeResponse)
       await beforeResponse(recorded).WaitAsync(cancellationToken);
+
+    if (messages.Any(message => message.Role == "system" && message.Content.Contains("AR_TOOL_WINDOW_V1", StringComparison.Ordinal))
+      && messages.Any(message => message.Role == "user" && message.Content.Contains("tool window fixture", StringComparison.Ordinal)))
+    {
+      await RespondToToolWindowAsync(context.Response, model, messages, availableTools, cancellationToken);
+      return;
+    }
 
     if (messages.Any(message => message.Role == "user"
       && message.Content.StartsWith("AGENTIC_ROUTER_STORY_EDITOR_V1\n", StringComparison.Ordinal)))

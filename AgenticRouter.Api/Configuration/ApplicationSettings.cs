@@ -177,11 +177,28 @@ public sealed record AnythingLlmKnowledgeSettings
 
 public sealed record CloudProvidersSettings
 {
+  public CloudProviderIntegrationSettings OpenAi { get; init; } = new();
+
+  public OpenAiRequestSettings OpenAiOptions { get; init; } = new();
+
   public CloudProviderIntegrationSettings Groq { get; init; } = new();
 
   public CloudProviderIntegrationSettings GoogleAiStudio { get; init; } = new();
 
   public CloudProviderIntegrationSettings Cerebras { get; init; } = new();
+}
+
+public sealed record OpenAiRequestSettings
+{
+  public string? OrganizationId { get; init; }
+
+  public string? ProjectId { get; init; }
+
+  public string ServiceTier { get; init; } = "auto";
+
+  public string Verbosity { get; init; } = "auto";
+
+  public int? MaximumOutputTokens { get; init; }
 }
 
 public sealed record CloudProviderIntegrationSettings

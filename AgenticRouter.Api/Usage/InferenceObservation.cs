@@ -10,6 +10,7 @@ public sealed class InferenceObservation(Action<InferenceProgressView>? progress
   private readonly Stopwatch _clock = new();
   public DateTimeOffset? DispatchedAt { get; private set; }
   public double? TimeToFirstTokenMilliseconds { get; private set; }
+  public double? CompletedRequestMilliseconds { get; private set; }
   public Action<InferenceProgressView>? ProgressObserver { get; } = progressObserver;
   public InferenceProgressSource.Subscription? Progress { get; set; }
 
@@ -26,6 +27,12 @@ public sealed class InferenceObservation(Action<InferenceProgressView>? progress
     if (DispatchedAt is not null)
       TimeToFirstTokenMilliseconds ??= _clock.Elapsed.TotalMilliseconds;
     Progress?.Generating();
+  }
+
+  public void CompleteRequest()
+  {
+    if (DispatchedAt is not null && CompletedRequestMilliseconds is null)
+      CompletedRequestMilliseconds = _clock.Elapsed.TotalMilliseconds;
   }
 
   public void Dispose() => Progress?.Dispose();

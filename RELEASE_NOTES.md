@@ -1,3 +1,31 @@
+# Agentic Router v0.17.0 alpha
+
+Shared-composer tool tabs, a compact Storytelling Editor and OpenAI Responses.
+The auxiliary tool pane starts closed and appears only when a tool is opened.
+Chat remains visible alongside the tool on wide layouts; a keyboard-accessible
+separator adjusts the split, and narrow layouts switch panes. Jump to latest
+belongs to the chat viewport. Editor controls move into a collapsible sidebar.
+
+The same selected specialist receives the active draft and revision preferences.
+It can declare the response target to the Host and propose replacements for
+explicit review and Apply. Chat records actions and delivery receipts. Native,
+external harnesses and supervised workers use the common Host capability;
+unsaved drafts and proposed text are excluded from Host conversation history.
+
+The optional OpenAI provider uses Responses with protected credentials, hosted
+web search, reasoning controls and observable background-response recovery.
+Cloud Execute retains its documented Direct routing. Local-model removal cleans
+obsolete settings after authoritative discovery; throughput estimates remain
+separate from measured generation. Existing policy and workspace boundaries apply.
+
+Windows x64 and Linux x64 packages share this source. Agent Browser and the new
+conversation dropdown are the next increment and are not enabled in this release.
+Shared-composer proposal, explicit Apply and Undo passed browser/API acceptance
+with the installed local Qwen model. Paid-provider acceptance was not rerun.
+Unsaved editor drafts remain window-local and are not reconstructed on restart.
+See the [release validation record](https://github.com/Shakansis/agentic-router/blob/main/docs/validation/release-0.17.0-alpha.md)
+for executed checks and limitations.
+
 # Agentic Router v0.16.1 alpha
 
 Fix Codex steering with local Ollama after interrupted reasoning. The Responses

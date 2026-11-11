@@ -177,6 +177,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
 
     var compact = new List<OllamaToolMessage>();
     AddLast(compact, messages, item => item.Role == "system" && item.Content?.StartsWith("APPLICATION_OWNED_PROJECT_CONTEXT", StringComparison.Ordinal) == true);
+    AddLast(compact, messages, item => item.Role == "system" && AgenticRouter.Api.Chat.ToolWindowTurn.IsContextMessage(item.Content));
     AddLast(compact, messages, item => item.Role == "user" && item.Content?.StartsWith(ExpertExecutionGuidanceService.GuidanceMarker, StringComparison.Ordinal) != true && !IsControlMessage(item.Content));
     AddLast(compact, messages, item => item.Content?.StartsWith(ExpertExecutionGuidanceService.GuidanceMarker, StringComparison.Ordinal) == true);
     compact.Add(new OllamaToolMessage("system", $"APPLICATION_OWNED_EXECUTION_STATE_V1\n{hostStateSummary}"));
@@ -318,6 +319,9 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       messages.Select(message => (message.Role, message.Content)),
       hasExecutionPlan: !planRequired
     );
+    // Auxiliary document authority comes from the Host grant, not objective text.
+    if (grantedTools.Contains(AgenticRouter.Api.Chat.ToolWindowTurn.ToolName, StringComparer.Ordinal))
+      scope = scope with { AvailableTools = scope.AvailableTools.Append(AgenticRouter.Api.Chat.ToolWindowTurn.ToolName).ToArray() };
     var catalogTools = ToolDefinitions.Where(
       tool => scope.Allows(tool.Name)
     ).ToArray();
@@ -792,6 +796,7 @@ public sealed class LocalActionPlanner : ILocalActionPlanner
       ),
       DiagnosticTraceCapability.ToolDefinition,
       WebSearchCapability.ToolDefinition,
+      AgenticRouter.Api.Chat.ToolWindowTurn.Definition,
       Tool(
         "create_file",
         "Create a new UTF-8 text file.",

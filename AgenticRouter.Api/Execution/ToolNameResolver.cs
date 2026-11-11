@@ -77,6 +77,7 @@ public sealed class ToolNameResolver : IToolNameResolver
     "search_text",
     DiagnosticTraceCapability.ToolName,
     WebSearchCapability.ToolName,
+    AgenticRouter.Api.Chat.ToolWindowTurn.ToolName,
     "create_file",
     "create_files",
     "download_file",

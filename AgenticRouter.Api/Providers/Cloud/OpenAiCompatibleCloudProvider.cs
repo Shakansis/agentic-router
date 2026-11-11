@@ -40,7 +40,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
 
   private bool SupportsSeed => ProviderId == ModelProviderIds.Groq;
 
-  private IReadOnlyList<string> SupportedThinkingModes(string? modelId)
+  protected virtual IReadOnlyList<string> SupportedThinkingModes(string? modelId)
   {
     if (ProviderId == ModelProviderIds.Groq && modelId is not null)
     {
@@ -182,7 +182,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     );
   }
 
-  public async Task<CloudCallResult<string>> GenerateStructuredAsync(
+  public virtual async Task<CloudCallResult<string>> GenerateStructuredAsync(
     string apiKey,
     string modelId,
     IReadOnlyList<ChatMessage> messages,
@@ -266,14 +266,15 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     );
   }
 
-  public async Task<CloudCallResult<OllamaToolResponse>> GenerateToolCallAsync(
+  public virtual async Task<CloudCallResult<OllamaToolResponse>> GenerateToolCallAsync(
     string apiKey,
     string modelId,
     IReadOnlyList<OllamaToolMessage> messages,
     IReadOnlyList<OllamaToolDefinition> tools,
     string stage,
     ProviderGenerationProfile? generationProfile,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    ProviderChatOptions? options = null
   )
   {
     generationProfile ??= ProviderGenerationProfiles.Deterministic;
@@ -377,7 +378,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     );
   }
 
-  public async IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(
+  public virtual async IAsyncEnumerable<OllamaChatUpdate> StreamChatAsync(
     string apiKey,
     string modelId,
     IReadOnlyList<ChatMessage> messages,
@@ -835,14 +836,20 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
     string stage,
     string? modelId,
     CancellationToken cancellationToken,
-    HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead
+    HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead,
+    string? clientName = null,
+    bool retryAmbiguousFailure = true
   )
   {
     HttpResponseMessage response;
 
     try
     {
-      response = await _httpClientFactory.CreateClient()
+      await ConfigureRequestAsync(request, cancellationToken);
+      using var client = clientName is null
+        ? _httpClientFactory.CreateClient()
+        : _httpClientFactory.CreateClient(clientName);
+      response = await client
         .SendAsync(
           request,
           completionOption,
@@ -860,7 +867,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         modelId,
         $"{DisplayName} did not complete the request in time.",
         504,
-        true,
+        retryAmbiguousFailure,
         null,
         exception
       );
@@ -878,7 +885,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         modelId,
         $"{DisplayName} could not be reached.",
         null,
-        true,
+        retryAmbiguousFailure,
         null,
         exception
       );
@@ -914,7 +921,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
         modelId,
         $"{DisplayName} rejected the request. {error}",
         status,
-        status is 408 or 429 or >= 500,
+        status == 429 || (retryAmbiguousFailure && status is 408 or >= 500),
         rateLimit,
         retryAfter: retryAfter
       );
@@ -922,6 +929,11 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
 
     return response;
   }
+
+  protected virtual Task ConfigureRequestAsync(
+    HttpRequestMessage request,
+    CancellationToken cancellationToken
+  ) => Task.CompletedTask;
 
   protected ProviderRateLimitSnapshot? ReadRateLimit(
     HttpResponseMessage response
@@ -1343,7 +1355,7 @@ public abstract class OpenAiCompatibleCloudProvider : ICloudProviderAdapter
       : null;
   }
 
-  private async Task<JsonDocument> ReadDocumentAsync(
+  protected async Task<JsonDocument> ReadDocumentAsync(
     HttpResponseMessage response,
     string stage,
     string? modelId,

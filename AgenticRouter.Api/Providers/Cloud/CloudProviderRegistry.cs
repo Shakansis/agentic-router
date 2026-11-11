@@ -395,6 +395,7 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
   {
     return providerId switch
     {
+      ModelProviderIds.OpenAi => settings.CloudProviders.OpenAi,
       ModelProviderIds.Groq => settings.CloudProviders.Groq,
       ModelProviderIds.GoogleAiStudio => settings.CloudProviders.GoogleAiStudio,
       ModelProviderIds.Cerebras => settings.CloudProviders.Cerebras,
@@ -418,6 +419,10 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
   {
     var cloud = providerId switch
     {
+      ModelProviderIds.OpenAi => settings.CloudProviders with
+      {
+        OpenAi = providerSettings
+      },
       ModelProviderIds.Groq => settings.CloudProviders with
       {
         Groq = providerSettings
@@ -475,6 +480,9 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
     return
     [
       RequireAdapter(
+        ModelProviderIds.OpenAi
+      ),
+      RequireAdapter(
         ModelProviderIds.Groq
       ),
       RequireAdapter(
@@ -524,6 +532,10 @@ public sealed class CloudProviderRegistry : ICloudProviderRegistry
         stream,
         cancellationToken: cancellationToken
       );
+
+      // Reapply adapter-owned compatibility without a hidden provider refresh.
+      if (cached?.SchemaVersion == 1 && providerId == ModelProviderIds.OpenAi)
+        cached = cached with { Models = cached.Models.Select(OpenAiCloudProvider.WithCurrentCapabilities).ToArray() };
 
       if (cached?.SchemaVersion == 1)
       {

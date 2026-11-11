@@ -767,7 +767,7 @@ public sealed class ProviderAndUiEndToEndTests : ChatEndToEndTestBase<ProviderAn
         "#cloud-providers-list .cloud-provider-card"
       )
     ).ToHaveCountAsync(
-      4
+      5
     );
     await Expect(Page.Locator(
       "#cloud-providers-list > .cloud-provider-card[data-provider=\"ollama-local\"] .ollama-web-search-settings"
@@ -4244,7 +4244,7 @@ baselineTotal!.Value
         "#cloud-providers-list .cloud-provider-card"
       )
     ).ToHaveCountAsync(
-      4
+      5
     );
     await Expect(
       Page.Locator(
@@ -4431,7 +4431,7 @@ baselineTotal!.Value
         ".app-version"
       )
     ).ToHaveTextAsync(
-      "v0.16.1_alpha"
+      "v0.17.0_alpha"
     );
     await Expect(
       Page.Locator(

@@ -13,7 +13,8 @@ public sealed record CanonicalToolDefinition(
 public sealed record CanonicalToolCall(
   string CallId,
   string Name,
-  JsonElement Arguments
+  JsonElement Arguments,
+  [property: System.Text.Json.Serialization.JsonIgnore] ProviderToolContinuation? Continuation = null
 );
 
 public sealed record CanonicalToolResult(
@@ -222,7 +223,8 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
       call => new CanonicalToolCall(
         string.IsNullOrWhiteSpace(call.Id) ? Guid.NewGuid().ToString("N") : call.Id,
         call.Name,
-        call.Arguments.Clone()
+        call.Arguments.Clone(),
+        call.Continuation
       )
     ).ToArray();
     var completion = calls.Length == 0 && !string.IsNullOrWhiteSpace(response.Content)
@@ -251,7 +253,8 @@ public sealed class SpecialistToolingProtocol : ISpecialistToolingProtocol
         call => new OllamaToolCall(
           call.Name,
           call.Arguments.Clone(),
-          call.CallId
+          call.CallId,
+          call.Continuation
         )
       ).ToArray()
     );

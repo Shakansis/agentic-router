@@ -116,7 +116,9 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
           path,
           body,
           context.Request.Headers["Authorization"],
-          context.Request.Headers["x-goog-api-key"]
+          context.Request.Headers["x-goog-api-key"],
+          context.Request.Headers["OpenAI-Organization"],
+          context.Request.Headers["OpenAI-Project"]
         )
       );
 
@@ -232,6 +234,50 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
         return;
       }
 
+      if (context.Request.HttpMethod == "GET" && path == "/openai/v1/models")
+      {
+        await WriteJsonAsync(context.Response, new
+        {
+          data = new[] { "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-4.1", "text-embedding-3-small", "gpt-6-unknown" }
+            .Select(id => new { id, created = 1_700_000_000, owned_by = "openai" })
+        }, cancellationToken);
+        return;
+      }
+      if (context.Request.HttpMethod == "POST" && path == "/openai/v1/responses")
+      {
+        await HandleResponsesAsync(context, body, cancellationToken);
+        return;
+      }
+      if (context.Request.HttpMethod == "GET" && path.StartsWith("/openai/v1/responses/resp_recovery_", StringComparison.Ordinal))
+      {
+        var id = path.Split('/')[^1];
+        var attempt = _scenarioRequests.AddOrUpdate(id, 1, (_, count) => count + 1);
+        if (context.Request.QueryString.GetValues("include[]")?.Contains("reasoning.encrypted_content") == true)
+        {
+          await WriteJsonAsync(context.Response, new { error = new { message = "Encrypted content cannot be requested for persisted responses." } },
+            cancellationToken, HttpStatusCode.BadRequest);
+        }
+        else if (attempt == 1)
+          await WriteJsonAsync(context.Response, new { id, status = "in_progress" }, cancellationToken);
+        else if (attempt <= (id == "resp_recovery_manual" ? 5 : 3))
+        {
+          await WriteJsonAsync(context.Response, new { error = new { message = "Temporary retrieval failure" } },
+            cancellationToken, HttpStatusCode.ServiceUnavailable);
+        }
+        else
+          await WriteJsonAsync(context.Response, new
+          {
+            id,
+            status = "completed",
+            output = new[] { new { type = "message", content = new[] { new { type = "output_text", text = "Recovered the same OpenAI response." } } } }
+          }, cancellationToken);
+        return;
+      }
+      if (context.Request.HttpMethod == "POST" && path == "/openai/v1/responses/resp_recovery_manual/cancel")
+      {
+        await WriteJsonAsync(context.Response, new { id = "resp_recovery_manual", status = "cancelled" }, cancellationToken);
+        return;
+      }
       if (
         context.Request.HttpMethod == HttpMethod.Get.Method
         && path == "/groq/openai/v1/models"
@@ -442,6 +488,128 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
     {
       context.Response.Abort();
     }
+  }
+
+  private static async Task HandleResponsesAsync(HttpListenerContext context, string body, CancellationToken cancellationToken)
+  {
+    using var document = JsonDocument.Parse(body);
+    var root = document.RootElement;
+    AddRateLimitHeaders(context.Response);
+    var isBackground = root.TryGetProperty("background", out var backgroundMode) && backgroundMode.GetBoolean();
+    if (isBackground && root.TryGetProperty("include", out var includes)
+      && includes.EnumerateArray().Any(item => item.GetString() == "reasoning.encrypted_content"))
+    {
+      await WriteJsonAsync(context.Response, new { error = new { message = "Encrypted content cannot be requested for persisted responses." } },
+        cancellationToken, HttpStatusCode.BadRequest);
+      return;
+    }
+    if (body.Contains("trigger-openai-recovery-", StringComparison.Ordinal))
+    {
+      if (!root.TryGetProperty("background", out var background) || !background.GetBoolean()
+        || !root.TryGetProperty("store", out var store) || store.GetBoolean())
+      {
+        await WriteJsonAsync(context.Response, new { error = new { message = "Expected temporary background response" } },
+          cancellationToken, HttpStatusCode.BadRequest);
+        return;
+      }
+      var id = body.Contains("trigger-openai-recovery-manual", StringComparison.Ordinal) ? "resp_recovery_manual" : "resp_recovery_auto";
+      await WriteJsonAsync(context.Response, new { id, status = "queued" }, cancellationToken);
+      return;
+    }
+    // Reject Chat Completions fields; a permissive fake would miss endpoint regressions.
+    if (root.TryGetProperty("messages", out _) || root.TryGetProperty("max_tokens", out _)
+      || root.TryGetProperty("citation_options", out _)
+      || (root.TryGetProperty("reasoning", out _) && root.TryGetProperty("temperature", out _)))
+    {
+      context.Response.StatusCode = 400;
+      await WriteJsonAsync(context.Response, new { error = new { message = "Invalid Responses request" } }, cancellationToken);
+      return;
+    }
+    object? usage = body.Contains("trigger-openai-no-usage", StringComparison.Ordinal) ? null : new
+    {
+      input_tokens = 12,
+      output_tokens = 8,
+      input_tokens_details = new { cached_tokens = 2 },
+      output_tokens_details = new { reasoning_tokens = 5 }
+    };
+    var input = root.GetProperty("input");
+    if (body.Contains("chat workspace read request", StringComparison.OrdinalIgnoreCase)
+      && input.EnumerateArray().Any(item => item.TryGetProperty("type", out var type) && type.GetString() == "function_call_output"))
+    {
+      var nativeItems = input.EnumerateArray().Where(item => item.TryGetProperty("type", out var type)
+        && type.GetString() is "reasoning" or "web_search_call" or "message" or "function_call").ToArray();
+      var commentaryIndex = Array.FindIndex(nativeItems, item => item.TryGetProperty("phase", out var phase) && phase.GetString() == "commentary");
+      var callIndex = Array.FindIndex(nativeItems, item => item.GetProperty("type").GetString() == "function_call");
+      var reasoningIndex = Array.FindIndex(nativeItems, item => item.GetProperty("type").GetString() == "reasoning"
+        && item.TryGetProperty("id", out var id) && id.GetString() == "rs_fake_openai"
+        && !item.TryGetProperty("encrypted_content", out _));
+      if (callIndex >= 0 && (reasoningIndex < 0 || reasoningIndex > callIndex))
+      {
+        await WriteJsonAsync(context.Response, new { error = new { message = "Function call is missing its required reasoning item." } },
+          cancellationToken, HttpStatusCode.BadRequest);
+        return;
+      }
+      if (commentaryIndex < 0 || callIndex <= commentaryIndex)
+      {
+        context.Response.StatusCode = 400;
+        await WriteJsonAsync(context.Response, new { error = new { message = "Missing ordered native commentary continuation" } }, cancellationToken);
+        return;
+      }
+    }
+    var text = "openai cloud answer";
+    var output = new List<object>();
+    if (root.TryGetProperty("tools", out var tools) && tools.GetArrayLength() > 0)
+    {
+      var first = tools.EnumerateArray().Where(tool => tool.TryGetProperty("name", out _))
+        .Select(tool => tool.GetProperty("name").GetString()).FirstOrDefault();
+      var hasResult = input.EnumerateArray().Any(item => item.TryGetProperty("type", out var type) && type.GetString() == "function_call_output");
+      if (!hasResult && body.Contains("chat workspace read request", StringComparison.OrdinalIgnoreCase))
+      {
+        output.Add(new { id = "msg_openai_commentary", type = "message", role = "assistant", phase = "commentary", content = new[] { new { type = "output_text", text = "I will read the file." } } });
+        output.Add(new { id = "fc_fake_openai_read", type = "function_call", call_id = "openai-read-call", name = "read_file", arguments = "{\"path\":\"chat-readable.txt\"}" });
+      }
+      else if (first is not null && first.StartsWith("benchmark_", StringComparison.Ordinal))
+        output.Add(new
+        {
+          type = "function_call",
+          call_id = "openai-conformance",
+          name = first,
+          arguments = ToolArguments(first)
+        });
+      else text = hasResult ? "OpenAI read the workspace file." : "openai cloud answer";
+    }
+    if (root.TryGetProperty("text", out var textOptions) && textOptions.TryGetProperty("format", out _))
+      text = "{\"intention\":\"general-chat\",\"confidence\":0.99,\"reason\":\"fake OpenAI routing\"}";
+    var searchUsed = root.TryGetProperty("tools", out var offeredTools)
+      && offeredTools.EnumerateArray().Any(tool => tool.GetProperty("type").GetString() == "web_search")
+      && body.Contains("hosted web search fixture", StringComparison.Ordinal);
+    var annotations = searchUsed ? new[] { new { type = "url_citation", title = "GPT-6.1 Terra", url = "https://developers.openai.com/api/docs/models/gpt-6.1-terra", start_index = 0, end_index = 10 } } : [];
+    if (output.Count == 0)
+      output.Add(new { type = "message", role = "assistant", content = new[] { new { type = "output_text", text, annotations } } });
+    else
+      output.Insert(0, new { id = "rs_fake_openai", type = "reasoning", summary = Array.Empty<object>() });
+    if (searchUsed)
+    {
+      output.Insert(0, new { id = "ws_search", type = "web_search_call", status = "completed", action = new { type = "search", queries = new[] { "GPT-6.1 Terra official", "GPT-6.1 Terra web search" } } });
+      output.Insert(1, new { id = "ws_open", type = "web_search_call", status = "completed", action = new { type = "open_page", url = "https://developers.openai.com/api/docs/models/gpt-6.1-terra" } });
+    }
+    var status = body.Contains("trigger-openai-incomplete", StringComparison.Ordinal) ? "incomplete" : "completed";
+    var response = new { id = "resp_fake", status, output, usage };
+    if (body.Contains("trigger-openai-estimate-delay", StringComparison.Ordinal))
+      await Task.Delay(120, cancellationToken);
+    if (root.TryGetProperty("stream", out var stream) && stream.GetBoolean())
+    {
+      context.Response.ContentType = "text/event-stream";
+      if (searchUsed)
+        foreach (var item in output.Take(2))
+          await WriteSseAsync(context.Response, new { type = "response.output_item.done", item }, cancellationToken);
+      await WriteSseAsync(context.Response, new { type = "response.output_text.delta", delta = text }, cancellationToken);
+      if (!body.Contains("trigger-openai-truncated", StringComparison.Ordinal))
+        await WriteSseAsync(context.Response, new { type = $"response.{status}", response }, cancellationToken);
+      context.Response.Close();
+      return;
+    }
+    await WriteJsonAsync(context.Response, response, cancellationToken);
   }
 
   private int ScenarioAttempt(
@@ -1335,10 +1503,11 @@ internal sealed class FakeCloudProviderServer : IAsyncDisposable
   private static async Task WriteJsonAsync(
     HttpListenerResponse response,
     object payload,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    HttpStatusCode status = HttpStatusCode.OK
   )
   {
-    response.StatusCode = (int)HttpStatusCode.OK;
+    response.StatusCode = (int)status;
     response.ContentType = "application/json";
     await WriteRawAsync(
       response,
@@ -1398,5 +1567,7 @@ internal sealed record FakeCloudRequest(
   string Path,
   string Body,
   string? Authorization,
-  string? GoogleApiKey
+  string? GoogleApiKey,
+  string? OpenAiOrganization = null,
+  string? OpenAiProject = null
 );
